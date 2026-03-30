@@ -70,3 +70,12 @@ vendor/
 coverage/
 .cache/
 tmp/
+.gsd/reports
+.gsd/doctor-history.jsonl
+.gsd/event-log.jsonl
+.gsd/gsd.db
+.gsd/state-manifest.json
+.gsd/completed-units.json
+.gsd/journal
+.gsd/gsd.db-shm
+.gsd/gsd.db-wal
