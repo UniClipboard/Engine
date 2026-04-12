@@ -38,6 +38,16 @@ Use when:
 - planning commit splits
 - reviewing whether a diff mixes multiple intents
 
+### 2a. Port definition / evolution / refactoring
+Read: `docs/architecture/ports.md`
+
+Use when:
+- defining new ports in `uc-core`
+- adding methods to existing port traits
+- deciding port granularity or naming
+- refactoring large port interfaces into smaller ones
+- reviewing whether a use case depends on more than it needs
+
 ### 3. Rust / Tauri / daemon / tracing work
 Read: `docs/agent/rust-tauri-rules.md`
 
@@ -105,6 +115,7 @@ Use when:
 
 - `docs/agent/workflow-rules.md`
 - `docs/agent/architecture-rules.md`
+- `docs/architecture/ports.md`
 - `docs/agent/rust-tauri-rules.md`
 - `docs/agent/frontend-ui-rules.md`
 - `docs/agent/project-memory.md`
