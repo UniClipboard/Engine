@@ -14,7 +14,9 @@ Do not treat this file as a full memory dump. Read only the documents needed for
 - Use repo-relative paths in tracked docs.
 - Use language identifiers on fenced code blocks.
 - When conversation is in Chinese, respond in natural Chinese.
-- When writing project docs, use English.
+- 本项目的代码注释与项目文档一律使用中文（包括 `docs/`、`.planning/`、crate 级 `AGENTS.md`、README、代码中的 `//` / `///` / `/* */` 注释、doc comments 等）。此约定覆盖全局 `CLAUDE.md` 中"写文档用英文"的默认规则。
+  - 例外：Git commit message / PR 标题与描述 / 代码标识符（函数、类型、变量名）保持英文，保证工具链与外部协作的兼容性。
+  - 引用外部规范（RFC、标准库 API 等）时，专有名词可保留英文原文。
 - `CLAUDE.md` is only a compatibility entrypoint. This file is the root instruction source.
 
 ## Read-on-Demand Map
