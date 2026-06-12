@@ -1,0 +1,1 @@
+DROP TABLE clipboard_migration_backup;
