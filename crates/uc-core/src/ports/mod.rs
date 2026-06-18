@@ -28,7 +28,7 @@ pub mod connection_channel;
 pub mod device_identity;
 pub mod errors;
 pub mod file_cache_hygiene;
-pub mod file_transfer_repository;
+pub mod file_transfer;
 pub mod first_sync_state;
 mod hash;
 pub mod host_event;
@@ -64,10 +64,11 @@ pub use clipboard_change_handler::ClipboardChangeHandler;
 pub use connection_channel::{ConnectionChannel, ConnectionChannelPort, ConnectionPath};
 pub use device_identity::DeviceIdentityPort;
 pub use errors::AppDirsError;
-pub use file_transfer_repository::{
+pub use file_transfer::{
     compute_aggregate_status, EntryTransferSummary, ExpiredInflightTransfer,
-    FileTransferRepositoryPort, NoopFileTransferRepositoryPort, PendingInboundTransfer,
-    TrackedFileTransfer, TrackedFileTransferStatus,
+    FailInflightTransfersPort, FileTransferProjectionError, FindEntryIdForTransferPort,
+    GetEntryTransferSummaryPort, ListExpiredInflightTransfersPort, PendingInboundTransfer,
+    RecordReceiverTransferPort, TrackedFileTransferStatus,
 };
 pub use host_event::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError, HostEvent,
