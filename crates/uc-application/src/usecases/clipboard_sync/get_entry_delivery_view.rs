@@ -18,7 +18,7 @@ use uc_core::mobile_sync::MobileDeviceId;
 use uc_core::ports::clipboard::GetClipboardEntryPort;
 use uc_core::ports::{
     ClipboardEventRepositoryPort, DeviceIdentityPort, EntryDeliveryRepositoryPort,
-    MobileDeviceRepositoryPort,
+    FindMobileDeviceByIdPort,
 };
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uc_core::MemberRepositoryPort;
@@ -78,7 +78,7 @@ pub enum GetEntryDeliveryViewError {
 
 /// `mobile_sync:` 前缀——移动端入站在 `apply_incoming.rs` 里
 /// 用 `DeviceId::new(format!("mobile_sync:{}", source_device_id))` 生成伪
-/// DeviceId。本 use case 需要识别该前缀以从 `MobileDeviceRepositoryPort`
+/// DeviceId。本 use case 需要识别该前缀以从 `FindMobileDeviceByIdPort`
 /// 查出设备 label。
 const MOBILE_SYNC_DEVICE_PREFIX: &str = "mobile_sync:";
 
@@ -89,7 +89,7 @@ pub(crate) struct GetEntryDeliveryViewUseCase {
     entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
-    mobile_device_repo: Arc<dyn MobileDeviceRepositoryPort>,
+    mobile_device_repo: Arc<dyn FindMobileDeviceByIdPort>,
 }
 
 impl GetEntryDeliveryViewUseCase {
@@ -100,7 +100,7 @@ impl GetEntryDeliveryViewUseCase {
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        mobile_device_repo: Arc<dyn MobileDeviceRepositoryPort>,
+        mobile_device_repo: Arc<dyn FindMobileDeviceByIdPort>,
     ) -> Self {
         Self {
             entry_repo,
@@ -512,30 +512,11 @@ mod tests {
     mockall::mock! {
         MobileDeviceRepo {}
         #[async_trait]
-        impl MobileDeviceRepositoryPort for MobileDeviceRepo {
-            async fn save(&self, device: &MobileDevice) -> Result<(), MobileDeviceError>;
-            async fn find_by_username(
-                &self,
-                username: &str,
-            ) -> Result<Option<MobileDevice>, MobileDeviceError>;
+        impl FindMobileDeviceByIdPort for MobileDeviceRepo {
             async fn find_by_device_id(
                 &self,
                 device_id: &MobileDeviceId,
             ) -> Result<Option<MobileDevice>, MobileDeviceError>;
-            async fn list_all(&self) -> Result<Vec<MobileDevice>, MobileDeviceError>;
-            async fn delete(&self, device_id: &MobileDeviceId) -> Result<bool, MobileDeviceError>;
-            async fn record_activity(
-                &self,
-                device_id: &MobileDeviceId,
-                last_seen_at_ms: i64,
-                last_seen_ip: Option<String>,
-                reported_name: Option<String>,
-                reported_os: Option<String>,
-            ) -> Result<(), MobileDeviceError>;
-            async fn update_mobile_device(
-                &self,
-                updated: &MobileDevice,
-            ) -> Result<bool, MobileDeviceError>;
         }
     }
 
@@ -624,7 +605,7 @@ mod tests {
         trusted_peer_repo: Arc<FakeTrustedPeerRepo>,
         delivery_repo: Arc<FakeDeliveryRepo>,
         member_repo: Arc<FakeMemberRepo>,
-        mobile_device_repo: Arc<dyn MobileDeviceRepositoryPort>,
+        mobile_device_repo: Arc<dyn FindMobileDeviceByIdPort>,
     ) -> GetEntryDeliveryViewUseCase {
         GetEntryDeliveryViewUseCase::new(
             entry_repo,
@@ -881,7 +862,7 @@ mod tests {
     //
     // 移动端入站写的 from_device 是 `mobile_sync:<mobile_device_id>` 伪
     // DeviceId,不在 SpaceMember 表里。视图层应剥离前缀后从
-    // MobileDeviceRepositoryPort 查出 label 作为展示名。
+    // FindMobileDeviceByIdPort 查出 label 作为展示名。
 
     #[tokio::test]
     async fn mobile_source_device_name_resolves_from_mobile_device_repo() {

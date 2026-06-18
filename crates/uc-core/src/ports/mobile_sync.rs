@@ -73,14 +73,16 @@ pub enum PasswordHasherError {
     Internal(String),
 }
 
-// ─── device repository ───────────────────────────────────────────────────
+// ─── device store (inner aggregate) ──────────────────────────────────────
 
-/// 已登记 mobile 设备的持久化能力(v3 改用 username 索引)。
+/// Inner aggregate persistence surface for registered mobile devices
+/// (username-indexed).
 ///
-/// 鉴权热路径调用 `find_by_username` —— adapter 必须确保有 username 索引;
-/// 删除路径在撤销 / 解绑时调用,需要立即生效(不能走异步队列)。
+/// This is the low-level store (ports.md §5.1/§12): adapters implement it once
+/// and the narrow device intent ports below delegate to it. Application-layer
+/// consumers depend on the narrow ports, never on this aggregate.
 #[async_trait]
-pub trait MobileDeviceRepositoryPort: Send + Sync {
+pub trait MobileDeviceStore: Send + Sync {
     /// 持久化一台新设备。重复 device_id / username 应返回对应的领域错误。
     async fn save(&self, device: &MobileDevice) -> Result<(), MobileDeviceError>;
 
@@ -103,25 +105,77 @@ pub trait MobileDeviceRepositoryPort: Send + Sync {
     /// 不存在(撤销操作幂等)。
     async fn delete(&self, device_id: &MobileDeviceId) -> Result<bool, MobileDeviceError>;
 
-    /// 鉴权链路成功后回写最近活跃信息 —— 仅运维 / UI 用。失败不应阻塞业
-    /// 务请求,调用方决定是否吞错。
-    ///
-    /// `reported_name` / `reported_os` 在 SyncClipboard 协议下永远是 `None`
-    /// (shortcut 不上报);保留参数以备 v2 ClipboardAuto 客户端扩展。
-    async fn record_activity(
-        &self,
-        device_id: &MobileDeviceId,
-        last_seen_at_ms: i64,
-        last_seen_ip: Option<String>,
-        reported_name: Option<String>,
-        reported_os: Option<String>,
-    ) -> Result<(), MobileDeviceError>;
-
     /// Replace the editable fields of one mobile device in a single write.
     ///
     /// Used by the device-management flow: label edits may keep credentials as-is,
     /// while username/password edits replace the persisted credential fields
     /// atomically. Implementations must preserve rows not matching `device_id`,
+    /// return `Ok(false)` when the device is missing, and return
+    /// `UsernameCollision` when `updated.username` is already held by another
+    /// device.
+    async fn update_mobile_device(&self, updated: &MobileDevice)
+        -> Result<bool, MobileDeviceError>;
+}
+
+// ─── device repository intent ports ──────────────────────────────────────
+//
+// Narrow, single-responsibility views over the registered-device store. Each
+// consumer depends only on the slice it actually uses; the concrete adapter
+// implements every one of them (see ports.md §8.3). `MobileDeviceStore`
+// above remains the inner aggregate store.
+
+/// Locate a registered device by its username.
+#[async_trait]
+pub trait FindMobileDeviceByUsernamePort: Send + Sync {
+    /// Return the device whose username matches exactly, or `None` if there is
+    /// no such device.
+    async fn find_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<MobileDevice>, MobileDeviceError>;
+}
+
+/// Locate a registered device by its stable device id.
+#[async_trait]
+pub trait FindMobileDeviceByIdPort: Send + Sync {
+    /// Return the device with this id, or `None` if there is no such device.
+    async fn find_by_device_id(
+        &self,
+        device_id: &MobileDeviceId,
+    ) -> Result<Option<MobileDevice>, MobileDeviceError>;
+}
+
+/// Enumerate every registered device.
+#[async_trait]
+pub trait ListMobileDevicesPort: Send + Sync {
+    /// Return all registered devices. The result is unordered and unpaged; the
+    /// expected population is small.
+    async fn list_all(&self) -> Result<Vec<MobileDevice>, MobileDeviceError>;
+}
+
+/// Persist a newly registered device.
+#[async_trait]
+pub trait SaveMobileDevicePort: Send + Sync {
+    /// Persist a brand-new device. Returns `AlreadyExists` when the device id is
+    /// already taken and `UsernameCollision` when the username is already held
+    /// by another device.
+    async fn save(&self, device: &MobileDevice) -> Result<(), MobileDeviceError>;
+}
+
+/// Remove a registered device.
+#[async_trait]
+pub trait DeleteMobileDevicePort: Send + Sync {
+    /// Delete the device with this id. Returns `true` when a row was removed,
+    /// `false` when no such device existed (the operation is idempotent).
+    async fn delete(&self, device_id: &MobileDeviceId) -> Result<bool, MobileDeviceError>;
+}
+
+/// Replace the editable fields of an existing device.
+#[async_trait]
+pub trait UpdateMobileDevicePort: Send + Sync {
+    /// Replace the editable fields of one device in a single write.
+    ///
+    /// Implementations must preserve rows not matching `updated.device_id`,
     /// return `Ok(false)` when the device is missing, and return
     /// `UsernameCollision` when `updated.username` is already held by another
     /// device.

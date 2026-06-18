@@ -21,9 +21,8 @@
 //!    本 use case 不在外面做"先 username 比对再说"的提前短路, 让 hasher
 //!    那 ~50ms 成为统一时长 ceiling, 哪怕命中"用户名不存在"也跑一次假
 //!    验证(实现见下文)。
-//! 4. **不更新 last_seen_*** —— 那是上层路由 happy path 后再决定是否调
-//!    `record_activity` 的事(给路由更细的控制粒度: 401 不应当 last_seen,
-//!    成功的请求才应当)。
+//! 4. **不更新 last_seen_*** —— 鉴权 use case 只回答"凭据是否合法",
+//!    活跃信息的回写不属于本职责。
 
 use std::sync::Arc;
 
@@ -32,7 +31,7 @@ use base64::Engine;
 use tracing::instrument;
 
 use uc_core::mobile_sync::{MobileDevice, MobileDeviceError};
-use uc_core::ports::{MobileDeviceRepositoryPort, PasswordHasherError, PasswordHasherPort};
+use uc_core::ports::{FindMobileDeviceByUsernamePort, PasswordHasherError, PasswordHasherPort};
 use uc_observability::analytics::{AnalyticsPort, Event, MobileAuthFailureKind};
 
 // ─── public-shaped (input / output / error) ─────────────────────────────
@@ -46,9 +45,7 @@ pub struct AuthenticateBasicAuthInput {
 
 /// 鉴权成功的产物:已被仓储确认存在并通过密码校验的 device。
 ///
-/// 上层路由拿到它后, 通常会:
-///   1. 把 `device` 塞进 axum extension 供后续 handler 用;
-///   2. 调 facade 的 record_activity 异步更新 last_seen_*。
+/// 上层路由拿到它后, 通常会把 `device` 塞进 axum extension 供后续 handler 用。
 #[derive(Debug, Clone)]
 pub struct AuthenticatedDevice {
     pub device: MobileDevice,
@@ -75,7 +72,7 @@ pub enum AuthenticateBasicAuthError {
 // ─── use case ───────────────────────────────────────────────────────────
 
 pub(crate) struct AuthenticateBasicAuthUseCase {
-    device_repo: Arc<dyn MobileDeviceRepositoryPort>,
+    find_by_username: Arc<dyn FindMobileDeviceByUsernamePort>,
     password_hasher: Arc<dyn PasswordHasherPort>,
     /// schema doc §7.6 / §12.2 P1：iPhone Basic Auth 失败率 anchor。
     ///
@@ -89,12 +86,12 @@ pub(crate) struct AuthenticateBasicAuthUseCase {
 
 impl AuthenticateBasicAuthUseCase {
     pub(crate) fn new(
-        device_repo: Arc<dyn MobileDeviceRepositoryPort>,
+        find_by_username: Arc<dyn FindMobileDeviceByUsernamePort>,
         password_hasher: Arc<dyn PasswordHasherPort>,
         analytics: Arc<dyn AnalyticsPort>,
     ) -> Self {
         Self {
-            device_repo,
+            find_by_username,
             password_hasher,
             analytics,
         }
@@ -123,7 +120,7 @@ impl AuthenticateBasicAuthUseCase {
         };
 
         // 2. 查仓储。
-        let found = match self.device_repo.find_by_username(&username).await {
+        let found = match self.find_by_username.find_by_username(&username).await {
             Ok(found) => found,
             Err(err) => {
                 // 仓储读失败属于服务端内部错误 —— 与"凭据无效"语义不同，

@@ -1,4 +1,4 @@
-//! `InMemoryMobileDeviceRepository` —— [`MobileDeviceRepositoryPort`] 的进
+//! `InMemoryMobileDeviceRepository` —— [`MobileDeviceStore`] 的进
 //! 程内实现(v3 SyncClipboard 兼容版)。
 //!
 //! 现在 daemon 链路上默认走 [`crate::db::repositories::DieselMobileDeviceRepository`]
@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use uc_core::mobile_sync::{MobileDevice, MobileDeviceError, MobileDeviceId};
-use uc_core::ports::MobileDeviceRepositoryPort;
+use uc_core::ports::MobileDeviceStore;
 
 #[derive(Default)]
 pub struct InMemoryMobileDeviceRepository {
@@ -36,7 +36,7 @@ impl InMemoryMobileDeviceRepository {
 }
 
 #[async_trait]
-impl MobileDeviceRepositoryPort for InMemoryMobileDeviceRepository {
+impl MobileDeviceStore for InMemoryMobileDeviceRepository {
     async fn save(&self, device: &MobileDevice) -> Result<(), MobileDeviceError> {
         let mut guard = self.devices.lock().await;
 
@@ -77,33 +77,6 @@ impl MobileDeviceRepositoryPort for InMemoryMobileDeviceRepository {
     async fn delete(&self, device_id: &MobileDeviceId) -> Result<bool, MobileDeviceError> {
         let mut guard = self.devices.lock().await;
         Ok(guard.remove(device_id).is_some())
-    }
-
-    async fn record_activity(
-        &self,
-        device_id: &MobileDeviceId,
-        last_seen_at_ms: i64,
-        last_seen_ip: Option<String>,
-        reported_name: Option<String>,
-        reported_os: Option<String>,
-    ) -> Result<(), MobileDeviceError> {
-        let mut guard = self.devices.lock().await;
-        // 找不到 device 不报错 —— 撤销路径下可能并发:use case 已经撤销但
-        // 鉴权链路里的 record_activity 还在路上。adapter 直接静默成功,让
-        // use case 决定是否在调用前先检查。
-        if let Some(device) = guard.get_mut(device_id) {
-            device.last_seen_at_ms = Some(last_seen_at_ms);
-            if last_seen_ip.is_some() {
-                device.last_seen_ip = last_seen_ip;
-            }
-            if reported_name.is_some() {
-                device.reported_name = reported_name;
-            }
-            if reported_os.is_some() {
-                device.reported_os = reported_os;
-            }
-        }
-        Ok(())
     }
 
     async fn update_mobile_device(
@@ -218,38 +191,6 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!repo.delete(&d.device_id).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn record_activity_updates_fields_when_device_exists() {
-        let repo = InMemoryMobileDeviceRepository::new();
-        let d = device("did_x", "0001", "phone");
-        repo.save(&d).await.unwrap();
-
-        repo.record_activity(
-            &d.device_id,
-            5_000,
-            Some("192.168.1.5".into()),
-            Some("iPhone".into()),
-            Some("iOS 18".into()),
-        )
-        .await
-        .unwrap();
-
-        let got = repo.find_by_device_id(&d.device_id).await.unwrap().unwrap();
-        assert_eq!(got.last_seen_at_ms, Some(5_000));
-        assert_eq!(got.last_seen_ip.as_deref(), Some("192.168.1.5"));
-        assert_eq!(got.reported_name.as_deref(), Some("iPhone"));
-        assert_eq!(got.reported_os.as_deref(), Some("iOS 18"));
-    }
-
-    #[tokio::test]
-    async fn record_activity_is_silent_no_op_when_device_missing() {
-        // 与撤销并发场景:record_activity 不应报错。
-        let repo = InMemoryMobileDeviceRepository::new();
-        repo.record_activity(&MobileDeviceId::new("did_ghost"), 5_000, None, None, None)
-            .await
-            .unwrap();
     }
 
     #[tokio::test]

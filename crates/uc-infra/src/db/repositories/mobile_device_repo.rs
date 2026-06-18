@@ -1,4 +1,4 @@
-//! `DieselMobileDeviceRepository` —— `MobileDeviceRepositoryPort` 的 sqlite
+//! `DieselMobileDeviceRepository` —— `MobileDeviceStore` 的 sqlite
 //! 实现(v3 SyncClipboard 兼容版)。
 //!
 //! ## 错误映射
@@ -16,19 +16,13 @@
 //! insert 与跟随的存在性查询都在同一个 `executor.run` 闭包(同一连接)内,
 //! 但默认 autocommit 下二者是两条独立语句,并不共享同一事务 —— 这里的
 //! 分类是失败 insert 之后的 best-effort post-hoc 读,而非事务内原子操作。
-//!
-//! ## record_activity
-//!
-//! Port 契约要求:device 不存在时**静默 no-op**,不报错(避免与撤销路径
-//! 并发时回写残留)。Diesel 的 `update().set().execute()` 在 0 行受影响
-//! 时返回 `Ok(0)`,不会变成错误,正好满足契约。
 
 use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::result::{DatabaseErrorKind, Error as DieselError};
 
 use uc_core::mobile_sync::{MobileDevice, MobileDeviceError, MobileDeviceId};
-use uc_core::ports::MobileDeviceRepositoryPort;
+use uc_core::ports::MobileDeviceStore;
 
 use crate::db::models::{MobileDeviceRow, NewMobileDeviceRow};
 use crate::db::ports::{DbExecutor, InsertMapper, RowMapper};
@@ -54,7 +48,7 @@ impl<E, M> DieselMobileDeviceRepository<E, M> {
 }
 
 #[async_trait]
-impl<E, M> MobileDeviceRepositoryPort for DieselMobileDeviceRepository<E, M>
+impl<E, M> MobileDeviceStore for DieselMobileDeviceRepository<E, M>
 where
     E: DbExecutor,
     M: InsertMapper<MobileDevice, NewMobileDeviceRow>
@@ -227,48 +221,119 @@ where
 
         outcome
     }
+}
 
-    async fn record_activity(
-        &self,
-        device_id_value: &MobileDeviceId,
-        last_seen_at_ms_value: i64,
-        last_seen_ip_value: Option<String>,
-        reported_name_value: Option<String>,
-        reported_os_value: Option<String>,
-    ) -> Result<(), MobileDeviceError> {
-        let needle = device_id_value.as_str().to_string();
+// ---- Intent ports ----
+//
+// The single Diesel adapter satisfies every narrow device-repository port by
+// delegating to its aggregate-store methods (UFCS disambiguates the same-named
+// methods). The composition root coerces one `Arc<DieselMobileDeviceRepository>`
+// into each port (see ports.md §8.3).
+//
+// These impls live in a private submodule so the narrow port traits do not leak
+// into the test module's method-resolution scope (they share method names with
+// the aggregate store); trait-impl coherence still applies crate-wide.
+mod intent_ports {
+    use super::*;
+    use uc_core::ports::{
+        DeleteMobileDevicePort, FindMobileDeviceByIdPort, FindMobileDeviceByUsernamePort,
+        ListMobileDevicesPort, SaveMobileDevicePort, UpdateMobileDevicePort,
+    };
 
-        // AsChangeset 对 `Option<T>` 列的默认语义是 None ⇒ 不更新该列,Some
-        // ⇒ set 为对应值。这正好契合 port 契约里"Some 时回写、None 时保留
-        // 旧值"。`last_seen_at_ms` 在 port 签名里不是 Option,但 schema 是
-        // Nullable,所以这里包成 Some 写入。
-        #[derive(AsChangeset)]
-        #[diesel(table_name = crate::db::schema::mobile_device)]
-        struct Changeset {
-            last_seen_at_ms: Option<i64>,
-            last_seen_ip: Option<String>,
-            reported_name: Option<String>,
-            reported_os: Option<String>,
+    #[async_trait]
+    impl<E, M> FindMobileDeviceByUsernamePort for DieselMobileDeviceRepository<E, M>
+    where
+        E: DbExecutor,
+        M: InsertMapper<MobileDevice, NewMobileDeviceRow>
+            + RowMapper<MobileDeviceRow, MobileDevice>
+            + Send
+            + Sync,
+    {
+        async fn find_by_username(
+            &self,
+            username_value: &str,
+        ) -> Result<Option<MobileDevice>, MobileDeviceError> {
+            MobileDeviceStore::find_by_username(self, username_value).await
         }
+    }
 
-        let changeset = Changeset {
-            last_seen_at_ms: Some(last_seen_at_ms_value),
-            last_seen_ip: last_seen_ip_value,
-            reported_name: reported_name_value,
-            reported_os: reported_os_value,
-        };
+    #[async_trait]
+    impl<E, M> FindMobileDeviceByIdPort for DieselMobileDeviceRepository<E, M>
+    where
+        E: DbExecutor,
+        M: InsertMapper<MobileDevice, NewMobileDeviceRow>
+            + RowMapper<MobileDeviceRow, MobileDevice>
+            + Send
+            + Sync,
+    {
+        async fn find_by_device_id(
+            &self,
+            device_id_value: &MobileDeviceId,
+        ) -> Result<Option<MobileDevice>, MobileDeviceError> {
+            MobileDeviceStore::find_by_device_id(self, device_id_value).await
+        }
+    }
 
-        self.executor
-            .run(move |conn| {
-                // 0 行受影响在 sqlite/Diesel 都不视作错误 —— 正是 port 契约
-                // 要的"撤销路径上的并发静默 no-op"。
-                diesel::update(mobile_device.filter(device_id.eq(&needle)))
-                    .set(&changeset)
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                Ok(())
-            })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))
+    #[async_trait]
+    impl<E, M> ListMobileDevicesPort for DieselMobileDeviceRepository<E, M>
+    where
+        E: DbExecutor,
+        M: InsertMapper<MobileDevice, NewMobileDeviceRow>
+            + RowMapper<MobileDeviceRow, MobileDevice>
+            + Send
+            + Sync,
+    {
+        async fn list_all(&self) -> Result<Vec<MobileDevice>, MobileDeviceError> {
+            MobileDeviceStore::list_all(self).await
+        }
+    }
+
+    #[async_trait]
+    impl<E, M> SaveMobileDevicePort for DieselMobileDeviceRepository<E, M>
+    where
+        E: DbExecutor,
+        M: InsertMapper<MobileDevice, NewMobileDeviceRow>
+            + RowMapper<MobileDeviceRow, MobileDevice>
+            + Send
+            + Sync,
+    {
+        async fn save(&self, device: &MobileDevice) -> Result<(), MobileDeviceError> {
+            MobileDeviceStore::save(self, device).await
+        }
+    }
+
+    #[async_trait]
+    impl<E, M> DeleteMobileDevicePort for DieselMobileDeviceRepository<E, M>
+    where
+        E: DbExecutor,
+        M: InsertMapper<MobileDevice, NewMobileDeviceRow>
+            + RowMapper<MobileDeviceRow, MobileDevice>
+            + Send
+            + Sync,
+    {
+        async fn delete(
+            &self,
+            device_id_value: &MobileDeviceId,
+        ) -> Result<bool, MobileDeviceError> {
+            MobileDeviceStore::delete(self, device_id_value).await
+        }
+    }
+
+    #[async_trait]
+    impl<E, M> UpdateMobileDevicePort for DieselMobileDeviceRepository<E, M>
+    where
+        E: DbExecutor,
+        M: InsertMapper<MobileDevice, NewMobileDeviceRow>
+            + RowMapper<MobileDeviceRow, MobileDevice>
+            + Send
+            + Sync,
+    {
+        async fn update_mobile_device(
+            &self,
+            updated: &MobileDevice,
+        ) -> Result<bool, MobileDeviceError> {
+            MobileDeviceStore::update_mobile_device(self, updated).await
+        }
     }
 }
 
@@ -398,48 +463,6 @@ mod tests {
             .await
             .unwrap()
             .is_none());
-    }
-
-    #[tokio::test]
-    async fn record_activity_updates_only_provided_fields_when_device_exists() {
-        let (repo, _t) = make_repo();
-        let d = fixture("did_x", "0001", "phone");
-        repo.save(&d).await.unwrap();
-
-        // 第一次:全字段写。
-        repo.record_activity(
-            &d.device_id,
-            5_000,
-            Some("192.168.1.5".into()),
-            Some("iPhone 15".into()),
-            Some("iOS 18".into()),
-        )
-        .await
-        .unwrap();
-        let after_first = repo.find_by_device_id(&d.device_id).await.unwrap().unwrap();
-        assert_eq!(after_first.last_seen_at_ms, Some(5_000));
-        assert_eq!(after_first.last_seen_ip.as_deref(), Some("192.168.1.5"));
-        assert_eq!(after_first.reported_name.as_deref(), Some("iPhone 15"));
-        assert_eq!(after_first.reported_os.as_deref(), Some("iOS 18"));
-
-        // 第二次:仅 last_seen_at_ms 推进,其它 None 应保留旧值。
-        repo.record_activity(&d.device_id, 6_000, None, None, None)
-            .await
-            .unwrap();
-        let after_second = repo.find_by_device_id(&d.device_id).await.unwrap().unwrap();
-        assert_eq!(after_second.last_seen_at_ms, Some(6_000));
-        assert_eq!(after_second.last_seen_ip.as_deref(), Some("192.168.1.5"));
-        assert_eq!(after_second.reported_name.as_deref(), Some("iPhone 15"));
-        assert_eq!(after_second.reported_os.as_deref(), Some("iOS 18"));
-    }
-
-    #[tokio::test]
-    async fn record_activity_silent_no_op_when_device_missing() {
-        let (repo, _t) = make_repo();
-        // 不存在的 device 不应报错。
-        repo.record_activity(&MobileDeviceId::new("did_ghost"), 1, None, None, None)
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
