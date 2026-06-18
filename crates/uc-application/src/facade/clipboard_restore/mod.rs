@@ -6,9 +6,10 @@ use uc_core::clipboard::ClipboardIntegrationMode;
 use uc_core::ids::EntryId;
 use uc_core::ports::{
     clipboard::{ClipboardPayloadResolverPort, PayloadResolveError},
-    ClipboardEntryRepositoryPort, ClipboardRepresentationRepositoryPort,
     ClipboardSelectionRepositoryPort, ClockPort,
 };
+
+use crate::deps::{ClipboardEntryPorts, ClipboardRepresentationPorts};
 
 use crate::clipboard_write::ClipboardWriteCoordinator;
 use crate::usecases::clipboard_restore::{
@@ -42,9 +43,15 @@ pub enum ClipboardRestoreError {
 /// this once from their wiring deps and pass it to
 /// `ClipboardRestoreFacade::new`.
 pub struct ClipboardRestoreFacadeDeps {
-    pub entry_repo: Arc<dyn ClipboardEntryRepositoryPort>,
     pub selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-    pub representation_repo: Arc<dyn ClipboardRepresentationRepositoryPort>,
+    /// Narrow entry intent ports: `get` feeds both the multi-format restore
+    /// path (via the shared `reconstruct_snapshot_from_entry` helper) and the
+    /// plain-text restore path; `touch` feeds the post-restore LRU touch.
+    pub entry_ports: ClipboardEntryPorts,
+    /// Narrow representation intent ports: `get` feeds both restore paths'
+    /// candidate lookup; `update_processing_result` feeds the shared helper's
+    /// orphan→Lost demotion side effect.
+    pub representation_ports: ClipboardRepresentationPorts,
     pub payload_resolver: Arc<dyn ClipboardPayloadResolverPort>,
     pub blob_store: Arc<dyn BlobReaderPort>,
     pub clock: Arc<dyn ClockPort>,
@@ -61,9 +68,9 @@ pub struct ClipboardRestoreFacade {
 impl ClipboardRestoreFacade {
     pub fn new(deps: ClipboardRestoreFacadeDeps) -> Self {
         let ClipboardRestoreFacadeDeps {
-            entry_repo,
             selection_repo,
-            representation_repo,
+            entry_ports,
+            representation_ports,
             payload_resolver,
             blob_store,
             clock,
@@ -71,25 +78,41 @@ impl ClipboardRestoreFacade {
             integration_mode,
         } = deps;
 
+        let ClipboardEntryPorts {
+            get: entry_get,
+            list: _entry_list,
+            save: _entry_save,
+            touch: entry_touch,
+            delete: _entry_delete,
+            find_by_snapshot_hash: _entry_find,
+        } = entry_ports;
+        let ClipboardRepresentationPorts {
+            get: rep_get,
+            get_by_blob_id: _rep_get_by_blob_id,
+            list_for_event: _rep_list_for_event,
+            update_processing_result: rep_update,
+        } = representation_ports;
+
         let restore_uc = RestoreClipboardSelectionUseCase::new(
-            entry_repo.clone(),
+            entry_get.clone(),
             write_coordinator.clone(),
             selection_repo.clone(),
-            representation_repo.clone(),
+            rep_get.clone(),
+            rep_update,
             payload_resolver.clone(),
             blob_store.clone(),
             integration_mode,
         );
         let plain_uc = RestoreClipboardEntryAsPlainTextUseCase::new(
-            entry_repo.clone(),
+            entry_get,
             write_coordinator,
             selection_repo,
-            representation_repo,
+            rep_get,
             payload_resolver,
             blob_store,
             integration_mode,
         );
-        let touch_uc = TouchClipboardEntryUseCase::new(entry_repo, clock);
+        let touch_uc = TouchClipboardEntryUseCase::new(entry_touch, clock);
 
         Self {
             restore_uc,
