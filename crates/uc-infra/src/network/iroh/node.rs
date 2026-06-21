@@ -27,8 +27,9 @@ use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::protocol::{Router, RouterBuilder};
 use iroh::{Endpoint, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
-use noq_proto::congestion::Bbr3Config;
+use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::{debug, info, instrument, warn};
+use uc_core::settings::model::CongestionController;
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::MemberRepositoryPort;
@@ -200,6 +201,10 @@ pub struct IrohNodeConfig {
     /// are unconditionally filtered regardless of this flag — they have no
     /// legitimate cross-host use case.
     pub allow_overlay_network_addrs: bool,
+    /// Congestion controller to use for QUIC connections.
+    /// `Cubic` (default) gives excellent LAN throughput; `Bbr3` may be
+    /// better on lossy WAN paths. Mapped from `Settings.network`.
+    pub congestion_controller: CongestionController,
     /// Pin the iroh UDP socket to a fixed IPv4 port instead of an
     /// OS-assigned ephemeral one (UniClipboard#900). `None` → bind
     /// `0.0.0.0:0` (today's behavior). `Some(port)` → bind `0.0.0.0:port`
@@ -281,20 +286,14 @@ fn log_publish_addrs(endpoint: &Endpoint, stage: &'static str) {
 /// by `QuicTransportConfig::builder()`. Setters are by-value chained
 /// instead of `&mut self`, but the underlying knobs are the same noq
 /// (the project's quinn fork) `TransportConfig` surface.
-fn build_transport_config() -> QuicTransportConfig {
+fn build_transport_config(cc: CongestionController) -> QuicTransportConfig {
+    let cc_factory: Arc<dyn noq_proto::congestion::ControllerFactory + Send + Sync> = match cc {
+        CongestionController::Cubic => Arc::new(CubicConfig::default()),
+        CongestionController::Bbr3 => Arc::new(Bbr3Config::default()),
+    };
+    info!(congestion_controller = %cc, "QUIC congestion controller selected");
     QuicTransportConfig::builder()
-        // BBR over CUBIC: we're observing iroh emit "Congestion controller
-        // state reset" 3× per connection (path-validation churn) which slams
-        // the CUBIC CWND back to 10 MSS each time, forcing slow-start. Even
-        // once warmed up, on macOS Wi-Fi a single sporadic loss halves the
-        // window — visible in our blob-fetch traces as 1–3s stalls every
-        // 4 MB chunk after the first ~22 MB/s burst. BBR models bandwidth ×
-        // RTT directly instead of treating loss as a congestion signal, so
-        // it recovers from those stalls without giving back the rate it
-        // earned. The trade-off is BBR can be unfair to CUBIC flows on a
-        // shared bottleneck; that's a non-issue for our P2P single-flow
-        // direct UDP path.
-        .congestion_controller_factory(Arc::new(Bbr3Config::default()))
+        .congestion_controller_factory(cc_factory)
         // QUIC flow-control sized for hole-punched cross-WAN BDP. iroh-blobs
         // opens a single bidi stream per blob fetch (`open_bi`), so the
         // stream window — not the connection window — is the per-transfer
@@ -516,7 +515,7 @@ impl IrohNodeBuilder {
             // `install_presence` / `install_clipboard`.
             .alpns(vec![PAIRING_ALPN.to_vec()])
             .relay_mode(relay_mode)
-            .transport_config(build_transport_config())
+            .transport_config(build_transport_config(config.congestion_controller))
             // UniClipboard#486: drop Clash TUN / link-local IPs from every
             // address-lookup service in one shot, and drop CGNAT/Tailscale
             // overlay IPs unless the user opts in. See `build_addr_filter`.
