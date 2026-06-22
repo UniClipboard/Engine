@@ -36,7 +36,10 @@ mod status_codec {
 
     pub const DELIVERED: &str = "delivered";
     pub const DUPLICATE: &str = "duplicate";
-    pub const FAILED_OFFLINE: &str = "failed_offline";
+    pub const UNREACHABLE: &str = "unreachable";
+    // Legacy alias: rows written before the Unreachable promotion decode as
+    // Unreachable for seamless migration without a schema rewrite.
+    const LEGACY_FAILED_OFFLINE: &str = "failed_offline";
     pub const FAILED_LOCAL_POLICY: &str = "failed_local_policy";
     pub const FAILED_PEER_REJECTED: &str = "failed_peer_rejected";
     pub const FAILED_IO: &str = "failed_io";
@@ -46,8 +49,8 @@ mod status_codec {
         match status {
             EntryDeliveryStatus::Delivered => DELIVERED,
             EntryDeliveryStatus::Duplicate => DUPLICATE,
+            EntryDeliveryStatus::Unreachable => UNREACHABLE,
             EntryDeliveryStatus::Failed { reason } => match reason {
-                DeliveryFailureReason::Offline => FAILED_OFFLINE,
                 DeliveryFailureReason::LocalPolicy => FAILED_LOCAL_POLICY,
                 DeliveryFailureReason::PeerRejected => FAILED_PEER_REJECTED,
                 DeliveryFailureReason::Io => FAILED_IO,
@@ -60,9 +63,7 @@ mod status_codec {
         match raw {
             DELIVERED => Ok(EntryDeliveryStatus::Delivered),
             DUPLICATE => Ok(EntryDeliveryStatus::Duplicate),
-            FAILED_OFFLINE => Ok(EntryDeliveryStatus::Failed {
-                reason: DeliveryFailureReason::Offline,
-            }),
+            UNREACHABLE | LEGACY_FAILED_OFFLINE => Ok(EntryDeliveryStatus::Unreachable),
             FAILED_LOCAL_POLICY => Ok(EntryDeliveryStatus::Failed {
                 reason: DeliveryFailureReason::LocalPolicy,
             }),
@@ -235,6 +236,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn decode_legacy_failed_offline_as_unreachable() {
+        let status = status_codec::decode("failed_offline").unwrap();
+        assert!(matches!(status, EntryDeliveryStatus::Unreachable));
+    }
+
+    #[test]
+    fn decode_new_unreachable_round_trips() {
+        let encoded = status_codec::encode(&EntryDeliveryStatus::Unreachable);
+        assert_eq!(encoded, "unreachable");
+        let decoded = status_codec::decode(encoded).unwrap();
+        assert!(matches!(decoded, EntryDeliveryStatus::Unreachable));
+    }
+
     #[tokio::test]
     async fn record_attempt_inserts_new_row() {
         let (repo, seed_exec, _tempdir) = make_repo();
@@ -267,21 +282,14 @@ mod tests {
         repo.record_attempt(&make_record(
             "entry-1",
             "peer-A",
-            EntryDeliveryStatus::Failed {
-                reason: DeliveryFailureReason::Offline,
-            },
+            EntryDeliveryStatus::Unreachable,
         ))
         .await
         .unwrap();
 
         let listed = repo.list_by_entry(&EntryId::from("entry-1")).await.unwrap();
         assert_eq!(listed.len(), 1, "upsert 不应增加行数");
-        assert!(matches!(
-            listed[0].status,
-            EntryDeliveryStatus::Failed {
-                reason: DeliveryFailureReason::Offline
-            }
-        ));
+        assert!(matches!(listed[0].status, EntryDeliveryStatus::Unreachable));
     }
 
     #[tokio::test]
