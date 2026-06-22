@@ -1,3 +1,4 @@
+mod active_clipboard;
 mod blob_migration_repo;
 mod clipboard_change_origin;
 mod clipboard_entry_repository;
@@ -20,6 +21,12 @@ mod sync_receiver;
 mod thumbnail_generator;
 mod thumbnail_repository;
 
+pub use active_clipboard::{
+    ActiveClipboardDispatchError, ActiveClipboardDispatchPort, ActiveClipboardPullClientError,
+    ActiveClipboardPullClientPort, ActiveClipboardPullServeError, ActiveClipboardPullServePort,
+    ActiveClipboardReceiverPort, ActiveClipboardRegisterError, AdvanceActiveClipboardPort,
+    InboundActiveClipboardState, LoadActiveClipboardPort, ResetActiveClipboardPort,
+};
 pub use blob_migration_repo::{BlobMigrationRepoError, BlobMigrationRepoPort, MigrationRecord};
 pub use clipboard_change_origin::ClipboardChangeOriginPort;
 pub use clipboard_entry_repository::ClipboardEntryStore;
@@ -28,7 +35,8 @@ pub use clipboard_selection_repository::ClipboardSelectionRepositoryPort;
 pub use delivery::EntryDeliveryRepositoryPort;
 pub use entry_intents::{
     DeleteClipboardEntryPort, FindEntryIdBySnapshotHashPort, GetClipboardEntryPort,
-    ListClipboardEntriesPort, SaveClipboardEntryPort, TouchClipboardEntryPort,
+    GetEntrySnapshotHashPort, ListClipboardEntriesPort, SaveClipboardEntryPort,
+    TouchClipboardEntryPort,
 };
 pub use local_clipboard::SystemClipboardPort;
 pub use payload_resolver::{

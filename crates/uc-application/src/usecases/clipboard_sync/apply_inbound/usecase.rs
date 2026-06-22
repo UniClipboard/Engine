@@ -7,8 +7,9 @@ use moka::sync::Cache;
 use tracing::{debug, error, info, instrument, warn, Instrument};
 use uc_observability::FlowId;
 
+use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::EntryId;
-use uc_core::ports::clipboard::FindEntryIdBySnapshotHashPort;
+use uc_core::ports::clipboard::{AdvanceActiveClipboardPort, FindEntryIdBySnapshotHashPort};
 use uc_core::SystemClipboardSnapshot;
 
 use crate::facade::blob_transfer::SharedHostEventEmitter;
@@ -30,16 +31,21 @@ pub struct ApplyInboundClipboardUseCase {
     capture: Arc<dyn InboundCapture>,
     write: Arc<dyn InboundWrite>,
     blob_materializer: Option<Arc<dyn InboundBlobMaterializer>>,
-    /// 短窗口去重：content_hash → entry_id。过滤同一 peer 反复推送完全
+    /// 短窗口去重：snapshot_hash → entry_id。过滤同一 peer 反复推送完全
     /// 相同字节的回声帧。
-    recent_content_hashes: Cache<String, EntryId>,
+    recent_snapshot_hashes: Cache<String, EntryId>,
     /// 略长窗口去重：visible_key → entry_id。捕获"同一可见内容、不同
-    /// content_hash"的场景（peer 重发时扩展了 representations）。
+    /// snapshot_hash"的场景（peer 重发时扩展了 representations）。
     recent_visible_content: Cache<String, EntryId>,
     /// Optional host-event emitter for surfacing the inbound entry to UI
     /// before the fetch+capture pipeline finishes. Wired only in daemon
     /// mode; tests / CLI leave it `None`.
     host_event_emitter: Option<SharedHostEventEmitter>,
+    /// Optional cross-device active-clipboard register. When wired, a freshly
+    /// applied inbound entry advances the register at capture-commit (the OS
+    /// write that trails it is best-effort and intentionally not gated on).
+    /// `None` in tests / contexts that don't track active state.
+    active_register: Option<Arc<dyn AdvanceActiveClipboardPort>>,
 }
 
 impl ApplyInboundClipboardUseCase {
@@ -54,7 +60,8 @@ impl ApplyInboundClipboardUseCase {
             write,
             blob_materializer: None,
             host_event_emitter: None,
-            recent_content_hashes: Cache::builder()
+            active_register: None,
+            recent_snapshot_hashes: Cache::builder()
                 .max_capacity(RECENT_INBOUND_MAX_RECORDS)
                 .time_to_live(RAPID_DUPLICATE_WINDOW)
                 .build(),
@@ -82,6 +89,40 @@ impl ApplyInboundClipboardUseCase {
         self
     }
 
+    /// Wire the cross-device active-clipboard register. When set, a newly
+    /// applied inbound entry advances the register so this device reflects
+    /// that the peer's content is now its active clipboard state.
+    pub fn with_active_register(mut self, register: Arc<dyn AdvanceActiveClipboardPort>) -> Self {
+        self.active_register = Some(register);
+        self
+    }
+
+    /// Advance the active-clipboard register for a freshly applied inbound
+    /// entry. The activation is attributed to the sending device, stamped
+    /// with the snapshot's observed time — the best available proxy on the
+    /// receiver for when the sender activated this content. Best-effort: a
+    /// register storage failure is logged and swallowed.
+    async fn advance_active_register(
+        &self,
+        snapshot_hash: String,
+        entry_id: EntryId,
+        activated_by: uc_core::ids::DeviceId,
+        activated_at_ms: i64,
+    ) {
+        let Some(register) = self.active_register.as_ref() else {
+            return;
+        };
+        let state =
+            ActiveClipboardState::new(snapshot_hash, entry_id, activated_at_ms, activated_by);
+        if let Err(e) = register.advance(&state).await {
+            warn!(
+                error = %e,
+                snapshot_hash = %state.snapshot_hash,
+                "active register: inbound advance failed (best-effort, ignored)"
+            );
+        }
+    }
+
     fn emit_host_event(&self, event: HostEvent) {
         let Some(bus) = self.host_event_emitter.as_ref() else {
             return;
@@ -91,10 +132,10 @@ impl ApplyInboundClipboardUseCase {
 
     fn find_recent_duplicate(
         &self,
-        content_hash: &str,
+        snapshot_hash: &str,
         visible_key: Option<&str>,
     ) -> Option<EntryId> {
-        if let Some(id) = self.recent_content_hashes.get(content_hash) {
+        if let Some(id) = self.recent_snapshot_hashes.get(snapshot_hash) {
             return Some(id);
         }
         self.recent_visible_content.get(visible_key?)
@@ -102,12 +143,12 @@ impl ApplyInboundClipboardUseCase {
 
     fn remember_recent_inbound(
         &self,
-        content_hash: String,
+        snapshot_hash: String,
         visible_key: Option<String>,
         entry_id: EntryId,
     ) {
-        self.recent_content_hashes
-            .insert(content_hash, entry_id.clone());
+        self.recent_snapshot_hashes
+            .insert(snapshot_hash, entry_id.clone());
         if let Some(visible_key) = visible_key {
             self.recent_visible_content.insert(visible_key, entry_id);
         }
@@ -126,7 +167,7 @@ impl ApplyInboundClipboardUseCase {
         fields(
             from_device = %input.from_device,
             peer.device_id = %input.from_device,
-            content_hash = %input.content_hash,
+            snapshot_hash = %input.snapshot_hash,
             plaintext_len = input.plaintext.len(),
             flow.id = tracing::field::Empty,
             flow.kind = "clipboard_sync",
@@ -143,7 +184,7 @@ impl ApplyInboundClipboardUseCase {
         // worst case we re-write the OS clipboard with identical bytes.
         let existing = self
             .entry_repo
-            .find_entry_id_by_snapshot_hash(&input.content_hash)
+            .find_entry_id_by_snapshot_hash(&input.snapshot_hash)
             .await
             .map_err(|e| ApplyInboundError::DedupQuery(e.to_string()))?;
         if let Some(existing_entry_id) = existing {
@@ -152,7 +193,7 @@ impl ApplyInboundClipboardUseCase {
                 "inbound dropped: duplicate of existing local entry"
             );
             return Ok(ApplyOutcome::DuplicateSkipped {
-                content_hash: input.content_hash,
+                snapshot_hash: input.snapshot_hash,
                 existing_entry_id,
             });
         }
@@ -249,14 +290,14 @@ impl ApplyInboundClipboardUseCase {
 
         let visible_key = snapshot.meaningful_origin_key();
         if let Some(existing_entry_id) =
-            self.find_recent_duplicate(&input.content_hash, visible_key.as_deref())
+            self.find_recent_duplicate(&input.snapshot_hash, visible_key.as_deref())
         {
             debug!(
                 existing_entry_id = %existing_entry_id,
                 "inbound dropped: rapid duplicate of recently applied entry"
             );
             return Ok(ApplyOutcome::DuplicateSkipped {
-                content_hash: input.content_hash,
+                snapshot_hash: input.snapshot_hash,
                 existing_entry_id,
             });
         }
@@ -304,15 +345,30 @@ impl ApplyInboundClipboardUseCase {
         // 会把第二次也判为 dup 直接 skip,用户陷入"取消后无法恢复"困境。
         // partial 不进 dedup,完整成功才记。
         if !is_partial {
-            self.remember_recent_inbound(input.content_hash.clone(), visible_key, entry_id.clone());
+            self.remember_recent_inbound(
+                input.snapshot_hash.clone(),
+                visible_key,
+                entry_id.clone(),
+            );
+            // Advance the active-clipboard register at capture-commit (D1
+            // call-site: inbound apply). The OS write below is detached and
+            // best-effort, so the register is intentionally decoupled from it
+            // for the bulk content-sync path.
+            self.advance_active_register(
+                input.snapshot_hash.clone(),
+                entry_id.clone(),
+                input.from_device,
+                snapshot_for_write.ts_ms,
+            )
+            .await;
             debug!(entry_id = %entry_id, "inbound: entry persisted, scheduling background OS clipboard write");
             let write_port = Arc::clone(&self.write);
             let entry_id_for_write = entry_id.clone();
             let from_device_for_write = input.from_device.clone();
-            let content_hash_for_write = input.content_hash.clone();
+            let snapshot_hash_for_write = input.snapshot_hash.clone();
             let origin_guard_key_for_write = snapshot_for_write.origin_guard_key();
             // `.in_current_span()` keeps the spawned task under `apply_inbound.execute`
-            // so trace_id / from_device / content_hash propagate into the failure event.
+            // so trace_id / from_device / snapshot_hash propagate into the failure event.
             // Without this the background failure was a context-less orphan in Sentry —
             // the missing peer_id field is exactly what made the recent UNICLIPBOARD-RUST-F
             // triage take an extra hour (couldn't tell whether 50 failures were one peer
@@ -326,7 +382,7 @@ impl ApplyInboundClipboardUseCase {
                             error = %e,
                             entry_id = %entry_id_for_write,
                             from_device = %from_device_for_write,
-                            content_hash = %content_hash_for_write,
+                            snapshot_hash = %snapshot_hash_for_write,
                             origin_guard_key = %origin_guard_key_for_write,
                             "inbound: OS clipboard background write failed after capture"
                         );

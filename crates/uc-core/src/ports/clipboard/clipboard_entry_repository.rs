@@ -31,8 +31,9 @@ pub trait ClipboardEntryStore: Send + Sync {
     /// Returns error if database operation fails
     async fn delete_entry(&self, entry_id: &EntryId) -> Result<()>;
 
-    /// Look up an existing entry by its event's `snapshot_hash` (stored as
-    /// the wire `content_hash` string, formatted as `"blake3v1:<hex>"`).
+    /// Look up an existing entry by its event's `snapshot_hash` (carried on
+    /// the wire as the `snapshot_hash` string, formatted as
+    /// `"blake3v1:<hex>"`).
     ///
     /// Returns `Some(EntryId)` when a prior capture (local or remote push)
     /// persisted a `ClipboardEvent` carrying this exact hash; returns
@@ -50,6 +51,24 @@ pub trait ClipboardEntryStore: Send + Sync {
         &self,
         _snapshot_hash: &str,
     ) -> Result<Option<EntryId>> {
+        Ok(None)
+    }
+
+    /// Return the snapshot hash persisted for `entry_id`'s event (the
+    /// `"blake3v1:<hex>"` content identity recorded when the content was first
+    /// captured), or `None` when no entry with `entry_id` exists.
+    ///
+    /// Inverse of [`Self::find_entry_id_by_snapshot_hash`]: that resolves a
+    /// hash to an entry, this resolves an entry to its persisted hash. The
+    /// value is the stored identity, returned verbatim; it must never be
+    /// recomputed from a materialized snapshot, because rebuilding file
+    /// content yields a different representation — and thus a different hash —
+    /// than the captured original.
+    ///
+    /// Implementation note: a read-only join across `clipboard_entry` +
+    /// `clipboard_event`. Adapters without the join (in-memory test fakes) may
+    /// return `Ok(None)` unconditionally.
+    async fn get_entry_snapshot_hash(&self, _entry_id: &EntryId) -> Result<Option<String>> {
         Ok(None)
     }
 }

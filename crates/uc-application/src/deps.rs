@@ -15,12 +15,13 @@ use tokio::sync::mpsc;
 use uc_core::blob::ports::{BlobReaderPort, BlobWriterPort};
 use uc_core::ids::RepresentationId;
 use uc_core::ports::clipboard::{
-    ClipboardChangeOriginPort, ClipboardPayloadResolverPort, ClipboardRepresentationNormalizerPort,
-    DeleteClipboardEntryPort, FindEntryIdBySnapshotHashPort, GetClipboardEntryPort,
-    GetRepresentationByBlobIdPort, GetRepresentationPort, ListClipboardEntriesPort,
-    ListRepresentationsForEventPort, RepresentationCachePort, SaveClipboardEntryPort,
-    SpoolQueuePort, SystemClipboardPort, ThumbnailGeneratorPort, ThumbnailRepositoryPort,
-    TouchClipboardEntryPort, UpdateRepresentationProcessingResultPort,
+    AdvanceActiveClipboardPort, ClipboardChangeOriginPort, ClipboardPayloadResolverPort,
+    ClipboardRepresentationNormalizerPort, DeleteClipboardEntryPort, FindEntryIdBySnapshotHashPort,
+    GetClipboardEntryPort, GetEntrySnapshotHashPort, GetRepresentationByBlobIdPort,
+    GetRepresentationPort, ListClipboardEntriesPort, ListRepresentationsForEventPort,
+    LoadActiveClipboardPort, RepresentationCachePort, ResetActiveClipboardPort,
+    SaveClipboardEntryPort, SpoolQueuePort, SystemClipboardPort, ThumbnailGeneratorPort,
+    ThumbnailRepositoryPort, TouchClipboardEntryPort, UpdateRepresentationProcessingResultPort,
 };
 use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::search::search_key::SearchKeyDerivationPort;
@@ -46,6 +47,10 @@ pub struct ClipboardEntryPorts {
     pub touch: Arc<dyn TouchClipboardEntryPort>,
     pub delete: Arc<dyn DeleteClipboardEntryPort>,
     pub find_by_snapshot_hash: Arc<dyn FindEntryIdBySnapshotHashPort>,
+    /// Forward lookup of an entry's persisted cross-device snapshot hash. The
+    /// restore paths read this rather than recomputing it from the
+    /// reconstructed snapshot, which would diverge for file entries.
+    pub get_snapshot_hash: Arc<dyn GetEntrySnapshotHashPort>,
 }
 
 /// Clipboard representation intent ports facing the application layer.
@@ -82,6 +87,18 @@ pub struct ClipboardPorts {
     pub clipboard_change_origin: Arc<dyn ClipboardChangeOriginPort>,
     pub worker_tx: mpsc::Sender<RepresentationId>,
     pub payload_resolver: Arc<dyn ClipboardPayloadResolverPort>,
+    /// Cross-device active-clipboard LWW register write port. Advanced by the
+    /// restore and inbound-apply paths when a local OS clipboard write makes
+    /// its content the latest active clipboard state.
+    pub active_register: Arc<dyn AdvanceActiveClipboardPort>,
+    /// Cross-device active-clipboard LWW register read port. Read by the
+    /// inbound 0xC3 state handler to decide whether an incoming observation
+    /// supersedes the current value (LWW + loop-stop).
+    pub active_register_load: Arc<dyn LoadActiveClipboardPort>,
+    /// Cross-device active-clipboard LWW register reset port. Clears the
+    /// register unconditionally; the startup reconcile uses it to drop a
+    /// persisted row that no longer matches the live OS clipboard.
+    pub active_register_reset: Arc<dyn ResetActiveClipboardPort>,
 }
 
 /// Narrow space-access intent ports facing the application layer.
