@@ -55,7 +55,7 @@ tests/hosts/ohos/build-emulator.sh
 
 ```toml
 uc-engine = {
-  git = "https://github.com/UniClipboard/UniClipboardCore.git",
+  git = "https://github.com/UniClipboard/core.git",
   rev = "<immutable-commit-sha>"
 }
 ```
