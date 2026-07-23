@@ -4,6 +4,7 @@ version.workspace = true
 license.workspace = true
 edition = "2021"
 description = "Stable cross-platform engine interface for UniClipboard hosts"
+publish = false
 
 [features]
 default = []
@@ -27,7 +28,7 @@ uuid = { version = "1", features = ["v4", "fast-rng"] }
 uc-application = { path = "../uc-application" }
 uc-core = { path = "../uc-core", features = ["task-registry"] }
 uc-infra = { path = "../uc-infra" }
-uc-mobile-proto = { path = "../uc-mobile-proto", optional = true }
+uc-mobile-proto = { path = "../../compatibility/uc-mobile-proto", optional = true }
 uc-observability-contract = { path = "../uc-observability-contract" }
 zeroize = "1.8"
 

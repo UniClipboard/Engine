@@ -59,7 +59,7 @@ fn ohos_binding_is_a_workspace_member_with_a_public_engine_boundary() {
 
 #[test]
 fn ohos_binding_registers_its_napi_exports_when_the_library_loads() {
-    let binding = read("crates/uc-ohos-napi/src/lib.rs");
+    let binding = read("bindings/uc-ohos-napi/src/lib.rs");
 
     assert!(binding.contains("cfg(target_env = \"ohos\")"));
     assert!(!binding.contains("cfg(target_os = \"ohos\")"));
@@ -69,7 +69,7 @@ fn ohos_binding_registers_its_napi_exports_when_the_library_loads() {
 
 #[test]
 fn ohos_binding_links_the_harmony_napi_runtime() {
-    let build_script = read("crates/uc-ohos-napi/build.rs");
+    let build_script = read("bindings/uc-ohos-napi/build.rs");
 
     assert!(build_script.contains("CARGO_CFG_TARGET_ENV"));
     assert!(build_script.contains("ace_napi.z"));
@@ -77,7 +77,7 @@ fn ohos_binding_links_the_harmony_napi_runtime() {
 
 #[test]
 fn ohos_binding_accepts_standard_typed_arrays_from_the_host() {
-    let host = read("crates/uc-ohos-napi/src/host.rs");
+    let host = read("bindings/uc-ohos-napi/src/host.rs");
 
     assert!(host.contains("call_host::<_, Option<Uint8Array>>"));
     assert!(host.contains("property::<Uint8Array>"));

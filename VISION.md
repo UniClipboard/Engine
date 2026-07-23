@@ -1,78 +1,45 @@
-# VISION.md
+# UniClipboardCore 愿景
 
-**UniClipboard 是一款端到端加密的跨平台剪贴板同步工具，通过 P2P 网络让个人拥有的多台设备共享同一份剪贴板。**
+`UniClipboardCore` 是 UniClipboard 在 macOS、Windows、Linux、iOS、Android 和 HarmonyOS 上共享的端到端加密 P2P 核心，也是核心协议、持久化格式、数据库迁移和移动绑定的唯一事实来源。
 
----
+## 目标
 
-## 项目定义
+- 所有平台运行同一身份、配对、加密、同步和内容协议。
+- 平台差异只通过宿主能力接入，不在核心中复制业务逻辑。
+- 通过一个稳定入口向 Rust 使用方提供完整能力，并用薄绑定服务移动平台。
+- 每次发布都能追溯到唯一提交、唯一版本和完整校验清单。
+- 核心仓可独立检出、检查和生成三种移动平台产物。
 
-- 产品定位：「多台设备服务一个人」——不是协作工具，不是消息队列
-- 支持 macOS、Windows、Linux、iOS、Android、HarmonyOS；所有平台都是同一 Space 中的完整 P2P 对等节点
-- 同步内容涵盖文本、图片、文件、链接、富文本、代码片段
-- 交付形态：GUI 桌面应用（Tauri + React）、原生移动应用、CLI 工具（uniclip）、桌面后台 daemon（uniclipd）
-- 核心交互入口：Quick Panel（Spotlight 式全局快捷面板，搜索历史、即时粘贴）
+## 结构原则
 
-## 核心目标
-
-- **数据主权**：剪贴板内容永远只存在于用户自己的设备上，不经过任何中心服务器存储
-- **端到端保护**：除允许按原始字节落盘的文件内容外，业务数据在静态存储中使用 XChaCha20-Poly1305 AEAD 加密；网络传输使用受认证的加密通道，passphrase 在 Space 创建时强制设定
-- **零配置可用**：设备配对后即自动同步，Quick Panel 默认启用，开箱即用
-- **轻量常驻**：GUI 是 daemon 的纯客户端，不加载 SQLite/iroh，可随时进入 Lightweight Mode（GUI 退出、daemon 继续）
-- **跨平台一致性**：同一份 uc-core 领域模型驱动所有平台，差异仅在适配器层
-- **对等能力一致**：桌面、iOS、Android、HarmonyOS 使用同一身份、配对、加密、P2P 传输和内容协议；对等不要求系统剪贴板自动化程度相同，移动端可因权限改为用户主动触发；受系统限制暂停时正常离线，恢复后以原身份重新上线
-
-## 架构原则
-
-- **六边形架构（Ports & Adapters）**：uc-core 定义纯领域模型和 Port trait，零基础设施依赖；uc-infra/uc-platform 提供具体实现
-- **uc-core 禁区**：不得出现数据库（SQLite/Diesel）、网络框架（iroh/HTTP）、OS API、加密算法实现（Argon2/ChaCha20）——只允许领域概念
-- **GUI 与 daemon 分离**：GUI 进程通过 HTTP/WS 连接外部 daemon，绝不内嵌 AppFacade 或打开数据库；daemon 绝不依赖任何 GUI 框架
-- **uc-desktop GUI 框架无关**：该 crate 禁止依赖 Tauri/AppKit/egui 等，由 uc-tauri 负责 GUI 壳适配
-- **薄中间层隔离重依赖**：uc-daemon-contract/uc-daemon-client/uc-daemon-process 作为叶子 crate，不携带 iroh/diesel/sqlite，使 CLI 和 GUI release 二进制免于链接重型依赖
-- **统一 P2P 核心**：桌面与移动宿主都通过同一核心入口运行完整节点；平台差异只存在于剪贴板、安全存储、文件句柄和生命周期接入，不得分叉协议、加密或内容能力。移动产品可额外提供用户显式选择的 LAN HTTP 兼容通道；它独立于 P2P 核心，不得自动回退或替代完整节点能力
-- **可测试性**：76+ async trait Port 均为 Send + Sync，通过 Arc&lt;dyn Port&gt; 注入，应用层测试使用 mockall/手写 fake，永不触碰真实基础设施
+- `uc-core` 只定义领域模型和宿主接口，不依赖数据库、网络框架或操作系统接口。
+- `uc-application` 负责业务编排，只依赖领域层提供的接口。
+- `uc-infra` 实现数据库、加密、文件和 P2P 网络能力。
+- `uc-engine` 隐藏内部层次，是外部 Rust 使用方唯一稳定入口。
+- `bindings/` 只做语言和平台调用转换，不承载业务规则。
+- `compatibility/` 中的 LAN 能力拥有独立版本和发布流程，不属于默认 P2P 路径。
 
 ## 安全与隐私底线
 
-- **持久化默认密文（不可打破的基石）**：任何写入持久化存储的业务负载——SQLite 数据库列、磁盘缓存、搜索索引——默认都必须先经 MasterKey AEAD 加密，**严禁明文落库**。这包括剪贴板正文、标题、预览、搜索渲染字段、标签名、文件名和文件路径等一切源自用户内容的数据。例外仅有 **内容类型分类枚举**（content type / file type，如 text/image/file/link）和文件内容本体；文件内容允许由 blob store 或核心导入目录按原始字节落盘，但不得因此明文保存文件名、路径或关联元数据。新增其他持久化列/文件默认加密；若主张某字段可明文，必须在 PR 中论证其非敏感性并显式获批。
-- **加密不可绕过**：Space 初始化强制设定 passphrase，MasterKey 直接加密所有本地历史；无 passphrase 则无法解密、无法存储
-- **传输保护**：非文件业务内容使用应用层 AEAD，并统一通过带 Ed25519 身份认证的 QUIC 加密通道传输；文件内容沿用现有 QUIC 文件协议
-- **AAD 绑定防重放**：每条密文通过 Additional Authenticated Data 绑定到具体实体（event_id、blob_id、transfer_id+chunk_index），密文不可跨实体迁移
-- **密钥材料 zeroize-on-drop**：MasterKey、Kek、Passphrase、Plaintext、ProofDerivedKey 均实现内存归零
-- **配对安全**：passphrase 验证使用 HMAC 挑战 - 应答协议；mDNS 广播配对码的 blake3 哈希前缀，被动观察者无法获取明文码
-- **日志脱敏**：所有敏感类型 Debug impl 输出 [REDACTED]，tracing 禁止记录明文剪贴板内容、密码、密钥、完整 token
-- **遥测隔离**：analytics ID 与业务 DeviceId 完全独立，永不关联；遥测永不上传剪贴板内容、文件名、文件路径、用户名、原始 IP
-- **LAN-only 模式**：allow_relay_fallback=false 时完全禁用 relay，仅 mDNS 本地发现，无任何流量离开局域网
-- **PID 身份验证**：向 daemon 发送信号前必须验证 PID 存活性 + 可执行文件路径匹配，防止信号误发给复用 PID 的无关进程
+- 除内容类型分类枚举和文件内容本体外，持久化业务数据必须先经 MasterKey AEAD 加密。
+- 文件名、路径、标题、预览、搜索字段、标签及其他用户内容不得明文落盘。
+- 网络传输必须使用经过身份认证的加密通道；非文件业务内容还要经过应用层 AEAD。
+- 密文必须通过附加认证数据绑定到对应实体，避免跨记录替换。
+- 密钥、密码和明文容器释放时必须清零。
+- 日志和错误信息不得泄露敏感值。
+- 数据迁移必须向前兼容；不得以导出明文或删除用户数据作为回退手段。
 
-## 用户体验哲学
+## 平台关系
 
-- **桌面背景优先**：桌面窗口关闭仅隐藏到托盘，daemon 继续常驻；移动端是否后台运行由系统授予的运行窗口决定
-- **Quick Panel 零延迟感知**：启动时预创建隐藏 WebView 并转换为 NSPanel（macOS），首次唤起无窗口创建开销
-- **粘贴不夺焦**：NSPanel NonactivatingPanel 样式保持前一应用焦点，粘贴时先确认焦点恢复再发送按键
-- **模糊事件防抖**：300ms show-debounce + 100ms verify-delay 消除 IME/系统通知导致的误关闭
-- **跨平台视觉适配**：Linux 自动禁用 backdrop-blur/动画/阴影等重效果，macOS/Windows 保留完整视觉
-- **自愈 autostart**：每次启动 reconcile OS 登录项到当前可执行文件路径，修复因更新/移动导致的静默失效
+- 桌面、iOS、Android 和 HarmonyOS 都是同一空间中的完整 P2P 节点。
+- 移动系统可以限制后台运行和剪贴板自动化，但不能因此改变协议和身份语义。
+- 宿主只向核心提供私有目录、安全存储、剪贴板、文件句柄和生命周期能力。
+- LAN 兼容能力只能由用户明确开启，不能读取 P2P 失败信号后自动接管。
 
-## 锁定决策
+## 发布原则
 
-| 决策 | 理由 |
-| ------ | ------ |
-| iroh 作为唯一 P2P 传输 | QUIC NAT 穿越 + Ed25519 身份 + relay fallback，一栈解决连接问题 |
-| 单 MasterKey 扁平加密 | v1 简化实现，代价是无法可靠撤销已泄露设备（需 DEK 信封分层，留待 v2） |
-| 剪贴板语义为瞬时性 | 离线不重发、不排队、不最终一致——失败即报告，用户手动重发 |
-| daemon per-profile 单例 | fs2 文件锁保证一个 profile 只有一个 daemon 实例 |
-| AGPL-3.0-only 许可 | 任何修改后通过网络提供服务的实体必须开源对应源码 |
-| 遥测事件名一旦上线永不重命名 | 防止历史数据聚合断裂，演进通过创建 *_v2 + 废弃旧事件 |
-| 四平台运行统一完整 P2P 节点 | 桌面、iOS、Android、HarmonyOS 使用同一核心与协议；对等身份不等于永久后台在线，移动端暂停时离线、恢复后以原身份重连。移动产品可让用户显式选择独立 LAN HTTP 兼容通道，但不得自动回退或以其替代 P2P 验收 |
-
-## 绝对禁区
-
-- **禁止明文持久化敏感元数据和非文件内容**：严禁将剪贴板正文、标题、预览、搜索渲染字段、标签、文件名和文件路径等数据以明文写入数据库列、磁盘缓存或搜索索引；仅内容类型分类枚举（text/image/file/link 等）和文件内容本体可明文。文件内容例外不得扩展到其名称、路径或关联元数据。
-- **禁止中心化存储剪贴板内容**：不建 relay blob store、不建 store-and-forward 邮箱、不建云同步
-- **禁止自动重发/最终一致性**：离线 = 预期状态，自动恢复是协作工具语义，与本项目定位冲突
-- **禁止用户账号体系（v1）**：Space 是本地密钥信任组，不是云账户；无登录、无注册、无中心认证
-- **禁止 daemon 依赖 GUI 框架**：daemon 是纯后台服务，编译结果不可包含 Tauri/GTK/AppKit UI 组件
-- **禁止 GUI 内嵌业务栈**：GUI 进程不打开 SQLite、不实例化 AppFacade、不运行 blob worker
-- **禁止 release 二进制暴露 dev 路由**：daemon dev-token 端点 #[cfg(debug_assertions)] 硬门控，CLI dev 命令 feature-gate 隔离
-- **禁止遥测关联真实身份**：analytics_device_id 不得从 DeviceId 派生，不得存入业务持久层，$geoip_disable 强制为 true
-- **禁止无身份验证的 PID 信号**：任何 kill/signal 操作前必须 verify_pid_identity，防止信号误投
+- 统一核心使用 `core-v*` 版本线。
+- LAN 兼容线使用 `uc-mobile-v*` 版本线。
+- 同一次核心发布的 iOS、Android、HarmonyOS、源码、锁文件、许可证和调试资料必须来自同一提交。
+- 发布资产不可覆盖；坏版本通过新版本修复。
+- 任何“跳过”的设备验收都必须在发布清单中如实记录。

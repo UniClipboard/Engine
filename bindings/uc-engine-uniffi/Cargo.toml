@@ -4,6 +4,7 @@ version.workspace = true
 license.workspace = true
 edition = "2021"
 description = "UniFFI bindings for the public UniClipboard engine interface"
+publish = false
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
@@ -19,7 +20,7 @@ bindgen-cli = ["uniffi/cli"]
 [dependencies]
 thiserror = "2"
 tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
-uc-engine = { path = "../uc-engine" }
+uc-engine = { path = "../../crates/uc-engine" }
 uniffi = "=0.31.1"
 zeroize = "1.8"
 

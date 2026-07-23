@@ -1,85 +1,20 @@
-# Security Policy
+# 安全说明
 
-UniClipboard is a security-oriented, end-to-end-encrypted clipboard sync tool.
-This document explains how to report vulnerabilities and how to verify the
-integrity and authenticity of the binaries we publish.
+UniClipboardCore 负责端到端加密、设备身份、P2P 协议和本地密文持久化。未公开修复的安全问题请不要提交公开 Issue。
 
-## Supported Versions
+## 报告方式
 
-UniClipboard is pre-1.0 and ships from a single active release line. Security
-fixes land on the latest released minor; older builds are not maintained.
-Please update to the latest release before reporting an issue.
+请在本仓库的 GitHub `Security` 页面选择 `Report a vulnerability`，通过私密安全报告提交复现条件、影响范围和已知缓解办法。
 
-| Version         | Supported          |
-| --------------- | ------------------ |
-| Latest `0.14.x` | :white_check_mark: |
-| Older `0.x`     | :x:                |
+## 支持范围
 
-## Reporting a Vulnerability
+项目仍处于 1.0 之前，只维护最新的 `core-v*` 发布线。安全修复通过新版本发布，不覆盖已有标签或资产。
 
-Please report security issues **privately** — do **not** open a public issue for
-an unfixed vulnerability.
+## 发布校验
 
-- Preferred: open a private report through GitHub Security Advisories on this
-  repository (the **"Report a vulnerability"** button under the **Security**
-  tab). This keeps the disclosure private until a fix is available.
+每次发布都包含 `release-manifest.json`。该文件记录来源提交、锁文件校验值、每个资产的大小和 SHA-256，以及已执行或明确跳过的设备验收。使用方必须同时校验清单和目标资产，不能只依赖文件名或可变分支。
 
-We aim to acknowledge new reports within a few business days and will keep you
-updated through triage, the fix, and coordinated disclosure. Thank you for
-helping keep UniClipboard users safe.
+持久化和发布安全的详细规则见：
 
-## Verifying Release Downloads
-
-UniClipboard uses two **independent** signing mechanisms, both built on
-[minisign](https://jedisct1.github.io/minisign/)-compatible Ed25519 keys. The
-two keys are intentionally separate so they can be rotated independently.
-
-### 1. In-app auto-updater (always on)
-
-The Tauri auto-updater cryptographically verifies every update bundle it
-downloads against a public key embedded in the application. You do not need to
-do anything: an update whose signature is missing or invalid is rejected
-automatically.
-
-For reference, the updater public key is:
-
-```
-untrusted comment: minisign public key: B2680836865C2738
-RWQ4J1yGNghostY9tL54b8pVCWvFIc7ebO9iD11Hvf2fqcMYemYwtIWb
-```
-
-This key signs the **updater payloads only** — `*.app.tar.gz` (macOS),
-`*.AppImage.tar.gz` (Linux) and `*.nsis.zip` (Windows) — whose detached `*.sig`
-files are attached to every GitHub release. It is the same key shipped in the
-application configuration, so it is fully public.
-
-> On macOS, release builds are additionally Apple-notarized and code-signed, so
-> Gatekeeper (`spctl --assess --type execute`) validates the `.app` directly.
-
-### 2. Release artifacts (`SHA256SUMS`)
-
-Starting with the first signed release, every GitHub release includes:
-
-- `SHA256SUMS.txt` — SHA-256 checksums of every release artifact, and
-- `SHA256SUMS.txt.minisig` — a minisign signature over that checksum file.
-
-The release-artifact public key is:
-
-```
-untrusted comment: minisign public key: 0659AAD44E7EB54C
-RWRMtX5O1KpZBhZHfGaa4gqlbwnzJMINb65be0QNzl8RKwK7VOwkMvO8
-```
-
-To verify a download:
-
-```sh
-# 1. Authenticate the checksum list against the release key
-minisign -Vm SHA256SUMS.txt -P 'RWRMtX5O1KpZBhZHfGaa4gqlbwnzJMINb65be0QNzl8RKwK7VOwkMvO8'
-
-# 2. Check your download's integrity against the (now-trusted) list
-sha256sum --ignore-missing -c SHA256SUMS.txt          # Linux
-# macOS: brew install coreutils, then:
-# gsha256sum --ignore-missing -c SHA256SUMS.txt
-```
-
-If both checks pass, the file you downloaded is authentic and untampered.
+- `docs/security/encrypted-persistence.md`
+- `docs/security/release-integrity.md`

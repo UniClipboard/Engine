@@ -1,0 +1,127 @@
+name: Release LAN Compatibility
+
+on:
+  push:
+    tags:
+      - uc-mobile-v*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: LAN compatibility tag matching the uc-mobile version
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub Release as a prerelease
+        required: false
+        type: boolean
+        default: true
+      dry_run:
+        description: Build without creating a tag or Release
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-lan-compat
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build isolated LAN compatibility assets
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: release
+        name: Validate tag and version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$EVENT_NAME" == "push" ]]; then tag="$PUSH_TAG"; else tag="$INPUT_TAG"; fi
+          node scripts/release/verify-version.mjs "$tag" uc-mobile
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse duplicate releases
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag already exists: $TAG" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release already exists: $TAG" >&2
+            exit 1
+          fi
+
+      - name: Install Apple targets
+        shell: bash
+        run: |
+          toolchain=$(rustup show active-toolchain | awk '{print $1}')
+          rustup target add --toolchain "$toolchain" \
+            aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: lan-compat-release
+
+      - name: Build LAN compatibility XCFramework
+        env:
+          UC_MOBILE_BUILD_LOCKED: '1'
+          UC_MOBILE_BUILD_ZIP: '1'
+        run: compatibility/uc-mobile/scripts/build-ios-xcframework.sh
+
+      - name: Stage and describe LAN assets
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          mkdir -p lan-dist
+          cp target/UniClipboardCore.xcframework.zip lan-dist/
+          cp target/UniClipboardCore.checksum.txt lan-dist/
+          cp target/uniffi-bindings/uc_mobile.swift lan-dist/
+          cp Cargo.lock LICENSE lan-dist/
+          git archive --format=tar.gz \
+            --prefix="UniClipboardCore-$TAG/" \
+            --output=lan-dist/UniClipboardCore-LAN-source.tar.gz \
+            "$COMMIT"
+          node scripts/release/build-lan-release-manifest.mjs lan-dist "$TAG" "$COMMIT"
+
+      - name: Upload dry-run assets
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.release.outputs.tag }}-verified
+          path: lan-dist/
+          if-no-files-found: error
+
+      - name: Create immutable LAN compatibility Release
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
+        run: |
+          prerelease_flag=()
+          if [[ "$PRERELEASE" == "true" ]]; then prerelease_flag+=(--prerelease); fi
+          gh release create "$TAG" \
+            --target "$COMMIT" \
+            --title "UniClipboard LAN compatibility $TAG" \
+            --generate-notes \
+            "${prerelease_flag[@]}" \
+            lan-dist/*

@@ -1,0 +1,46 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Core repository checks
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Validate workspace metadata
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Check all workspace targets
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check repository ownership and release rules
+        run: node scripts/architecture/check-core-repository.mjs
+
+      - name: Check patch whitespace
+        run: git diff --check

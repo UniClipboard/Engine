@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+        .join("../../..")
         .canonicalize()
         .expect("workspace root should exist")
 }
@@ -19,10 +19,10 @@ fn read(path: impl AsRef<Path>) -> String {
 fn ios_and_android_share_one_probe_core() {
     let root = workspace_root();
     let workspace = read(root.join("Cargo.toml"));
-    let manifest = read(root.join("apps/mobile-probe-core/Cargo.toml"));
+    let manifest = read(root.join("tests/hosts/uc-mobile-probe-core/Cargo.toml"));
 
-    assert!(workspace.contains("\"apps/mobile-probe-core\""));
-    assert!(!workspace.contains("\"apps/ios-probe-core\""));
+    assert!(workspace.contains("\"tests/hosts/uc-mobile-probe-core\""));
+    assert!(!workspace.contains("\"tests/hosts/ios-probe-core\""));
     assert!(manifest.contains("name = \"uc-mobile-probe-core\""));
     assert!(manifest.contains("crate-type = [\"lib\", \"staticlib\", \"cdylib\"]"));
 }
@@ -30,7 +30,7 @@ fn ios_and_android_share_one_probe_core() {
 #[test]
 fn shared_probe_selects_each_platform_secure_storage() {
     let root = workspace_root();
-    let source = read(root.join("apps/mobile-probe-core/src/lib.rs"));
+    let source = read(root.join("tests/hosts/uc-mobile-probe-core/src/lib.rs"));
 
     assert!(source.contains(
         "#[cfg(target_vendor = \"apple\")]\nfn host_secure_storage() -> Box<dyn HostSecureStorage> {\n    Box::new(KeychainStorage)\n}"
@@ -44,7 +44,7 @@ fn shared_probe_selects_each_platform_secure_storage() {
 fn android_probe_uses_android_keystore_for_persisted_secrets() {
     let root = workspace_root();
     let bridge = read(root.join(
-        "apps/android-probe/app/src/main/java/app/uniclipboard/engineprobe/ProbeBridge.java",
+        "tests/hosts/android/app/src/main/java/app/uniclipboard/engineprobe/ProbeBridge.java",
     ));
 
     assert!(bridge.contains("AndroidKeyStore"));
@@ -58,9 +58,9 @@ fn android_probe_uses_android_keystore_for_persisted_secrets() {
 fn android_shell_only_forwards_commands_to_the_shared_probe() {
     let root = workspace_root();
     let receiver = read(root.join(
-        "apps/android-probe/app/src/main/java/app/uniclipboard/engineprobe/ProbeReceiver.java",
+        "tests/hosts/android/app/src/main/java/app/uniclipboard/engineprobe/ProbeReceiver.java",
     ));
-    let android_bridge = read(root.join("apps/mobile-probe-core/src/android.rs"));
+    let android_bridge = read(root.join("tests/hosts/uc-mobile-probe-core/src/android.rs"));
 
     assert!(receiver.contains("bridge.command(command)"));
     assert!(android_bridge.contains("crate::probe_command"));
@@ -73,15 +73,15 @@ fn android_shell_only_forwards_commands_to_the_shared_probe() {
 #[test]
 fn android_pairing_keeps_the_probe_alive_with_a_data_sync_service() {
     let root = workspace_root();
-    let manifest = read(root.join("apps/android-probe/app/src/main/AndroidManifest.xml"));
+    let manifest = read(root.join("tests/hosts/android/app/src/main/AndroidManifest.xml"));
     let activity = read(root.join(
-        "apps/android-probe/app/src/main/java/app/uniclipboard/engineprobe/ProbeActivity.java",
+        "tests/hosts/android/app/src/main/java/app/uniclipboard/engineprobe/ProbeActivity.java",
     ));
     let receiver = read(root.join(
-        "apps/android-probe/app/src/main/java/app/uniclipboard/engineprobe/ProbeReceiver.java",
+        "tests/hosts/android/app/src/main/java/app/uniclipboard/engineprobe/ProbeReceiver.java",
     ));
     let service = read(root.join(
-        "apps/android-probe/app/src/main/java/app/uniclipboard/engineprobe/ProbeService.java",
+        "tests/hosts/android/app/src/main/java/app/uniclipboard/engineprobe/ProbeService.java",
     ));
 
     assert!(manifest.contains("android:foregroundServiceType=\"dataSync\""));

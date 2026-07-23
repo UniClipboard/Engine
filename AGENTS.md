@@ -1,152 +1,52 @@
 # AGENTS.md
 
-This file is the root navigation index for repository instructions.
+本文件是 `UniClipboardCore` 的维护入口。
 
-## Core Rule
+## 不可破坏的规则
 
-Do not treat this file as a full memory dump. Read only the documents needed for the current task.
+- **持久化默认密文**：任何写入 SQLite、磁盘缓存或搜索索引的业务负载，默认必须先经 MasterKey AEAD 加密，严禁明文落库。剪贴板正文、标题、预览、搜索渲染字段、标签名、文件名和文件路径均在此列。
+- 仅内容类型分类枚举和文件内容本体可以例外。文件内容可以由 blob store 或核心导入目录按原始字节保存，但文件名、路径和关联元数据仍须加密。
+- 新增持久化字段或文件时默认按敏感数据处理。若主张明文保存，必须在 PR 中说明理由并获得明确批准。
+- 核心问题必须在本仓修复，产品仓不得维护补丁副本。
+- `uc-engine` 是唯一稳定的 Rust 入口；外部使用方不得直接依赖内部 crate。
+- iOS、Android 和 HarmonyOS 绑定只依赖 `uc-engine`，并与其使用同一版本。
+- P2P 是默认能力。LAN 兼容线必须由用户明确选择，不得因 P2P 失败自动切换。
+- 内部 crate 和绑定均不发布到 crates.io；交付只通过带校验信息的 GitHub Release。
 
-## Always Apply
+## 目录归属
 
-- **持久化默认密文（不可打破的基石）**：任何写入持久化存储的业务负载——SQLite 数据库列、磁盘缓存、搜索索引——默认必须先经 MasterKey AEAD 加密，**严禁明文落库**（剪贴板正文、标题、预览、搜索渲染字段、标签名、文件名和文件路径等一切用户内容）。例外仅有内容类型分类枚举（text/image/file/link 等）和文件内容本体；文件内容允许由 blob store 或核心导入目录按原始字节落盘，但文件名、路径及关联元数据仍须加密。新增其他持久化列/文件默认加密，主张明文需在 PR 中论证并获批。详见 `VISION.md`「安全与隐私底线」与「绝对禁区」。
-- Fix root causes, not symptoms.
-- Use the standard, established terminology of software engineering and computer science. If a metaphor or coined expression is unavoidable, also give the corresponding standard term; never invent new words for the sake of novelty.
-- Preserve single source of truth and clear ownership.
-- Do not keep parallel old/new logic without a removal plan.
-- Use repo-relative paths in tracked docs.
-- Use language identifiers on fenced code blocks.
-- When conversation is in Chinese, respond in natural Chinese.
-  - Do not mix Chinese and English within a Chinese reply, except for established proper nouns / technical terms (e.g. crate names, API identifiers, file paths) that have no natural Chinese equivalent.
-- **项目文档**（`docs/`、README、crate 级 `AGENTS.md`、`CONTRIBUTING*.md`）使用中文。此约定覆盖全局 `CLAUDE.md` 中"写文档用英文"的默认规则。
-  - 引用外部规范（RFC、标准库 API 等）时，专有名词保留英文原文。
-- **代码注释**（`//` / `///` / `/* */` / doc comments）使用英文。存量中文注释不强制迁移，新增或修改注释时按英文撰写；踏到旧中文注释可顺手改成英文。
-  - 代码标识符（函数、类型、变量名）、Git commit message、PR 标题与描述同样保持英文。
-  - **不强制语言审查的开发自留路径**：`.planning/`（调研/spike 笔记）、`.claude/`（本地 agent skill 与工具）、`publish = false` 的诊断 crate（例如 `crates/p2p-bench`）。这些目录按写作者方便即可，CodeRabbit 也已在 `.coderabbit.yaml` 中跳过。
-- `CLAUDE.md` is only a compatibility entrypoint. This file is the root instruction source.
+- `crates/`：核心领域、应用编排、基础设施和稳定入口。
+- `bindings/`：iOS、Android 与 HarmonyOS 的薄绑定。
+- `compatibility/`：独立版本和独立发布的 LAN 兼容线。
+- `tests/hosts/`：移动平台验收宿主，不承载产品功能。
+- `scripts/architecture/`：仓库所有权、依赖方向和发布来源检查。
+- `scripts/release/`：产物归集、清单生成和发布前核验。
 
-## Read-on-Demand Map
+## 修改规则
 
-### 0. Product direction / architecture decisions
+- 项目文档使用中文；代码标识符、代码注释、提交信息使用英文。
+- 保持单一事实来源，不长期保留新旧两套实现。
+- 文档中的仓库路径使用相对路径。
+- Rust 命令从仓库根目录运行。
+- 生产代码禁止 `unwrap()`、`expect()`、`println!()` 和 `eprintln!()`。
+- 日志不得包含剪贴板内容、密码、密钥、完整令牌、文件名或文件路径。
 
-Read: `VISION.md`
+## 交付前检查
 
-Use when:
-- making product decisions (add/remove features, change UX paradigm)
-- evaluating whether a proposal violates project principles
-- judging issue priority or scope
-- changing architecture direction or locked decisions
-- reviewing whether a PR aligns with project goals
+不涉及行为改动时，至少运行：
 
-**This is the first document to consult before any non-trivial decision.**
+```bash
+cargo metadata --locked --format-version 1
+cargo check --workspace --all-targets --locked
+cargo fmt --all -- --check
+node scripts/architecture/check-core-repository.mjs
+git diff --check
+```
 
-### 1. General code change / bug fix / review
-Read: `docs/agent/workflow-rules.md`
+涉及发布时，还必须运行：
 
-Use when:
-- fixing bugs
-- evaluating whether a change is a patch or a refactor
-- processing AI review comments
-- updating docs or scripts with repository hygiene constraints
+```bash
+node scripts/release/verify-release-bundle.mjs <产物目录>
+```
 
-### 2. Architecture / boundaries / commit planning
-Read: `docs/agent/architecture-rules.md`
-
-Use when:
-- changing crate boundaries
-- adding ports/adapters
-- touching cross-crate DTO conversions
-- planning commit splits
-- reviewing whether a diff mixes multiple intents
-
-### 2a. Port definition / evolution / refactoring
-Read: `docs/architecture/ports.md`
-
-Use when:
-- defining new ports in `uc-core`
-- adding methods to existing port traits
-- deciding port granularity or naming
-- refactoring large port interfaces into smaller ones
-- reviewing whether a use case depends on more than it needs
-
-### 3. Rust / Tauri / daemon / tracing work
-Read: `docs/agent/rust-tauri-rules.md`
-
-Use when:
-- editing Rust code
-- adding or changing Tauri commands
-- handling async loops, network drivers, or daemon APIs
-- working on tracing/logging
-- emitting frontend events from Rust
-- running cargo commands
-
-### 4. React / TypeScript / Tailwind / UI work
-Read: `docs/agent/frontend-ui-rules.md`
-
-Use when:
-- editing React or TypeScript UI code
-- adjusting layouts or styling
-- touching theme behavior
-- working on frontend DTO handling or frontend tests
-
-### 5. Project memory / historical lessons / deeper references
-Read: `docs/agent/project-memory.md`
-
-Then selectively read:
-- `docs/README.md` and linked docs for current-state guidance
-- `.planning/` for roadmap, milestones, and spike research notes
-- `src/AGENTS.md` for frontend-local navigation
-- `crates/AGENTS.md` for Rust-workspace navigation (crates/ + apps/ + src-tauri/)
-- `src-tauri/AGENTS.md` for Tauri packaging specifics
-- `apps/cli/AGENTS.md` for `uniclip` CLI-local rules
-
-Log file locations (platform-conventional, separate from the data root; single
-source of truth is `uc_app_paths::app_log_dir()`):
-- macOS: `~/Library/Logs/app.uniclipboard.desktop[-<profile>]/`
-- Linux: `~/.local/state/app.uniclipboard.desktop[-<profile>]/logs/`
-- Windows: `%LOCALAPPDATA%\\app.uniclipboard.desktop[-<profile>]\\logs\\`
-
-Per-role files (`uniclipboard-{gui,daemon,cli}.json.<date>`), daily rotation,
-7-day retention (older files pruned on start). Portable builds keep logs under
-`<exe>/data/logs/`.
-
-Do not assume the older `uniclipboard` root is current, and note logs are no
-longer under the data root's `logs/` subdir on macOS/Linux. The app dir name is
-`app.uniclipboard.desktop`, with an optional `UC_PROFILE` suffix such as `-dev`.
-
-Use when:
-- entering an unfamiliar subsystem
-- trying to understand why a pattern exists
-- doing structural work that depends on past decisions
-
-## Practical Loading Order
-
-### Frontend task
-1. `AGENTS.md`
-2. `docs/agent/frontend-ui-rules.md`
-3. `src/AGENTS.md`
-4. relevant code/docs only
-
-### Rust/Tauri task
-1. `AGENTS.md`
-2. `docs/agent/rust-tauri-rules.md`
-3. `docs/agent/architecture-rules.md` if boundaries are involved
-4. `crates/AGENTS.md` (plus `src-tauri/AGENTS.md` for packaging work)
-5. relevant code/docs only
-
-### Complex bug in unfamiliar area
-1. `AGENTS.md`
-2. `docs/agent/workflow-rules.md`
-3. `docs/agent/project-memory.md`
-4. selective reads from `.planning/`, local `AGENTS.md`, and targeted docs
-
-## Files Managed by This Index
-
-- `VISION.md` — 产品方向、架构原则、锁定决策、绝对禁区
-- `docs/agent/workflow-rules.md`
-- `docs/agent/architecture-rules.md`
-- `docs/architecture/ports.md`
-- `docs/agent/rust-tauri-rules.md`
-- `docs/agent/frontend-ui-rules.md`
-- `docs/agent/project-memory.md`
-
-If new global guidance is added, prefer placing it in one of those focused documents and only add a pointer here.
+设备矩阵中未执行的项目必须记为“跳过”，不得记为“通过”。

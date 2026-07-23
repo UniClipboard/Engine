@@ -14,19 +14,19 @@ fn read(relative: &str) -> String {
 #[test]
 fn ohos_probe_has_a_stage_application_project() {
     for relative in [
-        "apps/ohos-probe/build-profile.json5",
-        "apps/ohos-probe/oh-package.json5",
-        "apps/ohos-probe/hvigorfile.ts",
-        "apps/ohos-probe/entry/build-profile.json5",
-        "apps/ohos-probe/entry/oh-package.json5",
-        "apps/ohos-probe/entry/hvigorfile.ts",
-        "apps/ohos-probe/entry/src/main/module.json5",
-        "apps/ohos-probe/engine/build-profile.json5",
-        "apps/ohos-probe/engine/Index.ets",
-        "apps/ohos-probe/engine/oh-package.json5",
-        "apps/ohos-probe/engine/hvigorfile.ts",
-        "apps/ohos-probe/engine/src/main/module.json5",
-        "crates/uc-ohos-napi/ohos/index.d.ts",
+        "tests/hosts/ohos/build-profile.json5",
+        "tests/hosts/ohos/oh-package.json5",
+        "tests/hosts/ohos/hvigorfile.ts",
+        "tests/hosts/ohos/entry/build-profile.json5",
+        "tests/hosts/ohos/entry/oh-package.json5",
+        "tests/hosts/ohos/entry/hvigorfile.ts",
+        "tests/hosts/ohos/entry/src/main/module.json5",
+        "tests/hosts/ohos/engine/build-profile.json5",
+        "tests/hosts/ohos/engine/Index.ets",
+        "tests/hosts/ohos/engine/oh-package.json5",
+        "tests/hosts/ohos/engine/hvigorfile.ts",
+        "tests/hosts/ohos/engine/src/main/module.json5",
+        "bindings/uc-ohos-napi/ohos/index.d.ts",
     ] {
         assert!(
             workspace_root().join(relative).is_file(),
@@ -37,24 +37,24 @@ fn ohos_probe_has_a_stage_application_project() {
 
 #[test]
 fn ohos_probe_declares_network_access_for_engine_startup() {
-    let module = read("apps/ohos-probe/entry/src/main/module.json5");
+    let module = read("tests/hosts/ohos/entry/src/main/module.json5");
 
     assert!(module.contains("ohos.permission.INTERNET"));
 }
 
 #[test]
 fn ohos_probe_declares_the_engine_napi_module() {
-    let package = read("apps/ohos-probe/entry/oh-package.json5");
+    let package = read("tests/hosts/ohos/entry/oh-package.json5");
     assert!(package.contains("libuc_ohos_napi.so"));
     assert!(package.contains("src/main/cpp/types/libuc_ohos_napi"));
 
-    let declarations = read("crates/uc-ohos-napi/ohos/index.d.ts");
+    let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
     assert!(declarations.contains("coreVersion(): string"));
 }
 
 #[test]
 fn ohos_probe_builds_the_arm64_binding_before_assembling_the_hap() {
-    let script = read("apps/ohos-probe/build-emulator.sh");
+    let script = read("tests/hosts/ohos/build-emulator.sh");
     assert!(script.contains("aarch64-unknown-linux-ohos"));
     assert!(script.contains("libuc_ohos_napi.so"));
     assert!(script.contains("assembleHap"));
@@ -65,23 +65,23 @@ fn ohos_probe_builds_the_arm64_binding_before_assembling_the_hap() {
 
 #[test]
 fn ohos_binding_owns_a_distributable_har_module() {
-    let entry = read("apps/ohos-probe/engine/Index.ets");
-    let module = read("apps/ohos-probe/engine/src/main/module.json5");
-    let package = read("apps/ohos-probe/engine/oh-package.json5");
-    let script = read("apps/ohos-probe/build-emulator.sh");
+    let entry = read("tests/hosts/ohos/engine/Index.ets");
+    let module = read("tests/hosts/ohos/engine/src/main/module.json5");
+    let package = read("tests/hosts/ohos/engine/oh-package.json5");
+    let script = read("tests/hosts/ohos/build-emulator.sh");
 
     assert!(entry.contains("import engine from 'libuc_ohos_napi.so'"));
     assert!(entry.contains("export default engine"));
     assert!(module.contains("\"type\": \"har\""));
     assert!(package.contains("@uniclipboard/engine"));
     assert!(package.contains("libuc_ohos_napi.so"));
-    assert!(script.contains("crates/uc-ohos-napi/ohos/index.d.ts"));
+    assert!(script.contains("bindings/uc-ohos-napi/ohos/index.d.ts"));
     assert!(script.contains("UniClipboardEngine.har.checksum.txt"));
 }
 
 #[test]
 fn ohos_probe_page_loads_the_engine_version_from_napi() {
-    let runtime = read("apps/ohos-probe/entry/src/main/ets/host/EngineRuntime.ets");
+    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
     assert!(runtime.contains("import engine from 'libuc_ohos_napi.so'"));
     assert!(runtime.contains("engine.coreVersion()"));
     assert!(runtime.contains("JSON.stringify(error)"));
@@ -90,7 +90,7 @@ fn ohos_probe_page_loads_the_engine_version_from_napi() {
 
 #[test]
 fn ohos_probe_uses_asset_store_without_a_plaintext_fallback() {
-    let storage = read("apps/ohos-probe/entry/src/main/ets/host/SecureAssetStorage.ets");
+    let storage = read("tests/hosts/ohos/entry/src/main/ets/host/SecureAssetStorage.ets");
 
     assert!(storage.contains("@kit.AssetStoreKit"));
     assert!(storage.contains("asset.addSync"));
@@ -103,7 +103,7 @@ fn ohos_probe_uses_asset_store_without_a_plaintext_fallback() {
 
 #[test]
 fn ohos_probe_normalizes_napi_secret_bytes_for_asset_store() {
-    let storage = read("apps/ohos-probe/entry/src/main/ets/host/SecureAssetStorage.ets");
+    let storage = read("tests/hosts/ohos/entry/src/main/ets/host/SecureAssetStorage.ets");
 
     assert!(storage.contains("const secret = new Uint8Array(value)"));
     assert!(storage.contains("[asset.Tag.SECRET, secret]"));
@@ -112,8 +112,8 @@ fn ohos_probe_normalizes_napi_secret_bytes_for_asset_store() {
 
 #[test]
 fn ohos_probe_keeps_authorized_file_uris_behind_memory_handles() {
-    let registry = read("apps/ohos-probe/entry/src/main/ets/host/FileHandleRegistry.ets");
-    let runtime = read("apps/ohos-probe/entry/src/main/ets/host/EngineRuntime.ets");
+    let registry = read("tests/hosts/ohos/entry/src/main/ets/host/FileHandleRegistry.ets");
+    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
 
     assert!(registry.contains("Map<string, FileEntry>"));
     assert!(registry.contains("registerOutput(uri: string)"));
@@ -129,7 +129,7 @@ fn ohos_probe_keeps_authorized_file_uris_behind_memory_handles() {
 
 #[test]
 fn ohos_probe_normalizes_napi_file_bytes_for_system_writes() {
-    let registry = read("apps/ohos-probe/entry/src/main/ets/host/FileHandleRegistry.ets");
+    let registry = read("tests/hosts/ohos/entry/src/main/ets/host/FileHandleRegistry.ets");
 
     assert!(registry.contains("const copy = new Uint8Array(bytes)"));
     assert!(!registry.contains("const copy = bytes.slice()"));
@@ -137,7 +137,7 @@ fn ohos_probe_normalizes_napi_file_bytes_for_system_writes() {
 
 #[test]
 fn ohos_probe_reads_the_exported_file_back_before_reporting_success() {
-    let runtime = read("apps/ohos-probe/entry/src/main/ets/host/EngineRuntime.ets");
+    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
 
     assert!(runtime.contains("const exportId = Date.now()"));
     assert!(
@@ -151,8 +151,8 @@ fn ohos_probe_reads_the_exported_file_back_before_reporting_success() {
 
 #[test]
 fn ohos_probe_scans_private_directories_for_export_plaintext() {
-    let runtime = read("apps/ohos-probe/entry/src/main/ets/host/EngineRuntime.ets");
-    let probe = read("apps/ohos-probe/entry/src/main/ets/host/PrivateStorageProbe.ets");
+    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
+    let probe = read("tests/hosts/ohos/entry/src/main/ets/host/PrivateStorageProbe.ets");
 
     assert!(runtime.contains("PrivateStorageProbe"));
     assert!(runtime.contains("context.filesDir"));
@@ -164,8 +164,8 @@ fn ohos_probe_scans_private_directories_for_export_plaintext() {
 
 #[test]
 fn ohos_probe_starts_the_engine_with_real_host_capabilities() {
-    let declarations = read("crates/uc-ohos-napi/ohos/index.d.ts");
-    let runtime = read("apps/ohos-probe/entry/src/main/ets/host/EngineRuntime.ets");
+    let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
+    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
 
     assert!(declarations.contains("prepareHost(host: OhHost): PreparedHost"));
     assert!(declarations.contains("export type PreparedHost = object"));
@@ -181,7 +181,7 @@ fn ohos_probe_starts_the_engine_with_real_host_capabilities() {
 
 #[test]
 fn ohos_probe_recovers_a_persisted_space_before_creating_one() {
-    let runtime = read("apps/ohos-probe/entry/src/main/ets/host/EngineRuntime.ets");
+    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
 
     assert!(runtime.contains("const recovery = await active.recoverSession(true)"));
     assert!(runtime.contains("if (recovery.unlocked && !recovery.resumed)"));
@@ -193,9 +193,9 @@ fn ohos_probe_recovers_a_persisted_space_before_creating_one() {
 
 #[test]
 fn ohos_system_lifecycle_uses_the_single_engine_runtime() {
-    let runtime = read("apps/ohos-probe/entry/src/main/ets/host/EngineRuntime.ets");
-    let ability = read("apps/ohos-probe/entry/src/main/ets/entryability/EntryAbility.ets");
-    let page = read("apps/ohos-probe/entry/src/main/ets/pages/Index.ets");
+    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
+    let ability = read("tests/hosts/ohos/entry/src/main/ets/entryability/EntryAbility.ets");
+    let page = read("tests/hosts/ohos/entry/src/main/ets/pages/Index.ets");
 
     assert!(runtime.contains("export const engineRuntime"));
     assert!(runtime.contains("recoverSession(true)"));
@@ -213,7 +213,7 @@ fn ohos_system_lifecycle_uses_the_single_engine_runtime() {
 
 #[test]
 fn ohos_probe_signs_with_sdk_test_material_and_verifies_the_hap() {
-    let script = read("apps/ohos-probe/sign-emulator.sh");
+    let script = read("tests/hosts/ohos/sign-emulator.sh");
     assert!(script.contains("hap-sign-tool.jar"));
     assert!(script.contains("UnsgnedReleasedProfileTemplate.json"));
     assert!(script.contains("verify-app"));

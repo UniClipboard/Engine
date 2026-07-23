@@ -16,6 +16,7 @@ SIMULATOR_DIR="$STAGE_DIR/simulator"
 XCFRAMEWORK="$DIST_DIR/UniClipboardEngine.xcframework"
 XCFRAMEWORK_ZIP="$DIST_DIR/UniClipboardEngine.xcframework.zip"
 CHECKSUM_FILE="$DIST_DIR/UniClipboardEngine.checksum.txt"
+DEBUG_DIR="$DIST_ROOT/debug-symbols/ios"
 CARGO_LOCKED=()
 
 selective_strip_archive() {
@@ -68,14 +69,15 @@ export CARGO_TARGET_DIR="$TARGET_DIR"
 export CARGO_PROFILE_RELEASE_DEBUG="${CARGO_PROFILE_RELEASE_DEBUG:-0}"
 export IPHONEOS_DEPLOYMENT_TARGET="${UC_ENGINE_UNIFFI_IOS_DEPLOYMENT_TARGET:-16.4}"
 cd "$REPO_ROOT"
-rm -rf "$STAGE_DIR" "$DIST_DIR"
+rm -rf "$STAGE_DIR" "$DIST_DIR" "$DEBUG_DIR"
 mkdir -p \
   "$INCLUDE_DIR" \
   "$DEVICE_DIR" \
   "$SIMULATOR_ARM64_DIR" \
   "$SIMULATOR_X86_64_DIR" \
   "$SIMULATOR_DIR" \
-  "$DIST_DIR"
+  "$DIST_DIR" \
+  "$DEBUG_DIR"
 
 echo "==> Generate Swift bindings from the host library"
 cargo build -p uc-engine-uniffi --release "${CARGO_LOCKED[@]}"
@@ -95,6 +97,9 @@ cp "$TARGET_DIR/aarch64-apple-ios-sim/release/libuc_engine_uniffi.a" \
   "$SIMULATOR_ARM64_DIR/"
 cp "$TARGET_DIR/x86_64-apple-ios/release/libuc_engine_uniffi.a" \
   "$SIMULATOR_X86_64_DIR/"
+cp "$DEVICE_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/device.a"
+cp "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/simulator-arm64.a"
+cp "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/simulator-x86_64.a"
 selective_strip_archive "$DEVICE_DIR/libuc_engine_uniffi.a"
 selective_strip_archive "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a"
 selective_strip_archive "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a"

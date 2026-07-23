@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROJECT_DIR="$REPO_ROOT/apps/android-probe"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+PROJECT_DIR="$REPO_ROOT/tests/hosts/android"
 TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/uni-desktop-android-probe-target}"
 
 cd "$REPO_ROOT"

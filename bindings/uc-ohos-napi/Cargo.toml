@@ -4,6 +4,7 @@ version.workspace = true
 license.workspace = true
 edition = "2021"
 description = "HarmonyOS N-API bindings for the public UniClipboard engine interface"
+publish = false
 
 [lib]
 crate-type = ["lib", "cdylib"]
@@ -12,7 +13,7 @@ crate-type = ["lib", "cdylib"]
 napi = { version = "2.16.17", default-features = false, features = ["napi8", "tokio_rt"] }
 napi-derive = "2.16.13"
 tokio = { version = "1", features = ["sync", "time"] }
-uc-engine = { path = "../uc-engine" }
+uc-engine = { path = "../../crates/uc-engine" }
 zeroize = "1.8"
 
 [build-dependencies]

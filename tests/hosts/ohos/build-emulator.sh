@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-workspace_root="$(cd "$project_root/../.." && pwd)"
+workspace_root="$(cd "$project_root/../../.." && pwd)"
 deveco_contents="${DEVECO_STUDIO_CONTENTS:-/Applications/DevEco-Studio.app/Contents}"
 sdk_root="$deveco_contents/sdk"
 native_root="$sdk_root/default/openharmony/native"
@@ -15,10 +15,11 @@ cmake="$native_root/build-tools/cmake/bin/cmake"
 library_dir="$project_root/entry/libs/arm64-v8a"
 har_root="$project_root/engine"
 har_library_dir="$har_root/libs/arm64-v8a"
-declaration_source="$workspace_root/crates/uc-ohos-napi/ohos/index.d.ts"
+declaration_source="$workspace_root/bindings/uc-ohos-napi/ohos/index.d.ts"
 entry_declaration_dir="$project_root/entry/src/main/cpp/types/libuc_ohos_napi"
 har_declaration_dir="$har_root/src/main/cpp/types/libuc_ohos_napi"
 dist_dir="${UC_OHOS_DIST_DIR:-$target_dir/uc-ohos-napi-dist/ohos}"
+debug_dir="$(dirname "$dist_dir")/debug-symbols/ohos"
 
 for executable in "$rust_linker" "$rust_cxx" "$rust_ar" "$cmake"; do
   if [[ ! -x "$executable" ]]; then
@@ -46,8 +47,9 @@ cp "$declaration_source" "$entry_declaration_dir/index.d.ts"
 cp "$declaration_source" "$har_declaration_dir/index.d.ts"
 cp "$entry_declaration_dir/oh-package.json5" "$har_declaration_dir/oh-package.json5"
 cp "$entry_declaration_dir/package.json" "$har_declaration_dir/package.json"
-mkdir -p "$dist_dir"
+mkdir -p "$dist_dir" "$debug_dir"
 cp "$library_dir/libuc_ohos_napi.so" "$dist_dir/libuc_ohos_napi.so"
+cp "$library_dir/libuc_ohos_napi.so" "$debug_dir/arm64-v8a.so"
 cp "$declaration_source" "$dist_dir/index.d.ts"
 shasum -a 256 "$dist_dir/libuc_ohos_napi.so" | awk '{print $1}' \
   > "$dist_dir/uc-ohos-napi.checksum.txt"

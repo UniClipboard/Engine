@@ -13,7 +13,7 @@ lan-compat = ["dep:uc-mobile-proto", "dep:qrcode", "dep:image"]
 # Core domain models
 uc-core = { path = "../uc-core" }
 # Mobile-sync wire protocol codec (connect-uri). Leaf crate, zero internal deps.
-uc-mobile-proto = { path = "../uc-mobile-proto", optional = true }
+uc-mobile-proto = { path = "../../compatibility/uc-mobile-proto", optional = true }
 # Portable observability contracts (events, flow correlation, stage constants)
 uc-observability-contract = { path = "../uc-observability-contract" }
 
@@ -72,7 +72,6 @@ features = ["v4"]
 
 [dev-dependencies]
 uc-infra = { path = "../uc-infra" }
-uc-platform = { path = "../uc-platform" }
 mockall = "0.13"
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

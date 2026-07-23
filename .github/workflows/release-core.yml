@@ -1,0 +1,210 @@
+name: Release Core
+
+on:
+  push:
+    tags:
+      - core-v*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Core tag matching the uc-engine version
+        required: true
+        type: string
+      device_matrix_path:
+        description: Tracked device matrix JSON for this commit
+        required: true
+        type: string
+        default: scripts/release/device-matrix.skipped.json
+      prerelease:
+        description: Mark the GitHub Release as a prerelease
+        required: false
+        type: boolean
+        default: true
+      dry_run:
+        description: Build and verify without creating a tag or Release
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-core
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate release request
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+      device_matrix_path: ${{ steps.release.outputs.device_matrix_path }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: release
+        name: Resolve immutable release inputs
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_MATRIX: ${{ inputs.device_matrix_path }}
+        run: |
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            tag="$PUSH_TAG"
+            matrix="scripts/release/device-matrix.skipped.json"
+          else
+            tag="$INPUT_TAG"
+            matrix="$INPUT_MATRIX"
+          fi
+          node scripts/release/verify-version.mjs "$tag" uc-engine
+          if [[ ! -f "$matrix" ]]; then
+            echo "Device matrix must be a tracked file in this commit: $matrix" >&2
+            exit 1
+          fi
+          git ls-files --error-unmatch "$matrix" >/dev/null
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "device_matrix_path=$matrix" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse mutable or duplicate release names
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag already exists: $TAG" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release already exists: $TAG" >&2
+            exit 1
+          fi
+
+  ios-android:
+    name: Build iOS and Android
+    needs: prepare
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Install targets and Android build helper
+        shell: bash
+        run: |
+          toolchain=$(rustup show active-toolchain | awk '{print $1}')
+          rustup target add --toolchain "$toolchain" \
+            aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios \
+            aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: core-release-macos
+
+      - name: Build iOS assets
+        env:
+          UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
+          UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/core-dist
+        run: bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
+
+      - name: Build Android assets
+        env:
+          UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
+          UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/core-dist
+        run: bindings/uc-engine-uniffi/scripts/build-android-aar.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-android-assets
+          path: ${{ runner.temp }}/core-dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  harmonyos:
+    name: Build HarmonyOS
+    needs: prepare
+    runs-on: [self-hosted, macOS, ARM64, deveco]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Install HarmonyOS Rust target
+        shell: bash
+        run: |
+          toolchain=$(rustup show active-toolchain | awk '{print $1}')
+          rustup target add --toolchain "$toolchain" aarch64-unknown-linux-ohos
+
+      - name: Build HarmonyOS assets and signed acceptance HAP
+        env:
+          UC_OHOS_DIST_DIR: ${{ runner.temp }}/core-dist/ohos
+          UC_OHOS_TARGET_DIR: ${{ runner.temp }}/uc-ohos-target
+        run: tests/hosts/ohos/build-emulator.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harmonyos-assets
+          path: ${{ runner.temp }}/core-dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Verify and publish one release bundle
+    needs: [prepare, ios-android, harmonyos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-assets'
+          path: ${{ runner.temp }}/core-dist
+          merge-multiple: true
+
+      - name: Stage source, licenses, debug material, and manifest
+        run: >-
+          node scripts/release/stage-core-release.mjs
+          "${{ runner.temp }}/core-dist"
+          "${{ needs.prepare.outputs.device_matrix_path }}"
+
+      - name: Upload verified dry-run bundle
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.tag }}-verified
+          path: ${{ runner.temp }}/core-dist/release-assets/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create immutable GitHub Release
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
+          ASSET_DIR: ${{ runner.temp }}/core-dist/release-assets
+        shell: bash
+        run: |
+          prerelease_flag=()
+          if [[ "$PRERELEASE" == "true" ]]; then prerelease_flag+=(--prerelease); fi
+          gh release create "$TAG" \
+            --target "$COMMIT" \
+            --title "UniClipboardCore $TAG" \
+            --generate-notes \
+            "${prerelease_flag[@]}" \
+            "$ASSET_DIR"/*

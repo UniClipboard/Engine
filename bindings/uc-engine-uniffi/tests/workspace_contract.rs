@@ -66,7 +66,7 @@ fn uniffi_binding_is_a_workspace_member_with_a_public_engine_boundary() {
 #[test]
 fn uniffi_binding_owns_runnable_ios_and_android_packaging() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let binding_root = workspace_root.join("crates/uc-engine-uniffi");
+    let binding_root = workspace_root.join("bindings/uc-engine-uniffi");
     let ios = fs::read_to_string(binding_root.join("scripts/build-ios-xcframework.sh"))
         .expect("unified binding must own an iOS packaging script");
     let android = fs::read_to_string(binding_root.join("scripts/build-android-aar.sh"))

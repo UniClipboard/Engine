@@ -10,10 +10,11 @@ STAGE_DIR="$TARGET_DIR/uc-engine-uniffi-android-package"
 BINDINGS_DIR="$STAGE_DIR/kotlin"
 JNI_DIR="$STAGE_DIR/jni"
 GRADLE_BUILD_DIR="$STAGE_DIR/gradle-build"
-ANDROID_PROJECT="$REPO_ROOT/crates/uc-engine-uniffi/android"
-GRADLEW="$REPO_ROOT/apps/android-probe/gradlew"
+ANDROID_PROJECT="$REPO_ROOT/bindings/uc-engine-uniffi/android"
+GRADLEW="$REPO_ROOT/tests/hosts/android/gradlew"
 AAR_OUT="$DIST_DIR/UniClipboardEngine.aar"
 CHECKSUM_FILE="$DIST_DIR/UniClipboardEngine.checksum.txt"
+DEBUG_DIR="$DIST_ROOT/debug-symbols/android"
 CARGO_LOCKED=()
 
 if [[ -n "${UC_ENGINE_UNIFFI_BUILD_LOCKED:-}" ]]; then
@@ -28,8 +29,8 @@ esac
 
 export CARGO_TARGET_DIR="$TARGET_DIR"
 cd "$REPO_ROOT"
-rm -rf "$STAGE_DIR" "$DIST_DIR"
-mkdir -p "$BINDINGS_DIR" "$JNI_DIR" "$DIST_DIR"
+rm -rf "$STAGE_DIR" "$DIST_DIR" "$DEBUG_DIR"
+mkdir -p "$BINDINGS_DIR" "$JNI_DIR" "$DIST_DIR" "$DEBUG_DIR"
 
 echo "==> Generate Kotlin bindings from the host library"
 cargo build -p uc-engine-uniffi --release "${CARGO_LOCKED[@]}"
@@ -46,6 +47,8 @@ cp "$TARGET_DIR/aarch64-linux-android/release/libuc_engine_uniffi.so" \
   "$JNI_DIR/arm64-v8a/"
 cp "$TARGET_DIR/x86_64-linux-android/release/libuc_engine_uniffi.so" \
   "$JNI_DIR/x86_64/"
+cp "$JNI_DIR/arm64-v8a/libuc_engine_uniffi.so" "$DEBUG_DIR/arm64-v8a.so"
+cp "$JNI_DIR/x86_64/libuc_engine_uniffi.so" "$DEBUG_DIR/x86_64.so"
 
 echo "==> Compile Kotlin bindings and assembleRelease"
 UC_ENGINE_UNIFFI_KOTLIN_DIR="$BINDINGS_DIR" \

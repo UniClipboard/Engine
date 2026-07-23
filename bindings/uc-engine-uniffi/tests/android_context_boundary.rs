@@ -18,9 +18,9 @@ fn read(path: impl AsRef<Path>) -> String {
 #[test]
 fn android_binding_installs_the_jni_context_before_engine_start() {
     let root = workspace_root();
-    let manifest = read(root.join("crates/uc-engine-uniffi/Cargo.toml"));
-    let library = read(root.join("crates/uc-engine-uniffi/src/lib.rs"));
-    let android = read(root.join("crates/uc-engine-uniffi/src/android.rs"));
+    let manifest = read(root.join("bindings/uc-engine-uniffi/Cargo.toml"));
+    let library = read(root.join("bindings/uc-engine-uniffi/src/lib.rs"));
+    let android = read(root.join("bindings/uc-engine-uniffi/src/android.rs"));
 
     assert!(manifest.contains("ndk-context"));
     assert!(manifest.contains("jni"));

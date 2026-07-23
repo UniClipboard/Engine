@@ -8,7 +8,7 @@ target = project.new_target(:application, "EngineProbe", :ios, "17.0")
 
 source_group = project.main_group.new_group(
   "EngineProbe",
-  "../../apps/ios-probe/EngineProbe"
+  "../../tests/hosts/ios/EngineProbe"
 )
 %w[
   EngineProbeApp.swift
@@ -28,8 +28,8 @@ target.build_configurations.each do |config|
   settings["DEVELOPMENT_TEAM"] = "8XG39X5CL8"
   settings["CODE_SIGN_STYLE"] = "Automatic"
   settings["SWIFT_VERSION"] = "5.0"
-  settings["INFOPLIST_FILE"] = "../../apps/ios-probe/EngineProbe/Info.plist"
-  settings["SWIFT_OBJC_BRIDGING_HEADER"] = "../../apps/ios-probe/EngineProbe/EngineProbe-Bridging-Header.h"
+  settings["INFOPLIST_FILE"] = "../../tests/hosts/ios/EngineProbe/Info.plist"
+  settings["SWIFT_OBJC_BRIDGING_HEADER"] = "../../tests/hosts/ios/EngineProbe/EngineProbe-Bridging-Header.h"
   settings["LIBRARY_SEARCH_PATHS"] = ["$(inherited)", "$(SRCROOT)/../../target/ios-probe-cargo/aarch64-apple-ios/release"]
   settings["OTHER_LDFLAGS"] = [
     "$(inherited)", "-luc_mobile_probe_core", "-framework", "Security",

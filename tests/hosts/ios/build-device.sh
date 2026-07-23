@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROJECT_DIR="$REPO_ROOT/apps/ios-probe"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+PROJECT_DIR="$REPO_ROOT/tests/hosts/ios"
 GENERATED_PROJECT="$REPO_ROOT/target/ios-probe-project/EngineProbe.xcodeproj"
 DERIVED_DATA="$REPO_ROOT/target/ios-probe-derived"
 DEVICE_ID="${1:-00008140-0011499C2650801C}"

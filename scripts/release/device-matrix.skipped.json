@@ -1,0 +1,14 @@
+{
+  "ios": {
+    "status": "skipped",
+    "reason": "No physical-device acceptance was run for this build"
+  },
+  "android": {
+    "status": "skipped",
+    "reason": "No physical-device acceptance was run for this build"
+  },
+  "harmonyos": {
+    "status": "skipped",
+    "reason": "No physical-device acceptance was run for this build"
+  }
+}
