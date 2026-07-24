@@ -338,6 +338,39 @@ fn mobile_host_observes_suspend_and_resume_state_events() {
 }
 
 #[test]
+fn peer_refresh_returns_explicit_connection_counts() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-peer-refresh".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+    engine
+        .create_space(
+            Some("mobile-peer-refresh".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .expect("binding must create a space");
+
+    let report = engine
+        .refresh_peer_connections()
+        .expect("binding must refresh peer connections");
+    assert_eq!(report.total, 0);
+    assert_eq!(report.online, 0);
+    assert_eq!(report.offline, 0);
+    assert_eq!(report.errors, 0);
+
+    engine
+        .shutdown(5_000)
+        .expect("binding engine must shut down within the deadline");
+}
+
+#[test]
 fn mobile_host_recovers_the_same_identity_after_process_restart() {
     let _test_guard = engine_test_guard();
     let root = tempfile::tempdir().expect("temporary host root must be available");
@@ -625,6 +658,91 @@ fn capture_current_clipboard_reads_a_structured_host_snapshot() {
         .expect("binding must capture the host clipboard")
         .expect("non-empty clipboard must create an entry");
     assert!(!entry_id.is_empty());
+
+    engine
+        .shutdown(5_000)
+        .expect("binding engine must shut down within the deadline");
+}
+
+#[test]
+fn observed_clipboard_change_returns_a_delivery_report_for_local_content() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    host.set_clipboard(BindingClipboardSnapshot {
+        observed_at_ms: 1_700_000_000_000,
+        representations: vec![BindingClipboardRepresentation::Inline {
+            format: "text/plain".to_owned(),
+            mime_type: Some("text/plain".to_owned()),
+            bytes: b"private observed clipboard text".to_vec(),
+        }],
+    });
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-observe-clipboard".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+    engine
+        .create_space(
+            Some("mobile-observe-host".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .expect("binding must create a space");
+
+    let report = engine
+        .observe_clipboard_change(true)
+        .expect("binding must process the observed clipboard change")
+        .expect("local content must be dispatched");
+    assert!(!report.entry_id.is_empty());
+    assert!(report.at_ms > 0);
+    assert_eq!(report.total_accepted, 0);
+    assert_eq!(report.total_duplicate, 0);
+    assert_eq!(report.total_offline, 0);
+    assert_eq!(report.total_errored, 0);
+    assert_eq!(report.total_pending, 0);
+
+    engine
+        .shutdown(5_000)
+        .expect("binding engine must shut down within the deadline");
+}
+
+#[test]
+fn observed_clipboard_change_can_capture_without_dispatching() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    host.set_clipboard(BindingClipboardSnapshot {
+        observed_at_ms: 1_700_000_000_000,
+        representations: vec![BindingClipboardRepresentation::Inline {
+            format: "text/plain".to_owned(),
+            mime_type: Some("text/plain".to_owned()),
+            bytes: b"private local-only clipboard text".to_vec(),
+        }],
+    });
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-observe-local-only".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+    engine
+        .create_space(
+            Some("mobile-observe-local-only".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .expect("binding must create a space");
+
+    assert_eq!(
+        engine
+            .observe_clipboard_change(false)
+            .expect("binding must observe without dispatching"),
+        None
+    );
 
     engine
         .shutdown(5_000)

@@ -92,6 +92,7 @@ pub enum OperationKind {
     CancelEntryReceive,
     CancelInboundTransfer,
     CaptureCurrentClipboard,
+    ObserveClipboardChange,
     RestoreClipboard,
     ExportEntry,
     ResendEntry,
@@ -176,6 +177,7 @@ impl fmt::Display for OperationKind {
             Self::CancelEntryReceive => "cancel_entry_receive",
             Self::CancelInboundTransfer => "cancel_inbound_transfer",
             Self::CaptureCurrentClipboard => "capture_current_clipboard",
+            Self::ObserveClipboardChange => "observe_clipboard_change",
             Self::RestoreClipboard => "restore_clipboard",
             Self::ExportEntry => "export_entry",
             Self::ResendEntry => "resend_entry",
@@ -262,6 +264,7 @@ pub enum Operation {
     CancelEntryReceive(CancelEntryReceiveInput),
     CancelInboundTransfer(CancelInboundTransferInput),
     CaptureCurrentClipboard,
+    ObserveClipboardChange(ObserveClipboardChangeInput),
     RestoreClipboard(RestoreClipboardInput),
     ExportEntry(ExportEntryInput),
     ResendEntry(ResendEntryInput),
@@ -346,6 +349,7 @@ impl Operation {
             Self::CancelEntryReceive(_) => OperationKind::CancelEntryReceive,
             Self::CancelInboundTransfer(_) => OperationKind::CancelInboundTransfer,
             Self::CaptureCurrentClipboard => OperationKind::CaptureCurrentClipboard,
+            Self::ObserveClipboardChange(_) => OperationKind::ObserveClipboardChange,
             Self::RestoreClipboard(_) => OperationKind::RestoreClipboard,
             Self::ExportEntry(_) => OperationKind::ExportEntry,
             Self::ResendEntry(_) => OperationKind::ResendEntry,
@@ -579,6 +583,11 @@ impl fmt::Debug for SendReportSummary {
 pub struct SendFilesInput {
     pub files: Vec<HostFileHandle>,
     pub target_devices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObserveClipboardChangeInput {
+    pub dispatch: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]

@@ -459,6 +459,9 @@ pub enum OperationResult {
     ClipboardCaptured {
         entry_id: Option<String>,
     },
+    ClipboardChangeObserved {
+        report: Option<SendReportSummary>,
+    },
     ClipboardRestored(ClipboardRestoreOutcome),
     EntryExported,
     EntryResent(ResendEntryOutcome),
@@ -661,6 +664,9 @@ impl fmt::Debug for OperationResult {
             Self::ClipboardCaptured { entry_id } => debug
                 .field("kind", &"clipboard_captured")
                 .field("has_entry", &entry_id.is_some()),
+            Self::ClipboardChangeObserved { report } => debug
+                .field("kind", &"clipboard_change_observed")
+                .field("has_report", &report.is_some()),
             Self::ClipboardRestored(outcome) => debug
                 .field("kind", &"clipboard_restored")
                 .field("outcome", outcome),

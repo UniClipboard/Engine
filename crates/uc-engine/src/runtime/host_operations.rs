@@ -271,6 +271,13 @@ pub(super) fn send_report_result(
     entry_id: String,
     outcome: ClipboardOutboundOutcome,
 ) -> Result<OperationResult, EngineError> {
+    send_report_summary(entry_id, outcome).map(OperationResult::EntrySent)
+}
+
+pub(super) fn send_report_summary(
+    entry_id: String,
+    outcome: ClipboardOutboundOutcome,
+) -> Result<crate::SendReportSummary, EngineError> {
     let ClipboardOutboundOutcome::Dispatched {
         snapshot_hash,
         per_target,
@@ -290,7 +297,7 @@ pub(super) fn send_report_result(
         ));
     };
 
-    Ok(OperationResult::EntrySent(crate::SendReportSummary {
+    Ok(crate::SendReportSummary {
         entry_id,
         snapshot_hash,
         at_ms,
@@ -312,7 +319,7 @@ pub(super) fn send_report_result(
                 },
             })
             .collect(),
-    }))
+    })
 }
 
 fn valid_host_display_name(display_name: &str) -> bool {

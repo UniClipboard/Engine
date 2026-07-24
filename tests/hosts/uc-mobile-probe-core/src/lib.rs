@@ -1124,6 +1124,25 @@ fn operation_response(result: OperationResult) -> Value {
             "kind": "clipboard_captured",
             "entry_id": entry_id,
         }),
+        OperationResult::ClipboardChangeObserved { report } => match report {
+            Some(report) => json!({
+                "ok": true,
+                "kind": "clipboard_change_observed",
+                "dispatched": true,
+                "entry_id": report.entry_id,
+                "accepted": report.total_accepted,
+                "duplicate": report.total_duplicate,
+                "offline": report.total_offline,
+                "errored": report.total_errored,
+                "pending": report.total_pending,
+                "target_count": report.per_target.len(),
+            }),
+            None => json!({
+                "ok": true,
+                "kind": "clipboard_change_observed",
+                "dispatched": false,
+            }),
+        },
         OperationResult::ClipboardRestored(outcome) => match outcome {
             uc_engine::ClipboardRestoreOutcome::Restored => json!({
                 "ok": true,
@@ -1461,6 +1480,39 @@ mod tests {
                 "kind": "session_recovered",
                 "unlocked": true,
                 "resumed": false,
+            })
+        );
+    }
+
+    #[test]
+    fn operation_response_exposes_observed_clipboard_delivery_without_payload_details() {
+        let dispatched = operation_response(OperationResult::ClipboardChangeObserved {
+            report: Some(uc_engine::SendReportSummary {
+                entry_id: "entry-1".into(),
+                snapshot_hash: "private snapshot hash".into(),
+                at_ms: 1_700_000_000_000,
+                total_accepted: 1,
+                total_duplicate: 2,
+                total_offline: 3,
+                total_errored: 4,
+                total_pending: 5,
+                per_target: Vec::new(),
+            }),
+        });
+        let captured_only =
+            operation_response(OperationResult::ClipboardChangeObserved { report: None });
+
+        assert_eq!(dispatched["kind"], "clipboard_change_observed");
+        assert_eq!(dispatched["dispatched"], true);
+        assert_eq!(dispatched["accepted"], 1);
+        assert_eq!(dispatched["pending"], 5);
+        assert!(!dispatched.to_string().contains("private snapshot hash"));
+        assert_eq!(
+            captured_only,
+            json!({
+                "ok": true,
+                "kind": "clipboard_change_observed",
+                "dispatched": false,
             })
         );
     }

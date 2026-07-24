@@ -5,14 +5,25 @@ use tracing::{error, warn};
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
     ClipboardHostEvent, ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardOriginKind,
-    ClipboardOutboundInput, ClipboardOutboundOutcome, HostEvent, HostEventBus,
+    ClipboardOutboundInput, HostEvent, HostEventBus,
 };
 use uc_core::ports::{SelfWriteLedgerPort, SystemClipboardPort};
 use uc_core::{ClipboardChangeOrigin, TaskRegistry};
 
-use super::ProductionSession;
-use crate::{HostClipboardChange, HostClipboardChangeStream};
+use super::host_operations::send_report_summary;
+use super::{operation_error_with_code, ProductionSession};
+use crate::{EngineError, HostClipboardChange, HostClipboardChangeStream, SendReportSummary};
 
+const OBSERVE_CLIPBOARD_FAILED_CODE: u32 = 1254;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchMode {
+    Background,
+    AwaitReport,
+    CaptureOnly,
+}
+
+#[derive(Clone)]
 pub(super) struct HostClipboardChangeRuntime {
     pub(super) session: Arc<Mutex<Option<ProductionSession>>>,
     pub(super) system_clipboard: Arc<dyn SystemClipboardPort>,
@@ -38,7 +49,7 @@ pub(super) async fn spawn_host_clipboard_change_task(
                     }
                     change = changes.next() => match change {
                         Ok(HostClipboardChange::Changed) => {
-                            if let Err(error) = runtime.process_change().await {
+                            if let Err(error) = runtime.process_change(DispatchMode::Background).await {
                                 warn!(error = %error, "host clipboard change processing failed");
                             }
                         }
@@ -55,27 +66,50 @@ pub(super) async fn spawn_host_clipboard_change_task(
 }
 
 impl HostClipboardChangeRuntime {
-    async fn process_change(&self) -> anyhow::Result<()> {
-        let session = self.session.lock().await;
-        let Some(session) = session.as_ref() else {
-            return Ok(());
+    pub(super) async fn observe_change(
+        &self,
+        dispatch: bool,
+    ) -> Result<Option<SendReportSummary>, EngineError> {
+        self.process_change(if dispatch {
+            DispatchMode::AwaitReport
+        } else {
+            DispatchMode::CaptureOnly
+        })
+        .await
+    }
+
+    async fn process_change(
+        &self,
+        dispatch_mode: DispatchMode,
+    ) -> Result<Option<SendReportSummary>, EngineError> {
+        let (facade, capture, live_index, outbound, tasks) = {
+            let session = self.session.lock().await;
+            let Some(session) = session.as_ref() else {
+                return Ok(None);
+            };
+            (
+                Arc::clone(&session.facade),
+                Arc::clone(&session.clipboard.capture),
+                Arc::clone(&session.clipboard.live_index),
+                Arc::clone(&session.clipboard.outbound),
+                Arc::clone(&session.tasks),
+            )
         };
-        let encryption = session
-            .facade
+        let encryption = facade
             .encryption
             .state()
             .await
-            .map_err(|_| anyhow::anyhow!("host clipboard encryption state unavailable"))?;
+            .map_err(|error| observe_error("clipboard encryption state", error))?;
         if !encryption.session_ready {
-            return Ok(());
+            return Ok(None);
         }
 
         let snapshot = self
             .system_clipboard
             .read_snapshot()
-            .map_err(|_| anyhow::anyhow!("host clipboard snapshot read failed"))?;
+            .map_err(|error| observe_error("clipboard snapshot read", error))?;
         if snapshot.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let origin_guard_key = snapshot.origin_guard_key();
         let origin = self
@@ -83,22 +117,20 @@ impl HostClipboardChangeRuntime {
             .attribute_observed_change(&origin_guard_key)
             .await;
         if origin.is_remote_push() {
-            return Ok(());
+            return Ok(None);
         }
         if origin == ClipboardChangeOrigin::Resend {
             error!("host clipboard watcher observed an invalid resend origin");
-            return Ok(());
+            return Ok(None);
         }
 
         let outbound_snapshot = Arc::new(snapshot.clone());
-        let Some(captured) = session
-            .clipboard
-            .capture
+        let Some(captured) = capture
             .capture(snapshot, origin, None)
             .await
-            .map_err(|_| anyhow::anyhow!("host clipboard capture failed"))?
+            .map_err(|error| observe_error("clipboard capture", error))?
         else {
-            return Ok(());
+            return Ok(None);
         };
         let entry_id = uc_core::ids::EntryId::from(captured.entry_id.as_str());
         self.active_register
@@ -113,9 +145,7 @@ impl HostClipboardChangeRuntime {
             }));
 
         if !captured.deduplicated {
-            match session
-                .clipboard
-                .live_index
+            match live_index
                 .index_capture(ClipboardLiveIndexInput {
                     entry_id: captured.entry_id.clone(),
                     snapshot: Arc::clone(&outbound_snapshot),
@@ -132,41 +162,52 @@ impl HostClipboardChangeRuntime {
 
         let dispatch_snapshot =
             Arc::try_unwrap(outbound_snapshot).unwrap_or_else(|shared| (*shared).clone());
-        let outbound = Arc::clone(&session.clipboard.outbound);
-        session
-            .tasks
-            .spawn("host_clipboard_outbound", move |cancel| async move {
-                let outcome = tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    outcome = outbound.dispatch_capture(ClipboardOutboundInput {
-                        entry_id: captured.entry_id,
-                        snapshot: dispatch_snapshot,
-                        origin,
-                    }) => outcome,
-                };
-                match outcome {
-                    Ok(ClipboardOutboundOutcome::Dispatched {
-                        accepted,
-                        duplicate,
-                        offline,
-                        errored,
-                        pending,
-                        ..
-                    }) => tracing::info!(
-                        accepted,
-                        duplicate,
-                        offline,
-                        errored,
-                        pending,
-                        "host clipboard outbound sync completed"
-                    ),
-                    Ok(ClipboardOutboundOutcome::Skipped { reason }) => {
-                        tracing::debug!(reason, "host clipboard outbound sync skipped");
-                    }
-                    Err(error) => warn!(error = %error, "host clipboard outbound sync failed"),
-                }
-            })
-            .await;
-        Ok(())
+        if dispatch_mode == DispatchMode::CaptureOnly {
+            return Ok(None);
+        }
+        let entry_id = captured.entry_id;
+        let dispatch = move || async move {
+            outbound
+                .dispatch_capture(ClipboardOutboundInput {
+                    entry_id: entry_id.clone(),
+                    snapshot: dispatch_snapshot,
+                    origin,
+                })
+                .await
+                .map_err(|error| observe_error("clipboard dispatch", error))
+                .and_then(|outcome| send_report_summary(entry_id, outcome))
+        };
+        match dispatch_mode {
+            DispatchMode::AwaitReport => dispatch().await.map(Some),
+            DispatchMode::Background => {
+                tasks
+                    .spawn("host_clipboard_outbound", move |cancel| async move {
+                        let outcome = tokio::select! {
+                            _ = cancel.cancelled() => return,
+                                    outcome = dispatch() => outcome,
+                        };
+                        match outcome {
+                            Ok(report) => tracing::info!(
+                                accepted = report.total_accepted,
+                                duplicate = report.total_duplicate,
+                                offline = report.total_offline,
+                                errored = report.total_errored,
+                                pending = report.total_pending,
+                                "host clipboard outbound sync completed"
+                            ),
+                            Err(error) => {
+                                warn!(error = %error, "host clipboard outbound sync failed")
+                            }
+                        }
+                    })
+                    .await;
+                Ok(None)
+            }
+            DispatchMode::CaptureOnly => Ok(None),
+        }
     }
+}
+
+fn observe_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
+    operation_error_with_code(OBSERVE_CLIPBOARD_FAILED_CODE, context, error)
 }

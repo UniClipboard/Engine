@@ -9,17 +9,18 @@ use uc_engine::{
     ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
     ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
-    HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput, Operation,
-    OperationResult, RecoverSessionInput, RestoreClipboardInput, SecretString, SendFilesInput,
-    SendImageInput, SendTextInput,
+    HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
+    ObserveClipboardChangeInput, Operation, OperationResult, RecoverSessionInput,
+    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
 };
 use zeroize::Zeroizing;
 
 use crate::{
-    BindingClipboardRepresentation, BindingClipboardRestoreMode, BindingClipboardRestoreOutcome,
-    BindingClipboardSnapshot, BindingConfig, BindingEngineState, BindingError, BindingEvent,
-    BindingFailure, BindingFileMetadata, BindingHost, BindingLifecycleAction,
-    BindingOperationTerminal, BindingRefreshReason, HostBindingError,
+    BindingClipboardOrigin, BindingClipboardRepresentation, BindingClipboardRestoreMode,
+    BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
+    BindingError, BindingEvent, BindingFailure, BindingFileMetadata, BindingHost,
+    BindingLifecycleAction, BindingOperationTerminal, BindingRefreshReason,
+    BindingTransferDirection, HostBindingError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -86,6 +87,14 @@ pub struct SendReport {
     pub total_pending: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PeerConnectionRefresh {
+    pub total: u64,
+    pub online: u64,
+    pub offline: u64,
+    pub errors: u64,
+}
+
 enum WorkerCommand {
     RecoverSession {
         allow_secure_storage_unlock: bool,
@@ -93,6 +102,9 @@ enum WorkerCommand {
     },
     QueryLocalDevice {
         response: mpsc::Sender<Result<LocalDevice, BindingError>>,
+    },
+    RefreshPeerConnections {
+        response: mpsc::Sender<Result<PeerConnectionRefresh, BindingError>>,
     },
     LifecycleState {
         response: mpsc::Sender<BindingEngineState>,
@@ -129,6 +141,10 @@ enum WorkerCommand {
     },
     CaptureCurrentClipboard {
         response: mpsc::Sender<Result<Option<String>, BindingError>>,
+    },
+    ObserveClipboardChange {
+        dispatch: bool,
+        response: mpsc::Sender<Result<Option<SendReport>, BindingError>>,
     },
     RestoreClipboard {
         entry_id: String,
@@ -295,6 +311,17 @@ impl MobileEngine {
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
+    pub fn refresh_peer_connections(&self) -> Result<PeerConnectionRefresh, BindingError> {
+        let commands = self.command_sender()?;
+        let (response, result) = mpsc::channel();
+        commands
+            .send(WorkerCommand::RefreshPeerConnections { response })
+            .map_err(|_| BindingError::RuntimeUnavailable)?;
+        result
+            .recv()
+            .map_err(|_| BindingError::RuntimeUnavailable)?
+    }
+
     pub fn lifecycle_state(&self) -> Result<BindingEngineState, BindingError> {
         let commands = self.command_sender()?;
         let (response, result) = mpsc::channel();
@@ -420,6 +447,20 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::CaptureCurrentClipboard { response })
+            .map_err(|_| BindingError::RuntimeUnavailable)?;
+        result
+            .recv()
+            .map_err(|_| BindingError::RuntimeUnavailable)?
+    }
+
+    pub fn observe_clipboard_change(
+        &self,
+        dispatch: bool,
+    ) -> Result<Option<SendReport>, BindingError> {
+        let commands = self.command_sender()?;
+        let (response, result) = mpsc::channel();
+        commands
+            .send(WorkerCommand::ObserveClipboardChange { dispatch, response })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
@@ -609,6 +650,14 @@ async fn run_worker_loop(
                     .and_then(map_local_device);
                 let _ = response.send(result);
             }
+            WorkerCommand::RefreshPeerConnections { response } => {
+                let result = engine
+                    .execute(Operation::RefreshPeerConnections)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_peer_connection_refresh);
+                let _ = response.send(result);
+            }
             WorkerCommand::LifecycleState { response } => {
                 let _ = response.send(map_engine_state(engine.lifecycle_state().await));
             }
@@ -709,6 +758,16 @@ async fn run_worker_loop(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_clipboard_captured);
+                let _ = response.send(result);
+            }
+            WorkerCommand::ObserveClipboardChange { dispatch, response } => {
+                let result = engine
+                    .execute(Operation::ObserveClipboardChange(
+                        ObserveClipboardChangeInput { dispatch },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_clipboard_change_observed);
                 let _ = response.send(result);
             }
             WorkerCommand::RestoreClipboard {
@@ -812,6 +871,71 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
         uc_engine::EngineEvent::Fatal { error } => BindingEvent::Fatal {
             failure: BindingFailure::from(error),
         },
+        uc_engine::EngineEvent::IncomingEntry(event) => BindingEvent::IncomingEntry {
+            entry_id: event.entry_id,
+            attempt_id: event.attempt_id,
+            preview: event.preview,
+            origin: match event.origin {
+                uc_engine::ClipboardOriginSummary::Local => BindingClipboardOrigin::Local,
+                uc_engine::ClipboardOriginSummary::Remote => BindingClipboardOrigin::Remote,
+            },
+        },
+        uc_engine::EngineEvent::IncomingPending(event) => BindingEvent::IncomingPending {
+            entry_id: event.entry_id,
+            attempt_id: event.attempt_id,
+            from_device: event.from_device,
+            total_bytes: event.total_bytes,
+            filenames: event.filenames,
+        },
+        uc_engine::EngineEvent::ReceiveAttemptStateChanged(event) => {
+            BindingEvent::ReceiveAttemptStateChanged {
+                entry_id: event.entry_id,
+                attempt_id: event.attempt_id,
+                state: event.state,
+            }
+        }
+        uc_engine::EngineEvent::DeliveryStatusChanged(event) => {
+            BindingEvent::DeliveryStatusChanged {
+                entry_id: event.entry_id,
+                target_device_id: event.target_device_id,
+            }
+        }
+        uc_engine::EngineEvent::PeerPresenceChanged(event) => BindingEvent::PeerPresenceChanged {
+            device_id: event.device_id,
+            state: event.state,
+            at_ms: event.at_ms,
+        },
+        uc_engine::EngineEvent::TransferProgress(event) => BindingEvent::TransferProgress {
+            transfer_id: event.transfer_id,
+            entry_id: event.entry_id,
+            attempt_id: event.attempt_id,
+            peer_id: event.peer_id,
+            direction: match event.direction {
+                uc_engine::TransferDirectionSummary::Sending => BindingTransferDirection::Sending,
+                uc_engine::TransferDirectionSummary::Receiving => {
+                    BindingTransferDirection::Receiving
+                }
+            },
+            completed_bytes: event.completed_bytes,
+            total_bytes: event.total_bytes,
+        },
+        uc_engine::EngineEvent::TransferStatusChanged(event) => {
+            BindingEvent::TransferStatusChanged {
+                transfer_id: event.transfer_id,
+                entry_id: event.entry_id,
+                attempt_id: event.attempt_id,
+                status: event.status,
+                reason: event.reason,
+            }
+        }
+        uc_engine::EngineEvent::ActiveClipboardChanged(event) => {
+            BindingEvent::ActiveClipboardChanged {
+                snapshot_hash: event.snapshot_hash,
+                entry_id: event.entry_id,
+                activated_at_ms: event.activated_at_ms,
+                activated_by: event.activated_by,
+            }
+        }
         other => BindingEvent::Changed {
             kind: other.kind().to_owned(),
         },
@@ -917,6 +1041,31 @@ fn map_send_report(result: OperationResult) -> Result<SendReport, BindingError> 
             total_errored: count_to_u64(report.total_errored)?,
             total_pending: count_to_u64(report.total_pending)?,
         }),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_peer_connection_refresh(
+    result: OperationResult,
+) -> Result<PeerConnectionRefresh, BindingError> {
+    match result {
+        OperationResult::PeerConnectionsRefreshed(report) => Ok(PeerConnectionRefresh {
+            total: u64::from(report.total),
+            online: u64::from(report.online),
+            offline: u64::from(report.offline),
+            errors: u64::from(report.errors),
+        }),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_clipboard_change_observed(
+    result: OperationResult,
+) -> Result<Option<SendReport>, BindingError> {
+    match result {
+        OperationResult::ClipboardChangeObserved { report } => report
+            .map(|report| map_send_report(OperationResult::EntrySent(report)))
+            .transpose(),
         _ => Err(BindingError::UnexpectedResult),
     }
 }
@@ -1268,6 +1417,158 @@ mod tests {
                     category: crate::BindingErrorCategory::Unavailable,
                     retryable: true,
                 },
+            }
+        );
+    }
+
+    #[test]
+    fn incoming_entry_event_keeps_history_identity_and_origin() {
+        let event = map_engine_event(uc_engine::EngineEvent::IncomingEntry(
+            uc_engine::IncomingEntryEvent {
+                entry_id: "entry-1".to_owned(),
+                attempt_id: Some("attempt-1".to_owned()),
+                preview: "New clipboard content".to_owned(),
+                origin: uc_engine::ClipboardOriginSummary::Remote,
+            },
+        ));
+
+        assert_eq!(
+            event,
+            BindingEvent::IncomingEntry {
+                entry_id: "entry-1".to_owned(),
+                attempt_id: Some("attempt-1".to_owned()),
+                preview: "New clipboard content".to_owned(),
+                origin: BindingClipboardOrigin::Remote,
+            }
+        );
+    }
+
+    #[test]
+    fn delivery_and_presence_events_keep_their_target_state() {
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::DeliveryStatusChanged(
+                uc_engine::DeliveryStatusChanged {
+                    entry_id: "entry-1".to_owned(),
+                    target_device_id: "device-2".to_owned(),
+                },
+            )),
+            BindingEvent::DeliveryStatusChanged {
+                entry_id: "entry-1".to_owned(),
+                target_device_id: "device-2".to_owned(),
+            }
+        );
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::PeerPresenceChanged(
+                uc_engine::PeerPresenceChanged {
+                    device_id: "device-2".to_owned(),
+                    state: "online".to_owned(),
+                    at_ms: 42,
+                },
+            )),
+            BindingEvent::PeerPresenceChanged {
+                device_id: "device-2".to_owned(),
+                state: "online".to_owned(),
+                at_ms: 42,
+            }
+        );
+    }
+
+    #[test]
+    fn transfer_events_keep_progress_and_terminal_details() {
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::TransferProgress(
+                uc_engine::TransferProgress {
+                    transfer_id: "transfer-1".to_owned(),
+                    entry_id: Some("entry-1".to_owned()),
+                    attempt_id: Some("attempt-1".to_owned()),
+                    peer_id: "device-2".to_owned(),
+                    direction: uc_engine::TransferDirectionSummary::Receiving,
+                    completed_bytes: 64,
+                    total_bytes: Some(128),
+                },
+            )),
+            BindingEvent::TransferProgress {
+                transfer_id: "transfer-1".to_owned(),
+                entry_id: Some("entry-1".to_owned()),
+                attempt_id: Some("attempt-1".to_owned()),
+                peer_id: "device-2".to_owned(),
+                direction: BindingTransferDirection::Receiving,
+                completed_bytes: 64,
+                total_bytes: Some(128),
+            }
+        );
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::TransferStatusChanged(
+                uc_engine::TransferStatusChanged {
+                    transfer_id: "transfer-1".to_owned(),
+                    entry_id: "entry-1".to_owned(),
+                    attempt_id: Some("attempt-1".to_owned()),
+                    status: "completed".to_owned(),
+                    reason: None,
+                },
+            )),
+            BindingEvent::TransferStatusChanged {
+                transfer_id: "transfer-1".to_owned(),
+                entry_id: "entry-1".to_owned(),
+                attempt_id: Some("attempt-1".to_owned()),
+                status: "completed".to_owned(),
+                reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn pending_receive_event_keeps_entry_and_file_summary() {
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::IncomingPending(
+                uc_engine::IncomingPendingEvent {
+                    entry_id: "entry-1".to_owned(),
+                    attempt_id: Some("attempt-1".to_owned()),
+                    from_device: "device-2".to_owned(),
+                    total_bytes: Some(256),
+                    filenames: vec!["private-name.txt".to_owned()],
+                },
+            )),
+            BindingEvent::IncomingPending {
+                entry_id: "entry-1".to_owned(),
+                attempt_id: Some("attempt-1".to_owned()),
+                from_device: "device-2".to_owned(),
+                total_bytes: Some(256),
+                filenames: vec!["private-name.txt".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn receive_attempt_and_active_clipboard_events_keep_refresh_identity() {
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::ReceiveAttemptStateChanged(
+                uc_engine::ReceiveAttemptStateChanged {
+                    entry_id: "entry-1".to_owned(),
+                    attempt_id: "attempt-1".to_owned(),
+                    state: "completed".to_owned(),
+                },
+            )),
+            BindingEvent::ReceiveAttemptStateChanged {
+                entry_id: "entry-1".to_owned(),
+                attempt_id: "attempt-1".to_owned(),
+                state: "completed".to_owned(),
+            }
+        );
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::ActiveClipboardChanged(
+                uc_engine::ActiveClipboardChanged {
+                    snapshot_hash: "snapshot-1".to_owned(),
+                    entry_id: "entry-1".to_owned(),
+                    activated_at_ms: 42,
+                    activated_by: "device-2".to_owned(),
+                },
+            )),
+            BindingEvent::ActiveClipboardChanged {
+                snapshot_hash: "snapshot-1".to_owned(),
+                entry_id: "entry-1".to_owned(),
+                activated_at_ms: 42,
+                activated_by: "device-2".to_owned(),
             }
         );
     }

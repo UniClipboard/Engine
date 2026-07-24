@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -9,6 +11,11 @@ fn read(relative: &str) -> String {
     let path = workspace_root().join(relative);
     fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
+fn read_json5(relative: &str) -> Value {
+    let source = read(relative);
+    json5::from_str(&source).unwrap_or_else(|error| panic!("failed to parse {relative}: {error}"))
 }
 
 #[test]
@@ -66,13 +73,13 @@ fn ohos_probe_builds_the_arm64_binding_before_assembling_the_hap() {
 #[test]
 fn ohos_binding_owns_a_distributable_har_module() {
     let entry = read("tests/hosts/ohos/engine/Index.ets");
-    let module = read("tests/hosts/ohos/engine/src/main/module.json5");
+    let module = read_json5("tests/hosts/ohos/engine/src/main/module.json5");
     let package = read("tests/hosts/ohos/engine/oh-package.json5");
     let script = read("tests/hosts/ohos/build-emulator.sh");
 
     assert!(entry.contains("import engine from 'libuc_ohos_napi.so'"));
     assert!(entry.contains("export default engine"));
-    assert!(module.contains("\"type\": \"har\""));
+    assert_eq!(module["module"]["type"], "har");
     assert!(package.contains("@uniclipboard/engine"));
     assert!(package.contains("libuc_ohos_napi.so"));
     assert!(script.contains("bindings/uc-ohos-napi/ohos/index.d.ts"));

@@ -5,8 +5,8 @@ mod android;
 mod runtime;
 
 pub use runtime::{
-    InvitationAvailability, InvitationIssued, LocalDevice, MobileEngine, SendReport,
-    SessionRecovery, SpaceCreated, SpaceJoined,
+    InvitationAvailability, InvitationIssued, LocalDevice, MobileEngine, PeerConnectionRefresh,
+    SendReport, SessionRecovery, SpaceCreated, SpaceJoined,
 };
 
 uniffi::setup_scaffolding!();
@@ -228,6 +228,18 @@ pub enum BindingRefreshReason {
     StateInvalidated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingClipboardOrigin {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingTransferDirection {
+    Sending,
+    Receiving,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum BindingEvent {
     StateChanged {
@@ -247,6 +259,55 @@ pub enum BindingEvent {
     },
     Fatal {
         failure: BindingFailure,
+    },
+    IncomingEntry {
+        entry_id: String,
+        attempt_id: Option<String>,
+        preview: String,
+        origin: BindingClipboardOrigin,
+    },
+    IncomingPending {
+        entry_id: String,
+        attempt_id: Option<String>,
+        from_device: String,
+        total_bytes: Option<u64>,
+        filenames: Vec<String>,
+    },
+    ReceiveAttemptStateChanged {
+        entry_id: String,
+        attempt_id: String,
+        state: String,
+    },
+    DeliveryStatusChanged {
+        entry_id: String,
+        target_device_id: String,
+    },
+    PeerPresenceChanged {
+        device_id: String,
+        state: String,
+        at_ms: i64,
+    },
+    TransferProgress {
+        transfer_id: String,
+        entry_id: Option<String>,
+        attempt_id: Option<String>,
+        peer_id: String,
+        direction: BindingTransferDirection,
+        completed_bytes: u64,
+        total_bytes: Option<u64>,
+    },
+    TransferStatusChanged {
+        transfer_id: String,
+        entry_id: String,
+        attempt_id: Option<String>,
+        status: String,
+        reason: Option<String>,
+    },
+    ActiveClipboardChanged {
+        snapshot_hash: String,
+        entry_id: String,
+        activated_at_ms: i64,
+        activated_by: String,
     },
     Changed {
         kind: String,

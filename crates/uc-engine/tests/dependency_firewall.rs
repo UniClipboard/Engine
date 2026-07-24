@@ -136,7 +136,7 @@ fn engine_default_dependency_contract_excludes_lan_compat_dependencies() {
 }
 
 #[test]
-fn engine_consumers_select_lan_compat_explicitly() {
+fn core_repository_engine_consumers_do_not_enable_lan_compat() {
     let metadata = workspace_metadata();
 
     for package_name in ["uc-engine-uniffi", "uc-ohos-napi", "uc-mobile-probe-core"] {
@@ -146,12 +146,6 @@ fn engine_consumers_select_lan_compat_explicitly() {
             "{package_name} must not enable uc-engine/lan-compat"
         );
     }
-
-    let webserver = normal_dependency(package(&metadata, "uc-webserver"), "uc-engine");
-    assert!(
-        webserver.features.contains(&"lan-compat".to_string()),
-        "uc-webserver must enable uc-engine/lan-compat"
-    );
 }
 
 fn package<'a>(

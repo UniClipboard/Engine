@@ -65,6 +65,7 @@ pub(crate) struct ProductionRuntime {
     temporary_dir: std::path::PathBuf,
     clipboard_import_root: std::path::PathBuf,
     files: Arc<dyn HostFileAccess>,
+    clipboard_change_runtime: HostClipboardChangeRuntime,
     #[cfg(feature = "lan-compat")]
     events: EventSender,
     #[cfg(feature = "lan-compat")]
@@ -140,21 +141,25 @@ impl ProductionRuntime {
         let blob_ports = BlobProcessingPorts::from_app_deps(&wired.deps);
         spawn_blob_processing_tasks(background, blob_ports, &task_registry).await;
         let session = Arc::new(Mutex::new(Some(session)));
+        let clipboard_change_runtime = HostClipboardChangeRuntime {
+            session: Arc::clone(&session),
+            system_clipboard: Arc::clone(&wired.deps.clipboard.system_clipboard),
+            change_origin: Arc::clone(&wired.deps.clipboard.clipboard_change_origin),
+            active_register: LocalActiveRegisterAdvancer::new(
+                Arc::clone(&wired.deps.clipboard.active_register),
+                Arc::clone(&wired.deps.device.device_identity),
+                Arc::clone(&wired.deps.system.clock),
+                wired.deps.clipboard.mobile_consumability.clone(),
+            ),
+            host_events: Arc::clone(&wired.shared.host_event_bus),
+        };
         if let Some(changes) = clipboard_changes {
-            let change_runtime = HostClipboardChangeRuntime {
-                session: Arc::clone(&session),
-                system_clipboard: Arc::clone(&wired.deps.clipboard.system_clipboard),
-                change_origin: Arc::clone(&wired.deps.clipboard.clipboard_change_origin),
-                active_register: LocalActiveRegisterAdvancer::new(
-                    Arc::clone(&wired.deps.clipboard.active_register),
-                    Arc::clone(&wired.deps.device.device_identity),
-                    Arc::clone(&wired.deps.system.clock),
-                    wired.deps.clipboard.mobile_consumability.clone(),
-                ),
-                host_events: Arc::clone(&wired.shared.host_event_bus),
-            };
-            spawn_host_clipboard_change_task(changes, change_runtime, Arc::clone(&task_registry))
-                .await;
+            spawn_host_clipboard_change_task(
+                changes,
+                clipboard_change_runtime.clone(),
+                Arc::clone(&task_registry),
+            )
+            .await;
         }
 
         #[cfg(feature = "lan-compat")]
@@ -187,6 +192,7 @@ impl ProductionRuntime {
             temporary_dir,
             clipboard_import_root,
             files,
+            clipboard_change_runtime,
             #[cfg(feature = "lan-compat")]
             events,
             #[cfg(feature = "lan-compat")]

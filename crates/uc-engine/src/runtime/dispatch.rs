@@ -472,6 +472,14 @@ impl EngineRuntime for ProductionRuntime {
             Operation::CaptureCurrentClipboard => {
                 execute_capture_current_clipboard(self.current_facade().await?.as_ref()).await
             }
+            Operation::ObserveClipboardChange(input) => {
+                Ok(OperationResult::ClipboardChangeObserved {
+                    report: self
+                        .clipboard_change_runtime
+                        .observe_change(input.dispatch)
+                        .await?,
+                })
+            }
             Operation::RestoreClipboard(input) => {
                 execute_restore_clipboard(self.current_facade().await?.as_ref(), input).await
             }

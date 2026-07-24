@@ -8,7 +8,7 @@ async function main() {
   assert.ok(addonPath, 'UC_OHOS_NAPI_NODE must point to the built N-API module');
 
   const addon = require(addonPath);
-  assert.equal(addon.coreVersion(), 'core-v0.20.0-rc.1');
+  assert.equal(addon.coreVersion(), 'core-v0.20.0-rc.2');
   assert.equal(typeof addon.prepareHost, 'function');
   assert.equal(typeof addon.startEngine, 'function');
 
