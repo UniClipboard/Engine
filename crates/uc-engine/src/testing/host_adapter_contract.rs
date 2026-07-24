@@ -1703,10 +1703,35 @@ async fn engine_start_builds_a_resumable_real_session() {
         }))
         .await
         .expect("images above the inline threshold must use blob transfer");
-    assert!(matches!(
-        oversized_image,
-        crate::OperationResult::EntrySent(_)
-    ));
+    let oversized_image_id = match oversized_image {
+        crate::OperationResult::EntrySent(report) => report.entry_id,
+        other => panic!("expected sent image, got {other:?}"),
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let resource = engine
+                .execute(crate::Operation::GetHistoryEntryResource(
+                    crate::HistoryEntryInput {
+                        entry_id: oversized_image_id.clone(),
+                    },
+                ))
+                .await
+                .unwrap();
+            if matches!(
+                resource,
+                crate::OperationResult::HistoryEntryResource(crate::HistoryEntryResourceSummary {
+                    blob_id: Some(_),
+                    inline_data: None,
+                    ..
+                })
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("large image must finish blob-backed storage");
     let sent_image = engine
         .execute(crate::Operation::SendImage(crate::SendImageInput {
             bytes: vec![137, 80, 78, 71],

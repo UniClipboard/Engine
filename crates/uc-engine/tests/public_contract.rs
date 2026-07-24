@@ -1298,6 +1298,8 @@ fn setup_state_result_preserves_invitation_and_redacts_user_content() {
 
     assert!(!debug.contains("NEVER-SHOW"));
     assert!(!debug.contains("Private Device"));
+    assert!(!debug.contains("space-1"));
+    assert!(debug.contains("has_space_id"));
     assert!(debug.contains("setup_state"));
 }
 

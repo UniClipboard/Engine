@@ -7,6 +7,7 @@ mod mobile_upload;
 
 #[cfg(feature = "lan-compat")]
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -335,7 +336,10 @@ impl ProductionRuntime {
 }
 
 fn startup_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
-    eprintln!("uc-engine startup failed [{context}]: {error}");
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "uc-engine startup failed [{context}]: {error}"
+    );
     error!(context, error = %error, "engine startup failed");
     EngineError::new(START_FAILED_CODE, EngineErrorCategory::Unavailable, true)
 }
