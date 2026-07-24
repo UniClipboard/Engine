@@ -1287,6 +1287,7 @@ fn reset_space_has_a_stable_terminal_result() {
 fn setup_state_result_preserves_invitation_and_redacts_user_content() {
     let result = OperationResult::SetupState(SetupStateSummary {
         has_completed: true,
+        space_id: Some("space-1".into()),
         current_invitation: Some(SetupInvitationSummary {
             invitation_code: "NEVER-SHOW".into(),
             expires_at_ms: 1234,
@@ -1297,6 +1298,8 @@ fn setup_state_result_preserves_invitation_and_redacts_user_content() {
 
     assert!(!debug.contains("NEVER-SHOW"));
     assert!(!debug.contains("Private Device"));
+    assert!(!debug.contains("space-1"));
+    assert!(debug.contains("has_space_id"));
     assert!(debug.contains("setup_state"));
 }
 

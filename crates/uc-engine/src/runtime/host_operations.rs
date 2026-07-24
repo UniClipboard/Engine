@@ -23,6 +23,7 @@ use crate::{
 };
 
 const EXPORT_CHUNK_SIZE: usize = 64 * 1024;
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const SEND_INVALID_INPUT_CODE: u32 = 1251;
 const SEND_FAILED_CODE: u32 = 1252;
 const SEND_SKIPPED_CODE: u32 = 1253;
@@ -64,10 +65,7 @@ impl ProductionRuntime {
         &self,
         input: SendImageInput,
     ) -> Result<OperationResult, EngineError> {
-        if input.bytes.is_empty()
-            || input.bytes.len() > MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES
-            || !input.mime_type.starts_with("image/")
-        {
+        if !is_valid_image_input(input.bytes.len(), &input.mime_type) {
             return Err(send_invalid_input_error());
         }
         let snapshot = SystemClipboardSnapshot {
@@ -265,6 +263,10 @@ impl ProductionRuntime {
             })?;
         send_report_result(captured.entry_id, outcome)
     }
+}
+
+fn is_valid_image_input(byte_len: usize, mime_type: &str) -> bool {
+    byte_len > 0 && byte_len <= MAX_IMAGE_BYTES && mime_type.starts_with("image/")
 }
 
 pub(super) fn send_report_result(
@@ -483,4 +485,17 @@ fn map_export_host_error(error: crate::HostCapabilityError) -> EngineError {
     };
     error!(error = %error, "host export failed");
     EngineError::new(code, category, retryable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_valid_image_input, MAX_IMAGE_BYTES};
+
+    #[test]
+    fn image_input_has_a_dedicated_size_limit() {
+        assert!(is_valid_image_input(MAX_IMAGE_BYTES, "image/png"));
+        assert!(!is_valid_image_input(MAX_IMAGE_BYTES + 1, "image/png"));
+        assert!(!is_valid_image_input(0, "image/png"));
+        assert!(!is_valid_image_input(1, "text/plain"));
+    }
 }

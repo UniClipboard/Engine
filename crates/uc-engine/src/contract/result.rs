@@ -700,6 +700,7 @@ impl fmt::Debug for SetupInvitationSummary {
 #[derive(Clone, PartialEq, Eq)]
 pub struct SetupStateSummary {
     pub has_completed: bool,
+    pub space_id: Option<String>,
     pub current_invitation: Option<SetupInvitationSummary>,
     pub device_name: Option<String>,
 }
@@ -709,6 +710,7 @@ impl fmt::Debug for SetupStateSummary {
         formatter
             .debug_struct("SetupStateSummary")
             .field("has_completed", &self.has_completed)
+            .field("has_space_id", &self.space_id.is_some())
             .field("has_current_invitation", &self.current_invitation.is_some())
             .field("has_device_name", &self.device_name.is_some())
             .finish()

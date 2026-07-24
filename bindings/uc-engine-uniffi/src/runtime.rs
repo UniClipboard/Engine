@@ -11,7 +11,8 @@ use uc_engine::{
     HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
     HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
     ObserveClipboardChangeInput, Operation, OperationResult, RecoverSessionInput,
-    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
+    RemoveMemberInput, ResendEntryInput, RestoreClipboardInput, SecretString, SendFilesInput,
+    SendImageInput, SendTextInput,
 };
 use zeroize::Zeroizing;
 
@@ -95,6 +96,55 @@ pub struct PeerConnectionRefresh {
     pub errors: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SpaceInvitation {
+    pub invitation_code: String,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SpaceState {
+    pub has_completed: bool,
+    pub space_id: Option<String>,
+    pub current_invitation: Option<SpaceInvitation>,
+    pub device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Device {
+    pub device_id: String,
+    pub display_name: String,
+    pub online: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum EntryNotResendableReason {
+    RemoteOrigin,
+    PayloadLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ResendEntryOutcome {
+    Completed {
+        accepted: u64,
+        duplicate: u64,
+        offline: u64,
+        errored: u64,
+        pending: u64,
+    },
+    EntryNotFound {
+        entry_id: String,
+    },
+    EntryNotResendable {
+        entry_id: String,
+        reason: EntryNotResendableReason,
+    },
+    TargetNotTrusted {
+        device_id: String,
+    },
+    NoEligibleTargets,
+}
+
 enum WorkerCommand {
     RecoverSession {
         allow_secure_storage_unlock: bool,
@@ -105,6 +155,24 @@ enum WorkerCommand {
     },
     RefreshPeerConnections {
         response: mpsc::Sender<Result<PeerConnectionRefresh, BindingError>>,
+    },
+    QuerySpaceState {
+        response: mpsc::Sender<Result<SpaceState, BindingError>>,
+    },
+    ListDevices {
+        response: mpsc::Sender<Result<Vec<Device>, BindingError>>,
+    },
+    RemoveMember {
+        device_id: String,
+        response: mpsc::Sender<Result<(), BindingError>>,
+    },
+    ResendEntry {
+        entry_id: String,
+        target_devices: Vec<String>,
+        response: mpsc::Sender<Result<ResendEntryOutcome, BindingError>>,
+    },
+    LeaveSpace {
+        response: mpsc::Sender<Result<(), BindingError>>,
     },
     LifecycleState {
         response: mpsc::Sender<BindingEngineState>,
@@ -322,6 +390,37 @@ impl MobileEngine {
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
+    pub fn query_space_state(&self) -> Result<SpaceState, BindingError> {
+        self.request(|response| WorkerCommand::QuerySpaceState { response })
+    }
+
+    pub fn list_devices(&self) -> Result<Vec<Device>, BindingError> {
+        self.request(|response| WorkerCommand::ListDevices { response })
+    }
+
+    pub fn remove_member(&self, device_id: String) -> Result<(), BindingError> {
+        self.request(|response| WorkerCommand::RemoveMember {
+            device_id,
+            response,
+        })
+    }
+
+    pub fn resend_entry(
+        &self,
+        entry_id: String,
+        target_devices: Vec<String>,
+    ) -> Result<ResendEntryOutcome, BindingError> {
+        self.request(|response| WorkerCommand::ResendEntry {
+            entry_id,
+            target_devices,
+            response,
+        })
+    }
+
+    pub fn leave_space(&self) -> Result<(), BindingError> {
+        self.request(|response| WorkerCommand::LeaveSpace { response })
+    }
+
     pub fn lifecycle_state(&self) -> Result<BindingEngineState, BindingError> {
         let commands = self.command_sender()?;
         let (response, result) = mpsc::channel();
@@ -537,6 +636,20 @@ impl MobileEngine {
 }
 
 impl MobileEngine {
+    fn request<T>(
+        &self,
+        command: impl FnOnce(mpsc::Sender<Result<T, BindingError>>) -> WorkerCommand,
+    ) -> Result<T, BindingError> {
+        let commands = self.command_sender()?;
+        let (response, result) = mpsc::channel();
+        commands
+            .send(command(response))
+            .map_err(|_| BindingError::RuntimeUnavailable)?;
+        result
+            .recv()
+            .map_err(|_| BindingError::RuntimeUnavailable)?
+    }
+
     fn command_sender(
         &self,
     ) -> Result<tokio::sync::mpsc::UnboundedSender<WorkerCommand>, BindingError> {
@@ -656,6 +769,56 @@ async fn run_worker_loop(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_peer_connection_refresh);
+                let _ = response.send(result);
+            }
+            WorkerCommand::QuerySpaceState { response } => {
+                let result = engine
+                    .execute(Operation::QuerySetupState)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_space_state);
+                let _ = response.send(result);
+            }
+            WorkerCommand::ListDevices { response } => {
+                let result = engine
+                    .execute(Operation::ListDevices)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_devices);
+                let _ = response.send(result);
+            }
+            WorkerCommand::RemoveMember {
+                device_id,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::RemoveMember(RemoveMemberInput { device_id }))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_member_removed);
+                let _ = response.send(result);
+            }
+            WorkerCommand::ResendEntry {
+                entry_id,
+                target_devices,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::ResendEntry(ResendEntryInput {
+                        entry_id,
+                        target_devices,
+                    }))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_resend_outcome);
+                let _ = response.send(result);
+            }
+            WorkerCommand::LeaveSpace { response } => {
+                let result = engine
+                    .execute(Operation::FactoryResetSpace)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_space_left);
                 let _ = response.send(result);
             }
             WorkerCommand::LifecycleState { response } => {
@@ -964,6 +1127,86 @@ fn map_space_created(result: OperationResult) -> Result<SpaceCreated, BindingErr
             self_device_id,
             identity_fingerprint,
         }),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_space_state(result: OperationResult) -> Result<SpaceState, BindingError> {
+    match result {
+        OperationResult::SetupState(state) => Ok(SpaceState {
+            has_completed: state.has_completed,
+            space_id: state.space_id,
+            current_invitation: state.current_invitation.map(|invitation| SpaceInvitation {
+                invitation_code: invitation.invitation_code,
+                expires_at_ms: invitation.expires_at_ms,
+            }),
+            device_name: state.device_name,
+        }),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
+    match result {
+        OperationResult::Devices(devices) => Ok(devices
+            .into_iter()
+            .map(|device| Device {
+                device_id: device.device_id,
+                display_name: device.display_name,
+                online: device.online,
+            })
+            .collect()),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_member_removed(result: OperationResult) -> Result<(), BindingError> {
+    match result {
+        OperationResult::MemberRemoved => Ok(()),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_resend_outcome(result: OperationResult) -> Result<ResendEntryOutcome, BindingError> {
+    match result {
+        OperationResult::EntryResent(outcome) => match outcome {
+            uc_engine::ResendEntryOutcome::Completed(report) => Ok(ResendEntryOutcome::Completed {
+                accepted: count_to_u64(report.accepted)?,
+                duplicate: count_to_u64(report.duplicate)?,
+                offline: count_to_u64(report.offline)?,
+                errored: count_to_u64(report.errored)?,
+                pending: count_to_u64(report.pending)?,
+            }),
+            uc_engine::ResendEntryOutcome::EntryNotFound { entry_id } => {
+                Ok(ResendEntryOutcome::EntryNotFound { entry_id })
+            }
+            uc_engine::ResendEntryOutcome::EntryNotResendable { entry_id, reason } => {
+                Ok(ResendEntryOutcome::EntryNotResendable {
+                    entry_id,
+                    reason: match reason {
+                        uc_engine::EntryNotResendableReason::RemoteOrigin => {
+                            EntryNotResendableReason::RemoteOrigin
+                        }
+                        uc_engine::EntryNotResendableReason::PayloadLost => {
+                            EntryNotResendableReason::PayloadLost
+                        }
+                    },
+                })
+            }
+            uc_engine::ResendEntryOutcome::TargetNotTrusted { device_id } => {
+                Ok(ResendEntryOutcome::TargetNotTrusted { device_id })
+            }
+            uc_engine::ResendEntryOutcome::NoEligibleTargets => {
+                Ok(ResendEntryOutcome::NoEligibleTargets)
+            }
+        },
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_space_left(result: OperationResult) -> Result<(), BindingError> {
+    match result {
+        OperationResult::SpaceFactoryReset => Ok(()),
         _ => Err(BindingError::UnexpectedResult),
     }
 }

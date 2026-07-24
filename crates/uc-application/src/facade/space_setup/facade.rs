@@ -708,6 +708,7 @@ impl SpaceSetupFacade {
             .map_err(|err| QuerySetupStateError::StorageFailed(err.to_string()))?;
         Ok(SetupStateView {
             has_completed: status.has_completed,
+            space_id: status.space_id,
             current_invitation,
             device_name: settings.general.device_name,
         })
@@ -1945,7 +1946,7 @@ mod tests {
         let setup_status = InMemorySetupStatus::default();
         *setup_status.status.lock().unwrap() = SetupStatus {
             has_completed: true,
-            space_id: None,
+            space_id: Some(SpaceId::from("space-restore")),
         };
         let (facade, _inv, _peer) = make_facade(
             Arc::new(FakeSpaceAccess::default()),
@@ -1954,6 +1955,10 @@ mod tests {
         );
         let view = facade.query_setup_state().await.expect("query ok");
         assert!(view.has_completed);
+        assert_eq!(
+            view.space_id.as_ref().map(AsRef::as_ref),
+            Some("space-restore")
+        );
         assert_eq!(view.device_name.as_deref(), Some("MacBook"));
         assert!(view.current_invitation.is_none());
     }
