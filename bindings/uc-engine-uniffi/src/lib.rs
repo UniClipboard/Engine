@@ -5,8 +5,9 @@ mod android;
 mod runtime;
 
 pub use runtime::{
-    InvitationAvailability, InvitationIssued, LocalDevice, MobileEngine, PeerConnectionRefresh,
-    SendReport, SessionRecovery, SpaceCreated, SpaceJoined,
+    Device, EntryNotResendableReason, InvitationAvailability, InvitationIssued, LocalDevice,
+    MobileEngine, PeerConnectionRefresh, ResendEntryOutcome, SendReport, SessionRecovery,
+    SpaceCreated, SpaceInvitation, SpaceJoined, SpaceState,
 };
 
 uniffi::setup_scaffolding!();

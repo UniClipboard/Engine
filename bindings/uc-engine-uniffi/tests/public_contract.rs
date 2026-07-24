@@ -371,6 +371,62 @@ fn peer_refresh_returns_explicit_connection_counts() {
 }
 
 #[test]
+fn space_management_preserves_state_devices_resend_outcomes_and_local_history() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-space-management".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+    let created = engine
+        .create_space(
+            Some("mobile-space-manager".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .expect("binding must create a space");
+
+    let state = engine
+        .query_space_state()
+        .expect("binding must query setup state");
+    assert!(state.has_completed);
+    assert_eq!(state.space_id.as_deref(), Some(created.space_id.as_str()));
+    assert_eq!(state.device_name.as_deref(), Some("mobile-space-manager"));
+
+    let devices = engine.list_devices().expect("binding must list devices");
+    assert!(devices.iter().all(|device| !device.device_id.is_empty()));
+
+    let resend = engine
+        .resend_entry("missing-entry".to_owned(), Vec::new())
+        .expect("missing entry must remain a structured business outcome");
+    assert!(matches!(
+        resend,
+        uc_engine_uniffi::ResendEntryOutcome::EntryNotFound { ref entry_id }
+            if entry_id == "missing-entry"
+    ));
+
+    let remove = engine.remove_member("missing-device".to_owned());
+    assert!(matches!(remove, Err(BindingError::Engine { .. })));
+
+    engine
+        .leave_space()
+        .expect("binding must leave the local space");
+    let left = engine
+        .query_space_state()
+        .expect("binding must query state after leaving");
+    assert!(!left.has_completed);
+    assert!(left.space_id.is_none());
+
+    engine
+        .shutdown(5_000)
+        .expect("binding engine must shut down within the deadline");
+}
+
+#[test]
 fn mobile_host_recovers_the_same_identity_after_process_restart() {
     let _test_guard = engine_test_guard();
     let root = tempfile::tempdir().expect("temporary host root must be available");
@@ -567,7 +623,8 @@ fn image_send_returns_the_shared_content_free_delivery_summary() {
         )
         .expect("binding must create a space");
 
-    let private_image = vec![137, 80, 78, 71, 13, 10, 26, 10];
+    let mut private_image = vec![0; 64 * 1024 + 1];
+    private_image[..8].copy_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
     let report: SendReport = engine
         .send_image(private_image.clone(), "image/png".to_owned(), Vec::new())
         .expect("binding must send an image through the core");

@@ -33,6 +33,7 @@ pub async fn execute_query_setup_state(facade: &AppFacade) -> Result<OperationRe
 
     Ok(OperationResult::SetupState(SetupStateSummary {
         has_completed: state.has_completed,
+        space_id: state.space_id.map(Into::into),
         current_invitation: state
             .current_invitation
             .map(|invitation| SetupInvitationSummary {

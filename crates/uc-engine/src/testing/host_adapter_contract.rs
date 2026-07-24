@@ -1702,11 +1702,11 @@ async fn engine_start_builds_a_resumable_real_session() {
             target_devices: Vec::new(),
         }))
         .await
-        .unwrap_err();
-    assert_eq!(
-        oversized_image.category(),
-        crate::EngineErrorCategory::InvalidInput
-    );
+        .expect("images above the inline threshold must use blob transfer");
+    assert!(matches!(
+        oversized_image,
+        crate::OperationResult::EntrySent(_)
+    ));
     let sent_image = engine
         .execute(crate::Operation::SendImage(crate::SendImageInput {
             bytes: vec![137, 80, 78, 71],
@@ -1748,7 +1748,7 @@ async fn engine_start_builds_a_resumable_real_session() {
             .await
             .unwrap(),
         crate::OperationResult::HistoryCleared(crate::HistoryClearSummary {
-            deleted_count: 1,
+            deleted_count: 2,
             ref failed_entry_ids,
         }) if failed_entry_ids.is_empty()
     ));

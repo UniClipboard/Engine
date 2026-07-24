@@ -64,10 +64,7 @@ impl ProductionRuntime {
         &self,
         input: SendImageInput,
     ) -> Result<OperationResult, EngineError> {
-        if input.bytes.is_empty()
-            || input.bytes.len() > MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES
-            || !input.mime_type.starts_with("image/")
-        {
+        if input.bytes.is_empty() || !input.mime_type.starts_with("image/") {
             return Err(send_invalid_input_error());
         }
         let snapshot = SystemClipboardSnapshot {

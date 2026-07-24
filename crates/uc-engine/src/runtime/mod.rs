@@ -335,6 +335,7 @@ impl ProductionRuntime {
 }
 
 fn startup_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
+    eprintln!("uc-engine startup failed [{context}]: {error}");
     error!(context, error = %error, "engine startup failed");
     EngineError::new(START_FAILED_CODE, EngineErrorCategory::Unavailable, true)
 }

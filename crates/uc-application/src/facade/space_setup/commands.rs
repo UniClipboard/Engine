@@ -163,6 +163,8 @@ pub struct SetupStateView {
     /// `true` when this device has completed A1 (`InitializeSpace`) or
     /// B2 (`RedeemPairingInvitation`); `false` on a fresh install.
     pub has_completed: bool,
+    /// Canonical persisted space identifier for restart restoration.
+    pub space_id: Option<SpaceId>,
     /// `Some(_)` when the sponsor has a Pending invitation parked in
     /// the in-memory holder; `None` when there is no in-flight code.
     /// Multi-pending policy is "earliest-expiring wins".
