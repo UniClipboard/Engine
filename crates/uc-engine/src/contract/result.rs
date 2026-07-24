@@ -63,6 +63,7 @@ pub struct HistoryEntrySummary {
     pub file_sizes: Option<Vec<i64>>,
     pub image_width: Option<i32>,
     pub image_height: Option<i32>,
+    pub is_directory: bool,
     pub payload_state: Option<String>,
 }
 
@@ -80,6 +81,7 @@ impl fmt::Debug for HistoryEntrySummary {
             .field("is_favorited", &self.is_favorited)
             .field("tag_count", &self.content_tags.len())
             .field("link_count", &self.link_urls.as_ref().map_or(0, Vec::len))
+            .field("is_directory", &self.is_directory)
             .field("has_payload_state", &self.payload_state.is_some())
             .finish()
     }

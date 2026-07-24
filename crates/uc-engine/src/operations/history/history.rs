@@ -145,6 +145,7 @@ fn history_entry_summary(entry: EntryProjectionView) -> HistoryEntrySummary {
         file_sizes: entry.file_sizes,
         image_width: entry.image_width,
         image_height: entry.image_height,
+        is_directory: entry.is_directory,
         payload_state: entry.payload_state,
     }
 }
@@ -207,6 +208,35 @@ fn map_history_error(error: ClipboardHistoryError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_summary_preserves_directory_flag() {
+        let summary = history_entry_summary(EntryProjectionView {
+            id: "entry-1".into(),
+            preview: "directory".into(),
+            has_detail: false,
+            size_bytes: 0,
+            captured_at: 1,
+            content_type: "file".into(),
+            thumbnail_url: None,
+            is_encrypted: true,
+            is_favorited: false,
+            updated_at: 1,
+            active_time: 1,
+            file_transfer_status: None,
+            file_transfer_reason: None,
+            content_tags: Vec::new(),
+            link_urls: None,
+            link_domains: None,
+            file_sizes: None,
+            image_width: None,
+            image_height: None,
+            is_directory: true,
+            payload_state: None,
+        });
+
+        assert!(summary.is_directory);
+    }
 
     #[test]
     fn history_failures_have_stable_categories_without_exposing_details() {

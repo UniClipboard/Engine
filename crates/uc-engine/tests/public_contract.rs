@@ -274,6 +274,7 @@ fn history_management_contract_preserves_results_without_debugging_user_content(
             file_sizes: Some(vec![10]),
             image_width: None,
             image_height: None,
+            is_directory: true,
             payload_state: None,
         }]),
         uc_engine::OperationResult::HistoryEntry(uc_engine::HistoryEntryDetailSummary {
