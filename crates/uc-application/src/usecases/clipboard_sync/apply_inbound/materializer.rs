@@ -19,8 +19,9 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use uc_core::clipboard::{
-    ContentHash, EntryFileSet, EntryFileSetLine, EntryFileSetLineKind, FileSetMemberKind,
-    FileSetMemberLocation, HashAlgorithm,
+    ContentHash, EntryFileSet, EntryFileSetLine, EntryFileSetLineKind, FileDisplayMetadata,
+    FileDisplayMetadataEntry, FileSetMemberKind, FileSetMemberLocation, HashAlgorithm,
+    FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME,
 };
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
@@ -1310,6 +1311,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         }
 
         let uri_list = local_file_uri_list(&local_paths)?;
+        rewrite_file_display_metadata(&mut snapshot, &local_paths, &file_refs)?;
         let mut rewritten_rep_count = 0usize;
         for rep in &mut snapshot.representations {
             if is_file_list_representation(rep) {
@@ -1391,6 +1393,66 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         result.receive_artifacts = receive_artifacts;
         Ok(result)
     }
+}
+
+fn rewrite_file_display_metadata(
+    snapshot: &mut SystemClipboardSnapshot,
+    local_paths: &[PathBuf],
+    file_refs: &[V3BlobRef],
+) -> Result<()> {
+    let files = local_paths
+        .iter()
+        .zip(file_refs)
+        .map(|(path, blob_ref)| {
+            let storage_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow!("materialize: local file path has no valid storage name"))?;
+            let display_name = blob_ref
+                .filename
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(storage_name);
+            Ok(FileDisplayMetadataEntry {
+                storage_name: storage_name.to_string(),
+                display_name: display_name.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let encoded = FileDisplayMetadata { files }
+        .encode()
+        .map_err(|error| anyhow!("materialize: failed to encode file display metadata: {error}"))?;
+
+    let mut rewritten = 0usize;
+    for representation in &mut snapshot.representations {
+        let is_display_metadata = representation.format_id.as_str() == FILE_DISPLAY_METADATA_FORMAT
+            || representation.mime.as_ref().is_some_and(|mime| {
+                mime.as_str()
+                    .eq_ignore_ascii_case(FILE_DISPLAY_METADATA_MIME)
+            });
+        if !is_display_metadata {
+            continue;
+        }
+        representation
+            .set_inline_bytes(encoded.clone())
+            .map_err(|error| {
+                anyhow!("materialize: failed to rewrite file display metadata: {error}")
+            })?;
+        rewritten += 1;
+    }
+
+    if rewritten == 0 {
+        snapshot
+            .representations
+            .push(ObservedClipboardRepresentation::new(
+                RepresentationId::new(),
+                FormatId::from(FILE_DISPLAY_METADATA_FORMAT),
+                Some(MimeType(FILE_DISPLAY_METADATA_MIME.to_string())),
+                encoded,
+            ));
+    }
+
+    Ok(())
 }
 
 impl FileCacheBlobMaterializer {

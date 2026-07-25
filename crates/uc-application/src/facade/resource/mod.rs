@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use tracing::instrument;
 use uc_core::blob::ports::BlobReaderPort;
-use uc_core::clipboard::MimeType;
+use uc_core::clipboard::{
+    FileDisplayMetadata, MimeType, FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME,
+};
 use uc_core::ids::{BlobId, EntryId, RepresentationId};
 use uc_core::ports::clipboard::{
     GetClipboardEntryPort, GetRepresentationByBlobIdPort, ListRepresentationsForEventPort,
@@ -170,11 +172,23 @@ impl ResourceFacade {
 
         let path = first_local_file_path(uri_list).ok_or(ResourceFacadeError::NotFound)?;
 
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
+        let storage_name = path.file_name().and_then(|name| name.to_str());
+        let display_metadata = representations.iter().find_map(|representation| {
+            is_file_display_metadata_representation(representation)
+                .then(|| representation.inline_data.as_deref())
+                .flatten()
+                .and_then(|bytes| FileDisplayMetadata::decode(bytes).ok())
+        });
+        let filename = storage_name
+            .and_then(|name| display_metadata.as_ref()?.display_name_for(name))
             .map(sanitize_basename)
             .filter(|name| !name.is_empty())
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(sanitize_basename)
+                    .filter(|name| !name.is_empty())
+            })
             .unwrap_or_else(|| "uniclip-recv.bin".to_string());
 
         let mime = file_rep.mime_type.as_ref().map(mime_to_string);
@@ -211,6 +225,18 @@ fn is_file_list_representation(rep: &uc_core::PersistedClipboardRepresentation) 
             .format_id
             .as_str()
             .eq_ignore_ascii_case("public.file-url")
+}
+
+fn is_file_display_metadata_representation(
+    rep: &uc_core::PersistedClipboardRepresentation,
+) -> bool {
+    rep.mime_type.as_ref().is_some_and(|mime| {
+        mime.as_str()
+            .eq_ignore_ascii_case(FILE_DISPLAY_METADATA_MIME)
+    }) || rep
+        .format_id
+        .as_str()
+        .eq_ignore_ascii_case(FILE_DISPLAY_METADATA_FORMAT)
 }
 
 /// Parse the first `file://` URI from a uri-list and convert it to a local

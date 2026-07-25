@@ -29,7 +29,10 @@ use uc_core::ports::{
     ReceiveItemRole, RecordDirectoryPublishPort, RequestReceiveCancellationOutcome,
     RequestReceiveCancellationPort,
 };
-use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
+use uc_core::{
+    FileDisplayMetadata, FileDisplayMetadataEntry, MimeType, ObservedClipboardRepresentation,
+    SystemClipboardSnapshot, FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME,
+};
 use uc_observability_contract::FlowId;
 
 use crate::usecases::clipboard_sync::payload_codec::{
@@ -1767,6 +1770,99 @@ async fn file_cache_blob_materializer_writes_file_and_rewrites_file_uri_list() {
         .await
         .expect("materialized file should exist");
     assert_eq!(bytes, b"hello world");
+}
+
+#[tokio::test]
+async fn file_cache_blob_materializer_rekeys_display_name_metadata_to_local_path() {
+    let cache_dir = tempfile::tempdir().expect("tempdir");
+    let entry_id = EntryId::from("entry-file-display-name");
+    let ticket = BlobTicket::from_bytes(vec![7, 8, 9]);
+    let expected_name = "plan008-ios-to-android-file.txt";
+    let blob_ref = V3BlobRef {
+        ticket: ticket.clone(),
+        entry_id: entry_id.clone(),
+        filename: Some(expected_name.to_string()),
+        mime: Some("text/plain".to_string()),
+        size_bytes: 11,
+        representation_index: None,
+    };
+    let display_metadata = FileDisplayMetadata {
+        files: vec![FileDisplayMetadataEntry {
+            storage_name: "sender-private-storage-name".to_string(),
+            display_name: expected_name.to_string(),
+        }],
+    }
+    .encode()
+    .expect("display metadata");
+    let snapshot = SystemClipboardSnapshot {
+        ts_ms: 1,
+        representations: vec![
+            ObservedClipboardRepresentation::new(
+                RepresentationId::new(),
+                FormatId::from("files"),
+                Some(MimeType("text/uri-list".to_string())),
+                b"file:///sender/sender-private-storage-name\n".to_vec(),
+            ),
+            ObservedClipboardRepresentation::new(
+                RepresentationId::new(),
+                FormatId::from(FILE_DISPLAY_METADATA_FORMAT),
+                Some(MimeType(FILE_DISPLAY_METADATA_MIME.to_string())),
+                display_metadata,
+            ),
+        ],
+        file_content_digests: Vec::new(),
+        file_set_v1_component: None,
+    };
+
+    let mut fetcher = MockBlobFetcher::new();
+    fetcher
+        .expect_fetch_blob_to_path()
+        .times(1)
+        .withf(move |command| command.entry_id == entry_id && command.ticket == ticket)
+        .returning(|command| {
+            let payload: &[u8] = b"hello world";
+            std::fs::write(&command.target_path, payload).expect("fake write target");
+            Ok(crate::facade::blob_transfer::FetchBlobToPathResult {
+                entry_id: command.entry_id,
+                plaintext_hash: PlaintextHash::from_bytes([0; 32]),
+                digest: BlobDigest::from_bytes([1; 32]),
+                bytes_written: payload.len() as u64,
+            })
+        });
+
+    let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
+    let rewritten = materializer
+        .materialize(
+            DeviceId::new("peer-x"),
+            EntryId::from("entry-receiver"),
+            snapshot,
+            vec![blob_ref],
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("materialize should succeed");
+
+    let metadata = rewritten
+        .snapshot
+        .representations
+        .iter()
+        .find(|representation| {
+            representation.mime.as_ref().is_some_and(|mime| {
+                mime.as_str()
+                    .eq_ignore_ascii_case(FILE_DISPLAY_METADATA_MIME)
+            })
+        })
+        .and_then(|representation| representation.inline_bytes())
+        .and_then(|bytes| FileDisplayMetadata::decode(bytes).ok())
+        .expect("rewritten file display metadata");
+
+    assert_eq!(metadata.display_name_for("00000000"), Some(expected_name));
+    assert_eq!(
+        metadata.display_name_for("sender-private-storage-name"),
+        None
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
