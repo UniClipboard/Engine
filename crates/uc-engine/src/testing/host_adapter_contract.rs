@@ -28,6 +28,7 @@ async fn next_engine_event_matching(
     .expect("timed out waiting for engine event")
 }
 
+#[cfg(feature = "lan-compat")]
 async fn drain_engine_events(events: &mut crate::EventStream) {
     loop {
         match tokio::time::timeout(std::time::Duration::from_millis(1), events.next()).await {
@@ -846,197 +847,202 @@ async fn engine_start_builds_a_resumable_real_session() {
         engine.execute(crate::Operation::ListDevices).await.unwrap(),
         crate::OperationResult::Devices(Vec::new())
     );
-    assert_eq!(
-        engine
-            .execute(crate::Operation::ListMobileDevices)
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileDevices(Vec::new())
-    );
-    assert_eq!(
-        engine
-            .execute(crate::Operation::RevokeMobileDevice(
-                crate::MobileDeviceInput {
-                    device_id: "missing-mobile-device".into(),
-                },
-            ))
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileDeviceRevoked(crate::MobileDeviceRevokeOutcome::NotFound,)
-    );
-    assert_eq!(
-        engine
-            .execute(crate::Operation::AuthenticateMobileRequest(
-                crate::AuthenticateMobileRequestInput {
-                    authorization: crate::SecretString::new("invalid authorization"),
-                },
-            ))
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileAuthentication(crate::MobileAuthenticationOutcome::Rejected,)
-    );
-    assert_eq!(
-        engine
-            .execute(crate::Operation::RevalidateMobileCredential(
-                crate::RevalidateMobileCredentialInput {
-                    credential: crate::MobileCredential::new(
-                        "missing-mobile-device",
-                        "missing-password-proof",
-                    ),
-                },
-            ))
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileCredentialCurrent { current: false }
-    );
-    assert!(matches!(
-        engine
-            .execute(crate::Operation::UpdateMobileSyncSettings(Box::new(
-                crate::MobileSyncSettingsPatch {
-                    lan_port: Some(Some(0)),
-                    ..Default::default()
-                },
-            )))
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileSyncSettingsUpdated(
-            crate::MobileSyncSettingsUpdateOutcome::Rejected { .. }
-        )
-    ));
-    assert!(matches!(
-        engine
-            .execute(crate::Operation::QueryMobileSyncSettings)
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileSyncSettings(ref settings)
-            if !settings.enabled && !settings.lan_listen_enabled
-    ));
-    assert!(matches!(
-        engine
-            .execute(crate::Operation::UpdateMobileSyncSettings(Box::new(
-                crate::MobileSyncSettingsPatch {
-                    enabled: Some(true),
-                    lan_listen_enabled: Some(true),
-                    ..Default::default()
-                },
-            )))
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileSyncSettingsUpdated(
-            crate::MobileSyncSettingsUpdateOutcome::Updated(ref settings)
-        ) if settings.enabled && settings.lan_listen_enabled && settings.changed
-    ));
-    assert_eq!(
-        next_engine_event_matching(&mut events, |event| {
-            matches!(event, EngineEvent::MobileLanSettingsChanged(_))
-        })
-        .await,
-        EngineEvent::MobileLanSettingsChanged(crate::MobileLanSettingsChanged {
-            enabled: true,
-            lan_listen_enabled: true,
-            lan_port: None,
-        })
-    );
-    assert!(matches!(
-        engine
-            .execute(crate::Operation::UpdateMobileSyncSettings(Box::new(
-                crate::MobileSyncSettingsPatch {
-                    enabled: Some(true),
-                    lan_listen_enabled: Some(true),
-                    ..Default::default()
-                },
-            )))
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileSyncSettingsUpdated(
-            crate::MobileSyncSettingsUpdateOutcome::Updated(ref settings)
-        ) if settings.enabled && settings.lan_listen_enabled && !settings.changed
-    ));
-    assert!(matches!(
-        engine
-            .execute(crate::Operation::QueryMobileSyncSettings)
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileSyncSettings(ref settings)
-            if settings.enabled && settings.lan_listen_enabled
-    ));
-    assert_eq!(
-        engine
-            .execute(crate::Operation::UpdateMobileLanEndpoint(
-                crate::MobileLanEndpointUpdate::Listening {
-                    base_url: "http://127.0.0.1:42720".into(),
-                },
-            ))
-            .await
-            .unwrap(),
-        crate::OperationResult::MobileLanEndpointUpdated
-    );
-    assert_eq!(
-        engine
+    #[cfg(feature = "lan-compat")]
+    {
+        assert_eq!(
+            engine
+                .execute(crate::Operation::ListMobileDevices)
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileDevices(Vec::new())
+        );
+        assert_eq!(
+            engine
+                .execute(crate::Operation::RevokeMobileDevice(
+                    crate::MobileDeviceInput {
+                        device_id: "missing-mobile-device".into(),
+                    },
+                ))
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileDeviceRevoked(crate::MobileDeviceRevokeOutcome::NotFound,)
+        );
+        assert_eq!(
+            engine
+                .execute(crate::Operation::AuthenticateMobileRequest(
+                    crate::AuthenticateMobileRequestInput {
+                        authorization: crate::SecretString::new("invalid authorization"),
+                    },
+                ))
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileAuthentication(
+                crate::MobileAuthenticationOutcome::Rejected,
+            )
+        );
+        assert_eq!(
+            engine
+                .execute(crate::Operation::RevalidateMobileCredential(
+                    crate::RevalidateMobileCredentialInput {
+                        credential: crate::MobileCredential::new(
+                            "missing-mobile-device",
+                            "missing-password-proof",
+                        ),
+                    },
+                ))
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileCredentialCurrent { current: false }
+        );
+        assert!(matches!(
+            engine
+                .execute(crate::Operation::UpdateMobileSyncSettings(Box::new(
+                    crate::MobileSyncSettingsPatch {
+                        lan_port: Some(Some(0)),
+                        ..Default::default()
+                    },
+                )))
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileSyncSettingsUpdated(
+                crate::MobileSyncSettingsUpdateOutcome::Rejected { .. }
+            )
+        ));
+        assert!(matches!(
+            engine
+                .execute(crate::Operation::QueryMobileSyncSettings)
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileSyncSettings(ref settings)
+                if !settings.enabled && !settings.lan_listen_enabled
+        ));
+        assert!(matches!(
+            engine
+                .execute(crate::Operation::UpdateMobileSyncSettings(Box::new(
+                    crate::MobileSyncSettingsPatch {
+                        enabled: Some(true),
+                        lan_listen_enabled: Some(true),
+                        ..Default::default()
+                    },
+                )))
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileSyncSettingsUpdated(
+                crate::MobileSyncSettingsUpdateOutcome::Updated(ref settings)
+            ) if settings.enabled && settings.lan_listen_enabled && settings.changed
+        ));
+        assert_eq!(
+            next_engine_event_matching(&mut events, |event| {
+                matches!(event, EngineEvent::MobileLanSettingsChanged(_))
+            })
+            .await,
+            EngineEvent::MobileLanSettingsChanged(crate::MobileLanSettingsChanged {
+                enabled: true,
+                lan_listen_enabled: true,
+                lan_port: None,
+            })
+        );
+        assert!(matches!(
+            engine
+                .execute(crate::Operation::UpdateMobileSyncSettings(Box::new(
+                    crate::MobileSyncSettingsPatch {
+                        enabled: Some(true),
+                        lan_listen_enabled: Some(true),
+                        ..Default::default()
+                    },
+                )))
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileSyncSettingsUpdated(
+                crate::MobileSyncSettingsUpdateOutcome::Updated(ref settings)
+            ) if settings.enabled && settings.lan_listen_enabled && !settings.changed
+        ));
+        assert!(matches!(
+            engine
+                .execute(crate::Operation::QueryMobileSyncSettings)
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileSyncSettings(ref settings)
+                if settings.enabled && settings.lan_listen_enabled
+        ));
+        assert_eq!(
+            engine
+                .execute(crate::Operation::UpdateMobileLanEndpoint(
+                    crate::MobileLanEndpointUpdate::Listening {
+                        base_url: "http://127.0.0.1:42720".into(),
+                    },
+                ))
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileLanEndpointUpdated
+        );
+        assert_eq!(
+            engine
+                .execute(crate::Operation::RegisterMobileDevice(
+                    crate::RegisterMobileDeviceInput {
+                        label: "".into(),
+                        username: None,
+                        password: None,
+                    },
+                ))
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileDeviceRegistered(
+                crate::MobileDeviceRegistrationOutcome::LabelEmpty,
+            )
+        );
+        let registered = engine
             .execute(crate::Operation::RegisterMobileDevice(
                 crate::RegisterMobileDeviceInput {
-                    label: "".into(),
-                    username: None,
-                    password: None,
+                    label: "Test Phone".into(),
+                    username: Some("test_phone".into()),
+                    password: Some(crate::SecretString::new("test-password")),
                 },
             ))
             .await
-            .unwrap(),
-        crate::OperationResult::MobileDeviceRegistered(
-            crate::MobileDeviceRegistrationOutcome::LabelEmpty,
-        )
-    );
-    let registered = engine
-        .execute(crate::Operation::RegisterMobileDevice(
-            crate::RegisterMobileDeviceInput {
-                label: "Test Phone".into(),
-                username: Some("test_phone".into()),
-                password: Some(crate::SecretString::new("test-password")),
-            },
-        ))
-        .await
-        .unwrap();
-    let registered_device_id = match registered {
-        crate::OperationResult::MobileDeviceRegistered(
-            crate::MobileDeviceRegistrationOutcome::Registered(registration),
-        ) => {
-            assert_eq!(registration.label, "Test Phone");
-            assert_eq!(registration.username, "test_phone");
-            assert_eq!(registration.password.expose(), "test-password");
-            registration.device_id
-        }
-        other => panic!("expected registered mobile device, got {other:?}"),
-    };
-    let updated = engine
-        .execute(crate::Operation::UpdateMobileDevice(
-            crate::UpdateMobileDeviceInput {
-                device_id: registered_device_id.clone(),
-                label: Some("Renamed Phone".into()),
-                username: None,
-                password: crate::MobilePasswordUpdate::AutoGenerate,
-            },
-        ))
-        .await
-        .unwrap();
-    assert!(matches!(
-        updated,
-        crate::OperationResult::MobileDeviceUpdated(
-            crate::MobileDeviceUpdateOutcome::Updated(ref update)
-        ) if update.device_id == registered_device_id
-            && update.label == "Renamed Phone"
-            && update.username == "test_phone"
-            && update.password.is_some()
-    ));
-    assert!(matches!(
-        engine
-            .execute(crate::Operation::ListMobileDevices)
+            .unwrap();
+        let registered_device_id = match registered {
+            crate::OperationResult::MobileDeviceRegistered(
+                crate::MobileDeviceRegistrationOutcome::Registered(registration),
+            ) => {
+                assert_eq!(registration.label, "Test Phone");
+                assert_eq!(registration.username, "test_phone");
+                assert_eq!(registration.password.expose(), "test-password");
+                registration.device_id
+            }
+            other => panic!("expected registered mobile device, got {other:?}"),
+        };
+        let updated = engine
+            .execute(crate::Operation::UpdateMobileDevice(
+                crate::UpdateMobileDeviceInput {
+                    device_id: registered_device_id.clone(),
+                    label: Some("Renamed Phone".into()),
+                    username: None,
+                    password: crate::MobilePasswordUpdate::AutoGenerate,
+                },
+            ))
             .await
-            .unwrap(),
-        crate::OperationResult::MobileDevices(ref devices)
-            if devices.len() == 1
-                && devices[0].device_id == registered_device_id
-                && devices[0].label == "Renamed Phone"
-    ));
+            .unwrap();
+        assert!(matches!(
+            updated,
+            crate::OperationResult::MobileDeviceUpdated(
+                crate::MobileDeviceUpdateOutcome::Updated(ref update)
+            ) if update.device_id == registered_device_id
+                && update.label == "Renamed Phone"
+                && update.username == "test_phone"
+                && update.password.is_some()
+        ));
+        assert!(matches!(
+            engine
+                .execute(crate::Operation::ListMobileDevices)
+                .await
+                .unwrap(),
+            crate::OperationResult::MobileDevices(ref devices)
+                if devices.len() == 1
+                    && devices[0].device_id == registered_device_id
+                    && devices[0].label == "Renamed Phone"
+        ));
+    }
     assert_eq!(
         engine
             .execute(crate::Operation::ExportConfig(crate::ExportConfigInput {
@@ -1801,18 +1807,19 @@ async fn engine_start_builds_a_resumable_real_session() {
         },)
     );
 
+    let local_member = engine
+        .execute(crate::Operation::RemoveMember(crate::RemoveMemberInput {
+            device_id: self_device_id,
+        }))
+        .await
+        .unwrap_err();
     assert_eq!(
-        engine
-            .execute(crate::Operation::RemoveMember(crate::RemoveMemberInput {
-                device_id: self_device_id.clone(),
-            },))
-            .await
-            .unwrap(),
-        crate::OperationResult::MemberRemoved
+        local_member.category(),
+        crate::EngineErrorCategory::InvalidInput
     );
     let missing_member = engine
         .execute(crate::Operation::RemoveMember(crate::RemoveMemberInput {
-            device_id: self_device_id,
+            device_id: "missing-member".into(),
         }))
         .await
         .unwrap_err();
@@ -1893,6 +1900,7 @@ async fn engine_start_builds_a_resumable_real_session() {
     );
 }
 
+#[cfg(feature = "lan-compat")]
 #[tokio::test]
 async fn engine_mobile_content_round_trips_and_drops_uploads_on_suspend() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
@@ -2162,6 +2170,7 @@ async fn engine_mobile_content_round_trips_and_drops_uploads_on_suspend() {
         .unwrap();
 }
 
+#[cfg(feature = "lan-compat")]
 #[tokio::test]
 async fn engine_mobile_upload_owns_transfer_lifecycle_events() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
