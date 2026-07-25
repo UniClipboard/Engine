@@ -148,6 +148,7 @@ jobs:
 
       - name: Build HarmonyOS assets and signed acceptance HAP
         env:
+          RUSTC_WRAPPER: ''
           UC_OHOS_DIST_DIR: ${{ runner.temp }}/core-dist/ohos
           UC_OHOS_TARGET_DIR: ${{ runner.temp }}/uc-ohos-target
         run: tests/hosts/ohos/build-emulator.sh
