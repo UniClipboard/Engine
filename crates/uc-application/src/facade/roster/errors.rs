@@ -39,6 +39,10 @@ pub enum RosterError {
     #[error("member `{0}` not found")]
     NotFound(String),
 
+    /// 本机不能作为远端成员移除；用户必须通过退出空间清理本机会话。
+    #[error("the local device cannot remove itself from the member roster")]
+    LocalDeviceRemoval,
+
     /// 成员 roster 入口尚未接入。通常表示 daemon/CLI 组合阶段没有注入该能力。
     #[error("member roster facade unavailable")]
     Unavailable,

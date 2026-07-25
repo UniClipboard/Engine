@@ -16,6 +16,7 @@
 //! `Connection::closed` watchdog. Failures are surfaced through
 //! `tracing::warn!` so ops still sees them.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +32,7 @@ use uc_core::ports::{
     SetupStatusPort,
 };
 use uc_core::setup::SetupStatus;
+use uc_core::{MemberRepositoryPort, TrustedPeerRepositoryPort};
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard_write::MobileConsumableBackfill;
@@ -118,6 +120,8 @@ pub struct SpaceSetupFacade {
     /// 必须自己拿 port。
     migration_state: Arc<dyn MigrationStatePort>,
     blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
+    member_repo: Arc<dyn MemberRepositoryPort>,
+    trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
     /// Held for the desktop keepalive scheduler — `list_paired_peer_device_ids`
     /// reads `peer_addr_repo.list()` and `ensure_reachable_one` forwards to
     /// `presence.ensure_reachable`. Both are thin wrappers driven by the
@@ -172,6 +176,8 @@ impl SpaceSetupFacade {
         let resume_session_for_facade = Arc::clone(&space_access.resume_session);
         let factory_reset_for_facade = Arc::clone(&space_access.factory_reset);
         let setup_status_for_facade = Arc::clone(&setup_status);
+        let member_repo_for_facade = Arc::clone(&member_repo);
+        let trusted_peer_repo_for_facade = Arc::clone(&trusted_peer_repo);
         // Slice4 P3 T3.2 · facade-local handle for `query_setup_state`
         // (reads `Settings.general.device_name`).
         let settings_for_facade = Arc::clone(&settings);
@@ -335,6 +341,8 @@ impl SpaceSetupFacade {
             switch_space,
             migration_state: migration_state_for_facade,
             blob_migration_repo: blob_migration_repo_for_facade,
+            member_repo: member_repo_for_facade,
+            trusted_peer_repo: trusted_peer_repo_for_facade,
             peer_addr_repo: peer_addr_repo_for_facade,
             presence: presence_for_facade,
             local_device_id: local_device_id_for_facade,
@@ -666,6 +674,7 @@ impl SpaceSetupFacade {
             .factory_reset(&space_id)
             .await
             .map_err(|err| FactoryResetError::KeyMaterialWipeFailed(err.to_string()))?;
+        self.clear_space_peer_state().await?;
         self.setup_status
             .set_status(&SetupStatus::default())
             .await
@@ -675,6 +684,52 @@ impl SpaceSetupFacade {
             cancelled_invitations = dropped,
             "factory reset wiped key material, cleared setup status, dropped invitations"
         );
+        Ok(())
+    }
+
+    async fn clear_space_peer_state(&self) -> Result<(), FactoryResetError> {
+        self.presence.disconnect_all().await;
+        let members = self
+            .member_repo
+            .list()
+            .await
+            .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
+        let trusted_peers = self
+            .trusted_peer_repo
+            .list()
+            .await
+            .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
+        let peer_addresses = self
+            .peer_addr_repo
+            .list()
+            .await
+            .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
+
+        let mut forgotten_devices = HashSet::new();
+        for address in peer_addresses {
+            forgotten_devices.insert(address.device_id.clone());
+            self.peer_addr_repo
+                .remove(&address.device_id)
+                .await
+                .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
+        }
+        for peer in trusted_peers {
+            forgotten_devices.insert(peer.peer_device_id.clone());
+            self.trusted_peer_repo
+                .remove(&peer.peer_device_id)
+                .await
+                .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
+        }
+        for member in members {
+            forgotten_devices.insert(member.device_id.clone());
+            self.member_repo
+                .remove(&member.device_id)
+                .await
+                .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
+        }
+        for device in forgotten_devices {
+            self.presence.forget(&device).await;
+        }
         Ok(())
     }
 
@@ -796,6 +851,7 @@ impl SpaceSetupFacade {
     /// A1/A2/B2 的空间变更已经落盘,单个 peer 拨不通属正常情形,
     /// adapter 的 `Connection::closed` watchdog 会按正常流程 lazy 补齐。
     async fn auto_prime_presence(&self) {
+        self.presence.activate().await;
         match self.ensure_reachable_all.execute().await {
             Ok(report) => {
                 info!(

@@ -27,7 +27,8 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
             .map(|entry| DeviceSummary {
                 device_id: entry.device_id.as_str().to_string(),
                 display_name: entry.device_name,
-                online: entry.state == ReachabilityState::Online,
+                is_local: entry.is_local,
+                online: entry.is_local || entry.state == ReachabilityState::Online,
             })
             .collect(),
     ))
@@ -145,6 +146,12 @@ fn map_roster_error(error: RosterError) -> EngineError {
             EngineErrorCategory::NotFound,
             false,
             "not_found",
+        ),
+        RosterError::LocalDeviceRemoval => (
+            MEMBER_INVALID_INPUT_CODE,
+            EngineErrorCategory::InvalidInput,
+            false,
+            "local_device_removal",
         ),
         RosterError::Unavailable => (
             MEMBER_UNAVAILABLE_CODE,

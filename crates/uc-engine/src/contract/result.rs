@@ -809,6 +809,7 @@ impl fmt::Debug for LocalDeviceSummary {
 pub struct DeviceSummary {
     pub device_id: String,
     pub display_name: String,
+    pub is_local: bool,
     pub online: bool,
 }
 
@@ -818,6 +819,7 @@ impl fmt::Debug for DeviceSummary {
             .debug_struct("DeviceSummary")
             .field("device_id", &self.device_id)
             .field("has_display_name", &!self.display_name.is_empty())
+            .field("is_local", &self.is_local)
             .field("online", &self.online)
             .finish()
     }

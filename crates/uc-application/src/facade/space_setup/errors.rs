@@ -220,9 +220,9 @@ pub enum ResetSpaceError {
 /// `InitializeSpaceUseCase` 撞到 `AlreadyInitialized`,把用户卡死,所以
 /// 这一步失败必须显式上抛而不是吞掉。
 ///
-/// 步骤顺序: (1) wipe key material → (2) clear setup status → (3) cancel
-/// invitations。前一步失败时后一步不执行,避免出现"setup_status 已清但
-/// keyslot 残留"的更糟状态。
+/// 步骤顺序: (1) wipe key material → (2) clear prior-space peer state →
+/// (3) clear setup status → (4) cancel invitations。前一步失败时后一步不执行,
+/// 避免出现"setup_status 已清但 keyslot 残留"的更糟状态。
 #[derive(Debug, Error)]
 pub enum FactoryResetError {
     /// `FactoryResetSpacePort::factory_reset` 失败 —— keyslot / KEK 删除出错,

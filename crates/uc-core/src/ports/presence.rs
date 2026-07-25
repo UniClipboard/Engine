@@ -104,6 +104,22 @@ pub trait PresencePort: Send + Sync {
         let _ = device;
     }
 
+    /// Forget every cached reachability observation for a device that is no
+    /// longer part of the active space. Implementations with connection or
+    /// state caches must evict them without emitting a new presence event.
+    async fn forget(&self, device: &DeviceId) {
+        let _ = device;
+    }
+
+    /// Close every live presence connection when the local device leaves its
+    /// active space. Implementations must also clear cached reachability so
+    /// peers from the previous space cannot remain online.
+    async fn disconnect_all(&self) {}
+
+    /// Re-enable inbound presence after a space has been created, restored,
+    /// or joined following a local leave.
+    async fn activate(&self) {}
+
     /// Read the current cached state without dialing.
     ///
     /// Returns `Unknown` if the device has never been probed in the current

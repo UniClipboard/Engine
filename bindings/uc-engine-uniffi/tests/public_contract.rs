@@ -399,6 +399,24 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
 
     let devices = engine.list_devices().expect("binding must list devices");
     assert!(devices.iter().all(|device| !device.device_id.is_empty()));
+    let local_devices = devices
+        .iter()
+        .filter(|device| device.is_local)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        local_devices.len(),
+        1,
+        "the roster must identify exactly one local device"
+    );
+    assert!(
+        local_devices[0].online,
+        "the local device must be shown as online"
+    );
+    let remove_local = engine.remove_member(local_devices[0].device_id.clone());
+    assert!(
+        matches!(remove_local, Err(BindingError::Engine { .. })),
+        "the binding must reject removing the local device"
+    );
 
     let resend = engine
         .resend_entry("missing-entry".to_owned(), Vec::new())
@@ -420,6 +438,13 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
         .expect("binding must query state after leaving");
     assert!(!left.has_completed);
     assert!(left.space_id.is_none());
+    assert!(
+        engine
+            .list_devices()
+            .expect("binding must list devices after leaving")
+            .is_empty(),
+        "leaving a space must not retain its member roster"
+    );
 
     engine
         .shutdown(5_000)

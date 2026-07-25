@@ -231,6 +231,23 @@ impl MemberRosterFacade {
     #[instrument(skip_all, fields(device_id = %device_id))]
     pub async fn revoke_member(&self, device_id: &str) -> Result<(), RosterError> {
         let device_id = DeviceId::new(device_id);
+        let member = self
+            .member_repo
+            .get(&device_id)
+            .await
+            .map_err(|err| RosterError::MemberRepository(err.to_string()))?
+            .ok_or_else(|| RosterError::NotFound(device_id.as_str().to_string()))?;
+        let local_fingerprint = self
+            .local_identity
+            .get_current_fingerprint()
+            .await
+            .map_err(|err| RosterError::LocalIdentity(err.to_string()))?;
+        if local_fingerprint
+            .as_ref()
+            .is_some_and(|fingerprint| fingerprint == &member.identity_fingerprint)
+        {
+            return Err(RosterError::LocalDeviceRemoval);
+        }
         let removed = self
             .member_repo
             .remove(&device_id)
@@ -487,6 +504,23 @@ mod tests {
             presence,
             connection_channel: None,
         })
+    }
+
+    fn expect_remote_member_lookup(
+        repo: &mut MockMemberRepo,
+        local_identity: &mut MockLocalIdentity,
+        device_id: &str,
+    ) {
+        let expected_device_id = DeviceId::new(device_id);
+        let remote_member = member(device_id, "Remote device", fp("REMOTE"));
+        repo.expect_get()
+            .times(1)
+            .withf(move |candidate| candidate == &expected_device_id)
+            .returning(move |_| Ok(Some(remote_member.clone())));
+        local_identity
+            .expect_get_current_fingerprint()
+            .times(1)
+            .returning(|| Ok(Some(fp("LOCAL"))));
     }
 
     // ── tests ───────────────────────────────────────────────────────────
@@ -837,6 +871,8 @@ mod tests {
         //   - peer_addr 残留 → dispatch / presence 仍把已撤销设备当目标
         //   - trusted_peer 残留 → 本机继续把已撤销设备当可信对端
         let mut repo = MockMemberRepo::new();
+        let mut id = MockLocalIdentity::new();
+        expect_remote_member_lookup(&mut repo, &mut id, "dev-1");
         repo.expect_remove()
             .times(1)
             .withf(|device_id| device_id == &DeviceId::new("dev-1"))
@@ -853,11 +889,41 @@ mod tests {
             .times(1)
             .withf(|device_id| device_id == &DeviceId::new("dev-1"))
             .returning(|_| Ok(true));
-        let id = MockLocalIdentity::new();
         let presence = Arc::new(FakePresence::new(vec![]));
         let facade = build_facade_with_unpair_repos(repo, peer_addr, trusted, id, presence);
 
         facade.revoke_member("dev-1").await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn revoke_member_rejects_the_local_device_before_deleting_any_records() {
+        let local_fingerprint = fp("LOCAL");
+        let local_member = member("dev-local", "This device", local_fingerprint.clone());
+        let mut repo = MockMemberRepo::new();
+        repo.expect_get()
+            .times(1)
+            .withf(|device_id| device_id == &DeviceId::new("dev-local"))
+            .returning(move |_| Ok(Some(local_member.clone())));
+        repo.expect_remove().times(0);
+        let mut local_identity = MockLocalIdentity::new();
+        local_identity
+            .expect_get_current_fingerprint()
+            .times(1)
+            .returning(move || Ok(Some(local_fingerprint.clone())));
+        let facade = build_facade_with_unpair_repos(
+            repo,
+            MockPeerAddrRepo::new(),
+            MockTrustedPeerRepo::new(),
+            local_identity,
+            Arc::new(FakePresence::new(vec![])),
+        );
+
+        let result = facade.revoke_member("dev-local").await;
+
+        assert!(
+            result.is_err(),
+            "the local device must leave instead of removing itself"
+        );
     }
 
     #[tokio::test]
@@ -866,12 +932,13 @@ mod tests {
         // 写——unpair 时 trusted_peer.remove 返回 Ok(false)(不存在),应当
         // 视为正常完成,不应抛错。
         let mut repo = MockMemberRepo::new();
+        let mut id = MockLocalIdentity::new();
+        expect_remote_member_lookup(&mut repo, &mut id, "dev-1");
         repo.expect_remove().times(1).returning(|_| Ok(true));
         let mut peer_addr = MockPeerAddrRepo::new();
         peer_addr.expect_remove().times(1).returning(|_| Ok(()));
         let mut trusted = MockTrustedPeerRepo::new();
         trusted.expect_remove().times(1).returning(|_| Ok(false));
-        let id = MockLocalIdentity::new();
         let presence = Arc::new(FakePresence::new(vec![]));
         let facade = build_facade_with_unpair_repos(repo, peer_addr, trusted, id, presence);
 
@@ -884,7 +951,8 @@ mod tests {
         // NotFound,不应再去碰 peer_addr_repo / trusted_peer_repo。两个 mock
         // 都不设 expect_remove,被调用即 panic。
         let mut repo = MockMemberRepo::new();
-        repo.expect_remove().times(1).returning(|_| Ok(false));
+        repo.expect_get().times(1).returning(|_| Ok(None));
+        repo.expect_remove().times(0);
         let peer_addr = MockPeerAddrRepo::new();
         let trusted = MockTrustedPeerRepo::new();
         let id = MockLocalIdentity::new();
@@ -900,6 +968,8 @@ mod tests {
         // member 已经删了无法回滚 —— peer_addr 失败短路返回错误,
         // trusted_peer 也不应再被调用(短路,mock 不设 expect_remove)。
         let mut repo = MockMemberRepo::new();
+        let mut id = MockLocalIdentity::new();
+        expect_remote_member_lookup(&mut repo, &mut id, "dev-1");
         repo.expect_remove().times(1).returning(|_| Ok(true));
         let mut peer_addr = MockPeerAddrRepo::new();
         peer_addr
@@ -907,7 +977,6 @@ mod tests {
             .times(1)
             .returning(|_| Err(PeerAddressError::Internal("disk full".into())));
         let trusted = MockTrustedPeerRepo::new();
-        let id = MockLocalIdentity::new();
         let presence = Arc::new(FakePresence::new(vec![]));
         let facade = build_facade_with_unpair_repos(repo, peer_addr, trusted, id, presence);
 
@@ -926,6 +995,8 @@ mod tests {
         // UI 才能感知"trust 没清,已撤销设备仍被当可信对端",
         // 启动期 reconcile_trusted_peers 会在下次 boot 兜底。
         let mut repo = MockMemberRepo::new();
+        let mut id = MockLocalIdentity::new();
+        expect_remote_member_lookup(&mut repo, &mut id, "dev-1");
         repo.expect_remove().times(1).returning(|_| Ok(true));
         let mut peer_addr = MockPeerAddrRepo::new();
         peer_addr.expect_remove().times(1).returning(|_| Ok(()));
@@ -934,7 +1005,6 @@ mod tests {
             .expect_remove()
             .times(1)
             .returning(|_| Err(TrustedPeerError::Repository("io error".into())));
-        let id = MockLocalIdentity::new();
         let presence = Arc::new(FakePresence::new(vec![]));
         let facade = build_facade_with_unpair_repos(repo, peer_addr, trusted, id, presence);
 

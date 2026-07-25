@@ -2388,21 +2388,17 @@ async fn engine_send_files_imports_opaque_content_and_exports_after_resume() {
         crate::OperationResult::EntrySent(report) => report.entry_id,
         other => panic!("expected sent file entry, got {other:?}"),
     };
-    assert!(matches!(
-        engine
-            .execute(crate::Operation::ReadEntryFile(
-                crate::HistoryEntryInput {
-                    entry_id: entry_id.clone(),
-                },
-            ))
-            .await
-            .unwrap(),
-        crate::OperationResult::EntryFileRead(crate::EntryFileResourceSummary {
-            bytes,
-            file_name,
-            ..
-        }) if bytes == file_bytes && !file_name.is_empty()
-    ));
+    let resource = engine
+        .execute(crate::Operation::ReadEntryFile(crate::HistoryEntryInput {
+            entry_id: entry_id.clone(),
+        }))
+        .await
+        .unwrap();
+    let crate::OperationResult::EntryFileRead(resource) = resource else {
+        panic!("expected entry file resource");
+    };
+    assert_eq!(resource.bytes, file_bytes);
+    assert_eq!(resource.file_name, display_name);
     let history = engine
         .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
             cursor: None,

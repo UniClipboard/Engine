@@ -1496,6 +1496,7 @@ fn operation_result_debug_output_redacts_user_content() {
         OperationResult::Devices(vec![DeviceSummary {
             device_id: "device-1".into(),
             display_name: "Private Phone Name".into(),
+            is_local: false,
             online: true,
         }]),
         OperationResult::HistoryPage {
@@ -1525,6 +1526,7 @@ fn device_summary_debug_output_redacts_display_name() {
     let device = DeviceSummary {
         device_id: "device-1".into(),
         display_name: "Private Phone Name".into(),
+        is_local: false,
         online: true,
     };
 

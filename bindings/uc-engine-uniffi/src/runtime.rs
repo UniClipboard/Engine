@@ -114,6 +114,7 @@ pub struct SpaceState {
 pub struct Device {
     pub device_id: String,
     pub display_name: String,
+    pub is_local: bool,
     pub online: bool,
 }
 
@@ -1153,6 +1154,7 @@ fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
             .map(|device| Device {
                 device_id: device.device_id,
                 display_name: device.display_name,
+                is_local: device.is_local,
                 online: device.online,
             })
             .collect()),
