@@ -1560,6 +1560,7 @@ mod tests {
             operation_response(OperationResult::Devices(vec![uc_engine::DeviceSummary {
                 device_id: "device-1".into(),
                 display_name: "private phone name".into(),
+                is_local: false,
                 online: true,
             }]));
         let peers = operation_response(OperationResult::PeerConnections(vec![
