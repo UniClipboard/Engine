@@ -36,9 +36,13 @@ zeroize = "1.8"
 cargo_metadata = "0.19.2"
 chrono = { version = "0.4", features = ["serde"] }
 diesel = { version = "2.3.5", features = ["sqlite"] }
+serde_json = "1"
 tempfile = "3"
+tokio = { version = "1", features = ["full"] }
 tracing-appender = "0.2"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uc-infra = { path = "../uc-infra", features = ["test-util"] }
+wiremock = "0.6"
 
 [lints]
 workspace = true
