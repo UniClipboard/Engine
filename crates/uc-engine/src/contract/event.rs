@@ -12,6 +12,15 @@ pub enum RefreshReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Sponsor-side terminal result for an invitation-matched pairing handshake.
+pub enum PairingCompletion {
+    /// The joiner was admitted and persisted locally.
+    Success { peer_device_id: String },
+    /// The matched handshake failed before confirmation was committed.
+    Failure { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
     StateChanged {
         state: EngineState,
@@ -24,6 +33,8 @@ pub enum EngineEvent {
     TransferStatusChanged(TransferStatusChanged),
     DeliveryStatusChanged(DeliveryStatusChanged),
     PeerPresenceChanged(PeerPresenceChanged),
+    /// A sponsor-side pairing handshake reached a terminal result.
+    PairingCompleted(PairingCompletion),
     ActiveClipboardChanged(ActiveClipboardChanged),
     MobileLanSettingsChanged(MobileLanSettingsChanged),
     RefreshRequired {
@@ -54,6 +65,7 @@ impl EngineEvent {
             Self::TransferStatusChanged(_) => "transfer_status_changed",
             Self::DeliveryStatusChanged(_) => "delivery_status_changed",
             Self::PeerPresenceChanged(_) => "peer_presence_changed",
+            Self::PairingCompleted(_) => "pairing_completed",
             Self::ActiveClipboardChanged(_) => "active_clipboard_changed",
             Self::MobileLanSettingsChanged(_) => "mobile_lan_settings_changed",
             Self::RefreshRequired { .. } => "refresh_required",

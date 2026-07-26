@@ -1269,6 +1269,7 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
             summary.refresh_requests += 1;
         }
         EngineEvent::PeerPresenceChanged(_) => summary.refresh_requests += 1,
+        EngineEvent::PairingCompleted(_) => {}
         EngineEvent::ActiveClipboardChanged(_) => summary.refresh_requests += 1,
         EngineEvent::MobileLanSettingsChanged(_) => summary.refresh_requests += 1,
         EngineEvent::RefreshRequired { .. } => summary.refresh_requests += 1,
