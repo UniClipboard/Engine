@@ -218,7 +218,6 @@ fn engine_event_for_inbound_notice(notice: &InboundNotice) -> EngineEvent {
     EngineEvent::InboundNotice(InboundNoticeEvent {
         from_device: notice.from_device.as_str().to_string(),
         snapshot_hash: notice.snapshot_hash.clone(),
-        plaintext: notice.plaintext.to_vec(),
         text_preview,
         representations,
         action: match notice.action {
@@ -289,12 +288,34 @@ mod tests {
             EngineEvent::InboundNotice(InboundNoticeEvent {
                 from_device: "peer-1".into(),
                 snapshot_hash: "hash-1".into(),
-                plaintext: vec![1, 2, 3],
                 text_preview: None,
                 representations: Vec::new(),
                 action: InboundNoticeActionSummary::DuplicateIgnored,
                 at_ms: 42,
             })
+        );
+    }
+
+    #[test]
+    fn inbound_notice_event_size_does_not_scale_with_clipboard_payload() {
+        let notice = InboundNotice {
+            from_device: DeviceId::new("peer-1"),
+            snapshot_hash: "hash-1".into(),
+            plaintext: vec![0; 20 * 1024 * 1024].into(),
+            flow_id: None,
+            action: InboundAction::NewEntry,
+            at_ms: 42,
+        };
+
+        let EngineEvent::InboundNotice(event) = engine_event_for_inbound_notice(&notice) else {
+            panic!("expected inbound notice event");
+        };
+        let encoded = serde_json::to_vec(&event).expect("serialize inbound notice event");
+
+        assert!(
+            encoded.len() < 64 * 1024,
+            "inbound notice unexpectedly contains {} bytes",
+            encoded.len()
         );
     }
 }

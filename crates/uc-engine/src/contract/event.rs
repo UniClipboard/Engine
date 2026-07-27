@@ -93,7 +93,6 @@ pub enum InboundNoticeActionSummary {
 pub struct InboundNoticeEvent {
     pub from_device: String,
     pub snapshot_hash: String,
-    pub plaintext: Vec<u8>,
     pub text_preview: Option<String>,
     pub representations: Vec<InboundRepresentationSummary>,
     pub action: InboundNoticeActionSummary,
@@ -112,7 +111,6 @@ impl fmt::Debug for InboundNoticeEvent {
             .debug_struct("InboundNoticeEvent")
             .field("has_from_device", &!self.from_device.is_empty())
             .field("has_snapshot_hash", &!self.snapshot_hash.is_empty())
-            .field("plaintext_len", &self.plaintext.len())
             .field("has_text_preview", &self.text_preview.is_some())
             .field("representation_count", &self.representations.len())
             .field("action", &self.action)
