@@ -884,6 +884,144 @@ fn restore_clipboard_writes_a_structured_snapshot_to_the_host() {
 }
 
 #[test]
+fn active_clipboard_can_be_queried_after_the_activation_event_was_missed() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    host.set_clipboard(BindingClipboardSnapshot {
+        observed_at_ms: 1_700_000_000_000,
+        representations: vec![BindingClipboardRepresentation::Inline {
+            format: "text/plain".to_owned(),
+            mime_type: Some("text/plain".to_owned()),
+            bytes: b"current active clipboard".to_vec(),
+        }],
+    });
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-query-active-clipboard".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+    engine
+        .create_space(
+            Some("mobile-query-active-host".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .expect("binding must create a space");
+    let entry_id = engine
+        .observe_clipboard_change(true)
+        .expect("binding must observe the host clipboard")
+        .expect("changed clipboard must be dispatched")
+        .entry_id;
+    let local_device = engine
+        .query_local_device()
+        .expect("binding must expose the local device");
+
+    let active = engine
+        .query_active_clipboard()
+        .expect("binding must query the active clipboard")
+        .expect("captured clipboard must be active");
+
+    assert_eq!(active.entry_id, entry_id);
+    assert_eq!(active.activated_by, local_device.device_id);
+
+    engine
+        .shutdown(5_000)
+        .expect("binding engine must shut down");
+}
+
+#[test]
+fn active_clipboard_query_returns_empty_before_the_first_activation() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-query-empty-active-clipboard".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+    engine
+        .create_space(
+            Some("mobile-query-empty-host".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .expect("binding must create a space");
+
+    assert_eq!(
+        engine
+            .query_active_clipboard()
+            .expect("binding must query an empty active clipboard"),
+        None
+    );
+
+    engine
+        .shutdown(5_000)
+        .expect("binding engine must shut down");
+}
+
+#[test]
+fn active_clipboard_query_survives_session_recovery() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    host.set_clipboard(BindingClipboardSnapshot {
+        observed_at_ms: 1_700_000_000_000,
+        representations: vec![BindingClipboardRepresentation::Inline {
+            format: "text/plain".to_owned(),
+            mime_type: Some("text/plain".to_owned()),
+            bytes: b"persisted active clipboard".to_vec(),
+        }],
+    });
+    let config = BindingConfig {
+        app_version: "1.2.3".to_owned(),
+        profile_id: "binding-query-recovered-active-clipboard".to_owned(),
+    };
+    let first =
+        MobileEngine::start(config.clone(), host.clone()).expect("first binding engine must start");
+    first
+        .create_space(
+            Some("mobile-query-recovery-host".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .expect("first binding engine must create a space");
+    let entry_id = first
+        .observe_clipboard_change(true)
+        .expect("first binding engine must observe the clipboard")
+        .expect("observed clipboard must be dispatched")
+        .entry_id;
+    let activated_by = first
+        .query_local_device()
+        .expect("first binding engine must expose the local device")
+        .device_id;
+    first
+        .shutdown(5_000)
+        .expect("first binding engine must shut down");
+
+    let restarted = MobileEngine::start(config, host).expect("restarted binding engine must start");
+    let recovery = restarted
+        .recover_session(true)
+        .expect("restarted binding engine must recover its persisted session");
+    assert!(recovery.unlocked);
+    assert!(recovery.resumed);
+
+    let active = restarted
+        .query_active_clipboard()
+        .expect("restarted binding engine must query the active clipboard")
+        .expect("recovered active clipboard must be available");
+    assert_eq!(active.entry_id, entry_id);
+    assert_eq!(active.activated_by, activated_by);
+
+    restarted
+        .shutdown(5_000)
+        .expect("restarted binding engine must shut down");
+}
+
+#[test]
 fn export_entry_writes_to_an_opaque_host_handle_and_finishes_it() {
     let _test_guard = engine_test_guard();
     let root = tempfile::tempdir().expect("temporary host root must be available");

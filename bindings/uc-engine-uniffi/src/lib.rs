@@ -5,9 +5,9 @@ mod android;
 mod runtime;
 
 pub use runtime::{
-    Device, EntryNotResendableReason, InvitationAvailability, InvitationIssued, LocalDevice,
-    MobileEngine, PeerConnectionRefresh, ResendEntryOutcome, SendReport, SessionRecovery,
-    SpaceCreated, SpaceInvitation, SpaceJoined, SpaceState,
+    ActiveClipboard, Device, EntryNotResendableReason, InvitationAvailability, InvitationIssued,
+    LocalDevice, MobileEngine, PeerConnectionRefresh, ResendEntryOutcome, SendReport,
+    SessionRecovery, SpaceCreated, SpaceInvitation, SpaceJoined, SpaceState,
 };
 
 uniffi::setup_scaffolding!();

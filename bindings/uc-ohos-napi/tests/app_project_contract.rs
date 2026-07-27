@@ -187,6 +187,18 @@ fn ohos_probe_starts_the_engine_with_real_host_capabilities() {
 }
 
 #[test]
+fn ohos_binding_exposes_the_active_clipboard_query() {
+    let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
+    let library = read("bindings/uc-ohos-napi/src/lib.rs");
+    let runtime = read("bindings/uc-ohos-napi/src/runtime.rs");
+
+    assert!(library.contains("pub struct OhActiveClipboard"));
+    assert!(runtime.contains("pub async fn query_active_clipboard"));
+    assert!(declarations.contains("export interface OhActiveClipboard"));
+    assert!(declarations.contains("queryActiveClipboard(): Promise<OhActiveClipboard | null>"));
+}
+
+#[test]
 fn ohos_probe_recovers_a_persisted_space_before_creating_one() {
     let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
 

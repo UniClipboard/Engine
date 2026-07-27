@@ -19,6 +19,7 @@ use crate::compatibility::mobile_lan::operations::{
 };
 use crate::engine::EngineRuntime;
 use crate::operations::clipboard::capture::execute_capture_current_clipboard;
+use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
@@ -479,6 +480,10 @@ impl EngineRuntime for ProductionRuntime {
                         .observe_change(input.dispatch)
                         .await?,
                 })
+            }
+            Operation::QueryActiveClipboard => {
+                execute_query_active_clipboard(self.current_active_clipboard().await?.as_ref())
+                    .await
             }
             Operation::RestoreClipboard(input) => {
                 execute_restore_clipboard(self.current_facade().await?.as_ref(), input).await

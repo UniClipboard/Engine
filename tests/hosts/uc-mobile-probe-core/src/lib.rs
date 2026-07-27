@@ -68,6 +68,7 @@ enum ProbeCommand {
         query: Option<String>,
         limit: u32,
     },
+    QueryActiveClipboard,
     ExportEntry {
         entry_id: String,
         path: String,
@@ -466,6 +467,9 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 }),
             )
             .await
+        }
+        ProbeCommand::QueryActiveClipboard => {
+            execute_operation(state, Operation::QueryActiveClipboard).await
         }
         ProbeCommand::ExportEntry { entry_id, path } => {
             let display_name = PathBuf::from(&path)
@@ -1143,6 +1147,20 @@ fn operation_response(result: OperationResult) -> Value {
                 "dispatched": false,
             }),
         },
+        OperationResult::ActiveClipboard(active) => match active {
+            Some(active) => json!({
+                "ok": true,
+                "kind": "active_clipboard",
+                "entry_id": active.entry_id,
+                "activated_by": active.activated_by,
+            }),
+            None => json!({
+                "ok": true,
+                "kind": "active_clipboard",
+                "entry_id": null,
+                "activated_by": null,
+            }),
+        },
         OperationResult::ClipboardRestored(outcome) => match outcome {
             uc_engine::ClipboardRestoreOutcome::Restored => json!({
                 "ok": true,
@@ -1367,6 +1385,21 @@ fn string_to_c_string(value: String) -> *mut c_char {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn query_active_clipboard_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand = serde_json::from_str(r#"{"command":"query_active_clipboard"}"#)
+            .expect("query-active command must deserialize");
+        let mut state = ProbeState {
+            engine: None,
+            files: ProbeFiles::default(),
+            events: Arc::new(Mutex::new(EventSummary::default())),
+        };
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
     #[test]
     fn event_summary_counts_lifecycle_transition_failures() {
         let summary = Arc::new(Mutex::new(EventSummary::default()));
@@ -1516,6 +1549,30 @@ mod tests {
                 "dispatched": false,
             })
         );
+    }
+
+    #[test]
+    fn operation_response_exposes_active_clipboard_identity_without_payload() {
+        let active = operation_response(OperationResult::ActiveClipboard(Some(
+            uc_engine::ActiveClipboardSummary {
+                entry_id: "entry-1".into(),
+                activated_by: "device-1".into(),
+            },
+        )));
+        let empty = operation_response(OperationResult::ActiveClipboard(None));
+
+        assert_eq!(
+            active,
+            json!({
+                "ok": true,
+                "kind": "active_clipboard",
+                "entry_id": "entry-1",
+                "activated_by": "device-1",
+            })
+        );
+        assert_eq!(empty["kind"], "active_clipboard");
+        assert!(empty["entry_id"].is_null());
+        assert!(empty["activated_by"].is_null());
     }
 
     #[test]

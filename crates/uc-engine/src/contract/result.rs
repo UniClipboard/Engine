@@ -284,6 +284,12 @@ pub enum ClipboardRestoreOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveClipboardSummary {
+    pub entry_id: String,
+    pub activated_by: String,
+}
+
 impl fmt::Debug for ClipboardRestoreOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("ClipboardRestoreOutcome");
@@ -464,6 +470,7 @@ pub enum OperationResult {
     ClipboardChangeObserved {
         report: Option<SendReportSummary>,
     },
+    ActiveClipboard(Option<ActiveClipboardSummary>),
     ClipboardRestored(ClipboardRestoreOutcome),
     EntryExported,
     EntryResent(ResendEntryOutcome),
@@ -669,6 +676,9 @@ impl fmt::Debug for OperationResult {
             Self::ClipboardChangeObserved { report } => debug
                 .field("kind", &"clipboard_change_observed")
                 .field("has_report", &report.is_some()),
+            Self::ActiveClipboard(active) => debug
+                .field("kind", &"active_clipboard")
+                .field("has_active", &active.is_some()),
             Self::ClipboardRestored(outcome) => debug
                 .field("kind", &"clipboard_restored")
                 .field("outcome", outcome),

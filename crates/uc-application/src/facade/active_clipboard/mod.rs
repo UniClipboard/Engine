@@ -21,7 +21,7 @@ use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 use tokio::task::JoinHandle;
 use tracing::{debug, instrument, warn};
 
-use uc_core::clipboard::ClipboardContentCategorySet;
+use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::clipboard::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
@@ -280,6 +280,14 @@ impl ActiveClipboardFacade {
             host_event_emitter: deps.host_event_emitter,
             resurface_clock: deps.resurface_clock,
         }
+    }
+
+    /// Return the current converged clipboard activation, if one exists.
+    pub async fn current(
+        &self,
+    ) -> Result<Option<ActiveClipboardState>, uc_core::ports::clipboard::ActiveClipboardRegisterError>
+    {
+        self.load_register.load().await
     }
 
     /// Announce a locally-originated activation of this device's clipboard

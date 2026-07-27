@@ -14,8 +14,8 @@ use uc_engine::{
 use zeroize::Zeroizing;
 
 use crate::{
-    host, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued, OhLocalDevice, OhSendReport,
-    OhSessionRecovery, OhSpaceCreated, OhSpaceJoined,
+    host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
+    OhLocalDevice, OhSendReport, OhSessionRecovery, OhSpaceCreated, OhSpaceJoined,
 };
 
 #[napi]
@@ -243,6 +243,24 @@ impl OhEngine {
             .map_err(engine_error)?;
         match result {
             OperationResult::ClipboardCaptured { entry_id } => Ok(entry_id),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_active_clipboard(&self) -> napi::Result<Option<OhActiveClipboard>> {
+        let result = self
+            .engine
+            .execute(Operation::QueryActiveClipboard)
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::ActiveClipboard(active) => {
+                Ok(active.map(|active| OhActiveClipboard {
+                    entry_id: active.entry_id,
+                    activated_by: active.activated_by,
+                }))
+            }
             _ => Err(unexpected_result()),
         }
     }

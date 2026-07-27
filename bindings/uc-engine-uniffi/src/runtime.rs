@@ -38,6 +38,12 @@ pub struct SessionRecovery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ActiveClipboard {
+    pub entry_id: String,
+    pub activated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct LocalDevice {
     pub device_id: String,
     pub display_name: String,
@@ -219,6 +225,9 @@ enum WorkerCommand {
         entry_id: String,
         mode: BindingClipboardRestoreMode,
         response: mpsc::Sender<Result<BindingClipboardRestoreOutcome, BindingError>>,
+    },
+    QueryActiveClipboard {
+        response: mpsc::Sender<Result<Option<ActiveClipboard>, BindingError>>,
     },
     ExportEntry {
         entry_id: String,
@@ -586,6 +595,10 @@ impl MobileEngine {
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
+    pub fn query_active_clipboard(&self) -> Result<Option<ActiveClipboard>, BindingError> {
+        self.request(|response| WorkerCommand::QueryActiveClipboard { response })
+    }
+
     pub fn export_entry(
         &self,
         entry_id: String,
@@ -947,6 +960,14 @@ async fn run_worker_loop(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_clipboard_restored);
+                let _ = response.send(result);
+            }
+            WorkerCommand::QueryActiveClipboard { response } => {
+                let result = engine
+                    .execute(Operation::QueryActiveClipboard)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_active_clipboard);
                 let _ = response.send(result);
             }
             WorkerCommand::ExportEntry {
@@ -1343,6 +1364,16 @@ fn map_clipboard_restored(
         OperationResult::ClipboardRestored(ClipboardRestoreOutcome::NotApplicable { .. }) => {
             Ok(BindingClipboardRestoreOutcome::NotApplicable)
         }
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_active_clipboard(result: OperationResult) -> Result<Option<ActiveClipboard>, BindingError> {
+    match result {
+        OperationResult::ActiveClipboard(active) => Ok(active.map(|active| ActiveClipboard {
+            entry_id: active.entry_id,
+            activated_by: active.activated_by,
+        })),
         _ => Err(BindingError::UnexpectedResult),
     }
 }

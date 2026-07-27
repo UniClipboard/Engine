@@ -363,6 +363,17 @@ impl ProductionRuntime {
             .ok_or_else(operation_unavailable_error)
     }
 
+    async fn current_active_clipboard(
+        &self,
+    ) -> Result<Arc<uc_application::facade::ActiveClipboardFacade>, EngineError> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| Arc::clone(&session.sync_engine.active_clipboard))
+            .ok_or_else(operation_unavailable_error)
+    }
+
     #[cfg(feature = "lan-compat")]
     async fn current_mobile_sync(
         &self,

@@ -69,6 +69,12 @@ pub struct OhLocalDevice {
 }
 
 #[napi(object)]
+pub struct OhActiveClipboard {
+    pub entry_id: String,
+    pub activated_by: String,
+}
+
+#[napi(object)]
 pub struct OhInvitationIssued {
     pub invitation_code: String,
     pub expires_at_ms: f64,

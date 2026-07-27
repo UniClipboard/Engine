@@ -68,10 +68,16 @@ export interface OhSpaceCreated {
   identityFingerprint: string
 }
 
+export interface OhActiveClipboard {
+  entryId: string
+  activatedBy: string
+}
+
 export interface OhEngine {
   createSpace(deviceName: string | null, passphrase: string): Promise<OhSpaceCreated>
   recoverSession(allowSecureStorageUnlock: boolean): Promise<OhSessionRecovery>
   queryLocalDevice(): Promise<OhLocalDevice>
+  queryActiveClipboard(): Promise<OhActiveClipboard | null>
   lifecycleState(): Promise<string>
   suspend(): Promise<void>
   resume(): Promise<void>
