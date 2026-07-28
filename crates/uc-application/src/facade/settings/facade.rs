@@ -192,12 +192,17 @@ impl SettingsFacade {
             .load()
             .await
             .map_err(|err| SettingsFacadeError::Load(err.to_string()))?;
+        let previous_relay_urls = existing.network.custom_relay_urls.clone();
         let merged = apply_settings_patch(existing, patch);
         validate_settings(&merged).map_err(SettingsFacadeError::Invalid)?;
         self.settings
             .save(&merged)
             .await
             .map_err(|err| SettingsFacadeError::Save(err.to_string()))?;
+        if let Some(credentials) = self.relay_credentials.as_ref() {
+            credentials
+                .delete_unreferenced(&previous_relay_urls, &merged.network.custom_relay_urls)?;
+        }
         Ok(merged.into())
     }
 }
@@ -340,6 +345,48 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, SettingsFacadeError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn removing_a_custom_relay_deletes_only_its_stored_credential() {
+        let relay_a = "https://relay-a.example.com/";
+        let relay_b = "https://relay-b.example.com/";
+        let mut settings = Settings::default();
+        settings.network.custom_relay_urls = vec![relay_a.to_string(), relay_b.to_string()];
+        let credentials = crate::facade::settings::RelayCredentials::new(Arc::new(
+            InMemorySecureStorage::default(),
+        ));
+        let facade = facade_with(settings).with_relay_credentials(credentials);
+        facade
+            .set_relay_access_token(relay_a, "relay-a-token".to_string())
+            .expect("set relay A credential");
+        facade
+            .set_relay_access_token(relay_b, "relay-b-token".to_string())
+            .expect("set relay B credential");
+
+        facade
+            .update(SettingsPatch {
+                network: Some(crate::facade::settings::NetworkSettingsPatch {
+                    custom_relay_urls: Some(vec![relay_b.to_string()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("remove relay A");
+
+        assert!(
+            !facade
+                .relay_credential_status(relay_a)
+                .expect("query relay A credential")
+                .configured
+        );
+        assert!(
+            facade
+                .relay_credential_status(relay_b)
+                .expect("query relay B credential")
+                .configured
+        );
     }
 
     #[tokio::test]

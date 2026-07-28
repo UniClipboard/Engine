@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -104,6 +104,25 @@ impl RelayCredentials {
                 .map_err(RelayCredentialsError::Storage)?;
         }
         Ok(existed)
+    }
+
+    pub fn delete_unreferenced(
+        &self,
+        previous_urls: &[String],
+        current_urls: &[String],
+    ) -> Result<(), RelayCredentialsError> {
+        let current_keys = current_urls
+            .iter()
+            .map(|url| storage_key(url))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut processed_keys = BTreeSet::new();
+        for relay_url in previous_urls {
+            let key = storage_key(relay_url)?;
+            if !current_keys.contains(&key) && processed_keys.insert(key) {
+                self.delete(relay_url)?;
+            }
+        }
+        Ok(())
     }
 }
 
