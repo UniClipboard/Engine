@@ -163,14 +163,18 @@ impl SettingsFacade {
     pub async fn probe_relay_url(
         &self,
         url: &str,
+        access_token: Option<RelayAccessToken>,
     ) -> Result<RelayProbeReportView, SettingsFacadeError> {
         let port = self
             .relay_diagnostic
             .as_ref()
             .ok_or(SettingsFacadeError::RelayProbeUnavailable)?;
-        let access_token = match self.relay_credentials.as_ref() {
-            Some(credentials) => credentials.load(url)?,
-            None => None,
+        let access_token = match access_token {
+            Some(token) => Some(token),
+            None => match self.relay_credentials.as_ref() {
+                Some(credentials) => credentials.load(url)?,
+                None => None,
+            },
         };
         let report = port.probe(url, access_token.as_ref()).await?;
         Ok(report.into())
@@ -411,7 +415,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relay_probe_uses_only_the_target_relay_credential() {
+    async fn relay_probe_prefers_the_unsaved_token_then_falls_back_to_the_stored_token() {
         let storage = Arc::new(InMemorySecureStorage::default());
         let credentials = crate::facade::settings::RelayCredentials::new(storage);
         let diagnostic = Arc::new(RecordingRelayDiagnostic::default());
@@ -423,15 +427,30 @@ mod tests {
             .expect("set credential");
 
         facade
-            .probe_relay_url("https://relay-b.example.com")
+            .probe_relay_url("https://relay-b.example.com", None)
             .await
             .expect("probe relay without credential");
         assert_eq!(*diagnostic.token.lock().unwrap(), None);
 
         facade
-            .probe_relay_url("https://relay-a.example.com")
+            .probe_relay_url(
+                "https://relay-a.example.com",
+                Some(
+                    crate::facade::settings::RelayAccessToken::new("draft-token".to_string())
+                        .expect("valid draft token"),
+                ),
+            )
             .await
-            .expect("probe relay with credential");
+            .expect("probe relay with unsaved credential");
+        assert_eq!(
+            diagnostic.token.lock().unwrap().as_deref(),
+            Some("draft-token")
+        );
+
+        facade
+            .probe_relay_url("https://relay-a.example.com", None)
+            .await
+            .expect("probe relay with stored credential");
         assert_eq!(
             diagnostic.token.lock().unwrap().as_deref(),
             Some("relay-a-token")

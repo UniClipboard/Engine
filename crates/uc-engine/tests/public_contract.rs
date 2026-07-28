@@ -359,6 +359,7 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
     assert_eq!(
         Operation::ProbeRelay(uc_engine::RelayProbeInput {
             url: "https://private-relay.example".into(),
+            access_token: Some(SecretString::new("private-relay-token")),
         })
         .kind(),
         OperationKind::ProbeRelay
@@ -378,6 +379,14 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
         set_relay_credential.kind(),
         OperationKind::SetRelayCredential
     );
+    let probe_debug = format!(
+        "{:?}",
+        Operation::ProbeRelay(uc_engine::RelayProbeInput {
+            url: "https://private-relay.example".into(),
+            access_token: Some(SecretString::new("private-relay-token")),
+        })
+    );
+    assert!(!probe_debug.contains("private-relay-token"));
     assert_eq!(
         Operation::DeleteRelayCredential(uc_engine::RelayCredentialInput {
             url: "https://private-relay.example".into(),

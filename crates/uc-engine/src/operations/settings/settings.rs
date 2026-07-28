@@ -56,7 +56,22 @@ pub(crate) async fn execute_probe_relay(
     facade: &AppFacade,
     input: RelayProbeInput,
 ) -> Result<OperationResult, EngineError> {
-    let outcome = match facade.settings.probe_relay_url(&input.url).await {
+    let access_token = match input.access_token {
+        Some(token) => match app::RelayAccessToken::new(token.expose().to_string()) {
+            Ok(token) => Some(token),
+            Err(_) => {
+                return Ok(OperationResult::RelayProbed(RelayProbeOutcome::Other {
+                    message: "invalid relay access token".to_string(),
+                }));
+            }
+        },
+        None => None,
+    };
+    let outcome = match facade
+        .settings
+        .probe_relay_url(&input.url, access_token)
+        .await
+    {
         Ok(report) => RelayProbeOutcome::Success {
             latency_ms: report.latency_ms,
         },

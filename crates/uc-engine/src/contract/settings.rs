@@ -371,6 +371,10 @@ impl fmt::Debug for SettingsUpdateOutcome {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayProbeInput {
     pub url: String,
+    /// One-time token supplied by the caller for this probe. It must never
+    /// cross a serialization boundary or appear in diagnostic output.
+    #[serde(skip)]
+    pub access_token: Option<crate::SecretString>,
 }
 
 impl fmt::Debug for RelayProbeInput {
