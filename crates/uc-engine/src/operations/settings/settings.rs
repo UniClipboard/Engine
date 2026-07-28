@@ -10,12 +10,12 @@ use crate::{
     CongestionControllerSummary, EngineError, EngineErrorCategory, FileSyncSettingsSummary,
     GeneralSettingsSummary, NetworkSettingsSummary, OperationResult, PairingSettingsSummary,
     QuickPanelDoubleTapModifierSummary, QuickPanelPositionSummary, QuickPanelSettingsSummary,
-    RelayCredentialInput, RelayCredentialStatus, RelayProbeInput, RelayProbeOutcome,
-    RetentionPolicySummary, RetentionRulePatch, RetentionRuleSummary, RuleEvaluationSummary,
-    SecuritySettingsSummary, SetRelayCredentialInput, SettingsContentTypes,
-    SettingsContentTypesPatch, SettingsPatch, SettingsSummary, SettingsUpdateOutcome,
-    ShortcutKeySummary, StartupModeSummary, SyncFrequencySummary, SyncSettingsSummary,
-    ThemeSummary, UpdateChannelSummary,
+    RelayCredentialEdit, RelayCredentialInput, RelayCredentialStatus, RelayProbeCredential,
+    RelayProbeInput, RelayProbeOutcome, RetentionPolicySummary, RetentionRulePatch,
+    RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput, SaveRelayOutcome,
+    SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch, SettingsPatch,
+    SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
+    SyncFrequencySummary, SyncSettingsSummary, ThemeSummary, UpdateChannelSummary,
 };
 
 pub(crate) async fn execute_query_settings(
@@ -56,20 +56,23 @@ pub(crate) async fn execute_probe_relay(
     facade: &AppFacade,
     input: RelayProbeInput,
 ) -> Result<OperationResult, EngineError> {
-    let access_token = match input.access_token {
-        Some(token) => match app::RelayAccessToken::new(token.expose().to_string()) {
-            Ok(token) => Some(token),
-            Err(_) => {
-                return Ok(OperationResult::RelayProbed(RelayProbeOutcome::Other {
-                    message: "invalid relay access token".to_string(),
-                }));
+    let credential = match input.credential {
+        RelayProbeCredential::Stored => app::RelayProbeCredential::Stored,
+        RelayProbeCredential::None => app::RelayProbeCredential::None,
+        RelayProbeCredential::Override(token) => {
+            match app::RelayAccessToken::new(token.expose().to_string()) {
+                Ok(token) => app::RelayProbeCredential::Override(token),
+                Err(_) => {
+                    return Ok(OperationResult::RelayProbed(RelayProbeOutcome::Other {
+                        message: "invalid relay access token".to_string(),
+                    }));
+                }
             }
-        },
-        None => None,
+        }
     };
     let outcome = match facade
         .settings
-        .probe_relay_url(&input.url, access_token)
+        .probe_relay_url(&input.url, credential)
         .await
     {
         Ok(report) => RelayProbeOutcome::Success {
@@ -99,6 +102,64 @@ pub(crate) async fn execute_probe_relay(
     Ok(OperationResult::RelayProbed(outcome))
 }
 
+pub(crate) async fn execute_save_relay(
+    facade: &AppFacade,
+    input: SaveRelayInput,
+) -> Result<OperationResult, EngineError> {
+    let patch = match map_patch(input.settings) {
+        Ok(patch) => patch,
+        Err(reason) => {
+            return Ok(OperationResult::RelaySaved(SaveRelayOutcome::Rejected {
+                reason,
+            }));
+        }
+    };
+    let credential = match input.credential {
+        RelayCredentialEdit::Keep { url } => app::RelayCredentialEdit::Keep { url },
+        RelayCredentialEdit::Set { url, access_token } => {
+            let access_token = match app::RelayAccessToken::new(access_token.expose().to_string()) {
+                Ok(token) => token,
+                Err(_) => {
+                    return Ok(OperationResult::RelaySaved(SaveRelayOutcome::Rejected {
+                        reason: "invalid relay access token".to_string(),
+                    }));
+                }
+            };
+            app::RelayCredentialEdit::Set { url, access_token }
+        }
+        RelayCredentialEdit::Delete { url } => app::RelayCredentialEdit::Delete { url },
+    };
+
+    match facade.settings.save_relay(patch, credential).await {
+        Ok(saved) => Ok(OperationResult::RelaySaved(SaveRelayOutcome::Saved {
+            settings: Box::new(map_settings(saved.settings)),
+            credential_status: RelayCredentialStatus {
+                configured: saved.credential_status.configured,
+            },
+        })),
+        Err(app::SettingsFacadeError::Invalid(reason)) => {
+            Ok(OperationResult::RelaySaved(SaveRelayOutcome::Rejected {
+                reason,
+            }))
+        }
+        Err(error) => Err(map_save_relay_error(error)),
+    }
+}
+
+fn map_save_relay_error(error: app::SettingsFacadeError) -> EngineError {
+    match error {
+        error @ app::SettingsFacadeError::RelayCredentialsUnavailable
+        | error @ app::SettingsFacadeError::RelayCredentialInvalidUrl
+        | error @ app::SettingsFacadeError::RelayCredentialInvalidToken
+        | error @ app::SettingsFacadeError::RelayCredentialInvalidTarget
+        | error @ app::SettingsFacadeError::RelayCredentialStorage
+        | error @ app::SettingsFacadeError::RelayCredentialCorrupt => {
+            map_relay_credential_error(error, SAVE_RELAY_FAILED_CODE)
+        }
+        _ => internal_error(SAVE_RELAY_FAILED_CODE),
+    }
+}
+
 pub(crate) async fn execute_query_relay_credential(
     facade: &AppFacade,
     input: RelayCredentialInput,
@@ -114,38 +175,11 @@ pub(crate) async fn execute_query_relay_credential(
     ))
 }
 
-pub(crate) async fn execute_set_relay_credential(
-    facade: &AppFacade,
-    input: SetRelayCredentialInput,
-) -> Result<OperationResult, EngineError> {
-    let status = facade
-        .settings
-        .set_relay_access_token(&input.url, input.access_token.expose().to_string())
-        .map_err(|error| map_relay_credential_error(error, SET_RELAY_CREDENTIAL_FAILED_CODE))?;
-    Ok(OperationResult::RelayCredentialStatus(
-        RelayCredentialStatus {
-            configured: status.configured,
-        },
-    ))
-}
-
-pub(crate) async fn execute_delete_relay_credential(
-    facade: &AppFacade,
-    input: RelayCredentialInput,
-) -> Result<OperationResult, EngineError> {
-    facade
-        .settings
-        .delete_relay_access_token(&input.url)
-        .map_err(|error| map_relay_credential_error(error, DELETE_RELAY_CREDENTIAL_FAILED_CODE))?;
-    Ok(OperationResult::RelayCredentialStatus(
-        RelayCredentialStatus { configured: false },
-    ))
-}
-
 fn map_relay_credential_error(error: app::SettingsFacadeError, code: u32) -> EngineError {
     let (category, retryable) = match error {
         app::SettingsFacadeError::RelayCredentialInvalidUrl
-        | app::SettingsFacadeError::RelayCredentialInvalidToken => {
+        | app::SettingsFacadeError::RelayCredentialInvalidToken
+        | app::SettingsFacadeError::RelayCredentialInvalidTarget => {
             (EngineErrorCategory::InvalidInput, false)
         }
         app::SettingsFacadeError::RelayCredentialsUnavailable
@@ -613,5 +647,15 @@ mod tests {
     fn shortcut_debug_output_redacts_key_values() {
         let shortcut = ShortcutKeySummary::Multiple(vec!["Private+Key".to_string()]);
         assert!(!format!("{shortcut:?}").contains("Private+Key"));
+    }
+
+    #[test]
+    fn relay_settings_persistence_failure_uses_the_relay_save_error_code() {
+        let error = map_save_relay_error(app::SettingsFacadeError::Save(
+            "settings storage unavailable".to_string(),
+        ));
+
+        assert_eq!(error.code(), SAVE_RELAY_FAILED_CODE);
+        assert_eq!(error.category(), EngineErrorCategory::Internal);
     }
 }

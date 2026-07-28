@@ -10,8 +10,8 @@ use crate::{
     MobileDeviceRevokeOutcome, MobileDeviceSummary, MobileDeviceUpdateOutcome,
     MobileFileUploadHandle, MobileLanInterfaceSummary, MobileSyncDocument,
     MobileSyncDocumentApplyOutcome, MobileSyncFileReadOutcome, MobileSyncSettingsSummary,
-    MobileSyncSettingsUpdateOutcome, RelayCredentialStatus, RelayProbeOutcome, SettingsSummary,
-    SettingsUpdateOutcome, UpgradeStatusSummary,
+    MobileSyncSettingsUpdateOutcome, RelayCredentialStatus, RelayProbeOutcome, SaveRelayOutcome,
+    SettingsSummary, SettingsUpdateOutcome, UpgradeStatusSummary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +393,7 @@ pub enum OperationResult {
     PeerConnectionsRefreshed(PeerConnectionRefreshSummary),
     Settings(Box<SettingsSummary>),
     SettingsUpdated(SettingsUpdateOutcome),
+    RelaySaved(SaveRelayOutcome),
     RelayProbed(RelayProbeOutcome),
     RelayCredentialStatus(RelayCredentialStatus),
     UpgradeStatus(UpgradeStatusSummary),
@@ -514,6 +515,9 @@ impl fmt::Debug for OperationResult {
             Self::Settings(_) => debug.field("kind", &"settings"),
             Self::SettingsUpdated(outcome) => debug
                 .field("kind", &"settings_updated")
+                .field("outcome", outcome),
+            Self::RelaySaved(outcome) => debug
+                .field("kind", &"relay_saved")
                 .field("outcome", outcome),
             Self::RelayProbed(outcome) => debug
                 .field("kind", &"relay_probed")

@@ -677,6 +677,21 @@ fn operation_response(result: OperationResult) -> Value {
             "kind": "relay_credential_status",
             "configured": status.configured,
         }),
+        OperationResult::RelaySaved(outcome) => match outcome {
+            uc_engine::SaveRelayOutcome::Saved {
+                credential_status, ..
+            } => json!({
+                "ok": true,
+                "kind": "relay_saved",
+                "outcome": "saved",
+                "credential_configured": credential_status.configured,
+            }),
+            uc_engine::SaveRelayOutcome::Rejected { .. } => json!({
+                "ok": true,
+                "kind": "relay_saved",
+                "outcome": "rejected",
+            }),
+        },
         OperationResult::UpgradeStatus(status) => {
             let (outcome, from, to) = match status {
                 uc_engine::UpgradeStatusSummary::FreshInstall { current } => {
@@ -1702,6 +1717,11 @@ mod tests {
         let relay_credential = operation_response(OperationResult::RelayCredentialStatus(
             uc_engine::RelayCredentialStatus { configured: true },
         ));
+        let relay_saved = operation_response(OperationResult::RelaySaved(
+            uc_engine::SaveRelayOutcome::Rejected {
+                reason: "private relay save rejection".into(),
+            },
+        ));
         let history = operation_response(OperationResult::HistoryPage {
             entries: vec![uc_engine::EntrySummary {
                 entry_id: "entry-1".into(),
@@ -1786,6 +1806,7 @@ mod tests {
             "/private/settings/path",
             "private settings rejection",
             "private relay error",
+            "private relay save rejection",
             "192.168.1.23",
             "private-mobile.example",
             "private mobile bind failure",
@@ -1802,6 +1823,7 @@ mod tests {
             assert!(!settings.to_string().contains(secret));
             assert!(!settings_rejected.to_string().contains(secret));
             assert!(!relay.to_string().contains(secret));
+            assert!(!relay_saved.to_string().contains(secret));
             assert!(!mobile_settings.to_string().contains(secret));
             assert!(!mobile_settings_rejected.to_string().contains(secret));
             assert!(!mobile_document.to_string().contains(secret));

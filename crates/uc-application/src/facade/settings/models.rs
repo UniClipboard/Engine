@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use uc_core::settings::model as core;
@@ -839,6 +839,7 @@ pub(crate) fn validate_settings(settings: &core::Settings) -> Result<(), String>
 }
 
 fn validate_custom_relay_urls(urls: &[String]) -> Result<(), String> {
+    let mut canonical_urls = BTreeSet::new();
     for raw in urls {
         let url = url::Url::parse(raw)
             .map_err(|err| format!("invalid custom relay URL `{raw}`: {err}"))?;
@@ -857,6 +858,9 @@ fn validate_custom_relay_urls(urls: &[String]) -> Result<(), String> {
             return Err(format!(
                 "invalid custom relay URL `{raw}`: URL must not include credentials"
             ));
+        }
+        if !canonical_urls.insert(url.to_string()) {
+            return Err(format!("duplicate custom relay URL `{raw}`"));
         }
     }
     Ok(())
@@ -1100,6 +1104,16 @@ mod network_settings_apply_patch_tests {
         let urls = vec!["https://login:password@relay.example.com".to_string()];
         let err = validate_custom_relay_urls(&urls).expect_err("embedded credentials");
         assert!(err.contains("must not include credentials"));
+    }
+
+    #[test]
+    fn validate_custom_relay_urls_rejects_canonical_duplicates() {
+        let urls = vec![
+            "https://relay.example.com".to_string(),
+            "https://relay.example.com/".to_string(),
+        ];
+        let err = validate_custom_relay_urls(&urls).expect_err("duplicate relay URL");
+        assert!(err.contains("duplicate"));
     }
 
     /// custom_relay_urls：合法 HTTP(S) URL 通过校验。

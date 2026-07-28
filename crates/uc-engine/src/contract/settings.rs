@@ -368,18 +368,76 @@ impl fmt::Debug for SettingsUpdateOutcome {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RelayProbeInput {
     pub url: String,
-    /// One-time token supplied by the caller for this probe. It must never
-    /// cross a serialization boundary or appear in diagnostic output.
-    #[serde(skip)]
-    pub access_token: Option<crate::SecretString>,
+    pub credential: RelayProbeCredential,
 }
 
 impl fmt::Debug for RelayProbeInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("RelayProbeInput([REDACTED])")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum RelayProbeCredential {
+    Stored,
+    None,
+    Override(crate::SecretString),
+}
+
+impl fmt::Debug for RelayProbeCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Stored => "stored",
+            Self::None => "none",
+            Self::Override(_) => "override",
+        };
+        formatter
+            .debug_struct("RelayProbeCredential")
+            .field("kind", &kind)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum RelayCredentialEdit {
+    Keep {
+        url: String,
+    },
+    Set {
+        url: String,
+        access_token: crate::SecretString,
+    },
+    Delete {
+        url: String,
+    },
+}
+
+impl fmt::Debug for RelayCredentialEdit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Keep { .. } => "keep",
+            Self::Set { .. } => "set",
+            Self::Delete { .. } => "delete",
+        };
+        formatter
+            .debug_struct("RelayCredentialEdit")
+            .field("kind", &kind)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SaveRelayInput {
+    pub settings: SettingsPatch,
+    pub credential: RelayCredentialEdit,
+}
+
+impl fmt::Debug for SaveRelayInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SaveRelayInput([REDACTED])")
     }
 }
 
@@ -394,21 +452,34 @@ impl fmt::Debug for RelayCredentialInput {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct SetRelayCredentialInput {
-    pub url: String,
-    pub access_token: crate::SecretString,
-}
-
-impl fmt::Debug for SetRelayCredentialInput {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SetRelayCredentialInput([REDACTED])")
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayCredentialStatus {
     pub configured: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SaveRelayOutcome {
+    Saved {
+        settings: Box<SettingsSummary>,
+        credential_status: RelayCredentialStatus,
+    },
+    Rejected {
+        reason: String,
+    },
+}
+
+impl fmt::Debug for SaveRelayOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Saved {
+                credential_status, ..
+            } => formatter
+                .debug_struct("SaveRelayOutcome::Saved")
+                .field("credential_configured", &credential_status.configured)
+                .finish(),
+            Self::Rejected { .. } => formatter.write_str("SaveRelayOutcome::Rejected([REDACTED])"),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -437,5 +508,36 @@ impl fmt::Debug for RelayProbeOutcome {
             .debug_struct("RelayProbeOutcome")
             .field("kind", &kind)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod relay_contract_tests {
+    use super::{
+        RelayCredentialEdit, RelayProbeCredential, RelayProbeInput, SaveRelayInput, SettingsPatch,
+    };
+
+    #[test]
+    fn relay_inputs_never_expose_urls_or_tokens_in_debug_output() {
+        let url = "https://login:password@relay.example.com/private";
+        let token = "top-secret-token";
+        let probe = RelayProbeInput {
+            url: url.to_string(),
+            credential: RelayProbeCredential::Override(crate::SecretString::new(token)),
+        };
+        let save = SaveRelayInput {
+            settings: SettingsPatch::default(),
+            credential: RelayCredentialEdit::Set {
+                url: url.to_string(),
+                access_token: crate::SecretString::new(token),
+            },
+        };
+
+        for output in [format!("{probe:?}"), format!("{save:?}")] {
+            assert!(!output.contains(url));
+            assert!(!output.contains("login"));
+            assert!(!output.contains("password"));
+            assert!(!output.contains(token));
+        }
     }
 }

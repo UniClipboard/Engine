@@ -84,7 +84,7 @@ fn secure_storage_adapter_preserves_secret_bytes() {
 }
 
 #[tokio::test]
-async fn relay_credentials_round_trip_through_host_secure_storage() {
+async fn relay_settings_and_credential_save_through_one_engine_operation() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let storage = MemoryHostSecureStorage::default();
@@ -107,23 +107,36 @@ async fn relay_credentials_round_trip_through_host_secure_storage() {
         .await
         .unwrap();
     let relay_url = "https://relay.example.com/";
-    let token = "relay-access-token";
+    let token = "relay-token";
 
-    let set = engine
-        .execute(crate::Operation::SetRelayCredential(
-            crate::SetRelayCredentialInput {
-                url: relay_url.to_string(),
-                access_token: crate::SecretString::new(token),
+    let saved = engine
+        .execute(crate::Operation::SaveRelay(Box::new(
+            crate::SaveRelayInput {
+                settings: crate::SettingsPatch {
+                    network: Some(crate::NetworkSettingsPatch {
+                        custom_relay_urls: Some(vec![relay_url.to_string()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                credential: crate::RelayCredentialEdit::Set {
+                    url: relay_url.to_string(),
+                    access_token: crate::SecretString::new(token),
+                },
             },
-        ))
+        )))
         .await
         .unwrap();
-    assert_eq!(
-        set,
-        crate::OperationResult::RelayCredentialStatus(crate::RelayCredentialStatus {
-            configured: true,
-        })
-    );
+
+    let crate::OperationResult::RelaySaved(crate::SaveRelayOutcome::Saved {
+        settings,
+        credential_status,
+    }) = saved
+    else {
+        panic!("expected saved relay outcome");
+    };
+    assert_eq!(settings.network.custom_relay_urls, vec![relay_url]);
+    assert!(credential_status.configured);
     assert!(storage
         .values()
         .values()
@@ -137,22 +150,38 @@ async fn relay_credentials_round_trip_through_host_secure_storage() {
         ))
         .await
         .unwrap();
-    assert_eq!(queried, set);
-
-    let deleted = engine
-        .execute(crate::Operation::DeleteRelayCredential(
-            crate::RelayCredentialInput {
-                url: relay_url.to_string(),
-            },
-        ))
-        .await
-        .unwrap();
     assert_eq!(
-        deleted,
+        queried,
         crate::OperationResult::RelayCredentialStatus(crate::RelayCredentialStatus {
-            configured: false,
+            configured: true,
         })
     );
+
+    let deleted = engine
+        .execute(crate::Operation::SaveRelay(Box::new(
+            crate::SaveRelayInput {
+                settings: crate::SettingsPatch {
+                    network: Some(crate::NetworkSettingsPatch {
+                        custom_relay_urls: Some(vec![relay_url.to_string()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                credential: crate::RelayCredentialEdit::Delete {
+                    url: relay_url.to_string(),
+                },
+            },
+        )))
+        .await
+        .unwrap();
+    let crate::OperationResult::RelaySaved(crate::SaveRelayOutcome::Saved {
+        credential_status,
+        ..
+    }) = deleted
+    else {
+        panic!("expected saved relay outcome");
+    };
+    assert!(!credential_status.configured);
     assert!(!storage
         .values()
         .values()

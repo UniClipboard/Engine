@@ -70,23 +70,32 @@ pub fn relay_policy_to_iroh_config(
     }
 }
 
-pub fn load_relay_access_tokens(
-    config: &mut IrohNodeConfig,
-    credentials: &RelayCredentials,
-) -> anyhow::Result<()> {
+pub fn load_relay_access_tokens(config: &mut IrohNodeConfig, credentials: &RelayCredentials) {
     config.relay_access_tokens.clear();
     for relay_url in &config.custom_relay_urls {
-        let Some(token) = credentials
-            .load(relay_url)
-            .map_err(|error| anyhow::anyhow!("failed to load relay credential: {error}"))?
-        else {
-            continue;
+        let token = match credentials.load(relay_url) {
+            Ok(Some(token)) => token,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "relay credential unavailable during startup; continuing without it"
+                );
+                continue;
+            }
         };
-        let token = IrohRelayAccessToken::new(token.expose_secret().to_string())
-            .map_err(|error| anyhow::anyhow!("invalid stored relay credential: {error}"))?;
+        let token = match IrohRelayAccessToken::new(token.expose_secret().to_string()) {
+            Ok(token) => token,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "stored relay credential cannot be used; continuing without it"
+                );
+                continue;
+            }
+        };
         config.relay_access_tokens.insert(relay_url.clone(), token);
     }
-    Ok(())
 }
 
 /// iroh 直连可达性输入（UniClipboard#900），来源于环境变量。两者默认
@@ -208,17 +217,26 @@ mod tests {
     use super::*;
     use std::{
         collections::BTreeMap,
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
     };
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     #[derive(Default)]
     struct InMemorySecureStorage {
         values: Mutex<BTreeMap<String, Vec<u8>>>,
+        corrupt_on_get: AtomicUsize,
+        get_count: AtomicUsize,
     }
 
     impl SecureStoragePort for InMemorySecureStorage {
         fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            let get_count = self.get_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.corrupt_on_get.load(Ordering::SeqCst) == get_count {
+                return Ok(Some(vec![0xff, 0xfe]));
+            }
             Ok(self.values.lock().unwrap().get(key).cloned())
         }
 
@@ -355,7 +373,7 @@ mod tests {
             None,
         );
 
-        load_relay_access_tokens(&mut config, &credentials).expect("load credentials");
+        load_relay_access_tokens(&mut config, &credentials);
 
         assert_eq!(config.relay_access_tokens.len(), 1);
         assert_eq!(
@@ -366,6 +384,36 @@ mod tests {
                 .expose_secret(),
             "relay-a-token"
         );
+        assert!(!config.relay_access_tokens.contains_key(relay_b));
+    }
+
+    #[test]
+    fn corrupt_relay_credential_does_not_block_other_relays() {
+        let relay_a = "https://relay-a.example.com/";
+        let relay_b = "https://relay-b.example.com/";
+        let storage = Arc::new(InMemorySecureStorage::default());
+        let credentials = uc_application::facade::settings::RelayCredentials::new(storage.clone());
+        let token =
+            uc_application::facade::settings::RelayAccessToken::new("relay-token".to_string())
+                .expect("valid token");
+        credentials
+            .set(relay_a, &token)
+            .expect("store relay A token");
+        credentials
+            .set(relay_b, &token)
+            .expect("store relay B token");
+        storage.corrupt_on_get.store(2, Ordering::SeqCst);
+        let mut config = relay_policy_to_iroh_config(
+            true,
+            false,
+            vec![relay_a.to_string(), relay_b.to_string()],
+            CongestionController::Cubic,
+            None,
+        );
+
+        load_relay_access_tokens(&mut config, &credentials);
+
+        assert!(config.relay_access_tokens.contains_key(relay_a));
         assert!(!config.relay_access_tokens.contains_key(relay_b));
     }
 

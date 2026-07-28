@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const STORAGE_KEY_PREFIX: &str = "relay_access_token:v1:";
 const MAX_TOKEN_LENGTH: usize = 4096;
@@ -33,12 +33,79 @@ impl fmt::Debug for RelayAccessToken {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub enum RelayProbeCredential {
+    Stored,
+    None,
+    Override(RelayAccessToken),
+}
+
+impl fmt::Debug for RelayProbeCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Stored => "stored",
+            Self::None => "none",
+            Self::Override(_) => "override",
+        };
+        formatter
+            .debug_struct("RelayProbeCredential")
+            .field("kind", &kind)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum RelayCredentialEdit {
+    Keep {
+        url: String,
+    },
+    Set {
+        url: String,
+        access_token: RelayAccessToken,
+    },
+    Delete {
+        url: String,
+    },
+}
+
+impl RelayCredentialEdit {
+    pub(crate) fn url(&self) -> &str {
+        match self {
+            Self::Keep { url } | Self::Set { url, .. } | Self::Delete { url } => url,
+        }
+    }
+
+    pub(crate) fn configured_after_save(&self, configured_before_save: bool) -> bool {
+        match self {
+            Self::Keep { .. } => configured_before_save,
+            Self::Set { .. } => true,
+            Self::Delete { .. } => false,
+        }
+    }
+}
+
+impl fmt::Debug for RelayCredentialEdit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Keep { .. } => "keep",
+            Self::Set { .. } => "set",
+            Self::Delete { .. } => "delete",
+        };
+        formatter
+            .debug_struct("RelayCredentialEdit")
+            .field("kind", &kind)
+            .finish()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RelayCredentialsError {
     #[error("invalid relay URL")]
     InvalidRelayUrl,
     #[error("invalid relay access token")]
     InvalidToken,
+    #[error("relay credential URL does not match the saved relay settings")]
+    InvalidTarget,
     #[error("relay credential storage failed")]
     Storage(#[source] SecureStorageError),
     #[error("stored relay credential is corrupt")]
@@ -48,6 +115,15 @@ pub enum RelayCredentialsError {
 #[derive(Clone)]
 pub struct RelayCredentials {
     storage: Arc<dyn SecureStoragePort>,
+}
+
+pub(crate) struct RelayCredentialRestorePoint {
+    entries: Vec<(String, Option<Zeroizing<Vec<u8>>>)>,
+}
+
+enum RelayCredentialMutation {
+    Set(RelayAccessToken),
+    Delete,
 }
 
 impl RelayCredentials {
@@ -75,6 +151,10 @@ impl RelayCredentials {
         RelayAccessToken::new(value)
             .map(Some)
             .map_err(|_| RelayCredentialsError::Corrupt)
+    }
+
+    pub fn is_configured(&self, relay_url: &str) -> Result<bool, RelayCredentialsError> {
+        Ok(self.load_raw(relay_url)?.is_some())
     }
 
     pub fn set(
@@ -106,23 +186,119 @@ impl RelayCredentials {
         Ok(existed)
     }
 
-    pub fn delete_unreferenced(
+    pub(crate) fn apply_settings_edit(
         &self,
         previous_urls: &[String],
         current_urls: &[String],
-    ) -> Result<(), RelayCredentialsError> {
+        edit: Option<&RelayCredentialEdit>,
+    ) -> Result<RelayCredentialRestorePoint, RelayCredentialsError> {
         let current_keys = current_urls
             .iter()
             .map(|url| storage_key(url))
             .collect::<Result<BTreeSet<_>, _>>()?;
-        let mut processed_keys = BTreeSet::new();
+        let previous_keys = previous_urls
+            .iter()
+            .map(|url| storage_key(url))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut mutations = std::collections::BTreeMap::new();
         for relay_url in previous_urls {
             let key = storage_key(relay_url)?;
-            if !current_keys.contains(&key) && processed_keys.insert(key) {
-                self.delete(relay_url)?;
+            if !current_keys.contains(&key) {
+                mutations.insert(key, (relay_url.clone(), RelayCredentialMutation::Delete));
             }
         }
-        Ok(())
+
+        if let Some(edit) = edit {
+            let url = edit.url().to_string();
+            let key = storage_key(&url)?;
+            let target_is_valid = match edit {
+                RelayCredentialEdit::Keep { .. } | RelayCredentialEdit::Set { .. } => {
+                    current_keys.contains(&key)
+                }
+                RelayCredentialEdit::Delete { .. } => {
+                    previous_keys.contains(&key) || current_keys.contains(&key)
+                }
+            };
+            if !target_is_valid {
+                return Err(RelayCredentialsError::InvalidTarget);
+            }
+            let mutation = match edit {
+                RelayCredentialEdit::Keep { .. } => None,
+                RelayCredentialEdit::Set { access_token, .. } => {
+                    Some(RelayCredentialMutation::Set(access_token.clone()))
+                }
+                RelayCredentialEdit::Delete { .. } => Some(RelayCredentialMutation::Delete),
+            };
+            if let Some(mutation) = mutation {
+                mutations.insert(key, (url, mutation));
+            }
+        }
+
+        let restore_point = RelayCredentialRestorePoint {
+            entries: mutations
+                .values()
+                .map(|(relay_url, _)| {
+                    self.load_raw(relay_url)
+                        .map(|value| (relay_url.clone(), value))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        for (index, (_, (relay_url, mutation))) in mutations.iter().enumerate() {
+            let result = match mutation {
+                RelayCredentialMutation::Set(token) => self.set(relay_url, token),
+                RelayCredentialMutation::Delete => self.delete(relay_url).map(|_| ()),
+            };
+            if let Err(error) = result {
+                self.restore_entries(&restore_point.entries[..=index])?;
+                return Err(error);
+            }
+        }
+
+        Ok(restore_point)
+    }
+
+    pub(crate) fn restore(
+        &self,
+        restore_point: &RelayCredentialRestorePoint,
+    ) -> Result<(), RelayCredentialsError> {
+        self.restore_entries(&restore_point.entries)
+    }
+
+    fn restore_entries(
+        &self,
+        entries: &[(String, Option<Zeroizing<Vec<u8>>>)],
+    ) -> Result<(), RelayCredentialsError> {
+        let mut first_error = None;
+        for (relay_url, value) in entries.iter().rev() {
+            let result = match value {
+                Some(value) => self
+                    .storage
+                    .set(&storage_key(relay_url)?, value.as_slice())
+                    .map_err(RelayCredentialsError::Storage),
+                None => self.delete(relay_url).map(|_| ()),
+            };
+            if let Err(error) = result {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn load_raw(
+        &self,
+        relay_url: &str,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, RelayCredentialsError> {
+        let key = storage_key(relay_url)?;
+        self.storage
+            .get(&key)
+            .map(|value| value.map(Zeroizing::new))
+            .map_err(RelayCredentialsError::Storage)
     }
 }
 
@@ -307,5 +483,86 @@ mod tests {
 
         assert!(!rendered.contains(TOKEN));
         assert!(rendered.contains("REDACTED"));
+    }
+
+    #[test]
+    fn credential_edit_rejects_a_url_unrelated_to_the_saved_settings() {
+        let storage = Arc::new(InMemorySecureStorage::default());
+        let credentials = RelayCredentials::new(storage);
+        let edit = super::RelayCredentialEdit::Set {
+            url: "https://orphan.example.com".to_string(),
+            access_token: RelayAccessToken::new(TOKEN.to_string()).expect("valid token"),
+        };
+
+        assert!(credentials
+            .apply_settings_edit(&[], &[], Some(&edit))
+            .is_err());
+        assert!(credentials
+            .load("https://orphan.example.com")
+            .expect("query orphan credential")
+            .is_none());
+    }
+
+    #[test]
+    fn credential_edit_can_replace_a_corrupt_stored_token() {
+        let relay = "https://relay.example.com/";
+        let storage = Arc::new(InMemorySecureStorage::default());
+        storage
+            .set(&storage_key(relay).expect("valid relay URL"), &[0xff, 0xfe])
+            .expect("seed corrupt credential");
+        let credentials = RelayCredentials::new(storage);
+        let edit = super::RelayCredentialEdit::Set {
+            url: relay.to_string(),
+            access_token: RelayAccessToken::new(TOKEN.to_string()).expect("valid token"),
+        };
+
+        credentials
+            .apply_settings_edit(&[relay.to_string()], &[relay.to_string()], Some(&edit))
+            .expect("replace corrupt credential");
+
+        assert_eq!(
+            credentials
+                .load(relay)
+                .expect("load replacement")
+                .expect("configured replacement")
+                .expose_secret(),
+            TOKEN
+        );
+    }
+
+    #[test]
+    fn credential_edit_can_delete_a_corrupt_stored_token() {
+        let relay = "https://relay.example.com/";
+        let storage = Arc::new(InMemorySecureStorage::default());
+        storage
+            .set(&storage_key(relay).expect("valid relay URL"), &[0xff, 0xfe])
+            .expect("seed corrupt credential");
+        let credentials = RelayCredentials::new(storage);
+        let edit = super::RelayCredentialEdit::Delete {
+            url: relay.to_string(),
+        };
+
+        credentials
+            .apply_settings_edit(&[relay.to_string()], &[relay.to_string()], Some(&edit))
+            .expect("delete corrupt credential");
+
+        assert!(credentials
+            .load(relay)
+            .expect("load deleted credential")
+            .is_none());
+    }
+
+    #[test]
+    fn corrupt_stored_credential_still_reports_as_configured() {
+        let relay = "https://relay.example.com/";
+        let storage = Arc::new(InMemorySecureStorage::default());
+        storage
+            .set(&storage_key(relay).expect("valid relay URL"), &[0xff, 0xfe])
+            .expect("seed corrupt credential");
+        let credentials = RelayCredentials::new(storage);
+
+        assert!(credentials
+            .is_configured(relay)
+            .expect("query credential presence"));
     }
 }

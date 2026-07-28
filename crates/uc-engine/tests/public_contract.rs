@@ -359,11 +359,20 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
     assert_eq!(
         Operation::ProbeRelay(uc_engine::RelayProbeInput {
             url: "https://private-relay.example".into(),
-            access_token: Some(SecretString::new("private-relay-token")),
+            credential: uc_engine::RelayProbeCredential::Override(SecretString::new(
+                "private-relay-token",
+            )),
         })
         .kind(),
         OperationKind::ProbeRelay
     );
+    let save_relay = Operation::SaveRelay(Box::new(uc_engine::SaveRelayInput {
+        settings: uc_engine::SettingsPatch::default(),
+        credential: uc_engine::RelayCredentialEdit::Keep {
+            url: "https://private-relay.example".into(),
+        },
+    }));
+    assert_eq!(save_relay.kind(), OperationKind::SaveRelay);
     assert_eq!(
         Operation::QueryRelayCredential(uc_engine::RelayCredentialInput {
             url: "https://private-relay.example".into(),
@@ -371,30 +380,16 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
         .kind(),
         OperationKind::QueryRelayCredential
     );
-    let set_relay_credential = Operation::SetRelayCredential(uc_engine::SetRelayCredentialInput {
-        url: "https://private-relay.example".into(),
-        access_token: SecretString::new("private-relay-token"),
-    });
-    assert_eq!(
-        set_relay_credential.kind(),
-        OperationKind::SetRelayCredential
-    );
     let probe_debug = format!(
         "{:?}",
         Operation::ProbeRelay(uc_engine::RelayProbeInput {
             url: "https://private-relay.example".into(),
-            access_token: Some(SecretString::new("private-relay-token")),
+            credential: uc_engine::RelayProbeCredential::Override(SecretString::new(
+                "private-relay-token",
+            )),
         })
     );
     assert!(!probe_debug.contains("private-relay-token"));
-    assert_eq!(
-        Operation::DeleteRelayCredential(uc_engine::RelayCredentialInput {
-            url: "https://private-relay.example".into(),
-        })
-        .kind(),
-        OperationKind::DeleteRelayCredential
-    );
-
     let mut settings = uc_engine::SettingsSummary::default();
     settings.general.device_name = Some("Private Mac".into());
     settings
@@ -419,7 +414,7 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
             configured: true,
         }),
     ];
-    let debug = format!("{set_relay_credential:?} {values:?}");
+    let debug = format!("{save_relay:?} {values:?}");
     for secret in [
         "Private Mac",
         "private-theme-value",
