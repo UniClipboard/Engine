@@ -363,6 +363,28 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
         .kind(),
         OperationKind::ProbeRelay
     );
+    assert_eq!(
+        Operation::QueryRelayCredential(uc_engine::RelayCredentialInput {
+            url: "https://private-relay.example".into(),
+        })
+        .kind(),
+        OperationKind::QueryRelayCredential
+    );
+    let set_relay_credential = Operation::SetRelayCredential(uc_engine::SetRelayCredentialInput {
+        url: "https://private-relay.example".into(),
+        access_token: SecretString::new("private-relay-token"),
+    });
+    assert_eq!(
+        set_relay_credential.kind(),
+        OperationKind::SetRelayCredential
+    );
+    assert_eq!(
+        Operation::DeleteRelayCredential(uc_engine::RelayCredentialInput {
+            url: "https://private-relay.example".into(),
+        })
+        .kind(),
+        OperationKind::DeleteRelayCredential
+    );
 
     let mut settings = uc_engine::SettingsSummary::default();
     settings.general.device_name = Some("Private Mac".into());
@@ -384,8 +406,11 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
         OperationResult::RelayProbed(uc_engine::RelayProbeOutcome::Dns {
             message: "private dns detail".into(),
         }),
+        OperationResult::RelayCredentialStatus(uc_engine::RelayCredentialStatus {
+            configured: true,
+        }),
     ];
-    let debug = format!("{values:?}");
+    let debug = format!("{set_relay_credential:?} {values:?}");
     for secret in [
         "Private Mac",
         "private-theme-value",
@@ -393,6 +418,7 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
         "/private/export/path",
         "private validation detail",
         "private dns detail",
+        "private-relay-token",
     ] {
         assert!(!debug.contains(secret), "debug output leaked {secret}");
     }

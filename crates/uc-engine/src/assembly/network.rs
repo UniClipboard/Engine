@@ -22,9 +22,10 @@
 
 use std::net::SocketAddr;
 
+use uc_application::facade::settings::RelayCredentials;
 use uc_core::settings::model::CongestionController;
 
-use uc_infra::network::iroh::IrohNodeConfig;
+use uc_infra::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 
 /// 把业务侧 `Settings.network` 翻译为 infra 侧 `IrohNodeConfig`。
 ///
@@ -59,6 +60,7 @@ pub fn relay_policy_to_iroh_config(
         // ↓ 正向同名字段，直接搬运不取反。
         allow_overlay_network_addrs,
         custom_relay_urls,
+        relay_access_tokens: Default::default(),
         congestion_controller,
         rendezvous_base_url,
         // 直连可达性（#900）来源于 env，不在本设置翻译点决定；由
@@ -66,6 +68,25 @@ pub fn relay_policy_to_iroh_config(
         bind_port: None,
         public_addr: None,
     }
+}
+
+pub fn load_relay_access_tokens(
+    config: &mut IrohNodeConfig,
+    credentials: &RelayCredentials,
+) -> anyhow::Result<()> {
+    config.relay_access_tokens.clear();
+    for relay_url in &config.custom_relay_urls {
+        let Some(token) = credentials
+            .load(relay_url)
+            .map_err(|error| anyhow::anyhow!("failed to load relay credential: {error}"))?
+        else {
+            continue;
+        };
+        let token = IrohRelayAccessToken::new(token.expose_secret().to_string())
+            .map_err(|error| anyhow::anyhow!("invalid stored relay credential: {error}"))?;
+        config.relay_access_tokens.insert(relay_url.clone(), token);
+    }
+    Ok(())
 }
 
 /// iroh 直连可达性输入（UniClipboard#900），来源于环境变量。两者默认
@@ -185,6 +206,35 @@ pub fn apply_congestion_controller_from_env(cfg: &mut IrohNodeConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
+    use uc_core::ports::{SecureStorageError, SecureStoragePort};
+
+    #[derive(Default)]
+    struct InMemorySecureStorage {
+        values: Mutex<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl SecureStoragePort for InMemorySecureStorage {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            Ok(self.values.lock().unwrap().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_vec());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
+            self.values.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
 
     /// Pitfall 1 防御 truth-table（正向）：allow=true 必须导致 disable=false。
     /// 这与下面 `allow_false_means_disable_true` 两个测试**不能合并** —
@@ -284,6 +334,39 @@ mod tests {
             cfg.custom_relay_urls,
             vec!["https://relay.example.com.".to_string()]
         );
+    }
+
+    #[test]
+    fn custom_relay_credentials_are_loaded_from_secure_storage() {
+        let relay_a = "https://relay-a.example.com/";
+        let relay_b = "https://relay-b.example.com/";
+        let credentials = uc_application::facade::settings::RelayCredentials::new(Arc::new(
+            InMemorySecureStorage::default(),
+        ));
+        let token =
+            uc_application::facade::settings::RelayAccessToken::new("relay-a-token".to_string())
+                .expect("valid token");
+        credentials.set(relay_a, &token).expect("store token");
+        let mut config = relay_policy_to_iroh_config(
+            true,
+            false,
+            vec![relay_a.to_string(), relay_b.to_string()],
+            CongestionController::Cubic,
+            None,
+        );
+
+        load_relay_access_tokens(&mut config, &credentials).expect("load credentials");
+
+        assert_eq!(config.relay_access_tokens.len(), 1);
+        assert_eq!(
+            config
+                .relay_access_tokens
+                .get(relay_a)
+                .expect("relay A token")
+                .expose_secret(),
+            "relay-a-token"
+        );
+        assert!(!config.relay_access_tokens.contains_key(relay_b));
     }
 
     /// settings 翻译点不负责直连可达性——两个字段恒为 None，由 env applier 填充。

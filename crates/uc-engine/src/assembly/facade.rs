@@ -8,7 +8,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uc_application::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::deps::AppDeps;
-use uc_application::facade::settings::{RelayDiagnosticPort, RelayProbeError, RelayProbeReport};
+use uc_application::facade::settings::{
+    RelayAccessToken, RelayCredentials, RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
+};
 use uc_application::facade::space_setup::SpaceSetupFacade;
 #[cfg(feature = "lan-compat")]
 use uc_application::facade::{
@@ -51,9 +53,13 @@ struct IrohRelayDiagnosticAdapter {
 
 #[async_trait]
 impl RelayDiagnosticPort for IrohRelayDiagnosticAdapter {
-    async fn probe(&self, url: &str) -> Result<RelayProbeReport, RelayProbeError> {
+    async fn probe(
+        &self,
+        url: &str,
+        access_token: Option<&RelayAccessToken>,
+    ) -> Result<RelayProbeReport, RelayProbeError> {
         self.inner
-            .probe(url)
+            .probe_with_access_token(url, access_token.map(RelayAccessToken::expose_secret))
             .await
             .map(map_relay_probe_report)
             .map_err(map_relay_probe_error)
@@ -317,7 +323,9 @@ pub fn build_app_facade_from_deps(
             // Relay 诊断 adapter 在 daemon 启动期一次性装配。infra 探测器
             // 初始化失败(TLS provider 缺失等)不应阻断整个 daemon 启动 ——
             // 走"探测能力缺失"路径,前端会得到 RelayProbeUnavailable。
-            let mut facade = SettingsFacade::new(deps.settings.clone());
+            let mut facade = SettingsFacade::new(deps.settings.clone()).with_relay_credentials(
+                RelayCredentials::new(deps.security.secure_storage.clone()),
+            );
             match IrohRelayProbeAdapter::new() {
                 Ok(probe) => {
                     let adapter = IrohRelayDiagnosticAdapter {

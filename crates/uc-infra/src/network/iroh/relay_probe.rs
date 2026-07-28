@@ -80,8 +80,19 @@ impl IrohRelayProbeAdapter {
     ///
     /// 注意:tracing span 仅记录 scheme + host(+port),丢弃 userinfo / path /
     /// query —— 防止用户误粘贴的 `https://user:token@...` 把凭据写进日志。
-    #[instrument(skip(self, url), fields(relay = %sanitize_url_for_log(url)))]
     pub async fn probe(&self, url: &str) -> Result<RelayProbeReport, RelayProbeError> {
+        self.probe_with_access_token(url, None).await
+    }
+
+    #[instrument(
+        skip(self, url, access_token),
+        fields(relay = %sanitize_url_for_log(url), credential_configured = access_token.is_some())
+    )]
+    pub async fn probe_with_access_token(
+        &self,
+        url: &str,
+        access_token: Option<&str>,
+    ) -> Result<RelayProbeReport, RelayProbeError> {
         let trimmed = url.trim();
         if trimmed.is_empty() {
             return Err(RelayProbeError::InvalidUrl(
@@ -102,6 +113,11 @@ impl IrohRelayProbeAdapter {
                 "relay URL must include a host".to_string(),
             ));
         }
+        if !relay_url.username().is_empty() || relay_url.password().is_some() {
+            return Err(RelayProbeError::InvalidUrl(
+                "relay URL must not include credentials".to_string(),
+            ));
+        }
 
         // Rebuild the DNS resolver against the *current* system config before
         // probing. Same wedge as the endpoint's resolver (see `net_recovery`):
@@ -116,8 +132,11 @@ impl IrohRelayProbeAdapter {
         // 一次性凭据 —— 与长期 iroh endpoint 身份解耦,避免把进程级 NodeId
         // 泄露给被测试的中继。
         let secret = SecretKey::generate();
-        let builder = ClientBuilder::new(relay_url, secret, self.dns_resolver.clone())
+        let mut builder = ClientBuilder::new(relay_url, secret, self.dns_resolver.clone())
             .tls_client_config(self.tls_config.clone());
+        if let Some(token) = access_token {
+            builder = builder.auth_token(token);
+        }
 
         let started_at = Instant::now();
         let connect = tokio::time::timeout(PROBE_BUDGET, builder.connect()).await;
@@ -172,6 +191,9 @@ fn map_connect_error(err: ConnectError) -> RelayProbeError {
         ConnectError::Tls { source, .. } => RelayProbeError::Tls(source.to_string()),
         ConnectError::InvalidTlsServername { .. } => {
             RelayProbeError::Tls("invalid TLS servername".to_string())
+        }
+        ConnectError::InvalidAuthToken { .. } => {
+            RelayProbeError::Handshake("invalid relay access token".to_string())
         }
         ConnectError::Handshake { source, .. } => RelayProbeError::Handshake(source.to_string()),
         ConnectError::BadVersionHeader { server_version, .. } => {
@@ -264,6 +286,16 @@ mod tests {
         assert!(matches!(err, RelayProbeError::InvalidUrl(_)));
     }
 
+    #[tokio::test]
+    async fn rejects_url_with_embedded_credentials() {
+        let adapter = IrohRelayProbeAdapter::new().expect("init");
+        let err = adapter
+            .probe_with_access_token("https://login:password@relay.example.com", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RelayProbeError::InvalidUrl(_)));
+    }
+
     /// 真握手回归用例。默认走 `--ignored` 跳过(CI / 离线开发不应依赖外部
     /// relay);本地排查 iroh-relay 升级 / 网络栈变更时:
     ///
@@ -278,9 +310,10 @@ mod tests {
     async fn probe_succeeds_against_real_relay() {
         let target = std::env::var("RELAY_PROBE_TARGET")
             .unwrap_or_else(|_| "https://use1-1.relay.iroh.network".to_string());
+        let access_token = std::env::var("RELAY_PROBE_TOKEN").ok();
         let adapter = IrohRelayProbeAdapter::new().expect("init");
         let report = adapter
-            .probe(&target)
+            .probe_with_access_token(&target, access_token.as_deref())
             .await
             .unwrap_or_else(|err| panic!("probe failed against {target}: {err}"));
         assert!(

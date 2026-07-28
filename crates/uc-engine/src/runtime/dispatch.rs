@@ -58,7 +58,8 @@ use crate::operations::settings::encryption::{
 };
 use crate::operations::settings::migration_progress::execute_query_migration_progress;
 use crate::operations::settings::settings::{
-    execute_probe_relay, execute_query_settings, execute_update_settings,
+    execute_delete_relay_credential, execute_probe_relay, execute_query_relay_credential,
+    execute_query_settings, execute_set_relay_credential, execute_update_settings,
 };
 use crate::operations::settings::storage::{
     execute_clear_storage_cache, execute_query_storage_stats,
@@ -171,6 +172,15 @@ impl EngineRuntime for ProductionRuntime {
             }
             Operation::ProbeRelay(input) => {
                 execute_probe_relay(self.current_facade().await?.as_ref(), input).await
+            }
+            Operation::QueryRelayCredential(input) => {
+                execute_query_relay_credential(self.current_facade().await?.as_ref(), input).await
+            }
+            Operation::SetRelayCredential(input) => {
+                execute_set_relay_credential(self.current_facade().await?.as_ref(), input).await
+            }
+            Operation::DeleteRelayCredential(input) => {
+                execute_delete_relay_credential(self.current_facade().await?.as_ref(), input).await
             }
             Operation::QueryUpgradeStatus => {
                 execute_query_upgrade_status(

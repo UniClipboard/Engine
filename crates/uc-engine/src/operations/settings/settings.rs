@@ -10,8 +10,9 @@ use crate::{
     CongestionControllerSummary, EngineError, EngineErrorCategory, FileSyncSettingsSummary,
     GeneralSettingsSummary, NetworkSettingsSummary, OperationResult, PairingSettingsSummary,
     QuickPanelDoubleTapModifierSummary, QuickPanelPositionSummary, QuickPanelSettingsSummary,
-    RelayProbeInput, RelayProbeOutcome, RetentionPolicySummary, RetentionRulePatch,
-    RetentionRuleSummary, RuleEvaluationSummary, SecuritySettingsSummary, SettingsContentTypes,
+    RelayCredentialInput, RelayCredentialStatus, RelayProbeInput, RelayProbeOutcome,
+    RetentionPolicySummary, RetentionRulePatch, RetentionRuleSummary, RuleEvaluationSummary,
+    SecuritySettingsSummary, SetRelayCredentialInput, SettingsContentTypes,
     SettingsContentTypesPatch, SettingsPatch, SettingsSummary, SettingsUpdateOutcome,
     ShortcutKeySummary, StartupModeSummary, SyncFrequencySummary, SyncSettingsSummary,
     ThemeSummary, UpdateChannelSummary,
@@ -81,6 +82,65 @@ pub(crate) async fn execute_probe_relay(
         Err(_) => return Err(internal_error(PROBE_RELAY_UNAVAILABLE_CODE)),
     };
     Ok(OperationResult::RelayProbed(outcome))
+}
+
+pub(crate) async fn execute_query_relay_credential(
+    facade: &AppFacade,
+    input: RelayCredentialInput,
+) -> Result<OperationResult, EngineError> {
+    let status = facade
+        .settings
+        .relay_credential_status(&input.url)
+        .map_err(|error| map_relay_credential_error(error, QUERY_RELAY_CREDENTIAL_FAILED_CODE))?;
+    Ok(OperationResult::RelayCredentialStatus(
+        RelayCredentialStatus {
+            configured: status.configured,
+        },
+    ))
+}
+
+pub(crate) async fn execute_set_relay_credential(
+    facade: &AppFacade,
+    input: SetRelayCredentialInput,
+) -> Result<OperationResult, EngineError> {
+    let status = facade
+        .settings
+        .set_relay_access_token(&input.url, input.access_token.expose().to_string())
+        .map_err(|error| map_relay_credential_error(error, SET_RELAY_CREDENTIAL_FAILED_CODE))?;
+    Ok(OperationResult::RelayCredentialStatus(
+        RelayCredentialStatus {
+            configured: status.configured,
+        },
+    ))
+}
+
+pub(crate) async fn execute_delete_relay_credential(
+    facade: &AppFacade,
+    input: RelayCredentialInput,
+) -> Result<OperationResult, EngineError> {
+    facade
+        .settings
+        .delete_relay_access_token(&input.url)
+        .map_err(|error| map_relay_credential_error(error, DELETE_RELAY_CREDENTIAL_FAILED_CODE))?;
+    Ok(OperationResult::RelayCredentialStatus(
+        RelayCredentialStatus { configured: false },
+    ))
+}
+
+fn map_relay_credential_error(error: app::SettingsFacadeError, code: u32) -> EngineError {
+    let (category, retryable) = match error {
+        app::SettingsFacadeError::RelayCredentialInvalidUrl
+        | app::SettingsFacadeError::RelayCredentialInvalidToken => {
+            (EngineErrorCategory::InvalidInput, false)
+        }
+        app::SettingsFacadeError::RelayCredentialsUnavailable
+        | app::SettingsFacadeError::RelayCredentialStorage => {
+            (EngineErrorCategory::Unavailable, true)
+        }
+        app::SettingsFacadeError::RelayCredentialCorrupt => (EngineErrorCategory::Internal, false),
+        _ => (EngineErrorCategory::Internal, false),
+    };
+    EngineError::new(code, category, retryable)
 }
 
 fn map_settings(settings: app::SettingsView) -> SettingsSummary {

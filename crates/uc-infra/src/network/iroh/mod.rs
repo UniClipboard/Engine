@@ -38,8 +38,8 @@ pub use connection_channel_adapter::IrohConnectionChannelAdapter;
 pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
-    IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError, PairingHandlers,
-    TransferProgressHandlers,
+    IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError, IrohRelayAccessToken,
+    PairingHandlers, TransferProgressHandlers,
 };
 pub use presence_adapter::{IrohPresenceAdapter, IrohPresenceHandler, PRESENCE_ALPN};
 pub use relay_probe::{

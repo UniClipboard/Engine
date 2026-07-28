@@ -672,6 +672,11 @@ fn operation_response(result: OperationResult) -> Value {
                 "latency_ms": latency_ms,
             })
         }
+        OperationResult::RelayCredentialStatus(status) => json!({
+            "ok": true,
+            "kind": "relay_credential_status",
+            "configured": status.configured,
+        }),
         OperationResult::UpgradeStatus(status) => {
             let (outcome, from, to) = match status {
                 uc_engine::UpgradeStatusSummary::FreshInstall { current } => {
@@ -1694,6 +1699,9 @@ mod tests {
                 message: "private relay error".into(),
             },
         ));
+        let relay_credential = operation_response(OperationResult::RelayCredentialStatus(
+            uc_engine::RelayCredentialStatus { configured: true },
+        ));
         let history = operation_response(OperationResult::HistoryPage {
             entries: vec![uc_engine::EntrySummary {
                 entry_id: "entry-1".into(),
@@ -1803,6 +1811,7 @@ mod tests {
         assert_eq!(mobile_settings["shortcut_install_method_count"], 1);
         assert_eq!(mobile_document["item_type"], "file");
         assert_eq!(mobile_file["byte_len"], 25);
+        assert_eq!(relay_credential["configured"], true);
         assert!(!history.to_string().contains("private payload"));
         assert!(!history_entry.to_string().contains("private full content"));
         assert!(!history_resource.to_string().contains("private/resource"));

@@ -99,6 +99,10 @@ pub async fn build_daemon_lifecycle(
         congestion_controller,
         None, // production 不 override rendezvous,使用默认 RENDEZVOUS_BASE_URL
     );
+    let relay_credentials = uc_application::facade::settings::RelayCredentials::new(
+        deps.security.secure_storage.clone(),
+    );
+    crate::assembly::network::load_relay_access_tokens(&mut iroh_config, &relay_credentials)?;
     // #900：从 env 读取直连可达性（固定 UDP 端口 + 广播公网地址）并写入。
     // 必须在 `build_sync_engine_assembly`（首次 endpoint 快照/配对交换）之前。
     crate::assembly::network::apply_iroh_direct_reachability_from_env(&mut iroh_config);
