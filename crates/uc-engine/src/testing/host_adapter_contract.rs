@@ -83,6 +83,87 @@ fn secure_storage_adapter_preserves_secret_bytes() {
     assert!(storage.get("identity").unwrap().is_none());
 }
 
+#[tokio::test]
+async fn relay_credentials_round_trip_through_host_secure_storage() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let storage = MemoryHostSecureStorage::default();
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            temp.path().join("private"),
+            temp.path().join("cache"),
+            temp.path().join("temporary"),
+        ),
+        Box::new(storage.clone()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+    let relay_url = "https://relay.example.com/";
+    let token = "relay-access-token";
+
+    let set = engine
+        .execute(crate::Operation::SetRelayCredential(
+            crate::SetRelayCredentialInput {
+                url: relay_url.to_string(),
+                access_token: crate::SecretString::new(token),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        set,
+        crate::OperationResult::RelayCredentialStatus(crate::RelayCredentialStatus {
+            configured: true,
+        })
+    );
+    assert!(storage
+        .values()
+        .values()
+        .any(|value| value.as_slice() == token.as_bytes()));
+
+    let queried = engine
+        .execute(crate::Operation::QueryRelayCredential(
+            crate::RelayCredentialInput {
+                url: relay_url.to_string(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(queried, set);
+
+    let deleted = engine
+        .execute(crate::Operation::DeleteRelayCredential(
+            crate::RelayCredentialInput {
+                url: relay_url.to_string(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        deleted,
+        crate::OperationResult::RelayCredentialStatus(crate::RelayCredentialStatus {
+            configured: false,
+        })
+    );
+    assert!(!storage
+        .values()
+        .values()
+        .any(|value| value.as_slice() == token.as_bytes()));
+
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
 struct FailingHostSecureStorage {
     category: crate::HostCapabilityErrorCategory,
 }

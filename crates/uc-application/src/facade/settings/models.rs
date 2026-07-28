@@ -853,6 +853,11 @@ fn validate_custom_relay_urls(urls: &[String]) -> Result<(), String> {
                 "invalid custom relay URL `{raw}`: host is required"
             ));
         }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(format!(
+                "invalid custom relay URL `{raw}`: URL must not include credentials"
+            ));
+        }
     }
     Ok(())
 }
@@ -1088,6 +1093,13 @@ mod network_settings_apply_patch_tests {
         let urls = vec!["ftp://relay.example.com".to_string()];
         let err = validate_custom_relay_urls(&urls).expect_err("invalid scheme");
         assert!(err.contains("scheme must be http or https"));
+    }
+
+    #[test]
+    fn validate_custom_relay_urls_rejects_embedded_credentials() {
+        let urls = vec!["https://login:password@relay.example.com".to_string()];
+        let err = validate_custom_relay_urls(&urls).expect_err("embedded credentials");
+        assert!(err.contains("must not include credentials"));
     }
 
     /// custom_relay_urls：合法 HTTP(S) URL 通过校验。

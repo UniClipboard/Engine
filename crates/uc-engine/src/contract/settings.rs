@@ -379,6 +379,34 @@ impl fmt::Debug for RelayProbeInput {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct RelayCredentialInput {
+    pub url: String,
+}
+
+impl fmt::Debug for RelayCredentialInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RelayCredentialInput([REDACTED])")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SetRelayCredentialInput {
+    pub url: String,
+    pub access_token: crate::SecretString,
+}
+
+impl fmt::Debug for SetRelayCredentialInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SetRelayCredentialInput([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayCredentialStatus {
+    pub configured: bool,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelayProbeOutcome {
     Success { latency_ms: u32 },

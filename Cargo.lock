@@ -6330,6 +6330,7 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
+ "zeroize",
  "zip",
 ]
 

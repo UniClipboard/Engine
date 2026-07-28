@@ -15,6 +15,8 @@
 
 use async_trait::async_trait;
 
+use super::RelayAccessToken;
+
 /// 探测成功时的报告。字段语义与具体协议无关:`latency_ms` 是端到端往返
 /// 耗时。未来如果需要暴露协议版本/服务端 ID,在此 struct 增字段并同步
 /// infra/bootstrap 的 1:1 映射。
@@ -52,5 +54,9 @@ pub enum RelayProbeError {
 /// * 不复用任何长期身份/凭据,避免向被测对端泄露应用内的稳定 ID。
 #[async_trait]
 pub trait RelayDiagnosticPort: Send + Sync {
-    async fn probe(&self, url: &str) -> Result<RelayProbeReport, RelayProbeError>;
+    async fn probe(
+        &self,
+        url: &str,
+        access_token: Option<&RelayAccessToken>,
+    ) -> Result<RelayProbeReport, RelayProbeError>;
 }

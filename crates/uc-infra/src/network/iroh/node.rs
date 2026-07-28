@@ -17,6 +17,8 @@
 //! [`install_presence`]: IrohNodeBuilder::install_presence
 //! [`install_clipboard`]: IrohNodeBuilder::install_clipboard
 
+use std::collections::BTreeMap;
+use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 #[cfg(not(any(test, feature = "test-util")))]
 use std::sync::Mutex;
@@ -25,11 +27,12 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::protocol::{Router, RouterBuilder};
-use iroh::{Endpoint, RelayMode, RelayUrl, TransportAddr};
+use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::{debug, info, instrument, warn};
 use uc_core::settings::model::CongestionController;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::MemberRepositoryPort;
@@ -222,6 +225,33 @@ impl IrohNode {
 /// Bootstrap-time configuration for [`IrohNodeBuilder`]. Defaults cover
 /// production; integration tests override the rendezvous URL (pointing at
 /// a mock server) and usually disable relays (loopback-only handshake).
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct IrohRelayAccessToken(String);
+
+impl IrohRelayAccessToken {
+    pub fn new(mut value: String) -> Result<Self, IrohNodeError> {
+        if value.is_empty()
+            || value.len() > 4096
+            || !value.is_ascii()
+            || value.chars().any(char::is_control)
+        {
+            value.zeroize();
+            return Err(IrohNodeError::InvalidRelayAccessToken);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for IrohRelayAccessToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("IrohRelayAccessToken([REDACTED])")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct IrohNodeConfig {
     /// Override rendezvous base URL. `None` → use
@@ -250,6 +280,9 @@ pub struct IrohNodeConfig {
     /// 非空时在 `disable_relays = false` 路径下翻译为 `RelayMode::Custom`。
     /// `disable_relays = true` 时该列表被保留但不参与 endpoint bind。
     pub custom_relay_urls: Vec<String>,
+    /// Access tokens keyed by their matching custom relay URL. Values are
+    /// redacted in debug output and zeroized when dropped.
+    pub relay_access_tokens: BTreeMap<String, IrohRelayAccessToken>,
     /// If true, allow VPN / overlay-network virtual NIC addresses (CGNAT
     /// `100.64.0.0/10`, Tailscale ULA `fd7a:115c:a1e0::/48`) to flow through
     /// the address filter as direct-connection candidates. Default `false`
@@ -454,7 +487,7 @@ fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNode
         return Ok(RelayMode::Default);
     }
 
-    let mut relay_urls = Vec::with_capacity(config.custom_relay_urls.len());
+    let mut relay_configs = Vec::with_capacity(config.custom_relay_urls.len());
     for raw in &config.custom_relay_urls {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -481,10 +514,24 @@ fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNode
                 message: "relay URL must include a host".to_string(),
             });
         }
-        relay_urls.push(parsed);
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(IrohNodeError::InvalidRelayUrl {
+                value: raw.clone(),
+                message: "relay URL must not include credentials".to_string(),
+            });
+        }
+        let mut relay_config = RelayConfig::from(parsed.clone());
+        if let Some(token) = config
+            .relay_access_tokens
+            .get(raw)
+            .or_else(|| config.relay_access_tokens.get(parsed.as_str()))
+        {
+            relay_config = relay_config.with_auth_token(token.expose_secret());
+        }
+        relay_configs.push(relay_config);
     }
 
-    Ok(RelayMode::custom(relay_urls))
+    Ok(RelayMode::Custom(relay_configs.into_iter().collect()))
 }
 
 /// A process-wide lease prevents two live production endpoints from sharing
@@ -1105,6 +1152,9 @@ pub enum IrohNodeError {
 
     #[error("invalid custom iroh relay URL `{value}`: {message}")]
     InvalidRelayUrl { value: String, message: String },
+
+    #[error("invalid iroh relay access token")]
+    InvalidRelayAccessToken,
 
     #[error(transparent)]
     Identity(#[from] LocalIdentityError),
@@ -1827,6 +1877,49 @@ mod tests {
     }
 
     #[test]
+    fn relay_mode_applies_tokens_only_to_matching_relays() {
+        let relay_a = "https://relay-a.example.com./";
+        let relay_b = "https://relay-b.example.com./";
+        let cfg = IrohNodeConfig {
+            disable_relays: false,
+            custom_relay_urls: vec![relay_a.to_string(), relay_b.to_string()],
+            relay_access_tokens: std::collections::BTreeMap::from([(
+                relay_a.to_string(),
+                IrohRelayAccessToken::new("relay-a-token".to_string()).expect("valid token"),
+            )]),
+            ..Default::default()
+        };
+
+        let mode = relay_mode_from_config(&cfg).expect("relay mode");
+        let RelayMode::Custom(map) = mode else {
+            panic!("expected custom relay mode");
+        };
+        let relay_a_url: RelayUrl = relay_a.parse().expect("relay A URL");
+        let relay_b_url: RelayUrl = relay_b.parse().expect("relay B URL");
+        assert_eq!(
+            map.get(&relay_a_url)
+                .expect("relay A config")
+                .auth_token
+                .as_deref(),
+            Some("relay-a-token")
+        );
+        assert_eq!(
+            map.get(&relay_b_url)
+                .expect("relay B config")
+                .auth_token
+                .as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn relay_access_token_rejects_values_that_cannot_be_sent_as_an_http_header() {
+        let error = IrohRelayAccessToken::new("令牌".to_string()).expect_err("invalid token");
+
+        assert!(matches!(error, IrohNodeError::InvalidRelayAccessToken));
+    }
+
+    #[test]
     fn relay_mode_lan_only_ignores_custom_urls() {
         let cfg = IrohNodeConfig {
             disable_relays: true,
@@ -1857,5 +1950,29 @@ mod tests {
         };
         let err = relay_mode_from_config(&cfg).expect_err("invalid relay scheme");
         assert!(matches!(err, IrohNodeError::InvalidRelayUrl { .. }));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a protected relay and access token"]
+    async fn endpoint_connects_to_protected_relay_with_scoped_token() {
+        let relay_url = std::env::var("RELAY_ENDPOINT_TARGET").expect("relay target");
+        let access_token = std::env::var("RELAY_ENDPOINT_TOKEN").expect("relay token");
+        let config = IrohNodeConfig {
+            custom_relay_urls: vec![relay_url.clone()],
+            relay_access_tokens: BTreeMap::from([(
+                relay_url,
+                IrohRelayAccessToken::new(access_token).expect("valid token"),
+            )]),
+            ..Default::default()
+        };
+        let store = identity_store();
+        let builder = IrohNodeBuilder::bind(&store, config)
+            .await
+            .expect("bind endpoint");
+
+        tokio::time::timeout(Duration::from_secs(10), builder.endpoint.online())
+            .await
+            .expect("endpoint did not connect to protected relay");
+        builder.endpoint.close().await;
     }
 }
