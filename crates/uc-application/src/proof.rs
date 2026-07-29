@@ -23,6 +23,12 @@ pub struct HmacProofAdapter {
     space_access: Option<Arc<dyn CurrentSessionProofKeyPort>>,
 }
 
+impl Default for HmacProofAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HmacProofAdapter {
     pub fn new() -> Self {
         Self {
