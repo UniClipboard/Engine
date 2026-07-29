@@ -3,6 +3,8 @@ mod host_clipboard;
 pub(crate) mod host_file;
 mod host_operations;
 #[cfg(feature = "lan-compat")]
+mod lan_compatibility;
+#[cfg(feature = "lan-compat")]
 mod mobile_upload;
 
 #[cfg(feature = "lan-compat")]

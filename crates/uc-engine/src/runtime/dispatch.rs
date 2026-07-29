@@ -1,22 +1,8 @@
 use std::time::Duration;
 
-#[cfg(feature = "lan-compat")]
-use super::engine_event_for_mobile_settings_update;
 #[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
 use super::ProductionRuntime;
-#[cfg(feature = "lan-compat")]
-use crate::compatibility::mobile_lan::content_operations::{
-    execute_apply_mobile_sync_document, execute_check_mobile_content_available,
-    execute_query_latest_mobile_sync_document, execute_read_mobile_sync_file,
-};
-#[cfg(feature = "lan-compat")]
-use crate::compatibility::mobile_lan::operations::{
-    execute_authenticate_mobile_request, execute_list_mobile_devices,
-    execute_query_mobile_sync_settings, execute_register_mobile_device,
-    execute_revalidate_mobile_credential, execute_revoke_mobile_device,
-    execute_update_mobile_device, execute_update_mobile_sync_settings,
-};
 use crate::engine::EngineRuntime;
 use crate::operations::clipboard::capture::execute_capture_current_clipboard;
 use crate::operations::clipboard::query_active::execute_query_active_clipboard;
@@ -76,8 +62,6 @@ use crate::operations::space::reset_space::execute_reset_space;
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
-#[cfg(feature = "lan-compat")]
-use crate::EngineErrorCategory;
 use crate::{EngineError, Operation, OperationResult};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -255,119 +239,25 @@ impl EngineRuntime for ProductionRuntime {
             | Operation::FinishMobileFileUpload(_)
             | Operation::AbortMobileFileUpload(_) => Err(super::operation_unavailable_error()),
             #[cfg(feature = "lan-compat")]
-            Operation::ListMobileDevices => {
-                execute_list_mobile_devices(self.current_mobile_sync().await?.as_ref()).await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::RevokeMobileDevice(input) => {
-                execute_revoke_mobile_device(self.current_mobile_sync().await?.as_ref(), input)
-                    .await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::AuthenticateMobileRequest(input) => {
-                execute_authenticate_mobile_request(
-                    self.current_mobile_sync().await?.as_ref(),
-                    input,
-                )
-                .await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::RevalidateMobileCredential(input) => {
-                execute_revalidate_mobile_credential(
-                    self.current_mobile_sync().await?.as_ref(),
-                    input,
-                )
-                .await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::ListMobileLanInterfaces => {
-                let interfaces = self
-                    .current_mobile_sync()
-                    .await?
-                    .list_lan_interfaces()
-                    .await
-                    .map_err(|_| EngineError::new(1450, EngineErrorCategory::Unavailable, true))?;
-                Ok(OperationResult::MobileLanInterfaces(
-                    interfaces
-                        .into_iter()
-                        .map(|interface| crate::MobileLanInterfaceSummary {
-                            name: interface.name,
-                            ipv4: interface.ipv4,
-                        })
-                        .collect(),
-                ))
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::QueryMobileSyncSettings => {
-                execute_query_mobile_sync_settings(self.current_mobile_sync().await?.as_ref()).await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::UpdateMobileSyncSettings(patch) => {
-                let result = execute_update_mobile_sync_settings(
-                    self.current_mobile_sync().await?.as_ref(),
-                    *patch,
-                )
-                .await;
-                if let Ok(OperationResult::MobileSyncSettingsUpdated(
-                    crate::MobileSyncSettingsUpdateOutcome::Updated(settings),
-                )) = &result
-                {
-                    self.events
-                        .send(engine_event_for_mobile_settings_update(settings));
-                }
-                result
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::UpdateMobileLanEndpoint(update) => {
-                self.mobile_lan_endpoint.update(update).await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::RegisterMobileDevice(input) => {
-                execute_register_mobile_device(self.current_mobile_sync().await?.as_ref(), input)
-                    .await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::UpdateMobileDevice(input) => {
-                execute_update_mobile_device(self.current_mobile_sync().await?.as_ref(), input)
-                    .await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::CheckMobileContentAvailable(input) => {
-                execute_check_mobile_content_available(
-                    self.current_mobile_sync().await?.as_ref(),
-                    input,
-                )
-                .await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::QueryLatestMobileSyncDocument => {
-                execute_query_latest_mobile_sync_document(
-                    self.current_mobile_sync().await?.as_ref(),
-                )
-                .await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::ApplyMobileSyncDocument(input) => {
-                execute_apply_mobile_sync_document(
-                    self.current_mobile_sync().await?.as_ref(),
-                    *input,
-                )
-                .await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::ReadMobileSyncFile(input) => {
-                execute_read_mobile_sync_file(self.current_mobile_sync().await?.as_ref(), input)
-                    .await
-            }
-            #[cfg(feature = "lan-compat")]
-            Operation::BeginMobileFileUpload(input) => self.begin_mobile_file_upload(input).await,
-            #[cfg(feature = "lan-compat")]
-            Operation::AppendMobileFileUpload(input) => self.append_mobile_file_upload(input).await,
-            #[cfg(feature = "lan-compat")]
-            Operation::FinishMobileFileUpload(input) => self.finish_mobile_file_upload(input).await,
-            #[cfg(feature = "lan-compat")]
-            Operation::AbortMobileFileUpload(input) => {
-                self.abort_mobile_file_upload(input.handle).await
+            operation @ (Operation::ListMobileDevices
+            | Operation::RevokeMobileDevice(_)
+            | Operation::AuthenticateMobileRequest(_)
+            | Operation::RevalidateMobileCredential(_)
+            | Operation::ListMobileLanInterfaces
+            | Operation::QueryMobileSyncSettings
+            | Operation::UpdateMobileSyncSettings(_)
+            | Operation::UpdateMobileLanEndpoint(_)
+            | Operation::RegisterMobileDevice(_)
+            | Operation::UpdateMobileDevice(_)
+            | Operation::CheckMobileContentAvailable(_)
+            | Operation::QueryLatestMobileSyncDocument
+            | Operation::ApplyMobileSyncDocument(_)
+            | Operation::ReadMobileSyncFile(_)
+            | Operation::BeginMobileFileUpload(_)
+            | Operation::AppendMobileFileUpload(_)
+            | Operation::FinishMobileFileUpload(_)
+            | Operation::AbortMobileFileUpload(_)) => {
+                self.execute_lan_compatibility_operation(operation).await
             }
             Operation::QueryReceiveReadiness => {
                 let status = self.file_transfer_lifecycle.receive_readiness_status();

@@ -2010,6 +2010,55 @@ async fn engine_start_builds_a_resumable_real_session() {
     );
 }
 
+#[cfg(not(feature = "lan-compat"))]
+#[tokio::test]
+async fn engine_rejects_lan_operations_without_lan_compatibility() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            temp.path().join("private"),
+            temp.path().join("cache"),
+            temp.path().join("temporary"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+
+    let operations = [
+        crate::Operation::ListMobileDevices,
+        crate::Operation::QueryMobileSyncSettings,
+        crate::Operation::UpdateMobileLanEndpoint(crate::MobileLanEndpointUpdate::Stopped),
+        crate::Operation::BeginMobileFileUpload(crate::BeginMobileFileUploadInput {
+            data_name: "mobile-content.bin".into(),
+            media_type: "application/octet-stream".into(),
+            source_device_id: "mobile-device".into(),
+            transfer_id: "mobile-transfer".into(),
+            total_bytes: Some(1),
+        }),
+    ];
+    for operation in operations {
+        let error = engine.execute(operation).await.unwrap_err();
+        assert_eq!(error.code(), 1103);
+        assert_eq!(error.category(), crate::EngineErrorCategory::Unavailable);
+        assert!(!error.is_retryable());
+    }
+
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+}
+
 #[cfg(feature = "lan-compat")]
 #[tokio::test]
 async fn engine_mobile_content_round_trips_and_drops_uploads_on_suspend() {
