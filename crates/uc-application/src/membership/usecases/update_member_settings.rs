@@ -36,7 +36,7 @@ where
             .repository
             .get(&input.device_id)
             .await?
-            .ok_or_else(|| MembershipApplicationError::NotFound(input.device_id.clone()))?;
+            .ok_or(MembershipApplicationError::NotFound(input.device_id))?;
 
         let updated = SpaceMember {
             sync_preferences: input.sync_preferences,

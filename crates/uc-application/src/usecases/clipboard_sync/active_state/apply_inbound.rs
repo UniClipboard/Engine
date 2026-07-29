@@ -282,7 +282,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         ),
     )]
     pub(crate) async fn handle_one(&self, inbound: InboundActiveClipboardState) {
-        let peer = inbound.peer_device_id.clone();
+        let peer = inbound.peer_device_id;
         let incoming = ActiveClipboardState::new(
             inbound.snapshot_hash,
             // Placeholder: the cross-device identity is `snapshot_hash`; the
@@ -488,7 +488,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
             incoming.snapshot_hash.clone(),
             local_entry_id.clone(),
             incoming.activated_at_ms,
-            incoming.activated_by.clone(),
+            incoming.activated_by,
         );
         let mobile_consumable = self
             .mobile_consumability

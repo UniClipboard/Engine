@@ -241,7 +241,7 @@ impl IngestInboundClipboardUseCase {
             return;
         }
         let notice = InboundClipboardNotice {
-            from_device: inbound.peer_device_id.clone(),
+            from_device: inbound.peer_device_id,
             snapshot_hash: inbound.header.snapshot_hash.clone(),
             plaintext,
             flow_id,

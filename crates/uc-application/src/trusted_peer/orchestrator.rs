@@ -88,7 +88,7 @@ where
             TrustState::AwaitingUserVerification {
                 peer_device_id,
                 challenge,
-            } => (peer_device_id.clone(), challenge.peer_fingerprint.clone()),
+            } => (*peer_device_id, challenge.peer_fingerprint.clone()),
             other => {
                 return Err(TrustedPeerApplicationError::IllegalTransition(format!(
                     "confirm_verification only valid in AwaitingUserVerification, was {other:?}"
@@ -99,7 +99,7 @@ where
         let trusted_peer = self
             .trust_peer
             .execute(TrustPeer {
-                local_device_id: self.local_device_id.clone(),
+                local_device_id: self.local_device_id,
                 peer_device_id,
                 peer_fingerprint,
                 trusted_at: Utc::now(),

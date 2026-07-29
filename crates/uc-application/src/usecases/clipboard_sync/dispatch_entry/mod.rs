@@ -432,7 +432,7 @@ impl DispatchClipboardEntryUseCase {
             let payload = SyncPayload {
                 ciphertext: ciphertext.clone(),
             };
-            let device_id = device_id.clone();
+            let device_id = *device_id;
             let child_span = info_span!(
                 "peer.dispatch",
                 peer.device_id = %device_id.as_str(),

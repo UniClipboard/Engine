@@ -175,7 +175,7 @@ impl ResourceFacade {
         let storage_name = path.file_name().and_then(|name| name.to_str());
         let display_metadata = representations.iter().find_map(|representation| {
             is_file_display_metadata_representation(representation)
-                .then(|| representation.inline_data.as_deref())
+                .then_some(representation.inline_data.as_deref())
                 .flatten()
                 .and_then(|bytes| FileDisplayMetadata::decode(bytes).ok())
         });

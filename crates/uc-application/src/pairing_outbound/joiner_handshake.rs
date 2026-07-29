@@ -206,7 +206,7 @@ impl JoinerHandshakeCoordinator {
         let transport_address_blob_len = transport_address_blob.len();
         let request = JoinerRequest {
             invitation_code: code.clone(),
-            device_id: local_device_id.clone(),
+            device_id: local_device_id,
             device_name: local_device_name,
             identity_fingerprint: local_fp.clone(),
             // 保留字段：Slice 1 sponsor 不消费 transcript nonce，留空占位

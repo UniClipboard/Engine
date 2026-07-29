@@ -427,7 +427,7 @@ impl SwitchSpaceUseCase {
         let now = self.now_utc()?;
 
         let admit_input = AdmitMember {
-            device_id: outcome.sponsor_device_id.clone(),
+            device_id: outcome.sponsor_device_id,
             device_name: outcome.sponsor_device_name.clone(),
             identity_fingerprint: outcome.sponsor_identity_fingerprint.clone(),
             joined_at: now,
@@ -439,8 +439,8 @@ impl SwitchSpaceUseCase {
             .map_err(map_admit_err)?;
 
         let trust_input = TrustPeer {
-            local_device_id: outcome.self_device_id.clone(),
-            peer_device_id: outcome.sponsor_device_id.clone(),
+            local_device_id: outcome.self_device_id,
+            peer_device_id: outcome.sponsor_device_id,
             peer_fingerprint: outcome.sponsor_identity_fingerprint.clone(),
             trusted_at: now,
         };
@@ -452,7 +452,7 @@ impl SwitchSpaceUseCase {
         // peer_addr_repo upsert 与 redeem use case 一致：失败仅 warn。
         if !outcome.sponsor_transport_address_blob.is_empty() {
             let record = PeerAddressRecord {
-                device_id: outcome.sponsor_device_id.clone(),
+                device_id: outcome.sponsor_device_id,
                 addr_blob: outcome.sponsor_transport_address_blob.clone(),
                 observed_at: now,
             };

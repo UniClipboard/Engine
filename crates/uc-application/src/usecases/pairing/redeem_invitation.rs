@@ -158,7 +158,7 @@ impl RedeemPairingInvitationUseCase {
 
         // Admit sponsor as member.
         let admit_input = AdmitMember {
-            device_id: outcome.sponsor_device_id.clone(),
+            device_id: outcome.sponsor_device_id,
             device_name: outcome.sponsor_device_name.clone(),
             identity_fingerprint: outcome.sponsor_identity_fingerprint.clone(),
             joined_at: now,
@@ -171,8 +171,8 @@ impl RedeemPairingInvitationUseCase {
 
         // Trust sponsor.
         let trust_input = TrustPeer {
-            local_device_id: outcome.self_device_id.clone(),
-            peer_device_id: outcome.sponsor_device_id.clone(),
+            local_device_id: outcome.self_device_id,
+            peer_device_id: outcome.sponsor_device_id,
             peer_fingerprint: outcome.sponsor_identity_fingerprint.clone(),
             trusted_at: now,
         };
@@ -250,7 +250,7 @@ impl RedeemPairingInvitationUseCase {
             return;
         }
         let record = PeerAddressRecord {
-            device_id: outcome.sponsor_device_id.clone(),
+            device_id: outcome.sponsor_device_id,
             addr_blob: outcome.sponsor_transport_address_blob.clone(),
             observed_at,
         };

@@ -216,7 +216,7 @@ impl ReconcileReceiveAttemptsUseCase {
             .map(|record| ((record.entry_id.clone(), record.attempt_id.clone()), record))
             .collect::<HashMap<_, _>>();
 
-        for ((entry_id, attempt_id), _) in &artifacts {
+        for (entry_id, attempt_id) in artifacts.keys() {
             let current = self
                 .get_attempt
                 .get_entry_attempt(entry_id)

@@ -421,7 +421,7 @@ impl PairingInboundOrchestrator {
         };
 
         let admit_input = AdmitMember {
-            device_id: facts.device_id.clone(),
+            device_id: facts.device_id,
             device_name: facts.device_name.clone(),
             identity_fingerprint: facts.identity_fingerprint.clone(),
             joined_at: now,
@@ -444,8 +444,8 @@ impl PairingInboundOrchestrator {
         }
 
         let trust_input = TrustPeer {
-            local_device_id: self.local_device_id.clone(),
-            peer_device_id: facts.device_id.clone(),
+            local_device_id: self.local_device_id,
+            peer_device_id: facts.device_id,
             peer_fingerprint: facts.identity_fingerprint.clone(),
             trusted_at: now,
         };
@@ -511,7 +511,7 @@ impl PairingInboundOrchestrator {
                 discovery_channel: None,
             });
             let _ = self.outcome_tx.send(PairingOutcome::Success {
-                peer_device_id: facts.device_id.clone(),
+                peer_device_id: facts.device_id,
                 peer_device_name: facts.device_name.clone(),
                 peer_fingerprint: facts.identity_fingerprint.clone(),
             });
@@ -528,7 +528,7 @@ impl PairingInboundOrchestrator {
             return;
         }
         let record = PeerAddressRecord {
-            device_id: facts.device_id.clone(),
+            device_id: facts.device_id,
             addr_blob: facts.transport_address_blob.clone(),
             observed_at,
         };

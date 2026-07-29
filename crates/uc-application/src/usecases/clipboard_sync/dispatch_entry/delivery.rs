@@ -63,7 +63,7 @@ pub(crate) fn classify_dispatch_result(
             debug!(device_id = %device_id.as_str(), "dispatch → Accepted");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
-                target_device_id: device_id.clone(),
+                target_device_id: device_id,
                 status: EntryDeliveryStatus::Delivered,
                 reason_detail: None,
                 updated_at_ms: now_ms,
@@ -81,7 +81,7 @@ pub(crate) fn classify_dispatch_result(
             debug!(device_id = %device_id.as_str(), "dispatch → DuplicateIgnored");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
-                target_device_id: device_id.clone(),
+                target_device_id: device_id,
                 status: EntryDeliveryStatus::Duplicate,
                 reason_detail: None,
                 updated_at_ms: now_ms,
@@ -99,7 +99,7 @@ pub(crate) fn classify_dispatch_result(
             debug!(device_id = %device_id.as_str(), "dispatch → Offline (unreachable)");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
-                target_device_id: device_id.clone(),
+                target_device_id: device_id,
                 status: EntryDeliveryStatus::Unreachable,
                 reason_detail: None,
                 updated_at_ms: now_ms,
@@ -134,7 +134,7 @@ pub(crate) fn classify_dispatch_result(
             };
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
-                target_device_id: device_id.clone(),
+                target_device_id: device_id,
                 status: EntryDeliveryStatus::Failed {
                     reason: failure_reason,
                 },

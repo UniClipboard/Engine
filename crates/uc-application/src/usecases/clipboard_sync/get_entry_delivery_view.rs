@@ -229,7 +229,7 @@ impl GetEntryDeliveryViewUseCase {
         // (默认不展示;若未来需要"显示已解除配对的设备",由 facade 增加
         // 参数切换,而不是把 trusted_peer 集合外的也展示出来)。
         for peer in trusted {
-            let target_id = peer.peer_device_id.clone();
+            let target_id = peer.peer_device_id;
             let target_name = name_index.get(&target_id).cloned();
             match delivery_index.get(target_id.as_str()) {
                 Some(rec) => {

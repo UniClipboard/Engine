@@ -152,7 +152,7 @@ impl InitializeSpaceUseCase {
         let device_id = self.device_identity.current_device_id();
         let joined_at = self.now_utc()?;
         let member = SpaceMember {
-            device_id: device_id.clone(),
+            device_id,
             device_name,
             identity_fingerprint: fingerprint.clone(),
             joined_at,

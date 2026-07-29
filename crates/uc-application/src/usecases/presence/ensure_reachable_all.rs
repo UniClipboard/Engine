@@ -118,7 +118,7 @@ impl EnsureReachableAllUseCase {
         let mut set: JoinSet<(DeviceId, Result<ReachabilityState, PresenceError>)> = JoinSet::new();
         for device_id in &targets {
             let presence = Arc::clone(&self.presence);
-            let device_id = device_id.clone();
+            let device_id = *device_id;
             set.spawn(async move {
                 // 用 verify_reachable 而非 ensure_reachable：probe 场景需要
                 // 绕过 IrohPresenceAdapter 的 fast-path，对已有 alive 连接

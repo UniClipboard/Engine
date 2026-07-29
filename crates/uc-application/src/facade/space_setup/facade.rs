@@ -236,7 +236,7 @@ impl SpaceSetupFacade {
         let local_device_id = device_identity.current_device_id();
         // Same id stashed for the keepalive scheduler's self-filter — the
         // original is moved into the inbound orchestrator below.
-        let local_device_id_for_facade = local_device_id.clone();
+        let local_device_id_for_facade = local_device_id;
         // Handshake TTL：sponsor 侧从 begin 到 confirm/reject 的 watchdog
         // （P7g），joiner 侧每次 recv 的 timeout（P7h）。180s 是为
         // Tailscale DERP relay 这种跨区中继路径预留的容差 —— 跨洋 DERP
@@ -707,21 +707,21 @@ impl SpaceSetupFacade {
 
         let mut forgotten_devices = HashSet::new();
         for address in peer_addresses {
-            forgotten_devices.insert(address.device_id.clone());
+            forgotten_devices.insert(address.device_id);
             self.peer_addr_repo
                 .remove(&address.device_id)
                 .await
                 .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
         }
         for peer in trusted_peers {
-            forgotten_devices.insert(peer.peer_device_id.clone());
+            forgotten_devices.insert(peer.peer_device_id);
             self.trusted_peer_repo
                 .remove(&peer.peer_device_id)
                 .await
                 .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
         }
         for member in members {
-            forgotten_devices.insert(member.device_id.clone());
+            forgotten_devices.insert(member.device_id);
             self.member_repo
                 .remove(&member.device_id)
                 .await
