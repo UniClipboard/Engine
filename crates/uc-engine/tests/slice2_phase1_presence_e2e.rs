@@ -12,7 +12,13 @@
 //!    看见 B = `Offline`(`IrohPresenceAdapter` 的 `Connection::closed()`
 //!    watchdog + 重 probe 组合路径)。
 //!
-//! ## 刻意未覆盖:"B 重启后再次 online" (plan §1.1 第三条)
+//! ## Recovery coverage and remaining restart gap
+//!
+//! This suite covers a peer that has been observed Offline and then reconnects
+//! from its still-running endpoint. The sponsor must report the peer Online
+//! again through the normal inbound presence path.
+//!
+//! A full stop-and-restart of B remains intentionally excluded:
 //!
 //! 要在 loopback-only 下可靠模拟"B 重新上线",joiner 必须用同一 iroh
 //! 密钥再绑一次——但 pair 时写进 sponsor `peer_addr_repo` 的 blob 含老
@@ -306,6 +312,7 @@ struct Side {
     /// 在 `build_sync_engine_assembly` 里同时构造二者;这里为保持与 slice1
     /// 测试同构,手工一起 new。
     roster: Arc<MemberRosterFacade>,
+    presence: Arc<dyn PresencePort>,
     iroh_node: IrohNode,
     member_repo: Arc<InMemoryMemberRepo>,
     device_id: DeviceId,
@@ -426,13 +433,14 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
             as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
         trusted_peer_repo: Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,
         local_identity: local_identity_for_roster,
-        presence: presence_for_roster,
+        presence: Arc::clone(&presence_for_roster),
         connection_channel: None,
     }));
 
     Side {
         facade,
         roster,
+        presence: presence_for_roster,
         iroh_node,
         member_repo,
         device_id,
@@ -675,6 +683,77 @@ async fn joiner_shutdown_flips_sponsor_roster_to_offline_within_10s() {
     );
 
     sponsor.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn joiner_reconnect_flips_sponsor_roster_back_to_online() {
+    let server = MockServer::start().await;
+    let vault: TicketVault = Arc::new(StdMutex::new(None));
+    const CODE: &str = "E2EP-ONL1";
+    const EXPIRES_AT_MS: i64 = 1_900_000_000_000;
+
+    mount_rendezvous(&server, &vault, CODE, EXPIRES_AT_MS).await;
+
+    let sponsor = build_side("sponsor", server.uri()).await;
+    let joiner = build_side("joiner", server.uri()).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    pair_sponsor_and_joiner(&sponsor, &joiner, "hunter22hunter22").await;
+
+    let initial = sponsor
+        .facade
+        .refresh_presence()
+        .await
+        .expect("sponsor initial refresh");
+    assert_eq!(
+        initial.online, 1,
+        "sponsor must initially see joiner Online"
+    );
+
+    sponsor.presence.mark_offline(&joiner.device_id).await;
+    let offline_entries = sponsor
+        .roster
+        .list_with_presence()
+        .await
+        .expect("sponsor roster after offline");
+    assert_eq!(
+        offline_entries
+            .iter()
+            .find(|entry| entry.device_id == joiner.device_id)
+            .expect("joiner still listed")
+            .state,
+        ReachabilityState::Offline,
+        "sponsor must record the joiner as offline before it reconnects"
+    );
+
+    let reconnected = joiner
+        .facade
+        .refresh_presence()
+        .await
+        .expect("joiner reconnect refresh");
+    assert_eq!(reconnected.online, 1, "joiner must reach sponsor again");
+
+    wait_for(Duration::from_secs(5), || {
+        let roster = Arc::clone(&sponsor.roster);
+        let joiner_device_id = joiner.device_id.clone();
+        async move {
+            roster
+                .list_with_presence()
+                .await
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .into_iter()
+                        .find(|entry| entry.device_id == joiner_device_id)
+                })
+                .map(|entry| entry.state == ReachabilityState::Online)
+                .unwrap_or(false)
+        }
+    })
+    .await;
+
+    sponsor.shutdown().await;
+    joiner.shutdown().await;
 }
 
 // ─── test helpers ───────────────────────────────────────────────────────────
