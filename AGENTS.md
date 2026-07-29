@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件是 `UniClipboardCore` 的维护入口。
+本文件是 `UniClipboardEngine` 的维护入口。
 
 ## 不可破坏的规则
 
@@ -39,7 +39,7 @@
 cargo metadata --locked --format-version 1
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check
-node scripts/architecture/check-core-repository.mjs
+node scripts/architecture/check-engine-repository.mjs
 git diff --check
 ```
 

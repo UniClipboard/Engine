@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   checks:
-    name: Core repository checks
+    name: Engine repository checks
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Check repository ownership and release rules
-        run: node scripts/architecture/check-core-repository.mjs
+        run: node scripts/architecture/check-engine-repository.mjs
 
       - name: Check patch whitespace
         run: git diff --check

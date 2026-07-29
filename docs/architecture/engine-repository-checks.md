@@ -1,14 +1,14 @@
-# 核心仓库检查
+# Engine 仓库检查
 
 仓库通过一个入口检查所有权和发布约束：
 
 ```bash
-node scripts/architecture/check-core-repository.mjs
+node scripts/architecture/check-engine-repository.mjs
 ```
 
 检查内容包括：
 
-- 工作区只能包含本仓拥有的核心、绑定、兼容和验收包。
+- 工作区只能包含本仓拥有的 Engine、内部实现、绑定、兼容和验收包。
 - 本地路径依赖不能指向仓库外，也不能依赖 desktop、daemon、CLI 或 Tauri 包。
 - `uc-engine` 是唯一稳定的 Rust 入口；移动绑定只依赖该入口。
 - 所有包均禁止发布到 crates.io。

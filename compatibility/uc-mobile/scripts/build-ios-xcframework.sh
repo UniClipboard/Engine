@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build UniClipboardCore.xcframework + UniFFI Swift bindings for uc-mobile.
+# Build UniClipboardEngine.xcframework + UniFFI Swift bindings for uc-mobile.
 #
 # Spike B1 pipeline (see .planning/research/uc-mobile-spike-plan.md §5):
 #   1. host cdylib            -> uniffi-bindgen library mode -> Swift bindings
@@ -15,10 +15,10 @@
 # Outputs (under target/, not checked in):
 #   target/uniffi-bindings/uc_mobile.swift          Swift binding source
 #   target/uniffi-bindings/include/                 C header + modulemap
-#   target/UniClipboardCore.xcframework             device + simulator + macOS slices
+#   target/UniClipboardEngine.xcframework           device + simulator + macOS slices
 # With UC_MOBILE_BUILD_ZIP=1 (CI release path) also:
-#   target/UniClipboardCore.xcframework.zip         zipped framework (SwiftPM url)
-#   target/UniClipboardCore.checksum.txt            sha256 of the zip (integrity)
+#   target/UniClipboardEngine.xcframework.zip       zipped framework (SwiftPM url)
+#   target/UniClipboardEngine.checksum.txt          sha256 of the zip (integrity)
 
 set -euo pipefail
 
@@ -26,9 +26,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$REPO_ROOT"
 
 BINDINGS_DIR="target/uniffi-bindings"
-XCFRAMEWORK_OUT="target/UniClipboardCore.xcframework"
-XCFRAMEWORK_ZIP="target/UniClipboardCore.xcframework.zip"
-CHECKSUM_OUT="target/UniClipboardCore.checksum.txt"
+XCFRAMEWORK_OUT="target/UniClipboardEngine.xcframework"
+XCFRAMEWORK_ZIP="target/UniClipboardEngine.xcframework.zip"
+CHECKSUM_OUT="target/UniClipboardEngine.checksum.txt"
 
 # CI knobs — both default OFF so a plain local run behaves exactly as before:
 #   UC_MOBILE_BUILD_LOCKED=1  pass --locked to cargo (reproducible CI builds; the
@@ -119,7 +119,7 @@ if [[ -n "${UC_MOBILE_BUILD_ZIP:-}" ]]; then
   # ditto preserves the xcframework's directory layout + symlinks; `zip -r` can
   # corrupt framework bundles. --keepParent keeps the top-level .xcframework dir
   # so the unzipped artifact is directly usable.
-  ( cd target && ditto -c -k --keepParent UniClipboardCore.xcframework UniClipboardCore.xcframework.zip )
+  ( cd target && ditto -c -k --keepParent UniClipboardEngine.xcframework UniClipboardEngine.xcframework.zip )
   # SwiftPM's binaryTarget(checksum:) is the SHA-256 of the zip bytes, so this is
   # the canonical value — but the iOS update script re-derives it via
   # `swift package compute-checksum` (run inside its own package) to write into

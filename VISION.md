@@ -1,6 +1,6 @@
-# UniClipboardCore 愿景
+# UniClipboardEngine 愿景
 
-`UniClipboardCore` 是 UniClipboard 在 macOS、Windows、Linux、iOS、Android 和 HarmonyOS 上共享的端到端加密 P2P 核心，也是核心协议、持久化格式、数据库迁移和移动绑定的唯一事实来源。
+`UniClipboardEngine` 是 UniClipboard 在 macOS、Windows、Linux、iOS、Android 和 HarmonyOS 上共享的端到端加密 P2P 运行时，也是协议、持久化格式、数据库迁移和移动绑定的唯一事实来源。
 
 ## 目标
 
@@ -38,7 +38,7 @@
 
 ## 发布原则
 
-- 统一核心使用 `core-v*` 版本线。
+- 统一 Engine 使用 `v*` 版本线。
 - LAN 兼容线使用 `uc-mobile-v*` 版本线。
 - 同一次核心发布的 iOS、Android、HarmonyOS、源码、锁文件、许可证和调试资料必须来自同一提交。
 - 发布资产不可覆盖；坏版本通过新版本修复。

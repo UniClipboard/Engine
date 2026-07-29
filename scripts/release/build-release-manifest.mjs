@@ -13,7 +13,17 @@ if (!releaseDirectoryArg || !deviceMatrixArg) {
 
 const repositoryRoot = process.cwd()
 const releaseDirectory = resolve(releaseDirectoryArg)
-const deviceMatrix = JSON.parse(readFileSync(resolve(deviceMatrixArg), 'utf8'))
+
+function parseJson(input, source) {
+  try {
+    return JSON.parse(input)
+  } catch (error) {
+    throw new Error(`invalid JSON from ${source}`, { cause: error })
+  }
+}
+
+const deviceMatrixPath = resolve(deviceMatrixArg)
+const deviceMatrix = parseJson(readFileSync(deviceMatrixPath, 'utf8'), deviceMatrixPath)
 
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
@@ -57,7 +67,7 @@ for (const [platform, record] of Object.entries(deviceMatrix)) {
   }
 }
 
-const version = readFileSync(join(releaseDirectory, 'core-version.txt'), 'utf8').trim()
+const version = readFileSync(join(releaseDirectory, 'version.txt'), 'utf8').trim()
 const commit = readFileSync(join(releaseDirectory, 'source-commit.txt'), 'utf8').trim()
 const lockPath = join(releaseDirectory, 'Cargo.lock')
 const rustToolchain = readFileSync(join(repositoryRoot, 'rust-toolchain.toml'), 'utf8')
@@ -65,12 +75,13 @@ const rustToolchain = readFileSync(join(repositoryRoot, 'rust-toolchain.toml'), 
 const migrations = readdirSync(join(repositoryRoot, 'crates/uc-infra/migrations'))
   .filter(name => /^\d/.test(name))
   .sort()
-const metadata = JSON.parse(
+const metadata = parseJson(
   execFileSync('cargo', ['metadata', '--locked', '--format-version', '1'], {
     cwd: repositoryRoot,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-  })
+  }),
+  'cargo metadata'
 )
 const packageVersion = name => metadata.packages.find(candidate => candidate.name === name)?.version
 

@@ -7,21 +7,30 @@ import process from 'node:process'
 
 const [distArg, deviceMatrixArg] = process.argv.slice(2)
 if (!distArg || !deviceMatrixArg) {
-  throw new Error('usage: stage-core-release.mjs <platform-dist-root> <device-matrix.json>')
+  throw new Error('usage: stage-engine-release.mjs <platform-dist-root> <device-matrix.json>')
 }
 
 const repositoryRoot = process.cwd()
+
+function parseJson(input, source) {
+  try {
+    return JSON.parse(input)
+  } catch (error) {
+    throw new Error(`invalid JSON from ${source}`, { cause: error })
+  }
+}
+
 const distRoot = resolve(distArg)
 const releaseDirectory = join(distRoot, 'release-assets')
 const platformDirectories = ['ios', 'android', 'ohos']
 
 const provenance = platformDirectories.map(platform => ({
   platform,
-  version: readFileSync(join(distRoot, platform, 'core-version.txt'), 'utf8').trim(),
+  version: readFileSync(join(distRoot, platform, 'version.txt'), 'utf8').trim(),
   commit: readFileSync(join(distRoot, platform, 'source-commit.txt'), 'utf8').trim(),
 }))
 if (new Set(provenance.map(item => item.version)).size !== 1) {
-  throw new Error('platform artifacts do not share one core version')
+  throw new Error('platform artifacts do not share one Engine version')
 }
 if (new Set(provenance.map(item => item.commit)).size !== 1) {
   throw new Error('platform artifacts do not share one source commit')
@@ -69,7 +78,7 @@ const trackedChanges = execFileSync('git', ['status', '--porcelain', '--untracke
 if (trackedChanges) {
   throw new Error('tracked files must be clean before staging release source assets')
 }
-writeFileSync(join(releaseDirectory, 'core-version.txt'), `${version}\n`)
+writeFileSync(join(releaseDirectory, 'version.txt'), `${version}\n`)
 writeFileSync(join(releaseDirectory, 'source-commit.txt'), `${commit}\n`)
 cpSync(join(repositoryRoot, 'Cargo.lock'), join(releaseDirectory, 'Cargo.lock'))
 cpSync(join(repositoryRoot, 'LICENSE'), join(releaseDirectory, 'LICENSE'))
@@ -79,23 +88,24 @@ execFileSync(
   [
     'archive',
     '--format=tar.gz',
-    `--prefix=UniClipboardCore-${version.replace(/^core-v/, '')}/`,
-    `--output=${join(releaseDirectory, 'UniClipboardCore-source.tar.gz')}`,
+    `--prefix=UniClipboardEngine-${version.replace(/^v/, '')}/`,
+    `--output=${join(releaseDirectory, 'UniClipboardEngine-source.tar.gz')}`,
     commit,
   ],
   { cwd: repositoryRoot, stdio: 'inherit' }
 )
 
-const metadata = JSON.parse(
+const metadata = parseJson(
   execFileSync('cargo', ['metadata', '--locked', '--format-version', '1'], {
     cwd: repositoryRoot,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-  })
+  }),
+  'cargo metadata'
 )
 const engineVersion = metadata.packages.find(candidate => candidate.name === 'uc-engine')?.version
-if (version !== `core-v${engineVersion}`) {
-  throw new Error(`platform version ${version} does not match uc-engine core-v${engineVersion}`)
+if (version !== `v${engineVersion}`) {
+  throw new Error(`platform version ${version} does not match uc-engine v${engineVersion}`)
 }
 const licenses = metadata.packages
   .map(packageMetadata => ({

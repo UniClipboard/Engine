@@ -121,7 +121,7 @@ pub struct PreparedHost {
 
 #[napi]
 pub fn core_version() -> String {
-    format!("core-v{}", env!("CARGO_PKG_VERSION"))
+    format!("v{}", env!("CARGO_PKG_VERSION"))
 }
 
 #[napi]

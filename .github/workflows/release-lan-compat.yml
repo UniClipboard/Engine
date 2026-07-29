@@ -90,13 +90,13 @@ jobs:
           COMMIT: ${{ steps.release.outputs.commit }}
         run: |
           mkdir -p lan-dist
-          cp target/UniClipboardCore.xcframework.zip lan-dist/
-          cp target/UniClipboardCore.checksum.txt lan-dist/
+          cp target/UniClipboardEngine.xcframework.zip lan-dist/
+          cp target/UniClipboardEngine.checksum.txt lan-dist/
           cp target/uniffi-bindings/uc_mobile.swift lan-dist/
           cp Cargo.lock LICENSE lan-dist/
           git archive --format=tar.gz \
-            --prefix="UniClipboardCore-$TAG/" \
-            --output=lan-dist/UniClipboardCore-LAN-source.tar.gz \
+            --prefix="UniClipboardEngine-$TAG/" \
+            --output=lan-dist/UniClipboardEngine-LAN-source.tar.gz \
             "$COMMIT"
           node scripts/release/build-lan-release-manifest.mjs lan-dist "$TAG" "$COMMIT"
 

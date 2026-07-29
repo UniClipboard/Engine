@@ -82,13 +82,21 @@ function readSourceTree(relativeRoot) {
   return sources.join('\n')
 }
 
+function parseJson(input, source) {
+  try {
+    return JSON.parse(input)
+  } catch (error) {
+    throw new Error(`invalid JSON from ${source}`, { cause: error })
+  }
+}
+
 function cargoMetadata() {
   const output = execFileSync(
     'cargo',
     ['metadata', '--no-deps', '--format-version', '1', '--locked'],
     { cwd: REPOSITORY_ROOT, encoding: 'utf8' }
   )
-  return JSON.parse(output)
+  return parseJson(output, 'cargo metadata')
 }
 
 function packageByName(metadata, name) {
@@ -227,12 +235,12 @@ function checkBindingProvenance(metadata, sources) {
   }
 
   for (const [name, source] of [['UniFFI', sources.uniffi], ['HarmonyOS', sources.ohos]]) {
-    if (!source.includes('format!("core-v{}", env!("CARGO_PKG_VERSION"))')) {
+    if (!source.includes('format!("v{}", env!("CARGO_PKG_VERSION"))')) {
       addProblem(problems, 'binding provenance', `${name} version is not derived from Cargo`)
     }
   }
 
-  const requiredTokens = ['core-version.txt', 'source-commit.txt', 'rev-parse HEAD', 'checksum']
+  const requiredTokens = ['version.txt', 'source-commit.txt', 'rev-parse HEAD', 'checksum']
   for (const [name, script] of [
     ['iOS', sources.iosPackaging],
     ['Android', sources.androidPackaging],
@@ -292,7 +300,7 @@ function checkLanIsolation(metadata, sources) {
 
 function checkPlaintextScanner() {
   const problems = []
-  const work = mkdtempSync(join(tmpdir(), 'uc-core-repository-check-'))
+  const work = mkdtempSync(join(tmpdir(), 'uc-engine-repository-check-'))
   const probe = join(work, 'probe.txt')
   const root = join(work, 'storage')
   const scanner = join(REPOSITORY_ROOT, 'scripts/security/scan-plaintext-probe.sh')
@@ -396,7 +404,7 @@ function main() {
     return
   }
   runNegativeFixtures(metadata, sources)
-  process.stdout.write('Core repository preflight passed\n')
+  process.stdout.write('Engine repository preflight passed\n')
 }
 
 main()

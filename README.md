@@ -1,6 +1,6 @@
-# UniClipboardCore
+# UniClipboardEngine
 
-UniClipboardCore 是 UniClipboard 的共享核心仓库。这里维护六个平台共同使用的身份、配对、端到端加密、P2P 同步、持久化、数据库迁移和移动绑定。
+UniClipboardEngine 是 UniClipboard 的共享运行时与发布仓库。这里维护六个平台共同使用的身份、配对、端到端加密、P2P 同步、持久化、数据库迁移和移动绑定。
 
 外部 Rust 使用方只通过 `uc-engine` 接入。内部 crate 不单独发布，也不承诺独立稳定性。
 
@@ -23,7 +23,7 @@ UniClipboardCore 是 UniClipboard 的共享核心仓库。这里维护六个平�
 cargo metadata --locked --format-version 1
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check
-node scripts/architecture/check-core-repository.mjs
+node scripts/architecture/check-engine-repository.mjs
 git diff --check
 ```
 
@@ -47,7 +47,7 @@ HarmonyOS：
 tests/hosts/ohos/build-emulator.sh
 ```
 
-完整核心发布由 `.github/workflows/release-core.yml` 从同一提交生成并归集三端产物。LAN 兼容线使用独立的 `.github/workflows/release-lan-compat.yml`。
+完整 Engine 发布由 `.github/workflows/release-engine.yml` 从同一提交生成并归集三端产物。LAN 兼容线使用独立的 `.github/workflows/release-lan-compat.yml`。
 
 ## 使用方式
 
@@ -55,12 +55,12 @@ tests/hosts/ohos/build-emulator.sh
 
 ```toml
 uc-engine = {
-  git = "https://github.com/UniClipboard/core.git",
+  git = "https://github.com/UniClipboard/Engine.git",
   rev = "<immutable-commit-sha>"
 }
 ```
 
-移动使用方固定完整的 `core-v*` Release，并同时采用对应平台的本地库、生成绑定和校验信息，不允许混用不同版本的文件。
+移动使用方固定完整的 `v*` Release，并同时采用对应平台的本地库、生成绑定和校验信息，不允许混用不同版本的文件。
 
 ## 进一步阅读
 

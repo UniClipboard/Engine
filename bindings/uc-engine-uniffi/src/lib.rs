@@ -343,5 +343,5 @@ pub trait BindingHost: Send + Sync {
 
 #[uniffi::export]
 pub fn core_version() -> String {
-    format!("core-v{}", env!("CARGO_PKG_VERSION"))
+    format!("v{}", env!("CARGO_PKG_VERSION"))
 }

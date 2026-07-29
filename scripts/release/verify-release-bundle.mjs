@@ -9,12 +9,21 @@ import process from 'node:process'
 const [releaseDirectoryArg] = process.argv.slice(2)
 if (!releaseDirectoryArg) throw new Error('usage: verify-release-bundle.mjs <release-directory>')
 const releaseDirectory = resolve(releaseDirectoryArg)
-const manifest = JSON.parse(readFileSync(join(releaseDirectory, 'release-manifest.json'), 'utf8'))
+
+function parseJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch (error) {
+    throw new Error(`invalid JSON file: ${path}`, { cause: error })
+  }
+}
+
+const manifest = parseJson(join(releaseDirectory, 'release-manifest.json'))
 
 const required = [
   'Cargo.lock',
   'LICENSE',
-  'UniClipboardCore-source.tar.gz',
+  'UniClipboardEngine-source.tar.gz',
   'dependency-licenses.json',
   'debug-symbols.tar.gz',
   'UniClipboardEngine.xcframework.zip',
@@ -32,7 +41,7 @@ const required = [
   'libuc_ohos_napi.so',
   'uc-ohos-napi.checksum.txt',
   'index.d.ts',
-  'core-version.txt',
+  'version.txt',
   'source-commit.txt',
 ]
 
@@ -54,8 +63,8 @@ function listFiles(root) {
   return files.sort()
 }
 
-if (!/^core-v\d+\.\d+\.\d+(?:-rc\.\d+)?$/.test(manifest.release.version)) {
-  throw new Error(`invalid core version: ${manifest.release.version}`)
+if (!/^v\d+\.\d+\.\d+(?:-rc\.\d+)?$/.test(manifest.release.version)) {
+  throw new Error(`invalid Engine version: ${manifest.release.version}`)
 }
 if (!/^[0-9a-f]{40}$/.test(manifest.release.commit)) {
   throw new Error(`invalid source commit: ${manifest.release.commit}`)
@@ -78,8 +87,8 @@ for (const artifact of manifest.artifacts) {
 if (sha256(join(releaseDirectory, 'Cargo.lock')) !== manifest.release.cargoLockSha256) {
   throw new Error('Cargo.lock checksum does not match the release record')
 }
-if (readFileSync(join(releaseDirectory, 'core-version.txt'), 'utf8').trim() !== manifest.release.version) {
-  throw new Error('core-version.txt does not match the release record')
+if (readFileSync(join(releaseDirectory, 'version.txt'), 'utf8').trim() !== manifest.release.version) {
+  throw new Error('version.txt does not match the release record')
 }
 if (readFileSync(join(releaseDirectory, 'source-commit.txt'), 'utf8').trim() !== manifest.release.commit) {
   throw new Error('source-commit.txt does not match the release record')

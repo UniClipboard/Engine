@@ -1,13 +1,13 @@
-name: Release Core
+name: Release Engine
 
 on:
   push:
     tags:
-      - core-v*
+      - v*
   workflow_dispatch:
     inputs:
       tag:
-        description: Core tag matching the uc-engine version
+        description: Engine tag matching the uc-engine version
         required: true
         type: string
       device_matrix_path:
@@ -30,7 +30,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-core
+  group: release-engine
   cancel-in-progress: false
 
 jobs:
@@ -109,24 +109,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
-          shared-key: core-release-macos
+          shared-key: engine-release-macos
 
       - name: Build iOS assets
         env:
           UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
-          UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/core-dist
+          UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/engine-dist
         run: bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
 
       - name: Build Android assets
         env:
           UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
-          UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/core-dist
+          UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/engine-dist
         run: bindings/uc-engine-uniffi/scripts/build-android-aar.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: ios-android-assets
-          path: ${{ runner.temp }}/core-dist/
+          path: ${{ runner.temp }}/engine-dist/
           if-no-files-found: error
           retention-days: 7
 
@@ -149,14 +149,14 @@ jobs:
       - name: Build HarmonyOS assets and signed acceptance HAP
         env:
           RUSTC_WRAPPER: ''
-          UC_OHOS_DIST_DIR: ${{ runner.temp }}/core-dist/ohos
+          UC_OHOS_DIST_DIR: ${{ runner.temp }}/engine-dist/ohos
           UC_OHOS_TARGET_DIR: ${{ runner.temp }}/uc-ohos-target
         run: tests/hosts/ohos/build-emulator.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: harmonyos-assets
-          path: ${{ runner.temp }}/core-dist/
+          path: ${{ runner.temp }}/engine-dist/
           if-no-files-found: error
           retention-days: 7
 
@@ -173,13 +173,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: '*-assets'
-          path: ${{ runner.temp }}/core-dist
+          path: ${{ runner.temp }}/engine-dist
           merge-multiple: true
 
       - name: Stage source, licenses, debug material, and manifest
         run: >-
-          node scripts/release/stage-core-release.mjs
-          "${{ runner.temp }}/core-dist"
+          node scripts/release/stage-engine-release.mjs
+          "${{ runner.temp }}/engine-dist"
           "${{ needs.prepare.outputs.device_matrix_path }}"
 
       - name: Upload verified dry-run bundle
@@ -187,7 +187,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ needs.prepare.outputs.tag }}-verified
-          path: ${{ runner.temp }}/core-dist/release-assets/
+          path: ${{ runner.temp }}/engine-dist/release-assets/
           if-no-files-found: error
           retention-days: 14
 
@@ -198,14 +198,14 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
           PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
-          ASSET_DIR: ${{ runner.temp }}/core-dist/release-assets
+          ASSET_DIR: ${{ runner.temp }}/engine-dist/release-assets
         shell: bash
         run: |
           prerelease_flag=()
           if [[ "$PRERELEASE" == "true" ]]; then prerelease_flag+=(--prerelease); fi
           gh release create "$TAG" \
             --target "$COMMIT" \
-            --title "UniClipboardCore $TAG" \
+            --title "UniClipboardEngine $TAG" \
             --generate-notes \
             "${prerelease_flag[@]}" \
             "$ASSET_DIR"/*

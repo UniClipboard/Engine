@@ -63,7 +63,7 @@ shasum -a 256 "$AAR_OUT" | awk '{print $1}' > "$CHECKSUM_FILE"
 VERSION="$(cargo pkgid -p uc-engine-uniffi)"
 VERSION="${VERSION##*#}"
 COMMIT="$(git rev-parse HEAD)"
-printf 'core-v%s\n' "$VERSION" > "$DIST_DIR/core-version.txt"
+printf 'v%s\n' "$VERSION" > "$DIST_DIR/version.txt"
 printf '%s\n' "$COMMIT" > "$DIST_DIR/source-commit.txt"
 printf '%s\n' \
   'net.java.dev.jna:jna:5.14.0@aar' \

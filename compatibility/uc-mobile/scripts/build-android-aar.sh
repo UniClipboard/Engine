@@ -23,7 +23,7 @@
 #        absence assertion (ring-only), same as the iOS script (seam 1).
 #   3. Assemble an Android library module: jniLibs/<abi>/libuc_mobile.so + the
 #      generated Kotlin under src/main/kotlin, then `gradle :uc-mobile:assembleRelease`
-#      -> UniClipboardCore-<version>.aar.
+#      -> UniClipboardEngine-<version>.aar.
 #   4. Runtime dependency the consumer app must add: net.java.dev.jna:jna
 #      (uniffi Kotlin bindings call into the .so via JNA).
 #

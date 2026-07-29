@@ -123,7 +123,7 @@ shasum -a 256 "$XCFRAMEWORK_ZIP" | awk '{print $1}' > "$CHECKSUM_FILE"
 VERSION="$(cargo pkgid -p uc-engine-uniffi)"
 VERSION="${VERSION##*#}"
 COMMIT="$(git rev-parse HEAD)"
-printf 'core-v%s\n' "$VERSION" > "$DIST_DIR/core-version.txt"
+printf 'v%s\n' "$VERSION" > "$DIST_DIR/version.txt"
 printf '%s\n' "$COMMIT" > "$DIST_DIR/source-commit.txt"
 
 echo "OK: $XCFRAMEWORK"

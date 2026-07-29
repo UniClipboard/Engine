@@ -2,7 +2,7 @@
 
 ## 统一来源
 
-每个 `core-v*` 发布的源码、锁文件、许可证、iOS、Android、HarmonyOS 和调试资料必须来自同一 Git 提交，并共享同一个核心版本。
+每个 `v*` 发布的源码、锁文件、许可证、iOS、Android、HarmonyOS 和调试资料必须来自同一 Git 提交，并共享同一个 Engine 版本。
 
 发布流程先生成各平台产物，再由 `scripts/release/build-release-manifest.mjs` 计算文件大小和 SHA-256，最后由 `scripts/release/verify-release-bundle.mjs` 重新计算并核对。校验完成前不得创建 GitHub Release。
 
@@ -23,4 +23,4 @@
 
 发布前必须确认同名标签和 Release 不存在。资产上传后不得覆盖；发现错误时发布新版本，并在旧版本说明中标记问题。
 
-LAN 兼容线使用独立的 `uc-mobile-v*` 标签和工作流，其资产不得混入 `core-v*` 发布。
+LAN 兼容线使用独立的 `uc-mobile-v*` 标签和工作流，其资产不得混入 `v*` 发布。

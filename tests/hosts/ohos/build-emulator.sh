@@ -56,7 +56,7 @@ shasum -a 256 "$dist_dir/libuc_ohos_napi.so" | awk '{print $1}' \
 version="$(cargo pkgid --manifest-path "$workspace_root/Cargo.toml" -p uc-ohos-napi)"
 version="${version##*#}"
 commit="$(git -C "$workspace_root" rev-parse HEAD)"
-printf 'core-v%s\n' "$version" > "$dist_dir/core-version.txt"
+printf 'v%s\n' "$version" > "$dist_dir/version.txt"
 printf '%s\n' "$commit" > "$dist_dir/source-commit.txt"
 printf 'sdk.dir=%s\n' "$sdk_root" > "$project_root/local.properties"
 
@@ -109,7 +109,7 @@ if ! tar -xOzf "$dist_dir/UniClipboardEngine.har" package/oh-package.json5 \
 fi
 if ! tar -xOzf "$dist_dir/UniClipboardEngine.har" package/oh-package.json5 \
   | grep -Fq "\"version\":\"$version\""; then
-  echo "HarmonyOS HAR version does not match core-v$version" >&2
+  echo "HarmonyOS HAR version does not match v$version" >&2
   exit 1
 fi
 
