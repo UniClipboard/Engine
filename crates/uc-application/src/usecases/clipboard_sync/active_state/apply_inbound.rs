@@ -107,28 +107,6 @@ pub(crate) trait InboundPulledContentStore: Send + Sync {
     ) -> Result<EntryId, InboundPulledContentStoreError>;
 }
 
-/// Handle owning the spawned inbound active-clipboard loop. Drop or
-/// `abort()` to stop it; the loop also exits on its own when the receiver
-/// adapter shuts down (its broadcast senders drop).
-///
-/// `pub` (not `pub(crate)`) so bootstrap can hold the loop's lifetime via the
-/// facade re-export; the use case itself stays `pub(crate)`.
-pub struct ActiveClipboardInboundHandle {
-    join: JoinHandle<()>,
-}
-
-impl ActiveClipboardInboundHandle {
-    pub fn abort(&self) {
-        self.join.abort();
-    }
-}
-
-impl Drop for ActiveClipboardInboundHandle {
-    fn drop(&mut self) {
-        self.join.abort();
-    }
-}
-
 /// Drives one device's inbound active-clipboard state toward convergence.
 pub(crate) struct ApplyInboundActiveClipboardStateUseCase {
     receiver: Arc<dyn ActiveClipboardReceiverPort>,
@@ -239,14 +217,8 @@ impl ApplyInboundActiveClipboardStateUseCase {
 
     /// Spawn the inbound loop. Takes `Arc<Self>` so the spawned task owns the
     /// use case's dependencies without moving them out of the owning facade.
-    pub(crate) fn spawn_run(self: Arc<Self>) -> ActiveClipboardInboundHandle {
-        let uc = Arc::clone(&self);
-        let join = tokio::spawn(async move { uc.run().await });
-        ActiveClipboardInboundHandle { join }
-    }
-
     #[instrument(name = "active_state.inbound_loop", skip_all)]
-    async fn run(self: Arc<Self>) {
+    pub(crate) async fn run(self: Arc<Self>) {
         let mut rx = self.receiver.subscribe();
         loop {
             match rx.recv().await {

@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast;
+#[cfg(test)]
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, info, instrument, warn};
@@ -58,25 +59,6 @@ use super::fanout::send_active_state_to;
 /// peer-online events are noisier (flapping, batch reconnects), so the window
 /// is wider.
 const PEER_ONLINE_RESYNC_DEBOUNCE: Duration = Duration::from_millis(1_500);
-
-/// Handle owning the spawned peer-online resync worker. Drop or `abort()` to
-/// stop it; the worker also exits on its own when the presence subscription's
-/// senders drop (router shutdown).
-pub struct PeerOnlineResyncHandle {
-    join: JoinHandle<()>,
-}
-
-impl PeerOnlineResyncHandle {
-    pub fn abort(&self) {
-        self.join.abort();
-    }
-}
-
-impl Drop for PeerOnlineResyncHandle {
-    fn drop(&mut self) {
-        self.join.abort();
-    }
-}
 
 /// Dependencies for the peer-online resync worker.
 pub(crate) struct PeerOnlineResyncWorker {
@@ -104,14 +86,13 @@ impl PeerOnlineResyncWorker {
         }
     }
 
-    /// Spawn the worker loop.
-    pub(crate) fn spawn(self) -> PeerOnlineResyncHandle {
-        let join = tokio::spawn(self.run());
-        PeerOnlineResyncHandle { join }
+    #[cfg(test)]
+    fn spawn(self) -> JoinHandle<()> {
+        tokio::spawn(self.run())
     }
 
     #[instrument(name = "active_state.peer_online_resync_loop", skip_all)]
-    async fn run(self) {
+    pub(crate) async fn run(self) {
         let mut rx = self.presence.subscribe();
         loop {
             // Block until the first online transition (or all senders drop →

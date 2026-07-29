@@ -246,7 +246,7 @@ impl ProductionRuntime {
         let lifecycle = build_daemon_lifecycle(&wired.deps, &wired.sync_engine, &wired.shared)
             .await
             .map_err(|error| startup_error("p2p session", error))?;
-        let mut sync_engine = lifecycle.sync_engine_assembly;
+        let sync_engine = lifecycle.sync_engine_assembly;
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         sync_engine.attach_restore_broadcast(restore_rx);
         let search_coordinator = build_search_coordinator(&wired.deps);

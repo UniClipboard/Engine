@@ -36,10 +36,9 @@ pub mod upgrade;
 
 pub use active_clipboard::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
-    ActiveClipboardHandle, ActiveClipboardPeerOnlineResyncHandle,
-    ActiveClipboardPullServeFacadeDeps, ActiveClipboardReconcileDeps,
-    ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
-    ActiveClipboardRestoreBroadcastHandle, ActiveClipboardResurfaceHandle, ClipboardSnapshotDeps,
+    ActiveClipboardLifecycle, ActiveClipboardLifecycleError, ActiveClipboardPullServeFacadeDeps,
+    ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
+    ClipboardSnapshotDeps,
 };
 pub use app_facade::{
     AppFacade, AppFacadeParts, AppPresenceEvent, AppPresenceSubscription,

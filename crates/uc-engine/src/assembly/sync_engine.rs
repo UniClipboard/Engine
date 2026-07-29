@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -47,12 +47,11 @@ use uc_application::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::clipboard_write::ClipboardWriteIntent;
 use uc_application::facade::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
-    ActiveClipboardHandle, ActiveClipboardPeerOnlineResyncHandle,
-    ActiveClipboardPullServeFacadeDeps, ActiveClipboardRestoreBroadcastHandle,
-    ActiveClipboardResurfaceHandle, BlobTransferDeps, BlobTransferFacade, ClipboardLiveIndexDeps,
-    ClipboardLiveIndexPort, ClipboardLiveIndexer, ClipboardSnapshotDeps, ClipboardSyncDeps,
-    ClipboardSyncFacade, HostEvent, HostEventBus, InboundClipboardApplyPort, IngestHandle,
-    MemberRosterDeps, MemberRosterFacade, SpaceSetupDeps, SpaceSetupFacade, TransferHostEvent,
+    ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, BlobTransferDeps,
+    BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
+    ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent, HostEventBus,
+    InboundClipboardApplyPort, IngestHandle, MemberRosterDeps, MemberRosterFacade, SpaceSetupDeps,
+    SpaceSetupFacade, TransferHostEvent,
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_application::{
@@ -133,12 +132,9 @@ pub struct SyncEngineAssembly {
     /// a downstream consumer to drive register convergence. Held here as the
     /// single subscription seam, mirroring how `clipboard_sync` owns the bulk
     /// inbound stream.
-    /// Active-clipboard register convergence facade (issue #1017). Owns the
-    /// inbound 0xC3 state use case (lifetime tracked by
-    /// `active_clipboard_inbound_handle`) and the outbound peer-online resync
-    /// worker (`active_clipboard_peer_online_resync_handle`). Held so the
-    /// remaining outbound-origination edit-site (restore broadcast) can reach
-    /// it via `attach_restore_broadcast`.
+    /// Active-clipboard register convergence facade (issue #1017). Background
+    /// task ownership stays behind `active_clipboard_lifecycle`; callers use
+    /// this facade only for convergence actions and queries.
     pub active_clipboard: Arc<ActiveClipboardFacade>,
     /// The shared iroh node. Held privately so callers can't bind a second
     /// node or install additional handlers after `spawn` — that would
@@ -150,24 +146,10 @@ pub struct SyncEngineAssembly {
     /// 出 `RecvError::Closed`)。`shutdown` 显式 abort 一次走在 router
     /// 关闭之前,加快进程退出。
     ingest_handle: IngestHandle,
-    /// Inbound active-clipboard (0xC3) convergence loop handle (issue #1017).
-    /// Same lifetime as `ingest_handle`: exits on its own when the
-    /// active-clipboard receiver adapter's broadcast senders drop at router
-    /// shutdown; `shutdown` aborts it explicitly first.
-    active_clipboard_inbound_handle: ActiveClipboardHandle,
-    /// Outbound peer-online resync worker handle (issue #1017 PR5). Subscribes
-    /// to presence transitions and resends the current register to peers that
-    /// come back online (debounced ~1.5s, full outbound gate). Spawned at
-    /// assembly; exits on its own when the presence subscription closes at
-    /// router shutdown, and `shutdown` aborts it explicitly first.
-    active_clipboard_peer_online_resync_handle: ActiveClipboardPeerOnlineResyncHandle,
-    /// Outbound restore-broadcast worker handle (issue #1017 PR4). Attached by
-    /// the daemon entry point once the restore-broadcast channel is wired
-    /// (the sender side lives in the restore use cases). `None` for entry
-    /// points that don't originate restore broadcasts. Aborted on shutdown
-    /// like the inbound handle.
-    active_clipboard_resurface_handle: ActiveClipboardResurfaceHandle,
-    restore_broadcast_handle: Option<ActiveClipboardRestoreBroadcastHandle>,
+    /// Owns the complete Active Clipboard worker topology: inbound
+    /// convergence, peer-online resync, restore broadcast, and history
+    /// resurface. This is the assembly's sole lifecycle seam for that module.
+    active_clipboard_lifecycle: ActiveClipboardLifecycle,
     /// 反向"传输进度"翻译 worker 的 join handle。订阅
     /// `IrohTransferProgressAdapter` 的 inbound 流,将每帧 progress 翻译
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
@@ -176,19 +158,17 @@ pub struct SyncEngineAssembly {
 }
 
 impl SyncEngineAssembly {
-    /// Spawn the outbound restore-broadcast worker on the active-clipboard
-    /// facade and retain its handle for coordinated teardown. `rx` is the
-    /// receiving end of the restore-broadcast channel whose sender the restore
-    /// use cases hold. Call once, after assembly, from the entry point that
-    /// created the channel.
+    /// Attach the externally-created restore source to the Active Clipboard
+    /// lifecycle. The lifecycle itself enforces its single-attachment rule.
     pub fn attach_restore_broadcast(
-        &mut self,
+        &self,
         rx: tokio::sync::mpsc::UnboundedReceiver<
             uc_application::clipboard_write::RestoreBroadcastRequest,
         >,
     ) {
-        let handle = self.active_clipboard.spawn_restore_broadcast(rx);
-        self.restore_broadcast_handle = Some(handle);
+        if let Err(error) = self.active_clipboard_lifecycle.attach_restore_broadcast(rx) {
+            warn!(error = %error, "active clipboard restore source attachment failed");
+        }
     }
 
     /// Coordinated teardown. Order matters:
@@ -207,12 +187,7 @@ impl SyncEngineAssembly {
         // same when `self` falls out of scope; the explicit call only
         // shaves a tick off teardown latency and makes ordering obvious.
         self.ingest_handle.abort();
-        self.active_clipboard_inbound_handle.abort();
-        self.active_clipboard_peer_online_resync_handle.abort();
-        self.active_clipboard_resurface_handle.abort();
-        if let Some(handle) = &self.restore_broadcast_handle {
-            handle.abort();
-        }
+        self.active_clipboard_lifecycle.shutdown().await;
         self.outbound_progress_translator.abort();
         self.facade.on_shutdown().await;
         self.iroh_node.shutdown().await;
@@ -710,14 +685,10 @@ pub async fn build_sync_engine_assembly(
         .with_entry_identity_coordinator(Arc::clone(&deps.clipboard.entry_identity_coordinator)),
     );
 
-    // Active-clipboard register convergence (issue #1017). The inbound worker
-    // subscribes to the 0xC3 receiver and drives the LWW register: locked /
-    // gate / LWW checks → reconstruct the locally-held content → detached OS
-    // write → on success advance the register + re-broadcast the same-key
-    // state to allowed peers. Spawned here with `ingest_handle`'s lifetime —
-    // the loop exits when the receiver adapter's broadcast senders drop on
-    // router shutdown, and `SyncEngineAssembly::shutdown` aborts it explicitly
-    // to shave a tick off teardown.
+    // Active-clipboard register convergence (issue #1017). The module owns
+    // its inbound convergence, peer-online resync, restore broadcast, and
+    // history-resurface worker topology behind one lifecycle seam. Assembly
+    // only constructs the facade and retains that lifecycle for shutdown.
     let active_clipboard = Arc::new(ActiveClipboardFacade::new(ActiveClipboardDeps {
         receiver: Arc::clone(&active_clipboard_receiver),
         dispatch: active_clipboard_dispatch,
@@ -754,15 +725,7 @@ pub async fn build_sync_engine_assembly(
         host_event_emitter: Arc::clone(&shared.host_event_bus),
         resurface_clock: Arc::clone(&deps.system.clock),
     }));
-    let active_clipboard_inbound_handle = active_clipboard.spawn_inbound_loop();
-    // Peer-online resync (issue #1017 PR5, D10). Subscribes to presence and,
-    // when a directly-connected peer comes online, resends this device's
-    // current register to it (debounced ~1.5s) so both ends converge under
-    // LWW. Symmetric: the peer runs the same worker and resends to us, no ack.
-    // Same lifetime as the inbound loop — exits when the presence
-    // subscription closes at router shutdown; aborted explicitly in `shutdown`.
-    let active_clipboard_peer_online_resync_handle = active_clipboard.spawn_peer_online_resync();
-    let active_clipboard_resurface_handle = active_clipboard.spawn_resurface_worker();
+    let active_clipboard_lifecycle = active_clipboard.start_background_workers();
 
     info!("Slice 2/3 SpaceSetupFacade + MemberRosterFacade + ClipboardSyncFacade + BlobTransferFacade assembled");
     Ok(SyncEngineAssembly {
@@ -774,10 +737,7 @@ pub async fn build_sync_engine_assembly(
         active_clipboard,
         iroh_node,
         ingest_handle,
-        active_clipboard_inbound_handle,
-        active_clipboard_peer_online_resync_handle,
-        active_clipboard_resurface_handle,
-        restore_broadcast_handle: None,
+        active_clipboard_lifecycle,
         outbound_progress_translator,
     })
 }

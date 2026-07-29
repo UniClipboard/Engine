@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
+#[cfg(test)]
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, instrument, warn};
@@ -36,26 +37,6 @@ use super::fanout::fan_out_active_state;
 
 /// Debounce window for coalescing rapid restores into one broadcast (D7).
 const RESTORE_BROADCAST_DEBOUNCE: Duration = Duration::from_millis(300);
-
-/// Handle owning the spawned restore-broadcast worker. Drop or `abort()` to
-/// stop it; the worker also exits on its own when every
-/// [`RestoreBroadcastTrigger`](crate::clipboard_write::RestoreBroadcastTrigger)
-/// sender is dropped.
-pub struct RestoreBroadcastHandle {
-    join: JoinHandle<()>,
-}
-
-impl RestoreBroadcastHandle {
-    pub fn abort(&self) {
-        self.join.abort();
-    }
-}
-
-impl Drop for RestoreBroadcastHandle {
-    fn drop(&mut self) {
-        self.join.abort();
-    }
-}
 
 /// Dependencies for the restore-broadcast worker.
 pub(crate) struct RestoreBroadcastWorker {
@@ -86,14 +67,13 @@ impl RestoreBroadcastWorker {
         }
     }
 
-    /// Spawn the worker loop.
-    pub(crate) fn spawn(self) -> RestoreBroadcastHandle {
-        let join = tokio::spawn(self.run());
-        RestoreBroadcastHandle { join }
+    #[cfg(test)]
+    fn spawn(self) -> JoinHandle<()> {
+        tokio::spawn(self.run())
     }
 
     #[instrument(name = "active_state.restore_broadcast_loop", skip_all)]
-    async fn run(mut self) {
+    pub(crate) async fn run(mut self) {
         loop {
             // Block until the next offer (or all senders drop → exit).
             let mut latest = match self.rx.recv().await {

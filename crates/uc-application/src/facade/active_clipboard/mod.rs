@@ -1,12 +1,11 @@
 //! `ActiveClipboardFacade` — application entry point for the cross-device
 //! active-clipboard register convergence (issue #1017).
 //!
-//! Owns the inbound state use case and exposes outbound origination actions:
-//! spawn the background loop that subscribes to inbound 0xC3 observations and
-//! drives the register toward convergence (write OS → advance register →
-//! re-broadcast), plus the outbound origination workers (restore broadcast,
-//! peer-online resync) and the mobile-push activation announce
-//! ([`ActiveClipboardFacade::announce_local_activation`]).
+//! Owns the inbound state use case, the background worker topology that drives
+//! convergence, and the mobile-push activation announce
+//! ([`ActiveClipboardFacade::announce_local_activation`]). Bootstrap crosses a
+//! single lifecycle seam for worker startup, late restore-source attachment,
+//! and coordinated shutdown.
 
 mod reconcile;
 
@@ -14,11 +13,23 @@ pub use reconcile::{
     ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
 };
 
-use std::sync::Arc;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use async_trait::async_trait;
-use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
-use tokio::task::JoinHandle;
+use thiserror::Error;
+use tokio::sync::{
+    broadcast,
+    mpsc::{self, UnboundedReceiver},
+    oneshot,
+};
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
@@ -48,17 +59,12 @@ use crate::facade::clipboard_inbound::{
 use crate::facade::clipboard_outbound::OutboundBlobPublishGateway;
 use crate::facade::host_event::{ClipboardHostEvent, ClipboardOriginKind, HostEvent};
 use crate::usecases::clipboard_sync::active_state::apply_inbound::{
-    ActiveClipboardConvergedEvent, ActiveClipboardInboundHandle,
-    ApplyInboundActiveClipboardStateUseCase, InboundPulledContentStore,
-    InboundPulledContentStoreError,
+    ActiveClipboardConvergedEvent, ApplyInboundActiveClipboardStateUseCase,
+    InboundPulledContentStore, InboundPulledContentStoreError,
 };
 use crate::usecases::clipboard_sync::active_state::fanout::fan_out_active_state;
-use crate::usecases::clipboard_sync::active_state::peer_online_resync_worker::{
-    PeerOnlineResyncHandle, PeerOnlineResyncWorker,
-};
-use crate::usecases::clipboard_sync::active_state::restore_broadcast_worker::{
-    RestoreBroadcastHandle, RestoreBroadcastWorker,
-};
+use crate::usecases::clipboard_sync::active_state::peer_online_resync_worker::PeerOnlineResyncWorker;
+use crate::usecases::clipboard_sync::active_state::restore_broadcast_worker::RestoreBroadcastWorker;
 use crate::usecases::clipboard_sync::active_state::serve_pull::{
     ActiveClipboardPullServeDeps, ActiveClipboardPullServeUseCase,
 };
@@ -193,9 +199,6 @@ pub fn build_active_clipboard_pull_serve_port(
     ))
 }
 
-/// Re-exported handle so bootstrap can hold the spawned loop's lifetime.
-pub use crate::usecases::clipboard_sync::active_state::apply_inbound::ActiveClipboardInboundHandle as ActiveClipboardHandle;
-
 /// Thin facade over the inbound active-clipboard state use case plus the
 /// outbound origination workers — restore broadcast and peer-online resync
 /// (issue #1017).
@@ -324,25 +327,56 @@ impl ActiveClipboardFacade {
         .await;
     }
 
-    /// Spawn the inbound convergence loop. Caller owns the returned handle;
-    /// dropping it (or `abort()`) terminates the loop. The loop also exits on
-    /// its own when the receiver adapter shuts down.
-    pub fn spawn_inbound_loop(&self) -> ActiveClipboardInboundHandle {
-        Arc::clone(&self.inbound_uc).spawn_run()
+    /// Start and own every Active Clipboard background worker. The returned
+    /// lifecycle is the only task-lifetime seam exposed to bootstrap.
+    pub fn start_background_workers(self: &Arc<Self>) -> ActiveClipboardLifecycle {
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let mut workers = JoinSet::new();
+
+        // Subscribe before the inbound loop is scheduled so its first
+        // convergence event cannot be missed by the history-resurface worker.
+        let resurface_rx = self.inbound_uc.subscribe_converged();
+        let resurface_facade = Arc::clone(self);
+        workers.spawn(async move {
+            resurface_facade.run_resurface_worker(resurface_rx).await;
+            "resurface"
+        });
+
+        let inbound_uc = Arc::clone(&self.inbound_uc);
+        workers.spawn(async move {
+            inbound_uc.run().await;
+            "inbound"
+        });
+
+        let resync = self.peer_online_resync_worker();
+        workers.spawn(async move {
+            resync.run().await;
+            "peer_online_resync"
+        });
+
+        let restore_facade = Arc::clone(self);
+        let restore_worker_starter: RestoreWorkerStarter = Arc::new(move |rx| {
+            let worker = restore_facade.restore_broadcast_worker(rx);
+            Box::pin(async move { worker.run().await })
+        });
+
+        ActiveClipboardLifecycle::start(workers, restore_worker_starter, commands, command_rx)
     }
 
-    /// Spawn the outbound restore-broadcast worker. `rx` is the receiving end
-    /// of the restore-broadcast channel whose sender side
-    /// ([`RestoreBroadcastTrigger`](crate::clipboard_write::RestoreBroadcastTrigger))
-    /// the restore use cases hold. The worker debounces rapid restores, gates
-    /// on `sync_on_restore` plus the per-device send preferences, and fans the
-    /// activation out to allowed peers through the shared fan-out. Caller owns
-    /// the returned handle; dropping it terminates the worker (which also exits
-    /// on its own once every trigger sender is dropped).
-    pub fn spawn_restore_broadcast(
+    fn peer_online_resync_worker(&self) -> PeerOnlineResyncWorker {
+        PeerOnlineResyncWorker::new(
+            Arc::clone(&self.presence),
+            Arc::clone(&self.load_register),
+            self.reconstructor.clone(),
+            Arc::clone(&self.dispatch),
+            Arc::clone(&self.member_repo),
+        )
+    }
+
+    fn restore_broadcast_worker(
         &self,
         rx: UnboundedReceiver<RestoreBroadcastRequest>,
-    ) -> RestoreBroadcastHandle {
+    ) -> RestoreBroadcastWorker {
         RestoreBroadcastWorker::new(
             rx,
             Arc::clone(&self.settings),
@@ -351,76 +385,288 @@ impl ActiveClipboardFacade {
             Arc::clone(&self.presence),
             Arc::clone(&self.member_repo),
         )
-        .spawn()
     }
 
-    /// Spawn the peer-online resync worker (issue #1017 PR5, D10). The worker
-    /// subscribes to presence transitions; when a peer comes online it
-    /// debounces a burst (D7, ~1.5s), loads the current register, reconstructs
-    /// the activation's content category for the outbound gate, and resends
-    /// the current state to each newly-online peer (full outbound gate:
-    /// `send_enabled` ∧ `send_content_types`). The resync is symmetric — the
-    /// peer runs the same worker and resends to us; LWW converges both ends
-    /// with no ack. Caller owns the returned handle; dropping it terminates
-    /// the worker (which also exits when the presence subscription closes at
-    /// router shutdown).
-    pub fn spawn_peer_online_resync(&self) -> PeerOnlineResyncHandle {
-        PeerOnlineResyncWorker::new(
-            Arc::clone(&self.presence),
-            Arc::clone(&self.load_register),
-            self.reconstructor.clone(),
-            Arc::clone(&self.dispatch),
-            Arc::clone(&self.member_repo),
-        )
-        .spawn()
-    }
-
-    /// Spawn a worker that subscribes to inbound convergence events and
-    /// resurfaces the converged entry in clipboard history (bumps
-    /// `active_time_ms` + notifies the frontend). Decouples history ordering
-    /// from the convergence use case.
-    pub fn spawn_resurface_worker(&self) -> ActiveClipboardResurfaceHandle {
-        let mut rx = self.inbound_uc.subscribe_converged();
-        let touch = Arc::clone(&self.touch_entry);
-        let bus = Arc::clone(&self.host_event_emitter);
-        let clock = Arc::clone(&self.resurface_clock);
-
-        let join = tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        resurface_entry(touch.as_ref(), &bus, clock.as_ref(), &event.entry_id)
-                            .await;
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        debug!(
-                            missed = n,
-                            "resurface worker lagged; some entries may not resurface immediately"
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
+    async fn run_resurface_worker(
+        self: Arc<Self>,
+        mut rx: broadcast::Receiver<ActiveClipboardConvergedEvent>,
+    ) {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    resurface_entry(
+                        self.touch_entry.as_ref(),
+                        &self.host_event_emitter,
+                        self.resurface_clock.as_ref(),
+                        &event.entry_id,
+                    )
+                    .await;
                 }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    debug!(
+                        missed = n,
+                        "resurface worker lagged; some entries may not resurface immediately"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
             }
+        }
+    }
+}
+
+/// Owns the Active Clipboard worker topology and its coordinated teardown.
+pub struct ActiveClipboardLifecycle {
+    commands: mpsc::UnboundedSender<ActiveClipboardLifecycleCommand>,
+    restore_broadcast_attached: AtomicBool,
+    supervisor: Option<JoinHandle<()>>,
+}
+
+impl ActiveClipboardLifecycle {
+    fn start(
+        workers: JoinSet<&'static str>,
+        restore_worker_starter: RestoreWorkerStarter,
+        commands: mpsc::UnboundedSender<ActiveClipboardLifecycleCommand>,
+        command_rx: mpsc::UnboundedReceiver<ActiveClipboardLifecycleCommand>,
+    ) -> Self {
+        let supervisor = tokio::spawn(async move {
+            ActiveClipboardWorkerSupervisor::new(restore_worker_starter, command_rx)
+                .run(workers)
+                .await;
         });
 
-        ActiveClipboardResurfaceHandle { join }
+        Self {
+            commands,
+            restore_broadcast_attached: AtomicBool::new(false),
+            supervisor: Some(supervisor),
+        }
+    }
+
+    /// Attach the restore-broadcast source after initial assembly. Exactly one
+    /// source may be attached for a lifecycle instance.
+    pub fn attach_restore_broadcast(
+        &self,
+        rx: UnboundedReceiver<RestoreBroadcastRequest>,
+    ) -> Result<(), ActiveClipboardLifecycleError> {
+        if self
+            .restore_broadcast_attached
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ActiveClipboardLifecycleError::RestoreBroadcastAlreadyAttached);
+        }
+
+        if self
+            .commands
+            .send(ActiveClipboardLifecycleCommand::AttachRestoreBroadcast { rx })
+            .is_err()
+        {
+            self.restore_broadcast_attached
+                .store(false, Ordering::Release);
+            return Err(ActiveClipboardLifecycleError::Stopped);
+        }
+
+        Ok(())
+    }
+
+    /// Stop all workers, wait for them to finish, and surface unexpected task
+    /// failures through tracing before returning.
+    pub async fn shutdown(mut self) {
+        let (completed, response) = oneshot::channel();
+        if self
+            .commands
+            .send(ActiveClipboardLifecycleCommand::Shutdown { completed })
+            .is_ok()
+        {
+            let _ = response.await;
+        }
+
+        if let Some(supervisor) = self.supervisor.take() {
+            if let Err(error) = supervisor.await {
+                if !error.is_cancelled() {
+                    warn!(error = %error, "active clipboard worker supervisor failed");
+                }
+            }
+        }
     }
 }
 
-/// Handle owning the resurface worker. Drop or `abort()` to stop it.
-pub struct ActiveClipboardResurfaceHandle {
-    join: JoinHandle<()>,
-}
-
-impl ActiveClipboardResurfaceHandle {
-    pub fn abort(&self) {
-        self.join.abort();
-    }
-}
-
-impl Drop for ActiveClipboardResurfaceHandle {
+impl Drop for ActiveClipboardLifecycle {
     fn drop(&mut self) {
-        self.join.abort();
+        if let Some(supervisor) = &self.supervisor {
+            supervisor.abort();
+        }
+    }
+}
+
+/// Lifecycle command errors exposed to bootstrap.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ActiveClipboardLifecycleError {
+    #[error("active clipboard background workers have stopped")]
+    Stopped,
+    #[error("the restore broadcast source is already attached")]
+    RestoreBroadcastAlreadyAttached,
+}
+
+type RestoreWorkerFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type RestoreWorkerStarter =
+    Arc<dyn Fn(UnboundedReceiver<RestoreBroadcastRequest>) -> RestoreWorkerFuture + Send + Sync>;
+
+enum ActiveClipboardLifecycleCommand {
+    AttachRestoreBroadcast {
+        rx: UnboundedReceiver<RestoreBroadcastRequest>,
+    },
+    Shutdown {
+        completed: oneshot::Sender<()>,
+    },
+}
+
+struct ActiveClipboardWorkerSupervisor {
+    restore_worker_starter: RestoreWorkerStarter,
+    commands: mpsc::UnboundedReceiver<ActiveClipboardLifecycleCommand>,
+}
+
+impl ActiveClipboardWorkerSupervisor {
+    fn new(
+        restore_worker_starter: RestoreWorkerStarter,
+        commands: mpsc::UnboundedReceiver<ActiveClipboardLifecycleCommand>,
+    ) -> Self {
+        Self {
+            restore_worker_starter,
+            commands,
+        }
+    }
+
+    async fn run(mut self, mut workers: JoinSet<&'static str>) {
+        loop {
+            tokio::select! {
+                command = self.commands.recv() => match command {
+                    Some(ActiveClipboardLifecycleCommand::AttachRestoreBroadcast { rx }) => {
+                        let worker = (self.restore_worker_starter)(rx);
+                        workers.spawn(async move {
+                            worker.await;
+                            "restore_broadcast"
+                        });
+                    }
+                    Some(ActiveClipboardLifecycleCommand::Shutdown { completed }) => {
+                        Self::stop_workers(&mut workers).await;
+                        let _ = completed.send(());
+                        return;
+                    }
+                    None => {
+                        Self::stop_workers(&mut workers).await;
+                        return;
+                    }
+                },
+                joined = workers.join_next(), if !workers.is_empty() => {
+                    if let Some(joined) = joined {
+                        Self::observe_worker_completion(joined);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn stop_workers(workers: &mut JoinSet<&'static str>) {
+        workers.abort_all();
+        while let Some(joined) = workers.join_next().await {
+            Self::observe_worker_completion(joined);
+        }
+    }
+
+    fn observe_worker_completion(joined: Result<&'static str, tokio::task::JoinError>) {
+        match joined {
+            Ok(worker) => debug!(worker, "active clipboard worker stopped"),
+            Err(error) if error.is_cancelled() => debug!("active clipboard worker cancelled"),
+            Err(error) => warn!(error = %error, "active clipboard worker failed"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    use tokio::sync::mpsc;
+    use tokio::task::JoinSet;
+
+    use super::{ActiveClipboardLifecycle, ActiveClipboardLifecycleError, RestoreWorkerStarter};
+
+    struct StopProbe(Arc<AtomicBool>);
+
+    impl Drop for StopProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_starts_workers_attaches_restore_once_and_joins_on_shutdown() {
+        let initial_started = Arc::new(AtomicBool::new(false));
+        let initial_stopped = Arc::new(AtomicBool::new(false));
+        let restore_started = Arc::new(AtomicBool::new(false));
+        let restore_stopped = Arc::new(AtomicBool::new(false));
+        let mut workers = JoinSet::new();
+        let initial_started_for_task = Arc::clone(&initial_started);
+        let initial_stopped_for_task = Arc::clone(&initial_stopped);
+        workers.spawn(async move {
+            initial_started_for_task.store(true, Ordering::SeqCst);
+            let _probe = StopProbe(initial_stopped_for_task);
+            std::future::pending::<()>().await;
+            "inbound"
+        });
+
+        let restore_started_for_factory = Arc::clone(&restore_started);
+        let restore_stopped_for_factory = Arc::clone(&restore_stopped);
+        let restore_worker_starter: RestoreWorkerStarter = Arc::new(move |_rx| {
+            restore_started_for_factory.store(true, Ordering::SeqCst);
+            let stopped = Arc::clone(&restore_stopped_for_factory);
+            Box::pin(async move {
+                let _probe = StopProbe(stopped);
+                std::future::pending::<()>().await;
+            })
+        });
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let lifecycle =
+            ActiveClipboardLifecycle::start(workers, restore_worker_starter, commands, command_rx);
+
+        wait_for(&initial_started, "lifecycle should start initial workers").await;
+
+        let (_restore_tx, restore_rx) = mpsc::unbounded_channel();
+        assert_eq!(lifecycle.attach_restore_broadcast(restore_rx), Ok(()));
+        wait_for(
+            &restore_started,
+            "lifecycle should start a late restore worker",
+        )
+        .await;
+
+        let (_duplicate_tx, duplicate_rx) = mpsc::unbounded_channel();
+        assert_eq!(
+            lifecycle.attach_restore_broadcast(duplicate_rx),
+            Err(ActiveClipboardLifecycleError::RestoreBroadcastAlreadyAttached)
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), lifecycle.shutdown())
+                .await
+                .is_ok(),
+            "lifecycle shutdown should join all workers"
+        );
+        assert!(initial_stopped.load(Ordering::SeqCst));
+        assert!(restore_stopped.load(Ordering::SeqCst));
+    }
+
+    async fn wait_for(flag: &AtomicBool, message: &str) {
+        let completed = tokio::time::timeout(Duration::from_secs(1), async {
+            while !flag.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(completed.is_ok(), "{message}");
     }
 }
 
@@ -516,11 +762,3 @@ impl InboundPulledContentStore for PulledContentStore {
         }
     }
 }
-
-/// Re-exported handle so bootstrap can hold the restore-broadcast worker's
-/// lifetime alongside the inbound loop handle.
-pub use crate::usecases::clipboard_sync::active_state::restore_broadcast_worker::RestoreBroadcastHandle as ActiveClipboardRestoreBroadcastHandle;
-
-/// Re-exported handle so bootstrap can hold the peer-online resync worker's
-/// lifetime alongside the other active-clipboard worker handles.
-pub use crate::usecases::clipboard_sync::active_state::peer_online_resync_worker::PeerOnlineResyncHandle as ActiveClipboardPeerOnlineResyncHandle;
