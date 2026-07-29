@@ -4,9 +4,8 @@ use tracing::instrument;
 
 use uc_core::ports::SettingsPort;
 
-use crate::facade::settings::models::{
-    apply_settings_patch, validate_settings, SettingsPatch, SettingsView,
-};
+use crate::facade::settings::models::{SettingsPatch, SettingsView};
+use crate::facade::settings::relay_configuration::{RelayConfiguration, RelayConfigurationError};
 use crate::facade::settings::relay_diagnostic::{
     RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
 };
@@ -102,20 +101,30 @@ impl From<RelayCredentialsError> for SettingsFacadeError {
     }
 }
 
+impl From<RelayConfigurationError> for SettingsFacadeError {
+    fn from(value: RelayConfigurationError) -> Self {
+        match value {
+            RelayConfigurationError::Load(error) => Self::Load(error),
+            RelayConfigurationError::Save(error) => Self::Save(error),
+            RelayConfigurationError::Invalid(error) => Self::Invalid(error),
+            RelayConfigurationError::CredentialsUnavailable => Self::RelayCredentialsUnavailable,
+            RelayConfigurationError::Credentials(error) => error.into(),
+        }
+    }
+}
+
 pub struct SettingsFacade {
     settings: Arc<dyn SettingsPort>,
     relay_diagnostic: Option<Arc<dyn RelayDiagnosticPort>>,
-    relay_credentials: Option<RelayCredentials>,
-    mutation_gate: tokio::sync::Mutex<()>,
+    relay_configuration: RelayConfiguration,
 }
 
 impl SettingsFacade {
     pub fn new(settings: Arc<dyn SettingsPort>) -> Self {
         Self {
+            relay_configuration: RelayConfiguration::new(Arc::clone(&settings)),
             settings,
             relay_diagnostic: None,
-            relay_credentials: None,
-            mutation_gate: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -128,7 +137,8 @@ impl SettingsFacade {
     }
 
     pub fn with_relay_credentials(mut self, credentials: RelayCredentials) -> Self {
-        self.relay_credentials = Some(credentials);
+        self.relay_configuration =
+            RelayConfiguration::new(Arc::clone(&self.settings)).with_credentials(credentials);
         self
     }
 
@@ -136,12 +146,8 @@ impl SettingsFacade {
         &self,
         url: &str,
     ) -> Result<RelayCredentialStatusView, SettingsFacadeError> {
-        let credentials = self
-            .relay_credentials
-            .as_ref()
-            .ok_or(SettingsFacadeError::RelayCredentialsUnavailable)?;
         Ok(RelayCredentialStatusView {
-            configured: credentials.is_configured(url)?,
+            configured: self.relay_configuration.credential_status(url)?,
         })
     }
 
@@ -163,9 +169,10 @@ impl SettingsFacade {
         let access_token = match credential {
             RelayProbeCredential::Override(token) => Some(token),
             RelayProbeCredential::None => None,
-            RelayProbeCredential::Stored => match self.relay_credentials.as_ref() {
-                Some(credentials) => credentials.load(url)?,
-                None => None,
+            RelayProbeCredential::Stored => match self.relay_configuration.load_access_token(url) {
+                Ok(token) => token,
+                Err(RelayConfigurationError::CredentialsUnavailable) => None,
+                Err(error) => return Err(error.into()),
             },
         };
         let report = port.probe(url, access_token.as_ref()).await?;
@@ -174,6 +181,7 @@ impl SettingsFacade {
 
     #[instrument(skip_all)]
     pub async fn get(&self) -> Result<SettingsView, SettingsFacadeError> {
+        self.relay_configuration.recover().await?;
         self.settings
             .load()
             .await
@@ -183,7 +191,12 @@ impl SettingsFacade {
 
     #[instrument(skip_all)]
     pub async fn update(&self, patch: SettingsPatch) -> Result<SettingsView, SettingsFacadeError> {
-        let result = self.persist_update(patch, None).await.map(|saved| saved.0);
+        let result = self
+            .relay_configuration
+            .apply(patch, None)
+            .await
+            .map(|saved| saved.settings.into())
+            .map_err(Into::into);
         tracing::debug!(success = result.is_ok(), "settings update completed");
         result
     }
@@ -194,61 +207,19 @@ impl SettingsFacade {
         patch: SettingsPatch,
         edit: RelayCredentialEdit,
     ) -> Result<RelaySaveView, SettingsFacadeError> {
-        let result = self.persist_update(patch, Some(&edit)).await.map(
-            |(settings, configured_before_save)| RelaySaveView {
-                settings,
+        let result = self
+            .relay_configuration
+            .apply(patch, Some(&edit))
+            .await
+            .map(|saved| RelaySaveView {
+                settings: saved.settings.into(),
                 credential_status: RelayCredentialStatusView {
-                    configured: edit.configured_after_save(configured_before_save),
+                    configured: edit.configured_after_save(saved.configured_before_save),
                 },
-            },
-        );
+            })
+            .map_err(Into::into);
         tracing::info!(success = result.is_ok(), "relay settings save completed");
         result
-    }
-
-    async fn persist_update(
-        &self,
-        patch: SettingsPatch,
-        edit: Option<&RelayCredentialEdit>,
-    ) -> Result<(SettingsView, bool), SettingsFacadeError> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        let existing = self
-            .settings
-            .load()
-            .await
-            .map_err(|err| SettingsFacadeError::Load(err.to_string()))?;
-        let previous_relay_urls = existing.network.custom_relay_urls.clone();
-        let merged = apply_settings_patch(existing, patch);
-        validate_settings(&merged).map_err(SettingsFacadeError::Invalid)?;
-        let (credential_restore, configured_before_save) = match self.relay_credentials.as_ref() {
-            Some(credentials) => {
-                let configured = match edit {
-                    Some(edit @ RelayCredentialEdit::Keep { .. }) => {
-                        credentials.is_configured(edit.url())?
-                    }
-                    Some(RelayCredentialEdit::Set { .. })
-                    | Some(RelayCredentialEdit::Delete { .. })
-                    | None => false,
-                };
-                let restore = credentials.apply_settings_edit(
-                    &previous_relay_urls,
-                    &merged.network.custom_relay_urls,
-                    edit,
-                )?;
-                (Some(restore), configured)
-            }
-            None if edit.is_some() => return Err(SettingsFacadeError::RelayCredentialsUnavailable),
-            None => (None, false),
-        };
-        if let Err(error) = self.settings.save(&merged).await {
-            if let (Some(credentials), Some(restore_point)) =
-                (self.relay_credentials.as_ref(), credential_restore.as_ref())
-            {
-                credentials.restore(restore_point)?;
-            }
-            return Err(SettingsFacadeError::Save(error.to_string()));
-        }
-        Ok((merged.into(), configured_before_save))
     }
 }
 
@@ -414,10 +385,8 @@ mod tests {
         let token = crate::facade::settings::RelayAccessToken::new(token.to_string())
             .expect("valid relay token");
         facade
-            .relay_credentials
-            .as_ref()
-            .expect("relay credentials")
-            .set(url, &token)
+            .relay_configuration
+            .set_access_token(url, &token)
             .expect("seed relay credential");
     }
 
@@ -747,10 +716,8 @@ mod tests {
 
         assert!(matches!(error, SettingsFacadeError::Save(_)));
         let stored = facade
-            .relay_credentials
-            .as_ref()
-            .expect("relay credentials")
-            .load(relay)
+            .relay_configuration
+            .load_access_token(relay)
             .expect("load stored credential")
             .expect("stored credential");
         assert_eq!(stored.expose_secret(), "old-token");

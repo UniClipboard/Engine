@@ -1,5 +1,6 @@
 mod facade;
 mod models;
+mod relay_configuration;
 mod relay_credentials;
 mod relay_diagnostic;
 
@@ -17,6 +18,7 @@ pub use models::{
     SettingsPatch, SettingsView, ShortcutKeyView, StartupModeView, SyncFrequencyView,
     SyncSettingsPatch, SyncSettingsView, ThemeView, UpdateChannelView,
 };
+pub use relay_configuration::{RelayConfiguration, RelayConfigurationError};
 pub use relay_credentials::{
     RelayAccessToken, RelayCredentialEdit, RelayCredentials, RelayCredentialsError,
     RelayProbeCredential,

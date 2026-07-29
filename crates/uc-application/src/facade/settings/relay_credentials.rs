@@ -1,9 +1,14 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
-use uc_core::ports::{SecureStorageError, SecureStoragePort};
+use serde::{Deserialize, Serialize};
+use uc_core::{
+    ports::{SecureStorageError, SecureStoragePort},
+    settings::model::Settings,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const STORAGE_KEY_PREFIX: &str = "relay_access_token:v1:";
+const SETTINGS_TRANSACTION_STORAGE_KEY: &str = "relay_configuration:transaction:v1";
 const MAX_TOKEN_LENGTH: usize = 4096;
 
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
@@ -121,6 +126,19 @@ pub(crate) struct RelayCredentialRestorePoint {
     entries: Vec<(String, Option<Zeroizing<Vec<u8>>>)>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct RelaySettingsTransaction {
+    version: u8,
+    previous_settings: Settings,
+    entries: Vec<RelaySettingsTransactionEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RelaySettingsTransactionEntry {
+    relay_url: String,
+    value: Option<Vec<u8>>,
+}
+
 enum RelayCredentialMutation {
     Set(RelayAccessToken),
     Delete,
@@ -186,6 +204,7 @@ impl RelayCredentials {
         Ok(existed)
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_settings_edit(
         &self,
         previous_urls: &[String],
@@ -258,11 +277,140 @@ impl RelayCredentials {
         Ok(restore_point)
     }
 
-    pub(crate) fn restore(
+    pub(crate) fn begin_settings_transaction(
         &self,
+        previous_settings: &Settings,
+        previous_urls: &[String],
+        current_urls: &[String],
+        edit: Option<&RelayCredentialEdit>,
+    ) -> Result<(), RelayCredentialsError> {
+        let current_keys = current_urls
+            .iter()
+            .map(|url| storage_key(url))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let previous_keys = previous_urls
+            .iter()
+            .map(|url| storage_key(url))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut mutations = std::collections::BTreeMap::new();
+        for relay_url in previous_urls {
+            let key = storage_key(relay_url)?;
+            if !current_keys.contains(&key) {
+                mutations.insert(key, (relay_url.clone(), RelayCredentialMutation::Delete));
+            }
+        }
+
+        if let Some(edit) = edit {
+            let url = edit.url().to_string();
+            let key = storage_key(&url)?;
+            let target_is_valid = match edit {
+                RelayCredentialEdit::Keep { .. } | RelayCredentialEdit::Set { .. } => {
+                    current_keys.contains(&key)
+                }
+                RelayCredentialEdit::Delete { .. } => {
+                    previous_keys.contains(&key) || current_keys.contains(&key)
+                }
+            };
+            if !target_is_valid {
+                return Err(RelayCredentialsError::InvalidTarget);
+            }
+            let mutation = match edit {
+                RelayCredentialEdit::Keep { .. } => None,
+                RelayCredentialEdit::Set { access_token, .. } => {
+                    Some(RelayCredentialMutation::Set(access_token.clone()))
+                }
+                RelayCredentialEdit::Delete { .. } => Some(RelayCredentialMutation::Delete),
+            };
+            if let Some(mutation) = mutation {
+                mutations.insert(key, (url, mutation));
+            }
+        }
+
+        let restore_point = RelayCredentialRestorePoint {
+            entries: mutations
+                .values()
+                .map(|(relay_url, _)| {
+                    self.load_raw(relay_url)
+                        .map(|value| (relay_url.clone(), value))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        self.write_settings_transaction(previous_settings, &restore_point)?;
+
+        for (index, (_, (relay_url, mutation))) in mutations.iter().enumerate() {
+            let result = match mutation {
+                RelayCredentialMutation::Set(token) => self.set(relay_url, token),
+                RelayCredentialMutation::Delete => self.delete(relay_url).map(|_| ()),
+            };
+            if let Err(error) = result {
+                self.restore_entries(&restore_point.entries[..=index])?;
+                self.complete_settings_transaction()?;
+                return Err(error);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn restore_pending_settings_transaction(
+        &self,
+    ) -> Result<Option<Settings>, RelayCredentialsError> {
+        let Some(mut bytes) = self
+            .storage
+            .get(SETTINGS_TRANSACTION_STORAGE_KEY)
+            .map_err(RelayCredentialsError::Storage)?
+        else {
+            return Ok(None);
+        };
+        let transaction = serde_json::from_slice::<RelaySettingsTransaction>(&bytes)
+            .map_err(|_| RelayCredentialsError::Corrupt);
+        bytes.zeroize();
+        let transaction = transaction?;
+        if transaction.version != 1 {
+            return Err(RelayCredentialsError::Corrupt);
+        }
+        let restore_point = RelayCredentialRestorePoint {
+            entries: transaction
+                .entries
+                .into_iter()
+                .map(|entry| (entry.relay_url, entry.value.map(Zeroizing::new)))
+                .collect(),
+        };
+        self.restore_entries(&restore_point.entries)?;
+        Ok(Some(transaction.previous_settings))
+    }
+
+    pub(crate) fn complete_settings_transaction(&self) -> Result<(), RelayCredentialsError> {
+        self.storage
+            .delete(SETTINGS_TRANSACTION_STORAGE_KEY)
+            .map_err(RelayCredentialsError::Storage)
+    }
+
+    fn write_settings_transaction(
+        &self,
+        previous_settings: &Settings,
         restore_point: &RelayCredentialRestorePoint,
     ) -> Result<(), RelayCredentialsError> {
-        self.restore_entries(&restore_point.entries)
+        let transaction = RelaySettingsTransaction {
+            version: 1,
+            previous_settings: previous_settings.clone(),
+            entries: restore_point
+                .entries
+                .iter()
+                .map(|(relay_url, value)| RelaySettingsTransactionEntry {
+                    relay_url: relay_url.clone(),
+                    value: value.as_ref().map(|value| value.to_vec()),
+                })
+                .collect(),
+        };
+        let mut bytes =
+            serde_json::to_vec(&transaction).map_err(|_| RelayCredentialsError::Corrupt)?;
+        let result = self
+            .storage
+            .set(SETTINGS_TRANSACTION_STORAGE_KEY, &bytes)
+            .map_err(RelayCredentialsError::Storage);
+        bytes.zeroize();
+        result
     }
 
     fn restore_entries(

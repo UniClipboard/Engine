@@ -73,6 +73,16 @@ pub async fn build_daemon_lifecycle(
         );
     }
 
+    let relay_credentials = uc_application::facade::settings::RelayCredentials::new(
+        deps.security.secure_storage.clone(),
+    );
+    let relay_configuration =
+        uc_application::facade::settings::RelayConfiguration::new(deps.settings.clone())
+            .with_credentials(relay_credentials.clone());
+    relay_configuration.recover().await.map_err(|error| {
+        anyhow::anyhow!("relay configuration recovery failed at startup: {error}")
+    })?;
+
     // Phase 94 NETSET-03:从 settings 读取 LAN-only Mode 偏好后翻译为
     // `IrohNodeConfig`。`SettingsPort::load` 当前错误返回类型 `anyhow::Result`
     // 不区分 NotFound vs Parse;`FileSettingsRepository::load` 已对 NotFound
@@ -98,9 +108,6 @@ pub async fn build_daemon_lifecycle(
         custom_relay_urls,
         congestion_controller,
         None, // production 不 override rendezvous,使用默认 RENDEZVOUS_BASE_URL
-    );
-    let relay_credentials = uc_application::facade::settings::RelayCredentials::new(
-        deps.security.secure_storage.clone(),
     );
     crate::assembly::network::load_relay_access_tokens(&mut iroh_config, &relay_credentials);
     // #900：从 env 读取直连可达性（固定 UDP 端口 + 广播公网地址）并写入。
