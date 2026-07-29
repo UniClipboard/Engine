@@ -61,8 +61,8 @@ use uc_infra::db::repositories::{
     DieselClipboardEventRepository, DieselClipboardRepresentationRepository,
     DieselClipboardSelectionRepository, DieselEntryAvailabilityRepository,
     DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
-    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository,
-    DieselThumbnailRepository, DieselTrustedPeerRepository,
+    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselRevocationRepository,
+    DieselSpaceMemberRepository, DieselThumbnailRepository, DieselTrustedPeerRepository,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
@@ -268,6 +268,7 @@ pub fn wire_dependencies_from_inputs(
         &infra.key_material,
         &platform.current_profile,
         &platform.session,
+        &infra.db_executor,
     );
 
     // Transfer metadata and event payloads are encrypted with two independent

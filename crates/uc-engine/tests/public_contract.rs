@@ -1236,7 +1236,15 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
     });
 
     assert!(format!("{preferences:?}").contains("member_sync_preferences"));
-    assert!(format!("{:?}", OperationResult::MemberRemoved).contains("member_removed"));
+    assert!(format!(
+        "{:?}",
+        OperationResult::MemberRemoved(uc_engine::MemberRevocationSummary {
+            revocation_id: Some("revocation-a".into()),
+            outcome: uc_engine::MemberRevocationOutcome::Applied,
+            pending_recipients: 1,
+        })
+    )
+    .contains("member_removed"));
 }
 
 #[test]

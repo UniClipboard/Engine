@@ -35,7 +35,7 @@ use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
-use uc_core::membership::MemberRepositoryPort;
+use uc_core::membership::{GroupRevocationPort, GroupUpdateDispatchPort, MemberRepositoryPort};
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
 use uc_core::ports::pairing_invitation::{
@@ -62,6 +62,7 @@ use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 use super::clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALPN};
 use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
+use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
 use super::identity_store::IrohIdentityStore;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
 use super::transfer_progress_adapter::{
@@ -98,6 +99,10 @@ pub struct PairingHandlers {
 pub struct ClipboardHandlers {
     pub dispatch: Arc<dyn ClipboardDispatchPort>,
     pub receiver: Arc<dyn ClipboardReceiverPort>,
+}
+
+pub struct GroupUpdateHandlers {
+    pub dispatch: Arc<dyn GroupUpdateDispatchPort>,
 }
 
 /// The active-clipboard state ports produced by
@@ -882,6 +887,27 @@ impl IrohNodeBuilder {
             dispatch,
             receiver: Arc::new(receiver),
         }
+    }
+
+    pub fn install_group_updates(
+        &mut self,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        group_revocation: Arc<dyn GroupRevocationPort>,
+    ) -> GroupUpdateHandlers {
+        let adapter = Arc::new(IrohGroupUpdateAdapter::new(
+            Arc::clone(&self.endpoint),
+            peer_addr_repo,
+            member_repo,
+            fingerprint_factory,
+            group_revocation,
+        ));
+        let Some(builder) = self.router_builder.take() else {
+            unreachable!("group update transport installed after router spawn");
+        };
+        self.router_builder = Some(builder.accept(GROUP_UPDATE_ALPN, adapter.handler()));
+        GroupUpdateHandlers { dispatch: adapter }
     }
 
     /// Install the active-clipboard state transport.

@@ -11,6 +11,7 @@ members = [
   "compatibility/uc-mobile-proto",
   "compatibility/uc-mobile",
   "tests/hosts/uc-mobile-probe-core",
+  "tests/openmls-validation",
 ]
 resolver = "2"
 

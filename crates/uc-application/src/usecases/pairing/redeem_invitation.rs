@@ -359,17 +359,22 @@ mod tests {
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::session_message::{
-        PairingSessionMessage, SponsorConfirm, SponsorKeyslotOffer,
+        PairingSessionMessage, SponsorAdmissionOffer, SponsorConfirm,
     };
     use uc_core::ports::pairing::{
         DialError, DialOutcome, DiscoveryChannel, PairingSessionId, PairingSessionPort,
         SessionError,
     };
-    use uc_core::ports::space::{DeriveProofKeyPort, ProofPort, SpaceAccessError};
+    use uc_core::ports::space::{
+        DeriveAdmissionProofKeyPort, GroupAdmissionPort, ProofPort, SpaceAccessError,
+    };
     use uc_core::ports::{DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort};
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
-    use uc_core::space_access::domain::{JoinOffer, ProofDerivedKey, SpaceAccessProofArtifact};
+    use uc_core::space_access::domain::{
+        AdmissionOffer, GroupAdmission, PreparedGroupJoin, ProofDerivedKey,
+        SpaceAccessProofArtifact,
+    };
     use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
 
     use chrono::DateTime;
@@ -389,12 +394,14 @@ mod tests {
             me.recv
                 .lock()
                 .unwrap()
-                .push_back(PairingSessionMessage::KeyslotOffer(SponsorKeyslotOffer {
-                    space_id: SpaceId::from_str("space-xyz"),
-                    keyslot_blob: vec![0xAA; 16],
-                    challenge: vec![0x42; 32],
-                    pairing_session_id: PairingSessionId::new("session-1"),
-                }));
+                .push_back(PairingSessionMessage::AdmissionOffer(
+                    SponsorAdmissionOffer {
+                        space_id: SpaceId::from_str("space-xyz"),
+                        kdf_parameters_blob: vec![0xAA; 16],
+                        challenge: vec![0x42; 32],
+                        pairing_session_id: PairingSessionId::new("session-1"),
+                    },
+                ));
             me.recv
                 .lock()
                 .unwrap()
@@ -405,6 +412,9 @@ mod tests {
                     sender_identity_fingerprint: sponsor_fp(),
                     transport_address_blob: Vec::new(),
                     sponsor_space_person_id: None,
+                    welcome: vec![1],
+                    encrypted_key_catalog: vec![2],
+                    group_epoch: 2,
                 }));
             me
         }
@@ -460,16 +470,55 @@ mod tests {
         }
     }
 
-    struct HappySpaceAccess;
-    #[async_trait]
-    impl DeriveProofKeyPort for HappySpaceAccess {
-        async fn derive_master_key_for_proof(
-            &self,
-            _: &JoinOffer,
-            _: &Passphrase,
-        ) -> Result<ProofDerivedKey, SpaceAccessError> {
-            Ok(ProofDerivedKey::from_bytes([0xCC; 32]))
+    mockall::mock! {
+        SpaceAccess {}
+
+        #[async_trait]
+        impl DeriveAdmissionProofKeyPort for SpaceAccess {
+            async fn derive_admission_proof_key(
+                &self,
+                offer: &AdmissionOffer,
+                passphrase: &Passphrase,
+                invitation: &InvitationCode,
+                pairing_session_id: &SessionId,
+            ) -> Result<ProofDerivedKey, SpaceAccessError>;
         }
+
+        #[async_trait]
+        impl GroupAdmissionPort for SpaceAccess {
+            async fn prepare_group_join(
+                &self,
+                device_id: &DeviceId,
+            ) -> Result<PreparedGroupJoin, SpaceAccessError>;
+            async fn admit_group_member(
+                &self,
+                space_id: &SpaceId,
+                sponsor_device_id: &DeviceId,
+                joiner_device_id: &DeviceId,
+                existing_member_ids: &[DeviceId],
+                key_package: &[u8],
+            ) -> Result<GroupAdmission, SpaceAccessError>;
+            async fn install_group_join(
+                &self,
+                space_id: &SpaceId,
+                passphrase: &Passphrase,
+                pending: PreparedGroupJoin,
+                welcome: &[u8],
+                encrypted_key_catalog: &[u8],
+                group_epoch: u64,
+            ) -> Result<(), SpaceAccessError>;
+        }
+    }
+
+    fn happy_space_access() -> Arc<MockSpaceAccess> {
+        let mut mock = MockSpaceAccess::new();
+        mock.expect_prepare_group_join()
+            .returning(|_| Ok(PreparedGroupJoin::new(vec![1, 2, 3], vec![4, 5, 6])));
+        mock.expect_derive_admission_proof_key()
+            .returning(|_, _, _, _| Ok(ProofDerivedKey::from_bytes([0xCC; 32])));
+        mock.expect_install_group_join()
+            .returning(|_, _, _, _, _, _| Ok(()));
+        Arc::new(mock)
     }
 
     struct FixedProof;
@@ -822,9 +871,11 @@ mod tests {
             setup_status: Arc<RecordingSetupStatus>,
             peer_addr_repo: Arc<MockPeerAddrRepo>,
         ) -> (RedeemPairingInvitationUseCase, Self) {
+            let space_access = happy_space_access();
             let handshake = JoinerHandshakeCoordinator::new(
                 session,
-                Arc::new(HappySpaceAccess),
+                space_access.clone(),
+                space_access,
                 Arc::new(FixedProof),
                 Arc::new(FixedLocal(joiner_fp())),
                 Arc::new(FixedDevice(DeviceId::new("joiner-device"))),
@@ -969,12 +1020,14 @@ mod tests {
         me.recv
             .lock()
             .unwrap()
-            .push_back(PairingSessionMessage::KeyslotOffer(SponsorKeyslotOffer {
-                space_id: SpaceId::from_str("space-xyz"),
-                keyslot_blob: vec![0xAA; 16],
-                challenge: vec![0x42; 32],
-                pairing_session_id: PairingSessionId::new("session-1"),
-            }));
+            .push_back(PairingSessionMessage::AdmissionOffer(
+                SponsorAdmissionOffer {
+                    space_id: SpaceId::from_str("space-xyz"),
+                    kdf_parameters_blob: vec![0xAA; 16],
+                    challenge: vec![0x42; 32],
+                    pairing_session_id: PairingSessionId::new("session-1"),
+                },
+            ));
         me.recv
             .lock()
             .unwrap()
@@ -985,6 +1038,9 @@ mod tests {
                 sender_identity_fingerprint: sponsor_fp(),
                 transport_address_blob: blob,
                 sponsor_space_person_id: None,
+                welcome: vec![1],
+                encrypted_key_catalog: vec![2],
+                group_epoch: 2,
             }));
         me
     }
@@ -1026,12 +1082,14 @@ mod tests {
         me.recv
             .lock()
             .unwrap()
-            .push_back(PairingSessionMessage::KeyslotOffer(SponsorKeyslotOffer {
-                space_id: SpaceId::from_str("space-xyz"),
-                keyslot_blob: vec![0xAA; 16],
-                challenge: vec![0x42; 32],
-                pairing_session_id: PairingSessionId::new("session-1"),
-            }));
+            .push_back(PairingSessionMessage::AdmissionOffer(
+                SponsorAdmissionOffer {
+                    space_id: SpaceId::from_str("space-xyz"),
+                    kdf_parameters_blob: vec![0xAA; 16],
+                    challenge: vec![0x42; 32],
+                    pairing_session_id: PairingSessionId::new("session-1"),
+                },
+            ));
         me.recv
             .lock()
             .unwrap()
@@ -1042,6 +1100,9 @@ mod tests {
                 sender_identity_fingerprint: sponsor_fp(),
                 transport_address_blob: Vec::new(),
                 sponsor_space_person_id: Some(space_person_id),
+                welcome: vec![1],
+                encrypted_key_catalog: vec![2],
+                group_epoch: 2,
             }));
         me
     }
@@ -1115,9 +1176,11 @@ mod tests {
         session: Arc<HappySession>,
         identity: Arc<FakeJoinerAnalyticsIdentity>,
     ) -> (RedeemPairingInvitationUseCase, Arc<CapturingAnalyticsSink>) {
+        let space_access = happy_space_access();
         let handshake = JoinerHandshakeCoordinator::new(
             session.clone() as Arc<dyn PairingSessionPort>,
-            Arc::new(HappySpaceAccess),
+            space_access.clone(),
+            space_access,
             Arc::new(FixedProof),
             Arc::new(FixedLocal(joiner_fp())),
             Arc::new(FixedDevice(DeviceId::new("joiner-device"))),

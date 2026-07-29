@@ -2739,6 +2739,21 @@ async fn recovering_a_locked_restart_from_secure_storage_restores_keyword_search
         }
     );
 
+    let history = restarted
+        .execute(crate::Operation::ListHistoryEntries(
+            crate::ListHistoryEntriesInput {
+                limit: 25,
+                offset: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    let crate::OperationResult::HistoryEntries(entries) = history else {
+        panic!("expected persisted history entries after secure-storage recovery");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].preview, "recoverable keyword");
+
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         match restarted

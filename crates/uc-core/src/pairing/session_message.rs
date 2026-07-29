@@ -31,10 +31,15 @@ use crate::security::IdentityFingerprint;
 #[derive(Debug, Clone)]
 pub enum PairingSessionMessage {
     Request(JoinerRequest),
-    KeyslotOffer(SponsorKeyslotOffer),
+    AdmissionOffer(SponsorAdmissionOffer),
     ChallengeResponse(JoinerChallengeResponse),
     Confirm(SponsorConfirm),
     Reject(PairingReject),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingSecurityCapability {
+    ReliableGroupEpochV1,
 }
 
 /// Joiner → sponsor. First message on the bi-stream (B2 step 5).
@@ -62,17 +67,22 @@ pub struct JoinerRequest {
     ///
     /// [`PeerAddressRepositoryPort`]: crate::ports::PeerAddressRepositoryPort
     pub transport_address_blob: Vec<u8>,
+    /// Explicit fail-closed capability. Older pairing protocols cannot join a
+    /// Space that has group epochs enabled.
+    pub security_capability: PairingSecurityCapability,
+    /// MLS KeyPackage. The matching private state never leaves the joiner.
+    pub key_package: Vec<u8>,
 }
 
 /// Sponsor → joiner. Hands the joiner an offer they can unseal with the
 /// shared passphrase (B2 step 6).
 #[derive(Debug, Clone)]
-pub struct SponsorKeyslotOffer {
+pub struct SponsorAdmissionOffer {
     /// The space this offer belongs to.
     pub space_id: SpaceId,
     /// Opaque keyslot payload. Infra serializes the historical
     /// `KeySlotFile` JSON here; core treats the blob as bytes.
-    pub keyslot_blob: Vec<u8>,
+    pub kdf_parameters_blob: Vec<u8>,
     /// 32-byte challenge nonce the joiner combines with the derived
     /// master key and `pairing_session_id` to compute an HMAC proof
     /// ([`ProofPort::build_proof`](crate::ports::space::ProofPort)).
@@ -121,6 +131,9 @@ pub struct SponsorConfirm {
     ///
     /// 不携带 PII；仅在 telemetry 隐私边界内使用。
     pub sponsor_space_person_id: Option<Uuid>,
+    pub welcome: Vec<u8>,
+    pub encrypted_key_catalog: Vec<u8>,
+    pub group_epoch: u64,
 }
 
 /// Either side → other. Terminal message with a structured reason so the

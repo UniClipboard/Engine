@@ -4,15 +4,16 @@ use crate::error_codes::*;
 
 use tracing::error;
 use uc_application::facade::{
-    AppFacade, ContentTypesPatch as AppContentTypesPatch,
-    MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    RosterError,
+    AppFacade, ContentTypesPatch as AppContentTypesPatch, MemberRevocationState,
+    MemberRevocationView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
+    MemberSyncPreferencesView, RosterError,
 };
 use uc_core::ports::ReachabilityState;
 
 use crate::{
     ContentTypesPatch, ContentTypesSummary, DeviceSummary, EngineError, EngineErrorCategory,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, OperationResult,
+    MemberRevocationOutcome, MemberRevocationSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesSummary, OperationResult, QueryMemberRevocationInput,
     QueryMemberSyncPreferencesInput, RemoveMemberInput, UpdateMemberSyncPreferencesInput,
 };
 
@@ -63,11 +64,48 @@ pub async fn execute_remove_member(
     input: RemoveMemberInput,
 ) -> Result<OperationResult, EngineError> {
     validate_device_id(&input.device_id)?;
-    member_roster(facade)?
+    let result = member_roster(facade)?
         .revoke_member(&input.device_id)
         .await
         .map_err(map_roster_error)?;
-    Ok(OperationResult::MemberRemoved)
+    Ok(member_revocation_result(result))
+}
+
+pub async fn execute_query_member_revocation(
+    facade: &AppFacade,
+    input: QueryMemberRevocationInput,
+) -> Result<OperationResult, EngineError> {
+    if input.revocation_id.trim().is_empty() {
+        return Err(EngineError::new(
+            MEMBER_INVALID_INPUT_CODE,
+            EngineErrorCategory::InvalidInput,
+            false,
+        ));
+    }
+    let result = member_roster(facade)?
+        .query_revocation(&input.revocation_id)
+        .await
+        .map_err(map_roster_error)?;
+    Ok(OperationResult::MemberRevocationStatus(
+        result.map(member_revocation_summary),
+    ))
+}
+
+fn member_revocation_result(result: MemberRevocationView) -> OperationResult {
+    OperationResult::MemberRemoved(member_revocation_summary(result))
+}
+
+fn member_revocation_summary(result: MemberRevocationView) -> MemberRevocationSummary {
+    let outcome = match result.state {
+        MemberRevocationState::LocalOnly => MemberRevocationOutcome::LocalOnly,
+        MemberRevocationState::Applied => MemberRevocationOutcome::Applied,
+        MemberRevocationState::Complete => MemberRevocationOutcome::Complete,
+    };
+    MemberRevocationSummary {
+        revocation_id: result.revocation_id,
+        outcome,
+        pending_recipients: u64::try_from(result.pending_recipients).unwrap_or(u64::MAX),
+    }
 }
 
 fn member_roster(
@@ -183,6 +221,12 @@ fn map_roster_error(error: RosterError) -> EngineError {
             false,
             "trusted_peer_repository",
         ),
+        RosterError::GroupRevocation(_) => (
+            MEMBER_REPOSITORY_FAILED_CODE,
+            EngineErrorCategory::Internal,
+            true,
+            "group_revocation",
+        ),
     };
     if category == EngineErrorCategory::Internal {
         error!(variant, error = %error_message, "member operation failed");
@@ -193,6 +237,7 @@ fn map_roster_error(error: RosterError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uc_application::facade::{MemberRevocationState, MemberRevocationView};
 
     #[test]
     fn roster_failures_keep_stable_categories_and_distinct_codes() {
@@ -205,5 +250,23 @@ mod tests {
         assert_eq!(repository.category(), EngineErrorCategory::Internal);
         assert_ne!(missing.code(), unavailable.code());
         assert_ne!(unavailable.code(), repository.code());
+    }
+
+    #[test]
+    fn member_revocation_progress_is_preserved_in_the_stable_result() {
+        let result = member_revocation_result(MemberRevocationView {
+            revocation_id: Some("revocation-a".into()),
+            state: MemberRevocationState::Applied,
+            pending_recipients: 2,
+        });
+
+        assert_eq!(
+            result,
+            OperationResult::MemberRemoved(MemberRevocationSummary {
+                revocation_id: Some("revocation-a".into()),
+                outcome: MemberRevocationOutcome::Applied,
+                pending_recipients: 2,
+            })
+        );
     }
 }

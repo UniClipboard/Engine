@@ -43,6 +43,9 @@ pub enum RosterError {
     #[error("the local device cannot remove itself from the member roster")]
     LocalDeviceRemoval,
 
+    #[error("failed to revoke group member: {0}")]
+    GroupRevocation(String),
+
     /// 成员 roster 入口尚未接入。通常表示 daemon/CLI 组合阶段没有注入该能力。
     #[error("member roster facade unavailable")]
     Unavailable,

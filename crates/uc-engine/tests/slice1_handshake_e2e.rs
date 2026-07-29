@@ -8,9 +8,9 @@
 //!
 //! The DI graph is assembled by hand here rather than going through
 //! [`uc_bootstrap::wire_dependencies`] because the production path reaches
-//! for keychain and a real SQLite pool; we replace those with in-memory
-//! fakes and tempdir-backed `JsonKeySlotStore` instances so the test runs
-//! hermetically on CI.
+//! for keychain and durable host storage; we replace keychain-facing ports
+//! with in-memory fakes while using tempdir-backed key material and SQLite
+//! stores so the security transaction matches production.
 
 mod common;
 
@@ -39,6 +39,9 @@ use uc_core::ports::{
 use uc_core::settings::model::Settings;
 use uc_core::setup::SetupStatus;
 use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError, TrustedPeerRepositoryPort};
+use uc_infra::db::executor::DieselSqliteExecutor;
+use uc_infra::db::pool::init_db_pool;
+use uc_infra::db::repositories::DieselRevocationRepository;
 use uc_infra::network::iroh::IrohNodeConfig;
 
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
@@ -330,10 +333,17 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
     ));
     let current_profile = Arc::new(DefaultCurrentProfile::new());
     let session = Arc::new(InMemorySession::new());
-    let space_access = Arc::new(DefaultSpaceAccessAdapter::new(
+    let database_path = keystore_dir.path().join("engine.sqlite3");
+    let database_url = database_path.to_str().expect("database path must be UTF-8");
+    let pool = init_db_pool(database_url).expect("initialize test database");
+    let key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
+        DieselRevocationRepository::new(DieselSqliteExecutor::new(pool), session.as_ref().clone()),
+    );
+    let space_access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
         key_material,
         current_profile,
         Arc::clone(&session) as Arc<InMemorySession>,
+        key_epoch_repository,
     ));
 
     let device_identity: Arc<dyn DeviceIdentityPort> =
@@ -375,9 +385,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
     );
     let iroh_node = builder.spawn();
 
-    let proof_port: Arc<dyn ProofPort> = Arc::new(HmacProofAdapter::new_with_space_access(
-        space_access.clone(),
-    ));
+    let proof_port: Arc<dyn ProofPort> = Arc::new(HmacProofAdapter::new());
     let local_identity: Arc<dyn LocalIdentityPort> = Arc::clone(&identity_store) as _;
 
     let (migration_state, key_migration, blob_migration_repo, blob_cipher) =
@@ -512,16 +520,7 @@ async fn sponsor_joiner_end_to_end_pairing_persists_both_sides() {
     assert_eq!(redeemed.sponsor_device_id, sponsor.device_id);
     assert_eq!(redeemed.self_device_id, joiner.device_id);
     assert_eq!(redeemed.sponsor_identity_fingerprint, init.fingerprint);
-    // Sponsor and joiner end up with *different* `space_id` values by
-    // design — the sponsor handshake coordinator generates a fresh probe
-    // id (sponsor_handshake.rs:`probe_space_id = SpaceId::new()`) rather
-    // than threading the A1 id through. The keyslot is keyed off
-    // `profile_id`, so this does not break crypto; both sides just carry
-    // different local ids. The _unused_ bindings below make that
-    // invariant explicit so a future refactor that tries to unify them
-    // shows up as a test change rather than a silent behaviour shift.
-    let _sponsor_a1_space_id = &init.space_id;
-    let _joiner_handshake_space_id = &redeemed.space_id;
+    assert_eq!(redeemed.space_id, init.space_id);
 
     // 7. Sponsor side also persists asynchronously via the inbound
     //    orchestrator; wait briefly for the final admit+trust to land

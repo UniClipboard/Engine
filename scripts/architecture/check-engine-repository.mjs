@@ -20,6 +20,7 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const REPOSITORY_ROOT = realpathSync(resolve(SCRIPT_DIR, '../..'))
 
 const EXPECTED_PACKAGES = [
+  'openmls-validation',
   'uc-application',
   'uc-content-hash',
   'uc-core',

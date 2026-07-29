@@ -11,6 +11,7 @@ pub(crate) mod entry_identity;
 pub mod facade;
 pub(crate) mod file_set_query;
 pub mod file_sync;
+pub(crate) mod group_update_delivery;
 pub mod sync_planner;
 #[cfg(test)]
 pub(crate) mod test_support;

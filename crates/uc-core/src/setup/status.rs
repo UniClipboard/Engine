@@ -8,9 +8,9 @@ use crate::ids::SpaceId;
 /// minted during first-time space creation and persisted forever after
 /// — it's the canonical identifier every downstream consumer (A2
 /// unlock, sponsor handshake, joiner's mirrored record) must agree on.
-/// Older installs that pre-date this field appear as `None`; callers
-/// must fall back to a fresh UUID and log a warning so the discrepancy
-/// is visible.
+/// Older installs that pre-date this field appear as `None`; callers must use
+/// the stable legacy Space identity so encrypted state remains readable across
+/// restarts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SetupStatus {
     pub has_completed: bool,

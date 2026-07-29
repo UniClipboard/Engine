@@ -439,7 +439,8 @@ pub enum OperationResult {
     },
     Devices(Vec<DeviceSummary>),
     MemberSyncPreferences(MemberSyncPreferencesSummary),
-    MemberRemoved,
+    MemberRemoved(MemberRevocationSummary),
+    MemberRevocationStatus(Option<MemberRevocationSummary>),
     SearchPage(SearchPageSummary),
     SearchTags(Vec<SearchTagSummary>),
     SearchStatus(SearchStatusSummary),
@@ -618,7 +619,12 @@ impl fmt::Debug for OperationResult {
             Self::MemberSyncPreferences(preferences) => debug
                 .field("kind", &"member_sync_preferences")
                 .field("preferences", preferences),
-            Self::MemberRemoved => debug.field("kind", &"member_removed"),
+            Self::MemberRemoved(summary) => debug
+                .field("kind", &"member_removed")
+                .field("summary", summary),
+            Self::MemberRevocationStatus(summary) => debug
+                .field("kind", &"member_revocation_status")
+                .field("summary", summary),
             Self::SearchPage(page) => debug.field("kind", &"search_page").field("page", page),
             Self::SearchTags(tags) => debug
                 .field("kind", &"search_tags")
@@ -829,6 +835,21 @@ pub struct DeviceSummary {
     pub display_name: String,
     pub is_local: bool,
     pub online: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberRevocationOutcome {
+    LocalOnly,
+    Applied,
+    Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberRevocationSummary {
+    pub revocation_id: Option<String>,
+    pub outcome: MemberRevocationOutcome,
+    pub pending_recipients: u64,
 }
 
 impl fmt::Debug for DeviceSummary {

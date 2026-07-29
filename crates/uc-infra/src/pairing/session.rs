@@ -559,6 +559,7 @@ async fn read_next_frame(
     wire::decode(&payload).map(Some).map_err(|err| match err {
         WireDecodeError::Postcard(_)
         | WireDecodeError::UnsupportedVersion { .. }
+        | WireDecodeError::UnsupportedSecurityCapability(_)
         | WireDecodeError::InvalidFingerprint(_)
         | WireDecodeError::InvalidSpacePersonId(_) => {
             SessionError::Internal(format!("wire decode: {err}"))
@@ -766,7 +767,7 @@ impl PairingSessionPort for IrohPairingSessionAdapter {
 fn message_kind(message: &PairingSessionMessage) -> &'static str {
     match message {
         PairingSessionMessage::Request(_) => "Request",
-        PairingSessionMessage::KeyslotOffer(_) => "KeyslotOffer",
+        PairingSessionMessage::AdmissionOffer(_) => "AdmissionOffer",
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
         PairingSessionMessage::Confirm(_) => "Confirm",
         PairingSessionMessage::Reject(_) => "Reject",
@@ -1041,6 +1042,8 @@ mod tests {
             identity_fingerprint: sample_fingerprint(),
             nonce: vec![7; 8],
             transport_address_blob: vec![],
+            security_capability: uc_core::pairing::PairingSecurityCapability::ReliableGroupEpochV1,
+            key_package: vec![1, 2, 3],
         })
     }
 

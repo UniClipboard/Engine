@@ -137,8 +137,9 @@ pub use resource::{
 };
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
-    MemberRosterDeps, MemberRosterFacade, MemberSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, PeerSnapshotView, PresenceEvent, RosterEntry, RosterError,
+    MemberRevocationState, MemberRevocationView, MemberRosterDeps, MemberRosterFacade,
+    MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
+    PresenceEvent, RosterEntry, RosterError,
 };
 pub use search::{
     map_search_error, ManualRebuildResult, SearchCoordinator, SearchCoordinatorDeps,

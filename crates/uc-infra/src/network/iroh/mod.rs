@@ -13,6 +13,7 @@ pub mod clipboard_wire;
 mod conn_path;
 mod connect;
 pub mod connection_channel_adapter;
+pub mod group_update_adapter;
 pub mod identity_store;
 mod net_recovery;
 pub mod node;
@@ -35,11 +36,12 @@ pub use clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALP
 pub use clipboard_receiver_adapter::{IrohClipboardReceiverAdapter, IrohClipboardReceiverHandler};
 pub(crate) use connect::connect_with_staggered_retry;
 pub use connection_channel_adapter::IrohConnectionChannelAdapter;
+pub use group_update_adapter::{IrohGroupUpdateAdapter, IrohGroupUpdateHandler, GROUP_UPDATE_ALPN};
 pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
-    IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError, IrohRelayAccessToken,
-    PairingHandlers, TransferProgressHandlers,
+    GroupUpdateHandlers, IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError,
+    IrohRelayAccessToken, PairingHandlers, TransferProgressHandlers,
 };
 pub use presence_adapter::{IrohPresenceAdapter, IrohPresenceHandler, PRESENCE_ALPN};
 pub use relay_probe::{

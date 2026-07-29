@@ -47,15 +47,18 @@ use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{DeviceId, SessionId, SpaceId};
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::pairing::session_message::{
-    JoinerChallengeResponse, JoinerRequest, PairingRejectReason, PairingSessionMessage,
+    JoinerChallengeResponse, JoinerRequest, PairingRejectReason, PairingSecurityCapability,
+    PairingSessionMessage,
 };
 use uc_core::ports::pairing::{
     DialError, DialOutcome, DiscoveryChannel, PairingSessionId, PairingSessionPort, SessionError,
 };
-use uc_core::ports::space::{DeriveProofKeyPort, ProofPort, SpaceAccessError};
+use uc_core::ports::space::{
+    DeriveAdmissionProofKeyPort, GroupAdmissionPort, ProofPort, SpaceAccessError,
+};
 use uc_core::ports::{DeviceIdentityPort, LocalIdentityPort, SettingsPort};
 use uc_core::security::IdentityFingerprint;
-use uc_core::space_access::JoinOffer;
+use uc_core::space_access::AdmissionOffer;
 
 use crate::facade::space_setup::RedeemPairingInvitationError;
 
@@ -94,7 +97,8 @@ pub(crate) struct JoinerHandshakeOutcome {
 
 pub(crate) struct JoinerHandshakeCoordinator {
     pairing_session: Arc<dyn PairingSessionPort>,
-    space_access: Arc<dyn DeriveProofKeyPort>,
+    space_access: Arc<dyn DeriveAdmissionProofKeyPort>,
+    group_admission: Arc<dyn GroupAdmissionPort>,
     proof_port: Arc<dyn ProofPort>,
     local_identity: Arc<dyn LocalIdentityPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
@@ -109,7 +113,8 @@ impl JoinerHandshakeCoordinator {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         pairing_session: Arc<dyn PairingSessionPort>,
-        space_access: Arc<dyn DeriveProofKeyPort>,
+        space_access: Arc<dyn DeriveAdmissionProofKeyPort>,
+        group_admission: Arc<dyn GroupAdmissionPort>,
         proof_port: Arc<dyn ProofPort>,
         local_identity: Arc<dyn LocalIdentityPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
@@ -119,6 +124,7 @@ impl JoinerHandshakeCoordinator {
         Arc::new(Self {
             pairing_session,
             space_access,
+            group_admission,
             proof_port,
             local_identity,
             device_identity,
@@ -204,6 +210,11 @@ impl JoinerHandshakeCoordinator {
             .await
             .unwrap_or_default();
         let transport_address_blob_len = transport_address_blob.len();
+        let pending_group_join = self
+            .group_admission
+            .prepare_group_join(&local_device_id)
+            .await
+            .map_err(map_space_access_err)?;
         let request = JoinerRequest {
             invitation_code: code.clone(),
             device_id: local_device_id,
@@ -214,6 +225,8 @@ impl JoinerHandshakeCoordinator {
             // binding 纳入 HMAC，再在这里填。
             nonce: Vec::new(),
             transport_address_blob,
+            security_capability: PairingSecurityCapability::ReliableGroupEpochV1,
+            key_package: pending_group_join.key_package.clone(),
         };
         self.pairing_session
             .send(session, PairingSessionMessage::Request(request))
@@ -228,7 +241,7 @@ impl JoinerHandshakeCoordinator {
 
         // ── 3. Await KeyslotOffer | Reject ───────────────────────────────
         let offer = match self.recv_with_ttl(session).await? {
-            PairingSessionMessage::KeyslotOffer(o) => o,
+            PairingSessionMessage::AdmissionOffer(o) => o,
             PairingSessionMessage::Reject(r) => {
                 warn!(
                     session = %session,
@@ -239,7 +252,7 @@ impl JoinerHandshakeCoordinator {
             }
             other => {
                 return Err(RedeemPairingInvitationError::Internal(format!(
-                    "expected KeyslotOffer, got {}",
+                    "expected AdmissionOffer, got {}",
                     variant_name(&other),
                 )));
             }
@@ -252,20 +265,23 @@ impl JoinerHandshakeCoordinator {
 
         // ── 4. Derive proof key (side effect: persists local keyslot) ───
         let challenge_nonce = challenge_to_array(&offer.challenge)?;
-        let join_offer = JoinOffer {
+        // Pairing session identifiers are local to each endpoint. The
+        // sponsor sends its identifier so both sides bind the proof to the
+        // same value; it is not expected to equal the joiner's dial handle.
+        let core_session = SessionId::new(offer.pairing_session_id.as_str().to_string());
+        let join_offer = AdmissionOffer {
             space_id: offer.space_id.clone(),
-            keyslot_blob: offer.keyslot_blob.clone(),
+            kdf_parameters_blob: offer.kdf_parameters_blob.clone(),
             challenge_nonce,
         };
         let derived_key = self
             .space_access
-            .derive_master_key_for_proof(&join_offer, passphrase)
+            .derive_admission_proof_key(&join_offer, passphrase, code, &core_session)
             .await
             .map_err(map_space_access_err)?;
         debug!(session = %session, "master key derived from sponsor offer");
 
         // ── 5. Build HMAC proof ──────────────────────────────────────────
-        let core_session = SessionId::new(offer.pairing_session_id.as_str().to_string());
         let proof = self
             .proof_port
             .build_proof(
@@ -307,6 +323,20 @@ impl JoinerHandshakeCoordinator {
                 )));
             }
         };
+        if confirm.space_id != join_offer.space_id {
+            return Err(RedeemPairingInvitationError::CorruptedKeyMaterial);
+        }
+        self.group_admission
+            .install_group_join(
+                &confirm.space_id,
+                passphrase,
+                pending_group_join,
+                &confirm.welcome,
+                &confirm.encrypted_key_catalog,
+                confirm.group_epoch,
+            )
+            .await
+            .map_err(map_space_access_err)?;
         info!(
             session = %session,
             sponsor_device_id = %confirm.sender_device_id.as_str(),
@@ -422,7 +452,7 @@ fn map_sponsor_reject(reason: PairingRejectReason) -> RedeemPairingInvitationErr
 fn variant_name(message: &PairingSessionMessage) -> &'static str {
     match message {
         PairingSessionMessage::Request(_) => "Request",
-        PairingSessionMessage::KeyslotOffer(_) => "KeyslotOffer",
+        PairingSessionMessage::AdmissionOffer(_) => "AdmissionOffer",
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
         PairingSessionMessage::Confirm(_) => "Confirm",
         PairingSessionMessage::Reject(_) => "Reject",
@@ -445,14 +475,19 @@ mod tests {
     use uc_core::crypto::domain::Passphrase;
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::pairing::session_message::{
-        JoinerChallengeResponse, JoinerRequest, PairingReject, SponsorConfirm, SponsorKeyslotOffer,
+        JoinerChallengeResponse, JoinerRequest, PairingReject, SponsorAdmissionOffer,
+        SponsorConfirm,
     };
     use uc_core::ports::pairing::{DialError, DialOutcome, DiscoveryChannel, SessionError};
-    use uc_core::ports::space::{DeriveProofKeyPort, SpaceAccessError};
+    use uc_core::ports::space::{
+        DeriveAdmissionProofKeyPort, GroupAdmissionPort, SpaceAccessError,
+    };
     use uc_core::ports::LocalIdentityError;
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
-    use uc_core::space_access::domain::{ProofDerivedKey, SpaceAccessProofArtifact};
+    use uc_core::space_access::domain::{
+        GroupAdmission, PreparedGroupJoin, ProofDerivedKey, SpaceAccessProofArtifact,
+    };
 
     // ── fakes ────────────────────────────────────────────────────────────
 
@@ -549,36 +584,65 @@ mod tests {
         }
     }
 
-    struct ScriptedSpaceAccess {
-        fail_next: StdMutex<Option<SpaceAccessError>>,
-        derived_key_bytes: [u8; 32],
+    mockall::mock! {
+        SpaceAccess {}
+
+        #[async_trait]
+        impl DeriveAdmissionProofKeyPort for SpaceAccess {
+            async fn derive_admission_proof_key(
+                &self,
+                offer: &AdmissionOffer,
+                passphrase: &Passphrase,
+                invitation: &InvitationCode,
+                pairing_session_id: &SessionId,
+            ) -> Result<ProofDerivedKey, SpaceAccessError>;
+        }
+
+        #[async_trait]
+        impl GroupAdmissionPort for SpaceAccess {
+            async fn prepare_group_join(
+                &self,
+                device_id: &DeviceId,
+            ) -> Result<PreparedGroupJoin, SpaceAccessError>;
+            async fn admit_group_member(
+                &self,
+                space_id: &SpaceId,
+                sponsor_device_id: &DeviceId,
+                joiner_device_id: &DeviceId,
+                existing_member_ids: &[DeviceId],
+                key_package: &[u8],
+            ) -> Result<GroupAdmission, SpaceAccessError>;
+            async fn install_group_join(
+                &self,
+                space_id: &SpaceId,
+                passphrase: &Passphrase,
+                pending: PreparedGroupJoin,
+                welcome: &[u8],
+                encrypted_key_catalog: &[u8],
+                group_epoch: u64,
+            ) -> Result<(), SpaceAccessError>;
+        }
     }
-    impl ScriptedSpaceAccess {
-        fn ok() -> Self {
-            Self {
-                fail_next: StdMutex::new(None),
-                derived_key_bytes: [0xCC; 32],
-            }
-        }
-        fn with_err(err: SpaceAccessError) -> Self {
-            Self {
-                fail_next: StdMutex::new(Some(err)),
-                derived_key_bytes: [0xCC; 32],
-            }
-        }
+
+    fn space_access() -> Arc<MockSpaceAccess> {
+        let mut mock = MockSpaceAccess::new();
+        mock.expect_prepare_group_join()
+            .returning(|_| Ok(PreparedGroupJoin::new(vec![1, 2, 3], vec![4, 5, 6])));
+        mock.expect_derive_admission_proof_key()
+            .returning(|_, _, _, _| Ok(ProofDerivedKey::from_bytes([0xCC; 32])));
+        mock.expect_install_group_join()
+            .returning(|_, _, _, _, _, _| Ok(()));
+        Arc::new(mock)
     }
-    #[async_trait]
-    impl DeriveProofKeyPort for ScriptedSpaceAccess {
-        async fn derive_master_key_for_proof(
-            &self,
-            _: &JoinOffer,
-            _: &Passphrase,
-        ) -> Result<ProofDerivedKey, SpaceAccessError> {
-            if let Some(err) = self.fail_next.lock().unwrap().take() {
-                return Err(err);
-            }
-            Ok(ProofDerivedKey::from_bytes(self.derived_key_bytes))
-        }
+
+    fn space_access_with_derivation_error(err: SpaceAccessError) -> Arc<MockSpaceAccess> {
+        let mut mock = MockSpaceAccess::new();
+        mock.expect_prepare_group_join()
+            .returning(|_| Ok(PreparedGroupJoin::new(vec![1, 2, 3], vec![4, 5, 6])));
+        mock.expect_derive_admission_proof_key()
+            .times(1)
+            .return_once(move |_, _, _, _| Err(err));
+        Arc::new(mock)
     }
 
     struct FixedProof(Vec<u8>);
@@ -662,10 +726,10 @@ mod tests {
     fn joiner_fp() -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string("AAAAAAAAAAAAAAAA").unwrap()
     }
-    fn keyslot_offer() -> SponsorKeyslotOffer {
-        SponsorKeyslotOffer {
+    fn keyslot_offer() -> SponsorAdmissionOffer {
+        SponsorAdmissionOffer {
             space_id: SpaceId::from_str("space-xyz"),
-            keyslot_blob: vec![0xAA; 16],
+            kdf_parameters_blob: vec![0xAA; 16],
             challenge: vec![0x42; 32],
             pairing_session_id: PairingSessionId::new("session-1"),
         }
@@ -680,20 +744,23 @@ mod tests {
             // Phase 098 默认 None：fixture 共享给多场景测试，绝大多数测试不
             // 关心 person 字段；想验证 Some 路径的测试就近构造一个新 confirm。
             sponsor_space_person_id: None,
+            welcome: vec![1],
+            encrypted_key_catalog: vec![2],
+            group_epoch: 2,
         }
     }
 
     struct Bundle {
         session: Arc<ScriptedSession>,
-        space_access: Arc<ScriptedSpaceAccess>,
+        space_access: Arc<MockSpaceAccess>,
         settings: Arc<StubSettings>,
     }
 
     impl Bundle {
         fn happy() -> Self {
             Self {
-                session: Arc::new(ScriptedSession::with_dial_ok("session-1")),
-                space_access: Arc::new(ScriptedSpaceAccess::ok()),
+                session: Arc::new(ScriptedSession::with_dial_ok("joiner-session")),
+                space_access: space_access(),
                 settings: Arc::new(StubSettings::named("joiner-laptop")),
             }
         }
@@ -706,6 +773,7 @@ mod tests {
         fn build(&self) -> Arc<JoinerHandshakeCoordinator> {
             JoinerHandshakeCoordinator::new(
                 self.session.clone(),
+                self.space_access.clone(),
                 self.space_access.clone(),
                 Arc::new(FixedProof(vec![0xFE; 32])),
                 Arc::new(FixedLocal(joiner_fp())),
@@ -729,7 +797,7 @@ mod tests {
     async fn happy_path_outcome_and_wire_sequence() {
         let b = Bundle::happy();
         b.session
-            .push_recv(RecvStep::Msg(PairingSessionMessage::KeyslotOffer(
+            .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
                 keyslot_offer(),
             )));
         b.session
@@ -856,7 +924,7 @@ mod tests {
     async fn sponsor_reject_passphrase_mismatch_after_challenge() {
         let b = Bundle::happy();
         b.session
-            .push_recv(RecvStep::Msg(PairingSessionMessage::KeyslotOffer(
+            .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
                 keyslot_offer(),
             )));
         b.session
@@ -948,7 +1016,7 @@ mod tests {
     async fn ttl_fires_on_second_recv_when_sponsor_silent_after_offer() {
         let b = Bundle::happy();
         b.session
-            .push_recv(RecvStep::Msg(PairingSessionMessage::KeyslotOffer(
+            .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
                 keyslot_offer(),
             )));
         b.session.push_recv(RecvStep::Hang);
@@ -968,11 +1036,9 @@ mod tests {
     #[tokio::test]
     async fn local_wrong_passphrase_maps_to_passphrase_mismatch() {
         let mut b = Bundle::happy();
-        b.space_access = Arc::new(ScriptedSpaceAccess::with_err(
-            SpaceAccessError::WrongPassphrase,
-        ));
+        b.space_access = space_access_with_derivation_error(SpaceAccessError::WrongPassphrase);
         b.session
-            .push_recv(RecvStep::Msg(PairingSessionMessage::KeyslotOffer(
+            .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
                 keyslot_offer(),
             )));
         let err = b
@@ -991,11 +1057,9 @@ mod tests {
     #[tokio::test]
     async fn local_corrupted_keyslot_maps_to_corrupted() {
         let mut b = Bundle::happy();
-        b.space_access = Arc::new(ScriptedSpaceAccess::with_err(
-            SpaceAccessError::CorruptedKeyMaterial,
-        ));
+        b.space_access = space_access_with_derivation_error(SpaceAccessError::CorruptedKeyMaterial);
         b.session
-            .push_recv(RecvStep::Msg(PairingSessionMessage::KeyslotOffer(
+            .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
                 keyslot_offer(),
             )));
         let err = b
@@ -1049,7 +1113,7 @@ mod tests {
             .unwrap_err();
         match err {
             RedeemPairingInvitationError::Internal(m) => {
-                assert!(m.contains("expected KeyslotOffer"), "msg = {m}")
+                assert!(m.contains("expected AdmissionOffer"), "msg = {m}")
             }
             other => panic!("expected Internal, got {other:?}"),
         }
@@ -1059,7 +1123,7 @@ mod tests {
     async fn unexpected_second_frame_surfaces_internal() {
         let b = Bundle::happy();
         b.session
-            .push_recv(RecvStep::Msg(PairingSessionMessage::KeyslotOffer(
+            .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
                 keyslot_offer(),
             )));
         b.session
@@ -1071,6 +1135,8 @@ mod tests {
                     identity_fingerprint: joiner_fp(),
                     nonce: vec![],
                     transport_address_blob: vec![],
+                    security_capability: PairingSecurityCapability::ReliableGroupEpochV1,
+                    key_package: vec![1, 2, 3],
                 },
             )));
         let err = b

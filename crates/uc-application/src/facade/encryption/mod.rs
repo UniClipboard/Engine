@@ -117,12 +117,14 @@ impl EncryptionFacade {
 
     #[instrument(skip_all)]
     pub async fn unlock(&self) -> Result<bool, EncryptionFacadeError> {
-        match self
+        let status = self
             .deps
-            .resume_session
-            .try_resume_session(&default_space_id())
+            .setup_status
+            .get_status()
             .await
-        {
+            .map_err(|err| EncryptionFacadeError::SetupStatus(err.to_string()))?;
+        let space_id = status.space_id.unwrap_or_else(default_space_id);
+        match self.deps.resume_session.try_resume_session(&space_id).await {
             Ok(Some(_)) => {
                 self.deps
                     .mobile_consumable_backfill
@@ -198,6 +200,7 @@ mod tests {
         lock_calls: Mutex<u32>,
         init_already_initialized: Mutex<bool>,
         init_calls: Mutex<u32>,
+        resume_space_ids: Mutex<Vec<SpaceId>>,
     }
 
     #[async_trait]
@@ -237,6 +240,10 @@ mod tests {
             &self,
             space_id: &SpaceId,
         ) -> Result<Option<ActiveSpace>, SpaceAccessError> {
+            self.resume_space_ids
+                .lock()
+                .expect("resume space ids lock")
+                .push(space_id.clone());
             if *self.resume_returns_session.lock().expect("resume lock") {
                 *self.unlocked.lock().expect("unlocked lock") = true;
                 Ok(Some(ActiveSpace::new(space_id.clone())))
@@ -268,7 +275,10 @@ mod tests {
             .status
             .lock()
             .expect("status lock")
-            .has_completed = completed;
+            .clone_from(&SetupStatus {
+                has_completed: completed,
+                space_id: completed.then(|| SpaceId::from("canonical-space")),
+            });
         let space_access = Arc::new(FakeSpaceAccess::default());
         *space_access.unlocked.lock().expect("unlocked lock") = unlocked;
         *space_access
@@ -332,6 +342,20 @@ mod tests {
         assert!(!not_resumed.unlock().await.expect("not resumed"));
         assert_eq!(resumed_backfill.calls(), 1);
         assert_eq!(not_resumed_backfill.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn unlock_resumes_the_canonical_setup_space() {
+        let (facade, space_access, _) = facade_with(true, false, true, false);
+
+        assert!(facade.unlock().await.expect("resume canonical space"));
+        assert_eq!(
+            *space_access
+                .resume_space_ids
+                .lock()
+                .expect("resume space ids lock"),
+            vec![SpaceId::from("canonical-space")]
+        );
     }
 
     #[tokio::test]

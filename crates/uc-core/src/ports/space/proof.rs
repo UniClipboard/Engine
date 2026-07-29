@@ -21,4 +21,15 @@ pub trait ProofPort: Send + Sync {
         proof: &SpaceAccessProofArtifact,
         expected_nonce: [u8; 32],
     ) -> anyhow::Result<bool>;
+
+    /// Verify against the one-shot credential prepared for this exact
+    /// invitation transcript. Stable pairing flows must use this method.
+    async fn verify_proof_with_key(
+        &self,
+        proof: &SpaceAccessProofArtifact,
+        expected_nonce: [u8; 32],
+        _verification_key: &ProofDerivedKey,
+    ) -> anyhow::Result<bool> {
+        self.verify_proof(proof, expected_nonce).await
+    }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "openmls-validation"
+version.workspace = true
+license.workspace = true
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+openmls = { version = "=0.8.1", features = ["fork-resolution"] }
+openmls_basic_credential = "=0.5.0"
+openmls_memory_storage = { version = "=0.5.0", features = ["test-utils"] }
+openmls_rust_crypto = "=0.5.1"
+openmls_traits = "=0.5.0"
+
+[lints]
+workspace = true

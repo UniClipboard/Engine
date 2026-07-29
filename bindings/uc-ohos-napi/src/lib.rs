@@ -69,6 +69,13 @@ pub struct OhLocalDevice {
 }
 
 #[napi(object)]
+pub struct OhMemberRevocation {
+    pub revocation_id: Option<String>,
+    pub outcome: String,
+    pub pending_recipients: u32,
+}
+
+#[napi(object)]
 pub struct OhActiveClipboard {
     pub entry_id: String,
     pub activated_by: String,

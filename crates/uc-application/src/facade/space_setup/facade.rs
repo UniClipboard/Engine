@@ -26,6 +26,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
 
 use uc_core::ids::{DeviceId, SpaceId};
+use uc_core::membership::{GroupRevocationPort, GroupUpdateDispatchPort};
 use uc_core::ports::space::{FactoryResetSpacePort, ResumeSpaceSessionPort, SpaceAccessError};
 use uc_core::ports::{
     PeerAddressRepositoryPort, PresenceError, PresencePort, ReachabilityState, SettingsPort,
@@ -54,6 +55,7 @@ use crate::facade::space_setup::errors::{
     InitializeSpaceError, IssuePairingInvitationError, TryResumeSessionError, UnlockSpaceError,
 };
 use crate::facade::space_setup::events::PairingOutcome;
+use crate::group_update_delivery::{GroupUpdateDelivery, GroupUpdateDeliveryPort};
 use crate::membership::usecases::AdmitMemberUseCase;
 use crate::pairing_inbound::orchestrator::PairingInboundOrchestrator;
 use crate::pairing_inbound::sponsor_handshake::SponsorHandshakeCoordinator;
@@ -144,6 +146,23 @@ impl SpaceSetupFacade {
     /// Wire all use cases from a single [`SpaceSetupDeps`] bundle and
     /// spawn the sponsor-side inbound pairing orchestrator.
     pub fn new(deps: SpaceSetupDeps) -> Self {
+        Self::new_internal(deps, None)
+    }
+
+    pub fn new_with_group_delivery(
+        deps: SpaceSetupDeps,
+        outbox: Arc<dyn GroupRevocationPort>,
+        dispatch: Arc<dyn GroupUpdateDispatchPort>,
+    ) -> Self {
+        let delivery: Arc<dyn GroupUpdateDeliveryPort> =
+            Arc::new(GroupUpdateDelivery::new(outbox, dispatch));
+        Self::new_internal(deps, Some(delivery))
+    }
+
+    fn new_internal(
+        deps: SpaceSetupDeps,
+        group_update_delivery: Option<Arc<dyn GroupUpdateDeliveryPort>>,
+    ) -> Self {
         let SpaceSetupDeps {
             space_access,
             local_identity,
@@ -252,7 +271,10 @@ impl SpaceSetupFacade {
 
         let sponsor_handshake = SponsorHandshakeCoordinator::new(
             Arc::clone(&pairing_session),
-            Arc::clone(&space_access.prepare_join_offer),
+            Arc::clone(&space_access.prepare_admission_offer),
+            Arc::clone(&space_access.group_admission),
+            group_update_delivery,
+            Arc::clone(&member_repo),
             Arc::clone(&proof_port),
             Arc::clone(&local_identity),
             Arc::clone(&device_identity),
@@ -286,7 +308,8 @@ impl SpaceSetupFacade {
         // case composes it with admit/trust/setup-status.
         let joiner_handshake = JoinerHandshakeCoordinator::new(
             pairing_session,
-            Arc::clone(&space_access.derive_proof_key),
+            Arc::clone(&space_access.derive_admission_proof_key),
+            Arc::clone(&space_access.group_admission),
             proof_port,
             local_identity,
             device_identity,
@@ -395,10 +418,10 @@ impl SpaceSetupFacade {
             return Ok(false);
         }
 
-        // The adapter keys off the current profile, so the `SpaceId`
-        // passed here is an opaque handle rather than a lookup key.
-        // Minting a fresh UUID matches how A2 `unlock` does it.
-        let space_id = SpaceId::new();
+        let space_id = status
+            .space_id
+            .clone()
+            .unwrap_or_else(|| SpaceId::from("space"));
         let resumed = match self.resume_session.try_resume_session(&space_id).await {
             Ok(Some(_)) => true,
             // Keyslot missing despite has_completed == true — treat
@@ -903,10 +926,10 @@ mod tests {
         PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
     };
     use uc_core::ports::space::{
-        CurrentSessionProofKeyPort, DeriveProofKeyPort, DeriveSpaceSubkeyPort,
-        FactoryResetSpacePort, InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort,
-        PrepareJoinOfferPort, ProofPort, ResumeSpaceSessionPort, SpaceAccessError, UnlockSpacePort,
-        VerifyKeychainAccessPort,
+        DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, FactoryResetSpacePort,
+        GroupAdmissionPort, InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort,
+        PrepareAdmissionOfferPort, ProofPort, ResumeSpaceSessionPort, SpaceAccessError,
+        UnlockSpacePort, VerifyKeychainAccessPort,
     };
     use uc_core::ports::{
         ClockPort, DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort,
@@ -917,116 +940,198 @@ mod tests {
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
     use uc_core::setup::SetupStatus;
-    use uc_core::space_access::{JoinOffer, ProofDerivedKey, SpaceAccessProofArtifact};
+    use uc_core::space_access::{
+        AdmissionOffer, GroupAdmission, PreparedAdmissionOffer, PreparedGroupJoin, ProofDerivedKey,
+        SpaceAccessProofArtifact,
+    };
     use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError, TrustedPeerRepositoryPort};
     use uc_core::SessionId;
 
-    // ── fakes (minimal) ──────────────────────────────────────────────────
+    // ── mock ports ───────────────────────────────────────────────────────
 
-    #[derive(Default)]
-    struct FakeSpaceAccess {
-        unlock_err: StdMutex<Option<SpaceAccessError>>,
-        factory_reset_calls: StdMutex<u32>,
-        factory_reset_err: StdMutex<Option<SpaceAccessError>>,
+    mockall::mock! {
+        SpaceAccess {}
+
+        #[async_trait]
+        impl InitializeSpacePort for SpaceAccess {
+            async fn initialize(
+                &self,
+                space_id: &SpaceId,
+                passphrase: &Passphrase,
+            ) -> Result<ActiveSpace, SpaceAccessError>;
+        }
+        #[async_trait]
+        impl UnlockSpacePort for SpaceAccess {
+            async fn unlock(
+                &self,
+                space_id: &SpaceId,
+                passphrase: &Passphrase,
+            ) -> Result<ActiveSpace, SpaceAccessError>;
+        }
+        #[async_trait]
+        impl IsSpaceUnlockedPort for SpaceAccess {
+            async fn is_unlocked(&self, space_id: &SpaceId) -> bool;
+        }
+        #[async_trait]
+        impl LockSpacePort for SpaceAccess {
+            async fn lock(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError>;
+        }
+        #[async_trait]
+        impl FactoryResetSpacePort for SpaceAccess {
+            async fn factory_reset(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError>;
+        }
+        #[async_trait]
+        impl ResumeSpaceSessionPort for SpaceAccess {
+            async fn try_resume_session(
+                &self,
+                space_id: &SpaceId,
+            ) -> Result<Option<ActiveSpace>, SpaceAccessError>;
+        }
+        #[async_trait]
+        impl VerifyKeychainAccessPort for SpaceAccess {
+            async fn verify_keychain_access(&self) -> Result<bool, SpaceAccessError>;
+        }
+        #[async_trait]
+        impl DeriveSpaceSubkeyPort for SpaceAccess {
+            async fn derive_subkey(
+                &self,
+                salt: &[u8],
+                info: &[u8],
+            ) -> Result<[u8; 32], SpaceAccessError>;
+        }
+        #[async_trait]
+        impl PrepareAdmissionOfferPort for SpaceAccess {
+            async fn prepare_admission_offer(
+                &self,
+                space_id: &SpaceId,
+                invitation: &InvitationCode,
+                pairing_session_id: &SessionId,
+            ) -> Result<PreparedAdmissionOffer, SpaceAccessError>;
+        }
+        #[async_trait]
+        impl DeriveAdmissionProofKeyPort for SpaceAccess {
+            async fn derive_admission_proof_key(
+                &self,
+                offer: &AdmissionOffer,
+                passphrase: &Passphrase,
+                invitation: &InvitationCode,
+                pairing_session_id: &SessionId,
+            ) -> Result<ProofDerivedKey, SpaceAccessError>;
+        }
+        #[async_trait]
+        impl GroupAdmissionPort for SpaceAccess {
+            async fn prepare_group_join(
+                &self,
+                device_id: &DeviceId,
+            ) -> Result<PreparedGroupJoin, SpaceAccessError>;
+            async fn admit_group_member(
+                &self,
+                space_id: &SpaceId,
+                sponsor_device_id: &DeviceId,
+                joiner_device_id: &DeviceId,
+                existing_member_ids: &[DeviceId],
+                key_package: &[u8],
+            ) -> Result<GroupAdmission, SpaceAccessError>;
+            async fn install_group_join(
+                &self,
+                space_id: &SpaceId,
+                passphrase: &Passphrase,
+                pending: PreparedGroupJoin,
+                welcome: &[u8],
+                encrypted_key_catalog: &[u8],
+                group_epoch: u64,
+            ) -> Result<(), SpaceAccessError>;
+        }
+        #[async_trait]
+        impl uc_core::membership::GroupRevocationPort for SpaceAccess {
+            async fn revoke_group_member(
+                &self,
+                target: &DeviceId,
+                retained_recipients: &[DeviceId],
+                now_ms: i64,
+            ) -> Result<uc_core::membership::GroupRevocationResult, uc_core::membership::KeyEpochError>;
+            async fn acknowledge_group_update(
+                &self,
+                revocation_id: &uc_core::membership::RevocationId,
+                recipient: &DeviceId,
+                now_ms: i64,
+            ) -> Result<uc_core::membership::GroupRevocationResult, uc_core::membership::KeyEpochError>;
+            async fn apply_group_epoch_update(
+                &self,
+                payload: &[u8],
+            ) -> Result<uc_core::membership::GroupEpoch, uc_core::membership::KeyEpochError>;
+            async fn pending_group_updates(
+                &self,
+                revocation_id: &uc_core::membership::RevocationId,
+            ) -> Result<Vec<uc_core::membership::PendingGroupUpdate>, uc_core::membership::KeyEpochError>;
+            async fn query_group_revocation(
+                &self,
+                revocation_id: &uc_core::membership::RevocationId,
+            ) -> Result<Option<uc_core::membership::GroupRevocationResult>, uc_core::membership::KeyEpochError>;
+            async fn resume_group_revocations(
+                &self,
+                now_ms: i64,
+            ) -> Result<Vec<uc_core::membership::GroupRevocationResult>, uc_core::membership::KeyEpochError>;
+            async fn pending_space_group_updates(
+                &self,
+            ) -> Result<Vec<uc_core::membership::PendingGroupUpdate>, uc_core::membership::KeyEpochError>;
+            async fn acknowledge_space_group_update(
+                &self,
+                update_id: &str,
+                now_ms: i64,
+            ) -> Result<bool, uc_core::membership::KeyEpochError>;
+        }
     }
 
-    #[async_trait]
-    impl InitializeSpacePort for FakeSpaceAccess {
-        async fn initialize(
-            &self,
-            space_id: &SpaceId,
-            _passphrase: &Passphrase,
-        ) -> Result<ActiveSpace, SpaceAccessError> {
-            Ok(ActiveSpace::new(space_id.clone()))
-        }
-    }
-    #[async_trait]
-    impl UnlockSpacePort for FakeSpaceAccess {
-        async fn unlock(
-            &self,
-            space_id: &SpaceId,
-            _passphrase: &Passphrase,
-        ) -> Result<ActiveSpace, SpaceAccessError> {
-            if let Some(err) = self.unlock_err.lock().unwrap().take() {
-                return Err(err);
+    fn configured_space_access(
+        unlock_error: Option<SpaceAccessError>,
+        factory_reset_result: Option<Result<(), SpaceAccessError>>,
+        expected_resume_space: Option<SpaceId>,
+    ) -> Arc<MockSpaceAccess> {
+        let mut mock = MockSpaceAccess::new();
+        mock.expect_initialize()
+            .returning(|space_id, _| Ok(ActiveSpace::new(space_id.clone())));
+        match unlock_error {
+            Some(error) => {
+                mock.expect_unlock()
+                    .times(1)
+                    .return_once(move |_, _| Err(error));
             }
-            Ok(ActiveSpace::new(space_id.clone()))
-        }
-    }
-    #[async_trait]
-    impl IsSpaceUnlockedPort for FakeSpaceAccess {
-        async fn is_unlocked(&self, _space_id: &SpaceId) -> bool {
-            true
-        }
-    }
-    #[async_trait]
-    impl LockSpacePort for FakeSpaceAccess {
-        async fn lock(&self, _space_id: &SpaceId) -> Result<(), SpaceAccessError> {
-            Ok(())
-        }
-    }
-    #[async_trait]
-    impl FactoryResetSpacePort for FakeSpaceAccess {
-        async fn factory_reset(&self, _space_id: &SpaceId) -> Result<(), SpaceAccessError> {
-            *self.factory_reset_calls.lock().unwrap() += 1;
-            if let Some(err) = self.factory_reset_err.lock().unwrap().take() {
-                return Err(err);
+            None => {
+                mock.expect_unlock()
+                    .returning(|space_id, _| Ok(ActiveSpace::new(space_id.clone())));
             }
-            Ok(())
         }
+        mock.expect_is_unlocked().returning(|_| true);
+        mock.expect_lock().returning(|_| Ok(()));
+        match factory_reset_result {
+            Some(result) => {
+                mock.expect_factory_reset()
+                    .times(1)
+                    .return_once(move |_| result);
+            }
+            None => {
+                mock.expect_factory_reset().returning(|_| Ok(()));
+            }
+        }
+        match expected_resume_space {
+            Some(expected) => {
+                mock.expect_try_resume_session()
+                    .withf(move |space_id| space_id == &expected)
+                    .times(1)
+                    .returning(|_| Ok(None));
+            }
+            None => {
+                mock.expect_try_resume_session().returning(|_| Ok(None));
+            }
+        }
+        mock.expect_verify_keychain_access().returning(|| Ok(true));
+        mock.expect_derive_subkey().returning(|_, _| Ok([0; 32]));
+        Arc::new(mock)
     }
-    #[async_trait]
-    impl ResumeSpaceSessionPort for FakeSpaceAccess {
-        async fn try_resume_session(
-            &self,
-            _space_id: &SpaceId,
-        ) -> Result<Option<ActiveSpace>, SpaceAccessError> {
-            Ok(None)
-        }
-    }
-    #[async_trait]
-    impl VerifyKeychainAccessPort for FakeSpaceAccess {
-        async fn verify_keychain_access(&self) -> Result<bool, SpaceAccessError> {
-            Ok(true)
-        }
-    }
-    #[async_trait]
-    impl DeriveSpaceSubkeyPort for FakeSpaceAccess {
-        async fn derive_subkey(
-            &self,
-            _salt: &[u8],
-            _info: &[u8],
-        ) -> Result<[u8; 32], SpaceAccessError> {
-            Ok([0; 32])
-        }
-    }
-    #[async_trait]
-    impl CurrentSessionProofKeyPort for FakeSpaceAccess {
-        async fn current_session_proof_key(
-            &self,
-        ) -> Result<Option<ProofDerivedKey>, SpaceAccessError> {
-            Ok(None)
-        }
-    }
-    #[async_trait]
-    impl PrepareJoinOfferPort for FakeSpaceAccess {
-        async fn prepare_join_offer(
-            &self,
-            _space_id: &SpaceId,
-            _passphrase: &Passphrase,
-        ) -> Result<JoinOffer, SpaceAccessError> {
-            unimplemented!("not used by A1/A2")
-        }
-    }
-    #[async_trait]
-    impl DeriveProofKeyPort for FakeSpaceAccess {
-        async fn derive_master_key_for_proof(
-            &self,
-            _offer: &JoinOffer,
-            _passphrase: &Passphrase,
-        ) -> Result<ProofDerivedKey, SpaceAccessError> {
-            unimplemented!("not used by A1/A2")
-        }
+
+    fn space_access() -> Arc<MockSpaceAccess> {
+        configured_space_access(None, None, None)
     }
 
     struct FakeLocalIdentity {
@@ -1518,7 +1623,7 @@ mod tests {
     use crate::test_support::{CountingMobileConsumableBackfill, NoopMobileConsumableBackfill};
 
     fn make_facade(
-        space_access: Arc<FakeSpaceAccess>,
+        space_access: Arc<MockSpaceAccess>,
         setup_status: Arc<dyn SetupStatusPort>,
         settings: Arc<dyn SettingsPort>,
     ) -> (
@@ -1536,7 +1641,7 @@ mod tests {
     }
 
     fn make_facade_with_migration_state(
-        space_access: Arc<FakeSpaceAccess>,
+        space_access: Arc<MockSpaceAccess>,
         setup_status: Arc<dyn SetupStatusPort>,
         settings: Arc<dyn SettingsPort>,
         migration_state: Arc<FakeMigrationState>,
@@ -1555,7 +1660,7 @@ mod tests {
     }
 
     fn make_facade_with(
-        space_access: Arc<FakeSpaceAccess>,
+        space_access: Arc<MockSpaceAccess>,
         setup_status: Arc<dyn SetupStatusPort>,
         settings: Arc<dyn SettingsPort>,
         migration_state: Arc<FakeMigrationState>,
@@ -1613,7 +1718,7 @@ mod tests {
     #[tokio::test]
     async fn initialize_space_forwards_happy_path() {
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             settings_with_device_name("mac"),
         );
@@ -1629,7 +1734,7 @@ mod tests {
     #[tokio::test]
     async fn initialize_space_forwards_passphrase_mismatch() {
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             settings_with_device_name("mac"),
         );
@@ -1651,7 +1756,7 @@ mod tests {
         };
         let backfill = Arc::new(CountingMobileConsumableBackfill::default());
         let (facade, _inv, _peer) = make_facade_with(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(setup_status),
             Arc::new(InMemorySettings::default()),
             Arc::new(FakeMigrationState::default()),
@@ -1667,7 +1772,7 @@ mod tests {
     #[tokio::test]
     async fn unlock_space_forwards_setup_not_completed() {
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -1685,10 +1790,10 @@ mod tests {
             has_completed: true,
             space_id: None,
         };
-        let space_access = FakeSpaceAccess::default();
-        *space_access.unlock_err.lock().unwrap() = Some(SpaceAccessError::WrongPassphrase);
+        let space_access =
+            configured_space_access(Some(SpaceAccessError::WrongPassphrase), None, None);
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(space_access),
+            space_access,
             Arc::new(setup_status),
             Arc::new(InMemorySettings::default()),
         );
@@ -1719,7 +1824,7 @@ mod tests {
             },
         ));
         let (facade, _inv, _peer) = make_facade_with_migration_state(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(setup_status),
             Arc::new(InMemorySettings::default()),
             Arc::clone(&migration_state),
@@ -1752,7 +1857,7 @@ mod tests {
         };
         let migration_state = Arc::new(FakeMigrationState::with_get_failure());
         let (facade, _inv, _peer) = make_facade_with_migration_state(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(setup_status),
             Arc::new(InMemorySettings::default()),
             migration_state,
@@ -1778,7 +1883,7 @@ mod tests {
         // 这里只确认 abort 入站 orchestrator 后 facade 能正常清理,不 panic、
         // 不阻塞。
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -1796,7 +1901,7 @@ mod tests {
     #[tokio::test]
     async fn f1_hook_initialize_space_success_triggers_ensure_reachable_all() {
         let (facade, _inv, peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             settings_with_device_name("mac"),
         );
@@ -1821,7 +1926,7 @@ mod tests {
             space_id: None,
         };
         let (facade, _inv, peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(setup_status),
             Arc::new(InMemorySettings::default()),
         );
@@ -1841,7 +1946,7 @@ mod tests {
         // A1 失败(passphrase mismatch)→ 不跑 ensure_reachable_all。
         // 验证 guard 顺序正确(失败短路在 prime 之前)。
         let (facade, _inv, peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             settings_with_device_name("mac"),
         );
@@ -1859,7 +1964,7 @@ mod tests {
     #[tokio::test]
     async fn issue_pairing_invitation_forwards_happy_path() {
         let (facade, inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -1871,7 +1976,7 @@ mod tests {
     #[tokio::test]
     async fn issue_pairing_invitation_forwards_network_not_started() {
         let (facade, inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -1888,7 +1993,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_invitation_returns_not_issued_when_holder_empty() {
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -1899,7 +2004,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_invitation_clears_pending_after_issue() {
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -1917,7 +2022,7 @@ mod tests {
             space_id: None,
         };
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(setup_status),
             Arc::new(InMemorySettings::default()),
         );
@@ -1939,7 +2044,7 @@ mod tests {
             has_completed: true,
             space_id: None,
         };
-        let space_access = Arc::new(FakeSpaceAccess::default());
+        let space_access = configured_space_access(None, Some(Ok(())), None);
         let (facade, _inv, _peer) = make_facade(
             space_access.clone(),
             Arc::new(setup_status),
@@ -1950,7 +2055,6 @@ mod tests {
 
         facade.factory_reset().await.expect("factory_reset ok");
 
-        assert_eq!(*space_access.factory_reset_calls.lock().unwrap(), 1);
         assert_eq!(facade.invitation_holder.len().await, 0);
         let view = facade.query_setup_state().await.expect("query ok");
         assert!(!view.has_completed);
@@ -1965,9 +2069,11 @@ mod tests {
             has_completed: true,
             space_id: None,
         };
-        let space_access = Arc::new(FakeSpaceAccess::default());
-        *space_access.factory_reset_err.lock().unwrap() =
-            Some(SpaceAccessError::Internal("disk i/o".to_string()));
+        let space_access = configured_space_access(
+            None,
+            Some(Err(SpaceAccessError::Internal("disk i/o".to_string()))),
+            None,
+        );
         let (facade, _inv, _peer) = make_facade(
             space_access.clone(),
             Arc::new(setup_status),
@@ -1987,7 +2093,7 @@ mod tests {
     #[tokio::test]
     async fn query_setup_state_reports_fresh_install_defaults() {
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -2005,7 +2111,7 @@ mod tests {
             space_id: Some(SpaceId::from("space-restore")),
         };
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(setup_status),
             settings_with_device_name("MacBook"),
         );
@@ -2022,7 +2128,7 @@ mod tests {
     #[tokio::test]
     async fn query_setup_state_surfaces_pending_invitation_after_issue() {
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -2043,7 +2149,7 @@ mod tests {
         // B1 不是 space-lifecycle 动作,不应触发 auto_prime_presence
         // (presence 缓存只该被 A1 / A2 / B2 触动,B1 出码不涉及与对端互联)。
         let (facade, _inv, peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -2062,14 +2168,14 @@ mod tests {
     // * pre-flight 把"设备未 setup"映射成 `NotSetup`。
     // * `query_migration_progress` 在空闲状态（FakeMigrationState 全返
     //   None）下返回 `phase=None, count=0`。
-    // * `try_resume_session` 在 has_completed=true + FakeSpaceAccess 返回
+    // * `try_resume_session` 在 has_completed=true + mock 返回
     //   `Some(active_space)` 时走通 `resume_pending`（None phase 是 noop，
     //   不会拉错路径）。
 
     #[tokio::test]
     async fn switch_space_rejects_when_setup_not_completed() {
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()), // has_completed=false
             Arc::new(InMemorySettings::default()),
         );
@@ -2086,7 +2192,7 @@ mod tests {
     #[tokio::test]
     async fn query_migration_progress_idle_returns_phase_none_and_zero_count() {
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(InMemorySetupStatus::default()),
             Arc::new(InMemorySettings::default()),
         );
@@ -2097,7 +2203,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_resume_session_resumes_silent_unlock_and_runs_migration_hook() {
-        // FakeSpaceAccess::try_resume_session 默认返回 Ok(None)，模拟没有
+        // helper 默认返回 Ok(None)，模拟没有
         // keyslot 的场景——`try_resume_session` 应返回 Ok(false)，且
         // resume_pending 因为 FakeMigrationState 返回 None 也是 noop。
         // 这里覆盖的是"两个 hook 都不 panic + 错误不被吞"。
@@ -2107,12 +2213,30 @@ mod tests {
             space_id: None,
         };
         let (facade, _inv, _peer) = make_facade(
-            Arc::new(FakeSpaceAccess::default()),
+            space_access(),
             Arc::new(setup_status),
             Arc::new(InMemorySettings::default()),
         );
         let resumed = facade.try_resume_session().await.expect("resume ok");
-        // FakeSpaceAccess.try_resume_session 默认 Ok(None) → "nothing to resume"
+        // helper 默认 Ok(None) → "nothing to resume"
         assert!(!resumed);
+    }
+
+    #[tokio::test]
+    async fn try_resume_session_uses_the_canonical_setup_space() {
+        let setup_status = InMemorySetupStatus::default();
+        *setup_status.status.lock().unwrap() = SetupStatus {
+            has_completed: true,
+            space_id: Some(SpaceId::from("canonical-space")),
+        };
+        let space_access =
+            configured_space_access(None, None, Some(SpaceId::from("canonical-space")));
+        let (facade, _inv, _peer) = make_facade(
+            space_access.clone(),
+            Arc::new(setup_status),
+            Arc::new(InMemorySettings::default()),
+        );
+
+        assert!(!facade.try_resume_session().await.expect("resume check"));
     }
 }
