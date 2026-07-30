@@ -1,4 +1,5 @@
 mod admission;
+mod bootstrap;
 mod error;
 mod member;
 mod ports;
@@ -6,6 +7,10 @@ mod preferences;
 mod revocation;
 
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
+pub use bootstrap::{
+    BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult, LegacyBootstrapRecord,
+    LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
+};
 pub use error::MembershipError;
 pub use member::SpaceMember;
 pub use ports::{
