@@ -23,15 +23,21 @@ pub(super) fn build_space_access_ports(
     session: &Arc<InMemorySession>,
     db_executor: &Arc<DieselSqliteExecutor>,
 ) -> SpaceAccessPorts {
-    let key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
-        DieselRevocationRepository::new(db_executor.clone(), session.as_ref().clone()),
-    );
+    let security_repository = Arc::new(DieselRevocationRepository::new(
+        db_executor.clone(),
+        session.as_ref().clone(),
+    ));
+    let key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> =
+        security_repository.clone();
+    let legacy_bootstrap_repository: Arc<dyn uc_core::membership::LegacyBootstrapRepositoryPort> =
+        security_repository;
     let space_access_adapter = Arc::new(
-        uc_infra::security::DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+        uc_infra::security::DefaultSpaceAccessAdapter::new_with_security_repositories(
             key_material.clone(),
             current_profile.clone(),
             session.clone(),
             key_epoch_repository,
+            legacy_bootstrap_repository,
         ),
     );
     SpaceAccessPorts::from_adapter(space_access_adapter)

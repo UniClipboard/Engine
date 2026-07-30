@@ -139,10 +139,10 @@ impl InMemorySession {
         );
     }
 
-    #[cfg(test)]
-    pub(crate) fn create_migrated_space_material(
+    fn create_ready_space_material(
         &self,
         space_id: &SpaceId,
+        group_state: Vec<u8>,
         updated_at_ms: i64,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
         let state = self.lock_state();
@@ -184,10 +184,31 @@ impl InMemorySession {
             .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
         Ok(SpaceKeyMaterial::new(
             key_state,
-            Vec::new(),
+            group_state,
             key_catalog,
             updated_at_ms,
         ))
+    }
+
+    pub(crate) fn create_legacy_bootstrap_material(
+        &self,
+        space_id: &SpaceId,
+        group_state: Vec<u8>,
+        updated_at_ms: i64,
+    ) -> Result<SpaceKeyMaterial, EncryptionError> {
+        if group_state.is_empty() {
+            return Err(EncryptionError::KeyMaterialCorrupt);
+        }
+        self.create_ready_space_material(space_id, group_state, updated_at_ms)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_migrated_space_material(
+        &self,
+        space_id: &SpaceId,
+        updated_at_ms: i64,
+    ) -> Result<SpaceKeyMaterial, EncryptionError> {
+        self.create_ready_space_material(space_id, Vec::new(), updated_at_ms)
     }
 
     pub(crate) fn install_space_material(

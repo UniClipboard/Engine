@@ -333,6 +333,11 @@ pub trait LegacyBootstrapRepositoryPort: Send + Sync {
         now_ms: i64,
     ) -> Result<LegacyBootstrapRecord, BootstrapError>;
 
+    async fn load_legacy_bootstrap_stage(
+        &self,
+        bootstrap_id: &BootstrapId,
+    ) -> Result<Option<LegacyBootstrapStage>, BootstrapError>;
+
     async fn get_legacy_bootstrap(
         &self,
         bootstrap_id: &BootstrapId,
@@ -399,6 +404,12 @@ pub enum BootstrapError {
 
     #[error("legacy bootstrap still has members awaiting readmission")]
     ReadmissionPending,
+
+    #[error("legacy bootstrap could not create cryptographic material")]
+    CryptographicState,
+
+    #[error("legacy bootstrap could not install activated session material")]
+    SessionMaterial,
 
     #[error("legacy bootstrap repository failure: {0}")]
     Repository(String),

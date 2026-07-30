@@ -964,6 +964,34 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselRevocationRepository
             .map_err(|error| BootstrapError::Repository(error.to_string()))
     }
 
+    async fn load_legacy_bootstrap_stage(
+        &self,
+        bootstrap_id: &BootstrapId,
+    ) -> Result<Option<LegacyBootstrapStage>, BootstrapError> {
+        let master_key = self
+            .session
+            .get_master_key()
+            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+        let bootstrap_id = bootstrap_id.as_str().to_owned();
+        self.executor
+            .run(move |conn| {
+                let Some(row) = load_bootstrap_row(conn, &bootstrap_id)? else {
+                    return Ok(None);
+                };
+                let Some(encrypted_stage) = row.encrypted_stage else {
+                    return Ok(None);
+                };
+                let stage = open(
+                    &master_key,
+                    &encrypted_stage,
+                    &bootstrap_stage_aad(&bootstrap_id),
+                )
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                Ok(Some(stage))
+            })
+            .map_err(|error| BootstrapError::Repository(error.to_string()))
+    }
+
     async fn get_legacy_bootstrap(
         &self,
         bootstrap_id: &BootstrapId,
@@ -1463,6 +1491,31 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             original
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_legacy_bootstrap_survives_repository_restart() {
+        let (repo, pool, _tempdir) = make_repo();
+        let stage = staged_legacy_bootstrap();
+        let prepared = LegacyBootstrapRecord::prepare(
+            stage.record().bootstrap_id().clone(),
+            stage.record().space_id().clone(),
+            stage.record().sponsor_device_id().clone(),
+            stage.record().pending_readmission().to_vec(),
+            stage.record().created_at_ms(),
+        )
+        .unwrap();
+        repo.begin_legacy_bootstrap(&prepared).await.unwrap();
+        repo.stage_legacy_bootstrap(&stage).await.unwrap();
+        drop(repo);
+
+        assert_eq!(
+            reopen_repo(&pool)
+                .load_legacy_bootstrap_stage(stage.record().bootstrap_id())
+                .await
+                .unwrap(),
+            Some(stage)
         );
     }
 
