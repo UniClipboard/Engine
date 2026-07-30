@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort};
 use uc_core::ids::RepresentationId;
+use uc_core::membership::GroupRevocationPort;
 use uc_core::ports::clipboard::{
     AdvanceActiveClipboardPort, CheckEntryAvailabilityPort, ClipboardPayloadResolverPort,
     ClipboardRepresentationNormalizerPort, DeleteClipboardEntryPort, EntryFileSetRepositoryPort,
@@ -30,8 +31,8 @@ use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::search::search_key::SearchKeyDerivationPort;
 use uc_core::ports::search::search_pipeline::SearchPipelinePort;
 use uc_core::ports::space::{
-    CurrentSessionProofKeyPort, DeriveProofKeyPort, DeriveSpaceSubkeyPort, FactoryResetSpacePort,
-    InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, PrepareJoinOfferPort,
+    DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, FactoryResetSpacePort, GroupAdmissionPort,
+    InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, PrepareAdmissionOfferPort,
     ResumeSpaceSessionPort, UnlockSpacePort, VerifyKeychainAccessPort,
 };
 use uc_core::ports::*;
@@ -155,9 +156,10 @@ pub struct SpaceAccessPorts {
     pub resume_session: Arc<dyn ResumeSpaceSessionPort>,
     pub verify_keychain_access: Arc<dyn VerifyKeychainAccessPort>,
     pub derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
-    pub current_session_proof_key: Arc<dyn CurrentSessionProofKeyPort>,
-    pub prepare_join_offer: Arc<dyn PrepareJoinOfferPort>,
-    pub derive_proof_key: Arc<dyn DeriveProofKeyPort>,
+    pub prepare_admission_offer: Arc<dyn PrepareAdmissionOfferPort>,
+    pub derive_admission_proof_key: Arc<dyn DeriveAdmissionProofKeyPort>,
+    pub group_admission: Arc<dyn GroupAdmissionPort>,
+    pub group_revocation: Arc<dyn GroupRevocationPort>,
 }
 
 impl SpaceAccessPorts {
@@ -174,9 +176,10 @@ impl SpaceAccessPorts {
             + ResumeSpaceSessionPort
             + VerifyKeychainAccessPort
             + DeriveSpaceSubkeyPort
-            + CurrentSessionProofKeyPort
-            + PrepareJoinOfferPort
-            + DeriveProofKeyPort
+            + PrepareAdmissionOfferPort
+            + DeriveAdmissionProofKeyPort
+            + GroupAdmissionPort
+            + GroupRevocationPort
             + 'static,
     {
         Self {
@@ -188,9 +191,10 @@ impl SpaceAccessPorts {
             resume_session: adapter.clone(),
             verify_keychain_access: adapter.clone(),
             derive_subkey: adapter.clone(),
-            current_session_proof_key: adapter.clone(),
-            prepare_join_offer: adapter.clone(),
-            derive_proof_key: adapter,
+            prepare_admission_offer: adapter.clone(),
+            derive_admission_proof_key: adapter.clone(),
+            group_admission: adapter.clone(),
+            group_revocation: adapter,
         }
     }
 }

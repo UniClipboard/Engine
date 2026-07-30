@@ -9,8 +9,8 @@ use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
-    execute_list_devices, execute_query_member_sync_preferences, execute_remove_member,
-    execute_update_member_sync_preferences,
+    execute_list_devices, execute_query_member_revocation, execute_query_member_sync_preferences,
+    execute_remove_member, execute_update_member_sync_preferences,
 };
 use crate::operations::device::peer_connections::{
     execute_query_peer_connections, execute_refresh_peer_connections,
@@ -294,6 +294,9 @@ impl EngineRuntime for ProductionRuntime {
             }
             Operation::RemoveMember(input) => {
                 execute_remove_member(self.current_facade().await?.as_ref(), input).await
+            }
+            Operation::QueryMemberRevocation(input) => {
+                execute_query_member_revocation(self.current_facade().await?.as_ref(), input).await
             }
             Operation::SearchEntries(input) => {
                 execute_search_entries(self.current_facade().await?.as_ref(), input).await

@@ -62,6 +62,9 @@ use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError, TrustedPeerRepository
 use uc_core::{
     ClipboardChangeOrigin, MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot,
 };
+use uc_infra::db::executor::DieselSqliteExecutor;
+use uc_infra::db::pool::init_db_pool;
+use uc_infra::db::repositories::DieselRevocationRepository;
 use uc_infra::network::iroh::IrohNodeConfig;
 
 use uc_infra::clipboard::TransferCipherAdapter;
@@ -438,10 +441,17 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
     ));
     let current_profile = Arc::new(DefaultCurrentProfile::new());
     let session = Arc::new(InMemorySession::new());
-    let space_access = Arc::new(DefaultSpaceAccessAdapter::new(
+    let database_path = keystore_dir.path().join("engine.sqlite3");
+    let pool = init_db_pool(database_path.to_str().expect("database path must be UTF-8"))
+        .expect("initialize test database");
+    let key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
+        DieselRevocationRepository::new(DieselSqliteExecutor::new(pool), session.as_ref().clone()),
+    );
+    let space_access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
         key_material,
         current_profile,
         Arc::clone(&session),
+        key_epoch_repository,
     ));
 
     // Same `InMemorySession` powers both sides of the cipher: pairing copies
@@ -494,9 +504,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
     let clipboard_receiver: Arc<dyn ClipboardReceiverPort> = clipboard_receiver;
     let iroh_node = builder.spawn();
 
-    let proof_port: Arc<dyn ProofPort> = Arc::new(HmacProofAdapter::new_with_space_access(
-        space_access.clone(),
-    ));
+    let proof_port: Arc<dyn ProofPort> = Arc::new(HmacProofAdapter::new());
     let local_identity: Arc<dyn LocalIdentityPort> = Arc::clone(&identity_store) as _;
 
     // Clone the presence + local_identity handles before SpaceSetupDeps moves

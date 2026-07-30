@@ -1,8 +1,9 @@
 use std::fmt;
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::ids::{SessionId, SpaceId};
+use crate::membership::PendingGroupUpdate;
 
 #[derive(Clone, Debug)]
 pub struct SpaceAccessProofArtifact {
@@ -23,6 +24,83 @@ pub struct JoinOffer {
     pub space_id: SpaceId,
     pub keyslot_blob: Vec<u8>,
     pub challenge_nonce: [u8; 32],
+}
+
+/// Sponsor-to-joiner admission challenge. The opaque KDF payload contains
+/// only password-derivation parameters; content keys and local keyslots are
+/// never carried by this message.
+#[derive(Clone, Debug)]
+pub struct AdmissionOffer {
+    pub space_id: SpaceId,
+    pub kdf_parameters_blob: Vec<u8>,
+    pub challenge_nonce: [u8; 32],
+}
+
+/// Sponsor-side result: the public offer plus the secret used only to verify
+/// this pairing transcript.
+pub struct PreparedAdmissionOffer {
+    pub offer: AdmissionOffer,
+    pub verification_key: ProofDerivedKey,
+}
+
+/// Joiner-side opaque MLS preparation. Only `key_package` is sent to the
+/// sponsor; `private_state` must remain local until the Welcome is installed.
+pub struct PreparedGroupJoin {
+    pub key_package: Vec<u8>,
+    private_state: Zeroizing<Vec<u8>>,
+}
+
+impl PreparedGroupJoin {
+    pub fn new(key_package: Vec<u8>, private_state: Vec<u8>) -> Self {
+        Self {
+            key_package,
+            private_state: Zeroizing::new(private_state),
+        }
+    }
+
+    pub fn private_state(&self) -> &[u8] {
+        &self.private_state
+    }
+
+    pub fn into_parts(mut self) -> (Vec<u8>, Vec<u8>) {
+        (
+            self.key_package,
+            std::mem::take(self.private_state.as_mut()),
+        )
+    }
+}
+
+impl fmt::Debug for PreparedGroupJoin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedGroupJoin")
+            .field("key_package_len", &self.key_package.len())
+            .field("private_state", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Sponsor-side payload delivered only after the admission proof succeeds.
+#[derive(Debug)]
+pub struct GroupAdmission {
+    pub welcome: Vec<u8>,
+    pub encrypted_key_catalog: Vec<u8>,
+    pub existing_member_updates: Vec<PendingGroupUpdate>,
+    pub group_epoch: u64,
+}
+
+impl fmt::Debug for PreparedAdmissionOffer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedAdmissionOffer")
+            .field("space_id", &self.offer.space_id)
+            .field(
+                "kdf_parameters_blob_len",
+                &self.offer.kdf_parameters_blob.len(),
+            )
+            .field("verification_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Pairing proof 链路上的不透明派生密钥。

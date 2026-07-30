@@ -8,14 +8,16 @@ use uc_engine::{
     ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
     EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
     InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    RecoverSessionInput, RefreshReason, RestoreClipboardInput, SecretString, SendFilesInput,
-    SendImageInput, SendReportSummary, SendTextInput,
+    QueryMemberRevocationInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
+    SendTextInput,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhLocalDevice, OhSendReport, OhSessionRecovery, OhSpaceCreated, OhSpaceJoined,
+    OhLocalDevice, OhMemberRevocation, OhSendReport, OhSessionRecovery, OhSpaceCreated,
+    OhSpaceJoined,
 };
 
 #[napi]
@@ -102,6 +104,37 @@ impl OhEngine {
                 device_id: device.device_id,
                 display_name: device.display_name,
             }),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn remove_member(&self, device_id: String) -> napi::Result<OhMemberRevocation> {
+        let result = self
+            .engine
+            .execute(Operation::RemoveMember(RemoveMemberInput { device_id }))
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::MemberRemoved(summary) => Ok(member_revocation(summary)),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_member_revocation(
+        &self,
+        revocation_id: String,
+    ) -> napi::Result<Option<OhMemberRevocation>> {
+        let result = self
+            .engine
+            .execute(Operation::QueryMemberRevocation(
+                QueryMemberRevocationInput { revocation_id },
+            ))
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::MemberRevocationStatus(summary) => Ok(summary.map(member_revocation)),
             _ => Err(unexpected_result()),
         }
     }
@@ -348,6 +381,20 @@ impl OhEngine {
             .shutdown(Duration::from_millis(u64::from(deadline_ms)))
             .await
             .map_err(engine_error)
+    }
+}
+
+fn member_revocation(summary: uc_engine::MemberRevocationSummary) -> OhMemberRevocation {
+    OhMemberRevocation {
+        revocation_id: summary.revocation_id,
+        outcome: match summary.outcome {
+            uc_engine::MemberRevocationOutcome::LocalOnly => "local_only",
+            uc_engine::MemberRevocationOutcome::Applied => "applied",
+            uc_engine::MemberRevocationOutcome::Complete => "complete",
+            uc_engine::MemberRevocationOutcome::RecoveryRequired => "recovery_required",
+        }
+        .to_owned(),
+        pending_recipients: u32::try_from(summary.pending_recipients).unwrap_or(u32::MAX),
     }
 }
 

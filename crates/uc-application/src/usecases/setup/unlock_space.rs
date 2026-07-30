@@ -65,7 +65,10 @@ impl UnlockSpaceUseCase {
             return Err(UnlockSpaceError::SetupNotCompleted);
         }
 
-        let space_id = status.space_id.clone().unwrap_or_else(SpaceId::new);
+        let space_id = status
+            .space_id
+            .clone()
+            .unwrap_or_else(|| SpaceId::from("space"));
         match self.space_access.unlock(&space_id, &cmd.passphrase).await {
             Ok(_) => {
                 info!(%space_id, "space unlocked");
@@ -229,10 +232,10 @@ mod tests {
     }
 
     /// Legacy profiles pre-dating F-058 may have `space_id == None` in
-    /// `SetupStatus`. Spec: fall back to minting a fresh id so A2 is not
-    /// blocked. T-17 self-heal is explicitly out of scope (backlog).
+    /// `SetupStatus`. The fallback must be stable across restarts because the
+    /// content-key catalog and keyed ciphertext bind the Space identity.
     #[tokio::test]
-    async fn missing_setup_space_id_falls_back_to_fresh_mint() {
+    async fn missing_setup_space_id_uses_the_stable_legacy_identity() {
         let space_access = Arc::new(FakeSpaceAccess::default());
         let setup_status = Arc::new(InMemorySetupStatus::default());
         setup_status.status.lock().unwrap().has_completed = true;
@@ -243,7 +246,7 @@ mod tests {
             wrap_facade(analytics.clone()),
         );
         let r = uc.execute(cmd("pass")).await.unwrap();
-        assert!(!r.space_id.inner().is_empty());
+        assert_eq!(r.space_id, SpaceId::from("space"));
         assert_eq!(*space_access.unlock_calls.lock().unwrap(), 1);
         assert_eq!(analytics.events(), vec![Event::SpaceUnlocked]);
     }

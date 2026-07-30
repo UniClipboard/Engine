@@ -6,8 +6,9 @@ mod runtime;
 
 pub use runtime::{
     ActiveClipboard, Device, EntryNotResendableReason, InvitationAvailability, InvitationIssued,
-    LocalDevice, MobileEngine, PeerConnectionRefresh, ResendEntryOutcome, SendReport,
-    SessionRecovery, SpaceCreated, SpaceInvitation, SpaceJoined, SpaceState,
+    LocalDevice, MemberRevocationOutcome, MemberRevocationResult, MobileEngine,
+    PeerConnectionRefresh, ResendEntryOutcome, SendReport, SessionRecovery, SpaceCreated,
+    SpaceInvitation, SpaceJoined, SpaceState,
 };
 
 uniffi::setup_scaffolding!();

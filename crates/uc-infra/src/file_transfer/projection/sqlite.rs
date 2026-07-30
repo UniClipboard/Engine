@@ -412,13 +412,28 @@ mod tests {
 
     #[tokio::test]
     async fn upgrade_purge_removes_legacy_transfer_plaintext_residue() {
+        #[derive(QueryableByName)]
+        struct LegacyFilenameColumn {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            name: String,
+        }
+
         const SENTINEL: &str = "legacy-private-transfer-4d8e2a.txt";
         let tempdir = tempdir().unwrap();
         let database_path = tempdir.path().join("legacy-transfer.sqlite");
         let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
         let mut conn = pool.get().unwrap();
 
-        for _ in 0..4 {
+        loop {
+            let legacy_column = diesel::sql_query(
+                "SELECT name FROM pragma_table_info('file_transfer') WHERE name = 'filename'",
+            )
+            .get_result::<LegacyFilenameColumn>(&mut conn)
+            .optional()
+            .unwrap();
+            if legacy_column.as_ref().map(|column| column.name.as_str()) == Some("filename") {
+                break;
+            }
             conn.revert_last_migration(MIGRATIONS).unwrap();
         }
         diesel::sql_query(format!(

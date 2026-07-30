@@ -31,6 +31,12 @@ pub use errors::{
 pub use events::{PairingFailureReason, PairingOutcome};
 pub use facade::SpaceSetupFacade;
 
+pub(crate) const LEGACY_SPACE_ID: &str = "space";
+
+pub(crate) fn legacy_space_id() -> uc_core::ids::SpaceId {
+    uc_core::ids::SpaceId::from(LEGACY_SPACE_ID)
+}
+
 // T10:CLI `members` 入口需要 report / error 类型才能展示 probe 摘要;
 // usecase 本身保持 `pub(crate)`(§11.4),此处只透出两个值对象。
 pub use crate::usecases::presence::ensure_reachable_all::{

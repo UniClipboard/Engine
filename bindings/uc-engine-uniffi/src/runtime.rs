@@ -10,9 +10,9 @@ use uc_engine::{
     ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
     HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
-    ObserveClipboardChangeInput, Operation, OperationResult, RecoverSessionInput,
-    RemoveMemberInput, ResendEntryInput, RestoreClipboardInput, SecretString, SendFilesInput,
-    SendImageInput, SendTextInput,
+    ObserveClipboardChangeInput, Operation, OperationResult, QueryMemberRevocationInput,
+    RecoverSessionInput, RemoveMemberInput, ResendEntryInput, RestoreClipboardInput, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput,
 };
 use zeroize::Zeroizing;
 
@@ -125,6 +125,21 @@ pub struct Device {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MemberRevocationOutcome {
+    LocalOnly,
+    Applied,
+    Complete,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MemberRevocationResult {
+    pub revocation_id: Option<String>,
+    pub outcome: MemberRevocationOutcome,
+    pub pending_recipients: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum EntryNotResendableReason {
     RemoteOrigin,
     PayloadLost,
@@ -171,7 +186,11 @@ enum WorkerCommand {
     },
     RemoveMember {
         device_id: String,
-        response: mpsc::Sender<Result<(), BindingError>>,
+        response: mpsc::Sender<Result<MemberRevocationResult, BindingError>>,
+    },
+    QueryMemberRevocation {
+        revocation_id: String,
+        response: mpsc::Sender<Result<Option<MemberRevocationResult>, BindingError>>,
     },
     ResendEntry {
         entry_id: String,
@@ -408,9 +427,19 @@ impl MobileEngine {
         self.request(|response| WorkerCommand::ListDevices { response })
     }
 
-    pub fn remove_member(&self, device_id: String) -> Result<(), BindingError> {
+    pub fn remove_member(&self, device_id: String) -> Result<MemberRevocationResult, BindingError> {
         self.request(|response| WorkerCommand::RemoveMember {
             device_id,
+            response,
+        })
+    }
+
+    pub fn query_member_revocation(
+        &self,
+        revocation_id: String,
+    ) -> Result<Option<MemberRevocationResult>, BindingError> {
+        self.request(|response| WorkerCommand::QueryMemberRevocation {
+            revocation_id,
             response,
         })
     }
@@ -812,6 +841,19 @@ async fn run_worker_loop(
                     .and_then(map_member_removed);
                 let _ = response.send(result);
             }
+            WorkerCommand::QueryMemberRevocation {
+                revocation_id,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::QueryMemberRevocation(
+                        QueryMemberRevocationInput { revocation_id },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_member_revocation_status);
+                let _ = response.send(result);
+            }
             WorkerCommand::ResendEntry {
                 entry_id,
                 target_devices,
@@ -1183,10 +1225,38 @@ fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
     }
 }
 
-fn map_member_removed(result: OperationResult) -> Result<(), BindingError> {
+fn map_member_removed(result: OperationResult) -> Result<MemberRevocationResult, BindingError> {
     match result {
-        OperationResult::MemberRemoved => Ok(()),
+        OperationResult::MemberRemoved(summary) => Ok(map_member_revocation_summary(summary)),
         _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_member_revocation_status(
+    result: OperationResult,
+) -> Result<Option<MemberRevocationResult>, BindingError> {
+    match result {
+        OperationResult::MemberRevocationStatus(summary) => {
+            Ok(summary.map(map_member_revocation_summary))
+        }
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_member_revocation_summary(
+    summary: uc_engine::MemberRevocationSummary,
+) -> MemberRevocationResult {
+    MemberRevocationResult {
+        revocation_id: summary.revocation_id,
+        outcome: match summary.outcome {
+            uc_engine::MemberRevocationOutcome::LocalOnly => MemberRevocationOutcome::LocalOnly,
+            uc_engine::MemberRevocationOutcome::Applied => MemberRevocationOutcome::Applied,
+            uc_engine::MemberRevocationOutcome::Complete => MemberRevocationOutcome::Complete,
+            uc_engine::MemberRevocationOutcome::RecoveryRequired => {
+                MemberRevocationOutcome::RecoveryRequired
+            }
+        },
+        pending_recipients: summary.pending_recipients,
     }
 }
 

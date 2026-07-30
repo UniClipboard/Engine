@@ -17,8 +17,12 @@
 use async_trait::async_trait;
 
 use crate::crypto::domain::{ActiveSpace, Passphrase};
-use crate::ids::SpaceId;
-use crate::space_access::{JoinOffer, ProofDerivedKey};
+use crate::ids::{DeviceId, SessionId, SpaceId};
+use crate::pairing::InvitationCode;
+use crate::space_access::{
+    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer, PreparedGroupJoin,
+    ProofDerivedKey,
+};
 
 /// 业务语义级的空间访问失败。
 ///
@@ -335,4 +339,58 @@ pub trait DeriveProofKeyPort: Send + Sync {
         offer: &JoinOffer,
         passphrase: &Passphrase,
     ) -> Result<ProofDerivedKey, SpaceAccessError>;
+}
+
+/// Prepare a password-and-invitation-bound admission challenge without
+/// exposing a content key or a local keyslot.
+#[async_trait]
+pub trait PrepareAdmissionOfferPort: Send + Sync {
+    async fn prepare_admission_offer(
+        &self,
+        space_id: &SpaceId,
+        invitation: &InvitationCode,
+        pairing_session_id: &SessionId,
+    ) -> Result<PreparedAdmissionOffer, SpaceAccessError>;
+}
+
+/// Derive the joiner's one-shot admission proof credential. This operation is
+/// side-effect free: it must not install key material or unlock a Space.
+#[async_trait]
+pub trait DeriveAdmissionProofKeyPort: Send + Sync {
+    async fn derive_admission_proof_key(
+        &self,
+        offer: &AdmissionOffer,
+        passphrase: &Passphrase,
+        invitation: &InvitationCode,
+        pairing_session_id: &SessionId,
+    ) -> Result<ProofDerivedKey, SpaceAccessError>;
+}
+
+/// Owns the opaque MLS member-add flow and the encrypted content-key catalog.
+/// Protocol state and key material never cross this boundary in plaintext.
+#[async_trait]
+pub trait GroupAdmissionPort: Send + Sync {
+    async fn prepare_group_join(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<PreparedGroupJoin, SpaceAccessError>;
+
+    async fn admit_group_member(
+        &self,
+        space_id: &SpaceId,
+        sponsor_device_id: &DeviceId,
+        joiner_device_id: &DeviceId,
+        existing_member_ids: &[DeviceId],
+        key_package: &[u8],
+    ) -> Result<GroupAdmission, SpaceAccessError>;
+
+    async fn install_group_join(
+        &self,
+        space_id: &SpaceId,
+        passphrase: &Passphrase,
+        pending: PreparedGroupJoin,
+        welcome: &[u8],
+        encrypted_key_catalog: &[u8],
+        group_epoch: u64,
+    ) -> Result<(), SpaceAccessError>;
 }

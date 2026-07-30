@@ -66,11 +66,13 @@ use uc_core::ports::space::ProofPort;
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ClipboardReceiverPort, ConnectionChannelPort, LocalIdentityPort, PresencePort,
+    ReachabilityState,
 };
 use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
 use uc_infra::network::iroh::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
-    IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohNodeError, TransferProgressHandlers,
+    GroupUpdateHandlers, IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohNodeError,
+    TransferProgressHandlers,
 };
 // Re-exported so external callers can parametrise the assembly without
 // having to `use uc_infra` themselves.
@@ -155,6 +157,9 @@ pub struct SyncEngineAssembly {
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
     /// 与 ingest_handle 同生命周期。
     outbound_progress_translator: JoinHandle<()>,
+    /// Retries encrypted group updates after restart and whenever peers
+    /// become reachable. Aborted explicitly during shutdown.
+    group_update_retry: JoinHandle<()>,
 }
 
 impl SyncEngineAssembly {
@@ -189,8 +194,85 @@ impl SyncEngineAssembly {
         self.ingest_handle.abort();
         self.active_clipboard_lifecycle.shutdown().await;
         self.outbound_progress_translator.abort();
+        self.group_update_retry.abort();
         self.facade.on_shutdown().await;
         self.iroh_node.shutdown().await;
+    }
+}
+
+const GROUP_UPDATE_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
+const GROUP_UPDATE_RETRY_MAX_DELAY: Duration = Duration::from_secs(300);
+
+fn group_update_retry_delay(consecutive_failures: u32, has_pending_work: bool) -> Duration {
+    if !has_pending_work {
+        return GROUP_UPDATE_RETRY_MAX_DELAY;
+    }
+    let multiplier = 1u64 << consecutive_failures.min(4);
+    Duration::from_secs(
+        GROUP_UPDATE_RETRY_BASE_DELAY
+            .as_secs()
+            .saturating_mul(multiplier)
+            .min(GROUP_UPDATE_RETRY_MAX_DELAY.as_secs()),
+    )
+}
+
+fn spawn_group_update_retry(roster: Arc<MemberRosterFacade>) -> JoinHandle<()> {
+    let mut presence_events = roster.subscribe_presence_events();
+    tokio::spawn(async move {
+        let mut retry_interval = tokio::time::interval(GROUP_UPDATE_RETRY_BASE_DELAY);
+        retry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        retry_interval.tick().await;
+        let mut consecutive_failures = 0u32;
+        let mut next_timer_retry_at = Instant::now();
+        loop {
+            let timer_triggered = tokio::select! {
+                _ = retry_interval.tick() => true,
+                event = presence_events.recv() => match event {
+                    Ok(event) if event.state == ReachabilityState::Online => false,
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => false,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+            };
+            if timer_triggered && Instant::now() < next_timer_retry_at {
+                continue;
+            }
+            match roster.resume_incomplete_revocations().await {
+                Ok(pending) => {
+                    consecutive_failures = 0;
+                    next_timer_retry_at =
+                        Instant::now() + group_update_retry_delay(0, !pending.is_empty());
+                }
+                Err(error) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    next_timer_retry_at =
+                        Instant::now() + group_update_retry_delay(consecutive_failures, true);
+                    if consecutive_failures == 1 {
+                        warn!(error = %error, "pending group updates could not be retried");
+                    } else {
+                        debug!(
+                            error = %error,
+                            consecutive_failures,
+                            "pending group update retry remains deferred"
+                        );
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod group_update_retry_tests {
+    use super::*;
+
+    #[test]
+    fn retry_delay_backs_off_failures_and_idles_without_pending_work() {
+        assert_eq!(group_update_retry_delay(0, true), Duration::from_secs(30));
+        assert_eq!(group_update_retry_delay(1, true), Duration::from_secs(60));
+        assert_eq!(group_update_retry_delay(3, true), Duration::from_secs(240));
+        assert_eq!(group_update_retry_delay(8, true), Duration::from_secs(300));
+        assert_eq!(group_update_retry_delay(0, false), Duration::from_secs(300));
     }
 }
 
@@ -389,6 +471,14 @@ pub async fn build_sync_engine_assembly(
     );
     let clipboard_dispatch: Arc<dyn ClipboardDispatchPort> = clipboard_dispatch;
     let clipboard_receiver: Arc<dyn ClipboardReceiverPort> = clipboard_receiver;
+    let GroupUpdateHandlers {
+        dispatch: group_update_dispatch,
+    } = builder.install_group_updates(
+        Arc::clone(&space_setup.peer_addr_repo),
+        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&deps.security.fingerprint),
+        Arc::clone(&deps.security.space_access_ports.group_revocation),
+    )?;
     // Install the active-clipboard state ALPN (0xC3) as an independent
     // sibling on the same node. A lone `.accept()` deeper in the node would
     // not be reachable from here — the handler has to be installed on this
@@ -492,62 +582,70 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&shared.host_event_bus),
     );
 
-    // HMAC proof adapter verifies the joiner's ChallengeResponse against the
-    // master key that `DeriveProofKeyPort::derive_master_key_for_proof` stashes
-    // in-session. Fed the same session-proof-key port the use cases share so
-    // the cache-miss fallback can still find the current session key.
-    let proof_port: Arc<dyn ProofPort> = Arc::new(HmacProofAdapter::new_with_space_access(
-        Arc::clone(&deps.security.space_access_ports.current_session_proof_key),
-    ));
+    // Pairing verification receives the one-shot invitation credential
+    // explicitly; it never falls back to a Space content key.
+    let proof_port: Arc<dyn ProofPort> = Arc::new(HmacProofAdapter::new());
 
     let local_identity: Arc<dyn LocalIdentityPort> = identity_store;
 
-    let facade = Arc::new(SpaceSetupFacade::new(SpaceSetupDeps {
-        space_access: deps.security.space_access_ports.clone(),
-        local_identity: Arc::clone(&local_identity),
-        device_identity: Arc::clone(&deps.device.device_identity),
-        member_repo: Arc::clone(&deps.device.member_repo),
-        setup_status: Arc::clone(&deps.setup_status),
-        settings: Arc::clone(&deps.settings),
-        clock: Arc::clone(&deps.system.clock),
-        mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
-        pairing_invitation: handlers.invitation,
-        pairing_invitation_addresses: handlers.invitation_addresses,
-        pairing_invitation_by_address: handlers.invitation_by_address,
-        pairing_session: handlers.session,
-        pairing_events: handlers.events,
-        proof_port,
-        trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
-        peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
-        presence: Arc::clone(&presence),
-        // Switch-space 4 阶段重加密迁移依赖（commit 4 接入）。`blob_cipher`
-        // 复用既有 `EncryptingClipboardEventWriter` /
-        // `DecryptingClipboardRepresentationRepository` 同款 adapter Arc，
-        // 共享 master_key session。
-        migration_state: Arc::clone(&space_setup.migration_state),
-        key_migration: Arc::clone(&space_setup.key_migration),
-        blob_migration_repo: Arc::clone(&space_setup.blob_migration_repo),
-        blob_cipher: Arc::clone(&deps.security.blob_cipher),
-        // Single facade covering both capture and identity transitions.
-        // The capture sink + identity store are composed inside the
-        // bootstrap so the application layer never wires them
-        // separately. Sink is installed once; the gate inside the
-        // wrapper handles enable/disable transitions.
-        analytics: Arc::clone(&space_setup.analytics_facade),
-    }));
+    let facade = Arc::new(SpaceSetupFacade::new_with_group_delivery(
+        SpaceSetupDeps {
+            space_access: deps.security.space_access_ports.clone(),
+            local_identity: Arc::clone(&local_identity),
+            device_identity: Arc::clone(&deps.device.device_identity),
+            member_repo: Arc::clone(&deps.device.member_repo),
+            setup_status: Arc::clone(&deps.setup_status),
+            settings: Arc::clone(&deps.settings),
+            clock: Arc::clone(&deps.system.clock),
+            mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
+            pairing_invitation: handlers.invitation,
+            pairing_invitation_addresses: handlers.invitation_addresses,
+            pairing_invitation_by_address: handlers.invitation_by_address,
+            pairing_session: handlers.session,
+            pairing_events: handlers.events,
+            proof_port,
+            trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
+            peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
+            presence: Arc::clone(&presence),
+            // Switch-space 4 阶段重加密迁移依赖（commit 4 接入）。`blob_cipher`
+            // 复用既有 `EncryptingClipboardEventWriter` /
+            // `DecryptingClipboardRepresentationRepository` 同款 adapter Arc，
+            // 共享 master_key session。
+            migration_state: Arc::clone(&space_setup.migration_state),
+            key_migration: Arc::clone(&space_setup.key_migration),
+            blob_migration_repo: Arc::clone(&space_setup.blob_migration_repo),
+            blob_cipher: Arc::clone(&deps.security.blob_cipher),
+            // Single facade covering both capture and identity transitions.
+            // The capture sink + identity store are composed inside the
+            // bootstrap so the application layer never wires them
+            // separately. Sink is installed once; the gate inside the
+            // wrapper handles enable/disable transitions.
+            analytics: Arc::clone(&space_setup.analytics_facade),
+        },
+        Arc::clone(&deps.security.space_access_ports.group_revocation),
+        Arc::clone(&group_update_dispatch),
+    ));
 
     // Slice 2 Phase 1 · T9:roster 门面和 space_setup facade 共享同一组
     // 实例(`member_repo` / `local_identity` / `presence`),这样 F1 hook
     // 通过 `presence.ensure_reachable_all` 填好的缓存,`list_with_presence`
     // 能直接读到。Facade 本身是纯 thin wrapper,构造非常便宜。
-    let roster = Arc::new(MemberRosterFacade::new(MemberRosterDeps {
-        member_repo: Arc::clone(&deps.device.member_repo),
-        peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
-        trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
-        local_identity: Arc::clone(&local_identity),
-        presence: Arc::clone(&presence),
-        connection_channel: Some(Arc::clone(&connection_channel)),
-    }));
+    let roster = Arc::new(MemberRosterFacade::new_with_group_delivery(
+        MemberRosterDeps {
+            member_repo: Arc::clone(&deps.device.member_repo),
+            peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
+            trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
+            local_identity: Arc::clone(&local_identity),
+            presence: Arc::clone(&presence),
+            connection_channel: Some(Arc::clone(&connection_channel)),
+        },
+        Arc::clone(&deps.security.space_access_ports.group_revocation),
+        group_update_dispatch,
+    ));
+    if let Err(error) = roster.resume_incomplete_revocations().await {
+        warn!(error = %error, "pending group updates could not resume during startup");
+    }
+    let group_update_retry = spawn_group_update_retry(Arc::clone(&roster));
 
     // Slice 2 Phase 2 · T10:剪切板同步门面。`dispatch_entry` 共享同一份
     // `peer_addr_repo` / `presence` 让 F1 hook 喂的 presence 缓存直接生
@@ -739,5 +837,6 @@ pub async fn build_sync_engine_assembly(
         ingest_handle,
         active_clipboard_lifecycle,
         outbound_progress_translator,
+        group_update_retry,
     })
 }

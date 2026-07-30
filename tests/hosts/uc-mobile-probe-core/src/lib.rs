@@ -1002,9 +1002,17 @@ fn operation_response(result: OperationResult) -> Value {
             "send_content_types": preferences.send_content_types,
             "receive_content_types": preferences.receive_content_types,
         }),
-        OperationResult::MemberRemoved => json!({
+        OperationResult::MemberRemoved(summary) => json!({
             "ok": true,
             "kind": "member_removed",
+            "revocation_id": summary.revocation_id,
+            "outcome": summary.outcome,
+            "pending_recipients": summary.pending_recipients,
+        }),
+        OperationResult::MemberRevocationStatus(summary) => json!({
+            "ok": true,
+            "kind": "member_revocation_status",
+            "revocation": summary,
         }),
         OperationResult::SearchPage(page) => json!({
             "ok": true,

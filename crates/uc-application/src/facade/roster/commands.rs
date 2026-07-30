@@ -16,6 +16,21 @@ use uc_core::membership::MemberSyncPreferences;
 use uc_core::ports::{ConnectionChannel, ReachabilityState};
 use uc_core::settings::model::ContentTypes;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberRevocationState {
+    LocalOnly,
+    Applied,
+    Complete,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRevocationView {
+    pub revocation_id: Option<String>,
+    pub state: MemberRevocationState,
+    pub pending_recipients: usize,
+}
+
 /// One row of the member roster view.
 ///
 /// 字段顺序按"UI 最关心 → 诊断信息"排列,方便 CLI 直接按 `{entry.device_name}

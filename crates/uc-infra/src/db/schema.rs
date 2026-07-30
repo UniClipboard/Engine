@@ -1,6 +1,30 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    member_revocation_log (revocation_id) {
+        revocation_id -> Text,
+        space_lookup_token -> Text,
+        previous_epoch -> BigInt,
+        next_epoch -> BigInt,
+        status -> Text,
+        encrypted_record -> Binary,
+        encrypted_stage -> Nullable<Binary>,
+        created_at_ms -> BigInt,
+        updated_at_ms -> BigInt,
+    }
+}
+
+diesel::table! {
+    space_key_epoch_state (space_lookup_token) {
+        space_lookup_token -> Text,
+        group_epoch -> BigInt,
+        security_mode -> Text,
+        encrypted_payload -> Binary,
+        updated_at_ms -> BigInt,
+    }
+}
+
+diesel::table! {
     active_clipboard_register (id) {
         id -> Integer,
         snapshot_hash -> Text,
@@ -322,9 +346,11 @@ diesel::allow_tables_to_appear_in_same_query!(
     file_transfer_events,
     file_transfer_privacy_maintenance,
     mobile_device,
+    member_revocation_log,
     peer_address,
     receive_artifact_log,
     space_member,
+    space_key_epoch_state,
     trusted_peer,
     search_document,
     search_entry_tag,

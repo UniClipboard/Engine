@@ -21,12 +21,19 @@ pub(super) fn build_space_access_ports(
     key_material: &Arc<KeyMaterialStore>,
     current_profile: &Arc<dyn uc_core::ports::security::current_profile::CurrentProfilePort>,
     session: &Arc<InMemorySession>,
+    db_executor: &Arc<DieselSqliteExecutor>,
 ) -> SpaceAccessPorts {
-    let space_access_adapter = Arc::new(uc_infra::security::DefaultSpaceAccessAdapter::new(
-        key_material.clone(),
-        current_profile.clone(),
-        session.clone(),
-    ));
+    let key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
+        DieselRevocationRepository::new(db_executor.clone(), session.as_ref().clone()),
+    );
+    let space_access_adapter = Arc::new(
+        uc_infra::security::DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+            key_material.clone(),
+            current_profile.clone(),
+            session.clone(),
+            key_epoch_repository,
+        ),
+    );
     SpaceAccessPorts::from_adapter(space_access_adapter)
 }
 pub(super) fn build_search_assembly(

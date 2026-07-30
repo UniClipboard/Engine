@@ -28,7 +28,7 @@ use thiserror::Error;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::pairing::{
     InvitationCode, JoinerChallengeResponse, JoinerRequest, PairingReject, PairingRejectReason,
-    PairingSessionMessage, SponsorConfirm, SponsorKeyslotOffer,
+    PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer, SponsorConfirm,
 };
 use uc_core::ports::pairing::PairingSessionId;
 use uc_core::security::IdentityFingerprint;
@@ -45,7 +45,7 @@ use uc_core::security::IdentityFingerprint;
 ///
 /// postcard 非 schema-兼容，每次新增字段都升版本号；旧 peer 发来的低版本帧会走
 /// [`WireDecodeError::UnsupportedVersion`] 分支显式拒连，让排障信号明确。
-const WIRE_VERSION: u8 = 3;
+const WIRE_VERSION: u8 = 4;
 
 // ============================================================================
 // Wire types (infra-local)
@@ -60,7 +60,7 @@ struct WireEnvelope {
 #[derive(Serialize, Deserialize, Debug)]
 enum WireBody {
     Request(WireJoinerRequest),
-    KeyslotOffer(WireSponsorKeyslotOffer),
+    AdmissionOffer(WireSponsorAdmissionOffer),
     ChallengeResponse(WireJoinerChallengeResponse),
     Confirm(WireSponsorConfirm),
     Reject(WirePairingReject),
@@ -86,12 +86,14 @@ struct WireJoinerRequest {
     /// `peer_addr_repo.upsert`，presence 下次 `ensure_reachable_all`
     /// 从 rendezvous 再拉兜底。
     transport_address_blob: Vec<u8>,
+    security_capability: u8,
+    key_package: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct WireSponsorKeyslotOffer {
+struct WireSponsorAdmissionOffer {
     space_id: String,
-    keyslot_blob: Vec<u8>,
+    kdf_parameters_blob: Vec<u8>,
     challenge: Vec<u8>,
     pairing_session_id: String,
 }
@@ -121,6 +123,9 @@ struct WireSponsorConfirm {
     /// 的字符串形态，wire 层不引入额外类型依赖；core 端 `SponsorConfirm` 把它
     /// 解析为 `Uuid`。
     sponsor_space_person_id: Option<String>,
+    welcome: Vec<u8>,
+    encrypted_key_catalog: Vec<u8>,
+    group_epoch: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -163,6 +168,9 @@ pub enum WireDecodeError {
     /// 触发对端重连——避免在 wire 上接受半破损的字段。
     #[error("invalid sponsor_space_person_id on wire: {0}")]
     InvalidSpacePersonId(String),
+
+    #[error("unsupported pairing security capability {0}")]
+    UnsupportedSecurityCapability(u8),
 }
 
 impl From<postcard::Error> for WireDecodeError {
@@ -210,13 +218,19 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
             identity_fingerprint: r.identity_fingerprint.as_display().to_string(),
             nonce: r.nonce.clone(),
             transport_address_blob: r.transport_address_blob.clone(),
+            security_capability: match r.security_capability {
+                PairingSecurityCapability::ReliableGroupEpochV1 => 1,
+            },
+            key_package: r.key_package.clone(),
         }),
-        PairingSessionMessage::KeyslotOffer(o) => WireBody::KeyslotOffer(WireSponsorKeyslotOffer {
-            space_id: o.space_id.inner().clone(),
-            keyslot_blob: o.keyslot_blob.clone(),
-            challenge: o.challenge.clone(),
-            pairing_session_id: o.pairing_session_id.as_str().to_string(),
-        }),
+        PairingSessionMessage::AdmissionOffer(o) => {
+            WireBody::AdmissionOffer(WireSponsorAdmissionOffer {
+                space_id: o.space_id.inner().clone(),
+                kdf_parameters_blob: o.kdf_parameters_blob.clone(),
+                challenge: o.challenge.clone(),
+                pairing_session_id: o.pairing_session_id.as_str().to_string(),
+            })
+        }
         PairingSessionMessage::ChallengeResponse(c) => {
             WireBody::ChallengeResponse(WireJoinerChallengeResponse {
                 encrypted_challenge: c.encrypted_challenge.clone(),
@@ -229,6 +243,9 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
             sender_identity_fingerprint: c.sender_identity_fingerprint.as_display().to_string(),
             transport_address_blob: c.transport_address_blob.clone(),
             sponsor_space_person_id: c.sponsor_space_person_id.map(|id| id.to_string()),
+            welcome: c.welcome.clone(),
+            encrypted_key_catalog: c.encrypted_key_catalog.clone(),
+            group_epoch: c.group_epoch,
         }),
         PairingSessionMessage::Reject(r) => WireBody::Reject(WirePairingReject {
             reason: match &r.reason {
@@ -251,13 +268,20 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
             identity_fingerprint: parse_fingerprint(&r.identity_fingerprint)?,
             nonce: r.nonce,
             transport_address_blob: r.transport_address_blob,
+            security_capability: match r.security_capability {
+                1 => PairingSecurityCapability::ReliableGroupEpochV1,
+                other => return Err(WireDecodeError::UnsupportedSecurityCapability(other)),
+            },
+            key_package: r.key_package,
         })),
-        WireBody::KeyslotOffer(o) => Ok(PairingSessionMessage::KeyslotOffer(SponsorKeyslotOffer {
-            space_id: SpaceId::from_string(o.space_id),
-            keyslot_blob: o.keyslot_blob,
-            challenge: o.challenge,
-            pairing_session_id: PairingSessionId::new(o.pairing_session_id),
-        })),
+        WireBody::AdmissionOffer(o) => Ok(PairingSessionMessage::AdmissionOffer(
+            SponsorAdmissionOffer {
+                space_id: SpaceId::from_string(o.space_id),
+                kdf_parameters_blob: o.kdf_parameters_blob,
+                challenge: o.challenge,
+                pairing_session_id: PairingSessionId::new(o.pairing_session_id),
+            },
+        )),
         WireBody::ChallengeResponse(c) => Ok(PairingSessionMessage::ChallengeResponse(
             JoinerChallengeResponse {
                 encrypted_challenge: c.encrypted_challenge,
@@ -277,6 +301,9 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
                     })
                 })
                 .transpose()?,
+            welcome: c.welcome,
+            encrypted_key_catalog: c.encrypted_key_catalog,
+            group_epoch: c.group_epoch,
         })),
         WireBody::Reject(r) => Ok(PairingSessionMessage::Reject(PairingReject {
             reason: match r.reason {
@@ -321,6 +348,8 @@ mod tests {
             identity_fingerprint: sample_fingerprint(),
             nonce: vec![1, 2, 3, 4, 5],
             transport_address_blob: vec![0x9a, 0x01, 0x02],
+            security_capability: PairingSecurityCapability::ReliableGroupEpochV1,
+            key_package: vec![0x44, 0x55],
         });
 
         let decoded = round_trip(original);
@@ -332,29 +361,34 @@ mod tests {
                 assert_eq!(r.identity_fingerprint, sample_fingerprint());
                 assert_eq!(r.nonce, vec![1, 2, 3, 4, 5]);
                 assert_eq!(r.transport_address_blob, vec![0x9a, 0x01, 0x02]);
+                assert_eq!(
+                    r.security_capability,
+                    PairingSecurityCapability::ReliableGroupEpochV1
+                );
+                assert_eq!(r.key_package, vec![0x44, 0x55]);
             }
             other => panic!("expected Request, got {other:?}"),
         }
     }
 
     #[test]
-    fn keyslot_offer_round_trips() {
-        let original = PairingSessionMessage::KeyslotOffer(SponsorKeyslotOffer {
+    fn admission_offer_round_trips() {
+        let original = PairingSessionMessage::AdmissionOffer(SponsorAdmissionOffer {
             space_id: SpaceId::from_str("space-42"),
-            keyslot_blob: vec![0xde, 0xad, 0xbe, 0xef],
+            kdf_parameters_blob: vec![0xde, 0xad, 0xbe, 0xef],
             challenge: vec![0x01; 32],
             pairing_session_id: PairingSessionId::new("sess-abc-42"),
         });
 
         let decoded = round_trip(original);
         match decoded {
-            PairingSessionMessage::KeyslotOffer(o) => {
+            PairingSessionMessage::AdmissionOffer(o) => {
                 assert_eq!(o.space_id.inner(), "space-42");
-                assert_eq!(o.keyslot_blob, vec![0xde, 0xad, 0xbe, 0xef]);
+                assert_eq!(o.kdf_parameters_blob, vec![0xde, 0xad, 0xbe, 0xef]);
                 assert_eq!(o.challenge, vec![0x01; 32]);
                 assert_eq!(o.pairing_session_id.as_str(), "sess-abc-42");
             }
-            other => panic!("expected KeyslotOffer, got {other:?}"),
+            other => panic!("expected AdmissionOffer, got {other:?}"),
         }
     }
 
@@ -382,6 +416,9 @@ mod tests {
             sender_identity_fingerprint: sample_fingerprint(),
             transport_address_blob: vec![0xaa, 0xbb, 0xcc],
             sponsor_space_person_id: Some(space_person),
+            welcome: vec![1, 2, 3],
+            encrypted_key_catalog: vec![4, 5, 6],
+            group_epoch: 7,
         });
         let decoded = round_trip(original);
         match decoded {
@@ -392,6 +429,9 @@ mod tests {
                 assert_eq!(c.sender_identity_fingerprint, sample_fingerprint());
                 assert_eq!(c.transport_address_blob, vec![0xaa, 0xbb, 0xcc]);
                 assert_eq!(c.sponsor_space_person_id, Some(space_person));
+                assert_eq!(c.welcome, vec![1, 2, 3]);
+                assert_eq!(c.encrypted_key_catalog, vec![4, 5, 6]);
+                assert_eq!(c.group_epoch, 7);
             }
             other => panic!("expected Confirm, got {other:?}"),
         }
@@ -409,6 +449,9 @@ mod tests {
             sender_identity_fingerprint: sample_fingerprint(),
             transport_address_blob: vec![],
             sponsor_space_person_id: None,
+            welcome: vec![1],
+            encrypted_key_catalog: vec![2],
+            group_epoch: 2,
         });
         let decoded = round_trip(original);
         match decoded {
@@ -471,6 +514,29 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_unsupported_security_capability() {
+        let envelope = WireEnvelope {
+            v: WIRE_VERSION,
+            body: WireBody::Request(WireJoinerRequest {
+                invitation_code: "ABCDEFGH".into(),
+                device_id: "device-a".into(),
+                device_name: "Device A".into(),
+                identity_fingerprint: sample_fingerprint().as_display().to_string(),
+                nonce: vec![1; 32],
+                transport_address_blob: vec![2],
+                security_capability: 2,
+                key_package: vec![3],
+            }),
+        };
+        let bytes = postcard::to_allocvec(&envelope).unwrap();
+
+        assert!(matches!(
+            decode(&bytes),
+            Err(WireDecodeError::UnsupportedSecurityCapability(2))
+        ));
+    }
+
+    #[test]
     fn decode_rejects_garbage_bytes() {
         let garbage = vec![0xff; 16];
         match decode(&garbage) {
@@ -491,6 +557,8 @@ mod tests {
                 identity_fingerprint: "TOO_SHORT".to_string(),
                 nonce: vec![],
                 transport_address_blob: vec![],
+                security_capability: 1,
+                key_package: vec![1],
             }),
         };
         let bytes = postcard::to_allocvec(&fake).unwrap();

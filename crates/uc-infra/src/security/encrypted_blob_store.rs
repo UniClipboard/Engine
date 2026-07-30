@@ -27,16 +27,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info_span, Instrument};
 
+use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::{blob::ports::BlobReaderPort, crypto::aad, BlobId, ContentHash};
 
+use super::key_epoch_aad;
 use super::session::InMemorySession;
 use super::v1_aead;
 use crate::blob::{BlobStorePort, StoredPathBlob};
 
 /// Magic bytes identifying a UniClipboard blob file ("UCBL")
 const BLOB_MAGIC: [u8; 4] = [0x55, 0x43, 0x42, 0x4C];
-/// Binary format version (v1 of the binary format, not to be confused with AAD v2)
-const BLOB_FORMAT_VERSION: u8 = 0x01;
+const LEGACY_BLOB_FORMAT_VERSION: u8 = 0x01;
+const KEYED_BLOB_FORMAT_VERSION: u8 = 0x02;
 /// Header size: magic(4) + version(1) + nonce(24) = 29 bytes
 const BLOB_HEADER_SIZE: usize = 4 + 1 + 24;
 /// zstd compression level (3 = default, good speed/ratio balance)
@@ -45,17 +47,49 @@ const ZSTD_LEVEL: i32 = 3;
 const MAX_DECOMPRESSED_SIZE: usize = 500 * 1024 * 1024;
 
 /// Serializes a nonce and ciphertext into the UCBL binary format.
+#[cfg(test)]
 fn serialize_blob(nonce: &[u8; 24], ciphertext: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(BLOB_HEADER_SIZE + ciphertext.len());
     buf.extend_from_slice(&BLOB_MAGIC);
-    buf.push(BLOB_FORMAT_VERSION);
+    buf.push(LEGACY_BLOB_FORMAT_VERSION);
     buf.extend_from_slice(nonce);
     buf.extend_from_slice(ciphertext);
     buf
 }
 
 /// Parses the UCBL binary format, extracting nonce and ciphertext.
-fn parse_blob(data: &[u8]) -> Result<(&[u8; 24], &[u8])> {
+fn serialize_keyed_blob(
+    content_key_id: &ContentKeyId,
+    epoch: GroupEpoch,
+    nonce: &[u8; 24],
+    ciphertext: &[u8],
+) -> Vec<u8> {
+    let key_id = content_key_id.as_str().as_bytes();
+    let mut buf = Vec::with_capacity(4 + 1 + 8 + 1 + key_id.len() + 24 + ciphertext.len());
+    buf.extend_from_slice(&BLOB_MAGIC);
+    buf.push(KEYED_BLOB_FORMAT_VERSION);
+    buf.extend_from_slice(&epoch.value().to_le_bytes());
+    buf.push(key_id.len() as u8);
+    buf.extend_from_slice(key_id);
+    buf.extend_from_slice(nonce);
+    buf.extend_from_slice(ciphertext);
+    buf
+}
+
+enum ParsedBlob<'a> {
+    Legacy {
+        nonce: &'a [u8; 24],
+        ciphertext: &'a [u8],
+    },
+    Keyed {
+        content_key_id: ContentKeyId,
+        epoch: GroupEpoch,
+        nonce: &'a [u8; 24],
+        ciphertext: &'a [u8],
+    },
+}
+
+fn parse_blob(data: &[u8]) -> Result<ParsedBlob<'_>> {
     if data.len() < BLOB_HEADER_SIZE {
         return Err(anyhow::anyhow!(
             "blob file truncated: {} bytes < {} header",
@@ -66,16 +100,50 @@ fn parse_blob(data: &[u8]) -> Result<(&[u8; 24], &[u8])> {
     if data[0..4] != BLOB_MAGIC {
         return Err(anyhow::anyhow!("invalid blob magic bytes"));
     }
-    if data[4] != BLOB_FORMAT_VERSION {
-        return Err(anyhow::anyhow!(
-            "unsupported blob format version: {}",
-            data[4]
-        ));
+    match data[4] {
+        LEGACY_BLOB_FORMAT_VERSION => {
+            let nonce: &[u8; 24] = data[5..29]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("nonce extraction failed"))?;
+            Ok(ParsedBlob::Legacy {
+                nonce,
+                ciphertext: &data[29..],
+            })
+        }
+        KEYED_BLOB_FORMAT_VERSION => {
+            const FIXED_PREFIX: usize = 4 + 1 + 8 + 1;
+            if data.len() < FIXED_PREFIX + 24 {
+                return Err(anyhow::anyhow!("keyed blob header truncated"));
+            }
+            let epoch = GroupEpoch::new(u64::from_le_bytes(
+                data[5..13]
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("epoch extraction failed"))?,
+            ));
+            let key_id_len = data[13] as usize;
+            let nonce_start = FIXED_PREFIX + key_id_len;
+            let ciphertext_start = nonce_start + 24;
+            if key_id_len == 0 || data.len() < ciphertext_start {
+                return Err(anyhow::anyhow!("invalid keyed blob header"));
+            }
+            let key_id = std::str::from_utf8(&data[FIXED_PREFIX..nonce_start])
+                .map_err(|_| anyhow::anyhow!("content key id is not utf-8"))?;
+            let content_key_id = ContentKeyId::from_string(key_id)
+                .map_err(|_| anyhow::anyhow!("invalid content key id"))?;
+            let nonce: &[u8; 24] = data[nonce_start..ciphertext_start]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("nonce extraction failed"))?;
+            Ok(ParsedBlob::Keyed {
+                content_key_id,
+                epoch,
+                nonce,
+                ciphertext: &data[ciphertext_start..],
+            })
+        }
+        version => Err(anyhow::anyhow!(
+            "unsupported blob format version: {version}"
+        )),
     }
-    let nonce: &[u8; 24] = data[5..29]
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("nonce extraction failed"))?;
-    Ok((nonce, &data[29..]))
 }
 
 /// Decorator that encrypts/decrypts blob data transparently.
@@ -99,20 +167,30 @@ impl BlobStorePort for EncryptedBlobStore {
     async fn put(&self, blob_id: &BlobId, data: &[u8]) -> Result<(PathBuf, Option<i64>)> {
         let plaintext_size = data.len();
 
-        let master_key = self
+        let space_id = self.session.current_space_id()?;
+        let resolved = self
             .session
-            .get_master_key()
-            .context("encryption session not ready - cannot encrypt blob")?;
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .context("content key is unavailable - cannot encrypt blob")?;
 
         let compressed =
             zstd::bulk::compress(data, ZSTD_LEVEL).context("failed to compress blob data")?;
         let compressed_size = compressed.len();
 
-        let aad_bytes = aad::for_blob_v2(blob_id);
+        let business_aad = aad::for_blob_v2(blob_id);
+        let aad_bytes = key_epoch_aad::bind(
+            b"ucbl-v2",
+            &space_id,
+            resolved.epoch(),
+            resolved.content_key_id(),
+            ContentKeyPurpose::Content,
+            &business_aad,
+        );
 
-        // Slice 3 起直接走 v1_aead helper,跳过 EncryptedBlob 结构包装——
-        // EncryptedBlobStore 自己用 UCBL 二进制 wire format,不需要 JSON 包装。
-        let blob = v1_aead::encrypt_blob_xchacha(&master_key, &compressed, &aad_bytes)
+        // Slice 3 uses the v1_aead helper directly and bypasses the
+        // EncryptedBlob wrapper. This store writes the UCBL binary wire format,
+        // so it does not need the wrapper's JSON representation.
+        let blob = v1_aead::encrypt_blob_xchacha(resolved.key(), &compressed, &aad_bytes)
             .context("failed to encrypt blob data")?;
 
         let nonce: [u8; 24] = blob
@@ -121,7 +199,12 @@ impl BlobStorePort for EncryptedBlobStore {
             .try_into()
             .context("encrypted blob nonce is not 24 bytes")?;
 
-        let binary_data = serialize_blob(&nonce, &blob.ciphertext);
+        let binary_data = serialize_keyed_blob(
+            resolved.content_key_id(),
+            resolved.epoch(),
+            &nonce,
+            &blob.ciphertext,
+        );
         let on_disk_size = binary_data.len() as i64;
 
         let (path, _) = self
@@ -191,18 +274,43 @@ impl BlobReaderPort for EncryptedBlobStore {
             .await
             .context("failed to read encrypted blob from storage")?;
 
-        let (nonce, ciphertext) = parse_blob(&binary_data)?;
-
-        let master_key = self
-            .session
-            .get_master_key()
-            .context("encryption session not ready - cannot decrypt blob")?;
-
-        let aad_bytes = aad::for_blob_v2(blob_id);
-
-        // 直接走 v1_aead 解 (nonce + ciphertext + aad),跳过 EncryptedBlob 重构。
-        let compressed = v1_aead::decrypt_blob_xchacha(&master_key, nonce, ciphertext, &aad_bytes)
-            .context("failed to decrypt blob - key mismatch or data corrupted")?;
+        let parsed = parse_blob(&binary_data)?;
+        let business_aad = aad::for_blob_v2(blob_id);
+        let compressed = match parsed {
+            ParsedBlob::Legacy { nonce, ciphertext } => {
+                let master_key = self
+                    .session
+                    .legacy_content_key()
+                    .context("encryption session not ready - cannot decrypt blob")?;
+                v1_aead::decrypt_blob_xchacha(&master_key, nonce, ciphertext, &business_aad)
+                    .context("failed to decrypt legacy blob")?
+            }
+            ParsedBlob::Keyed {
+                content_key_id,
+                epoch,
+                nonce,
+                ciphertext,
+            } => {
+                let space_id = self.session.current_space_id()?;
+                let resolved = self
+                    .session
+                    .content_key(&space_id, &content_key_id, ContentKeyPurpose::Content)
+                    .context("content key is unavailable - cannot decrypt blob")?;
+                if resolved.epoch() != epoch {
+                    return Err(anyhow::anyhow!("blob key epoch mismatch"));
+                }
+                let aad_bytes = key_epoch_aad::bind(
+                    b"ucbl-v2",
+                    &space_id,
+                    epoch,
+                    &content_key_id,
+                    ContentKeyPurpose::Content,
+                    &business_aad,
+                );
+                v1_aead::decrypt_blob_xchacha(resolved.key(), nonce, ciphertext, &aad_bytes)
+                    .context("failed to decrypt keyed blob")?
+            }
+        };
 
         let plaintext = zstd::bulk::decompress(&compressed, MAX_DECOMPRESSED_SIZE)
             .context("failed to decompress blob data - data may be corrupted")?;
@@ -232,7 +340,13 @@ mod tests {
     fn store_with_key(dir: PathBuf) -> EncryptedBlobStore {
         let inner: Arc<dyn BlobStorePort> = Arc::new(FilesystemBlobStore::new(dir));
         let session = Arc::new(InMemorySession::new());
-        session.set_master_key(MasterKey::from_bytes(&[7u8; 32]).unwrap());
+        let space_id = uc_core::ids::SpaceId::from_str("blob-space");
+        session
+            .set_master_key_for_space(space_id.clone(), MasterKey::from_bytes(&[7u8; 32]).unwrap());
+        let material = session
+            .create_migrated_space_material(&space_id, 100)
+            .unwrap();
+        session.install_space_material(&material).unwrap();
         EncryptedBlobStore::new(inner, session)
     }
 
@@ -274,5 +388,74 @@ mod tests {
         store.delete(&blob_id).await.unwrap();
         assert!(BlobReaderPort::get(&store, &blob_id).await.is_err());
         store.delete(&blob_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_blob_header_contains_key_epoch_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_with_key(tmp.path().join("blobs"));
+        let blob_id = BlobId::new();
+
+        let (path, _) = store.put(&blob_id, b"secret").await.unwrap();
+        let raw = tokio::fs::read(path).await.unwrap();
+
+        assert_eq!(&raw[..4], &BLOB_MAGIC);
+        assert_eq!(raw[4], 2);
+        assert!(raw
+            .windows("legacy-v1".len())
+            .all(|window| window != b"legacy-v1"));
+        assert_eq!(
+            BlobReaderPort::get(&store, &blob_id).await.unwrap(),
+            b"secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_blob_format_remains_readable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("blobs");
+        let inner: Arc<dyn BlobStorePort> = Arc::new(FilesystemBlobStore::new(dir));
+        let root = MasterKey::from_bytes(&[7u8; 32]).unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = uc_core::ids::SpaceId::from_str("blob-space");
+        session.set_master_key_for_space(space_id.clone(), root.clone());
+        let material = session
+            .create_migrated_space_material(&space_id, 100)
+            .unwrap();
+        session.install_space_material(&material).unwrap();
+        let store = EncryptedBlobStore::new(inner.clone(), session);
+        let blob_id = BlobId::new();
+        let compressed = zstd::bulk::compress(b"legacy", ZSTD_LEVEL).unwrap();
+        let encrypted =
+            v1_aead::encrypt_blob_xchacha(&root, &compressed, &aad::for_blob_v2(&blob_id)).unwrap();
+        let nonce: [u8; 24] = encrypted.nonce.try_into().unwrap();
+        inner
+            .put(&blob_id, &serialize_blob(&nonce, &encrypted.ciphertext))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            BlobReaderPort::get(&store, &blob_id).await.unwrap(),
+            b"legacy"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_blob_key_does_not_fall_back_to_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("blobs");
+        let writer = store_with_key(dir.clone());
+        let blob_id = BlobId::new();
+        writer.put(&blob_id, b"secret").await.unwrap();
+
+        let inner: Arc<dyn BlobStorePort> = Arc::new(FilesystemBlobStore::new(dir));
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(
+            uc_core::ids::SpaceId::from_str("blob-space"),
+            MasterKey::from_bytes(&[7u8; 32]).unwrap(),
+        );
+        let reader = EncryptedBlobStore::new(inner, session);
+
+        assert!(BlobReaderPort::get(&reader, &blob_id).await.is_err());
     }
 }
