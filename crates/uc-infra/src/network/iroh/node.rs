@@ -64,6 +64,7 @@ use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
 use super::identity_store::IrohIdentityStore;
+use super::net_recovery::DemandRecoveryCoordinator;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
 use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
@@ -582,6 +583,7 @@ impl Drop for NodeRunLease {
 /// [`spawn`](Self::spawn) the router.
 pub struct IrohNodeBuilder {
     endpoint: Arc<Endpoint>,
+    demand_recovery: Arc<DemandRecoveryCoordinator>,
     /// Held in `Option` so `install_*` methods can `take()` + reassign the
     /// builder (iroh's `RouterBuilder::accept` consumes `self`).
     router_builder: Option<RouterBuilder>,
@@ -708,6 +710,10 @@ impl IrohNodeBuilder {
             .await
             .map_err(|err| IrohNodeError::Bind(err.to_string()))?;
         let endpoint = Arc::new(endpoint);
+        let demand_recovery = Arc::new(DemandRecoveryCoordinator::new(
+            (*endpoint).clone(),
+            !config.disable_relays,
+        ));
         let router_builder = Router::builder((*endpoint).clone());
         debug!(
             endpoint_id = %endpoint.id().fmt_short(),
@@ -720,6 +726,7 @@ impl IrohNodeBuilder {
         log_publish_addrs(&endpoint, "post-bind");
         Ok(Self {
             endpoint,
+            demand_recovery,
             router_builder: Some(router_builder),
             config,
             run_lease,
@@ -809,12 +816,13 @@ impl IrohNodeBuilder {
         // and broadcast `Sender` — that's what makes inbound dials flip a
         // recovered peer to Online without needing our own keepalive to
         // dial them again.
-        let adapter = IrohPresenceAdapter::new(
+        let adapter = IrohPresenceAdapter::new_with_recovery(
             Arc::clone(&self.endpoint),
             peer_addr_repo,
             member_repo,
             fingerprint_factory,
             clock,
+            Arc::clone(&self.demand_recovery),
         );
         let handler = adapter.handler();
 

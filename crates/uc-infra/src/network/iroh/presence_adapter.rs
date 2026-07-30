@@ -73,6 +73,7 @@ use uc_core::ports::{
 use uc_core::security::IdentityFingerprint;
 
 use super::connect::connect_with_staggered_retry;
+use super::net_recovery::DemandRecoveryCoordinator;
 
 /// ALPN identifier for the Slice 2 presence protocol. The accept-side
 /// handler performs no application-level handshake — its sole job is to
@@ -322,6 +323,7 @@ fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool 
 /// Iroh-backed [`PresencePort`] implementation.
 pub struct IrohPresenceAdapter {
     endpoint: Arc<Endpoint>,
+    demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     clock: Arc<dyn ClockPort>,
     /// Live iroh connections keyed by `DeviceId`. `DeviceId` is `Copy +
@@ -393,6 +395,42 @@ impl IrohPresenceAdapter {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
+        Self::build(
+            endpoint,
+            peer_addr_repo,
+            member_repo,
+            fingerprint_factory,
+            clock,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_recovery(
+        endpoint: Arc<Endpoint>,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        clock: Arc<dyn ClockPort>,
+        demand_recovery: Arc<DemandRecoveryCoordinator>,
+    ) -> Self {
+        Self::build(
+            endpoint,
+            peer_addr_repo,
+            member_repo,
+            fingerprint_factory,
+            clock,
+            Some(demand_recovery),
+        )
+    }
+
+    fn build(
+        endpoint: Arc<Endpoint>,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        clock: Arc<dyn ClockPort>,
+        demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
+    ) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let last_state = Arc::new(Mutex::new(HashMap::new()));
         let last_offline_at = Arc::new(Mutex::new(HashMap::new()));
@@ -409,6 +447,7 @@ impl IrohPresenceAdapter {
         });
         Self {
             endpoint,
+            demand_recovery,
             peer_addr_repo,
             clock,
             peers: Arc::new(Mutex::new(HashMap::new())),
@@ -500,6 +539,10 @@ impl IrohPresenceAdapter {
             postcard::from_bytes(&record.addr_blob).map_err(|err| {
                 PresenceError::Internal(format!("postcard decode EndpointAddr: {err}"))
             })?;
+
+        if let Some(recovery) = &self.demand_recovery {
+            recovery.recover_for_demand().await;
+        }
 
         // Dial.
         match connect_with_staggered_retry(

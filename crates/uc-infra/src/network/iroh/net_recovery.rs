@@ -47,6 +47,8 @@
 //! (`disable_relays = true`) there is no home relay by design, so the "no
 //! healthy relay" signal is expected and this watchdog is not started.
 
+use std::future::Future;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use iroh::{Endpoint, Watcher as _};
@@ -65,6 +67,121 @@ const DNS_SELFTEST_HOST: &str = "dns.iroh.link";
 /// Budget for one self-test lookup. Short so a wedged resolver's timeout does
 /// not stall the watchdog loop for long.
 const DNS_SELFTEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Suppress duplicate demand-driven nudges while one network transition is
+/// settling. Share-extension peer refreshes and clipboard fan-out can produce
+/// a burst of concurrent dials; one resolver reset + endpoint nudge is enough
+/// for all of them.
+const DEMAND_RECOVERY_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// `Endpoint::network_change` is expected to enqueue work promptly. Keep the
+/// caller bounded even if an upstream actor is wedged; the passive watchdog
+/// remains available as a later fallback.
+const DEMAND_RECOVERY_ACTION_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Small synchronous state machine used to claim a demand-driven recovery.
+/// The enclosing mutex makes the claim atomic across concurrent peer dials;
+/// the potentially-async recovery action runs after the lock is released.
+struct DemandRecoveryGate {
+    cooldown: Duration,
+    last_claimed_at: Option<Instant>,
+}
+
+impl DemandRecoveryGate {
+    fn new(cooldown: Duration) -> Self {
+        Self {
+            cooldown,
+            last_claimed_at: None,
+        }
+    }
+
+    fn claim(&mut self, relays_enabled: bool, relay_is_healthy: bool, now: Instant) -> bool {
+        if !relays_enabled {
+            return false;
+        }
+        if relay_is_healthy {
+            self.last_claimed_at = None;
+            return false;
+        }
+        if self
+            .last_claimed_at
+            .is_some_and(|last| now.saturating_duration_since(last) < self.cooldown)
+        {
+            return false;
+        }
+        self.last_claimed_at = Some(now);
+        true
+    }
+}
+
+/// Node-owned coordinator for explicit outbound demand. It complements the
+/// passive watchdog: a user action does not wait out the watchdog grace, while
+/// idle nodes retain the low-power backoff cadence.
+pub(crate) struct DemandRecoveryCoordinator {
+    endpoint: Endpoint,
+    relays_enabled: bool,
+    gate: Mutex<DemandRecoveryGate>,
+}
+
+impl DemandRecoveryCoordinator {
+    pub(crate) fn new(endpoint: Endpoint, relays_enabled: bool) -> Self {
+        Self {
+            endpoint,
+            relays_enabled,
+            gate: Mutex::new(DemandRecoveryGate::new(DEMAND_RECOVERY_COOLDOWN)),
+        }
+    }
+
+    /// Immediately rebuild relay prerequisites when an outbound operation
+    /// needs connectivity and the home relay is not healthy yet.
+    pub(crate) async fn recover_for_demand(&self) {
+        let relay_is_healthy = relay_healthy(&self.endpoint.home_relay_status().get());
+        let claimed = match self.gate.lock() {
+            Ok(mut gate) => gate.claim(self.relays_enabled, relay_is_healthy, Instant::now()),
+            Err(err) => {
+                warn!(target: "iroh.net_recovery", error = %err, "demand recovery gate lock poisoned");
+                false
+            }
+        };
+        if !claimed {
+            return;
+        }
+
+        info!(
+            target: "iroh.net_recovery",
+            "outbound demand found home relay unhealthy; recovering immediately"
+        );
+        reset_resolver(&self.endpoint);
+        if !await_bounded(
+            DEMAND_RECOVERY_ACTION_TIMEOUT,
+            self.endpoint.network_change(),
+        )
+        .await
+        {
+            warn!(
+                target: "iroh.net_recovery",
+                budget_ms = DEMAND_RECOVERY_ACTION_TIMEOUT.as_millis() as u64,
+                "demand-driven endpoint recovery exceeded its action budget"
+            );
+        }
+    }
+}
+
+async fn await_bounded<F>(budget: Duration, future: F) -> bool
+where
+    F: Future<Output = ()>,
+{
+    tokio::time::timeout(budget, future).await.is_ok()
+}
+
+fn reset_resolver(endpoint: &Endpoint) {
+    match endpoint.dns_resolver() {
+        Ok(resolver) => resolver.reset(),
+        Err(err) => {
+            warn!(target: "iroh.net_recovery", error = %err, "cannot reset DNS resolver");
+        }
+    }
+}
 
 /// Pacing for the relay self-healing watchdog. All values live here so the
 /// recovery cadence is defined in one place rather than scattered as literals.
@@ -235,12 +352,7 @@ async fn run(endpoint: Endpoint, policy: RecoveryPolicy) {
                 // interface state is identical and that path never fires. Reset
                 // the resolver directly — it re-reads /etc/resolv.conf / the
                 // Windows registry (lazily, no IO here).
-                match endpoint.dns_resolver() {
-                    Ok(resolver) => resolver.reset(),
-                    Err(err) => {
-                        warn!(target: "iroh.net_recovery", error = %err, "cannot reset DNS resolver");
-                    }
-                }
+                reset_resolver(&endpoint);
                 // Additionally nudge the endpoint: re-STUN + relay-connection
                 // re-check when the network genuinely changed. Harmless no-op
                 // otherwise, and prompts the relay actor to redial sooner.
@@ -325,6 +437,7 @@ async fn dns_selftest(endpoint: &Endpoint, stage: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn policy() -> RecoveryPolicy {
         RecoveryPolicy {
@@ -399,5 +512,57 @@ mod tests {
         let t2 = now + secs(100);
         assert_eq!(s.observe(false, t2), Action::Wait(secs(45)));
         assert_eq!(s.observe(false, t2 + secs(45)), Action::Nudge(secs(30)));
+    }
+
+    #[test]
+    fn explicit_demand_claims_recovery_immediately_when_relay_is_unhealthy() {
+        let mut gate = DemandRecoveryGate::new(secs(5));
+        let now = Instant::now();
+
+        assert!(gate.claim(true, false, now));
+    }
+
+    #[test]
+    fn explicit_demand_does_not_recover_healthy_or_lan_only_nodes() {
+        let mut gate = DemandRecoveryGate::new(secs(5));
+        let now = Instant::now();
+
+        assert!(!gate.claim(true, true, now));
+        assert!(!gate.claim(false, false, now));
+    }
+
+    #[tokio::test]
+    async fn concurrent_demands_claim_one_recovery_action() {
+        let gate = Arc::new(Mutex::new(DemandRecoveryGate::new(secs(5))));
+        let barrier = Arc::new(tokio::sync::Barrier::new(17));
+        let now = Instant::now();
+        let mut tasks = Vec::new();
+
+        for _ in 0..16 {
+            let gate = Arc::clone(&gate);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                gate.lock().expect("gate lock").claim(true, false, now)
+            }));
+        }
+
+        barrier.wait().await;
+        let mut claims = 0;
+        for task in tasks {
+            if task.await.expect("claim task") {
+                claims += 1;
+            }
+        }
+        assert_eq!(claims, 1);
+    }
+
+    #[tokio::test]
+    async fn demand_recovery_action_is_bounded() {
+        let started = Instant::now();
+        let completed = await_bounded(secs(0), std::future::pending::<()>()).await;
+
+        assert!(!completed);
+        assert!(started.elapsed() < Duration::from_millis(100));
     }
 }
