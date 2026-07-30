@@ -47,6 +47,8 @@ use super::scope_identifier::scope_identifier;
 use super::session::InMemorySession;
 use super::v1_aead;
 
+const MAX_STALLED_REVOCATION_ITERATIONS: usize = 3;
+
 /// `SpaceAccessStore` 默认实现(同时提供全部窄意图 port)。
 pub struct DefaultSpaceAccessAdapter {
     key_material: Arc<KeyMaterialStore>,
@@ -476,10 +478,11 @@ impl DefaultSpaceAccessAdapter {
             .key_epoch_repository
             .as_ref()
             .ok_or_else(|| SpaceAccessError::Internal("key epoch repository unavailable".into()))?;
+        let (key_package, private_state) = pending.into_parts();
         let completed = MlsGroupEngine::complete_join(
             PendingMlsJoin {
-                key_package: pending.key_package.clone(),
-                client_state: MlsClientState::from_bytes(pending.private_state().to_vec()),
+                key_package,
+                client_state: MlsClientState::from_bytes(private_state),
             },
             space_id.as_ref().as_bytes(),
             welcome,
@@ -604,7 +607,9 @@ impl DefaultSpaceAccessAdapter {
             }
         };
 
+        let mut stalled_iterations = 0;
         loop {
+            let previous_status = record.status();
             match record.status() {
                 RevocationStatus::Prepared => {
                     let base = repository
@@ -714,6 +719,16 @@ impl DefaultSpaceAccessAdapter {
                 .get_revocation(record.revocation_id())
                 .await?
                 .ok_or_else(|| KeyEpochError::Repository("revocation state disappeared".into()))?;
+            if record.status() == previous_status {
+                stalled_iterations += 1;
+                if stalled_iterations >= MAX_STALLED_REVOCATION_ITERATIONS {
+                    return Err(KeyEpochError::Repository(format!(
+                        "revocation recovery required: repository state remained at {previous_status:?}"
+                    )));
+                }
+            } else {
+                stalled_iterations = 0;
+            }
         }
     }
 
@@ -1839,7 +1854,7 @@ impl GroupRevocationPort for DefaultSpaceAccessAdapter {
 #[cfg(test)]
 mod admission_tests {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -1938,13 +1953,19 @@ mod admission_tests {
         }
     }
 
-    fn memory_revocation_repository(
+    fn memory_revocation_repository_with_stage_persistence(
         initial_material: Option<SpaceKeyMaterial>,
-    ) -> (Arc<MockRevocationRepository>, Arc<AtomicBool>) {
+        persist_stage: bool,
+    ) -> (
+        Arc<MockRevocationRepository>,
+        Arc<AtomicBool>,
+        Arc<AtomicUsize>,
+    ) {
         let material = Arc::new(Mutex::new(initial_material));
         let record = Arc::new(Mutex::new(None::<RevocationRecord>));
         let stage = Arc::new(Mutex::new(None::<RevocationStage>));
         let fail_saves = Arc::new(AtomicBool::new(false));
+        let stage_calls = Arc::new(AtomicUsize::new(0));
         let mut mock = MockRevocationRepository::new();
 
         let save_material = material.clone();
@@ -2003,9 +2024,17 @@ mod admission_tests {
 
         let staged_record = record.clone();
         let staged_value = stage.clone();
+        let recorded_stage_calls = stage_calls.clone();
         mock.expect_stage_revocation().returning(move |value| {
-            *staged_record.lock().unwrap() = Some(value.record().clone());
-            *staged_value.lock().unwrap() = Some(value.clone());
+            let call = recorded_stage_calls.fetch_add(1, Ordering::AcqRel) + 1;
+            if persist_stage {
+                *staged_record.lock().unwrap() = Some(value.record().clone());
+                *staged_value.lock().unwrap() = Some(value.clone());
+            } else if call > 3 {
+                return Err(KeyEpochError::Repository(
+                    "test repository observed excessive staging retries".into(),
+                ));
+            }
             Ok(())
         });
 
@@ -2084,7 +2113,15 @@ mod admission_tests {
                 Ok(acknowledged)
             });
 
-        (Arc::new(mock), fail_saves)
+        (Arc::new(mock), fail_saves, stage_calls)
+    }
+
+    fn memory_revocation_repository(
+        initial_material: Option<SpaceKeyMaterial>,
+    ) -> (Arc<MockRevocationRepository>, Arc<AtomicBool>) {
+        let (repository, fail_saves, _) =
+            memory_revocation_repository_with_stage_persistence(initial_material, true);
+        (repository, fail_saves)
     }
 
     fn local_key_material(
@@ -2110,12 +2147,15 @@ mod admission_tests {
         )
     }
 
-    fn sponsor_fixture() -> (
+    fn sponsor_fixture_with_stage_persistence(
+        persist_stage: bool,
+    ) -> (
         DefaultSpaceAccessAdapter,
         Arc<InMemorySession>,
         Arc<MockRevocationRepository>,
         SpaceId,
         TempDir,
+        Arc<AtomicUsize>,
     ) {
         let directory = tempdir().unwrap();
         let session = Arc::new(InMemorySession::new());
@@ -2126,7 +2166,8 @@ mod admission_tests {
             .create_migrated_space_material(&space_id, 1)
             .unwrap();
         session.install_space_material(&material).unwrap();
-        let (repository, _) = memory_revocation_repository(Some(material));
+        let (repository, _, stage_calls) =
+            memory_revocation_repository_with_stage_persistence(Some(material), persist_stage);
         let key_material = local_key_material(&directory, memory_secure_storage());
         (
             adapter(key_material, session.clone(), repository.clone()),
@@ -2134,7 +2175,20 @@ mod admission_tests {
             repository,
             space_id,
             directory,
+            stage_calls,
         )
+    }
+
+    fn sponsor_fixture() -> (
+        DefaultSpaceAccessAdapter,
+        Arc<InMemorySession>,
+        Arc<MockRevocationRepository>,
+        SpaceId,
+        TempDir,
+    ) {
+        let (adapter, session, repository, space_id, directory, _) =
+            sponsor_fixture_with_stage_persistence(true);
+        (adapter, session, repository, space_id, directory)
     }
 
     #[test]
@@ -2388,6 +2442,37 @@ mod admission_tests {
             .unwrap();
         assert_eq!(stage.outbox().len(), 1);
         assert_eq!(stage.outbox()[0].recipient(), &DeviceId::new("bob"));
+    }
+
+    #[tokio::test]
+    async fn reliable_revocation_stops_when_repository_state_does_not_advance() {
+        let (sponsor, _session, _repository, space_id, _directory, stage_calls) =
+            sponsor_fixture_with_stage_persistence(false);
+        let charlie = sponsor
+            .prepare_group_join(&DeviceId::new("charlie"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("charlie"),
+                &[],
+                &charlie.key_package,
+            )
+            .await
+            .unwrap();
+
+        let error = sponsor
+            .revoke_group_member(&DeviceId::new("charlie"), &[], 100)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            KeyEpochError::Repository(message) if message.contains("recovery required")
+        ));
+        assert_eq!(stage_calls.load(Ordering::Acquire), 3);
     }
 
     #[tokio::test]

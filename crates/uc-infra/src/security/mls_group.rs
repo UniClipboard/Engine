@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::RwLock;
-
 use openmls::{
     group::MlsGroup,
     prelude::{tls_codec::*, *},
@@ -65,7 +62,7 @@ impl OpenMlsProvider for SnapshotProvider {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredClientState {
     version: u8,
-    storage_entries: Vec<(Vec<u8>, Vec<u8>)>,
+    serialized_storage: Vec<u8>,
     signer_public: Vec<u8>,
     group_id: Option<Vec<u8>>,
 }
@@ -400,17 +397,14 @@ fn snapshot(
     signer: &SignatureKeyPair,
     group_id: Option<&[u8]>,
 ) -> Result<MlsClientState, MlsGroupError> {
-    let storage = provider
+    let mut serialized_storage = Vec::new();
+    provider
         .storage
-        .values
-        .read()
+        .serialize(&mut serialized_storage)
         .map_err(|_| MlsGroupError::InvalidState)?;
     let stored = StoredClientState {
         version: STATE_VERSION,
-        storage_entries: storage
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
+        serialized_storage,
         signer_public: signer.to_public_vec(),
         group_id: group_id.map(ToOwned::to_owned),
     };
@@ -424,17 +418,11 @@ fn restore(state: &MlsClientState) -> Result<(SnapshotProvider, StoredClientStat
     if stored.version != STATE_VERSION {
         return Err(MlsGroupError::InvalidState);
     }
+    let storage = MemoryStorage::deserialize(&mut stored.serialized_storage.as_slice())
+        .map_err(|_| MlsGroupError::InvalidState)?;
     let provider = SnapshotProvider {
         crypto: RustCrypto::default(),
-        storage: MemoryStorage {
-            values: RwLock::new(
-                stored
-                    .storage_entries
-                    .iter()
-                    .cloned()
-                    .collect::<HashMap<_, _>>(),
-            ),
-        },
+        storage,
     };
     Ok((provider, stored))
 }

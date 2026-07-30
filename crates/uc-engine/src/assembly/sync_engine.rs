@@ -200,28 +200,80 @@ impl SyncEngineAssembly {
     }
 }
 
+const GROUP_UPDATE_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
+const GROUP_UPDATE_RETRY_MAX_DELAY: Duration = Duration::from_secs(300);
+
+fn group_update_retry_delay(consecutive_failures: u32, has_pending_work: bool) -> Duration {
+    if !has_pending_work {
+        return GROUP_UPDATE_RETRY_MAX_DELAY;
+    }
+    let multiplier = 1u64 << consecutive_failures.min(4);
+    Duration::from_secs(
+        GROUP_UPDATE_RETRY_BASE_DELAY
+            .as_secs()
+            .saturating_mul(multiplier)
+            .min(GROUP_UPDATE_RETRY_MAX_DELAY.as_secs()),
+    )
+}
+
 fn spawn_group_update_retry(roster: Arc<MemberRosterFacade>) -> JoinHandle<()> {
     let mut presence_events = roster.subscribe_presence_events();
     tokio::spawn(async move {
-        let mut retry_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut retry_interval = tokio::time::interval(GROUP_UPDATE_RETRY_BASE_DELAY);
         retry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        retry_interval.tick().await;
+        let mut consecutive_failures = 0u32;
+        let mut next_timer_retry_at = Instant::now();
         loop {
-            let should_retry = tokio::select! {
+            let timer_triggered = tokio::select! {
                 _ = retry_interval.tick() => true,
                 event = presence_events.recv() => match event {
-                    Ok(event) => event.state == ReachabilityState::Online,
-                    Err(broadcast::error::RecvError::Lagged(_)) => true,
+                    Ok(event) if event.state == ReachabilityState::Online => false,
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => false,
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
             };
-            if !should_retry {
+            if timer_triggered && Instant::now() < next_timer_retry_at {
                 continue;
             }
-            if let Err(error) = roster.resume_incomplete_revocations().await {
-                warn!(error = %error, "pending group updates could not be retried");
+            match roster.resume_incomplete_revocations().await {
+                Ok(pending) => {
+                    consecutive_failures = 0;
+                    next_timer_retry_at =
+                        Instant::now() + group_update_retry_delay(0, !pending.is_empty());
+                }
+                Err(error) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    next_timer_retry_at =
+                        Instant::now() + group_update_retry_delay(consecutive_failures, true);
+                    if consecutive_failures == 1 {
+                        warn!(error = %error, "pending group updates could not be retried");
+                    } else {
+                        debug!(
+                            error = %error,
+                            consecutive_failures,
+                            "pending group update retry remains deferred"
+                        );
+                    }
+                }
             }
         }
     })
+}
+
+#[cfg(test)]
+mod group_update_retry_tests {
+    use super::*;
+
+    #[test]
+    fn retry_delay_backs_off_failures_and_idles_without_pending_work() {
+        assert_eq!(group_update_retry_delay(0, true), Duration::from_secs(30));
+        assert_eq!(group_update_retry_delay(1, true), Duration::from_secs(60));
+        assert_eq!(group_update_retry_delay(3, true), Duration::from_secs(240));
+        assert_eq!(group_update_retry_delay(8, true), Duration::from_secs(300));
+        assert_eq!(group_update_retry_delay(0, false), Duration::from_secs(300));
+    }
 }
 
 /// 把接收端推回的进度帧翻译成 `HostEvent::Transfer` 发给 emitter。
@@ -426,7 +478,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.device.member_repo),
         Arc::clone(&deps.security.fingerprint),
         Arc::clone(&deps.security.space_access_ports.group_revocation),
-    );
+    )?;
     // Install the active-clipboard state ALPN (0xC3) as an independent
     // sibling on the same node. A lone `.accept()` deeper in the node would
     // not be reachable from here — the handler has to be installed on this

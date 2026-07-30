@@ -1,6 +1,6 @@
 use std::fmt;
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::ids::{SessionId, SpaceId};
 use crate::membership::PendingGroupUpdate;
@@ -47,19 +47,26 @@ pub struct PreparedAdmissionOffer {
 /// sponsor; `private_state` must remain local until the Welcome is installed.
 pub struct PreparedGroupJoin {
     pub key_package: Vec<u8>,
-    private_state: Vec<u8>,
+    private_state: Zeroizing<Vec<u8>>,
 }
 
 impl PreparedGroupJoin {
     pub fn new(key_package: Vec<u8>, private_state: Vec<u8>) -> Self {
         Self {
             key_package,
-            private_state,
+            private_state: Zeroizing::new(private_state),
         }
     }
 
     pub fn private_state(&self) -> &[u8] {
         &self.private_state
+    }
+
+    pub fn into_parts(mut self) -> (Vec<u8>, Vec<u8>) {
+        (
+            self.key_package,
+            std::mem::take(self.private_state.as_mut()),
+        )
     }
 }
 
@@ -70,12 +77,6 @@ impl fmt::Debug for PreparedGroupJoin {
             .field("key_package_len", &self.key_package.len())
             .field("private_state", &"[REDACTED]")
             .finish()
-    }
-}
-
-impl Drop for PreparedGroupJoin {
-    fn drop(&mut self) {
-        self.private_state.zeroize();
     }
 }
 

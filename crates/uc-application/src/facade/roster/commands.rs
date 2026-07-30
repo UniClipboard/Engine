@@ -21,6 +21,7 @@ pub enum MemberRevocationState {
     LocalOnly,
     Applied,
     Complete,
+    RecoveryRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -248,7 +248,7 @@ impl SpaceSetupFacade {
             Arc::clone(&device_identity),
         ));
         // Build the sponsor-side pairing stack: the handshake
-        // coordinator owns wire I/O for the KeyslotOffer→Confirm flow;
+        // coordinator owns wire I/O for the AdmissionOffer→Confirm flow;
         // the orchestrator composes it with admit/trust use cases so
         // persistence is done by the already-existing use cases rather
         // than being duplicated here.
@@ -421,7 +421,7 @@ impl SpaceSetupFacade {
         let space_id = status
             .space_id
             .clone()
-            .unwrap_or_else(|| SpaceId::from("space"));
+            .unwrap_or_else(super::legacy_space_id);
         let resumed = match self.resume_session.try_resume_session(&space_id).await {
             Ok(Some(_)) => true,
             // Keyslot missing despite has_completed == true — treat

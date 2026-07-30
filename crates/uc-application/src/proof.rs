@@ -75,6 +75,19 @@ impl HmacProofAdapter {
         mac.update(&payload);
         Ok(mac.finalize().into_bytes().to_vec())
     }
+
+    fn verify_hmac(
+        pairing_session_id: &SessionId,
+        space_id: &SpaceId,
+        challenge_nonce: [u8; 32],
+        key_bytes: &[u8],
+        tag: &[u8],
+    ) -> anyhow::Result<bool> {
+        let payload = Self::payload(pairing_session_id, space_id, challenge_nonce);
+        let mut mac = HmacSha256::new_from_slice(key_bytes)?;
+        mac.update(&payload);
+        Ok(mac.verify_slice(tag).is_ok())
+    }
 }
 
 #[async_trait]
@@ -141,20 +154,18 @@ impl ProofPort for HmacProofAdapter {
             return Ok(false);
         };
 
-        let recomputed = Self::compute_hmac(
+        let matched = Self::verify_hmac(
             &proof.pairing_session_id,
             &proof.space_id,
             proof.challenge_nonce,
             &master_key,
+            &proof.proof_bytes,
         )?;
-
-        let matched = recomputed == proof.proof_bytes;
         if !matched {
             tracing::warn!(
                 session_id = %proof.pairing_session_id,
                 space_id = %proof.space_id,
                 proof_len = proof.proof_bytes.len(),
-                recomputed_len = recomputed.len(),
                 "proof verification failed: HMAC mismatch"
             );
         } else {
@@ -176,13 +187,13 @@ impl ProofPort for HmacProofAdapter {
         if proof.challenge_nonce != expected_nonce {
             return Ok(false);
         }
-        let recomputed = Self::compute_hmac(
+        Self::verify_hmac(
             &proof.pairing_session_id,
             &proof.space_id,
             proof.challenge_nonce,
             verification_key.as_bytes(),
-        )?;
-        Ok(recomputed == proof.proof_bytes)
+            &proof.proof_bytes,
+        )
     }
 }
 
@@ -252,10 +263,20 @@ mod tests {
         assert!(!adapter.verify_proof(&proof, nonce).await?);
 
         let logs = writer.dump();
+        let full_key_hex = key
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let key_debug = format!("{key:?}");
         assert!(
             !logs.contains("abcdef01"),
             "proof key material leaked into logs: {logs}"
         );
+        assert!(
+            !logs.contains(&full_key_hex),
+            "complete key leaked into logs"
+        );
+        assert!(!logs.contains(&key_debug), "raw key bytes leaked into logs");
         Ok(())
     }
 }

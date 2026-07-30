@@ -592,6 +592,12 @@ pub struct IrohNodeBuilder {
 }
 
 impl IrohNodeBuilder {
+    fn take_router_builder(&mut self) -> Result<RouterBuilder, IrohNodeError> {
+        self.router_builder
+            .take()
+            .ok_or(IrohNodeError::InstallAfterSpawn)
+    }
+
     /// Bind the iroh endpoint, reusing the Ed25519 secret persisted by
     /// [`IrohIdentityStore`] so the endpoint's on-wire identity matches the
     /// fingerprint `LocalIdentityPort` hands out to domain code.
@@ -889,13 +895,17 @@ impl IrohNodeBuilder {
         }
     }
 
+    /// Install the encrypted group-update transport under [`GROUP_UPDATE_ALPN`].
+    ///
+    /// Must be called before [`spawn`](Self::spawn), while the shared router
+    /// still accepts protocol handlers.
     pub fn install_group_updates(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         group_revocation: Arc<dyn GroupRevocationPort>,
-    ) -> GroupUpdateHandlers {
+    ) -> Result<GroupUpdateHandlers, IrohNodeError> {
         let adapter = Arc::new(IrohGroupUpdateAdapter::new(
             Arc::clone(&self.endpoint),
             peer_addr_repo,
@@ -903,11 +913,9 @@ impl IrohNodeBuilder {
             fingerprint_factory,
             group_revocation,
         ));
-        let Some(builder) = self.router_builder.take() else {
-            unreachable!("group update transport installed after router spawn");
-        };
+        let builder = self.take_router_builder()?;
         self.router_builder = Some(builder.accept(GROUP_UPDATE_ALPN, adapter.handler()));
-        GroupUpdateHandlers { dispatch: adapter }
+        Ok(GroupUpdateHandlers { dispatch: adapter })
     }
 
     /// Install the active-clipboard state transport.
@@ -1176,6 +1184,9 @@ pub enum IrohNodeError {
     #[error("failed to initialize iroh blob store: {0}")]
     BlobStoreInit(String),
 
+    #[error("iroh transport handlers must be installed before the router is spawned")]
+    InstallAfterSpawn,
+
     #[error("invalid custom iroh relay URL `{value}`: {message}")]
     InvalidRelayUrl { value: String, message: String },
 
@@ -1312,6 +1323,20 @@ mod tests {
         // Clean shutdown exits without hanging; the test runner's default
         // timeout would catch a deadlock.
         node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn router_builder_take_reports_install_after_spawn() {
+        let store = identity_store();
+        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+            .await
+            .expect("bind");
+        builder.router_builder.take();
+
+        assert!(matches!(
+            builder.take_router_builder(),
+            Err(IrohNodeError::InstallAfterSpawn)
+        ));
     }
 
     #[tokio::test]

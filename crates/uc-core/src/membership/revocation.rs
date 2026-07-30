@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -224,7 +224,22 @@ impl RevocationStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawRevocationRecord")]
 pub struct RevocationRecord {
+    revocation_id: RevocationId,
+    space_id: SpaceId,
+    target_device_id: DeviceId,
+    #[serde(default)]
+    retained_recipients: Vec<DeviceId>,
+    previous_epoch: GroupEpoch,
+    next_epoch: GroupEpoch,
+    status: RevocationStatus,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+#[derive(Deserialize)]
+struct RawRevocationRecord {
     revocation_id: RevocationId,
     space_id: SpaceId,
     target_device_id: DeviceId,
@@ -342,7 +357,17 @@ impl fmt::Debug for RevocationOutboxMessage {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawRevocationStage")]
 pub struct RevocationStage {
+    record: RevocationRecord,
+    next_space_state: SpaceKeyState,
+    group_state: Vec<u8>,
+    key_catalog: Vec<u8>,
+    outbox: Vec<RevocationOutboxMessage>,
+}
+
+#[derive(Deserialize)]
+struct RawRevocationStage {
     record: RevocationRecord,
     next_space_state: SpaceKeyState,
     group_state: Vec<u8>,
@@ -425,6 +450,51 @@ impl RevocationStage {
         self.outbox
             .iter()
             .all(RevocationOutboxMessage::is_confirmed)
+    }
+}
+
+impl TryFrom<RawRevocationStage> for RevocationStage {
+    type Error = KeyEpochError;
+
+    fn try_from(raw: RawRevocationStage) -> Result<Self, Self::Error> {
+        let target_status = raw.record.status();
+        let updated_at_ms = raw.record.updated_at_ms();
+        let mut record = RevocationRecord::prepare_with_recipients(
+            raw.record.revocation_id().clone(),
+            raw.record.space_id().clone(),
+            raw.record.target_device_id().clone(),
+            raw.record.retained_recipients().to_vec(),
+            raw.record.previous_epoch(),
+            raw.record.created_at_ms(),
+        )?;
+        record.transition_to(RevocationStatus::Staged, updated_at_ms)?;
+        let mut stage = Self::new(
+            record,
+            raw.next_space_state,
+            raw.group_state,
+            raw.key_catalog,
+            raw.outbox,
+        )?;
+        match target_status {
+            RevocationStatus::Staged => {}
+            RevocationStatus::Activated => {
+                stage.transition_to(RevocationStatus::Activated, updated_at_ms)?;
+            }
+            RevocationStatus::Distributing => {
+                stage.transition_to(RevocationStatus::Activated, updated_at_ms)?;
+                stage.transition_to(RevocationStatus::Distributing, updated_at_ms)?;
+            }
+            RevocationStatus::Complete => {
+                stage.transition_to(RevocationStatus::Activated, updated_at_ms)?;
+                stage.transition_to(RevocationStatus::Distributing, updated_at_ms)?;
+                stage.transition_to(RevocationStatus::Complete, updated_at_ms)?;
+            }
+            RevocationStatus::RecoveryRequired => {
+                stage.transition_to(RevocationStatus::RecoveryRequired, updated_at_ms)?;
+            }
+            RevocationStatus::Prepared => return Err(KeyEpochError::InvalidRevocationStage),
+        }
+        Ok(stage)
     }
 }
 
@@ -576,6 +646,11 @@ impl RevocationRecord {
         {
             return Err(KeyEpochError::RemovedMemberInOutbox);
         }
+        let mut seen = HashSet::new();
+        let retained_recipients = retained_recipients
+            .into_iter()
+            .filter(|recipient| seen.insert(recipient.clone()))
+            .collect();
         Ok(Self {
             revocation_id,
             space_id,
@@ -660,6 +735,51 @@ impl RevocationRecord {
     }
 }
 
+impl TryFrom<RawRevocationRecord> for RevocationRecord {
+    type Error = KeyEpochError;
+
+    fn try_from(raw: RawRevocationRecord) -> Result<Self, Self::Error> {
+        if raw.next_epoch != raw.previous_epoch.next()? {
+            return Err(KeyEpochError::InvalidRevocationRecord);
+        }
+        let mut record = Self::prepare_with_recipients(
+            raw.revocation_id,
+            raw.space_id,
+            raw.target_device_id,
+            raw.retained_recipients,
+            raw.previous_epoch,
+            raw.created_at_ms,
+        )?;
+        match raw.status {
+            RevocationStatus::Prepared => {
+                record.transition_to(RevocationStatus::Prepared, raw.updated_at_ms)?;
+            }
+            RevocationStatus::Staged => {
+                record.transition_to(RevocationStatus::Staged, raw.updated_at_ms)?;
+            }
+            RevocationStatus::Activated => {
+                record.transition_to(RevocationStatus::Staged, raw.updated_at_ms)?;
+                record.transition_to(RevocationStatus::Activated, raw.updated_at_ms)?;
+            }
+            RevocationStatus::Distributing => {
+                record.transition_to(RevocationStatus::Staged, raw.updated_at_ms)?;
+                record.transition_to(RevocationStatus::Activated, raw.updated_at_ms)?;
+                record.transition_to(RevocationStatus::Distributing, raw.updated_at_ms)?;
+            }
+            RevocationStatus::Complete => {
+                record.transition_to(RevocationStatus::Staged, raw.updated_at_ms)?;
+                record.transition_to(RevocationStatus::Activated, raw.updated_at_ms)?;
+                record.transition_to(RevocationStatus::Distributing, raw.updated_at_ms)?;
+                record.transition_to(RevocationStatus::Complete, raw.updated_at_ms)?;
+            }
+            RevocationStatus::RecoveryRequired => {
+                record.transition_to(RevocationStatus::RecoveryRequired, raw.updated_at_ms)?;
+            }
+        }
+        Ok(record)
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum KeyEpochError {
     #[error("group epoch overflow")]
@@ -682,6 +802,9 @@ pub enum KeyEpochError {
 
     #[error("invalid staged revocation payload")]
     InvalidRevocationStage,
+
+    #[error("invalid persisted revocation record")]
+    InvalidRevocationRecord,
 
     #[error("removed member cannot receive the staged revocation")]
     RemovedMemberInOutbox,

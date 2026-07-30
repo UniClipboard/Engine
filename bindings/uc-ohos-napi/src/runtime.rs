@@ -391,6 +391,7 @@ fn member_revocation(summary: uc_engine::MemberRevocationSummary) -> OhMemberRev
             uc_engine::MemberRevocationOutcome::LocalOnly => "local_only",
             uc_engine::MemberRevocationOutcome::Applied => "applied",
             uc_engine::MemberRevocationOutcome::Complete => "complete",
+            uc_engine::MemberRevocationOutcome::RecoveryRequired => "recovery_required",
         }
         .to_owned(),
         pending_recipients: u32::try_from(summary.pending_recipients).unwrap_or(u32::MAX),

@@ -843,6 +843,7 @@ pub enum MemberRevocationOutcome {
     LocalOnly,
     Applied,
     Complete,
+    RecoveryRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

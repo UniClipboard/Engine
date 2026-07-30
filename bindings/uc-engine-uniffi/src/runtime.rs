@@ -129,6 +129,7 @@ pub enum MemberRevocationOutcome {
     LocalOnly,
     Applied,
     Complete,
+    RecoveryRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -1251,6 +1252,9 @@ fn map_member_revocation_summary(
             uc_engine::MemberRevocationOutcome::LocalOnly => MemberRevocationOutcome::LocalOnly,
             uc_engine::MemberRevocationOutcome::Applied => MemberRevocationOutcome::Applied,
             uc_engine::MemberRevocationOutcome::Complete => MemberRevocationOutcome::Complete,
+            uc_engine::MemberRevocationOutcome::RecoveryRequired => {
+                MemberRevocationOutcome::RecoveryRequired
+            }
         },
         pending_recipients: summary.pending_recipients,
     }

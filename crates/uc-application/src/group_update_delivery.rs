@@ -27,17 +27,21 @@ impl GroupUpdateDeliveryPort for GroupUpdateDelivery {
     async fn deliver_pending(&self, now_ms: i64) -> Result<usize, KeyEpochError> {
         let updates = self.outbox.pending_space_group_updates().await?;
         let mut delivered = 0;
+        let mut acknowledgement_error = None;
         for update in updates {
-            if self.dispatch.dispatch_group_update(&update).await.is_ok()
-                && self
+            if self.dispatch.dispatch_group_update(&update).await.is_ok() {
+                match self
                     .outbox
                     .acknowledge_space_group_update(update.update_id(), now_ms)
-                    .await?
-            {
-                delivered += 1;
+                    .await
+                {
+                    Ok(true) => delivered += 1,
+                    Ok(false) => {}
+                    Err(error) => acknowledgement_error = Some(error),
+                }
             }
         }
-        Ok(delivered)
+        acknowledgement_error.map_or(Ok(delivered), Err)
     }
 }
 
@@ -151,5 +155,48 @@ mod tests {
             .unwrap();
 
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn continues_after_acknowledgement_error_and_returns_it_after_the_batch() {
+        let first = PendingGroupUpdate::persistent(DeviceId::new("first"), vec![1]);
+        let second = PendingGroupUpdate::persistent(DeviceId::new("second"), vec![2]);
+        let first_id = first.update_id().to_owned();
+        let second_id = second.update_id().to_owned();
+        let mut outbox = MockOutbox::new();
+        outbox
+            .expect_pending_space_group_updates()
+            .times(1)
+            .return_once(move || Ok(vec![first, second]));
+        let mut sequence = mockall::Sequence::new();
+        outbox
+            .expect_acknowledge_space_group_update()
+            .times(1)
+            .withf(move |update_id, _| update_id == first_id)
+            .in_sequence(&mut sequence)
+            .returning(|_, _| Err(KeyEpochError::Repository("first ack failed".into())));
+        outbox
+            .expect_acknowledge_space_group_update()
+            .times(1)
+            .withf(move |update_id, _| update_id == second_id)
+            .in_sequence(&mut sequence)
+            .returning(|_, _| Ok(true));
+        let mut dispatch = MockDispatch::new();
+        dispatch
+            .expect_dispatch_group_update()
+            .times(2)
+            .returning(|_| Ok(()));
+        let delivery = super::GroupUpdateDelivery::new(
+            std::sync::Arc::new(outbox),
+            std::sync::Arc::new(dispatch),
+        );
+
+        let error = super::GroupUpdateDeliveryPort::deliver_pending(&delivery, 123)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, KeyEpochError::Repository(message) if message == "first ack failed")
+        );
     }
 }

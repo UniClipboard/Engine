@@ -3,7 +3,7 @@
 diesel::table! {
     member_revocation_log (revocation_id) {
         revocation_id -> Text,
-        space_id -> Text,
+        space_lookup_token -> Text,
         previous_epoch -> BigInt,
         next_epoch -> BigInt,
         status -> Text,
@@ -15,11 +15,10 @@ diesel::table! {
 }
 
 diesel::table! {
-    space_key_epoch_state (space_id) {
-        space_id -> Text,
+    space_key_epoch_state (space_lookup_token) {
+        space_lookup_token -> Text,
         group_epoch -> BigInt,
         security_mode -> Text,
-        current_content_key_id -> Text,
         encrypted_payload -> Binary,
         updated_at_ms -> BigInt,
     }

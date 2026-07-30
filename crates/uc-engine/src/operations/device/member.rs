@@ -100,6 +100,7 @@ fn member_revocation_summary(result: MemberRevocationView) -> MemberRevocationSu
         MemberRevocationState::LocalOnly => MemberRevocationOutcome::LocalOnly,
         MemberRevocationState::Applied => MemberRevocationOutcome::Applied,
         MemberRevocationState::Complete => MemberRevocationOutcome::Complete,
+        MemberRevocationState::RecoveryRequired => MemberRevocationOutcome::RecoveryRequired,
     };
     MemberRevocationSummary {
         revocation_id: result.revocation_id,
@@ -222,7 +223,7 @@ fn map_roster_error(error: RosterError) -> EngineError {
             "trusted_peer_repository",
         ),
         RosterError::GroupRevocation(_) => (
-            MEMBER_REPOSITORY_FAILED_CODE,
+            MEMBER_GROUP_REVOCATION_FAILED_CODE,
             EngineErrorCategory::Internal,
             true,
             "group_revocation",

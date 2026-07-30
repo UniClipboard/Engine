@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Binary, Nullable, Text};
+use hmac::{Hmac, Mac};
 use serde::{de::DeserializeOwned, Serialize};
+use sha2::Sha256;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     BeginRevocationOutcome, KeyEpochError, RevocationId, RevocationRecord,
@@ -29,7 +31,7 @@ struct RevocationRow {
     #[diesel(sql_type = Text)]
     revocation_id: String,
     #[diesel(sql_type = Text)]
-    space_id: String,
+    space_lookup_token: String,
     #[diesel(sql_type = BigInt)]
     previous_epoch: i64,
     #[diesel(sql_type = BigInt)]
@@ -49,13 +51,11 @@ struct RevocationRow {
 #[derive(QueryableByName)]
 struct SpaceMaterialRow {
     #[diesel(sql_type = Text)]
-    space_id: String,
+    space_lookup_token: String,
     #[diesel(sql_type = BigInt)]
     group_epoch: i64,
     #[diesel(sql_type = Text)]
     security_mode: String,
-    #[diesel(sql_type = Text)]
-    current_content_key_id: String,
     #[diesel(sql_type = Binary)]
     encrypted_payload: Vec<u8>,
     #[diesel(sql_type = BigInt)]
@@ -101,6 +101,14 @@ fn space_aad(space_id: &str, epoch: i64) -> Vec<u8> {
     format!("uc-space-key-material-v1|{space_id}|{epoch}").into_bytes()
 }
 
+fn space_lookup_token(master_key: &MasterKey, space_id: &SpaceId) -> Result<String, KeyEpochError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(master_key.as_bytes()).map_err(backend)?;
+    mac.update(b"uc-space-lookup-v1|");
+    mac.update(&(space_id.as_ref().len() as u64).to_be_bytes());
+    mac.update(space_id.as_ref().as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
 fn seal<T: Serialize>(
     master_key: &MasterKey,
     value: &T,
@@ -128,7 +136,7 @@ fn load_revocation_row(
     revocation_id: &str,
 ) -> anyhow::Result<Option<RevocationRow>> {
     diesel::sql_query(
-        "SELECT revocation_id, space_id, previous_epoch, next_epoch, status, \
+        "SELECT revocation_id, space_lookup_token, previous_epoch, next_epoch, status, \
          encrypted_record, encrypted_stage, created_at_ms, updated_at_ms \
          FROM member_revocation_log WHERE revocation_id = ?",
     )
@@ -150,7 +158,7 @@ fn decode_record(
     let previous_epoch = epoch_to_i64(record.previous_epoch().value())?;
     let next_epoch = epoch_to_i64(record.next_epoch().value())?;
     if record.revocation_id().as_str() != row.revocation_id
-        || record.space_id().as_ref() != row.space_id
+        || space_lookup_token(master_key, record.space_id())? != row.space_lookup_token
         || previous_epoch != row.previous_epoch
         || next_epoch != row.next_epoch
         || status_name(record.status()) != row.status
@@ -170,20 +178,19 @@ fn save_space_material_on(
     let state = material.state();
     let epoch = epoch_to_i64(state.epoch().value())?;
     let space_id = state.space_id().as_ref();
+    let lookup_token = space_lookup_token(master_key, state.space_id())?;
     let encrypted = seal(master_key, material, &space_aad(space_id, epoch))?;
     diesel::sql_query(
         "INSERT INTO space_key_epoch_state \
-         (space_id, group_epoch, security_mode, current_content_key_id, encrypted_payload, updated_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(space_id) DO UPDATE SET \
+         (space_lookup_token, group_epoch, security_mode, encrypted_payload, updated_at_ms) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(space_lookup_token) DO UPDATE SET \
          group_epoch = excluded.group_epoch, security_mode = excluded.security_mode, \
-         current_content_key_id = excluded.current_content_key_id, \
          encrypted_payload = excluded.encrypted_payload, updated_at_ms = excluded.updated_at_ms",
     )
-    .bind::<Text, _>(space_id)
+    .bind::<Text, _>(lookup_token)
     .bind::<BigInt, _>(epoch)
     .bind::<Text, _>(mode_name(state.mode()))
-    .bind::<Text, _>(state.current_content_key_id().as_str())
     .bind::<Binary, _>(encrypted)
     .bind::<BigInt, _>(material.updated_at_ms())
     .execute(conn)
@@ -194,17 +201,18 @@ fn save_space_material_on(
 fn decode_space_material(
     master_key: &MasterKey,
     row: SpaceMaterialRow,
+    expected_space_id: &SpaceId,
 ) -> Result<SpaceKeyMaterial, KeyEpochError> {
     let material: SpaceKeyMaterial = open(
         master_key,
         &row.encrypted_payload,
-        &space_aad(&row.space_id, row.group_epoch),
+        &space_aad(expected_space_id.as_ref(), row.group_epoch),
     )?;
     let state = material.state();
-    if state.space_id().as_ref() != row.space_id
+    if state.space_id() != expected_space_id
+        || space_lookup_token(master_key, state.space_id())? != row.space_lookup_token
         || epoch_to_i64(state.epoch().value())? != row.group_epoch
         || mode_name(state.mode()) != row.security_mode
-        || state.current_content_key_id().as_str() != row.current_content_key_id
         || material.updated_at_ms() != row.updated_at_ms
     {
         return Err(backend("space key material row integrity mismatch"));
@@ -215,17 +223,18 @@ fn decode_space_material(
 fn load_space_material_on(
     conn: &mut SqliteConnection,
     master_key: &MasterKey,
-    space_id: &str,
+    space_id: &SpaceId,
 ) -> Result<Option<SpaceKeyMaterial>, KeyEpochError> {
+    let lookup_token = space_lookup_token(master_key, space_id)?;
     let row = diesel::sql_query(
-        "SELECT space_id, group_epoch, security_mode, current_content_key_id, \
-         encrypted_payload, updated_at_ms FROM space_key_epoch_state WHERE space_id = ?",
+        "SELECT space_lookup_token, group_epoch, security_mode, \
+         encrypted_payload, updated_at_ms FROM space_key_epoch_state WHERE space_lookup_token = ?",
     )
-    .bind::<Text, _>(space_id)
+    .bind::<Text, _>(lookup_token)
     .get_result::<SpaceMaterialRow>(conn)
     .optional()
     .map_err(backend)?;
-    row.map(|row| decode_space_material(master_key, row))
+    row.map(|row| decode_space_material(master_key, row, space_id))
         .transpose()
 }
 
@@ -246,22 +255,13 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselRevocationRepository<E> {
         space_id: &SpaceId,
     ) -> Result<Option<SpaceKeyMaterial>, KeyEpochError> {
         let master_key = self.session.get_master_key().map_err(backend)?;
-        let space_id = space_id.as_ref().to_owned();
-        let row = self
-            .executor
+        let space_id = space_id.clone();
+        self.executor
             .run(move |conn| {
-                diesel::sql_query(
-                    "SELECT space_id, group_epoch, security_mode, current_content_key_id, \
-                     encrypted_payload, updated_at_ms FROM space_key_epoch_state WHERE space_id = ?",
-                )
-                .bind::<Text, _>(&space_id)
-                .get_result::<SpaceMaterialRow>(conn)
-                .optional()
-                .map_err(anyhow::Error::from)
+                load_space_material_on(conn, &master_key, &space_id)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
             })
-            .map_err(backend)?;
-        row.map(|row| decode_space_material(&master_key, row))
-            .transpose()
+            .map_err(backend)
     }
 
     async fn begin_revocation(
@@ -281,15 +281,16 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselRevocationRepository<E> {
             ),
         )?;
         let prepared = prepared.clone();
+        let lookup_token = space_lookup_token(&master_key, prepared.space_id())?;
         self.executor
             .run(move |conn| {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     let rows = diesel::sql_query(
-                        "SELECT revocation_id, space_id, previous_epoch, next_epoch, status, \
+                        "SELECT revocation_id, space_lookup_token, previous_epoch, next_epoch, status, \
                          encrypted_record, encrypted_stage, created_at_ms, updated_at_ms \
-                         FROM member_revocation_log WHERE space_id = ? AND status <> 'complete'",
+                         FROM member_revocation_log WHERE space_lookup_token = ? AND status <> 'complete'",
                     )
-                    .bind::<Text, _>(prepared.space_id().as_ref())
+                    .bind::<Text, _>(&lookup_token)
                     .load::<RevocationRow>(conn)?;
                     let has_incomplete = !rows.is_empty();
                     for row in rows {
@@ -306,12 +307,12 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselRevocationRepository<E> {
                     }
                     diesel::sql_query(
                         "INSERT INTO member_revocation_log \
-                         (revocation_id, space_id, previous_epoch, next_epoch, status, \
+                         (revocation_id, space_lookup_token, previous_epoch, next_epoch, status, \
                           encrypted_record, encrypted_stage, created_at_ms, updated_at_ms) \
                          VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
                     )
                     .bind::<Text, _>(prepared.revocation_id().as_str())
-                    .bind::<Text, _>(prepared.space_id().as_ref())
+                    .bind::<Text, _>(&lookup_token)
                     .bind::<BigInt, _>(
                         epoch_to_i64(prepared.previous_epoch().value())
                             .map_err(|error| anyhow::anyhow!(error.to_string()))?,
@@ -350,7 +351,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselRevocationRepository<E> {
             .executor
             .run(|conn| {
                 diesel::sql_query(
-                    "SELECT revocation_id, space_id, previous_epoch, next_epoch, status, \
+                    "SELECT revocation_id, space_lookup_token, previous_epoch, next_epoch, status, \
                      encrypted_record, encrypted_stage, created_at_ms, updated_at_ms \
                      FROM member_revocation_log WHERE status <> 'complete' ORDER BY created_at_ms",
                 )
@@ -457,13 +458,10 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselRevocationRepository<E> {
                     stage
                         .transition_to(RevocationStatus::Activated, now_ms)
                         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    let current_material = load_space_material_on(
-                        conn,
-                        &master_key,
-                        stage.record().space_id().as_ref(),
-                    )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                    .ok_or_else(|| anyhow::anyhow!("space key material not found"))?;
+                    let current_material =
+                        load_space_material_on(conn, &master_key, stage.record().space_id())
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                            .ok_or_else(|| anyhow::anyhow!("space key material not found"))?;
                     let material = SpaceKeyMaterial::new(
                         stage.next_space_state().clone(),
                         stage.group_state().to_vec(),
@@ -660,7 +658,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselRevocationRepository<E> {
 #[cfg(test)]
 mod tests {
     use diesel::prelude::*;
-    use diesel::sql_types::{Binary, Nullable};
+    use diesel::sql_types::{Binary, Nullable, Text};
     use tempfile::{tempdir, TempDir};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
@@ -798,6 +796,8 @@ mod tests {
 
     #[derive(QueryableByName)]
     struct RawSpaceCiphertext {
+        #[diesel(sql_type = Text)]
+        space_lookup_token: String,
         #[diesel(sql_type = Binary)]
         encrypted_payload: Vec<u8>,
     }
@@ -816,15 +816,19 @@ mod tests {
         )
         .get_result::<RawCiphertexts>(&mut conn)
         .unwrap();
-        let space =
-            diesel::sql_query("SELECT encrypted_payload FROM space_key_epoch_state LIMIT 1")
-                .get_result::<RawSpaceCiphertext>(&mut conn)
-                .unwrap();
+        let space = diesel::sql_query(
+            "SELECT space_lookup_token, encrypted_payload FROM space_key_epoch_state LIMIT 1",
+        )
+        .get_result::<RawSpaceCiphertext>(&mut conn)
+        .unwrap();
         let mut persisted = row.encrypted_record;
         persisted.extend(row.encrypted_stage.unwrap());
+        persisted.extend(space.space_lookup_token.as_bytes());
         persisted.extend(space.encrypted_payload);
 
         for plaintext in [
+            "space-sensitive",
+            "content-key-current",
             "removed-device-sensitive",
             "retained-device-sensitive",
             "group-state-sensitive",
@@ -856,7 +860,7 @@ mod tests {
 
         let mut conn = pool.get().unwrap();
         let row = diesel::sql_query(
-            "SELECT encrypted_payload FROM space_key_epoch_state WHERE space_id = 'space-sensitive'",
+            "SELECT space_lookup_token, encrypted_payload FROM space_key_epoch_state LIMIT 1",
         )
         .get_result::<RawSpaceCiphertext>(&mut conn)
         .unwrap();

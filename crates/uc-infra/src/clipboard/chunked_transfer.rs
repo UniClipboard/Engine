@@ -32,6 +32,7 @@ use chacha20poly1305::{
 use tracing::info_span;
 use uc_core::config::RECEIVE_PLAINTEXT_CAP;
 use uc_core::crypto::aad;
+use uc_core::crypto::model::EncryptionError;
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::ports::{TransferCipherError, TransferCipherPort};
 use uuid::Uuid;
@@ -75,6 +76,8 @@ const PARALLEL_COMPRESSION_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 /// Adapters map these to `TransferCipherError` at the port boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum ChunkedTransferError {
+    #[error("space session is not unlocked")]
+    NotUnlocked,
     /// First 4 bytes do not match V3_MAGIC.
     #[error("invalid magic bytes")]
     InvalidMagic,
@@ -414,11 +417,11 @@ impl TransferCipherPort for TransferCipherAdapter {
         let space_id = self
             .session
             .current_space_id()
-            .map_err(|error| TransferCipherError::Internal(error.to_string()))?;
+            .map_err(map_session_error_for_transfer)?;
         let resolved = self
             .session
             .current_content_key(&space_id, ContentKeyPurpose::Transport)
-            .map_err(|error| TransferCipherError::Internal(error.to_string()))?;
+            .map_err(map_session_error_for_transfer)?;
 
         let transfer_id: [u8; 16] = *Uuid::new_v4().as_bytes();
         let uncompressed_len = u32::try_from(plaintext.len()).map_err(|_| {
@@ -590,17 +593,12 @@ fn decode_v4(encrypted: &[u8], session: &InMemorySession) -> Result<Vec<u8>, Chu
         total_plaintext_len,
     )?;
 
-    let space_id =
-        session
-            .current_space_id()
-            .map_err(|error| ChunkedTransferError::InvalidHeader {
-                reason: error.to_string(),
-            })?;
+    let space_id = session
+        .current_space_id()
+        .map_err(map_session_error_for_v4)?;
     let resolved = session
         .content_key(&space_id, &content_key_id, ContentKeyPurpose::Transport)
-        .map_err(|error| ChunkedTransferError::InvalidHeader {
-            reason: error.to_string(),
-        })?;
+        .map_err(map_session_error_for_v4)?;
     if resolved.epoch() != epoch {
         return Err(ChunkedTransferError::InvalidHeader {
             reason: "content key epoch mismatch".to_owned(),
@@ -689,6 +687,7 @@ fn validate_lengths(
 
 fn map_chunked_error_for_encrypt(e: ChunkedTransferError) -> TransferCipherError {
     match e {
+        ChunkedTransferError::NotUnlocked => TransferCipherError::NotUnlocked,
         ChunkedTransferError::EncryptFailed(_) => TransferCipherError::EncryptionFailed,
         ChunkedTransferError::CompressionFailed { reason } => {
             TransferCipherError::Internal(format!("compression failed: {reason}"))
@@ -700,6 +699,7 @@ fn map_chunked_error_for_encrypt(e: ChunkedTransferError) -> TransferCipherError
 
 fn map_chunked_error_for_decrypt(e: ChunkedTransferError) -> TransferCipherError {
     match e {
+        ChunkedTransferError::NotUnlocked => TransferCipherError::NotUnlocked,
         ChunkedTransferError::DecryptFailed { .. } => TransferCipherError::DecryptionFailed,
         ChunkedTransferError::DecompressionFailed { .. }
         | ChunkedTransferError::InvalidCompressionAlgo { .. }
@@ -713,6 +713,22 @@ fn map_chunked_error_for_decrypt(e: ChunkedTransferError) -> TransferCipherError
             TransferCipherError::Internal(format!("compression failed: {reason}"))
         }
         ChunkedTransferError::Io(err) => TransferCipherError::Internal(format!("IO error: {err}")),
+    }
+}
+
+fn map_session_error_for_transfer(error: EncryptionError) -> TransferCipherError {
+    match error {
+        EncryptionError::NotInitialized => TransferCipherError::NotUnlocked,
+        other => TransferCipherError::Internal(other.to_string()),
+    }
+}
+
+fn map_session_error_for_v4(error: EncryptionError) -> ChunkedTransferError {
+    match error {
+        EncryptionError::NotInitialized => ChunkedTransferError::NotUnlocked,
+        other => ChunkedTransferError::InvalidHeader {
+            reason: other.to_string(),
+        },
     }
 }
 
@@ -791,5 +807,24 @@ mod tests {
         encrypted[4] ^= 1;
 
         assert!(adapter.decrypt(&encrypted).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn locked_session_is_reported_for_v4_encrypt_and_decrypt() {
+        let (ready, _root) = ready_session();
+        let encrypted = TransferCipherAdapter::new(ready)
+            .encrypt(b"secret")
+            .await
+            .unwrap();
+        let locked = TransferCipherAdapter::new(Arc::new(InMemorySession::new()));
+
+        assert!(matches!(
+            locked.encrypt(b"secret").await,
+            Err(TransferCipherError::NotUnlocked)
+        ));
+        assert!(matches!(
+            locked.decrypt(&encrypted).await,
+            Err(TransferCipherError::NotUnlocked)
+        ));
     }
 }

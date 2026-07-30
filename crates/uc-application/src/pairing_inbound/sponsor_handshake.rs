@@ -1,7 +1,7 @@
 //! Sponsor-side handshake wire adapter.
 //!
 //! Owns the transport-level conversation with one joiner for the duration
-//! of a pairing session: sends `KeyslotOffer`, verifies the joiner's
+//! of a pairing session: sends `AdmissionOffer`, verifies the joiner's
 //! `ChallengeResponse`, and emits `Confirm` / `Reject` on the wire.
 //! Persistence (SpaceMember / TrustedPeer) is intentionally **not** done
 //! here — the outer [`super::orchestrator::PairingInboundOrchestrator`]
@@ -80,7 +80,7 @@ pub(crate) enum Verdict {
     Rejected,
 }
 
-/// Per-session data parked between `KeyslotOffer` (sent) and
+/// Per-session data parked between `AdmissionOffer` (sent) and
 /// `ChallengeResponse` (received). Dropped on any terminal outcome
 /// (Confirm, Reject, peer-initiated Close, TTL timeout).
 struct SessionCtx {
@@ -164,7 +164,7 @@ impl SponsorHandshakeCoordinator {
         })
     }
 
-    /// Step 1: prepare + send `KeyslotOffer`, park per-session state.
+    /// Step 1: prepare + send `AdmissionOffer`, park per-session state.
     ///
     /// On success the session is ready to receive `ChallengeResponse`.
     /// On failure the coordinator itself sends `Reject(Internal)` and
@@ -179,7 +179,7 @@ impl SponsorHandshakeCoordinator {
             session = %session,
             joiner_device_id = %request.device_id.as_str(),
             transport_address_blob_len = request.transport_address_blob.len(),
-            "sponsor pairing begin; preparing KeyslotOffer"
+            "sponsor pairing begin; preparing AdmissionOffer"
         );
         if request.security_capability != PairingSecurityCapability::ReliableGroupEpochV1
             || request.key_package.is_empty()
@@ -204,7 +204,7 @@ impl SponsorHandshakeCoordinator {
                     session = %session,
                     "SetupStatus.space_id missing; using stable legacy Space identity"
                 );
-                SpaceId::from_str("space")
+                crate::facade::space_setup::legacy_space_id()
             }),
             Err(err) => {
                 warn!(
@@ -272,11 +272,11 @@ impl SponsorHandshakeCoordinator {
             warn!(
                 session = %session,
                 error = %err,
-                "KeyslotOffer send failed; dropping ctx and closing"
+                "AdmissionOffer send failed; dropping ctx and closing"
             );
             self.sessions.lock().await.remove(session);
             self.pairing_session
-                .close(session, Some("KeyslotOffer send failed".into()))
+                .close(session, Some("AdmissionOffer send failed".into()))
                 .await;
             return Err(());
         }
@@ -286,7 +286,7 @@ impl SponsorHandshakeCoordinator {
         info!(
             session = %session,
             ttl_ms = %self.handshake_ttl.as_millis(),
-            "KeyslotOffer sent; awaiting ChallengeResponse"
+            "AdmissionOffer sent; awaiting ChallengeResponse"
         );
         Ok(())
     }
@@ -295,7 +295,7 @@ impl SponsorHandshakeCoordinator {
     /// ctx. If the ctx was already gone (e.g. a racing `reject` cleared
     /// it between the `send` return and this call), the handle is
     /// aborted immediately so the task never fires. Called only from
-    /// `begin` after a successful `KeyslotOffer` send.
+    /// `begin` after a successful `AdmissionOffer` send.
     async fn arm_timeout(&self, session: &PairingSessionId) {
         let ttl = self.handshake_ttl;
         let weak = self.self_weak.clone();
@@ -714,7 +714,10 @@ mod tests {
         Arc::new(delivery)
     }
 
-    fn space_access(expected_existing_members: Option<Vec<DeviceId>>) -> Arc<MockSpaceAccess> {
+    fn space_access(
+        expected_existing_members: Option<Vec<DeviceId>>,
+        require_admission: bool,
+    ) -> Arc<MockSpaceAccess> {
         let mut access = MockSpaceAccess::new();
         access
             .expect_prepare_admission_offer()
@@ -731,7 +734,11 @@ mod tests {
             });
 
         let admission = access.expect_admit_group_member();
-        admission.times(0..=1);
+        if require_admission {
+            admission.times(1);
+        } else {
+            admission.times(0..=1);
+        }
         if let Some(expected) = expected_existing_members {
             admission.withf(move |_, _, _, actual, _| actual == expected.as_slice());
         }
@@ -877,7 +884,7 @@ mod tests {
             Arc::new(FixedLocal(sponsor_fp())),
             Arc::new(FixedDevice(DeviceId::new("sponsor-device"))),
             settings,
-            // Tests don't care which space_id lands in the KeyslotOffer
+            // Tests don't care which space_id lands in the AdmissionOffer
             // — a stub that returns a fixed completed-but-no-id status
             // exercises the fallback branch, which is fine because
             // assertions compare against what the coordinator emits.
@@ -912,7 +919,21 @@ mod tests {
     ) {
         (
             Arc::new(RecordingSessionPort::default()),
-            space_access(None),
+            space_access(None, false),
+            Arc::new(ScriptedProof(StdMutex::new(vec![Ok(true)]))),
+            Arc::new(StubSettings::named("sponsor-mac")),
+        )
+    }
+
+    fn confirm_defaults() -> (
+        Arc<RecordingSessionPort>,
+        Arc<MockSpaceAccess>,
+        Arc<ScriptedProof>,
+        Arc<StubSettings>,
+    ) {
+        (
+            Arc::new(RecordingSessionPort::default()),
+            space_access(None, true),
             Arc::new(ScriptedProof(StdMutex::new(vec![Ok(true)]))),
             Arc::new(StubSettings::named("sponsor-mac")),
         )
@@ -921,7 +942,7 @@ mod tests {
     // ── begin ────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn begin_sends_keyslot_offer_and_parks_ctx() {
+    async fn begin_sends_admission_offer_and_parks_ctx() {
         let (sp, sa, pr, st) = happy_defaults();
         let coord = happy_coordinator(sp.clone(), sa, pr, st);
         let session = PairingSessionId::new("s1");
@@ -1064,7 +1085,7 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_sends_confirm_wire_closes_drops_ctx() {
-        let (sp, sa, pr, st) = happy_defaults();
+        let (sp, sa, pr, st) = confirm_defaults();
         let coord = happy_coordinator(sp.clone(), sa, pr, st);
         let session = PairingSessionId::new("s7");
         coord.begin(&session, joiner_request()).await.unwrap();
@@ -1079,7 +1100,7 @@ mod tests {
         coord.confirm(&session).await.unwrap();
 
         let sent = sp.sent();
-        assert_eq!(sent.len(), 2, "KeyslotOffer + Confirm");
+        assert_eq!(sent.len(), 2, "AdmissionOffer + Confirm");
         match &sent[1].1 {
             PairingSessionMessage::Confirm(c) => {
                 assert_eq!(c.space_id.inner(), "space-xyz");
@@ -1096,7 +1117,7 @@ mod tests {
     #[tokio::test]
     async fn confirm_sends_group_update_to_existing_members_only() {
         let sp = Arc::new(RecordingSessionPort::default());
-        let sa = space_access(Some(vec![DeviceId::new("bob-device")]));
+        let sa = space_access(Some(vec![DeviceId::new("bob-device")]), true);
         let pr = Arc::new(ScriptedProof(StdMutex::new(vec![Ok(true)])));
         let st = Arc::new(StubSettings::named("sponsor-mac"));
         let delivery = delivery_once();
@@ -1151,7 +1172,7 @@ mod tests {
         coord.begin(&session, joiner_request()).await.unwrap();
         let err = coord.confirm(&session).await.unwrap_err();
         assert!(err.contains("device_name"), "err = {err}");
-        // Only KeyslotOffer went out — Confirm was never attempted.
+        // Only AdmissionOffer went out — Confirm was never attempted.
         assert_eq!(sp.sent().len(), 1);
     }
 
@@ -1168,7 +1189,7 @@ mod tests {
             .await;
 
         let sent = sp.sent();
-        assert_eq!(sent.len(), 2, "KeyslotOffer + Reject");
+        assert_eq!(sent.len(), 2, "AdmissionOffer + Reject");
         match &sent[1].1 {
             PairingSessionMessage::Reject(r) => {
                 assert_eq!(r.reason, PairingRejectReason::PassphraseMismatch)
@@ -1241,7 +1262,7 @@ mod tests {
         tokio::time::sleep(ttl + Duration::from_secs(1)).await;
 
         let sent = sp.sent();
-        assert_eq!(sent.len(), 2, "KeyslotOffer + Reject(Timeout)");
+        assert_eq!(sent.len(), 2, "AdmissionOffer + Reject(Timeout)");
         match &sent[1].1 {
             PairingSessionMessage::Reject(r) => {
                 assert_eq!(r.reason, PairingRejectReason::Timeout)
@@ -1258,7 +1279,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn confirm_aborts_ttl_watchdog() {
-        let (sp, sa, pr, st) = happy_defaults();
+        let (sp, sa, pr, st) = confirm_defaults();
         let ttl = Duration::from_secs(30);
         let coord = happy_coordinator_with_ttl(sp.clone(), sa, pr, st, ttl);
         let session = PairingSessionId::new("confirm-abort");
@@ -1276,9 +1297,9 @@ mod tests {
         // 时间跨过 TTL，任何没被 abort 的 watchdog 都会在这一步 fire。
         tokio::time::sleep(ttl * 2).await;
 
-        // 只应看到 KeyslotOffer + Confirm —— 绝不能多出 Reject。
+        // 只应看到 AdmissionOffer + Confirm —— 绝不能多出 Reject。
         let sent = sp.sent();
-        assert_eq!(sent.len(), 2, "KeyslotOffer + Confirm only");
+        assert_eq!(sent.len(), 2, "AdmissionOffer + Confirm only");
         assert!(matches!(
             sent[0].1,
             PairingSessionMessage::AdmissionOffer(_)
@@ -1301,7 +1322,7 @@ mod tests {
         tokio::time::sleep(ttl * 2).await;
 
         let sent = sp.sent();
-        assert_eq!(sent.len(), 2, "KeyslotOffer + Reject(PassphraseMismatch)");
+        assert_eq!(sent.len(), 2, "AdmissionOffer + Reject(PassphraseMismatch)");
         match &sent[1].1 {
             PairingSessionMessage::Reject(r) => {
                 assert_eq!(r.reason, PairingRejectReason::PassphraseMismatch)
@@ -1325,7 +1346,7 @@ mod tests {
 
         tokio::time::sleep(ttl * 2).await;
 
-        // 仅 KeyslotOffer；handle_session_closed 本身不打 wire，
+        // 仅 AdmissionOffer；handle_session_closed 本身不打 wire，
         // watchdog 若 leak 就会多出 Reject(Timeout)。
         let sent = sp.sent();
         assert_eq!(sent.len(), 1);

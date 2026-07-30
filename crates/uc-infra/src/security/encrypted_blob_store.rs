@@ -187,8 +187,9 @@ impl BlobStorePort for EncryptedBlobStore {
             &business_aad,
         );
 
-        // Slice 3 起直接走 v1_aead helper,跳过 EncryptedBlob 结构包装——
-        // EncryptedBlobStore 自己用 UCBL 二进制 wire format,不需要 JSON 包装。
+        // Slice 3 uses the v1_aead helper directly and bypasses the
+        // EncryptedBlob wrapper. This store writes the UCBL binary wire format,
+        // so it does not need the wrapper's JSON representation.
         let blob = v1_aead::encrypt_blob_xchacha(resolved.key(), &compressed, &aad_bytes)
             .context("failed to encrypt blob data")?;
 

@@ -1,7 +1,7 @@
 //! Joiner-side handshake coordinator.
 //!
 //! Owns the transport + crypto half of the joiner-side pairing flow:
-//! dial → send Request → recv KeyslotOffer → derive master key → build
+//! dial → send Request → recv AdmissionOffer → derive admission proof key → build
 //! proof → send ChallengeResponse → recv Confirm. Returns a structured
 //! [`JoinerHandshakeOutcome`] with the sponsor's identity facts. Does
 //! **not** touch persistence (`SpaceMember` / `TrustedPeer` /
@@ -236,17 +236,17 @@ impl JoinerHandshakeCoordinator {
             session = %session,
             code = %code.as_str(),
             transport_address_blob_len,
-            "JoinerRequest sent; awaiting KeyslotOffer"
+            "JoinerRequest sent; awaiting AdmissionOffer"
         );
 
-        // ── 3. Await KeyslotOffer | Reject ───────────────────────────────
+        // ── 3. Await AdmissionOffer | Reject ───────────────────────────────
         let offer = match self.recv_with_ttl(session).await? {
             PairingSessionMessage::AdmissionOffer(o) => o,
             PairingSessionMessage::Reject(r) => {
                 warn!(
                     session = %session,
                     reason = ?r.reason,
-                    "sponsor rejected before KeyslotOffer"
+                    "sponsor rejected before AdmissionOffer"
                 );
                 return Err(map_sponsor_reject(r.reason));
             }
@@ -260,7 +260,7 @@ impl JoinerHandshakeCoordinator {
         debug!(
             session = %session,
             space_id = %offer.space_id,
-            "KeyslotOffer received"
+            "AdmissionOffer received"
         );
 
         // ── 4. Derive proof key (side effect: persists local keyslot) ───
@@ -279,7 +279,7 @@ impl JoinerHandshakeCoordinator {
             .derive_admission_proof_key(&join_offer, passphrase, code, &core_session)
             .await
             .map_err(map_space_access_err)?;
-        debug!(session = %session, "master key derived from sponsor offer");
+        debug!(session = %session, "admission proof key derived from sponsor offer");
 
         // ── 5. Build HMAC proof ──────────────────────────────────────────
         let proof = self
@@ -726,7 +726,7 @@ mod tests {
     fn joiner_fp() -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string("AAAAAAAAAAAAAAAA").unwrap()
     }
-    fn keyslot_offer() -> SponsorAdmissionOffer {
+    fn admission_offer() -> SponsorAdmissionOffer {
         SponsorAdmissionOffer {
             space_id: SpaceId::from_str("space-xyz"),
             kdf_parameters_blob: vec![0xAA; 16],
@@ -798,7 +798,7 @@ mod tests {
         let b = Bundle::happy();
         b.session
             .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
-                keyslot_offer(),
+                admission_offer(),
             )));
         b.session
             .push_recv(RecvStep::Msg(PairingSessionMessage::Confirm(
@@ -925,7 +925,7 @@ mod tests {
         let b = Bundle::happy();
         b.session
             .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
-                keyslot_offer(),
+                admission_offer(),
             )));
         b.session
             .push_recv(RecvStep::Msg(PairingSessionMessage::Reject(
@@ -1017,7 +1017,7 @@ mod tests {
         let b = Bundle::happy();
         b.session
             .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
-                keyslot_offer(),
+                admission_offer(),
             )));
         b.session.push_recv(RecvStep::Hang);
         let sent_probe = b.session.clone();
@@ -1039,7 +1039,7 @@ mod tests {
         b.space_access = space_access_with_derivation_error(SpaceAccessError::WrongPassphrase);
         b.session
             .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
-                keyslot_offer(),
+                admission_offer(),
             )));
         let err = b
             .build()
@@ -1060,7 +1060,7 @@ mod tests {
         b.space_access = space_access_with_derivation_error(SpaceAccessError::CorruptedKeyMaterial);
         b.session
             .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
-                keyslot_offer(),
+                admission_offer(),
             )));
         let err = b
             .build()
@@ -1124,7 +1124,7 @@ mod tests {
         let b = Bundle::happy();
         b.session
             .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionOffer(
-                keyslot_offer(),
+                admission_offer(),
             )));
         b.session
             .push_recv(RecvStep::Msg(PairingSessionMessage::Request(

@@ -146,6 +146,37 @@ function checkWorkspaceShape(metadata) {
   return problems
 }
 
+function checkOpenMlsValidation(metadata) {
+  const problems = []
+  const validation = packageByName(metadata, 'openmls-validation')
+  const executableTarget = validation.targets.find(
+    target => target.name === 'revocation' && target.kind.includes('test')
+  )
+  if (!executableTarget) {
+    addProblem(
+      problems,
+      'OpenMLS validation',
+      'openmls-validation must contain the executable revocation test target'
+    )
+  }
+  return problems
+}
+
+function runOpenMlsValidation() {
+  const result = spawnSync(
+    'cargo',
+    ['test', '-p', 'openmls-validation', '--test', 'revocation', '--locked'],
+    { cwd: REPOSITORY_ROOT, encoding: 'utf8' }
+  )
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  const passed = output.match(/test result: ok\. ([1-9]\d*) passed/)
+  if (result.status !== 0 || !passed) {
+    process.stderr.write(output)
+    throw new Error('OpenMLS executable validation target did not pass')
+  }
+  process.stdout.write(`OK OpenMLS executable validation passed: ${passed[1]} tests\n`)
+}
+
 function checkLocalDependencies(metadata) {
   const problems = []
   for (const packageMetadata of metadata.packages) {
@@ -353,6 +384,7 @@ function repositorySources() {
 function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
   return [
     ...checkWorkspaceShape(metadata),
+    ...checkOpenMlsValidation(metadata),
     ...checkLocalDependencies(metadata),
     ...checkPublicSurface(metadata, sources),
     ...checkBindingProvenance(metadata, sources),
@@ -390,6 +422,10 @@ function runNegativeFixtures(metadata, sources) {
   expectRejected('automatic LAN fallback', (_changed, changedSources) => {
     changedSources.runtime += '\nfn fallback_to_lan() {}\n'
   }, metadata, sources)
+  expectRejected('missing OpenMLS validation target', changed => {
+    const validation = packageByName(changed, 'openmls-validation')
+    validation.targets = validation.targets.filter(target => !target.kind.includes('test'))
+  }, metadata, sources)
 }
 
 function main() {
@@ -404,6 +440,7 @@ function main() {
     process.exitCode = 1
     return
   }
+  runOpenMlsValidation()
   runNegativeFixtures(metadata, sources)
   process.stdout.write('Engine repository preflight passed\n')
 }

@@ -58,14 +58,7 @@ impl EncryptionFacade {
     // / `error!` 即可,无需 root span。其他写动作(initialize / unlock /
     // lock / verify_keychain_access)仍保留 instrument。
     pub async fn state(&self) -> Result<EncryptionStateView, EncryptionFacadeError> {
-        let initialized = self
-            .deps
-            .setup_status
-            .get_status()
-            .await
-            .map(|status| status.has_completed)
-            .map_err(|err| EncryptionFacadeError::SetupStatus(err.to_string()))?;
-        let space_id = default_space_id();
+        let (initialized, space_id) = self.setup_state().await?;
         let session_ready = if initialized {
             self.deps.is_unlocked.is_unlocked(&space_id).await
         } else {
@@ -117,13 +110,7 @@ impl EncryptionFacade {
 
     #[instrument(skip_all)]
     pub async fn unlock(&self) -> Result<bool, EncryptionFacadeError> {
-        let status = self
-            .deps
-            .setup_status
-            .get_status()
-            .await
-            .map_err(|err| EncryptionFacadeError::SetupStatus(err.to_string()))?;
-        let space_id = status.space_id.unwrap_or_else(default_space_id);
+        let (_, space_id) = self.setup_state().await?;
         match self.deps.resume_session.try_resume_session(&space_id).await {
             Ok(Some(_)) => {
                 self.deps
@@ -153,6 +140,19 @@ impl EncryptionFacade {
             .verify_keychain_access()
             .await
             .map_err(space_access_error)
+    }
+
+    async fn setup_state(&self) -> Result<(bool, SpaceId), EncryptionFacadeError> {
+        let status = self
+            .deps
+            .setup_status
+            .get_status()
+            .await
+            .map_err(|err| EncryptionFacadeError::SetupStatus(err.to_string()))?;
+        Ok((
+            status.has_completed,
+            status.space_id.unwrap_or_else(default_space_id),
+        ))
     }
 }
 
@@ -201,6 +201,7 @@ mod tests {
         init_already_initialized: Mutex<bool>,
         init_calls: Mutex<u32>,
         resume_space_ids: Mutex<Vec<SpaceId>>,
+        is_unlocked_space_ids: Mutex<Vec<SpaceId>>,
     }
 
     #[async_trait]
@@ -220,7 +221,11 @@ mod tests {
 
     #[async_trait]
     impl IsSpaceUnlockedPort for FakeSpaceAccess {
-        async fn is_unlocked(&self, _space_id: &SpaceId) -> bool {
+        async fn is_unlocked(&self, space_id: &SpaceId) -> bool {
+            self.is_unlocked_space_ids
+                .lock()
+                .expect("is unlocked space ids lock")
+                .push(space_id.clone());
             *self.unlocked.lock().expect("unlocked lock")
         }
     }
@@ -320,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_reports_session_ready_after_completed_setup() {
-        let (facade, _, _) = facade_with(true, true, false, false);
+        let (facade, space_access, _) = facade_with(true, true, false, false);
 
         let state = facade.state().await.expect("state");
 
@@ -330,6 +335,13 @@ mod tests {
                 initialized: true,
                 session_ready: true
             }
+        );
+        assert_eq!(
+            *space_access
+                .is_unlocked_space_ids
+                .lock()
+                .expect("is unlocked space ids lock"),
+            vec![SpaceId::from("canonical-space")]
         );
     }
 

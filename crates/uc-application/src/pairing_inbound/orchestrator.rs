@@ -7,7 +7,7 @@
 //!    + `PairingInvitationPort::consume_invitation` decide whether this
 //!    inbound joiner is expected at all.
 //! 2. **Handshake** — [`SponsorHandshakeCoordinator`] prepares the
-//!    keyslot offer, parks per-session state, verifies the joiner's
+//!    admission offer, parks per-session state, verifies the joiner's
 //!    challenge response, and emits `Confirm` / `Reject` on the wire.
 //! 3. **Membership admit** — [`AdmitMemberUseCase`] persists the joiner
 //!    as a `SpaceMember` (application-level re-pair/replace + error
@@ -259,16 +259,16 @@ impl PairingInboundOrchestrator {
             .unwrap()
             .insert(session.clone(), Instant::now());
 
-        // `begin` sends the KeyslotOffer + parks per-session state; on
+        // `begin` sends the AdmissionOffer + parks per-session state; on
         // failure it has already emitted Reject + close internally.
         match self.handshake.begin(&session, request).await {
             Ok(()) => info!(
                 session = %session,
-                "inbound pairing KeyslotOffer sent; waiting for ChallengeResponse"
+                "inbound pairing AdmissionOffer sent; waiting for ChallengeResponse"
             ),
             Err(()) => warn!(
                 session = %session,
-                "inbound pairing failed while sending KeyslotOffer"
+                "inbound pairing failed while sending AdmissionOffer"
             ),
         }
     }
@@ -850,7 +850,7 @@ mod tests {
     }
 
     /// Minimal SetupStatusPort stub — orchestrator tests don't care
-    /// which `space_id` lands in the KeyslotOffer, so a None value
+    /// which `space_id` lands in the AdmissionOffer, so a None value
     /// triggers the sponsor coordinator's fresh-UUID fallback. That's
     /// fine because assertions here compare wire intent and use case
     /// ordering, not specific space ids.
@@ -1231,7 +1231,7 @@ mod tests {
         assert_eq!(trusted[0].peer_device_id.as_str(), "joiner-device");
         drop(trusted);
 
-        // Wire: KeyslotOffer + Confirm in order; no Reject.
+        // Wire: AdmissionOffer + Confirm in order; no Reject.
         let sent = sp.sent();
         assert_eq!(sent.len(), 2);
         assert!(matches!(
@@ -1299,7 +1299,7 @@ mod tests {
         })
         .await;
 
-        // Wire: KeyslotOffer + Confirm, no Reject — pairing succeeded.
+        // Wire: AdmissionOffer + Confirm, no Reject — pairing succeeded.
         let sent = sp.sent();
         assert_eq!(sent.len(), 2);
         assert!(matches!(
@@ -1481,7 +1481,7 @@ mod tests {
         .await;
 
         let sent = sp.sent();
-        assert_eq!(sent.len(), 2, "KeyslotOffer + Reject");
+        assert_eq!(sent.len(), 2, "AdmissionOffer + Reject");
         assert!(matches!(
             sent[1].1,
             PairingSessionMessage::Reject(PairingReject {
@@ -1525,7 +1525,7 @@ mod tests {
         })
         .await;
 
-        // KeyslotOffer + Reject(Internal admit_member:...) — Confirm
+        // AdmissionOffer + Reject(Internal admit_member:...) — Confirm
         // never went out.
         let sent = sp.sent();
         assert_eq!(sent.len(), 2);
@@ -1630,7 +1630,7 @@ mod tests {
         .await;
         // Follow-up ChallengeResponse on the same id is now a ghost;
         // verify_challenge returns None → orchestrator logs + drops.
-        // No panic, no wire side effect beyond the original KeyslotOffer.
+        // No panic, no wire side effect beyond the original AdmissionOffer.
     }
 
     // ── stray follow-up message is logged, not closed ──────────────────
@@ -1661,7 +1661,7 @@ mod tests {
         })
         .await;
 
-        // Only KeyslotOffer in the sent log; session stays open.
+        // Only AdmissionOffer in the sent log; session stays open.
         assert_eq!(sp.sent().len(), 1);
         assert!(sp.closed().is_empty());
     }

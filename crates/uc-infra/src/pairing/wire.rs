@@ -514,6 +514,29 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_unsupported_security_capability() {
+        let envelope = WireEnvelope {
+            v: WIRE_VERSION,
+            body: WireBody::Request(WireJoinerRequest {
+                invitation_code: "ABCDEFGH".into(),
+                device_id: "device-a".into(),
+                device_name: "Device A".into(),
+                identity_fingerprint: sample_fingerprint().as_display().to_string(),
+                nonce: vec![1; 32],
+                transport_address_blob: vec![2],
+                security_capability: 2,
+                key_package: vec![3],
+            }),
+        };
+        let bytes = postcard::to_allocvec(&envelope).unwrap();
+
+        assert!(matches!(
+            decode(&bytes),
+            Err(WireDecodeError::UnsupportedSecurityCapability(2))
+        ));
+    }
+
+    #[test]
     fn decode_rejects_garbage_bytes() {
         let garbage = vec![0xff; 16];
         match decode(&garbage) {

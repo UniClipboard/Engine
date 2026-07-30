@@ -175,3 +175,159 @@ fn persisted_space_key_material_redacts_sensitive_bytes() {
     assert_eq!(material.key_catalog(), b"secret key catalog");
     assert_eq!(material.updated_at_ms(), 200);
 }
+
+#[test]
+fn recovery_required_is_terminal_and_reachable_from_active_states() {
+    for status in [
+        RevocationStatus::Prepared,
+        RevocationStatus::Staged,
+        RevocationStatus::Activated,
+        RevocationStatus::Distributing,
+    ] {
+        let mut record = RevocationRecord::prepare(
+            RevocationId::from_string(format!("recovery-{status:?}")).unwrap(),
+            SpaceId::from_str("space-1"),
+            DeviceId::new("removed-device"),
+            GroupEpoch::new(1),
+            100,
+        )
+        .unwrap();
+        for next in [
+            RevocationStatus::Staged,
+            RevocationStatus::Activated,
+            RevocationStatus::Distributing,
+        ] {
+            if record.status() == status {
+                break;
+            }
+            record.transition_to(next, 101).unwrap();
+        }
+        record
+            .transition_to(RevocationStatus::RecoveryRequired, 102)
+            .unwrap();
+        assert!(record.status().is_terminal());
+    }
+    assert!(RevocationStatus::Complete.is_terminal());
+    assert!(!RevocationStatus::Distributing.is_terminal());
+}
+
+#[test]
+fn retained_recipients_are_deduplicated_independent_of_order() {
+    let record = RevocationRecord::prepare_with_recipients(
+        RevocationId::from_string("deduplicated-recipients").unwrap(),
+        SpaceId::from_str("space-1"),
+        DeviceId::new("removed-device"),
+        vec![
+            DeviceId::new("alice"),
+            DeviceId::new("bob"),
+            DeviceId::new("alice"),
+        ],
+        GroupEpoch::new(1),
+        100,
+    )
+    .unwrap();
+
+    assert_eq!(
+        record.retained_recipients(),
+        &[DeviceId::new("alice"), DeviceId::new("bob")]
+    );
+}
+
+#[test]
+fn revocation_stage_tracks_each_recipient_once_and_rejects_unknown_ack() {
+    let mut record = RevocationRecord::prepare_with_recipients(
+        RevocationId::from_string("recipient-acks").unwrap(),
+        SpaceId::from_str("space-1"),
+        DeviceId::new("removed-device"),
+        vec![DeviceId::new("alice"), DeviceId::new("bob")],
+        GroupEpoch::new(1),
+        100,
+    )
+    .unwrap();
+    record.transition_to(RevocationStatus::Staged, 101).unwrap();
+    let mut state = SpaceKeyState::legacy(SpaceId::from_str("space-1"));
+    state.mark_migrating().unwrap();
+    state
+        .mark_ready(ContentKeyId::from_string("current-1").unwrap())
+        .unwrap();
+    state
+        .rotate(ContentKeyId::from_string("current-2").unwrap())
+        .unwrap();
+    let mut stage = RevocationStage::new(
+        record,
+        state,
+        vec![1],
+        vec![2],
+        vec![
+            RevocationOutboxMessage::new(DeviceId::new("alice"), vec![3]),
+            RevocationOutboxMessage::new(DeviceId::new("bob"), vec![4]),
+        ],
+    )
+    .unwrap();
+
+    assert!(!stage.all_recipients_confirmed());
+    assert_eq!(
+        stage.acknowledge_recipient(&DeviceId::new("unknown"), 102),
+        Err(KeyEpochError::RevocationRecipientNotFound)
+    );
+    stage
+        .acknowledge_recipient(&DeviceId::new("alice"), 103)
+        .unwrap();
+    assert!(!stage.all_recipients_confirmed());
+    stage
+        .acknowledge_recipient(&DeviceId::new("bob"), 104)
+        .unwrap();
+    assert!(stage.all_recipients_confirmed());
+}
+
+#[test]
+fn space_material_pending_updates_are_acknowledged_by_id() {
+    let mut material = SpaceKeyMaterial::new(
+        SpaceKeyState::legacy(SpaceId::from_str("space-1")),
+        vec![1],
+        vec![2],
+        100,
+    );
+    let first =
+        uc_core::membership::PendingGroupUpdate::persistent(DeviceId::new("alice"), vec![3]);
+    let first_id = first.update_id().to_owned();
+    let second = uc_core::membership::PendingGroupUpdate::persistent(DeviceId::new("bob"), vec![4]);
+    material.add_pending_group_updates([first, second], 101);
+
+    assert_eq!(material.pending_group_updates().len(), 2);
+    assert!(!material.acknowledge_group_update("unknown", 102));
+    assert!(material.acknowledge_group_update(&first_id, 103));
+    assert_eq!(material.pending_group_updates().len(), 1);
+}
+
+#[test]
+fn content_key_id_rejects_invalid_strings() {
+    assert_eq!(
+        ContentKeyId::from_string(""),
+        Err(KeyEpochError::InvalidContentKeyId)
+    );
+    assert_eq!(
+        ContentKeyId::from_string("a".repeat(129)),
+        Err(KeyEpochError::InvalidContentKeyId)
+    );
+    assert_eq!(
+        ContentKeyId::from_string("non-ascii-key-密钥"),
+        Err(KeyEpochError::InvalidContentKeyId)
+    );
+}
+
+#[test]
+fn persisted_revocation_record_rejects_broken_epoch_invariant() {
+    let record = RevocationRecord::prepare(
+        RevocationId::from_string("invalid-persisted-record").unwrap(),
+        SpaceId::from_str("space-1"),
+        DeviceId::new("removed-device"),
+        GroupEpoch::new(1),
+        100,
+    )
+    .unwrap();
+    let mut value = serde_json::to_value(record).unwrap();
+    value["next_epoch"] = serde_json::json!(9);
+
+    assert!(serde_json::from_value::<RevocationRecord>(value).is_err());
+}

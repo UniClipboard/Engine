@@ -76,7 +76,7 @@ rand = "0.9.2"
 zeroize = { version = "1.8.2", features = ["derive"] }
 openmls = { version = "=0.8.1", features = ["fork-resolution"] }
 openmls_basic_credential = "=0.5.0"
-openmls_memory_storage = "=0.5.0"
+openmls_memory_storage = { version = "=0.5.0", features = ["test-utils"] }
 openmls_rust_crypto = "=0.5.1"
 openmls_traits = "=0.5.0"
 blake3 = "1.8.2"
