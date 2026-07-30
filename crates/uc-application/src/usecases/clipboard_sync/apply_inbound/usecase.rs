@@ -1,5 +1,6 @@
 //! `ApplyInboundClipboardUseCase` —— 入站剪贴板流程的编排主体。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use moka::sync::Cache;
@@ -7,7 +8,8 @@ use tracing::{debug, error, info, instrument, warn, Instrument};
 use uc_observability_contract::FlowId;
 
 use uc_core::clipboard::ActiveClipboardState;
-use uc_core::ids::EntryId;
+use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::clipboard::{
     AdvanceActiveClipboardPort, CheckEntryAvailabilityPort, FindEntryIdBySnapshotHashPort,
     TouchClipboardEntryPort,
@@ -35,7 +37,9 @@ use crate::facade::clipboard_live_index::{
 use crate::facade::host_event::{
     ClipboardHostEvent, ClipboardOriginKind, HostEvent, TransferHostEvent,
 };
-use crate::usecases::clipboard_sync::payload_codec::decode_v3_bytes_to_snapshot_blob_refs_and_file_set;
+use crate::usecases::clipboard_sync::payload_codec::{
+    decode_v3_bytes_to_snapshot_blob_refs_and_file_set, V3BlobRef,
+};
 
 use super::materializer::{
     is_directory_cancel_error, verify_file_set_identity, DirectoryPublication,
@@ -55,6 +59,7 @@ pub struct ApplyInboundClipboardUseCase {
     receive_attempts: Option<ReceiveAttemptPorts>,
     receive_artifact_cleanup: Option<Arc<dyn CleanupReceiveArtifactsPort>>,
     provisional_receive: Option<Arc<dyn FinalizeProvisionalReceivePort>>,
+    outbound_progress_reporter: Option<Arc<dyn OutboundProgressReporterPort>>,
     receive_readiness: Option<Arc<ReceiveReadinessCoordinator>>,
     /// Inbound idempotency, `snapshot_hash` → `entry_id`: collapses a peer
     /// re-pushing byte-identical frames to one logical clip. TTL =
@@ -136,6 +141,7 @@ impl ApplyInboundClipboardUseCase {
             receive_attempts: None,
             receive_artifact_cleanup: None,
             provisional_receive: None,
+            outbound_progress_reporter: None,
             receive_readiness: None,
             coordinator: Arc::new(EntryIdentityCoordinator::new()),
             availability: None,
@@ -163,6 +169,14 @@ impl ApplyInboundClipboardUseCase {
         availability: Arc<dyn CheckEntryAvailabilityPort>,
     ) -> Self {
         self.availability = Some(availability);
+        self
+    }
+
+    pub fn with_outbound_progress_reporter(
+        mut self,
+        reporter: Arc<dyn OutboundProgressReporterPort>,
+    ) -> Self {
+        self.outbound_progress_reporter = Some(reporter);
         self
     }
 
@@ -842,6 +856,8 @@ impl ApplyInboundClipboardUseCase {
             .map_err(|e| ApplyInboundError::DedupQuery(e.to_string()))?;
         if let Some(existing_id) = existing.as_ref() {
             if self.is_entry_available(existing_id).await {
+                self.report_reused_outbound_transfers(&input.from_device, &blob_refs)
+                    .await;
                 if let Some((transfer_id, _)) = provisional.as_ref() {
                     self.finalize_provisional(
                         transfer_id,
@@ -861,6 +877,8 @@ impl ApplyInboundClipboardUseCase {
 
         if existing.is_none() {
             if let Some(existing_entry_id) = self.recent_snapshot_hashes.get(&input.snapshot_hash) {
+                self.report_reused_outbound_transfers(&input.from_device, &blob_refs)
+                    .await;
                 if let Some((transfer_id, _)) = provisional.as_ref() {
                     self.finalize_provisional(
                         transfer_id,
@@ -1495,6 +1513,30 @@ impl ApplyInboundClipboardUseCase {
         }));
 
         Ok(ApplyOutcome::Applied { entry_id })
+    }
+
+    async fn report_reused_outbound_transfers(&self, target: &DeviceId, blob_refs: &[V3BlobRef]) {
+        let Some(reporter) = self.outbound_progress_reporter.as_ref() else {
+            return;
+        };
+        let mut totals = BTreeMap::<String, u64>::new();
+        for blob_ref in blob_refs {
+            let total = totals
+                .entry(blob_ref.entry_id.as_ref().to_owned())
+                .or_default();
+            *total = total.saturating_add(blob_ref.size_bytes);
+        }
+        for (transfer_id, total_bytes) in totals {
+            reporter
+                .report(
+                    target,
+                    &transfer_id,
+                    total_bytes,
+                    Some(total_bytes),
+                    OutboundProgressStatus::Completed,
+                )
+                .await;
+        }
     }
 }
 

@@ -129,6 +129,7 @@ pub(crate) fn build_clipboard_runtime(
         )
         .with_search_live_index(Arc::clone(&search_live_indexer))
         .with_check_entry_availability(deps.clipboard.entry_ports.availability.clone())
+        .with_outbound_progress_reporter(Arc::clone(&sync_engine.outbound_progress_reporter))
         .with_entry_identity_coordinator(deps.clipboard.entry_identity_coordinator.clone())
         .with_resurface(
             uc_application::facade::ClipboardSnapshotDeps {

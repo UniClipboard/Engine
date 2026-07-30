@@ -119,6 +119,8 @@ pub struct SyncEngineAssembly {
     /// Slice 3 Phase 2:大 payload 发布 / 拉取门面。CLI 与后续 daemon/UI
     /// 都从这里走完整的 hash 去重、加解密和 blob 传输编排。
     pub blob: Arc<BlobTransferFacade>,
+    pub(crate) outbound_progress_reporter:
+        Arc<dyn uc_core::file_transfer::OutboundProgressReporterPort>,
     /// Slice 3 Phase 1:大 payload 的 iroh-blobs 传输能力。Phase 2 的
     /// blob use case 会从这里接入。
     pub blob_transfer: Arc<dyn BlobTransferPort>,
@@ -532,7 +534,7 @@ pub async fn build_sync_engine_assembly(
         // 统一发出。
         host_event_emitter: Some(Arc::clone(&shared.host_event_bus)),
         // 反向进度上报端口:接收端 fetch 进度通过新 ALPN 推回 sender。
-        outbound_progress_reporter: Some(outbound_progress_reporter),
+        outbound_progress_reporter: Some(Arc::clone(&outbound_progress_reporter)),
         // file_transfer lifecycle facade —— iroh 路径每次 fetch 通过它落
         // `Started` / `Completed` / `Failed` 事件,让 file_transfer 表的
         // 状态投影与 sweep / reconcile workers 真正发挥作用。
@@ -831,6 +833,7 @@ pub async fn build_sync_engine_assembly(
         roster,
         clipboard_sync,
         blob,
+        outbound_progress_reporter,
         blob_transfer,
         active_clipboard,
         iroh_node,
