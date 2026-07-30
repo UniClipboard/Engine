@@ -397,7 +397,7 @@ impl DefaultSpaceAccessAdapter {
     async fn admit_group_member(
         &self,
         space_id: &SpaceId,
-        sponsor_device_id: &DeviceId,
+        _sponsor_device_id: &DeviceId,
         joiner_device_id: &DeviceId,
         existing_member_ids: &[DeviceId],
         key_package: &[u8],
@@ -411,15 +411,10 @@ impl DefaultSpaceAccessAdapter {
             .await
             .map_err(|error| SpaceAccessError::Internal(error.to_string()))?
             .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
-        let sponsor_state = if current.group_state().is_empty() {
-            MlsGroupEngine::create_sponsor(
-                space_id.as_ref().as_bytes(),
-                sponsor_device_id.as_str().as_bytes(),
-            )
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?
-        } else {
-            MlsClientState::from_bytes(current.group_state().to_vec())
-        };
+        if current.group_state().is_empty() {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        let sponsor_state = MlsClientState::from_bytes(current.group_state().to_vec());
         let admission = MlsGroupEngine::admit_member(
             &sponsor_state,
             joiner_device_id.as_str().as_bytes(),
@@ -2485,8 +2480,10 @@ mod admission_tests {
         let space_id = SpaceId::from("space-group-admission");
         let local_root = MasterKey::from_bytes(&[0x11; 32]).unwrap();
         session.set_master_key_for_space(space_id.clone(), local_root);
+        let sponsor_state =
+            MlsGroupEngine::create_sponsor(space_id.as_ref().as_bytes(), b"alice").unwrap();
         let material = session
-            .create_migrated_space_material(&space_id, 1)
+            .create_legacy_bootstrap_material(&space_id, sponsor_state.into_bytes(), 1)
             .unwrap();
         session.install_space_material(&material).unwrap();
         let (repository, _, stage_calls) =
@@ -2616,7 +2613,7 @@ mod admission_tests {
         let admission = sponsor
             .admit_group_member(
                 &space_id,
-                &DeviceId::new("sponsor-device"),
+                &DeviceId::new("alice"),
                 &DeviceId::new("joiner-device"),
                 &[],
                 &pending.key_package,
@@ -2707,7 +2704,7 @@ mod admission_tests {
         let admission = sponsor
             .admit_group_member(
                 &target_space,
-                &DeviceId::new("sponsor-device"),
+                &DeviceId::new("alice"),
                 &DeviceId::new("joiner-device"),
                 &[],
                 &pending.key_package,

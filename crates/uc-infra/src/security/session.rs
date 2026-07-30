@@ -208,14 +208,15 @@ impl InMemorySession {
         space_id: &SpaceId,
         updated_at_ms: i64,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
-        self.create_ready_space_material(space_id, Vec::new(), updated_at_ms)
+        self.create_ready_space_material(space_id, b"test-only-group-state".to_vec(), updated_at_ms)
     }
 
     pub(crate) fn install_space_material(
         &self,
         material: &SpaceKeyMaterial,
     ) -> Result<(), EncryptionError> {
-        if material.state().mode() != SpaceSecurityMode::Ready {
+        if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty()
+        {
             return Err(EncryptionError::KeyMaterialCorrupt);
         }
         let catalog: PersistedContentKeyCatalog = serde_json::from_slice(material.key_catalog())
@@ -489,6 +490,24 @@ mod tests {
         assert_eq!(before.epoch(), GroupEpoch::new(1));
         assert_eq!(before.key().as_bytes(), after.key().as_bytes());
         assert_ne!(before.content_key_id(), &ContentKeyId::legacy_v1());
+    }
+
+    #[test]
+    fn empty_group_state_cannot_be_installed_as_ready_material() {
+        let space_id = SpaceId::from_str("space-a");
+        let session = InMemorySession::new();
+        session.set_master_key_for_space(space_id.clone(), key(1));
+        let material = session
+            .create_migrated_space_material(&space_id, 100)
+            .unwrap();
+        let malformed = SpaceKeyMaterial::new(
+            material.state().clone(),
+            Vec::new(),
+            material.key_catalog().to_vec(),
+            100,
+        );
+
+        assert!(session.install_space_material(&malformed).is_err());
     }
 
     #[test]
