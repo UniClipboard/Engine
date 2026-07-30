@@ -451,6 +451,7 @@ pub async fn build_sync_engine_assembly(
     let presence: Arc<dyn PresencePort> = builder.install_presence(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
         Arc::clone(&deps.system.clock),
     );
@@ -468,6 +469,7 @@ pub async fn build_sync_engine_assembly(
     } = builder.install_clipboard(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
         Arc::clone(&presence),
     );
@@ -478,6 +480,7 @@ pub async fn build_sync_engine_assembly(
     } = builder.install_group_updates(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
         Arc::clone(&deps.security.space_access_ports.group_revocation),
     )?;
@@ -494,6 +497,7 @@ pub async fn build_sync_engine_assembly(
     } = builder.install_active_clipboard(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
     );
     let active_clipboard_dispatch: Arc<dyn ActiveClipboardDispatchPort> = active_clipboard_dispatch;
@@ -508,6 +512,7 @@ pub async fn build_sync_engine_assembly(
     } = builder.install_transfer_progress(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
     );
 
@@ -569,6 +574,7 @@ pub async fn build_sync_engine_assembly(
     } = builder.install_active_clipboard_pull(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
         active_clipboard_pull_serve,
     );

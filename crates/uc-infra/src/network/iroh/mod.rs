@@ -22,6 +22,20 @@ pub mod presence_adapter;
 pub mod relay_probe;
 pub(crate) mod runtime_consts;
 pub mod transfer_progress_adapter;
+
+#[cfg(test)]
+pub(crate) struct StaticPeerAdmission(pub(crate) bool);
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl uc_core::membership::PeerAdmissionPort for StaticPeerAdmission {
+    async fn is_admitted(
+        &self,
+        _device_id: &uc_core::ids::DeviceId,
+    ) -> Result<bool, uc_core::membership::PeerAdmissionError> {
+        Ok(self.0)
+    }
+}
 pub mod transfer_progress_wire;
 
 pub use active_clipboard::{

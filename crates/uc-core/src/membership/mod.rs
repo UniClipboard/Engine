@@ -1,9 +1,11 @@
+mod admission;
 mod error;
 mod member;
 mod ports;
 mod preferences;
 mod revocation;
 
+pub use admission::{PeerAdmissionError, PeerAdmissionPort};
 pub use error::MembershipError;
 pub use member::SpaceMember;
 pub use ports::{

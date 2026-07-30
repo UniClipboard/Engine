@@ -326,6 +326,7 @@ mod tests {
         wait_for_direct_addrs(&receiver_endpoint).await;
         let adapter = IrohActiveClipboardReceiverAdapter::new(
             member_repo,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let mut inbound_rx: broadcast::Receiver<_> = adapter.subscribe();

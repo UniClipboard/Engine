@@ -36,7 +36,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use tracing::{debug, warn};
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::MemberRepositoryPort;
+use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::clipboard::{ActiveClipboardPullServeError, ActiveClipboardPullServePort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::security::IdentityFingerprint;
@@ -62,6 +62,7 @@ pub struct IrohActiveClipboardPullServeAdapter {
 
 struct HandlerState {
     member_repo: Arc<dyn MemberRepositoryPort>,
+    peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     serve: Arc<dyn ActiveClipboardPullServePort>,
 }
@@ -69,12 +70,14 @@ struct HandlerState {
 impl IrohActiveClipboardPullServeAdapter {
     pub fn new(
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
     ) -> Self {
         Self {
             state: Arc::new(HandlerState {
                 member_repo,
+                peer_admission,
                 fingerprint_factory,
                 serve,
             }),
@@ -119,6 +122,14 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
             );
             return Ok(());
         };
+
+        if !self.state.is_admitted(&peer_device_id).await {
+            warn!(
+                peer = %peer_device_id.as_str(),
+                "active-clipboard pull serve: peer is not admitted by current space protection"
+            );
+            return Ok(());
+        }
 
         // 2. Accept the bi-stream. The requester opens it, writes the request,
         //    and reads our response on the same stream.
@@ -207,6 +218,16 @@ impl HandlerState {
     /// derived from `remote_pubkey_bytes`. Returns `None` when the peer is
     /// unknown or the repository errors (logged). Mirrors the bulk receiver's
     /// member-fingerprint admission; the roster is bounded (N ≤ 10).
+    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
+        match self.peer_admission.is_admitted(device_id).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                warn!(error = %error, peer = %device_id.as_str(), "active-clipboard pull serve: peer admission check failed");
+                false
+            }
+        }
+    }
+
     async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
         let derived = match self
             .fingerprint_factory
@@ -383,6 +404,7 @@ mod tests {
         wait_for_direct_addrs(&endpoint).await;
         let adapter = IrohActiveClipboardPullServeAdapter::new(
             member_repo,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
             serve,
         );

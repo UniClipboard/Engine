@@ -12,6 +12,7 @@ pub(crate) mod key_epoch_aad;
 mod key_material;
 mod key_migration_adapter;
 pub(crate) mod mls_group;
+mod peer_admission_adapter;
 mod scope_identifier;
 mod secrets;
 mod session;
@@ -36,6 +37,7 @@ pub use identity_fingerprint::{
 };
 pub use key_material::KeyMaterialStore;
 pub use key_migration_adapter::DefaultKeyMigrationAdapter;
+pub use peer_admission_adapter::MlsPeerAdmissionAdapter;
 pub(crate) use secrets::MasterKey;
 pub use session::InMemorySession;
 pub use space_access_adapter::DefaultSpaceAccessAdapter;

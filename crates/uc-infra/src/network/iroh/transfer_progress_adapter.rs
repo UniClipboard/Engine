@@ -35,7 +35,7 @@ use tracing::{debug, instrument, trace, warn};
 
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
 use uc_core::ids::DeviceId;
-use uc_core::membership::MemberRepositoryPort;
+use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 
@@ -86,6 +86,7 @@ pub struct IrohTransferProgressAdapter {
 
 struct HandlerState {
     member_repo: Arc<dyn MemberRepositoryPort>,
+    peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     event_tx: broadcast::Sender<InboundProgressEvent>,
 }
@@ -95,6 +96,7 @@ impl IrohTransferProgressAdapter {
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(PROGRESS_BROADCAST_CAPACITY);
@@ -102,6 +104,7 @@ impl IrohTransferProgressAdapter {
             event_tx: event_tx.clone(),
             handler_state: Arc::new(HandlerState {
                 member_repo,
+                peer_admission,
                 fingerprint_factory,
                 event_tx,
             }),
@@ -164,9 +167,17 @@ impl ProtocolHandler for IrohTransferProgressHandler {
             }
         };
 
+        if !self.state.is_admitted(&from_device).await {
+            warn!(
+                from_device = %from_device.as_str(),
+                "transfer progress: peer is not admitted by current space protection"
+            );
+            return Ok(());
+        }
+
         debug!(
             from_device = %from_device.as_str(),
-            "transfer progress: accepted connection from known peer",
+            "transfer progress: accepted connection from admitted peer",
         );
 
         // 2. Loop accepting uni-streams. Receiver writes one frame per
@@ -228,6 +239,16 @@ impl HandlerState {
     /// Mirrors `clipboard_receiver_adapter::HandlerState::resolve_device`
     /// but doesn't share code with it (different broadcast types,
     /// different state struct).
+    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
+        match self.peer_admission.is_admitted(device_id).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                warn!(error = %error, peer = %device_id.as_str(), "transfer progress: peer admission check failed");
+                false
+            }
+        }
+    }
+
     async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
         let derived = self
             .fingerprint_factory
@@ -510,6 +531,7 @@ mod tests {
             // happen here in this test), so any impl is fine.
             Arc::new(MemPeerAddrRepo::default()),
             member_repo,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let rx = adapter.subscribe();
@@ -554,6 +576,7 @@ mod tests {
             Arc::clone(&receiver_endpoint),
             Arc::clone(&peer_addr_repo),
             Arc::new(MemMemberRepo::default()),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let reporter = receiver_adapter.reporter();
@@ -614,6 +637,7 @@ mod tests {
             Arc::clone(&receiver_endpoint),
             Arc::clone(&peer_addr_repo),
             Arc::new(MemMemberRepo::default()),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let reporter = receiver_adapter.reporter();
@@ -646,6 +670,7 @@ mod tests {
             Arc::clone(&receiver_endpoint),
             peer_addr_repo,
             Arc::new(MemMemberRepo::default()),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let reporter = adapter.reporter();
@@ -673,6 +698,7 @@ mod tests {
             Arc::clone(&receiver_endpoint),
             peer_addr_repo,
             Arc::new(MemMemberRepo::default()),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let reporter = adapter.reporter();

@@ -35,7 +35,9 @@ use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
-use uc_core::membership::{GroupRevocationPort, GroupUpdateDispatchPort, MemberRepositoryPort};
+use uc_core::membership::{
+    GroupRevocationPort, GroupUpdateDispatchPort, MemberRepositoryPort, PeerAdmissionPort,
+};
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
 use uc_core::ports::pairing_invitation::{
@@ -809,6 +811,7 @@ impl IrohNodeBuilder {
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
     ) -> Arc<dyn PresencePort> {
@@ -820,6 +823,7 @@ impl IrohNodeBuilder {
             Arc::clone(&self.endpoint),
             peer_addr_repo,
             member_repo,
+            peer_admission,
             fingerprint_factory,
             clock,
             Arc::clone(&self.demand_recovery),
@@ -878,10 +882,12 @@ impl IrohNodeBuilder {
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         presence: Arc<dyn PresencePort>,
     ) -> ClipboardHandlers {
-        let receiver = IrohClipboardReceiverAdapter::new(member_repo, fingerprint_factory);
+        let receiver =
+            IrohClipboardReceiverAdapter::new(member_repo, peer_admission, fingerprint_factory);
         let handler = receiver.handler();
 
         let builder = self
@@ -911,6 +917,7 @@ impl IrohNodeBuilder {
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         group_revocation: Arc<dyn GroupRevocationPort>,
     ) -> Result<GroupUpdateHandlers, IrohNodeError> {
@@ -918,6 +925,7 @@ impl IrohNodeBuilder {
             Arc::clone(&self.endpoint),
             peer_addr_repo,
             member_repo,
+            peer_admission,
             fingerprint_factory,
             group_revocation,
         ));
@@ -945,9 +953,14 @@ impl IrohNodeBuilder {
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> ActiveClipboardHandlers {
-        let receiver = IrohActiveClipboardReceiverAdapter::new(member_repo, fingerprint_factory);
+        let receiver = IrohActiveClipboardReceiverAdapter::new(
+            member_repo,
+            peer_admission,
+            fingerprint_factory,
+        );
         let handler = receiver.handler();
 
         let builder = self
@@ -989,11 +1002,16 @@ impl IrohNodeBuilder {
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
     ) -> ActiveClipboardPullHandlers {
-        let serve_adapter =
-            IrohActiveClipboardPullServeAdapter::new(member_repo, fingerprint_factory, serve);
+        let serve_adapter = IrohActiveClipboardPullServeAdapter::new(
+            member_repo,
+            peer_admission,
+            fingerprint_factory,
+            serve,
+        );
         let handler = serve_adapter.handler();
 
         let builder = self
@@ -1026,12 +1044,14 @@ impl IrohNodeBuilder {
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> TransferProgressHandlers {
         let adapter = IrohTransferProgressAdapter::new(
             Arc::clone(&self.endpoint),
             peer_addr_repo,
             member_repo,
+            peer_admission,
             fingerprint_factory,
         );
         let handler = adapter.handler();
@@ -1419,6 +1439,7 @@ mod tests {
         let presence: Arc<dyn PresencePort> = builder.install_presence(
             Arc::new(EmptyPeerAddressRepo),
             Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(crate::security::Sha256IdentityFingerprintFactory),
             Arc::new(FixedClock(1_700_000_000_000)),
         );
@@ -1483,6 +1504,7 @@ mod tests {
         let presence = builder.install_presence(
             Arc::clone(&peer_addr_repo),
             Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(crate::security::Sha256IdentityFingerprintFactory),
             Arc::new(FixedClock(1_700_000_000_000)),
         );
@@ -1490,6 +1512,7 @@ mod tests {
         let ClipboardHandlers { dispatch, receiver } = builder.install_clipboard(
             peer_addr_repo,
             Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(crate::security::Sha256IdentityFingerprintFactory),
             presence,
         );
@@ -1544,6 +1567,7 @@ mod tests {
         let presence = builder.install_presence(
             Arc::clone(&peer_addr_repo),
             Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(crate::security::Sha256IdentityFingerprintFactory),
             Arc::new(FixedClock(1_700_000_000_000)),
         );
@@ -1551,6 +1575,7 @@ mod tests {
         let _clipboard = builder.install_clipboard(
             peer_addr_repo,
             Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(crate::security::Sha256IdentityFingerprintFactory),
             presence,
         );

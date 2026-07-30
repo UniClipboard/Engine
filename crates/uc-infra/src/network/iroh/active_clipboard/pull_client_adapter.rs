@@ -357,6 +357,7 @@ mod tests {
         wait_for_direct_addrs(&endpoint).await;
         let adapter = IrohActiveClipboardPullServeAdapter::new(
             member_repo,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
             StubServe::new(serve_result),
         );

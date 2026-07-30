@@ -270,6 +270,7 @@ pub fn wire_dependencies_from_inputs(
         &platform.session,
         &infra.db_executor,
     );
+    let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
 
     // Transfer metadata and event payloads are encrypted with two independent
     // profile-scoped subkeys, so their adapters are assembled only after space
@@ -600,6 +601,7 @@ pub fn wire_dependencies_from_inputs(
     let wired = WiredDependencies {
         deps,
         sync_engine: SyncEngineDeps {
+            peer_admission,
             peer_addr_repo: Arc::clone(&infra.peer_addr_repo),
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             blob_migration_repo: Arc::clone(&infra.blob_migration_repo),

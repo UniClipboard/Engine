@@ -326,6 +326,25 @@ impl MlsGroupEngine {
         })
     }
 
+    pub(crate) fn contains_active_member(
+        client_state: &MlsClientState,
+        expected_device_identity: &[u8],
+    ) -> Result<bool, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Ok(false);
+        }
+        let contains_member = group.members().any(|member| {
+            BasicCredential::try_from(member.credential)
+                .is_ok_and(|credential| credential.identity() == expected_device_identity)
+        });
+        Ok(contains_member)
+    }
+
     pub(crate) fn apply_commit(
         client_state: &MlsClientState,
         expected_space_id: &[u8],

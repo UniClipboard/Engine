@@ -9,7 +9,7 @@ use iroh::{Endpoint, EndpointAddr};
 use tracing::{debug, warn};
 use uc_core::membership::{
     GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, MemberRepositoryPort,
-    PendingGroupUpdate,
+    PeerAdmissionPort, PendingGroupUpdate,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
@@ -40,6 +40,7 @@ pub struct IrohGroupUpdateAdapter {
 
 struct HandlerState {
     member_repo: Arc<dyn MemberRepositoryPort>,
+    peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     group_revocation: Arc<dyn GroupRevocationPort>,
 }
@@ -49,6 +50,7 @@ impl IrohGroupUpdateAdapter {
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         group_revocation: Arc<dyn GroupRevocationPort>,
     ) -> Self {
@@ -57,6 +59,7 @@ impl IrohGroupUpdateAdapter {
             peer_addr_repo,
             handler_state: Arc::new(HandlerState {
                 member_repo,
+                peer_admission,
                 fingerprint_factory,
                 group_revocation,
             }),
@@ -139,9 +142,9 @@ impl std::fmt::Debug for IrohGroupUpdateHandler {
 
 impl ProtocolHandler for IrohGroupUpdateHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let known_peer = self
+        let peer_device_id = self
             .state
-            .is_known_peer(connection.remote_id().as_bytes())
+            .resolve_device(connection.remote_id().as_bytes())
             .await;
         let (mut send, mut recv) =
             match tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, connection.accept_bi()).await {
@@ -155,7 +158,15 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
                     return Ok(());
                 }
             };
-        if !known_peer {
+        let Some(peer_device_id) = peer_device_id else {
+            emit_ack(&mut send, ACK_REJECTED).await;
+            return Ok(());
+        };
+        if !self.state.is_admitted(&peer_device_id).await {
+            warn!(
+                peer = %peer_device_id.as_str(),
+                "group update: peer is not admitted by current space protection"
+            );
             emit_ack(&mut send, ACK_REJECTED).await;
             return Ok(());
         }
@@ -197,17 +208,26 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
 }
 
 impl HandlerState {
-    async fn is_known_peer(&self, public_key: &[u8; 32]) -> bool {
-        let fingerprint = match self.fingerprint_factory.from_public_key(public_key) {
-            Ok(fingerprint) => fingerprint,
-            Err(_) => return false,
-        };
-        match self.member_repo.list().await {
-            Ok(members) => members
-                .into_iter()
-                .any(|member| member.identity_fingerprint == fingerprint),
+    async fn resolve_device(&self, public_key: &[u8; 32]) -> Option<uc_core::ids::DeviceId> {
+        let fingerprint = self.fingerprint_factory.from_public_key(public_key).ok()?;
+        let members = match self.member_repo.list().await {
+            Ok(members) => members,
             Err(error) => {
                 warn!(error = %error, "group update member lookup failed");
+                return None;
+            }
+        };
+        members
+            .into_iter()
+            .find(|member| member.identity_fingerprint == fingerprint)
+            .map(|member| member.device_id)
+    }
+
+    async fn is_admitted(&self, device_id: &uc_core::ids::DeviceId) -> bool {
+        match self.peer_admission.is_admitted(device_id).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                warn!(error = %error, peer = %device_id.as_str(), "group update: peer admission check failed");
                 false
             }
         }

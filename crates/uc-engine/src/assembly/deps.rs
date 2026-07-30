@@ -65,6 +65,9 @@ pub struct BackgroundRuntimeDeps {
 /// AppFacade path.
 #[derive(Clone)]
 pub struct SyncEngineDeps {
+    /// Authoritative authorization check used by every inbound Iroh handler
+    /// after it resolves an endpoint identity to a known device.
+    pub peer_admission: Arc<dyn uc_core::membership::PeerAdmissionPort>,
     /// peer address repo — best-effort transport-address writes after pairing,
     /// dialed by F1 `ensure_reachable_all`.
     pub peer_addr_repo: Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,

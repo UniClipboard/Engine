@@ -64,7 +64,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::MemberRepositoryPort;
+use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{
     ClockPort, PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort,
@@ -149,6 +149,7 @@ const MARK_OFFLINE_STICKY_TTL: Duration = Duration::from_secs(30);
 /// state mutation goes through the same lock.
 struct HandlerState {
     member_repo: Arc<dyn MemberRepositoryPort>,
+    peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     last_state: Arc<Mutex<HashMap<DeviceId, ReachabilityState>>>,
     /// Shared with the dial-side adapter so an inbound presence ping from
@@ -204,6 +205,16 @@ impl HandlerState {
             .map(|m| m.device_id)
     }
 
+    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
+        match self.peer_admission.is_admitted(device_id).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                warn!(error = %error, peer = %device_id.as_str(), "presence accept: peer admission check failed");
+                false
+            }
+        }
+    }
+
     fn now(&self) -> DateTime<Utc> {
         let ms = self.clock.now_ms();
         Utc.timestamp_millis_opt(ms).single().unwrap_or_else(|| {
@@ -244,6 +255,11 @@ impl ProtocolHandler for IrohPresenceHandler {
 
         let remote_bytes: [u8; 32] = *remote.as_bytes();
         if let Some(device_id) = self.state.resolve_device(&remote_bytes).await {
+            if !self.state.is_admitted(&device_id).await {
+                warn!(device = %device_id.as_str(), "presence accept: peer is not admitted by current space protection");
+                connection.close(0u32.into(), b"peer_not_admitted");
+                return Ok(());
+            }
             let mut inbound = self.state.inbound_connections.lock().await;
             if !self.state.accepting.load(Ordering::Acquire) {
                 connection.close(0u32.into(), b"space_inactive");
@@ -392,6 +408,7 @@ impl IrohPresenceAdapter {
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
@@ -399,6 +416,7 @@ impl IrohPresenceAdapter {
             endpoint,
             peer_addr_repo,
             member_repo,
+            peer_admission,
             fingerprint_factory,
             clock,
             None,
@@ -409,6 +427,7 @@ impl IrohPresenceAdapter {
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
         demand_recovery: Arc<DemandRecoveryCoordinator>,
@@ -417,6 +436,7 @@ impl IrohPresenceAdapter {
             endpoint,
             peer_addr_repo,
             member_repo,
+            peer_admission,
             fingerprint_factory,
             clock,
             Some(demand_recovery),
@@ -427,6 +447,7 @@ impl IrohPresenceAdapter {
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
         demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
@@ -437,6 +458,7 @@ impl IrohPresenceAdapter {
         let inbound_connections = Arc::new(Mutex::new(HashMap::new()));
         let handler_state = Arc::new(HandlerState {
             member_repo,
+            peer_admission,
             fingerprint_factory,
             last_state: Arc::clone(&last_state),
             last_offline_at: Arc::clone(&last_offline_at),
@@ -1115,6 +1137,7 @@ mod tests {
             Arc::clone(&endpoint_b),
             Arc::new(FakePeerAddressRepo::default()),
             member_repo,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
             Arc::new(FixedClock),
         );
@@ -1144,6 +1167,7 @@ mod tests {
             endpoint,
             repo,
             Arc::new(MemMemberRepo::default()),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
             Arc::new(FixedClock),
         )
@@ -1160,6 +1184,7 @@ mod tests {
             endpoint,
             repo,
             member_repo,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
             Arc::new(FixedClock),
         )

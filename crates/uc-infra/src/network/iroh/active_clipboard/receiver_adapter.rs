@@ -35,7 +35,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::MemberRepositoryPort;
+use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ActiveClipboardReceiverPort, InboundActiveClipboardState};
 use uc_core::security::IdentityFingerprint;
@@ -65,6 +65,7 @@ pub struct IrohActiveClipboardReceiverAdapter {
 
 struct HandlerState {
     member_repo: Arc<dyn MemberRepositoryPort>,
+    peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     event_tx: broadcast::Sender<InboundActiveClipboardState>,
 }
@@ -72,11 +73,13 @@ struct HandlerState {
 impl IrohActiveClipboardReceiverAdapter {
     pub fn new(
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(INBOUND_CHANNEL_CAPACITY);
         let handler_state = Arc::new(HandlerState {
             member_repo,
+            peer_admission,
             fingerprint_factory,
             event_tx: event_tx.clone(),
         });
@@ -135,6 +138,14 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
             // connection drop.
             return Ok(());
         };
+
+        if !self.state.is_admitted(&peer_device_id).await {
+            warn!(
+                peer = %peer_device_id.as_str(),
+                "active-clipboard receiver: peer is not admitted by current space protection"
+            );
+            return Ok(());
+        }
 
         // 2. Accept the inbound stream. The sender opens a bi-stream and
         //    finishes its send half after the frame; we only read.
@@ -205,6 +216,16 @@ impl HandlerState {
     /// `member_repo.list()` is used because the port does not expose
     /// lookup-by-fingerprint and the roster size is bounded (N ≤ 10); a
     /// dedicated index is a later concern, mirroring the bulk receiver.
+    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
+        match self.peer_admission.is_admitted(device_id).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                warn!(error = %error, peer = %device_id.as_str(), "active-clipboard receiver: peer admission check failed");
+                false
+            }
+        }
+    }
+
     async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
         let derived = match self
             .fingerprint_factory
@@ -355,6 +376,7 @@ mod tests {
 
         let adapter = IrohActiveClipboardReceiverAdapter::new(
             member_repo,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let inbound_rx = adapter.subscribe();

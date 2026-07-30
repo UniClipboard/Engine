@@ -36,6 +36,19 @@ pub(super) fn build_space_access_ports(
     );
     SpaceAccessPorts::from_adapter(space_access_adapter)
 }
+pub(super) fn build_peer_admission_port(
+    session: &Arc<InMemorySession>,
+    db_executor: &Arc<DieselSqliteExecutor>,
+) -> Arc<dyn uc_core::membership::PeerAdmissionPort> {
+    let repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
+        DieselRevocationRepository::new(db_executor.clone(), session.as_ref().clone()),
+    );
+    Arc::new(uc_infra::security::MlsPeerAdmissionAdapter::new(
+        session.clone(),
+        repository,
+    ))
+}
+
 pub(super) fn build_search_assembly(
     db_pool_for_search: DbPool,
     space_access_ports: &SpaceAccessPorts,

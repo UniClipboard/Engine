@@ -42,7 +42,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, instrument, warn};
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::MemberRepositoryPort;
+use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ClipboardReceiverPort, InboundClipboard};
 use uc_core::security::IdentityFingerprint;
@@ -66,6 +66,7 @@ pub struct IrohClipboardReceiverAdapter {
 
 struct HandlerState {
     member_repo: Arc<dyn MemberRepositoryPort>,
+    peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     event_tx: broadcast::Sender<InboundClipboard>,
 }
@@ -73,11 +74,13 @@ struct HandlerState {
 impl IrohClipboardReceiverAdapter {
     pub fn new(
         member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(INBOUND_CHANNEL_CAPACITY);
         let handler_state = Arc::new(HandlerState {
             member_repo,
+            peer_admission,
             fingerprint_factory,
             event_tx: event_tx.clone(),
         });
@@ -157,6 +160,16 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         // 3. Read the frame. Any codec-level failure ends the connection
         //    with a `Rejected` ack so the sender gets a typed
         //    `PeerRejected` error rather than an unexplained `Io`.
+        if !self.state.is_admitted(&peer_device_id).await {
+            warn!(
+                peer = %peer_device_id.as_str(),
+                "clipboard receiver: peer is not admitted by current space protection"
+            );
+            emit_ack(&mut send, AckCode::Rejected).await;
+            let _ = connection.closed().await;
+            return Ok(());
+        }
+
         let frame = match clipboard_wire::read_frame(&mut recv).await {
             Ok(f) => f,
             Err(err) => {
@@ -220,6 +233,16 @@ impl HandlerState {
     /// `member_repo.list()` is used because the port does not expose
     /// lookup-by-fingerprint and the roster size is bounded (Slice 2
     /// assumption N ≤ 10). Adding a dedicated index is a Phase 3 concern.
+    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
+        match self.peer_admission.is_admitted(device_id).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                warn!(error = %error, peer = %device_id.as_str(), "clipboard receiver: peer admission check failed");
+                false
+            }
+        }
+    }
+
     async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
         let derived = match self
             .fingerprint_factory
@@ -444,6 +467,7 @@ mod tests {
 
         let adapter = IrohClipboardReceiverAdapter::new(
             member_repo,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let inbound_rx = adapter.subscribe();
