@@ -203,6 +203,21 @@ impl LegacyBootstrapRecord {
     }
 }
 
+impl fmt::Debug for LegacyBootstrapRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LegacyBootstrapRecord")
+            .field("bootstrap_id", &self.bootstrap_id)
+            .field("previous_epoch", &self.previous_epoch)
+            .field("next_epoch", &self.next_epoch)
+            .field("status", &self.status)
+            .field("pending_readmission_count", &self.pending_readmission.len())
+            .field("created_at_ms", &self.created_at_ms)
+            .field("updated_at_ms", &self.updated_at_ms)
+            .finish()
+    }
+}
+
 impl TryFrom<RawLegacyBootstrapRecord> for LegacyBootstrapRecord {
     type Error = BootstrapError;
 
