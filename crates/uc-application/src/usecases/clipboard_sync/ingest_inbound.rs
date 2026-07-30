@@ -636,6 +636,94 @@ mod tests {
         );
     }
 
+    /// A peer absent from the local member repository is dropped before
+    /// decryption. A receive policy cannot be enforced without its local
+    /// authoritative member record.
+    #[tokio::test]
+    async fn missing_member_is_dropped_before_decrypt() {
+        let receiver = Arc::new(FakeReceiver::new());
+        let mut member_repo = MockMemberRepo::new();
+        member_repo.expect_get().returning(|_| Ok(None));
+        let cipher = MockCipher::new();
+
+        let uc = Arc::new(IngestInboundClipboardUseCase::new(
+            receiver.clone(),
+            Arc::new(member_repo),
+            Arc::new(cipher),
+            Arc::new(FixedClock(0)),
+        ));
+        let mut notice_rx = uc.subscribe_notices();
+        let _handle = Arc::clone(&uc).spawn_run();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        receiver.publish(inbound_fixture(
+            "peer-unknown",
+            "0".repeat(64).as_str(),
+            Bytes::from_static(b"will-not-be-decrypted"),
+        ));
+
+        let fast_poll = tokio::time::timeout(Duration::from_millis(200), notice_rx.recv()).await;
+        assert!(
+            fast_poll.is_err(),
+            "unknown members must not produce an inbound notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_lookup_failure_is_rejected() {
+        let mut member_repo = MockMemberRepo::new();
+        member_repo
+            .expect_get()
+            .returning(|_| Err(MembershipError::Repository("unavailable".to_owned())));
+        let gate = super::super::receive_gate::MemberReceiveGate::new(Arc::new(member_repo));
+
+        assert!(
+            !gate
+                .is_receive_allowed(&DeviceId::new("peer-unavailable"))
+                .await,
+            "a receive policy cannot be bypassed when member lookup fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_disabled_between_gate_stages_is_rejected() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reads_for_repo = Arc::clone(&reads);
+        let mut member_repo = MockMemberRepo::new();
+        member_repo.expect_get().times(2).returning(move |did| {
+            let mut preferences = MemberSyncPreferences::default();
+            if reads_for_repo.fetch_add(1, Ordering::SeqCst) == 1 {
+                preferences.receive_enabled = false;
+            }
+            Ok(Some(SpaceMember {
+                device_id: did.clone(),
+                device_name: "Peer Disabled During Receive".to_string(),
+                identity_fingerprint: fp(),
+                joined_at: chrono::Utc::now(),
+                sync_preferences: preferences,
+            }))
+        });
+        let gate = super::super::receive_gate::MemberReceiveGate::new(Arc::new(member_repo));
+        let peer = DeviceId::new("peer-disabled-between-stages");
+
+        assert!(
+            gate.is_receive_allowed(&peer).await,
+            "the first read allows receive"
+        );
+        assert!(
+            !gate
+                .is_receive_category_allowed(
+                    &peer,
+                    &uc_core::clipboard::ClipboardContentCategorySet::empty(),
+                )
+                .await,
+            "the second read must honor a newly disabled master switch"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
     /// 6. Per-device content-type receive gate — peer's
     /// `receive_content_types.text=false` causes a Text-classified frame
     /// to be dropped *after* decrypt (the snapshot only becomes

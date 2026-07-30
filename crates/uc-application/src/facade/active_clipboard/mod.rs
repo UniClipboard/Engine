@@ -60,7 +60,7 @@ use crate::facade::clipboard_outbound::OutboundBlobPublishGateway;
 use crate::facade::host_event::{ClipboardHostEvent, ClipboardOriginKind, HostEvent};
 use crate::usecases::clipboard_sync::active_state::apply_inbound::{
     ActiveClipboardConvergedEvent, ApplyInboundActiveClipboardStateUseCase,
-    InboundPulledContentStore, InboundPulledContentStoreError,
+    InboundPulledContentStore, InboundPulledContentStoreError, InboundPulledContentStoreOutcome,
 };
 use crate::usecases::clipboard_sync::active_state::fanout::fan_out_active_state;
 use crate::usecases::clipboard_sync::active_state::peer_online_resync_worker::PeerOnlineResyncWorker;
@@ -68,6 +68,8 @@ use crate::usecases::clipboard_sync::active_state::restore_broadcast_worker::Res
 use crate::usecases::clipboard_sync::active_state::serve_pull::{
     ActiveClipboardPullServeDeps, ActiveClipboardPullServeUseCase,
 };
+use crate::usecases::clipboard_sync::payload_codec::decode_v3_bytes_to_snapshot;
+use crate::usecases::clipboard_sync::receive_gate::MemberReceiveGate;
 use crate::usecases::clipboard_sync::send_gate::MemberSendGate;
 use crate::usecases::clipboard_sync::snapshot_from_entry::SnapshotReconstructor;
 
@@ -259,6 +261,7 @@ impl ActiveClipboardFacade {
         if let (Some(pull_client), Some(pull_apply)) = (deps.pull_client, deps.pull_apply) {
             let store: Arc<dyn InboundPulledContentStore> = Arc::new(PulledContentStore {
                 cipher: Arc::clone(&deps.transfer_cipher),
+                receive_gate: MemberReceiveGate::new(Arc::clone(&deps.member_repo)),
                 apply: pull_apply,
             });
             inbound_uc = inbound_uc.with_pull(pull_client, store);
@@ -703,6 +706,7 @@ async fn resurface_entry(
 /// the active-clipboard register — the inbound convergence tail owns that.
 struct PulledContentStore {
     cipher: Arc<dyn TransferCipherPort>,
+    receive_gate: MemberReceiveGate,
     apply: Arc<dyn InboundClipboardApplyPort>,
 }
 
@@ -713,15 +717,25 @@ impl InboundPulledContentStore for PulledContentStore {
         from_device: &DeviceId,
         snapshot_hash: &str,
         transfer_envelope: Vec<u8>,
-    ) -> Result<EntryId, InboundPulledContentStoreError> {
-        // Decrypt the transfer envelope into the V3 plaintext the inbound apply
-        // path decodes. A locked session (between the pull and the store) or a
-        // tampered envelope surfaces here.
+    ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
+        // Decrypt first because categories are inside the encrypted V3
+        // envelope. Decode and enforce the receive allowlist before invoking
+        // the shared inbound apply path, which can persist entries and blobs.
         let plaintext = self
             .cipher
             .decrypt(&transfer_envelope)
             .await
             .map_err(|err| InboundPulledContentStoreError::Decrypt(err.to_string()))?;
+        let snapshot = decode_v3_bytes_to_snapshot(&plaintext)
+            .map_err(|err| InboundPulledContentStoreError::Store(format!("decode: {err}")))?;
+        let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
+        if !self
+            .receive_gate
+            .is_receive_category_allowed(from_device, &categories)
+            .await
+        {
+            return Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy);
+        }
 
         // Persist via the shared inbound apply path (decode V3 → materialize
         // blobs → capture). Reuses the same pipeline the bulk 0xC1 path uses,
@@ -743,7 +757,9 @@ impl InboundPulledContentStore for PulledContentStore {
             .map_err(|err| InboundPulledContentStoreError::Store(err.to_string()))?;
 
         match outcome {
-            InboundClipboardApplyOutcome::Applied { entry_id } => Ok(EntryId::from(entry_id)),
+            InboundClipboardApplyOutcome::Applied { entry_id } => Ok(
+                InboundPulledContentStoreOutcome::Stored(EntryId::from(entry_id)),
+            ),
             // A duplicate means the content landed locally between the pull and
             // the store (e.g. the bulk path raced us); the existing entry is
             // exactly what we wanted, so converge on it.
@@ -752,7 +768,9 @@ impl InboundPulledContentStore for PulledContentStore {
             }
             | InboundClipboardApplyOutcome::DuplicateSkipped {
                 existing_entry_id, ..
-            } => Ok(EntryId::from(existing_entry_id)),
+            } => Ok(InboundPulledContentStoreOutcome::Stored(EntryId::from(
+                existing_entry_id,
+            ))),
             InboundClipboardApplyOutcome::DecodeFailed { reason } => {
                 warn!(reason, "pulled content store: envelope decode failed");
                 Err(InboundPulledContentStoreError::Store(format!(
@@ -760,5 +778,114 @@ impl InboundPulledContentStore for PulledContentStore {
                 )))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pull_store_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use uc_core::clipboard::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
+    use uc_core::ids::{FormatId, RepresentationId};
+    use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
+    use uc_core::{MemberRepositoryPort, MemberSyncPreferences, MembershipError, SpaceMember};
+
+    use super::*;
+    use crate::facade::clipboard_inbound::InboundClipboardApplyError;
+    use crate::usecases::clipboard_sync::payload_codec::encode_snapshot_to_v3_bytes;
+
+    struct PlaintextCipher(Vec<u8>);
+
+    #[async_trait]
+    impl TransferCipherPort for PlaintextCipher {
+        async fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>, TransferCipherError> {
+            unreachable!("pull store only decrypts")
+        }
+
+        async fn decrypt(&self, _encrypted: &[u8]) -> Result<Vec<u8>, TransferCipherError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct TextDeniedMemberRepo;
+
+    #[async_trait]
+    impl MemberRepositoryPort for TextDeniedMemberRepo {
+        async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
+            let mut preferences = MemberSyncPreferences::default();
+            preferences.receive_content_types.text = false;
+            Ok(Some(SpaceMember {
+                device_id: device_id.clone(),
+                device_name: "peer".to_owned(),
+                identity_fingerprint: uc_core::security::IdentityFingerprint::from_raw_string(
+                    "0123456789abcdef",
+                )
+                .expect("valid test fingerprint"),
+                joined_at: Utc::now(),
+                sync_preferences: preferences,
+            }))
+        }
+
+        async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
+            Ok(Vec::new())
+        }
+
+        async fn save(&self, _member: &SpaceMember) -> Result<(), MembershipError> {
+            Ok(())
+        }
+
+        async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
+            Ok(false)
+        }
+    }
+
+    struct ApplyNeverCalled;
+
+    #[async_trait]
+    impl InboundClipboardApplyPort for ApplyNeverCalled {
+        async fn apply(
+            &self,
+            _input: InboundClipboardApplyInput,
+        ) -> Result<InboundClipboardApplyOutcome, InboundClipboardApplyError> {
+            panic!("receive policy must reject before inbound apply")
+        }
+    }
+
+    #[tokio::test]
+    async fn text_rejection_happens_before_pulled_content_is_persisted() {
+        let snapshot = SystemClipboardSnapshot {
+            ts_ms: 0,
+            representations: vec![ObservedClipboardRepresentation::new(
+                RepresentationId::new(),
+                FormatId::from("text"),
+                Some(MimeType("text/plain".to_owned())),
+                b"private text".to_vec(),
+            )],
+            file_content_digests: Vec::new(),
+            file_set_v1_component: None,
+        };
+        let (plaintext, snapshot_hash) =
+            encode_snapshot_to_v3_bytes(&snapshot).expect("encode text envelope");
+        let store = PulledContentStore {
+            cipher: Arc::new(PlaintextCipher(plaintext.to_vec())),
+            receive_gate: MemberReceiveGate::new(Arc::new(TextDeniedMemberRepo)),
+            apply: Arc::new(ApplyNeverCalled),
+        };
+
+        let outcome = store
+            .store(
+                &DeviceId::new("peer-text-disabled"),
+                &snapshot_hash,
+                b"encrypted-envelope".to_vec(),
+            )
+            .await
+            .expect("policy rejection is not a storage error");
+
+        assert_eq!(
+            outcome,
+            InboundPulledContentStoreOutcome::RejectedByReceivePolicy
+        );
     }
 }

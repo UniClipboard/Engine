@@ -42,8 +42,8 @@ use uc_application::facade::space_setup::{
     InitializeSpaceInput, RedeemPairingInvitationInput, SpaceSetupDeps, SpaceSetupFacade,
 };
 use uc_application::facade::{
-    decode_v3_bytes_to_snapshot, ClipboardSyncDeps, ClipboardSyncFacade, IngestHandle,
-    MemberRosterDeps, MemberRosterFacade,
+    decode_v3_bytes_to_snapshot, ClipboardSyncDeps, ClipboardSyncFacade, ContentTypesPatch,
+    IngestHandle, MemberRosterDeps, MemberRosterFacade, MemberSyncPreferencesPatch,
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_core::ids::{DeviceId, FormatId, RepresentationId};
@@ -397,11 +397,9 @@ impl Respond for GetPairing {
 
 struct Side {
     facade: Arc<SpaceSetupFacade>,
-    /// Cloned for `refresh_presence` reuse — phase 2 dispatch needs a
-    /// non-`Unknown` cache or it skips the target. Kept as a field
-    /// (prefixed `_`) so the parallel structure with phase 1 e2e is
-    /// obvious; future verdicts can drop the prefix.
-    _roster: Arc<MemberRosterFacade>,
+    /// Shared with the clipboard receiver so tests can change local per-peer
+    /// receive policy while the P2P node is running.
+    roster: Arc<MemberRosterFacade>,
     clipboard_sync: Arc<ClipboardSyncFacade>,
     /// Held to keep the spawned ingest loop alive for the duration of
     /// the test. Drop aborts (Phase 2 · T8 contract).
@@ -584,7 +582,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
 
     Side {
         facade,
-        _roster: roster,
+        roster,
         clipboard_sync,
         _ingest: ingest_handle,
         iroh_node,
@@ -732,6 +730,155 @@ async fn sponsor_dispatch_lands_on_joiner_within_2s() {
     assert_eq!(
         decoded.representations[0].mime.as_ref().map(|m| m.as_str()),
         Some("text/plain")
+    );
+
+    sponsor.shutdown().await;
+    joiner.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn receiver_policy_blocks_then_restores_p2p_inbound_delivery() {
+    let server = MockServer::start().await;
+    let vault: TicketVault = Arc::new(StdMutex::new(None));
+    const CODE: &str = "E2EP-CL03";
+    const EXPIRES_AT_MS: i64 = 1_900_000_000_000;
+
+    mount_rendezvous(&server, &vault, CODE, EXPIRES_AT_MS).await;
+
+    let sponsor = build_side("sponsor", server.uri()).await;
+    let joiner = build_side("joiner", server.uri()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    pair_sponsor_and_joiner(&sponsor, &joiner, "hunter22hunter22").await;
+
+    let preferences = joiner
+        .roster
+        .update_sync_preferences(
+            sponsor.device_id.as_str(),
+            MemberSyncPreferencesPatch {
+                receive_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("disable receiver policy");
+    assert!(!preferences.receive_enabled);
+
+    let mut joiner_notices = joiner.clipboard_sync.subscribe_inbound_notices();
+    let blocked_snapshot = || SystemClipboardSnapshot {
+        ts_ms: 1_700_000_000_000,
+        representations: vec![ObservedClipboardRepresentation::new(
+            RepresentationId::new(),
+            FormatId::from("text"),
+            Some(MimeType("text/plain".to_string())),
+            b"blocked clipboard".to_vec(),
+        )],
+        file_content_digests: Vec::new(),
+        file_set_v1_component: None,
+    };
+    let blocked = sponsor
+        .clipboard_sync
+        .dispatch_snapshot(
+            blocked_snapshot(),
+            ClipboardChangeOrigin::LocalCapture,
+            None,
+            None,
+        )
+        .await
+        .expect("dispatch to policy-blocked receiver");
+    assert_eq!(blocked.total_accepted, 1, "wire delivery remains accepted");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), joiner_notices.recv())
+            .await
+            .is_err(),
+        "policy-blocked payload must not produce an inbound notice"
+    );
+
+    let preferences = joiner
+        .roster
+        .update_sync_preferences(
+            sponsor.device_id.as_str(),
+            MemberSyncPreferencesPatch {
+                receive_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("re-enable receiver policy");
+    assert!(preferences.receive_enabled);
+
+    let restored_text = "restored clipboard";
+    let restored = sponsor
+        .clipboard_sync
+        .dispatch_snapshot(
+            SystemClipboardSnapshot {
+                ts_ms: 1_700_000_000_001,
+                representations: vec![ObservedClipboardRepresentation::new(
+                    RepresentationId::new(),
+                    FormatId::from("text"),
+                    Some(MimeType("text/plain".to_string())),
+                    restored_text.as_bytes().to_vec(),
+                )],
+                file_content_digests: Vec::new(),
+                file_set_v1_component: None,
+            },
+            ClipboardChangeOrigin::LocalCapture,
+            None,
+            None,
+        )
+        .await
+        .expect("dispatch after receiver policy restore");
+    assert_eq!(restored.total_accepted, 1);
+    let notice = tokio::time::timeout(Duration::from_secs(5), joiner_notices.recv())
+        .await
+        .expect("restored receiver policy delivers inbound notice")
+        .expect("inbound notice sender remains active");
+    let decoded = decode_v3_bytes_to_snapshot(&notice.plaintext)
+        .expect("restored inbound notice is a V3 envelope");
+    assert_eq!(
+        decoded.representations[0].expect_inline_bytes(),
+        restored_text.as_bytes()
+    );
+
+    joiner
+        .roster
+        .update_sync_preferences(
+            sponsor.device_id.as_str(),
+            MemberSyncPreferencesPatch {
+                receive_content_types: Some(ContentTypesPatch {
+                    text: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("disable text receiver policy");
+    let filtered = sponsor
+        .clipboard_sync
+        .dispatch_snapshot(
+            SystemClipboardSnapshot {
+                ts_ms: 1_700_000_000_002,
+                representations: vec![ObservedClipboardRepresentation::new(
+                    RepresentationId::new(),
+                    FormatId::from("text"),
+                    Some(MimeType("text/plain".to_string())),
+                    b"filtered clipboard".to_vec(),
+                )],
+                file_content_digests: Vec::new(),
+                file_set_v1_component: None,
+            },
+            ClipboardChangeOrigin::LocalCapture,
+            None,
+            None,
+        )
+        .await
+        .expect("dispatch to text-filtered receiver");
+    assert_eq!(filtered.total_accepted, 1, "wire delivery remains accepted");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), joiner_notices.recv())
+            .await
+            .is_err(),
+        "text-filtered payload must not produce an inbound notice"
     );
 
     sponsor.shutdown().await;
