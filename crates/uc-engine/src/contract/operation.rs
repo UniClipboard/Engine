@@ -70,7 +70,10 @@ pub enum OperationKind {
     QueryMemberSyncPreferences,
     UpdateMemberSyncPreferences,
     RemoveMember,
+    SecureRemoveLegacyMember,
     QueryMemberRevocation,
+    QueryLegacyBootstrap,
+    QuerySpaceProtection,
     SearchEntries,
     QuerySearchTags,
     QuerySearchStatus,
@@ -159,7 +162,10 @@ impl fmt::Display for OperationKind {
             Self::QueryMemberSyncPreferences => "query_member_sync_preferences",
             Self::UpdateMemberSyncPreferences => "update_member_sync_preferences",
             Self::RemoveMember => "remove_member",
+            Self::SecureRemoveLegacyMember => "secure_remove_legacy_member",
             Self::QueryMemberRevocation => "query_member_revocation",
+            Self::QueryLegacyBootstrap => "query_legacy_bootstrap",
+            Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
             Self::QuerySearchTags => "query_search_tags",
             Self::QuerySearchStatus => "query_search_status",
@@ -250,7 +256,10 @@ pub enum Operation {
     QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput),
     UpdateMemberSyncPreferences(UpdateMemberSyncPreferencesInput),
     RemoveMember(RemoveMemberInput),
+    SecureRemoveLegacyMember(RemoveMemberInput),
     QueryMemberRevocation(QueryMemberRevocationInput),
+    QueryLegacyBootstrap(QueryLegacyBootstrapInput),
+    QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
     QuerySearchTags,
     QuerySearchStatus,
@@ -339,7 +348,10 @@ impl Operation {
             Self::QueryMemberSyncPreferences(_) => OperationKind::QueryMemberSyncPreferences,
             Self::UpdateMemberSyncPreferences(_) => OperationKind::UpdateMemberSyncPreferences,
             Self::RemoveMember(_) => OperationKind::RemoveMember,
+            Self::SecureRemoveLegacyMember(_) => OperationKind::SecureRemoveLegacyMember,
             Self::QueryMemberRevocation(_) => OperationKind::QueryMemberRevocation,
+            Self::QueryLegacyBootstrap(_) => OperationKind::QueryLegacyBootstrap,
+            Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
             Self::QuerySearchTags => OperationKind::QuerySearchTags,
             Self::QuerySearchStatus => OperationKind::QuerySearchStatus,
@@ -456,6 +468,11 @@ pub struct RemoveMemberInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryMemberRevocationInput {
     pub revocation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryLegacyBootstrapInput {
+    pub bootstrap_id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

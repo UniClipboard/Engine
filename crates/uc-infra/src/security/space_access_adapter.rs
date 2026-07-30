@@ -29,10 +29,12 @@ use super::secrets::{Kek, MasterKey};
 use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
 use uc_core::membership::{
     BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult,
-    GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError, LegacyBootstrapRecord,
-    LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus, PendingGroupUpdate,
+    GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError, LegacyBootstrapProgress,
+    LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
+    LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus, PendingGroupUpdate,
     RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
-    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityMode,
+    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError,
+    SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
@@ -394,6 +396,45 @@ impl DefaultSpaceAccessAdapter {
         ))
     }
 
+    async fn acknowledge_bootstrap_readmission_after_admission(
+        &self,
+        space_id: &SpaceId,
+        joiner_device_id: &DeviceId,
+        now_ms: i64,
+    ) {
+        let Some(repository) = &self.legacy_bootstrap_repository else {
+            return;
+        };
+        let records = match repository.list_incomplete_legacy_bootstraps().await {
+            Ok(records) => records,
+            Err(error) => {
+                warn!(error = %error, "legacy bootstrap readmission lookup failed after group admission");
+                return;
+            }
+        };
+        for record in records {
+            if record.space_id() != space_id
+                || record.status() != LegacyBootstrapStatus::AwaitingReadmission
+                || !record
+                    .pending_readmission()
+                    .iter()
+                    .any(|member| member == joiner_device_id)
+            {
+                continue;
+            }
+            if let Err(error) = repository
+                .acknowledge_legacy_readmission(record.bootstrap_id(), joiner_device_id, now_ms)
+                .await
+            {
+                warn!(
+                    error = %error,
+                    bootstrap_id = %record.bootstrap_id().as_str(),
+                    "legacy bootstrap readmission acknowledgement will be retried during recovery"
+                );
+            }
+        }
+    }
+
     async fn admit_group_member(
         &self,
         space_id: &SpaceId,
@@ -472,6 +513,12 @@ impl DefaultSpaceAccessAdapter {
         self.session
             .install_space_material(&next)
             .map_err(map_encryption_error)?;
+        self.acknowledge_bootstrap_readmission_after_admission(
+            space_id,
+            joiner_device_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await;
 
         Ok(GroupAdmission {
             welcome: admission.welcome,
@@ -1973,16 +2020,158 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
         let records = repository.list_incomplete_legacy_bootstraps().await?;
         let mut results = Vec::with_capacity(records.len());
         for record in records {
-            results.push(
-                self.bootstrap_legacy_space(
-                    record.sponsor_device_id(),
-                    record.pending_readmission(),
-                    now_ms,
-                )
-                .await?,
-            );
+            match record.status() {
+                LegacyBootstrapStatus::Prepared | LegacyBootstrapStatus::Staged => {
+                    results.push(
+                        self.bootstrap_legacy_space(
+                            record.sponsor_device_id(),
+                            record.pending_readmission(),
+                            now_ms,
+                        )
+                        .await?,
+                    );
+                }
+                LegacyBootstrapStatus::AwaitingReadmission => {
+                    let key_epoch_repository =
+                        self.key_epoch_repository.as_ref().ok_or_else(|| {
+                            BootstrapError::Repository(
+                                "key epoch repository is not configured".into(),
+                            )
+                        })?;
+                    let material = key_epoch_repository
+                        .load_space_material(record.space_id())
+                        .await
+                        .map_err(|error| BootstrapError::Repository(error.to_string()))?
+                        .ok_or(BootstrapError::InvalidRecord)?;
+                    let group_state = MlsClientState::from_bytes(material.group_state().to_vec());
+                    for member in record.pending_readmission().to_vec() {
+                        let is_member = MlsGroupEngine::contains_active_member(
+                            &group_state,
+                            member.as_str().as_bytes(),
+                        )
+                        .map_err(|_| BootstrapError::CryptographicState)?;
+                        if is_member {
+                            repository
+                                .acknowledge_legacy_readmission(
+                                    record.bootstrap_id(),
+                                    &member,
+                                    now_ms,
+                                )
+                                .await?;
+                        }
+                    }
+                    let updated = repository
+                        .get_legacy_bootstrap(record.bootstrap_id())
+                        .await?
+                        .ok_or(BootstrapError::InvalidRecord)?;
+                    results.push(bootstrap_result(updated)?);
+                }
+                LegacyBootstrapStatus::Complete | LegacyBootstrapStatus::RecoveryRequired => {
+                    results.push(bootstrap_result(record)?);
+                }
+            }
         }
         Ok(results)
+    }
+}
+
+#[async_trait]
+impl SpaceProtectionStatusPort for DefaultSpaceAccessAdapter {
+    async fn query_space_protection(
+        &self,
+        members: &[DeviceId],
+    ) -> Result<SpaceProtectionSnapshot, SpaceProtectionError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|_| SpaceProtectionError::Unavailable)?;
+        let key_epoch_repository = self
+            .key_epoch_repository
+            .as_ref()
+            .ok_or(SpaceProtectionError::Unavailable)?;
+        let material = key_epoch_repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?;
+        let legacy_bootstrap = if let Some(repository) = &self.legacy_bootstrap_repository {
+            repository
+                .list_legacy_bootstraps()
+                .await
+                .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?
+                .into_iter()
+                .find(|record| {
+                    record.space_id() == &space_id
+                        && record.status() != LegacyBootstrapStatus::Complete
+                })
+        } else {
+            None
+        };
+        let mode = match (material.as_ref(), legacy_bootstrap.as_ref()) {
+            (_, Some(record)) if record.status() == LegacyBootstrapStatus::RecoveryRequired => {
+                SpaceProtectionMode::Migrating
+            }
+            (Some(material), _) => material.state().mode().into(),
+            (None, Some(_)) => SpaceProtectionMode::Migrating,
+            (None, None) => SpaceProtectionMode::Legacy,
+        };
+        let active_group = if mode == SpaceProtectionMode::Ready {
+            let material = material.as_ref().ok_or(SpaceProtectionError::Corrupted)?;
+            if material.group_state().is_empty() {
+                return Err(SpaceProtectionError::Corrupted);
+            }
+            Some(MlsClientState::from_bytes(material.group_state().to_vec()))
+        } else {
+            None
+        };
+        let member_status =
+            |member: &DeviceId| -> Result<MemberProtectionStatus, SpaceProtectionError> {
+                if legacy_bootstrap.as_ref().is_some_and(|record| {
+                    record.status() == LegacyBootstrapStatus::AwaitingReadmission
+                        && record
+                            .pending_readmission()
+                            .iter()
+                            .any(|pending| pending == member)
+                }) {
+                    return Ok(MemberProtectionStatus::AwaitingReadmission);
+                }
+                match mode {
+                    SpaceProtectionMode::Legacy => Ok(MemberProtectionStatus::LegacyUnprotected),
+                    SpaceProtectionMode::Migrating => Ok(MemberProtectionStatus::RecoveryRequired),
+                    SpaceProtectionMode::Ready => {
+                        let group = active_group
+                            .as_ref()
+                            .ok_or(SpaceProtectionError::Corrupted)?;
+                        let is_active = MlsGroupEngine::contains_active_member(
+                            group,
+                            member.as_str().as_bytes(),
+                        )
+                        .map_err(|_| SpaceProtectionError::Corrupted)?;
+                        Ok(if is_active {
+                            MemberProtectionStatus::Protected
+                        } else {
+                            MemberProtectionStatus::RequiresReadmission
+                        })
+                    }
+                }
+            };
+        let members = members
+            .iter()
+            .map(|device_id| {
+                Ok(MemberProtection {
+                    device_id: device_id.clone(),
+                    status: member_status(device_id)?,
+                })
+            })
+            .collect::<Result<Vec<_>, SpaceProtectionError>>()?;
+        Ok(SpaceProtectionSnapshot {
+            mode,
+            members,
+            legacy_bootstrap: legacy_bootstrap.map(|record| LegacyBootstrapProgress {
+                bootstrap_id: record.bootstrap_id().clone(),
+                status: record.status(),
+                pending_readmission: record.pending_readmission().len(),
+            }),
+        })
     }
 }
 
@@ -2113,6 +2302,12 @@ mod admission_tests {
                 .filter(|record| !record.status().is_terminal())
                 .cloned()
                 .collect())
+        }
+
+        async fn list_legacy_bootstraps(
+            &self,
+        ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
+            Ok(self.record.lock().unwrap().iter().cloned().collect())
         }
 
         async fn acknowledge_legacy_readmission(
@@ -2463,6 +2658,171 @@ mod admission_tests {
                 .unwrap(),
             GroupBootstrapResult::Complete { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn group_admission_confirms_a_pending_legacy_readmission() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-readmission-space");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x7b; 32]).unwrap(),
+        );
+        let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
+        let (key_epoch_repository, _) = memory_revocation_repository(None);
+        let key_epoch_port: Arc<dyn RevocationRepositoryPort> = key_epoch_repository.clone();
+        let adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            key_epoch_port,
+            bootstrap_repository.clone(),
+        );
+        let sponsor = DeviceId::new("sponsor-device");
+        let retained = DeviceId::new("retained-device");
+        let bootstrap_id = match adapter
+            .bootstrap_legacy_space(&sponsor, &[retained.clone()], 100)
+            .await
+            .unwrap()
+        {
+            GroupBootstrapResult::AwaitingReadmission { bootstrap_id, .. } => bootstrap_id,
+            other => panic!("unexpected bootstrap result: {other:?}"),
+        };
+        let stage = bootstrap_repository
+            .load_legacy_bootstrap_stage(&bootstrap_id)
+            .await
+            .unwrap()
+            .unwrap();
+        key_epoch_repository
+            .save_space_material(stage.material())
+            .await
+            .unwrap();
+        let pending = adapter.prepare_group_join(&retained).await.unwrap();
+
+        adapter
+            .admit_group_member(&space_id, &sponsor, &retained, &[], &pending.key_package)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            bootstrap_repository
+                .get_legacy_bootstrap(&bootstrap_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
+            LegacyBootstrapStatus::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_recovery_confirms_readmission_from_persisted_mls_state() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-recovery-space");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x6d; 32]).unwrap(),
+        );
+        let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
+        let (key_epoch_repository, _) = memory_revocation_repository(None);
+        let key_epoch_port: Arc<dyn RevocationRepositoryPort> = key_epoch_repository.clone();
+        let recovery_adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            key_epoch_port.clone(),
+            bootstrap_repository.clone(),
+        );
+        let sponsor = DeviceId::new("sponsor-device");
+        let retained = DeviceId::new("retained-device");
+        let bootstrap_id = match recovery_adapter
+            .bootstrap_legacy_space(&sponsor, &[retained.clone()], 100)
+            .await
+            .unwrap()
+        {
+            GroupBootstrapResult::AwaitingReadmission { bootstrap_id, .. } => bootstrap_id,
+            other => panic!("unexpected bootstrap result: {other:?}"),
+        };
+        let stage = bootstrap_repository
+            .load_legacy_bootstrap_stage(&bootstrap_id)
+            .await
+            .unwrap()
+            .unwrap();
+        key_epoch_repository
+            .save_space_material(stage.material())
+            .await
+            .unwrap();
+        let before_readmission = recovery_adapter
+            .query_space_protection(&[sponsor.clone(), retained.clone()])
+            .await
+            .unwrap();
+        assert_eq!(before_readmission.mode, SpaceProtectionMode::Ready);
+        assert!(matches!(
+            before_readmission.members.as_slice(),
+            [
+                MemberProtection {
+                    status: MemberProtectionStatus::Protected,
+                    ..
+                },
+                MemberProtection {
+                    status: MemberProtectionStatus::AwaitingReadmission,
+                    ..
+                },
+            ]
+        ));
+        assert!(matches!(
+            before_readmission.legacy_bootstrap,
+            Some(LegacyBootstrapProgress { bootstrap_id: ref actual, .. }) if actual == &bootstrap_id
+        ));
+
+        // Simulate a process exit after the admission commit persisted but before
+        // the bootstrap record acknowledgement could run.
+        let admission_adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            key_epoch_port,
+            Arc::new(MemoryLegacyBootstrapRepository::new()),
+        );
+        let pending = admission_adapter
+            .prepare_group_join(&retained)
+            .await
+            .unwrap();
+        admission_adapter
+            .admit_group_member(&space_id, &sponsor, &retained, &[], &pending.key_package)
+            .await
+            .unwrap();
+
+        let resumed = recovery_adapter
+            .resume_legacy_bootstraps(200)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            resumed.as_slice(),
+            [GroupBootstrapResult::Complete { bootstrap_id: actual }] if actual == &bootstrap_id
+        ));
+        assert_eq!(
+            bootstrap_repository
+                .get_legacy_bootstrap(&bootstrap_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
+            LegacyBootstrapStatus::Complete
+        );
+        let after_recovery = recovery_adapter
+            .query_space_protection(&[sponsor, retained])
+            .await
+            .unwrap();
+        assert_eq!(after_recovery.mode, SpaceProtectionMode::Ready);
+        assert!(after_recovery.legacy_bootstrap.is_none());
+        assert!(after_recovery
+            .members
+            .iter()
+            .all(|member| member.status == MemberProtectionStatus::Protected));
     }
 
     fn sponsor_fixture_with_stage_persistence(

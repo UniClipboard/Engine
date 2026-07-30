@@ -2,13 +2,14 @@ use uc_engine::{
     ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
     EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
     EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
-    JoinSpaceInput, LocalDeviceSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
-    MigrationPhaseSummary, MigrationProgressSummary, Operation, OperationKind, OperationResult,
-    QueryHistoryInput, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
+    JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary, LocalDeviceSummary,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MigrationPhaseSummary,
+    MigrationProgressSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
+    QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
     RemoveMemberInput, ResendEntryInput, SearchEntriesInput, SearchPageSummary,
     SearchResultSummary, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    SetupInvitationSummary, SetupStateSummary, StorageStatsSummary, UnlockSpaceInput,
-    UpdateMemberSyncPreferencesInput,
+    SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary, SpaceProtectionSummary,
+    StorageStatsSummary, UnlockSpaceInput, UpdateMemberSyncPreferencesInput,
 };
 
 #[test]
@@ -108,6 +109,22 @@ fn every_public_operation_has_a_stable_kind() {
                 device_id: "member-1".into(),
             }),
             OperationKind::RemoveMember,
+        ),
+        (
+            Operation::SecureRemoveLegacyMember(RemoveMemberInput {
+                device_id: "member-1".into(),
+            }),
+            OperationKind::SecureRemoveLegacyMember,
+        ),
+        (
+            Operation::QueryLegacyBootstrap(QueryLegacyBootstrapInput {
+                bootstrap_id: "bootstrap-a".into(),
+            }),
+            OperationKind::QueryLegacyBootstrap,
+        ),
+        (
+            Operation::QuerySpaceProtection,
+            OperationKind::QuerySpaceProtection,
         ),
         (
             Operation::SearchEntries(SearchEntriesInput {
@@ -1245,6 +1262,24 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
         })
     )
     .contains("member_removed"));
+    assert!(format!(
+        "{:?}",
+        OperationResult::LegacyMemberRemoval(LegacyBootstrapSummary {
+            bootstrap_id: "bootstrap-a".into(),
+            outcome: LegacyBootstrapOutcome::AwaitingReadmission,
+            pending_readmission: 1,
+        })
+    )
+    .contains("legacy_member_removal"));
+    assert!(format!(
+        "{:?}",
+        OperationResult::SpaceProtection(SpaceProtectionSummary {
+            mode: SpaceProtectionModeSummary::Ready,
+            members: Vec::new(),
+            legacy_bootstrap: None,
+        })
+    )
+    .contains("space_protection"));
 }
 
 #[test]

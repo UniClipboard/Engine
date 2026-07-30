@@ -61,8 +61,8 @@ use uc_infra::db::repositories::{
     DieselClipboardEventRepository, DieselClipboardRepresentationRepository,
     DieselClipboardSelectionRepository, DieselEntryAvailabilityRepository,
     DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
-    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselRevocationRepository,
-    DieselSpaceMemberRepository, DieselThumbnailRepository, DieselTrustedPeerRepository,
+    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository,
+    DieselSpaceSecurityStore, DieselThumbnailRepository, DieselTrustedPeerRepository,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;

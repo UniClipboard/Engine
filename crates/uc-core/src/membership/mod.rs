@@ -4,6 +4,7 @@ mod error;
 mod member;
 mod ports;
 mod preferences;
+mod protection;
 mod revocation;
 
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
@@ -18,6 +19,10 @@ pub use ports::{
     MemberRepositoryPort, RevocationRepositoryPort,
 };
 pub use preferences::MemberSyncPreferences;
+pub use protection::{
+    LegacyBootstrapProgress, MemberProtection, MemberProtectionStatus, SpaceProtectionError,
+    SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
+};
 pub use revocation::{
     ContentKeyId, ContentKeyPurpose, GroupEpoch, GroupRevocationResult, KeyEpochError,
     PendingGroupUpdate, RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationStage,

@@ -4,17 +4,21 @@ use crate::error_codes::*;
 
 use tracing::error;
 use uc_application::facade::{
-    AppFacade, ContentTypesPatch as AppContentTypesPatch, MemberRevocationState,
-    MemberRevocationView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, RosterError,
+    AppFacade, ContentTypesPatch as AppContentTypesPatch, LegacyBootstrapState,
+    LegacyBootstrapView, MemberProtectionStatusView, MemberRevocationState, MemberRevocationView,
+    MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
+    RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
 use uc_core::ports::ReachabilityState;
 
 use crate::{
     ContentTypesPatch, ContentTypesSummary, DeviceSummary, EngineError, EngineErrorCategory,
-    MemberRevocationOutcome, MemberRevocationSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesSummary, OperationResult, QueryMemberRevocationInput,
-    QueryMemberSyncPreferencesInput, RemoveMemberInput, UpdateMemberSyncPreferencesInput,
+    LegacyBootstrapOutcome, LegacyBootstrapSummary, MemberProtectionStatusSummary,
+    MemberProtectionSummary, MemberRevocationOutcome, MemberRevocationSummary,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, OperationResult,
+    QueryLegacyBootstrapInput, QueryMemberRevocationInput, QueryMemberSyncPreferencesInput,
+    RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
+    UpdateMemberSyncPreferencesInput,
 };
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
@@ -71,6 +75,46 @@ pub async fn execute_remove_member(
     Ok(member_revocation_result(result))
 }
 
+pub async fn execute_secure_remove_legacy_member(
+    facade: &AppFacade,
+    input: RemoveMemberInput,
+) -> Result<OperationResult, EngineError> {
+    validate_device_id(&input.device_id)?;
+    let result = member_roster(facade)?
+        .secure_remove_legacy_member(&input.device_id)
+        .await
+        .map_err(map_roster_error)?;
+    Ok(OperationResult::LegacyMemberRemoval(
+        legacy_bootstrap_summary(result),
+    ))
+}
+
+pub async fn execute_query_space_protection(
+    facade: &AppFacade,
+) -> Result<OperationResult, EngineError> {
+    let result = member_roster(facade)?
+        .query_space_protection()
+        .await
+        .map_err(map_roster_error)?;
+    Ok(OperationResult::SpaceProtection(space_protection_summary(
+        result,
+    )))
+}
+
+pub async fn execute_query_legacy_bootstrap(
+    facade: &AppFacade,
+    input: QueryLegacyBootstrapInput,
+) -> Result<OperationResult, EngineError> {
+    validate_bootstrap_id(&input.bootstrap_id)?;
+    let result = member_roster(facade)?
+        .query_legacy_bootstrap(&input.bootstrap_id)
+        .await
+        .map_err(map_roster_error)?;
+    Ok(OperationResult::LegacyBootstrapStatus(
+        result.map(legacy_bootstrap_summary),
+    ))
+}
+
 pub async fn execute_query_member_revocation(
     facade: &AppFacade,
     input: QueryMemberRevocationInput,
@@ -93,6 +137,54 @@ pub async fn execute_query_member_revocation(
 
 fn member_revocation_result(result: MemberRevocationView) -> OperationResult {
     OperationResult::MemberRemoved(member_revocation_summary(result))
+}
+
+fn space_protection_summary(result: SpaceProtectionView) -> SpaceProtectionSummary {
+    let mode = match result.mode {
+        SpaceProtectionModeView::Legacy => SpaceProtectionModeSummary::Legacy,
+        SpaceProtectionModeView::Migrating => SpaceProtectionModeSummary::Migrating,
+        SpaceProtectionModeView::Ready => SpaceProtectionModeSummary::Ready,
+    };
+    let members = result
+        .members
+        .into_iter()
+        .map(|member| MemberProtectionSummary {
+            device_id: member.device_id,
+            status: match member.status {
+                MemberProtectionStatusView::LegacyUnprotected => {
+                    MemberProtectionStatusSummary::LegacyUnprotected
+                }
+                MemberProtectionStatusView::Protected => MemberProtectionStatusSummary::Protected,
+                MemberProtectionStatusView::AwaitingReadmission => {
+                    MemberProtectionStatusSummary::AwaitingReadmission
+                }
+                MemberProtectionStatusView::RequiresReadmission => {
+                    MemberProtectionStatusSummary::RequiresReadmission
+                }
+                MemberProtectionStatusView::RecoveryRequired => {
+                    MemberProtectionStatusSummary::RecoveryRequired
+                }
+            },
+        })
+        .collect();
+    SpaceProtectionSummary {
+        mode,
+        members,
+        legacy_bootstrap: result.legacy_bootstrap.map(legacy_bootstrap_summary),
+    }
+}
+
+fn legacy_bootstrap_summary(result: LegacyBootstrapView) -> LegacyBootstrapSummary {
+    let outcome = match result.state {
+        LegacyBootstrapState::AwaitingReadmission => LegacyBootstrapOutcome::AwaitingReadmission,
+        LegacyBootstrapState::Complete => LegacyBootstrapOutcome::Complete,
+        LegacyBootstrapState::RecoveryRequired => LegacyBootstrapOutcome::RecoveryRequired,
+    };
+    LegacyBootstrapSummary {
+        bootstrap_id: result.bootstrap_id,
+        outcome,
+        pending_readmission: u64::try_from(result.pending_readmission).unwrap_or(u64::MAX),
+    }
 }
 
 fn member_revocation_summary(result: MemberRevocationView) -> MemberRevocationSummary {
@@ -119,6 +211,17 @@ fn member_roster(
             true,
         )
     })
+}
+
+fn validate_bootstrap_id(bootstrap_id: &str) -> Result<(), EngineError> {
+    if bootstrap_id.is_empty() || bootstrap_id.len() > 128 || !bootstrap_id.is_ascii() {
+        return Err(EngineError::new(
+            MEMBER_INVALID_INPUT_CODE,
+            EngineErrorCategory::InvalidInput,
+            false,
+        ));
+    }
+    Ok(())
 }
 
 fn validate_device_id(device_id: &str) -> Result<(), EngineError> {
@@ -227,6 +330,30 @@ fn map_roster_error(error: RosterError) -> EngineError {
             EngineErrorCategory::Internal,
             true,
             "group_revocation",
+        ),
+        RosterError::LegacyBootstrapRequired => (
+            MEMBER_LEGACY_BOOTSTRAP_REQUIRED_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+            "legacy_bootstrap_required",
+        ),
+        RosterError::GroupBootstrap(_) => (
+            MEMBER_LEGACY_BOOTSTRAP_FAILED_CODE,
+            EngineErrorCategory::Internal,
+            true,
+            "legacy_bootstrap",
+        ),
+        RosterError::SpaceProtection(_) => (
+            SPACE_PROTECTION_FAILED_CODE,
+            EngineErrorCategory::Internal,
+            true,
+            "space_protection",
+        ),
+        RosterError::LocalMemberUnavailable => (
+            MEMBER_LOCAL_MEMBER_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+            "local_member_unavailable",
         ),
     };
     if category == EngineErrorCategory::Internal {

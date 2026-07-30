@@ -22,8 +22,8 @@ mod peer_address_repo;
 mod receive_artifact_cipher;
 mod receive_artifact_log_repo;
 mod representation_repo;
-mod revocation_repo;
 mod space_member_repo;
+mod space_security_store;
 mod thumbnail_repo;
 mod trusted_peer_repo;
 
@@ -47,7 +47,7 @@ pub use mobile_device_repo::*;
 pub use peer_address_repo::*;
 pub use receive_artifact_log_repo::*;
 pub use representation_repo::*;
-pub use revocation_repo::*;
 pub use space_member_repo::*;
+pub use space_security_store::*;
 pub use thumbnail_repo::*;
 pub use trusted_peer_repo::*;

@@ -47,7 +47,7 @@ use uc_application::facade::{
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_core::ids::{DeviceId, FormatId, RepresentationId};
-use uc_core::membership::{MemberRepositoryPort, MembershipError, SpaceMember};
+use uc_core::membership::{MemberRepositoryPort, MembershipError, PeerAdmissionPort, SpaceMember};
 use uc_core::ports::pairing::PairingSessionPort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::space::ProofPort;
@@ -64,7 +64,7 @@ use uc_core::{
 };
 use uc_infra::db::executor::DieselSqliteExecutor;
 use uc_infra::db::pool::init_db_pool;
-use uc_infra::db::repositories::DieselRevocationRepository;
+use uc_infra::db::repositories::DieselSpaceSecurityStore;
 use uc_infra::network::iroh::IrohNodeConfig;
 
 use uc_infra::clipboard::TransferCipherAdapter;
@@ -74,7 +74,7 @@ use uc_infra::network::iroh::{
 };
 use uc_infra::security::{
     DefaultCurrentProfile, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
-    Sha256IdentityFingerprintFactory,
+    MlsPeerAdmissionAdapter, Sha256IdentityFingerprintFactory,
 };
 
 /// Slice 8c-2 · e2e 不依赖磁盘 first-sync 状态——所有 `mark_*` 直接返回
@@ -445,8 +445,12 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
     let pool = init_db_pool(database_path.to_str().expect("database path must be UTF-8"))
         .expect("initialize test database");
     let key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
-        DieselRevocationRepository::new(DieselSqliteExecutor::new(pool), session.as_ref().clone()),
+        DieselSpaceSecurityStore::new(DieselSqliteExecutor::new(pool), session.as_ref().clone()),
     );
+    let peer_admission: Arc<dyn PeerAdmissionPort> = Arc::new(MlsPeerAdmissionAdapter::new(
+        Arc::clone(&session),
+        Arc::clone(&key_epoch_repository),
+    ));
     let space_access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
         key_material,
         current_profile,
@@ -488,6 +492,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
     let presence: Arc<dyn PresencePort> = builder.install_presence(
         Arc::clone(&peer_addr_repo) as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
         Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
+        Arc::clone(&peer_admission),
         Arc::new(Sha256IdentityFingerprintFactory),
         Arc::new(SystemClock),
     );
@@ -497,6 +502,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
     } = builder.install_clipboard(
         Arc::clone(&peer_addr_repo) as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
         Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
+        peer_admission,
         Arc::new(Sha256IdentityFingerprintFactory),
         Arc::clone(&presence),
     );

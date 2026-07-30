@@ -347,6 +347,8 @@ pub trait LegacyBootstrapRepositoryPort: Send + Sync {
         &self,
     ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError>;
 
+    async fn list_legacy_bootstraps(&self) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError>;
+
     async fn acknowledge_legacy_readmission(
         &self,
         bootstrap_id: &BootstrapId,

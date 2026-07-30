@@ -31,6 +31,49 @@ pub struct MemberRevocationView {
     pub pending_recipients: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyBootstrapState {
+    AwaitingReadmission,
+    Complete,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyBootstrapView {
+    pub bootstrap_id: String,
+    pub state: LegacyBootstrapState,
+    pub pending_readmission: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceProtectionModeView {
+    Legacy,
+    Migrating,
+    Ready,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberProtectionStatusView {
+    LegacyUnprotected,
+    Protected,
+    AwaitingReadmission,
+    RequiresReadmission,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberProtectionView {
+    pub device_id: String,
+    pub status: MemberProtectionStatusView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpaceProtectionView {
+    pub mode: SpaceProtectionModeView,
+    pub members: Vec<MemberProtectionView>,
+    pub legacy_bootstrap: Option<LegacyBootstrapView>,
+}
+
 /// One row of the member roster view.
 ///
 /// 字段顺序按"UI 最关心 → 诊断信息"排列,方便 CLI 直接按 `{entry.device_name}

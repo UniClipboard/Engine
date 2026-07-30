@@ -161,6 +161,7 @@ pub struct SpaceAccessPorts {
     pub group_admission: Arc<dyn GroupAdmissionPort>,
     pub group_revocation: Arc<dyn GroupRevocationPort>,
     pub group_bootstrap: Arc<dyn uc_core::membership::GroupBootstrapPort>,
+    pub space_protection: Arc<dyn uc_core::membership::SpaceProtectionStatusPort>,
 }
 
 impl SpaceAccessPorts {
@@ -182,6 +183,7 @@ impl SpaceAccessPorts {
             + GroupAdmissionPort
             + GroupRevocationPort
             + uc_core::membership::GroupBootstrapPort
+            + uc_core::membership::SpaceProtectionStatusPort
             + 'static,
     {
         Self {
@@ -197,7 +199,8 @@ impl SpaceAccessPorts {
             derive_admission_proof_key: adapter.clone(),
             group_admission: adapter.clone(),
             group_revocation: adapter.clone(),
-            group_bootstrap: adapter,
+            group_bootstrap: adapter.clone(),
+            space_protection: adapter,
         }
     }
 }

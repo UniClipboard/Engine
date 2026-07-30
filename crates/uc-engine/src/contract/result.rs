@@ -441,6 +441,9 @@ pub enum OperationResult {
     MemberSyncPreferences(MemberSyncPreferencesSummary),
     MemberRemoved(MemberRevocationSummary),
     MemberRevocationStatus(Option<MemberRevocationSummary>),
+    LegacyMemberRemoval(LegacyBootstrapSummary),
+    LegacyBootstrapStatus(Option<LegacyBootstrapSummary>),
+    SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
     SearchTags(Vec<SearchTagSummary>),
     SearchStatus(SearchStatusSummary),
@@ -624,6 +627,15 @@ impl fmt::Debug for OperationResult {
                 .field("summary", summary),
             Self::MemberRevocationStatus(summary) => debug
                 .field("kind", &"member_revocation_status")
+                .field("summary", summary),
+            Self::LegacyMemberRemoval(summary) => debug
+                .field("kind", &"legacy_member_removal")
+                .field("summary", summary),
+            Self::LegacyBootstrapStatus(summary) => debug
+                .field("kind", &"legacy_bootstrap_status")
+                .field("summary", summary),
+            Self::SpaceProtection(summary) => debug
+                .field("kind", &"space_protection")
                 .field("summary", summary),
             Self::SearchPage(page) => debug.field("kind", &"search_page").field("page", page),
             Self::SearchTags(tags) => debug
@@ -851,6 +863,52 @@ pub struct MemberRevocationSummary {
     pub revocation_id: Option<String>,
     pub outcome: MemberRevocationOutcome,
     pub pending_recipients: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyBootstrapOutcome {
+    AwaitingReadmission,
+    Complete,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyBootstrapSummary {
+    pub bootstrap_id: String,
+    pub outcome: LegacyBootstrapOutcome,
+    pub pending_readmission: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceProtectionModeSummary {
+    Legacy,
+    Migrating,
+    Ready,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberProtectionStatusSummary {
+    LegacyUnprotected,
+    Protected,
+    AwaitingReadmission,
+    RequiresReadmission,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberProtectionSummary {
+    pub device_id: String,
+    pub status: MemberProtectionStatusSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceProtectionSummary {
+    pub mode: SpaceProtectionModeSummary,
+    pub members: Vec<MemberProtectionSummary>,
+    pub legacy_bootstrap: Option<LegacyBootstrapSummary>,
 }
 
 impl fmt::Debug for DeviceSummary {

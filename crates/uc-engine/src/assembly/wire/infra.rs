@@ -23,7 +23,7 @@ pub(super) fn build_space_access_ports(
     session: &Arc<InMemorySession>,
     db_executor: &Arc<DieselSqliteExecutor>,
 ) -> SpaceAccessPorts {
-    let security_repository = Arc::new(DieselRevocationRepository::new(
+    let security_repository = Arc::new(DieselSpaceSecurityStore::new(
         db_executor.clone(),
         session.as_ref().clone(),
     ));
@@ -47,7 +47,7 @@ pub(super) fn build_peer_admission_port(
     db_executor: &Arc<DieselSqliteExecutor>,
 ) -> Arc<dyn uc_core::membership::PeerAdmissionPort> {
     let repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
-        DieselRevocationRepository::new(db_executor.clone(), session.as_ref().clone()),
+        DieselSpaceSecurityStore::new(db_executor.clone(), session.as_ref().clone()),
     );
     Arc::new(uc_infra::security::MlsPeerAdmissionAdapter::new(
         session.clone(),

@@ -46,6 +46,18 @@ pub enum RosterError {
     #[error("failed to revoke group member: {0}")]
     GroupRevocation(String),
 
+    #[error("legacy space requires a secure bootstrap before member removal")]
+    LegacyBootstrapRequired,
+
+    #[error("failed to bootstrap legacy space security: {0}")]
+    GroupBootstrap(String),
+
+    #[error("failed to query space protection: {0}")]
+    SpaceProtection(String),
+
+    #[error("the local device is not present in the member roster")]
+    LocalMemberUnavailable,
+
     /// 成员 roster 入口尚未接入。通常表示 daemon/CLI 组合阶段没有注入该能力。
     #[error("member roster facade unavailable")]
     Unavailable,

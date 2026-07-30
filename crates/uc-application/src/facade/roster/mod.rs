@@ -24,9 +24,10 @@ mod errors;
 mod facade;
 
 pub use commands::{
-    ContentTypesPatch, ContentTypesView, MemberRevocationState, MemberRevocationView,
+    ContentTypesPatch, ContentTypesView, LegacyBootstrapState, LegacyBootstrapView,
+    MemberProtectionStatusView, MemberProtectionView, MemberRevocationState, MemberRevocationView,
     MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
-    RosterEntry,
+    RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use errors::RosterError;
 pub use facade::{MemberRosterDeps, MemberRosterFacade};

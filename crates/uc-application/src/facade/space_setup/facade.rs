@@ -1081,6 +1081,29 @@ mod tests {
                 now_ms: i64,
             ) -> Result<bool, uc_core::membership::KeyEpochError>;
         }
+        #[async_trait]
+        impl uc_core::membership::GroupBootstrapPort for SpaceAccess {
+            async fn bootstrap_legacy_space(
+                &self,
+                sponsor: &DeviceId,
+                retained_members: &[DeviceId],
+                now_ms: i64,
+            ) -> Result<uc_core::membership::GroupBootstrapResult, uc_core::membership::BootstrapError>;
+            async fn acknowledge_legacy_readmission(
+                &self,
+                bootstrap_id: &uc_core::membership::BootstrapId,
+                member: &DeviceId,
+                now_ms: i64,
+            ) -> Result<uc_core::membership::GroupBootstrapResult, uc_core::membership::BootstrapError>;
+            async fn query_legacy_bootstrap(
+                &self,
+                bootstrap_id: &uc_core::membership::BootstrapId,
+            ) -> Result<Option<uc_core::membership::GroupBootstrapResult>, uc_core::membership::BootstrapError>;
+            async fn resume_legacy_bootstraps(
+                &self,
+                now_ms: i64,
+            ) -> Result<Vec<uc_core::membership::GroupBootstrapResult>, uc_core::membership::BootstrapError>;
+        }
     }
 
     fn configured_space_access(

@@ -638,20 +638,31 @@ pub async fn build_sync_engine_assembly(
     // 实例(`member_repo` / `local_identity` / `presence`),这样 F1 hook
     // 通过 `presence.ensure_reachable_all` 填好的缓存,`list_with_presence`
     // 能直接读到。Facade 本身是纯 thin wrapper,构造非常便宜。
-    let roster = Arc::new(MemberRosterFacade::new_with_group_delivery(
-        MemberRosterDeps {
-            member_repo: Arc::clone(&deps.device.member_repo),
-            peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
-            trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
-            local_identity: Arc::clone(&local_identity),
-            presence: Arc::clone(&presence),
-            connection_channel: Some(Arc::clone(&connection_channel)),
-        },
-        Arc::clone(&deps.security.space_access_ports.group_revocation),
-        group_update_dispatch,
-    ));
+    let roster = Arc::new(
+        MemberRosterFacade::new_with_group_delivery(
+            MemberRosterDeps {
+                member_repo: Arc::clone(&deps.device.member_repo),
+                peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
+                trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
+                local_identity: Arc::clone(&local_identity),
+                presence: Arc::clone(&presence),
+                connection_channel: Some(Arc::clone(&connection_channel)),
+            },
+            Arc::clone(&deps.security.space_access_ports.group_revocation),
+            group_update_dispatch,
+        )
+        .with_group_bootstrap(Arc::clone(
+            &deps.security.space_access_ports.group_bootstrap,
+        ))
+        .with_space_protection(Arc::clone(
+            &deps.security.space_access_ports.space_protection,
+        )),
+    );
     if let Err(error) = roster.resume_incomplete_revocations().await {
         warn!(error = %error, "pending group updates could not resume during startup");
+    }
+    if let Err(error) = roster.resume_legacy_bootstraps().await {
+        warn!(error = %error, "legacy bootstrap recovery could not resume during startup");
     }
     let group_update_retry = spawn_group_update_retry(Arc::clone(&roster));
 
