@@ -16,7 +16,7 @@ use tracing::{debug, debug_span};
 use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
-    ContentKeyId, ContentKeyPurpose, GroupEpoch, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityMode,
+    ContentKeyId, ContentKeyPurpose, GroupEpoch, SpaceKeyMaterial, SpaceSecurityMode,
 };
 
 use super::secrets::MasterKey;
@@ -139,6 +139,7 @@ impl InMemorySession {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn create_migrated_space_material(
         &self,
         space_id: &SpaceId,
@@ -174,7 +175,7 @@ impl InMemorySession {
         };
         let key_catalog =
             serde_json::to_vec(&catalog).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
-        let mut key_state = SpaceKeyState::legacy(space_id.clone());
+        let mut key_state = uc_core::membership::SpaceKeyState::legacy(space_id.clone());
         key_state
             .mark_migrating()
             .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;

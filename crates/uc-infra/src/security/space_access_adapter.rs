@@ -987,23 +987,9 @@ impl DefaultSpaceAccessAdapter {
 
         let material = match repository.load_space_material(space_id).await {
             Ok(Some(material)) => material,
-            Ok(None) => {
-                let material = match self
-                    .session
-                    .create_migrated_space_material(space_id, chrono::Utc::now().timestamp_millis())
-                {
-                    Ok(material) => material,
-                    Err(error) => {
-                        self.session.clear();
-                        return Err(map_encryption_error(error));
-                    }
-                };
-                if let Err(error) = repository.save_space_material(&material).await {
-                    self.session.clear();
-                    return Err(SpaceAccessError::Internal(error.to_string()));
-                }
-                material
-            }
+            // A missing record is an existing Legacy space, not evidence that
+            // a group and new content key catalog have been safely created.
+            Ok(None) => return Ok(()),
             Err(error) => {
                 self.session.clear();
                 return Err(SpaceAccessError::Internal(error.to_string()));
@@ -1861,8 +1847,8 @@ mod admission_tests {
     use tempfile::{tempdir, TempDir};
     use uc_core::crypto::domain::Passphrase;
     use uc_core::membership::{
-        BeginRevocationOutcome, ContentKeyPurpose, KeyEpochError, RevocationId, RevocationRecord,
-        RevocationStage, RevocationStatus,
+        BeginRevocationOutcome, ContentKeyId, ContentKeyPurpose, KeyEpochError, RevocationId,
+        RevocationRecord, RevocationStage, RevocationStatus,
     };
     use uc_core::pairing::InvitationCode;
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
@@ -2189,6 +2175,35 @@ mod admission_tests {
         let (adapter, session, repository, space_id, directory, _) =
             sponsor_fixture_with_stage_persistence(true);
         (adapter, session, repository, space_id, directory)
+    }
+
+    #[tokio::test]
+    async fn activate_session_without_material_keeps_legacy_key_state() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-space");
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .returning(|_| Ok(None));
+        repository.expect_save_space_material().never();
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::new(repository),
+        );
+
+        adapter
+            .activate_session(&space_id, MasterKey::from_bytes(&[0x11; 32]).unwrap())
+            .await
+            .unwrap();
+
+        let current = session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap();
+        assert_eq!(current.content_key_id(), &ContentKeyId::legacy_v1());
+        assert_eq!(current.epoch(), GroupEpoch::new(0));
     }
 
     #[test]
