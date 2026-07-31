@@ -8,6 +8,7 @@ DIST_ROOT="${UC_ENGINE_UNIFFI_DIST_DIR:-$TARGET_DIR/uc-engine-uniffi-dist}"
 DIST_DIR="$DIST_ROOT/android"
 STAGE_DIR="$TARGET_DIR/uc-engine-uniffi-android-package"
 BINDINGS_DIR="$STAGE_DIR/kotlin"
+KOTLIN_BINDING="$BINDINGS_DIR/uniffi/uc_engine_uniffi/uc_engine_uniffi.kt"
 JNI_DIR="$STAGE_DIR/jni"
 GRADLE_BUILD_DIR="$STAGE_DIR/gradle-build"
 ANDROID_PROJECT="$REPO_ROOT/bindings/uc-engine-uniffi/android"
@@ -32,13 +33,6 @@ cd "$REPO_ROOT"
 rm -rf "$STAGE_DIR" "$DIST_DIR" "$DEBUG_DIR"
 mkdir -p "$BINDINGS_DIR" "$JNI_DIR" "$DIST_DIR" "$DEBUG_DIR"
 
-echo "==> Generate Kotlin bindings from the host library"
-cargo build -p uc-engine-uniffi --release "${CARGO_LOCKED[@]}"
-cargo run -p uc-engine-uniffi --release --features bindgen-cli \
-  --bin uc-engine-uniffi-bindgen "${CARGO_LOCKED[@]}" -- \
-  generate --library "$HOST_LIBRARY" --language kotlin \
-  --out-dir "$BINDINGS_DIR" --no-format
-
 echo "==> Build Android native libraries"
 cargo ndk -t arm64-v8a -t x86_64 \
   build -p uc-engine-uniffi --release "${CARGO_LOCKED[@]}"
@@ -50,6 +44,14 @@ cp "$TARGET_DIR/x86_64-linux-android/release/libuc_engine_uniffi.so" \
 cp "$JNI_DIR/arm64-v8a/libuc_engine_uniffi.so" "$DEBUG_DIR/arm64-v8a.so"
 cp "$JNI_DIR/x86_64/libuc_engine_uniffi.so" "$DEBUG_DIR/x86_64.so"
 
+echo "==> Generate Kotlin bindings from the host library"
+cargo build -p uc-engine-uniffi --release "${CARGO_LOCKED[@]}"
+cargo run -p uc-engine-uniffi --release --features bindgen-cli \
+  --bin uc-engine-uniffi-bindgen "${CARGO_LOCKED[@]}" -- \
+  generate --library "$HOST_LIBRARY" --language kotlin \
+  --out-dir "$BINDINGS_DIR" --no-format
+test -f "$KOTLIN_BINDING"
+
 echo "==> Compile Kotlin bindings and assembleRelease"
 UC_ENGINE_UNIFFI_KOTLIN_DIR="$BINDINGS_DIR" \
 UC_ENGINE_UNIFFI_JNI_DIR="$JNI_DIR" \
@@ -57,7 +59,7 @@ UC_ENGINE_UNIFFI_GRADLE_BUILD_DIR="$GRADLE_BUILD_DIR" \
   "$GRADLEW" --no-daemon -p "$ANDROID_PROJECT" assembleRelease
 
 cp "$GRADLE_BUILD_DIR/outputs/aar/UniClipboardEngine-release.aar" "$AAR_OUT"
-cp "$BINDINGS_DIR/uniffi/uc_engine_uniffi/uc_engine_uniffi.kt" "$DIST_DIR/"
+cp "$KOTLIN_BINDING" "$DIST_DIR/"
 shasum -a 256 "$AAR_OUT" | awk '{print $1}' > "$CHECKSUM_FILE"
 
 VERSION="$(cargo pkgid -p uc-engine-uniffi)"
