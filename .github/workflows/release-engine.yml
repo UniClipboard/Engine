@@ -87,8 +87,8 @@ jobs:
             exit 1
           fi
 
-  ios:
-    name: Build iOS
+  ios-android:
+    name: Build iOS and Android
     needs: prepare
     runs-on: macos-14
     steps:
@@ -97,53 +97,25 @@ jobs:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
-      - name: Install iOS Rust targets
+      - name: Install targets and Android build helper
         shell: bash
         run: |
           toolchain=$(rustup show active-toolchain | awk '{print $1}')
           rustup target add --toolchain "$toolchain" \
-            aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-          shared-key: engine-release-ios
-
-      - name: Build iOS assets
-        env:
-          UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
-          UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/engine-dist
-        run: bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ios-assets
-          path: ${{ runner.temp }}/engine-dist/
-          if-no-files-found: error
-          retention-days: 7
-
-  android:
-    name: Build Android
-    needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.commit }}
-          fetch-depth: 0
-
-      - name: Install Android Rust targets and build helper
-        shell: bash
-        run: |
-          toolchain=$(rustup show active-toolchain | awk '{print $1}')
-          rustup target add --toolchain "$toolchain" \
+            aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios \
             aarch64-linux-android x86_64-linux-android
           cargo install cargo-ndk --locked
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
-          shared-key: engine-release-android
+          shared-key: engine-release-macos
+
+      - name: Build iOS assets
+        env:
+          UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
+          UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/engine-dist
+        run: bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
 
       - name: Build Android assets
         env:
@@ -153,7 +125,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: android-assets
+          name: ios-android-assets
           path: ${{ runner.temp }}/engine-dist/
           if-no-files-found: error
           retention-days: 7
@@ -190,7 +162,7 @@ jobs:
 
   assemble:
     name: Verify and publish one release bundle
-    needs: [prepare, ios, android, harmonyos]
+    needs: [prepare, ios-android, harmonyos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
