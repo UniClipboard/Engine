@@ -86,6 +86,13 @@ pub(crate) enum InboundPulledContentStoreError {
     Store(String),
 }
 
+/// Result of checking and storing a pulled transfer envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InboundPulledContentStoreOutcome {
+    Stored(EntryId),
+    RejectedByReceivePolicy,
+}
+
 /// Decrypt + persist a pulled transfer envelope, returning the local entry id.
 ///
 /// This is the inbound store half of the pull path: the requester has the
@@ -96,15 +103,16 @@ pub(crate) enum InboundPulledContentStoreError {
 /// with the convergence tail, which couples the advance to OS-write success.
 #[async_trait]
 pub(crate) trait InboundPulledContentStore: Send + Sync {
-    /// Decrypt `transfer_envelope` (the bytes a peer served), persist the
-    /// content as an entry attributed to `from_device`, and return its local
-    /// entry id. `snapshot_hash` is the cross-device identity used for dedup.
+    /// Decrypt `transfer_envelope` (the bytes a peer served), validate its
+    /// receive policy, and persist allowed content as an entry attributed to
+    /// `from_device`. `snapshot_hash` is the cross-device identity used for
+    /// dedup. A policy rejection must not persist content.
     async fn store(
         &self,
         from_device: &DeviceId,
         snapshot_hash: &str,
         transfer_envelope: Vec<u8>,
-    ) -> Result<EntryId, InboundPulledContentStoreError>;
+    ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError>;
 }
 
 /// Drives one device's inbound active-clipboard state toward convergence.
@@ -404,12 +412,16 @@ impl ApplyInboundActiveClipboardStateUseCase {
             }
         };
 
-        // Decrypt + persist. A store failure (decrypt / decode / capture)
-        // leaves the register untouched.
+        // Decrypt + validate receive policy + persist. A store failure or a
+        // policy rejection leaves the register untouched.
         match store.store(peer, snapshot_hash, envelope).await {
-            Ok(entry_id) => {
+            Ok(InboundPulledContentStoreOutcome::Stored(entry_id)) => {
                 info!(entry_id = %entry_id, "active state inbound: pulled content stored");
                 Some(entry_id)
+            }
+            Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy) => {
+                info!(peer = %peer, "active state inbound: pulled content rejected by receive policy");
+                None
             }
             Err(err) => {
                 warn!(error = %err, "active state inbound: pulled content store failed; dropping");
@@ -1033,9 +1045,11 @@ mod tests {
             _from_device: &DeviceId,
             _snapshot_hash: &str,
             transfer_envelope: Vec<u8>,
-        ) -> Result<EntryId, InboundPulledContentStoreError> {
+        ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
             *self.seen_envelope.lock().unwrap() = Some(transfer_envelope);
-            Ok(self.entry_id.clone())
+            Ok(InboundPulledContentStoreOutcome::Stored(
+                self.entry_id.clone(),
+            ))
         }
     }
 
@@ -1048,8 +1062,21 @@ mod tests {
             _from_device: &DeviceId,
             _snapshot_hash: &str,
             _transfer_envelope: Vec<u8>,
-        ) -> Result<EntryId, InboundPulledContentStoreError> {
+        ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
             panic!("store reached after a pull failure");
+        }
+    }
+
+    struct StoreRejectedByReceivePolicy;
+    #[async_trait]
+    impl InboundPulledContentStore for StoreRejectedByReceivePolicy {
+        async fn store(
+            &self,
+            _from_device: &DeviceId,
+            _snapshot_hash: &str,
+            _transfer_envelope: Vec<u8>,
+        ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
+            Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy)
         }
     }
 
@@ -1310,6 +1337,28 @@ mod tests {
             pull_client.calls.load(Ordering::SeqCst),
             1,
             "pull must be attempted exactly once (no retry)"
+        );
+        assert_inert(&h);
+    }
+
+    /// A successful pull whose content fails the receive policy must not write
+    /// the OS clipboard, advance the register, or re-broadcast the activation.
+    #[tokio::test]
+    async fn pull_policy_rejection_does_not_advance_or_broadcast() {
+        let pull_client = PullClientSpy::new(Ok(b"transfer-envelope".to_vec()));
+        let h = pull_harness(
+            Some(Arc::clone(&pull_client) as _),
+            Some(Arc::new(StoreRejectedByReceivePolicy)),
+            EntryId::new(),
+        );
+
+        h.uc.handle_one(inbound("blake3v1:rejected", 1_000, "dev-x"))
+            .await;
+
+        assert_eq!(
+            pull_client.calls.load(Ordering::SeqCst),
+            1,
+            "policy rejection occurs after a single pull"
         );
         assert_inert(&h);
     }
