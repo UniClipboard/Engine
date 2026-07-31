@@ -1,6 +1,14 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    legacy_upgrade_pending_join (peer_lookup_token) {
+        peer_lookup_token -> Text,
+        encrypted_payload -> Binary,
+        updated_at_ms -> BigInt,
+    }
+}
+
+diesel::table! {
     legacy_space_bootstrap_log (bootstrap_id) {
         bootstrap_id -> Text,
         space_lookup_token -> Text,
@@ -360,6 +368,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     file_transfer_events,
     file_transfer_privacy_maintenance,
     mobile_device,
+    legacy_upgrade_pending_join,
     legacy_space_bootstrap_log,
     member_revocation_log,
     peer_address,

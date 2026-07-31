@@ -6,6 +6,7 @@ mod ports;
 mod preferences;
 mod protection;
 mod revocation;
+mod upgrade;
 
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
 pub use bootstrap::{
@@ -27,4 +28,11 @@ pub use revocation::{
     ContentKeyId, ContentKeyPurpose, GroupEpoch, GroupRevocationResult, KeyEpochError,
     PendingGroupUpdate, RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationStage,
     RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityMode,
+};
+pub use upgrade::{
+    decide_legacy_upgrade, AdmissionReplayId, LegacyProtectionCommand, LegacyProtectionPort,
+    LegacyProtectionResult, LegacyProtectionSnapshot, LegacyRequestInspection, LegacyUpgradeAction,
+    LegacyUpgradeDescriptor, LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort,
+    LegacyUpgradeEndpointPort, LegacyUpgradeError, LegacyUpgradeId, LegacyUpgradeRequest,
+    LegacyUpgradeResponse, LegacyUpgradeResponseKind, ProtectionGroupAdmission, ProtectionGroupId,
 };

@@ -1,5 +1,6 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::ids::{SessionId, SpaceId};
@@ -81,7 +82,7 @@ impl fmt::Debug for PreparedGroupJoin {
 }
 
 /// Sponsor-side payload delivered only after the admission proof succeeds.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupAdmission {
     pub welcome: Vec<u8>,
     pub encrypted_key_catalog: Vec<u8>,

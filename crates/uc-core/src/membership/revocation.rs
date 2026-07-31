@@ -5,6 +5,9 @@ use thiserror::Error;
 
 use crate::ids::{DeviceId, SpaceId};
 
+use super::ProtectionGroupId;
+use super::{AdmissionReplayId, ProtectionGroupAdmission};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GroupEpoch(u64);
 
@@ -80,6 +83,8 @@ pub struct SpaceKeyState {
     epoch: GroupEpoch,
     current_content_key_id: ContentKeyId,
     mode: SpaceSecurityMode,
+    #[serde(default)]
+    protection_group_id: Option<ProtectionGroupId>,
 }
 
 impl SpaceKeyState {
@@ -89,6 +94,7 @@ impl SpaceKeyState {
             epoch: GroupEpoch::new(0),
             current_content_key_id: ContentKeyId::legacy_v1(),
             mode: SpaceSecurityMode::Legacy,
+            protection_group_id: None,
         }
     }
 
@@ -106,7 +112,11 @@ impl SpaceKeyState {
         }
     }
 
-    pub fn mark_ready(&mut self, content_key_id: ContentKeyId) -> Result<(), KeyEpochError> {
+    pub fn mark_ready(
+        &mut self,
+        content_key_id: ContentKeyId,
+        protection_group_id: ProtectionGroupId,
+    ) -> Result<(), KeyEpochError> {
         if self.mode != SpaceSecurityMode::Migrating {
             return Err(KeyEpochError::InvalidSpaceSecurityTransition {
                 from: self.mode,
@@ -115,6 +125,7 @@ impl SpaceKeyState {
         }
         self.advance(content_key_id)?;
         self.mode = SpaceSecurityMode::Ready;
+        self.protection_group_id = Some(protection_group_id);
         Ok(())
     }
 
@@ -148,6 +159,24 @@ impl SpaceKeyState {
 
     pub const fn mode(&self) -> SpaceSecurityMode {
         self.mode
+    }
+
+    pub fn protection_group_id(&self) -> Option<&ProtectionGroupId> {
+        self.protection_group_id.as_ref()
+    }
+
+    pub fn backfill_protection_group_id(
+        &mut self,
+        protection_group_id: ProtectionGroupId,
+    ) -> Result<bool, KeyEpochError> {
+        if self.mode != SpaceSecurityMode::Ready {
+            return Err(KeyEpochError::SpaceNotReady);
+        }
+        if self.protection_group_id.is_some() {
+            return Ok(false);
+        }
+        self.protection_group_id = Some(protection_group_id);
+        Ok(true)
     }
 }
 
@@ -518,7 +547,16 @@ pub struct SpaceKeyMaterial {
     key_catalog: Vec<u8>,
     #[serde(default)]
     pending_group_updates: Vec<PendingGroupUpdate>,
+    #[serde(default)]
+    pending_group_admission_replays: Vec<PendingGroupAdmissionReplay>,
     updated_at_ms: i64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingGroupAdmissionReplay {
+    recipient: DeviceId,
+    replay_id: AdmissionReplayId,
+    admission: ProtectionGroupAdmission,
 }
 
 impl SpaceKeyMaterial {
@@ -533,12 +571,20 @@ impl SpaceKeyMaterial {
             group_state,
             key_catalog,
             pending_group_updates: Vec::new(),
+            pending_group_admission_replays: Vec::new(),
             updated_at_ms,
         }
     }
 
     pub fn state(&self) -> &SpaceKeyState {
         &self.state
+    }
+
+    pub fn backfill_protection_group_id(
+        &mut self,
+        protection_group_id: ProtectionGroupId,
+    ) -> Result<bool, KeyEpochError> {
+        self.state.backfill_protection_group_id(protection_group_id)
     }
 
     pub fn group_state(&self) -> &[u8] {
@@ -575,6 +621,7 @@ impl SpaceKeyMaterial {
 
     pub fn with_pending_group_updates_from(mut self, previous: &Self) -> Self {
         self.pending_group_updates = previous.pending_group_updates.clone();
+        self.pending_group_admission_replays = previous.pending_group_admission_replays.clone();
         self
     }
 
@@ -589,7 +636,42 @@ impl SpaceKeyMaterial {
             .filter(|update| update.recipient() != excluded_recipient)
             .cloned()
             .collect();
+        self.pending_group_admission_replays = previous
+            .pending_group_admission_replays
+            .iter()
+            .filter(|admission| &admission.recipient != excluded_recipient)
+            .cloned()
+            .collect();
         self
+    }
+
+    pub fn cache_group_admission(
+        &mut self,
+        recipient: DeviceId,
+        replay_id: AdmissionReplayId,
+        admission: ProtectionGroupAdmission,
+        now_ms: i64,
+    ) {
+        self.pending_group_admission_replays
+            .retain(|cached| cached.recipient != recipient);
+        self.pending_group_admission_replays
+            .push(PendingGroupAdmissionReplay {
+                recipient,
+                replay_id,
+                admission,
+            });
+        self.updated_at_ms = now_ms;
+    }
+
+    pub fn cached_group_admission(
+        &self,
+        recipient: &DeviceId,
+        replay_id: AdmissionReplayId,
+    ) -> Option<&ProtectionGroupAdmission> {
+        self.pending_group_admission_replays
+            .iter()
+            .find(|cached| cached.recipient == *recipient && cached.replay_id == replay_id)
+            .map(|cached| &cached.admission)
     }
 
     pub const fn updated_at_ms(&self) -> i64 {
@@ -608,6 +690,10 @@ impl fmt::Debug for SpaceKeyMaterial {
             .field(
                 "pending_group_update_count",
                 &self.pending_group_updates.len(),
+            )
+            .field(
+                "pending_group_admission_replay_count",
+                &self.pending_group_admission_replays.len(),
             )
             .field("updated_at_ms", &self.updated_at_ms)
             .finish()

@@ -7,6 +7,8 @@ use thiserror::Error;
 use crate::ids::{DeviceId, SpaceId};
 
 use super::revocation::{GroupEpoch, SpaceKeyMaterial, SpaceSecurityMode};
+#[cfg(test)]
+use super::ProtectionGroupId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BootstrapId(String);
@@ -437,7 +439,9 @@ mod tests {
             .unwrap();
         let mut state = SpaceKeyState::legacy(SpaceId::from("space-a"));
         state.mark_migrating().unwrap();
-        state.mark_ready(ContentKeyId::generate()).unwrap();
+        state
+            .mark_ready(ContentKeyId::generate(), ProtectionGroupId::generate())
+            .unwrap();
 
         assert_eq!(
             LegacyBootstrapStage::new(record, SpaceKeyMaterial::new(state, Vec::new(), vec![1], 2))

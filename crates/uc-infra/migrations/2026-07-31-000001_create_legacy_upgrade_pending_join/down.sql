@@ -1,0 +1,1 @@
+DROP TABLE legacy_upgrade_pending_join;

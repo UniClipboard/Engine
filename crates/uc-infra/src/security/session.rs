@@ -10,13 +10,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tracing::{debug, debug_span};
 use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
-    ContentKeyId, ContentKeyPurpose, GroupEpoch, SpaceKeyMaterial, SpaceSecurityMode,
+    ContentKeyId, ContentKeyPurpose, GroupEpoch, LegacyUpgradeId, ProtectionGroupId,
+    SpaceKeyMaterial, SpaceSecurityMode,
 };
 
 use super::secrets::MasterKey;
@@ -142,6 +144,7 @@ impl InMemorySession {
     fn create_ready_space_material(
         &self,
         space_id: &SpaceId,
+        protection_group_id: Option<ProtectionGroupId>,
         group_state: Vec<u8>,
         updated_at_ms: i64,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
@@ -180,7 +183,10 @@ impl InMemorySession {
             .mark_migrating()
             .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
         key_state
-            .mark_ready(content_key_id)
+            .mark_ready(
+                content_key_id,
+                protection_group_id.unwrap_or_else(ProtectionGroupId::generate),
+            )
             .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
         Ok(SpaceKeyMaterial::new(
             key_state,
@@ -199,7 +205,25 @@ impl InMemorySession {
         if group_state.is_empty() {
             return Err(EncryptionError::KeyMaterialCorrupt);
         }
-        self.create_ready_space_material(space_id, group_state, updated_at_ms)
+        self.create_ready_space_material(space_id, None, group_state, updated_at_ms)
+    }
+
+    pub(crate) fn create_legacy_bootstrap_material_in_group(
+        &self,
+        space_id: &SpaceId,
+        protection_group_id: ProtectionGroupId,
+        group_state: Vec<u8>,
+        updated_at_ms: i64,
+    ) -> Result<SpaceKeyMaterial, EncryptionError> {
+        if group_state.is_empty() {
+            return Err(EncryptionError::KeyMaterialCorrupt);
+        }
+        self.create_ready_space_material(
+            space_id,
+            Some(protection_group_id),
+            group_state,
+            updated_at_ms,
+        )
     }
 
     #[cfg(test)]
@@ -208,7 +232,12 @@ impl InMemorySession {
         space_id: &SpaceId,
         updated_at_ms: i64,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
-        self.create_ready_space_material(space_id, b"test-only-group-state".to_vec(), updated_at_ms)
+        self.create_ready_space_material(
+            space_id,
+            None,
+            b"test-only-group-state".to_vec(),
+            updated_at_ms,
+        )
     }
 
     pub(crate) fn install_space_material(
@@ -279,6 +308,43 @@ impl InMemorySession {
         state.current_content_key_id = Some(current_id.clone());
         state.current_epoch = Some(material.state().epoch());
         Ok(())
+    }
+
+    pub(crate) fn merge_space_material_history(
+        &self,
+        previous: &SpaceKeyMaterial,
+        incoming: SpaceKeyMaterial,
+    ) -> Result<SpaceKeyMaterial, EncryptionError> {
+        let previous_catalog: PersistedContentKeyCatalog =
+            serde_json::from_slice(previous.key_catalog())
+                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let mut incoming_catalog: PersistedContentKeyCatalog =
+            serde_json::from_slice(incoming.key_catalog())
+                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        if previous_catalog.version != 2 || incoming_catalog.version != 2 {
+            return Err(EncryptionError::UnsupportedVersion);
+        }
+        for entry in previous_catalog.entries {
+            match incoming_catalog
+                .entries
+                .iter()
+                .find(|candidate| candidate.content_key_id == entry.content_key_id)
+            {
+                Some(candidate) if candidate.epoch != entry.epoch || candidate.key != entry.key => {
+                    return Err(EncryptionError::KeyMaterialCorrupt);
+                }
+                Some(_) => {}
+                None => incoming_catalog.entries.push(entry),
+            }
+        }
+        let key_catalog = serde_json::to_vec(&incoming_catalog)
+            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        Ok(SpaceKeyMaterial::new(
+            incoming.state().clone(),
+            incoming.group_state().to_vec(),
+            key_catalog,
+            incoming.updated_at_ms(),
+        ))
     }
 
     pub(crate) fn rotate_space_material(
@@ -385,6 +451,58 @@ impl InMemorySession {
         Ok(output)
     }
 
+    pub(crate) fn legacy_upgrade_id(&self) -> Result<LegacyUpgradeId, EncryptionError> {
+        let secret = self.derive_legacy_upgrade_secret(b"uniclipboard-legacy-upgrade-id/v1")?;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&secret).map_err(|_| EncryptionError::CryptoFailure)?;
+        mac.update(b"legacy-space-membership");
+        Ok(LegacyUpgradeId::from_bytes(
+            mac.finalize().into_bytes().into(),
+        ))
+    }
+
+    pub(crate) fn legacy_upgrade_proof(
+        &self,
+        transcript: &[u8],
+    ) -> Result<[u8; 32], EncryptionError> {
+        let secret = self.derive_legacy_upgrade_secret(b"uniclipboard-legacy-upgrade-proof/v1")?;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&secret).map_err(|_| EncryptionError::CryptoFailure)?;
+        mac.update(transcript);
+        Ok(mac.finalize().into_bytes().into())
+    }
+
+    pub(crate) fn verify_legacy_upgrade_proof(
+        &self,
+        transcript: &[u8],
+        proof: &[u8],
+    ) -> Result<bool, EncryptionError> {
+        let secret = self.derive_legacy_upgrade_secret(b"uniclipboard-legacy-upgrade-proof/v1")?;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&secret).map_err(|_| EncryptionError::CryptoFailure)?;
+        mac.update(transcript);
+        Ok(mac.verify_slice(proof).is_ok())
+    }
+
+    fn derive_legacy_upgrade_secret(&self, info: &[u8]) -> Result<[u8; 32], EncryptionError> {
+        let state = self.lock_state();
+        if state.space_id.is_none() {
+            return Err(EncryptionError::NotInitialized);
+        }
+        let legacy_key = state
+            .content_keys
+            .get(&ContentKeyId::legacy_v1())
+            .ok_or(EncryptionError::KeyNotFound)?;
+        let hkdf = Hkdf::<Sha256>::new(
+            Some(b"uniclipboard-legacy-upgrade/v1"),
+            legacy_key.key.as_bytes(),
+        );
+        let mut output = [0u8; 32];
+        hkdf.expand(info, &mut output)
+            .map_err(|_| EncryptionError::CryptoFailure)?;
+        Ok(output)
+    }
+
     fn resolve_from_state(
         state: &State,
         content_key_id: &ContentKeyId,
@@ -440,7 +558,7 @@ impl Default for InMemorySession {
 #[cfg(test)]
 mod tests {
     use uc_core::ids::SpaceId;
-    use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
+    use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch, ProtectionGroupId};
 
     use super::*;
 
@@ -547,6 +665,119 @@ mod tests {
                 .derive_stable_subkey(b"profile-a", b"uniclipboard-search-index/v1")
                 .unwrap(),
             expected
+        );
+    }
+
+    #[test]
+    fn legacy_upgrade_id_is_stable_for_the_same_legacy_space_key() {
+        let first = InMemorySession::new();
+        first.set_master_key_for_space(SpaceId::from_str("space-a"), key(7));
+        let second = InMemorySession::new();
+        second.set_master_key_for_space(SpaceId::from_str("space-a"), key(7));
+
+        assert_eq!(
+            first.legacy_upgrade_id().unwrap(),
+            second.legacy_upgrade_id().unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_upgrade_identity_uses_the_shared_key_not_the_local_space_label() {
+        let first = InMemorySession::new();
+        first.set_master_key_for_space(SpaceId::from_str("local-space-a"), key(7));
+        let second = InMemorySession::new();
+        second.set_master_key_for_space(SpaceId::from_str("local-space-b"), key(7));
+        let transcript = b"same-upgrade-request";
+
+        assert_eq!(
+            first.legacy_upgrade_id().unwrap(),
+            second.legacy_upgrade_id().unwrap()
+        );
+        let proof = first.legacy_upgrade_proof(transcript).unwrap();
+        assert!(second
+            .verify_legacy_upgrade_proof(transcript, &proof)
+            .unwrap());
+    }
+
+    #[test]
+    fn legacy_upgrade_id_differs_for_a_different_legacy_space_key() {
+        let first = InMemorySession::new();
+        first.set_master_key_for_space(SpaceId::from_str("space-a"), key(7));
+        let second = InMemorySession::new();
+        second.set_master_key_for_space(SpaceId::from_str("space-a"), key(8));
+
+        assert_ne!(
+            first.legacy_upgrade_id().unwrap(),
+            second.legacy_upgrade_id().unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_upgrade_proof_is_bound_to_the_complete_request_transcript() {
+        let session = InMemorySession::new();
+        session.set_master_key_for_space(SpaceId::from_str("space-a"), key(7));
+        let request = b"device-a|device-b|group-a|key-package-a";
+        let proof = session.legacy_upgrade_proof(request).unwrap();
+
+        assert!(session
+            .verify_legacy_upgrade_proof(request, &proof)
+            .unwrap());
+        assert!(!session
+            .verify_legacy_upgrade_proof(b"device-a|device-c|group-a|key-package-a", &proof,)
+            .unwrap());
+    }
+
+    #[test]
+    fn bootstrap_material_uses_the_selected_protection_group_id() {
+        let session = InMemorySession::new();
+        let space_id = SpaceId::from_str("space-a");
+        let group_id = ProtectionGroupId::from_string("group-a").unwrap();
+        session.set_master_key_for_space(space_id.clone(), key(7));
+
+        let material = session
+            .create_legacy_bootstrap_material_in_group(&space_id, group_id.clone(), vec![1], 100)
+            .unwrap();
+
+        assert_eq!(material.state().protection_group_id(), Some(&group_id));
+    }
+
+    #[test]
+    fn joining_a_winning_group_preserves_local_history_keys() {
+        let space_id = SpaceId::from_str("space-a");
+        let local = InMemorySession::new();
+        local.set_master_key_for_space(space_id.clone(), key(7));
+        let local_material = local
+            .create_legacy_bootstrap_material_in_group(
+                &space_id,
+                ProtectionGroupId::from_string("group-b").unwrap(),
+                vec![1],
+                100,
+            )
+            .unwrap();
+        let local_key_id = local_material.state().current_content_key_id().clone();
+
+        let winner = InMemorySession::new();
+        winner.set_master_key_for_space(space_id.clone(), key(7));
+        let winning_material = winner
+            .create_legacy_bootstrap_material_in_group(
+                &space_id,
+                ProtectionGroupId::from_string("group-a").unwrap(),
+                vec![2],
+                100,
+            )
+            .unwrap();
+
+        let merged = local
+            .merge_space_material_history(&local_material, winning_material)
+            .unwrap();
+        local.install_space_material(&merged).unwrap();
+
+        assert!(local
+            .content_key(&space_id, &local_key_id, ContentKeyPurpose::Content)
+            .is_ok());
+        assert_eq!(
+            merged.state().protection_group_id().unwrap().as_str(),
+            "group-a"
         );
     }
 }

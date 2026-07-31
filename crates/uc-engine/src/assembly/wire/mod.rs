@@ -264,7 +264,7 @@ pub fn wire_dependencies_from_inputs(
 
     // Space access — single session/key access entry. See
     // `build_space_access_ports` for the §8.3 single-adapter-reuse rationale.
-    let space_access_ports = build_space_access_ports(
+    let (space_access_ports, legacy_protection) = build_space_access_ports(
         &infra.key_material,
         &platform.current_profile,
         &platform.session,
@@ -601,6 +601,7 @@ pub fn wire_dependencies_from_inputs(
     let wired = WiredDependencies {
         deps,
         sync_engine: SyncEngineDeps {
+            legacy_protection,
             peer_admission,
             peer_addr_repo: Arc::clone(&infra.peer_addr_repo),
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),

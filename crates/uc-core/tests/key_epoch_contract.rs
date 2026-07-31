@@ -1,6 +1,6 @@
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    ContentKeyId, ContentKeyPurpose, GroupEpoch, KeyEpochError, RevocationId,
+    ContentKeyId, ContentKeyPurpose, GroupEpoch, KeyEpochError, ProtectionGroupId, RevocationId,
     RevocationOutboxMessage, RevocationRecord, RevocationStage, RevocationStatus, SpaceKeyMaterial,
     SpaceKeyState, SpaceSecurityMode,
 };
@@ -79,7 +79,9 @@ fn legacy_space_migrates_once_then_rotates_forward() {
 
     state.mark_migrating().unwrap();
     let first_current = ContentKeyId::from_string("current-1").unwrap();
-    state.mark_ready(first_current.clone()).unwrap();
+    state
+        .mark_ready(first_current.clone(), ProtectionGroupId::generate())
+        .unwrap();
     assert_eq!(state.mode(), SpaceSecurityMode::Ready);
     assert_eq!(state.epoch(), GroupEpoch::new(1));
     assert_eq!(state.current_content_key_id(), &first_current);
@@ -98,7 +100,9 @@ fn ready_space_cannot_return_to_migration_or_reuse_a_key_id() {
     let mut state = SpaceKeyState::legacy(SpaceId::from_str("space-1"));
     state.mark_migrating().unwrap();
     let current = ContentKeyId::from_string("current-1").unwrap();
-    state.mark_ready(current.clone()).unwrap();
+    state
+        .mark_ready(current.clone(), ProtectionGroupId::generate())
+        .unwrap();
 
     assert_eq!(
         state.mark_migrating(),
@@ -125,7 +129,10 @@ fn staged_revocation_redacts_payloads_and_excludes_removed_member() {
     let mut state = SpaceKeyState::legacy(SpaceId::from_str("space-1"));
     state.mark_migrating().unwrap();
     state
-        .mark_ready(ContentKeyId::from_string("current-1").unwrap())
+        .mark_ready(
+            ContentKeyId::from_string("current-1").unwrap(),
+            ProtectionGroupId::generate(),
+        )
         .unwrap();
     state
         .rotate(ContentKeyId::from_string("current-2").unwrap())
@@ -248,7 +255,10 @@ fn revocation_stage_tracks_each_recipient_once_and_rejects_unknown_ack() {
     let mut state = SpaceKeyState::legacy(SpaceId::from_str("space-1"));
     state.mark_migrating().unwrap();
     state
-        .mark_ready(ContentKeyId::from_string("current-1").unwrap())
+        .mark_ready(
+            ContentKeyId::from_string("current-1").unwrap(),
+            ProtectionGroupId::generate(),
+        )
         .unwrap();
     state
         .rotate(ContentKeyId::from_string("current-2").unwrap())

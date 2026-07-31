@@ -22,7 +22,6 @@ anyhow = "1.0"
 async-trait = "0.1"
 
 # Cryptographic hashing
-sha2 = "0.10"
 
 # Base64 encoding
 base64 = "0.22"

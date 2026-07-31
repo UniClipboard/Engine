@@ -36,7 +36,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchPort, MemberRepositoryPort, PeerAdmissionPort,
+    GroupRevocationPort, GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
+    PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
@@ -68,6 +69,7 @@ use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
 use super::identity_store::IrohIdentityStore;
+use super::legacy_upgrade_adapter::{IrohLegacyUpgradeAdapter, LEGACY_UPGRADE_ALPN};
 use super::net_recovery::DemandRecoveryCoordinator;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
 use super::transfer_progress_adapter::{
@@ -936,6 +938,31 @@ impl IrohNodeBuilder {
         let builder = self.take_router_builder()?;
         self.router_builder = Some(builder.accept(GROUP_UPDATE_ALPN, adapter.handler()));
         Ok(GroupUpdateHandlers { dispatch: adapter })
+    }
+
+    pub fn build_legacy_upgrade_adapter(
+        &self,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    ) -> Arc<IrohLegacyUpgradeAdapter> {
+        Arc::new(IrohLegacyUpgradeAdapter::new(
+            Arc::clone(&self.endpoint),
+            peer_addr_repo,
+            member_repo,
+            fingerprint_factory,
+        ))
+    }
+
+    pub fn install_legacy_upgrade_handler(
+        &mut self,
+        adapter: &IrohLegacyUpgradeAdapter,
+        upgrade_endpoint: Arc<dyn LegacyUpgradeEndpointPort>,
+    ) -> Result<(), IrohNodeError> {
+        let builder = self.take_router_builder()?;
+        self.router_builder =
+            Some(builder.accept(LEGACY_UPGRADE_ALPN, adapter.handler(upgrade_endpoint)));
+        Ok(())
     }
 
     /// Install the active-clipboard state transport.
