@@ -523,6 +523,18 @@ mod tests {
         Router,
         broadcast::Receiver<InboundProgressEvent>,
     ) {
+        spawn_sender_side_with_admission(seed, member_repo, true).await
+    }
+
+    async fn spawn_sender_side_with_admission(
+        seed: [u8; 32],
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        admitted: bool,
+    ) -> (
+        Arc<Endpoint>,
+        Router,
+        broadcast::Receiver<InboundProgressEvent>,
+    ) {
         let endpoint = bind_endpoint_with(seed).await;
         wait_for_direct_addrs(&endpoint).await;
         let adapter = IrohTransferProgressAdapter::new(
@@ -531,7 +543,7 @@ mod tests {
             // happen here in this test), so any impl is fine.
             Arc::new(MemPeerAddrRepo::default()),
             member_repo,
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let rx = adapter.subscribe();
@@ -656,6 +668,57 @@ mod tests {
         let polled = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
         assert!(polled.is_err(), "unknown receiver must not broadcast");
 
+        sender_router.shutdown().await.ok();
+    }
+
+    /// A roster-resolved peer rejected by the current MLS group cannot emit
+    /// a progress event on the sender side.
+    #[tokio::test]
+    async fn known_but_unadmitted_receiver_drops_connection_without_broadcast() {
+        let sender_seed = [0x45u8; 32];
+        let receiver_seed = [0x46u8; 32];
+        let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+        member_repo
+            .save(&make_member(receiver_seed, "revoked-receiver"))
+            .await
+            .unwrap();
+        let (sender_endpoint, sender_router, mut rx) =
+            spawn_sender_side_with_admission(sender_seed, Arc::clone(&member_repo), false).await;
+        let receiver_endpoint = bind_endpoint_with(receiver_seed).await;
+        wait_for_direct_addrs(&receiver_endpoint).await;
+        let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> =
+            Arc::new(MemPeerAddrRepo::default());
+        peer_addr_repo
+            .upsert(&PeerAddressRecord {
+                device_id: DeviceId::new("sender-z"),
+                addr_blob: postcard::to_stdvec(&sender_endpoint.addr()).unwrap(),
+                observed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let receiver_adapter = IrohTransferProgressAdapter::new(
+            Arc::clone(&receiver_endpoint),
+            peer_addr_repo,
+            Arc::new(MemMemberRepo::default()),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(Sha256IdentityFingerprintFactory),
+        );
+        receiver_adapter
+            .reporter()
+            .report(
+                &DeviceId::new("sender-z"),
+                "11111111-2222-4333-8444-555555555555",
+                100,
+                Some(1000),
+                OutboundProgressStatus::InProgress,
+            )
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .is_err(),
+            "an unadmitted peer must not broadcast transfer progress"
+        );
         sender_router.shutdown().await.ok();
     }
 

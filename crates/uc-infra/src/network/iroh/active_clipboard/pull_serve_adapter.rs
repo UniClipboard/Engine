@@ -400,11 +400,20 @@ mod tests {
         member_repo: Arc<dyn MemberRepositoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
     ) -> (Arc<Endpoint>, Router) {
+        spawn_serve_with_admission(seed, member_repo, serve, true).await
+    }
+
+    async fn spawn_serve_with_admission(
+        seed: [u8; 32],
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        serve: Arc<dyn ActiveClipboardPullServePort>,
+        admitted: bool,
+    ) -> (Arc<Endpoint>, Router) {
         let endpoint = bind_endpoint_with(seed).await;
         wait_for_direct_addrs(&endpoint).await;
         let adapter = IrohActiveClipboardPullServeAdapter::new(
             member_repo,
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
             serve,
         );
@@ -497,7 +506,36 @@ mod tests {
         router.shutdown().await.ok();
     }
 
-    /// Verdict 3 — a locked holder responds `Locked` without panicking and
+    /// Verdict 3 — a roster-resolved peer rejected by the current MLS group
+    /// receives no pull response and cannot reach the content serve port.
+    #[tokio::test]
+    async fn known_but_unadmitted_peer_is_dropped_before_serve() {
+        let sender_seed = [0x45u8; 32];
+        let receiver_seed = [0x46u8; 32];
+        let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+        member_repo
+            .save(&make_member(sender_seed, "revoked-member"))
+            .await
+            .unwrap();
+        let (endpoint, router) = spawn_serve_with_admission(
+            receiver_seed,
+            Arc::clone(&member_repo),
+            Arc::new(NeverServe),
+            false,
+        )
+        .await;
+
+        let hash = format!("blake3v1:{}", "9".repeat(64));
+        assert!(
+            pull_request(sender_seed, endpoint.addr(), &hash)
+                .await
+                .is_err(),
+            "an unadmitted peer must not receive a response frame"
+        );
+        router.shutdown().await.ok();
+    }
+
+    /// Verdict 4 — a locked holder responds `Locked` without panicking and
     /// without leaking any envelope bytes.
     #[tokio::test]
     async fn locked_holder_responds_locked() {

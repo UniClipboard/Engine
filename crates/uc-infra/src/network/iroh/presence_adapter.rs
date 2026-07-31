@@ -1180,11 +1180,20 @@ mod tests {
         repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> IrohPresenceAdapter {
+        build_adapter_with_member_repo_and_admission(endpoint, repo, member_repo, true)
+    }
+
+    fn build_adapter_with_member_repo_and_admission(
+        endpoint: Arc<Endpoint>,
+        repo: Arc<dyn PeerAddressRepositoryPort>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        admitted: bool,
+    ) -> IrohPresenceAdapter {
         IrohPresenceAdapter::new(
             endpoint,
             repo,
             member_repo,
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
             Arc::new(FixedClock),
         )
@@ -1673,6 +1682,53 @@ mod tests {
 
         drop(conn1);
         drop(conn2);
+        router_b.shutdown().await.ok();
+        endpoint_a.close().await;
+    }
+
+    /// Verdict — a roster-resolved peer rejected by the current MLS group
+    /// must not alter presence state or emit an online event.
+    #[tokio::test]
+    async fn accept_known_but_unadmitted_peer_does_not_touch_state() {
+        let endpoint_a = bound_endpoint().await;
+        wait_for_direct_addrs(&endpoint_a).await;
+        let endpoint_b = bound_endpoint().await;
+        wait_for_direct_addrs(&endpoint_b).await;
+
+        let a_member = member_for_endpoint(&endpoint_a, "revoked-device");
+        let a_device_id = a_member.device_id.clone();
+        let b_member_repo = Arc::new(MemMemberRepo::default());
+        b_member_repo.seed(a_member);
+        let b_adapter = build_adapter_with_member_repo_and_admission(
+            Arc::clone(&endpoint_b),
+            Arc::new(FakePeerAddressRepo::default()),
+            b_member_repo,
+            false,
+        );
+        let mut subscriber = b_adapter.subscribe();
+        let router_b = Router::builder((*endpoint_b).clone())
+            .accept(PRESENCE_ALPN, b_adapter.handler())
+            .spawn();
+
+        let conn = timeout(
+            DIAL_BUDGET,
+            endpoint_a.connect(endpoint_b.addr(), PRESENCE_ALPN),
+        )
+        .await
+        .expect("connect within budget")
+        .expect("dial succeeds");
+        assert!(
+            timeout(Duration::from_millis(500), subscriber.recv())
+                .await
+                .is_err(),
+            "an unadmitted peer must not emit an online event"
+        );
+        assert_eq!(
+            b_adapter.current_state(&a_device_id).await,
+            ReachabilityState::Unknown
+        );
+
+        drop(conn);
         router_b.shutdown().await.ok();
         endpoint_a.close().await;
     }

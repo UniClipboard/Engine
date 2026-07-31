@@ -462,12 +462,20 @@ mod tests {
         seed: [u8; 32],
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> ReceiverHarness {
+        spawn_receiver_with_admission(seed, member_repo, true).await
+    }
+
+    async fn spawn_receiver_with_admission(
+        seed: [u8; 32],
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        admitted: bool,
+    ) -> ReceiverHarness {
         let receiver_endpoint = bind_endpoint_with(seed).await;
         wait_for_direct_addrs(&receiver_endpoint).await;
 
         let adapter = IrohClipboardReceiverAdapter::new(
             member_repo,
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let inbound_rx = adapter.subscribe();
@@ -597,7 +605,61 @@ mod tests {
         harness.receiver_router.shutdown().await.ok();
     }
 
-    /// Verdict 3 — bad magic byte from a malicious / out-of-protocol peer.
+    /// Verdict 3 — a roster-resolved peer rejected by the current MLS group
+    /// receives a rejection ACK and cannot publish clipboard content.
+    #[tokio::test]
+    async fn rejects_known_but_unadmitted_peer_with_ack_rejected() {
+        let sender_seed = [0x45u8; 32];
+        let receiver_seed = [0x46u8; 32];
+        let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+        member_repo
+            .save(&make_member(sender_seed, "revoked-sender"))
+            .await
+            .unwrap();
+        let harness =
+            spawn_receiver_with_admission(receiver_seed, Arc::clone(&member_repo), false).await;
+        let receiver_addr = harness.receiver_endpoint.addr();
+
+        let sender_endpoint = bind_endpoint_with(sender_seed).await;
+        wait_for_direct_addrs(&sender_endpoint).await;
+        let peer_addr_repo = Arc::new(MemPeerAddrRepo::default());
+        peer_addr_repo
+            .upsert(&PeerAddressRecord {
+                device_id: DeviceId::new("receiver-d"),
+                addr_blob: postcard::to_stdvec(&receiver_addr).unwrap(),
+                observed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let dispatch =
+            IrohClipboardDispatchAdapter::new(sender_endpoint, peer_addr_repo, presence_mock());
+
+        let result = dispatch
+            .dispatch(
+                &DeviceId::new("receiver-d"),
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"must-not-publish"),
+                },
+            )
+            .await
+            .outcome;
+        assert!(matches!(
+            result,
+            Err(uc_core::ports::ClipboardDispatchError::PeerRejected(_))
+        ));
+
+        let mut inbound_rx = harness.inbound_rx;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), inbound_rx.recv())
+                .await
+                .is_err(),
+            "an unadmitted peer must not publish"
+        );
+        harness.receiver_router.shutdown().await.ok();
+    }
+
+    /// Verdict 4 — bad magic byte from a malicious / out-of-protocol peer.
     /// The handler rejects the frame with `Rejected` ack and drops the
     /// connection without touching the broadcast stream. Uses a raw
     /// sender that writes garbage bytes to ensure the handler tolerates

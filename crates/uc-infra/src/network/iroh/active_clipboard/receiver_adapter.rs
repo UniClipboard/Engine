@@ -371,12 +371,20 @@ mod tests {
         seed: [u8; 32],
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> ReceiverHarness {
+        spawn_receiver_with_admission(seed, member_repo, true).await
+    }
+
+    async fn spawn_receiver_with_admission(
+        seed: [u8; 32],
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        admitted: bool,
+    ) -> ReceiverHarness {
         let receiver_endpoint = bind_endpoint_with(seed).await;
         wait_for_direct_addrs(&receiver_endpoint).await;
 
         let adapter = IrohActiveClipboardReceiverAdapter::new(
             member_repo,
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );
         let inbound_rx = adapter.subscribe();
@@ -464,7 +472,34 @@ mod tests {
         harness.receiver_router.shutdown().await.ok();
     }
 
-    /// Verdict 3 — a known peer that writes a bad-magic frame is dropped
+    /// Verdict 3 — a roster-resolved peer rejected by the current MLS group
+    /// cannot publish an active clipboard observation.
+    #[tokio::test]
+    async fn rejects_known_but_unadmitted_peer_without_publishing() {
+        let sender_seed = [0x45u8; 32];
+        let receiver_seed = [0x46u8; 32];
+        let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+        member_repo
+            .save(&make_member(sender_seed, "revoked-sender"))
+            .await
+            .unwrap();
+        let harness =
+            spawn_receiver_with_admission(receiver_seed, Arc::clone(&member_repo), false).await;
+        let receiver_addr = harness.receiver_endpoint.addr();
+
+        send_one_frame(sender_seed, receiver_addr, &sample_message()).await;
+
+        let mut inbound_rx = harness.inbound_rx;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), inbound_rx.recv())
+                .await
+                .is_err(),
+            "an unadmitted peer must not publish"
+        );
+        harness.receiver_router.shutdown().await.ok();
+    }
+
+    /// Verdict 4 — a known peer that writes a bad-magic frame is dropped
     /// without touching the broadcast stream.
     #[tokio::test]
     async fn drops_bad_magic_without_publishing() {
