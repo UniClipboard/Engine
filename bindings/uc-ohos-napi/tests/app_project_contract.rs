@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use cargo_metadata::MetadataCommand;
 use serde_json::Value;
 
 fn workspace_root() -> PathBuf {
@@ -84,6 +85,24 @@ fn ohos_binding_owns_a_distributable_har_module() {
     assert!(package.contains("libuc_ohos_napi.so"));
     assert!(script.contains("bindings/uc-ohos-napi/ohos/index.d.ts"));
     assert!(script.contains("UniClipboardEngine.har.checksum.txt"));
+}
+
+#[test]
+fn ohos_har_package_version_matches_the_engine_version() {
+    let metadata = MetadataCommand::new()
+        .manifest_path(workspace_root().join("Cargo.toml"))
+        .no_deps()
+        .exec()
+        .expect("workspace metadata must be readable");
+    let engine = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == "uc-engine")
+        .expect("uc-engine must be a workspace member");
+    let engine_version = engine.version.to_string();
+    let package = read_json5("tests/hosts/ohos/engine/oh-package.json5");
+
+    assert_eq!(package["version"].as_str(), Some(engine_version.as_str()));
 }
 
 #[test]
