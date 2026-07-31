@@ -4516,7 +4516,7 @@ dependencies = [
 
 [[package]]
 name = "openmls-validation"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "openmls",
  "openmls_basic_credential",
@@ -7047,7 +7047,7 @@ checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "uc-application"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7087,7 +7087,7 @@ dependencies = [
 
 [[package]]
 name = "uc-content-hash"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "blake3",
  "hex",
@@ -7095,7 +7095,7 @@ dependencies = [
 
 [[package]]
 name = "uc-core"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -7125,7 +7125,7 @@ dependencies = [
 
 [[package]]
 name = "uc-engine"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7154,7 +7154,7 @@ dependencies = [
 
 [[package]]
 name = "uc-engine-uniffi"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "cargo_metadata",
  "jni 0.21.1",
@@ -7169,7 +7169,7 @@ dependencies = [
 
 [[package]]
 name = "uc-infra"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "anyhow",
  "argon2",
@@ -7254,7 +7254,7 @@ dependencies = [
 
 [[package]]
 name = "uc-mobile-probe-core"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "base64",
  "jni 0.21.1",
@@ -7269,7 +7269,7 @@ dependencies = [
 
 [[package]]
 name = "uc-mobile-proto"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "base64",
  "chrono",
@@ -7283,7 +7283,7 @@ dependencies = [
 
 [[package]]
 name = "uc-observability-contract"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7297,7 +7297,7 @@ dependencies = [
 
 [[package]]
 name = "uc-ohos-napi"
-version = "0.20.0-rc.14"
+version = "0.20.0-rc.15"
 dependencies = [
  "cargo_metadata",
  "json5",
