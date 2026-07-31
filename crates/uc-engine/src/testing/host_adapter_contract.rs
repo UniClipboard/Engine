@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::{
@@ -9,6 +9,11 @@ use crate::{
     HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
     HostSecureStorage,
 };
+use uc_observability_contract::analytics::{
+    AdoptOutcome, AnalyticsIdentityError, AnalyticsIdentityPort, AnalyticsPort, Event,
+    IdentifyPayload, ReleaseOutcome,
+};
+use uuid::Uuid;
 
 static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -81,6 +86,103 @@ fn secure_storage_adapter_preserves_secret_bytes() {
     );
     storage.delete("identity").unwrap();
     assert!(storage.get("identity").unwrap().is_none());
+}
+
+#[derive(Default)]
+struct RecordingAnalyticsSink {
+    captures: AtomicUsize,
+    identifies: AtomicUsize,
+}
+
+impl AnalyticsPort for RecordingAnalyticsSink {
+    fn capture(&self, _: Event) {
+        self.captures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn identify(&self, _: IdentifyPayload) {
+        self.identifies.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+struct RecordingAnalyticsIdentity {
+    adopted: Mutex<Vec<Uuid>>,
+}
+
+impl AnalyticsIdentityPort for RecordingAnalyticsIdentity {
+    fn adopt_space_person(
+        &self,
+        space_person_id: Uuid,
+    ) -> Result<AdoptOutcome, AnalyticsIdentityError> {
+        self.adopted
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(space_person_id);
+        Ok(AdoptOutcome {
+            previous_distinct_id: Uuid::nil(),
+            new_distinct_id: space_person_id,
+        })
+    }
+
+    fn release_space_person(&self) -> Result<ReleaseOutcome, AnalyticsIdentityError> {
+        Ok(ReleaseOutcome {
+            previous_distinct_id: Uuid::nil(),
+            new_distinct_id: Uuid::nil(),
+        })
+    }
+
+    fn current_space_person_id(&self) -> Option<Uuid> {
+        None
+    }
+
+    fn reset_telemetry_identity(&self) -> Result<ReleaseOutcome, AnalyticsIdentityError> {
+        self.release_space_person()
+    }
+}
+
+#[tokio::test]
+async fn host_analytics_reaches_application_and_identity_wiring() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let sink = Arc::new(RecordingAnalyticsSink::default());
+    let identity = Arc::new(RecordingAnalyticsIdentity::default());
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            temp.path().join("private"),
+            temp.path().join("cache"),
+            temp.path().join("temporary"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    )
+    .with_analytics(sink.clone(), identity.clone());
+
+    let wiring = crate::assembly::host::wire_host_capabilities(&EngineConfig::new("1.2.3"), host)
+        .expect("host wiring");
+    wiring.wired.deps.analytics.capture(Event::AppFirstOpen);
+    let person_id = Uuid::now_v7();
+    wiring
+        .wired
+        .sync_engine
+        .analytics_facade
+        .adopt_from_sponsor(person_id);
+
+    assert_eq!(sink.captures.load(Ordering::Relaxed), 1);
+    assert_eq!(sink.identifies.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        identity
+            .adopted
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_slice(),
+        &[person_id]
+    );
 }
 
 #[tokio::test]

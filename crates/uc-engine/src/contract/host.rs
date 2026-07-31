@@ -1,7 +1,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use uc_observability_contract::analytics::{
+    AnalyticsIdentityPort, AnalyticsPort, NoopAnalyticsIdentity, NoopAnalyticsSink,
+};
 
 use crate::HostFileHandle;
 
@@ -223,6 +227,21 @@ pub struct HostCapabilities {
     secure_storage: Box<dyn HostSecureStorage>,
     clipboard: Box<dyn HostClipboard>,
     files: Box<dyn HostFileAccess>,
+    analytics: HostAnalyticsCapabilities,
+}
+
+pub(crate) struct HostAnalyticsCapabilities {
+    pub(crate) sink: Arc<dyn AnalyticsPort>,
+    pub(crate) identity: Arc<dyn AnalyticsIdentityPort>,
+}
+
+impl Default for HostAnalyticsCapabilities {
+    fn default() -> Self {
+        Self {
+            sink: Arc::new(NoopAnalyticsSink),
+            identity: Arc::new(NoopAnalyticsIdentity),
+        }
+    }
 }
 
 impl HostCapabilities {
@@ -237,7 +256,20 @@ impl HostCapabilities {
             secure_storage,
             clipboard,
             files,
+            analytics: HostAnalyticsCapabilities::default(),
         }
+    }
+
+    /// Supplies host-owned analytics implementations to the production wiring.
+    /// The engine owns the resulting facade and passes only contract traits to
+    /// its use cases, so hosts never depend on engine-internal assembly types.
+    pub fn with_analytics(
+        mut self,
+        sink: Arc<dyn AnalyticsPort>,
+        identity: Arc<dyn AnalyticsIdentityPort>,
+    ) -> Self {
+        self.analytics = HostAnalyticsCapabilities { sink, identity };
+        self
     }
 
     pub fn directories(&self) -> &HostDirectories {
@@ -263,12 +295,14 @@ impl HostCapabilities {
         Box<dyn HostSecureStorage>,
         Box<dyn HostClipboard>,
         Box<dyn HostFileAccess>,
+        HostAnalyticsCapabilities,
     ) {
         (
             self.directories,
             self.secure_storage,
             self.clipboard,
             self.files,
+            self.analytics,
         )
     }
 }

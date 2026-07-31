@@ -16,6 +16,7 @@ use uc_core::ports::{
     HostEventEmitterPort, PlatformClipboardPort, SecureStorageError, SecureStoragePort,
     SystemClipboardPort, TransferHostEvent,
 };
+use uc_observability_contract::analytics::DefaultAnalyticsFacade;
 
 use crate::assembly::deps::{BackgroundRuntimeDeps, WiredDependencies, WiringError, WiringResult};
 use crate::assembly::platform::SystemClipboardLayer;
@@ -421,7 +422,7 @@ pub(crate) fn wire_host_capabilities_with_emitter(
     host: HostCapabilities,
     host_event_emitter: Arc<dyn HostEventEmitterPort>,
 ) -> WiringResult<HostWiring> {
-    let (directories, secure_storage, mut clipboard, files) = host.into_parts();
+    let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
     let clipboard_changes = clipboard.take_change_stream().map_err(|_| {
         WiringError::ClipboardInit("failed to open host clipboard change stream".into())
     })?;
@@ -467,8 +468,11 @@ pub(crate) fn wire_host_capabilities_with_emitter(
             Arc::clone(&files),
             clipboard_import_root.clone(),
         ),
-        analytics_sink: Arc::new(uc_observability_contract::analytics::NoopAnalyticsSink),
-        analytics_facade: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
+        analytics_sink: Arc::clone(&analytics.sink),
+        analytics_facade: Arc::new(DefaultAnalyticsFacade::new(
+            analytics.sink,
+            analytics.identity,
+        )),
         host_event_emitter,
     })?;
 
