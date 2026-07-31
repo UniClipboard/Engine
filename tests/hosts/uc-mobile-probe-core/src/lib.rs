@@ -1014,6 +1014,25 @@ fn operation_response(result: OperationResult) -> Value {
             "kind": "member_revocation_status",
             "revocation": summary,
         }),
+        OperationResult::LegacyMemberRemoval(summary) => json!({
+            "ok": true,
+            "kind": "legacy_member_removal",
+            "bootstrap_id": summary.bootstrap_id,
+            "outcome": summary.outcome,
+            "pending_readmission": summary.pending_readmission,
+        }),
+        OperationResult::LegacyBootstrapStatus(summary) => json!({
+            "ok": true,
+            "kind": "legacy_bootstrap_status",
+            "bootstrap": summary,
+        }),
+        OperationResult::SpaceProtection(summary) => json!({
+            "ok": true,
+            "kind": "space_protection",
+            "mode": summary.mode,
+            "members": summary.members,
+            "legacy_bootstrap": summary.legacy_bootstrap,
+        }),
         OperationResult::SearchPage(page) => json!({
             "ok": true,
             "kind": "search_page",
