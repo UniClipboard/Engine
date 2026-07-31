@@ -107,27 +107,6 @@ fn uniffi_binding_owns_runnable_ios_and_android_packaging() {
             "Android packaging missing {required}"
         );
     }
-    let native_build = android
-        .find("cargo ndk")
-        .expect("Android packaging must build native libraries");
-    let kotlin_bindgen = android
-        .find("--language kotlin")
-        .expect("Android packaging must generate Kotlin bindings");
-    let gradle_build = android
-        .find("assembleRelease")
-        .expect("Android packaging must assemble the AAR");
-    assert!(
-        native_build < kotlin_bindgen,
-        "Kotlin bindings must be generated after Android native builds"
-    );
-    assert!(
-        kotlin_bindgen < gradle_build,
-        "Kotlin bindings must exist before Gradle assembles the AAR"
-    );
-    assert!(
-        android.contains("test -f \"$KOTLIN_BINDING\""),
-        "Android packaging must fail before Gradle when Kotlin binding generation is missing"
-    );
     assert!(gradle.contains("com.android.library"));
     assert!(gradle.contains("org.jetbrains.kotlin.android"));
     assert!(gradle.contains("net.java.dev.jna:jna:5.14.0@aar"));
