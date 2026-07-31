@@ -1104,6 +1104,13 @@ mod tests {
                 now_ms: i64,
             ) -> Result<Vec<uc_core::membership::GroupBootstrapResult>, uc_core::membership::BootstrapError>;
         }
+        #[async_trait]
+        impl uc_core::membership::SpaceProtectionStatusPort for SpaceAccess {
+            async fn query_space_protection(
+                &self,
+                members: &[DeviceId],
+            ) -> Result<uc_core::membership::SpaceProtectionSnapshot, uc_core::membership::SpaceProtectionError>;
+        }
     }
 
     fn configured_space_access(
