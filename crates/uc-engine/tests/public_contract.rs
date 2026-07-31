@@ -1024,13 +1024,16 @@ fn entry_delivery_contract_preserves_full_view_without_debugging_user_content() 
             reason: uc_engine::DeliveryFailureReasonSummary::PeerRejected,
         },
         uc_engine::EntryDeliveryStatusSummary::Failed {
+            reason: uc_engine::DeliveryFailureReasonSummary::PeerIncompatible,
+        },
+        uc_engine::EntryDeliveryStatusSummary::Failed {
             reason: uc_engine::DeliveryFailureReasonSummary::Io,
         },
         uc_engine::EntryDeliveryStatusSummary::Failed {
             reason: uc_engine::DeliveryFailureReasonSummary::Internal,
         },
     ];
-    assert_eq!(statuses.len(), 8);
+    assert_eq!(statuses.len(), 9);
 }
 
 #[test]

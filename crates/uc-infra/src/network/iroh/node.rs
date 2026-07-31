@@ -61,7 +61,9 @@ use super::active_clipboard::{
 };
 use super::addr_filter::{apply_addr_filter, enumerate_local_lan_v4};
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
-use super::clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALPN};
+use super::clipboard_dispatch_adapter::{
+    IrohClipboardDispatchAdapter, CLIPBOARD_ALPN, LEGACY_CLIPBOARD_ALPN,
+};
 use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
@@ -894,7 +896,9 @@ impl IrohNodeBuilder {
             .router_builder
             .take()
             .expect("router_builder missing — install_* called after spawn");
-        let builder = builder.accept(CLIPBOARD_ALPN, handler);
+        let builder = builder
+            .accept(CLIPBOARD_ALPN, handler.clone())
+            .accept(LEGACY_CLIPBOARD_ALPN, handler);
         self.router_builder = Some(builder);
 
         let dispatch = Arc::new(IrohClipboardDispatchAdapter::new(

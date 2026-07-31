@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use iroh::endpoint::ConnectOptions;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use tokio::task::JoinSet;
@@ -71,6 +72,16 @@ pub(crate) async fn connect_with_staggered_retry(
     alpn: &'static [u8],
     purpose: &'static str,
 ) -> Result<Connection, String> {
+    connect_with_staggered_retry_and_alpns(endpoint, addr, alpn, Vec::new(), purpose).await
+}
+
+pub(crate) async fn connect_with_staggered_retry_and_alpns(
+    endpoint: Arc<Endpoint>,
+    addr: EndpointAddr,
+    alpn: &'static [u8],
+    additional_alpns: Vec<Vec<u8>>,
+    purpose: &'static str,
+) -> Result<Connection, String> {
     let addr = strip_relay_if_lan_only(addr);
     let mut attempts = JoinSet::new();
 
@@ -78,6 +89,7 @@ pub(crate) async fn connect_with_staggered_retry(
         let endpoint = Arc::clone(&endpoint);
         let addr = addr.clone();
         let addr_id = addr.id;
+        let additional_alpns = additional_alpns.clone();
         attempts.spawn(async move {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
@@ -91,7 +103,15 @@ pub(crate) async fn connect_with_staggered_retry(
                 "iroh connect attempt started"
             );
 
-            match tokio::time::timeout(ATTEMPT_TIMEOUT, endpoint.connect(addr, alpn)).await {
+            let options = ConnectOptions::new().with_additional_alpns(additional_alpns);
+            let connect = async {
+                let connecting = endpoint
+                    .connect_with_opts(addr, alpn, options)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                connecting.await.map_err(|error| error.to_string())
+            };
+            match tokio::time::timeout(ATTEMPT_TIMEOUT, connect).await {
                 Ok(Ok(connection)) => {
                     // Diagnostic for UniClipboard#486 — log which path won
                     // the candidate race. iroh 0.98 replaced the older
@@ -127,7 +147,7 @@ pub(crate) async fn connect_with_staggered_retry(
                     );
                     Ok((attempt_no, connection))
                 }
-                Ok(Err(err)) => Err((attempt_no, err.to_string())),
+                Ok(Err(err)) => Err((attempt_no, err)),
                 Err(_) => Err((
                     attempt_no,
                     format!("timed out after {}ms", ATTEMPT_TIMEOUT.as_millis()),

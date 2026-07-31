@@ -147,6 +147,7 @@ fn map_dispatch_error_to_failure_reason(err: &ClipboardDispatchError) -> Failure
         ClipboardDispatchError::Offline => FailureReason::PeerOffline,
         ClipboardDispatchError::LocalPolicyExceeded(_) => FailureReason::FileTooLarge,
         ClipboardDispatchError::PeerRejected(_) => FailureReason::NetworkError,
+        ClipboardDispatchError::PeerIncompatible => FailureReason::NetworkError,
         ClipboardDispatchError::Io(_) => FailureReason::NetworkError,
         ClipboardDispatchError::Internal(_) => FailureReason::Unknown,
     }
@@ -163,6 +164,7 @@ fn dispatch_failure_stage(err: &ClipboardDispatchError) -> SyncFailureStage {
         ClipboardDispatchError::Internal(_) => SyncFailureStage::ImmediateSend,
         ClipboardDispatchError::Offline
         | ClipboardDispatchError::PeerRejected(_)
+        | ClipboardDispatchError::PeerIncompatible
         | ClipboardDispatchError::Io(_) => SyncFailureStage::ImmediateSend,
     }
 }

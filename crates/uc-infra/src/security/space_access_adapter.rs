@@ -438,7 +438,7 @@ impl DefaultSpaceAccessAdapter {
     async fn admit_group_member(
         &self,
         space_id: &SpaceId,
-        _sponsor_device_id: &DeviceId,
+        sponsor_device_id: &DeviceId,
         joiner_device_id: &DeviceId,
         existing_member_ids: &[DeviceId],
         key_package: &[u8],
@@ -447,11 +447,28 @@ impl DefaultSpaceAccessAdapter {
             .key_epoch_repository
             .as_ref()
             .ok_or_else(|| SpaceAccessError::Internal("key epoch repository unavailable".into()))?;
-        let current = repository
+        let current = match repository
             .load_space_material(space_id)
             .await
             .map_err(|error| SpaceAccessError::Internal(error.to_string()))?
-            .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+        {
+            Some(current) => current,
+            None if existing_member_ids.is_empty() => {
+                let sponsor_state = MlsGroupEngine::create_sponsor(
+                    space_id.as_ref().as_bytes(),
+                    sponsor_device_id.as_str().as_bytes(),
+                )
+                .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+                self.session
+                    .create_legacy_bootstrap_material(
+                        space_id,
+                        sponsor_state.into_bytes(),
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .map_err(map_encryption_error)?
+            }
+            None => return Err(SpaceAccessError::CorruptedKeyMaterial),
+        };
         if current.group_state().is_empty() {
             return Err(SpaceAccessError::CorruptedKeyMaterial);
         }
@@ -642,12 +659,16 @@ impl DefaultSpaceAccessAdapter {
             .session
             .current_space_id()
             .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
-        let current = repository
-            .load_space_material(&space_id)
-            .await?
-            .ok_or_else(|| KeyEpochError::Repository("space key material unavailable".into()))?;
-        if current.state().mode() != SpaceSecurityMode::Ready || current.group_state().is_empty() {
+        let Some(current) = repository.load_space_material(&space_id).await? else {
             return Ok(GroupRevocationResult::LocalOnly);
+        };
+        if current.state().mode() != SpaceSecurityMode::Ready {
+            return Ok(GroupRevocationResult::LocalOnly);
+        }
+        if current.group_state().is_empty() {
+            return Err(KeyEpochError::Repository(
+                "ready space key material is corrupted".into(),
+            ));
         }
         if retained_recipients
             .iter()
@@ -2869,6 +2890,131 @@ mod admission_tests {
         let (adapter, session, repository, space_id, directory, _) =
             sponsor_fixture_with_stage_persistence(true);
         (adapter, session, repository, space_id, directory)
+    }
+
+    #[tokio::test]
+    async fn revocation_without_space_material_requires_legacy_bootstrap() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-space-without-group-material");
+        session.set_master_key_for_space(space_id, MasterKey::from_bytes(&[0x31; 32]).unwrap());
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            repository,
+        );
+
+        let result = adapter
+            .revoke_group_member(&DeviceId::new("removed-device"), &[], 100)
+            .await
+            .unwrap();
+
+        assert_eq!(result, GroupRevocationResult::LocalOnly);
+    }
+
+    #[tokio::test]
+    async fn revocation_rejects_ready_material_without_group_state_as_corrupted() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("ready-space-without-group-state");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x32; 32]).unwrap(),
+        );
+        let mut state = SpaceKeyState::legacy(space_id);
+        state.mark_migrating().unwrap();
+        state.mark_ready(ContentKeyId::generate()).unwrap();
+        let material = SpaceKeyMaterial::new(state, Vec::new(), vec![0x01], 100);
+        let (repository, _) = memory_revocation_repository(Some(material));
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            repository,
+        );
+
+        let error = adapter
+            .revoke_group_member(&DeviceId::new("removed-device"), &[], 100)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            KeyEpochError::Repository(message) if message.contains("corrupted")
+        ));
+    }
+
+    #[tokio::test]
+    async fn first_group_admission_bootstraps_a_single_member_legacy_space() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("new-space-before-first-pairing");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x33; 32]).unwrap(),
+        );
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::clone(&repository),
+        );
+        let sponsor = DeviceId::new("sponsor-device");
+        let joiner = DeviceId::new("joiner-device");
+        let pending = adapter.prepare_group_join(&joiner).await.unwrap();
+
+        adapter
+            .admit_group_member(&space_id, &sponsor, &joiner, &[], &pending.key_package)
+            .await
+            .unwrap();
+
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(material.state().mode(), SpaceSecurityMode::Ready);
+        let group = MlsClientState::from_bytes(material.group_state().to_vec());
+        assert!(
+            MlsGroupEngine::contains_active_member(&group, sponsor.as_str().as_bytes()).unwrap()
+        );
+        assert!(
+            MlsGroupEngine::contains_active_member(&group, joiner.as_str().as_bytes()).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn group_admission_does_not_bootstrap_a_legacy_space_with_existing_members() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-space-with-existing-members");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x34; 32]).unwrap(),
+        );
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            repository,
+        );
+        let pending = adapter
+            .prepare_group_join(&DeviceId::new("joiner-device"))
+            .await
+            .unwrap();
+
+        let error = adapter
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("sponsor-device"),
+                &DeviceId::new("joiner-device"),
+                &[DeviceId::new("existing-device")],
+                &pending.key_package,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::CorruptedKeyMaterial));
     }
 
     #[tokio::test]

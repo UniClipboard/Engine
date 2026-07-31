@@ -127,6 +127,10 @@ pub(crate) fn classify_dispatch_result(
                 ClipboardDispatchError::PeerRejected(s) => {
                     (DeliveryFailureReason::PeerRejected, Some(s.clone()))
                 }
+                ClipboardDispatchError::PeerIncompatible => (
+                    DeliveryFailureReason::PeerIncompatible,
+                    Some(err.to_string()),
+                ),
                 ClipboardDispatchError::Io(s) => (DeliveryFailureReason::Io, Some(s.clone())),
                 ClipboardDispatchError::Internal(s) => {
                     (DeliveryFailureReason::Internal, Some(s.clone()))
@@ -325,6 +329,24 @@ mod tests {
             }
         ));
         assert_eq!(rec.reason_detail, Some("nope".to_string()));
+    }
+
+    #[test]
+    fn incompatible_peer_maps_to_a_distinct_delivery_failure() {
+        let joined = Ok((
+            dev("peer-old"),
+            Err(ClipboardDispatchError::PeerIncompatible),
+        ));
+
+        let processed = classify_dispatch_result(joined, Some(&eid()), 7);
+        let record = processed.delivery_record.expect("delivery record");
+
+        assert!(matches!(
+            record.status,
+            EntryDeliveryStatus::Failed {
+                reason: DeliveryFailureReason::PeerIncompatible
+            }
+        ));
     }
 
     #[test]

@@ -231,6 +231,7 @@ pub enum EntryDeliveryStatusSummary {
 pub enum DeliveryFailureReasonSummary {
     LocalPolicy,
     PeerRejected,
+    PeerIncompatible,
     Io,
     Internal,
 }

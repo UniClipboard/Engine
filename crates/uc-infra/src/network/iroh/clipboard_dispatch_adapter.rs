@@ -44,12 +44,13 @@ use uc_core::ports::{
 
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
 use super::conn_path::{path_for, OnMissing};
-use super::connect::connect_with_staggered_retry;
+use super::connect::connect_with_staggered_retry_and_alpns;
 
 /// ALPN identifier for the Slice 2 clipboard sync protocol. Independent of
 /// the presence / pairing ALPNs so the Router can multiplex all three
 /// transports on the same endpoint.
-pub const CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
+pub const CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard-applied/1";
+pub const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 
 /// Result a single in-flight dial broadcasts to every follower waiting
 /// on the same peer's single-flight slot. `Connection: Clone` makes
@@ -133,10 +134,11 @@ impl IrohClipboardDispatchAdapter {
 
         match role {
             Role::Leader(tx) => {
-                let result = connect_with_staggered_retry(
+                let result = connect_with_staggered_retry_and_alpns(
                     Arc::clone(&self.endpoint),
                     addr,
                     CLIPBOARD_ALPN,
+                    vec![LEGACY_CLIPBOARD_ALPN.to_vec()],
                     "clipboard",
                 )
                 .await;
@@ -313,6 +315,17 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
                 };
             }
         };
+
+        if connection.alpn() == LEGACY_CLIPBOARD_ALPN {
+            let transport = path_for(&self.endpoint, addr_id, OnMissing::Unknown)
+                .await
+                .channel;
+            drop(connection);
+            return DispatchReport {
+                transport,
+                outcome: Err(ClipboardDispatchError::PeerIncompatible),
+            };
+        }
 
         // 4. Write the frame + read the ack on a fresh bi-stream.
         let outcome = self.send_and_ack(&connection, header, &payload).await;
@@ -592,6 +605,45 @@ mod tests {
             .expect("dispatch succeeds");
         assert_eq!(ack, DispatchAck::DuplicateIgnored);
 
+        peer_router.shutdown().await.expect("router shutdown");
+    }
+
+    #[tokio::test]
+    async fn dispatch_reports_online_legacy_peer_as_incompatible_without_sending() {
+        let peer_endpoint = bind_endpoint().await;
+        wait_for_direct_addrs(&peer_endpoint).await;
+        let peer_router = Router::builder((*peer_endpoint).clone())
+            .accept(
+                LEGACY_CLIPBOARD_ALPN,
+                FixedAckHandler {
+                    ack_byte: AckCode::Accepted.as_byte(),
+                },
+            )
+            .spawn();
+        let peer_addr = peer_endpoint.addr();
+
+        let sender_endpoint = bind_endpoint().await;
+        wait_for_direct_addrs(&sender_endpoint).await;
+        let repo = Arc::new(MemRepo::default());
+        let target = DeviceId::new("legacy-target");
+        seed_addr(&repo, &target, &peer_addr).await;
+
+        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
+        let result = adapter
+            .dispatch(
+                &target,
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"must-not-reach-legacy-ingest"),
+                },
+            )
+            .await
+            .outcome;
+
+        assert!(matches!(
+            result,
+            Err(ClipboardDispatchError::PeerIncompatible)
+        ));
         peer_router.shutdown().await.expect("router shutdown");
     }
 

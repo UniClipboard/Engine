@@ -34,6 +34,7 @@
 //! retry logic.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -44,7 +45,9 @@ use tracing::{debug, instrument, warn};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
-use uc_core::ports::{ClipboardReceiverPort, InboundClipboard};
+use uc_core::ports::{
+    ClipboardReceiverPort, InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt,
+};
 use uc_core::security::IdentityFingerprint;
 
 use super::clipboard_wire::{self, AckCode};
@@ -54,6 +57,7 @@ use super::clipboard_wire::{self, AckCode};
 /// share the same burst tolerance. Lagging subscribers drop frames per
 /// broadcast semantics — they recover on the peer's next dispatch.
 const INBOUND_CHANNEL_CAPACITY: usize = 64;
+const APPLICATION_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Receiver-side adapter. Holds the broadcast sender and domain
 /// dependencies needed to resolve `endpoint_id → DeviceId`. See
@@ -189,23 +193,38 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         //    the port contract (section header above). We still send
         //    `Accepted` because the sender side did its job; application
         //    consumer responsibility is to subscribe before F1 completes.
+        let (receipt, result) = InboundClipboardReceipt::pending();
         let inbound = InboundClipboard {
             peer_device_id,
             header: frame.header,
             ciphertext: frame.ciphertext,
+            receipt,
         };
         if self.state.event_tx.send(inbound).is_err() {
             debug!(
                 peer = %peer_device_id.as_str(),
                 "clipboard receiver: no subscribers attached; inbound frame dropped"
             );
+            emit_ack(&mut send, AckCode::Rejected).await;
+            let _ = connection.closed().await;
+            return Ok(());
         }
 
-        // 5. Ack accepted; hold the connection open until the peer closes
+        let disposition = tokio::time::timeout(APPLICATION_SETTLEMENT_TIMEOUT, result.wait())
+            .await
+            .ok()
+            .flatten();
+        let ack = match disposition {
+            Some(InboundClipboardDisposition::Applied) => AckCode::Accepted,
+            Some(InboundClipboardDisposition::Duplicate) => AckCode::DuplicateIgnored,
+            Some(InboundClipboardDisposition::Rejected) | None => AckCode::Rejected,
+        };
+
+        // 5. Ack the application result; hold the connection open until the peer closes
         //    it so the ack byte has time to flush. The sender side drops
         //    the connection after reading the ack, which resolves
         //    `Connection::closed()` here and lets the handler return.
-        emit_ack(&mut send, AckCode::Accepted).await;
+        emit_ack(&mut send, ack).await;
         let _ = connection.closed().await;
         Ok(())
     }
@@ -304,13 +323,13 @@ mod tests {
 
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::{
-        ClipboardDispatchPort, ClipboardHeader, PresenceError, PresenceEvent, PresencePort,
-        ReachabilityState, SyncPayload,
+        ClipboardDispatchPort, ClipboardHeader, InboundClipboardDisposition, PresenceError,
+        PresenceEvent, PresencePort, ReachabilityState, SyncPayload,
     };
     use uc_core::MemberSyncPreferences;
 
     use crate::network::iroh::clipboard_dispatch_adapter::{
-        IrohClipboardDispatchAdapter, CLIPBOARD_ALPN,
+        IrohClipboardDispatchAdapter, CLIPBOARD_ALPN, LEGACY_CLIPBOARD_ALPN,
     };
     use crate::security::Sha256IdentityFingerprintFactory;
     use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
@@ -481,6 +500,7 @@ mod tests {
         let inbound_rx = adapter.subscribe();
         let router = Router::builder((*receiver_endpoint).clone())
             .accept(CLIPBOARD_ALPN, adapter.handler())
+            .accept(LEGACY_CLIPBOARD_ALPN, adapter.handler())
             .spawn();
 
         ReceiverHarness {
@@ -524,18 +544,20 @@ mod tests {
             IrohClipboardDispatchAdapter::new(sender_endpoint, peer_addr_repo, presence_mock());
 
         let payload = Bytes::from(vec![0xAB; 128]);
-        let ack = dispatch
-            .dispatch(
-                &DeviceId::new("receiver-b"),
-                &sample_header(),
-                SyncPayload {
-                    ciphertext: payload.clone(),
-                },
-            )
-            .await
-            .outcome
-            .expect("dispatch succeeds");
-        assert_eq!(ack, uc_core::ports::DispatchAck::Accepted);
+        let expected_payload = payload.clone();
+        let mut dispatch_task = tokio::spawn(async move {
+            dispatch
+                .dispatch(
+                    &DeviceId::new("receiver-b"),
+                    &sample_header(),
+                    SyncPayload {
+                        ciphertext: expected_payload,
+                    },
+                )
+                .await
+                .outcome
+                .expect("dispatch succeeds")
+        });
 
         let mut inbound_rx = harness.inbound_rx;
         let inbound = tokio::time::timeout(Duration::from_secs(3), inbound_rx.recv())
@@ -546,6 +568,16 @@ mod tests {
         assert_eq!(inbound.peer_device_id.as_str(), "sender-a");
         assert_eq!(inbound.header, sample_header());
         assert_eq!(inbound.ciphertext, payload);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut dispatch_task)
+                .await
+                .is_err(),
+            "sender must wait for application settlement"
+        );
+        assert!(inbound.receipt.finish(InboundClipboardDisposition::Applied));
+        let ack = dispatch_task.await.expect("dispatch task joins");
+        assert_eq!(ack, uc_core::ports::DispatchAck::Accepted);
 
         harness.receiver_router.shutdown().await.ok();
     }
@@ -602,6 +634,48 @@ mod tests {
         let fast_poll = tokio::time::timeout(Duration::from_millis(200), inbound_rx.recv()).await;
         assert!(fast_poll.is_err(), "unknown peer must not publish");
 
+        harness.receiver_router.shutdown().await.ok();
+    }
+
+    #[tokio::test]
+    async fn accepts_legacy_sender_on_the_legacy_protocol() {
+        let sender_seed = [0x31u8; 32];
+        let receiver_seed = [0x32u8; 32];
+        let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+        member_repo
+            .save(&make_member(sender_seed, "legacy-sender"))
+            .await
+            .unwrap();
+        let harness = spawn_receiver(receiver_seed, member_repo).await;
+
+        let sender_endpoint = bind_endpoint_with(sender_seed).await;
+        wait_for_direct_addrs(&sender_endpoint).await;
+        let connection = sender_endpoint
+            .connect(harness.receiver_endpoint.addr(), LEGACY_CLIPBOARD_ALPN)
+            .await
+            .expect("legacy sender connects");
+        let (mut send, mut recv) = connection.open_bi().await.expect("open legacy stream");
+        clipboard_wire::write_frame(
+            &mut send,
+            &sample_header(),
+            &Bytes::from_static(b"legacy-ciphertext"),
+        )
+        .await
+        .expect("write legacy frame");
+        send.finish().expect("finish legacy frame");
+
+        let mut inbound_rx = harness.inbound_rx;
+        let inbound = tokio::time::timeout(Duration::from_secs(3), inbound_rx.recv())
+            .await
+            .expect("legacy inbound arrives")
+            .expect("receiver alive");
+        assert_eq!(inbound.peer_device_id.as_str(), "legacy-sender");
+        assert!(inbound.receipt.finish(InboundClipboardDisposition::Applied));
+
+        let mut ack = [0u8; 1];
+        recv.read_exact(&mut ack).await.expect("legacy ack");
+        assert_eq!(ack[0], AckCode::Accepted.as_byte());
+        drop(connection);
         harness.receiver_router.shutdown().await.ok();
     }
 
@@ -766,10 +840,6 @@ mod tests {
             }));
         }
 
-        for task in tasks {
-            task.await.expect("sender task");
-        }
-
         // Collect three inbound frames; order is not asserted (concurrency).
         let mut inbound_rx = harness.inbound_rx;
         let mut seen: Vec<String> = Vec::new();
@@ -779,6 +849,10 @@ mod tests {
                 .expect("broadcast arrives in time")
                 .expect("subscriber sees frame");
             seen.push(inbound.peer_device_id.as_str().to_string());
+            assert!(inbound.receipt.finish(InboundClipboardDisposition::Applied));
+        }
+        for task in tasks {
+            task.await.expect("sender task");
         }
         seen.sort();
         assert_eq!(seen, vec!["sender-0", "sender-1", "sender-2"]);

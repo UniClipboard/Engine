@@ -12,6 +12,7 @@ use uc_application::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundCapture as ApplyInboundCapture,
     InboundWrite as ApplyInboundWrite,
 };
+use uc_core::ports::{InboundClipboardDisposition, InboundClipboardReceipt};
 use uc_core::TaskRegistry;
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 
@@ -183,7 +184,9 @@ pub(crate) async fn spawn_clipboard_runtime_tasks(
                                 plaintext: notice.plaintext,
                                 flow_id: notice.flow_id,
                             };
-                            match inbound.apply_notice(input).await {
+                            let apply_result = inbound.apply_notice(input).await;
+                            settle_inbound_receipt(&notice.receipt, &apply_result);
+                            match apply_result {
                                 Ok(InboundClipboardApplyOutcome::Applied { entry_id }) => {
                                     info!(entry_id = %entry_id, "inbound clipboard applied");
                                 }
@@ -212,6 +215,28 @@ pub(crate) async fn spawn_clipboard_runtime_tasks(
             }
         })
         .await;
+}
+
+fn settle_inbound_receipt(
+    receipt: &InboundClipboardReceipt,
+    result: &Result<
+        InboundClipboardApplyOutcome,
+        uc_application::facade::InboundClipboardApplyError,
+    >,
+) {
+    let disposition = match result {
+        Ok(InboundClipboardApplyOutcome::Applied { .. })
+        | Ok(InboundClipboardApplyOutcome::Resurfaced { .. }) => {
+            InboundClipboardDisposition::Applied
+        }
+        Ok(InboundClipboardApplyOutcome::DuplicateSkipped { .. }) => {
+            InboundClipboardDisposition::Duplicate
+        }
+        Ok(InboundClipboardApplyOutcome::DecodeFailed { .. }) | Err(_) => {
+            InboundClipboardDisposition::Rejected
+        }
+    };
+    receipt.finish(disposition);
 }
 
 fn engine_event_for_inbound_notice(notice: &InboundNotice) -> EngineEvent {
@@ -268,13 +293,21 @@ fn summarize_inbound_notice(
 mod tests {
     use uc_application::facade::{InboundAction, InboundNotice};
     use uc_core::ids::DeviceId;
+    use uc_core::ports::{
+        InboundClipboardDisposition, InboundClipboardReceipt, InboundClipboardResult,
+    };
 
     use crate::{EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent};
 
-    use super::engine_event_for_inbound_notice;
+    use super::{engine_event_for_inbound_notice, settle_inbound_receipt};
+
+    fn pending_receipt() -> (InboundClipboardReceipt, InboundClipboardResult) {
+        InboundClipboardReceipt::pending()
+    }
 
     #[test]
     fn inbound_notice_event_preserves_the_existing_daemon_watch_contract() {
+        let (receipt, _result) = pending_receipt();
         let notice = InboundNotice {
             from_device: DeviceId::new("peer-1"),
             snapshot_hash: "hash-1".into(),
@@ -282,6 +315,7 @@ mod tests {
             flow_id: None,
             action: InboundAction::DuplicateIgnored,
             at_ms: 42,
+            receipt,
         };
 
         assert_eq!(
@@ -299,6 +333,7 @@ mod tests {
 
     #[test]
     fn inbound_notice_event_size_does_not_scale_with_clipboard_payload() {
+        let (receipt, _result) = pending_receipt();
         let notice = InboundNotice {
             from_device: DeviceId::new("peer-1"),
             snapshot_hash: "hash-1".into(),
@@ -306,6 +341,7 @@ mod tests {
             flow_id: None,
             action: InboundAction::NewEntry,
             at_ms: 42,
+            receipt,
         };
 
         let EngineEvent::InboundNotice(event) = engine_event_for_inbound_notice(&notice) else {
@@ -317,6 +353,25 @@ mod tests {
             encoded.len() < 64 * 1024,
             "inbound notice unexpectedly contains {} bytes",
             encoded.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn applied_inbound_settles_sender_receipt_as_applied() {
+        let (receipt, result) = pending_receipt();
+
+        settle_inbound_receipt(
+            &receipt,
+            &Ok(
+                uc_application::facade::InboundClipboardApplyOutcome::Applied {
+                    entry_id: "entry-1".to_string(),
+                },
+            ),
+        );
+
+        assert_eq!(
+            result.wait().await,
+            Some(InboundClipboardDisposition::Applied)
         );
     }
 }

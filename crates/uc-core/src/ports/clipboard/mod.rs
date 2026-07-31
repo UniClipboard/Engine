@@ -63,6 +63,9 @@ pub use sync_dispatch::{
     ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, DispatchAck, DispatchReport,
     SyncPayload,
 };
-pub use sync_receiver::{ClipboardReceiverPort, InboundClipboard};
+pub use sync_receiver::{
+    ClipboardReceiverPort, InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt,
+    InboundClipboardResult,
+};
 pub use thumbnail_generator::{GeneratedThumbnail, ThumbnailGeneratorPort};
 pub use thumbnail_repository::ThumbnailRepositoryPort;

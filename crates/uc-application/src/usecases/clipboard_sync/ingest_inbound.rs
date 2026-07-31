@@ -34,7 +34,9 @@ use uc_observability_contract::FlowId;
 
 use uc_core::ids::DeviceId;
 use uc_core::ports::security::TransferCipherPort;
-use uc_core::ports::{ClipboardReceiverPort, ClockPort};
+use uc_core::ports::{
+    ClipboardReceiverPort, ClockPort, InboundClipboardDisposition, InboundClipboardReceipt,
+};
 use uc_core::MemberRepositoryPort;
 
 use super::payload_codec::decode_v3_bytes_to_snapshot;
@@ -50,6 +52,7 @@ pub(crate) struct InboundClipboardNotice {
     pub flow_id: Option<FlowId>,
     pub action: InboundAction,
     pub at_ms: i64,
+    pub receipt: InboundClipboardReceipt,
 }
 
 /// What the ingest path did with the inbound frame. Phase 2 only emits
@@ -169,6 +172,7 @@ impl IngestInboundClipboardUseCase {
         ),
     )]
     async fn handle_one(&self, inbound: uc_core::ports::InboundClipboard) {
+        let receipt = inbound.receipt.clone();
         let flow_id = match inbound.header.flow_id.as_deref() {
             Some(wire_id) => match FlowId::parse_str(wire_id) {
                 Ok(flow_id) => {
@@ -201,6 +205,7 @@ impl IngestInboundClipboardUseCase {
             .is_receive_allowed(&inbound.peer_device_id)
             .await
         {
+            receipt.finish(InboundClipboardDisposition::Rejected);
             return;
         }
         let plaintext = match self.transfer_cipher.decrypt(&inbound.ciphertext).await {
@@ -212,6 +217,7 @@ impl IngestInboundClipboardUseCase {
                     error = %err,
                     "ingest: decrypt failed; dropping frame"
                 );
+                receipt.finish(InboundClipboardDisposition::Rejected);
                 return;
             }
         };
@@ -238,6 +244,7 @@ impl IngestInboundClipboardUseCase {
             .is_receive_category_allowed(&inbound.peer_device_id, &categories)
             .await
         {
+            receipt.finish(InboundClipboardDisposition::Rejected);
             return;
         }
         let notice = InboundClipboardNotice {
@@ -247,12 +254,14 @@ impl IngestInboundClipboardUseCase {
             flow_id,
             action: InboundAction::NewEntry,
             at_ms: self.clock.now_ms(),
+            receipt,
         };
-        if self.notices_tx.send(notice).is_err() {
-            debug!(
-                peer = %inbound.peer_device_id.as_str(),
-                "ingest: no notice subscribers; frame dropped"
-            );
+        if let Err(error) = self.notices_tx.send(notice) {
+            error
+                .0
+                .receipt
+                .finish(InboundClipboardDisposition::Rejected);
+            debug!(peer = %inbound.peer_device_id.as_str(), "ingest: no notice subscribers; frame dropped");
         }
     }
 }
@@ -282,7 +291,10 @@ mod tests {
     use async_trait::async_trait;
 
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
-    use uc_core::ports::{ClipboardHeader, ClockPort, InboundClipboard};
+    use uc_core::ports::{
+        ClipboardHeader, ClockPort, InboundClipboard, InboundClipboardDisposition,
+        InboundClipboardReceipt, InboundClipboardResult,
+    };
     use uc_core::security::IdentityFingerprint;
     use uc_core::{MemberRepositoryPort, MemberSyncPreferences, MembershipError, SpaceMember};
 
@@ -376,7 +388,16 @@ mod tests {
     }
 
     fn inbound_fixture(peer: &str, snapshot_hash: &str, ciphertext: Bytes) -> InboundClipboard {
-        InboundClipboard {
+        inbound_fixture_with_result(peer, snapshot_hash, ciphertext).0
+    }
+
+    fn inbound_fixture_with_result(
+        peer: &str,
+        snapshot_hash: &str,
+        ciphertext: Bytes,
+    ) -> (InboundClipboard, InboundClipboardResult) {
+        let (receipt, result) = InboundClipboardReceipt::pending();
+        let inbound = InboundClipboard {
             peer_device_id: DeviceId::new(peer),
             header: ClipboardHeader {
                 version: ClipboardHeader::CURRENT_VERSION,
@@ -388,7 +409,9 @@ mod tests {
                 flow_id: None,
             },
             ciphertext,
-        }
+            receipt,
+        };
+        (inbound, result)
     }
 
     /// 1. Happy path — one inbound, decrypt succeeds, notice arrives on
@@ -465,14 +488,21 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        receiver.publish(inbound_fixture(
+        let (inbound, result) = inbound_fixture_with_result(
             "peer-broken",
             "f".repeat(64).as_str(),
             Bytes::from_static(b"broken"),
-        ));
+        );
+        receiver.publish(inbound);
 
         let fast_poll = tokio::time::timeout(Duration::from_millis(200), notice_rx.recv()).await;
         assert!(fast_poll.is_err(), "decrypt failure must not emit a notice");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), result.wait())
+                .await
+                .expect("ingest settles receipt"),
+            Some(InboundClipboardDisposition::Rejected)
+        );
     }
 
     /// 3. Three inbounds — publish three frames in quick succession; the
@@ -706,6 +736,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(20)).await;
 
+        let (receipt, _result) = InboundClipboardReceipt::pending();
         receiver.publish(InboundClipboard {
             peer_device_id: DeviceId::new("peer-no-text"),
             header: ClipboardHeader {
@@ -718,6 +749,7 @@ mod tests {
                 flow_id: None,
             },
             ciphertext: Bytes::from(envelope_bytes),
+            receipt,
         });
 
         let fast_poll = tokio::time::timeout(Duration::from_millis(200), notice_rx.recv()).await;

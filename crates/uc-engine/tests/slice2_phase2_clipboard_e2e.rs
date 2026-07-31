@@ -53,8 +53,8 @@ use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::space::ProofPort;
 use uc_core::ports::{
     ClipboardDispatchPort, ClipboardReceiverPort, ClockPort, DeviceIdentityPort,
-    FirstSyncStateError, FirstSyncStatePort, LocalIdentityPort, PresencePort, SecureStorageError,
-    SecureStoragePort, SettingsPort, SetupStatusPort,
+    FirstSyncStateError, FirstSyncStatePort, InboundClipboardDisposition, LocalIdentityPort,
+    PresencePort, SecureStorageError, SecureStoragePort, SettingsPort, SetupStatusPort,
 };
 use uc_core::settings::model::Settings;
 use uc_core::setup::SetupStatus;
@@ -694,24 +694,12 @@ async fn sponsor_dispatch_lands_on_joiner_within_2s() {
         file_set_v1_component: None,
     };
     let expected_hash = snapshot.snapshot_hash().to_string();
-    let outcome = sponsor
-        .clipboard_sync
-        .dispatch_snapshot(snapshot, ClipboardChangeOrigin::LocalCapture, None, None)
-        .await
-        .expect("sponsor dispatch ok");
-    assert_eq!(
-        outcome.total_accepted, 1,
-        "exactly one accepted ack expected (joiner is the only paired peer): outcome = {outcome:?}"
-    );
-    assert_eq!(
-        outcome.per_target.len(),
-        1,
-        "per_target must list the single online peer"
-    );
-    assert_eq!(
-        outcome.per_target[0].device_id, joiner.device_id,
-        "the per_target entry must be the joiner"
-    );
+    let sponsor_clipboard = Arc::clone(&sponsor.clipboard_sync);
+    let dispatch = tokio::spawn(async move {
+        sponsor_clipboard
+            .dispatch_snapshot(snapshot, ClipboardChangeOrigin::LocalCapture, None, None)
+            .await
+    });
 
     // Plan §1 contract: ≤ 2s. Test wall here is 5s ceiling for CI jitter.
     let notice = tokio::time::timeout(Duration::from_secs(5), joiner_notices.recv())
@@ -738,6 +726,25 @@ async fn sponsor_dispatch_lands_on_joiner_within_2s() {
     assert_eq!(
         decoded.representations[0].mime.as_ref().map(|m| m.as_str()),
         Some("text/plain")
+    );
+    assert!(notice.receipt.finish(InboundClipboardDisposition::Applied));
+
+    let outcome = dispatch
+        .await
+        .expect("dispatch task joins")
+        .expect("sponsor dispatch ok");
+    assert_eq!(
+        outcome.total_accepted, 1,
+        "exactly one accepted ack expected (joiner is the only paired peer): outcome = {outcome:?}"
+    );
+    assert_eq!(
+        outcome.per_target.len(),
+        1,
+        "per_target must list the single online peer"
+    );
+    assert_eq!(
+        outcome.per_target[0].device_id, joiner.device_id,
+        "the per_target entry must be the joiner"
     );
 
     sponsor.shutdown().await;
@@ -796,16 +803,23 @@ async fn repeat_dispatch_lands_twice_phase2_no_dedup() {
         file_set_v1_component: None,
     };
     let canonical_hash = build_snapshot().snapshot_hash().to_string();
+    let mut received = Vec::with_capacity(2);
     for attempt in 0..2 {
-        let outcome = sponsor
-            .clipboard_sync
-            .dispatch_snapshot(
-                build_snapshot(),
-                ClipboardChangeOrigin::LocalCapture,
-                None,
-                None,
-            )
+        let sponsor_clipboard = Arc::clone(&sponsor.clipboard_sync);
+        let snapshot = build_snapshot();
+        let dispatch = tokio::spawn(async move {
+            sponsor_clipboard
+                .dispatch_snapshot(snapshot, ClipboardChangeOrigin::LocalCapture, None, None)
+                .await
+        });
+        let notice = tokio::time::timeout(Duration::from_secs(5), joiner_notices.recv())
             .await
+            .expect("inbound notice arrives within 5s")
+            .expect("notice broadcast still has a sender");
+        assert!(notice.receipt.finish(InboundClipboardDisposition::Applied));
+        let outcome = dispatch
+            .await
+            .expect("dispatch task joins")
             .unwrap_or_else(|e| panic!("attempt {attempt} dispatch must succeed: {e:?}"));
         assert_eq!(
             outcome.total_accepted, 1,
@@ -819,16 +833,9 @@ async fn repeat_dispatch_lands_twice_phase2_no_dedup() {
             outcome.snapshot_hash, canonical_hash,
             "snapshot_hash should be deterministic across identical snapshots"
         );
-    }
-
-    let mut received = Vec::with_capacity(2);
-    for _ in 0..2 {
-        let notice = tokio::time::timeout(Duration::from_secs(5), joiner_notices.recv())
-            .await
-            .expect("inbound notice arrives within 5s")
-            .expect("notice broadcast still has a sender");
         received.push(notice);
     }
+
     assert!(
         received.iter().all(|n| n.snapshot_hash == canonical_hash),
         "both notices must carry identical canonical snapshot_hash; got {received:?}"

@@ -42,6 +42,7 @@ mod status_codec {
     const LEGACY_FAILED_OFFLINE: &str = "failed_offline";
     pub const FAILED_LOCAL_POLICY: &str = "failed_local_policy";
     pub const FAILED_PEER_REJECTED: &str = "failed_peer_rejected";
+    pub const FAILED_PEER_INCOMPATIBLE: &str = "failed_peer_incompatible";
     pub const FAILED_IO: &str = "failed_io";
     pub const FAILED_INTERNAL: &str = "failed_internal";
 
@@ -53,6 +54,7 @@ mod status_codec {
             EntryDeliveryStatus::Failed { reason } => match reason {
                 DeliveryFailureReason::LocalPolicy => FAILED_LOCAL_POLICY,
                 DeliveryFailureReason::PeerRejected => FAILED_PEER_REJECTED,
+                DeliveryFailureReason::PeerIncompatible => FAILED_PEER_INCOMPATIBLE,
                 DeliveryFailureReason::Io => FAILED_IO,
                 DeliveryFailureReason::Internal => FAILED_INTERNAL,
             },
@@ -69,6 +71,9 @@ mod status_codec {
             }),
             FAILED_PEER_REJECTED => Ok(EntryDeliveryStatus::Failed {
                 reason: DeliveryFailureReason::PeerRejected,
+            }),
+            FAILED_PEER_INCOMPATIBLE => Ok(EntryDeliveryStatus::Failed {
+                reason: DeliveryFailureReason::PeerIncompatible,
             }),
             FAILED_IO => Ok(EntryDeliveryStatus::Failed {
                 reason: DeliveryFailureReason::Io,
@@ -249,6 +254,16 @@ mod tests {
         assert_eq!(encoded, "unreachable");
         let decoded = status_codec::decode(encoded).unwrap();
         assert!(matches!(decoded, EntryDeliveryStatus::Unreachable));
+    }
+
+    #[test]
+    fn incompatible_delivery_failure_round_trips() {
+        let status = EntryDeliveryStatus::Failed {
+            reason: DeliveryFailureReason::PeerIncompatible,
+        };
+        let encoded = status_codec::encode(&status);
+        assert_eq!(encoded, "failed_peer_incompatible");
+        assert_eq!(status_codec::decode(encoded).unwrap(), status);
     }
 
     #[tokio::test]

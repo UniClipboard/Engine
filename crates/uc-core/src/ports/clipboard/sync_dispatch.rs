@@ -101,6 +101,10 @@ pub enum ClipboardDispatchError {
     /// `LocalPolicyExceeded` which never reaches the peer.
     #[error("peer rejected: {0}")]
     PeerRejected(String),
+    /// The peer is reachable but only supports a clipboard protocol that
+    /// cannot confirm application-level ingest.
+    #[error("peer version is incompatible with confirmed clipboard delivery")]
+    PeerIncompatible,
     /// Stream I/O failure — broken connection, short read, etc.
     #[error("stream io: {0}")]
     Io(String),

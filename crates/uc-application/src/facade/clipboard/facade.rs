@@ -169,6 +169,7 @@ pub struct InboundNotice {
     pub flow_id: Option<FlowId>,
     pub action: InboundAction,
     pub at_ms: i64,
+    pub receipt: uc_core::ports::InboundClipboardReceipt,
 }
 
 /// Public mirror of the internal `InboundAction` enum.
@@ -686,6 +687,7 @@ fn lift_notice(internal: UcInboundNotice) -> InboundNotice {
             UcInboundAction::DuplicateIgnored => InboundAction::DuplicateIgnored,
         },
         at_ms: internal.at_ms,
+        receipt: internal.receipt,
     }
 }
 
@@ -1182,6 +1184,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(30)).await;
 
+        let (receipt, _result) = uc_core::ports::InboundClipboardReceipt::pending();
         receiver.publish(InboundClipboard {
             peer_device_id: DeviceId::new("peer-x"),
             header: ClipboardHeader {
@@ -1194,6 +1197,7 @@ mod tests {
                 flow_id: None,
             },
             ciphertext: Bytes::from_static(b"hello"),
+            receipt,
         });
 
         let notice = tokio::time::timeout(Duration::from_secs(2), notices.recv())

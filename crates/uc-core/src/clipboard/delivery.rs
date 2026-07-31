@@ -44,6 +44,8 @@ pub enum DeliveryFailureReason {
     LocalPolicy,
     /// 对端在 wire 层显式拒绝(协议版本不兼容、header 不合法等)。
     PeerRejected,
+    /// 对端在线，但只支持无法确认真实收件结果的旧协议。
+    PeerIncompatible,
     /// 流 I/O 故障(连接断开、短读、读写错等)。
     Io,
     /// 其他内部错误。

@@ -75,6 +75,7 @@ fn delivery_failure_reason(reason: DeliveryFailureReason) -> DeliveryFailureReas
     match reason {
         DeliveryFailureReason::LocalPolicy => DeliveryFailureReasonSummary::LocalPolicy,
         DeliveryFailureReason::PeerRejected => DeliveryFailureReasonSummary::PeerRejected,
+        DeliveryFailureReason::PeerIncompatible => DeliveryFailureReasonSummary::PeerIncompatible,
         DeliveryFailureReason::Io => DeliveryFailureReasonSummary::Io,
         DeliveryFailureReason::Internal => DeliveryFailureReasonSummary::Internal,
     }
@@ -114,5 +115,13 @@ mod tests {
         assert_eq!(internal.category(), EngineErrorCategory::Internal);
         assert!(!internal.to_string().contains("uniclipboard.db"));
         assert_ne!(missing.code(), internal.code());
+    }
+
+    #[test]
+    fn delivery_failure_preserves_peer_incompatibility() {
+        assert_eq!(
+            delivery_failure_reason(DeliveryFailureReason::PeerIncompatible),
+            DeliveryFailureReasonSummary::PeerIncompatible
+        );
     }
 }
