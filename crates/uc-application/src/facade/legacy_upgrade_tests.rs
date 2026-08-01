@@ -470,12 +470,16 @@ async fn concurrent_temporary_groups_converge_on_the_smaller_group_id() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn runtime_reconciles_online_events_and_shutdown_stops_it() {
     let world = UpgradeWorld::new(&["device-a", "device-b"]);
+    world.protection("device-a").set_group("group-a");
     let automatic_upgrade = world.device("device-b");
     let (presence_tx, presence_rx) = broadcast::channel(4);
+    let started_at = tokio::time::Instant::now();
     let runtime = automatic_upgrade.start(presence_rx);
+    wait_for_snapshot_calls(&world.protection("device-b"), 1).await;
+    let startup_calls = world.network.exchange_calls.load(Ordering::Acquire);
 
     presence_tx
         .send(PresenceEvent {
@@ -484,9 +488,15 @@ async fn runtime_reconciles_online_events_and_shutdown_stops_it() {
             at: Utc::now(),
         })
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    assert_eq!(world.network.exchange_calls.load(Ordering::Acquire), 0);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        world.network.exchange_calls.load(Ordering::Acquire),
+        startup_calls
+    );
 
+    world.publish_devices();
     presence_tx
         .send(PresenceEvent {
             device_id: DeviceId::new("device-a"),
@@ -494,13 +504,17 @@ async fn runtime_reconciles_online_events_and_shutdown_stops_it() {
             at: Utc::now(),
         })
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while world.network.exchange_calls.load(Ordering::Acquire) == 0 {
-            tokio::task::yield_now().await;
+    for _ in 0..100 {
+        if world.protection("device-b").group_id() == Some(group("group-a")) {
+            break;
         }
-    })
-    .await
-    .unwrap();
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        world.protection("device-b").group_id(),
+        Some(group("group-a"))
+    );
+    assert_eq!(tokio::time::Instant::now(), started_at);
 
     runtime.shutdown().await;
     assert!(presence_tx
@@ -510,6 +524,30 @@ async fn runtime_reconciles_online_events_and_shutdown_stops_it() {
             at: Utc::now(),
         })
         .is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_reconciles_immediately_when_the_upgraded_device_starts() {
+    let world = UpgradeWorld::new(&["device-a", "device-b"]);
+    world.protection("device-a").set_group("group-a");
+    world.publish_devices();
+    let started_at = tokio::time::Instant::now();
+    let (_presence_tx, presence_rx) = broadcast::channel(4);
+
+    let runtime = world.device("device-b").start(presence_rx);
+    for _ in 0..100 {
+        if world.protection("device-b").group_id() == Some(group("group-a")) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        world.protection("device-b").group_id(),
+        Some(group("group-a"))
+    );
+    assert_eq!(tokio::time::Instant::now(), started_at);
+    runtime.shutdown().await;
 }
 
 #[tokio::test(start_paused = true)]

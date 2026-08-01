@@ -181,22 +181,27 @@ impl AutomaticLegacyUpgrade {
             async move {
                 let started_at = Instant::now();
                 let mut presence_open = true;
+                let mut first_pass = true;
                 let mut next_timer_retry_at = started_at + DISCOVERY_RETRY_DELAY;
                 loop {
-                    let timer = tokio::time::sleep_until(next_timer_retry_at);
-                    tokio::pin!(timer);
-                    tokio::select! {
-                        _ = &mut timer => {}
-                        event = presence_events.recv(), if presence_open => match event {
-                            Ok(event) if event.state == ReachabilityState::Online => {}
-                            Ok(_) => continue,
-                            Err(broadcast::error::RecvError::Lagged(_)) => {}
-                            Err(broadcast::error::RecvError::Closed) => {
-                                presence_open = false;
-                                continue;
-                            }
-                        },
-                    };
+                    if first_pass {
+                        first_pass = false;
+                    } else {
+                        let timer = tokio::time::sleep_until(next_timer_retry_at);
+                        tokio::pin!(timer);
+                        tokio::select! {
+                            _ = &mut timer => {}
+                            event = presence_events.recv(), if presence_open => match event {
+                                Ok(event) if event.state == ReachabilityState::Online => {}
+                                Ok(_) => continue,
+                                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    presence_open = false;
+                                    continue;
+                                }
+                            },
+                        };
+                    }
                     let discovery_phase = if started_at.elapsed() >= DISCOVERY_GRACE {
                         LegacyDiscoveryPhase::Complete
                     } else {
