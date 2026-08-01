@@ -375,6 +375,13 @@ pub trait GroupBootstrapPort: Send + Sync {
         now_ms: i64,
     ) -> Result<GroupBootstrapResult, BootstrapError>;
 
+    async fn withdraw_legacy_readmission(
+        &self,
+        bootstrap_id: &BootstrapId,
+        member: &DeviceId,
+        now_ms: i64,
+    ) -> Result<GroupBootstrapResult, BootstrapError>;
+
     async fn query_legacy_bootstrap(
         &self,
         bootstrap_id: &BootstrapId,

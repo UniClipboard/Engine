@@ -292,12 +292,57 @@ impl MemberRosterFacade {
     ) -> Result<MemberRevocationView, RosterError> {
         let device_id = DeviceId::new(device_id);
         let local_fingerprint = self.validate_remote_member(&device_id).await?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let mut revocation = if let Some(group_revocation) = &self.group_revocation {
             let members = self
                 .member_repo
                 .list()
                 .await
                 .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
+            if let Some(space_protection) = &self.space_protection {
+                let member_ids = members
+                    .iter()
+                    .map(|member| member.device_id)
+                    .collect::<Vec<_>>();
+                let protection = space_protection
+                    .query_space_protection(&member_ids)
+                    .await
+                    .map_err(|error| RosterError::SpaceProtection(error.to_string()))?;
+                let target_status = protection
+                    .members
+                    .iter()
+                    .find(|member| member.device_id == device_id)
+                    .map(|member| member.status);
+                if matches!(
+                    target_status,
+                    Some(
+                        CoreMemberProtectionStatus::AwaitingReadmission
+                            | CoreMemberProtectionStatus::RequiresReadmission
+                    )
+                ) {
+                    if target_status == Some(CoreMemberProtectionStatus::AwaitingReadmission) {
+                        let bootstrap = protection
+                            .legacy_bootstrap
+                            .ok_or(RosterError::Unavailable)?;
+                        self.group_bootstrap
+                            .as_ref()
+                            .ok_or(RosterError::Unavailable)?
+                            .withdraw_legacy_readmission(
+                                &bootstrap.bootstrap_id,
+                                &device_id,
+                                now_ms,
+                            )
+                            .await
+                            .map_err(|error| RosterError::GroupBootstrap(error.to_string()))?;
+                    }
+                    self.remove_member_records(&device_id).await?;
+                    return Ok(MemberRevocationView {
+                        revocation_id: None,
+                        state: MemberRevocationState::Complete,
+                        pending_recipients: 0,
+                    });
+                }
+            }
             let retained_recipients = members
                 .into_iter()
                 .filter(|candidate| candidate.device_id != device_id)
@@ -305,11 +350,7 @@ impl MemberRosterFacade {
                 .map(|candidate| candidate.device_id)
                 .collect::<Vec<_>>();
             group_revocation
-                .revoke_group_member(
-                    &device_id,
-                    &retained_recipients,
-                    chrono::Utc::now().timestamp_millis(),
-                )
+                .revoke_group_member(&device_id, &retained_recipients, now_ms)
                 .await
                 .map_err(|error| RosterError::GroupRevocation(error.to_string()))?
         } else {
@@ -1370,6 +1411,12 @@ mod tests {
                 member: &DeviceId,
                 now_ms: i64,
             ) -> Result<uc_core::membership::GroupBootstrapResult, uc_core::membership::BootstrapError>;
+            async fn withdraw_legacy_readmission(
+                &self,
+                bootstrap_id: &uc_core::membership::BootstrapId,
+                member: &DeviceId,
+                now_ms: i64,
+            ) -> Result<uc_core::membership::GroupBootstrapResult, uc_core::membership::BootstrapError>;
             async fn query_legacy_bootstrap(
                 &self,
                 bootstrap_id: &uc_core::membership::BootstrapId,
@@ -1378,6 +1425,18 @@ mod tests {
                 &self,
                 now_ms: i64,
             ) -> Result<Vec<uc_core::membership::GroupBootstrapResult>, uc_core::membership::BootstrapError>;
+        }
+    }
+
+    mockall::mock! {
+        SpaceProtection {}
+
+        #[async_trait]
+        impl uc_core::membership::SpaceProtectionStatusPort for SpaceProtection {
+            async fn query_space_protection(
+                &self,
+                members: &[DeviceId],
+            ) -> Result<uc_core::membership::SpaceProtectionSnapshot, uc_core::membership::SpaceProtectionError>;
         }
     }
 
@@ -1548,6 +1607,88 @@ mod tests {
         let error = facade.revoke_member("dev-1").await.unwrap_err();
 
         assert!(matches!(error, RosterError::GroupRevocation(_)));
+    }
+
+    #[tokio::test]
+    async fn revoke_member_removes_a_legacy_peer_waiting_for_readmission() {
+        let local_fingerprint = fp("LOCAL");
+        let target = member("dev-1", "Legacy device", fp("REMOTE"));
+        let local = member("dev-local", "This device", local_fingerprint.clone());
+        let mut repo = MockMemberRepo::new();
+        let target_for_get = target.clone();
+        repo.expect_get()
+            .times(1)
+            .returning(move |_| Ok(Some(target_for_get.clone())));
+        repo.expect_list()
+            .times(1)
+            .returning(move || Ok(vec![local.clone(), target.clone()]));
+        repo.expect_remove()
+            .times(1)
+            .withf(|device_id| device_id == &DeviceId::new("dev-1"))
+            .returning(|_| Ok(true));
+        let mut local_identity = MockLocalIdentity::new();
+        local_identity
+            .expect_get_current_fingerprint()
+            .times(1)
+            .returning(move || Ok(Some(local_fingerprint.clone())));
+        let mut peer_addr = MockPeerAddrRepo::new();
+        peer_addr.expect_remove().times(1).returning(|_| Ok(()));
+        let mut trusted = MockTrustedPeerRepo::new();
+        trusted.expect_remove().times(1).returning(|_| Ok(true));
+
+        let bootstrap_id = BootstrapId::from_string("bootstrap-auto-upgrade").unwrap();
+        let mut protection = MockSpaceProtection::new();
+        let expected_bootstrap_id = bootstrap_id.clone();
+        protection
+            .expect_query_space_protection()
+            .times(1)
+            .withf(|members| members == [DeviceId::new("dev-local"), DeviceId::new("dev-1")])
+            .returning(move |_| {
+                Ok(SpaceProtectionSnapshot {
+                    mode: CoreSpaceProtectionMode::Ready,
+                    members: vec![uc_core::membership::MemberProtection {
+                        device_id: DeviceId::new("dev-1"),
+                        status: CoreMemberProtectionStatus::AwaitingReadmission,
+                    }],
+                    legacy_bootstrap: Some(uc_core::membership::LegacyBootstrapProgress {
+                        bootstrap_id: expected_bootstrap_id.clone(),
+                        status: LegacyBootstrapStatus::AwaitingReadmission,
+                        pending_readmission: 1,
+                    }),
+                })
+            });
+        let mut bootstrap = MockGroupBootstrap::new();
+        bootstrap
+            .expect_withdraw_legacy_readmission()
+            .times(1)
+            .withf(move |actual_id, member, _| {
+                actual_id == &bootstrap_id && member == &DeviceId::new("dev-1")
+            })
+            .returning(|actual_id, _, _| {
+                Ok(GroupBootstrapResult::Complete {
+                    bootstrap_id: actual_id.clone(),
+                })
+            });
+        let mut group = MockGroupRevocation::new();
+        group.expect_revoke_group_member().times(0);
+        let facade = MemberRosterFacade::new_with_group_revocation(
+            MemberRosterDeps {
+                member_repo: Arc::new(repo),
+                peer_addr_repo: Arc::new(peer_addr),
+                trusted_peer_repo: Arc::new(trusted),
+                local_identity: Arc::new(local_identity),
+                presence: Arc::new(FakePresence::new(vec![])),
+                connection_channel: None,
+            },
+            Arc::new(group),
+        )
+        .with_group_bootstrap(Arc::new(bootstrap))
+        .with_space_protection(Arc::new(protection));
+
+        let result = facade.revoke_member("dev-1").await.unwrap();
+
+        assert_eq!(result.state, MemberRevocationState::Complete);
+        assert_eq!(result.pending_recipients, 0);
     }
 
     #[tokio::test]

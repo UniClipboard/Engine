@@ -140,6 +140,20 @@ pub struct MemberRevocationResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum LegacyMemberRemovalOutcome {
+    AwaitingReadmission,
+    Complete,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LegacyMemberRemovalResult {
+    pub bootstrap_id: String,
+    pub outcome: LegacyMemberRemovalOutcome,
+    pub pending_readmission: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum EntryNotResendableReason {
     RemoteOrigin,
     PayloadLost,
@@ -187,6 +201,10 @@ enum WorkerCommand {
     RemoveMember {
         device_id: String,
         response: mpsc::Sender<Result<MemberRevocationResult, BindingError>>,
+    },
+    SecureRemoveLegacyMember {
+        device_id: String,
+        response: mpsc::Sender<Result<LegacyMemberRemovalResult, BindingError>>,
     },
     QueryMemberRevocation {
         revocation_id: String,
@@ -429,6 +447,16 @@ impl MobileEngine {
 
     pub fn remove_member(&self, device_id: String) -> Result<MemberRevocationResult, BindingError> {
         self.request(|response| WorkerCommand::RemoveMember {
+            device_id,
+            response,
+        })
+    }
+
+    pub fn secure_remove_legacy_member(
+        &self,
+        device_id: String,
+    ) -> Result<LegacyMemberRemovalResult, BindingError> {
+        self.request(|response| WorkerCommand::SecureRemoveLegacyMember {
             device_id,
             response,
         })
@@ -841,6 +869,19 @@ async fn run_worker_loop(
                     .and_then(map_member_removed);
                 let _ = response.send(result);
             }
+            WorkerCommand::SecureRemoveLegacyMember {
+                device_id,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::SecureRemoveLegacyMember(RemoveMemberInput {
+                        device_id,
+                    }))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_legacy_member_removal);
+                let _ = response.send(result);
+            }
             WorkerCommand::QueryMemberRevocation {
                 revocation_id,
                 response,
@@ -1228,6 +1269,27 @@ fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
 fn map_member_removed(result: OperationResult) -> Result<MemberRevocationResult, BindingError> {
     match result {
         OperationResult::MemberRemoved(summary) => Ok(map_member_revocation_summary(summary)),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_legacy_member_removal(
+    result: OperationResult,
+) -> Result<LegacyMemberRemovalResult, BindingError> {
+    match result {
+        OperationResult::LegacyMemberRemoval(summary) => Ok(LegacyMemberRemovalResult {
+            bootstrap_id: summary.bootstrap_id,
+            outcome: match summary.outcome {
+                uc_engine::LegacyBootstrapOutcome::AwaitingReadmission => {
+                    LegacyMemberRemovalOutcome::AwaitingReadmission
+                }
+                uc_engine::LegacyBootstrapOutcome::Complete => LegacyMemberRemovalOutcome::Complete,
+                uc_engine::LegacyBootstrapOutcome::RecoveryRequired => {
+                    LegacyMemberRemovalOutcome::RecoveryRequired
+                }
+            },
+            pending_readmission: summary.pending_readmission,
+        }),
         _ => Err(BindingError::UnexpectedResult),
     }
 }
@@ -1743,6 +1805,32 @@ mod tests {
 
             assert_eq!(invitation.availability, binding_availability);
         }
+    }
+
+    #[test]
+    fn legacy_member_removal_survives_the_mobile_binding() {
+        let _public_method: fn(
+            &MobileEngine,
+            String,
+        ) -> Result<LegacyMemberRemovalResult, BindingError> =
+            MobileEngine::secure_remove_legacy_member;
+        let removal = map_legacy_member_removal(OperationResult::LegacyMemberRemoval(
+            uc_engine::LegacyBootstrapSummary {
+                bootstrap_id: "bootstrap-1".to_owned(),
+                outcome: uc_engine::LegacyBootstrapOutcome::AwaitingReadmission,
+                pending_readmission: 2,
+            },
+        ))
+        .expect("legacy member removal must map into the mobile binding");
+
+        assert_eq!(
+            removal,
+            LegacyMemberRemovalResult {
+                bootstrap_id: "bootstrap-1".to_owned(),
+                outcome: LegacyMemberRemovalOutcome::AwaitingReadmission,
+                pending_readmission: 2,
+            }
+        );
     }
 
     #[test]

@@ -1095,6 +1095,12 @@ mod tests {
                 member: &DeviceId,
                 now_ms: i64,
             ) -> Result<uc_core::membership::GroupBootstrapResult, uc_core::membership::BootstrapError>;
+            async fn withdraw_legacy_readmission(
+                &self,
+                bootstrap_id: &uc_core::membership::BootstrapId,
+                member: &DeviceId,
+                now_ms: i64,
+            ) -> Result<uc_core::membership::GroupBootstrapResult, uc_core::membership::BootstrapError>;
             async fn query_legacy_bootstrap(
                 &self,
                 bootstrap_id: &uc_core::membership::BootstrapId,

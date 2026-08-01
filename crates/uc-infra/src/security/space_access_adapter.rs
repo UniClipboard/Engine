@@ -2091,6 +2091,22 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
         )
     }
 
+    async fn withdraw_legacy_readmission(
+        &self,
+        bootstrap_id: &BootstrapId,
+        member: &DeviceId,
+        now_ms: i64,
+    ) -> Result<GroupBootstrapResult, BootstrapError> {
+        let repository = self.legacy_bootstrap_repository.as_ref().ok_or_else(|| {
+            BootstrapError::Repository("legacy bootstrap is not configured".into())
+        })?;
+        bootstrap_result(
+            repository
+                .acknowledge_legacy_readmission(bootstrap_id, member, now_ms)
+                .await?,
+        )
+    }
+
     async fn query_legacy_bootstrap(
         &self,
         bootstrap_id: &BootstrapId,
@@ -2799,6 +2815,47 @@ mod admission_tests {
                 .unwrap(),
             GroupBootstrapResult::Complete { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn withdrawing_legacy_readmission_removes_the_pending_member() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-bootstrap-withdrawal");
+        session.set_master_key_for_space(space_id, MasterKey::from_bytes(&[0x7b; 32]).unwrap());
+        let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
+        let key_epoch_repository: Arc<dyn RevocationRepositoryPort> =
+            Arc::new(MockRevocationRepository::new());
+        let adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            key_epoch_repository,
+            bootstrap_repository.clone(),
+        );
+        let sponsor = DeviceId::new("sponsor-device");
+        let removed = DeviceId::new("legacy-device");
+        let bootstrap_id = match adapter
+            .bootstrap_legacy_space(&sponsor, &[removed.clone()], 100)
+            .await
+            .unwrap()
+        {
+            GroupBootstrapResult::AwaitingReadmission { bootstrap_id, .. } => bootstrap_id,
+            other => panic!("unexpected bootstrap result: {other:?}"),
+        };
+
+        let result = adapter
+            .withdraw_legacy_readmission(&bootstrap_id, &removed, 110)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, GroupBootstrapResult::Complete { .. }));
+        let record = bootstrap_repository
+            .get_legacy_bootstrap(&bootstrap_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(record.pending_readmission().is_empty());
     }
 
     #[tokio::test]
