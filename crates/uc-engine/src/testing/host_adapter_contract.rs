@@ -151,6 +151,7 @@ async fn host_analytics_reaches_application_and_identity_wiring() {
             temp.path().join("private"),
             temp.path().join("cache"),
             temp.path().join("temporary"),
+            temp.path().join("logs"),
         ),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(StaticHostClipboard {
@@ -195,6 +196,7 @@ async fn relay_settings_and_credential_save_through_one_engine_operation() {
             temp.path().join("private"),
             temp.path().join("cache"),
             temp.path().join("temporary"),
+            temp.path().join("logs"),
         ),
         Box::new(storage.clone()),
         Box::new(StaticHostClipboard {
@@ -560,7 +562,7 @@ async fn engine_shutdown_removes_host_clipboard_imports() {
     }
     let bytes = b"clipboard file content".to_vec();
     let host = HostCapabilities::new(
-        HostDirectories::new(private, cache, temporary.clone()),
+        HostDirectories::new(private, cache, temporary.clone(), temp.path().join("logs")),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(StaticHostClipboard {
             snapshot: HostClipboardSnapshot {
@@ -625,7 +627,7 @@ async fn host_clipboard_change_is_processed_by_the_engine_and_stops_on_shutdown(
     let (change_tx, change_rx) = tokio::sync::mpsc::unbounded_channel();
     let stopped = Arc::new(AtomicBool::new(false));
     let host = HostCapabilities::new(
-        HostDirectories::new(private, cache, temporary),
+        HostDirectories::new(private, cache, temporary, temp.path().join("logs")),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(NotifyingHostClipboard {
             snapshot: HostClipboardSnapshot {
@@ -711,6 +713,7 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
                 first_temp.path().join("private"),
                 first_temp.path().join("cache"),
                 first_temp.path().join("temporary"),
+                first_temp.path().join("logs"),
             ),
             Box::new(MemoryHostSecureStorage::default()),
             Box::new(StaticHostClipboard {
@@ -743,6 +746,7 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
                 second_temp.path().join("private"),
                 second_temp.path().join("cache"),
                 second_temp.path().join("temporary"),
+                second_temp.path().join("logs"),
             ),
             Box::new(MemoryHostSecureStorage::default()),
             Box::new(StaticHostClipboard {
@@ -767,11 +771,12 @@ async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
 }
 
 #[test]
-fn host_directories_derive_only_private_and_cache_storage_paths() {
+fn host_directories_preserve_the_host_log_directory() {
     let directories = HostDirectories::new(
         "/host/private".into(),
         "/host/cache".into(),
         "/host/temporary".into(),
+        "/host/platform-logs".into(),
     );
 
     let paths = crate::assembly::host::derive_app_paths(&directories);
@@ -791,6 +796,7 @@ fn host_directories_derive_only_private_and_cache_storage_paths() {
     );
     assert_eq!(paths.cache_dir, std::path::Path::new("/host/cache"));
     assert_eq!(paths.spool_dir, std::path::Path::new("/host/cache/spool"));
+    assert_eq!(paths.logs_dir, std::path::Path::new("/host/platform-logs"));
 }
 
 #[tokio::test]
@@ -988,7 +994,7 @@ async fn host_capabilities_wire_real_core_dependencies() {
     let cache = temp.path().join("cache");
     let temporary = temp.path().join("temporary");
     let host = HostCapabilities::new(
-        HostDirectories::new(private.clone(), cache, temporary),
+        HostDirectories::new(private.clone(), cache, temporary, temp.path().join("logs")),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(StaticHostClipboard {
             snapshot: HostClipboardSnapshot {
@@ -1031,6 +1037,7 @@ async fn engine_start_builds_a_resumable_real_session() {
             private.clone(),
             temp.path().join("cache"),
             temp.path().join("temporary"),
+            temp.path().join("logs"),
         ),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(StaticHostClipboard {
@@ -2122,6 +2129,7 @@ async fn engine_rejects_lan_operations_without_lan_compatibility() {
             temp.path().join("private"),
             temp.path().join("cache"),
             temp.path().join("temporary"),
+            temp.path().join("logs"),
         ),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(StaticHostClipboard {
@@ -2171,6 +2179,7 @@ async fn engine_mobile_content_round_trips_and_drops_uploads_on_suspend() {
             temp.path().join("private"),
             temp.path().join("cache"),
             temp.path().join("temporary"),
+            temp.path().join("logs"),
         ),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(StaticHostClipboard {
@@ -2441,6 +2450,7 @@ async fn engine_mobile_upload_owns_transfer_lifecycle_events() {
             temp.path().join("private"),
             temp.path().join("cache"),
             temp.path().join("temporary"),
+            temp.path().join("logs"),
         ),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(StaticHostClipboard {
@@ -2619,7 +2629,12 @@ async fn engine_send_files_imports_opaque_content_and_exports_after_resume() {
     let file_bytes = b"host file payload survives import and resend".to_vec();
     let host_files = Arc::new(RecordingHostFilesState::default());
     let host = HostCapabilities::new(
-        HostDirectories::new(private.clone(), cache.clone(), temporary.clone()),
+        HostDirectories::new(
+            private.clone(),
+            cache.clone(),
+            temporary.clone(),
+            temp.path().join("logs"),
+        ),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(StaticHostClipboard {
             snapshot: HostClipboardSnapshot {
@@ -2765,6 +2780,7 @@ async fn recovering_a_locked_restart_from_secure_storage_restores_keyword_search
             private.clone(),
             temp.path().join("cache"),
             temp.path().join("temporary"),
+            temp.path().join("logs"),
         ),
         Box::new(secure_storage.clone()),
         Box::new(StaticHostClipboard {
@@ -2813,6 +2829,7 @@ async fn recovering_a_locked_restart_from_secure_storage_restores_keyword_search
             private,
             temp.path().join("cache"),
             temp.path().join("temporary"),
+            temp.path().join("logs"),
         ),
         Box::new(secure_storage),
         Box::new(StaticHostClipboard {
@@ -2898,7 +2915,12 @@ async fn production_engine_restarts_ten_times_with_the_same_network_identity() {
 
     for cycle in 0..10 {
         let host = HostCapabilities::new(
-            HostDirectories::new(private.clone(), cache.clone(), temporary.clone()),
+            HostDirectories::new(
+                private.clone(),
+                cache.clone(),
+                temporary.clone(),
+                temp.path().join("logs"),
+            ),
             Box::new(secure_storage.clone()),
             Box::new(StaticHostClipboard {
                 snapshot: HostClipboardSnapshot {
@@ -2978,7 +3000,12 @@ async fn persisted_engine_text_image_preview_and_logs_do_not_leave_plaintext_on_
     std::fs::write(&probe_file, &probe).unwrap();
 
     let host = HostCapabilities::new(
-        HostDirectories::new(private.clone(), cache.clone(), temporary.clone()),
+        HostDirectories::new(
+            private.clone(),
+            cache.clone(),
+            temporary.clone(),
+            logs.clone(),
+        ),
         Box::new(MemoryHostSecureStorage::default()),
         Box::new(StaticHostClipboard {
             snapshot: HostClipboardSnapshot {

@@ -59,14 +59,16 @@ pub struct HostDirectories {
     private_data: PathBuf,
     cache: PathBuf,
     temporary: PathBuf,
+    logs: PathBuf,
 }
 
 impl HostDirectories {
-    pub fn new(private_data: PathBuf, cache: PathBuf, temporary: PathBuf) -> Self {
+    pub fn new(private_data: PathBuf, cache: PathBuf, temporary: PathBuf, logs: PathBuf) -> Self {
         Self {
             private_data,
             cache,
             temporary,
+            logs,
         }
     }
 
@@ -81,6 +83,10 @@ impl HostDirectories {
     pub fn temporary(&self) -> &Path {
         &self.temporary
     }
+
+    pub fn logs(&self) -> &Path {
+        &self.logs
+    }
 }
 
 impl fmt::Debug for HostDirectories {
@@ -90,6 +96,7 @@ impl fmt::Debug for HostDirectories {
             .field("private_data", &"[REDACTED]")
             .field("cache", &"[REDACTED]")
             .field("temporary", &"[REDACTED]")
+            .field("logs", &"[REDACTED]")
             .finish()
     }
 }

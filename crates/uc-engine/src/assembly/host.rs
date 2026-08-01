@@ -271,7 +271,7 @@ pub fn derive_app_paths(directories: &HostDirectories) -> AppPaths {
     AppPaths::from_app_dirs(&AppDirs {
         app_data_root: directories.private_data().to_path_buf(),
         app_cache_root: directories.cache().to_path_buf(),
-        app_log_dir: directories.cache().join("logs"),
+        app_log_dir: directories.logs().to_path_buf(),
     })
 }
 

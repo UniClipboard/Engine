@@ -94,6 +94,7 @@ fn host_capabilities_are_constructible_without_internal_ports() {
             PathBuf::from("/private/data"),
             PathBuf::from("/private/cache"),
             PathBuf::from("/private/temp"),
+            PathBuf::from("/private/logs"),
         ),
         Box::new(MemorySecureStorage::default()),
         Box::new(EmptyClipboard),

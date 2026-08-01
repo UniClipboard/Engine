@@ -28,10 +28,12 @@ pub(crate) fn unref_callbacks(host: &mut OhHost, env: &Env) -> napi::Result<()> 
 }
 
 pub(crate) fn capabilities(host: OhHost) -> napi::Result<HostCapabilities> {
+    let cache_directory = PathBuf::from(host.cache_directory);
     let directories = HostDirectories::new(
         PathBuf::from(host.private_data_directory),
-        PathBuf::from(host.cache_directory),
+        cache_directory.clone(),
         PathBuf::from(host.temporary_directory),
+        cache_directory.join("logs"),
     );
     for directory in [
         directories.private_data(),

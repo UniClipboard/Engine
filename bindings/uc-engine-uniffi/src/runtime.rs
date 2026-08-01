@@ -1460,10 +1460,12 @@ fn count_to_u64(value: usize) -> Result<u64, BindingError> {
 }
 
 fn host_capabilities(host: Arc<dyn BindingHost>) -> Result<HostCapabilities, BindingError> {
+    let cache_directory = host_path(host.cache_directory())?;
     let directories = HostDirectories::new(
         host_path(host.private_data_directory())?,
-        host_path(host.cache_directory())?,
+        cache_directory.clone(),
         host_path(host.temporary_directory())?,
+        cache_directory.join("logs"),
     );
     for directory in [
         directories.private_data(),

@@ -354,6 +354,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                     directories[0].clone(),
                     directories[1].clone(),
                     directories[2].clone(),
+                    directories[1].join("logs"),
                 ),
                 host_secure_storage(),
                 Box::new(ProbeClipboard),
