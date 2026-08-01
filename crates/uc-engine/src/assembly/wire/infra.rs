@@ -22,7 +22,10 @@ pub(super) fn build_space_access_ports(
     current_profile: &Arc<dyn uc_core::ports::security::current_profile::CurrentProfilePort>,
     session: &Arc<InMemorySession>,
     db_executor: &Arc<DieselSqliteExecutor>,
-) -> SpaceAccessPorts {
+) -> (
+    SpaceAccessPorts,
+    Arc<dyn uc_core::membership::LegacyProtectionPort>,
+) {
     let security_repository = Arc::new(DieselSpaceSecurityStore::new(
         db_executor.clone(),
         session.as_ref().clone(),
@@ -30,7 +33,7 @@ pub(super) fn build_space_access_ports(
     let key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> =
         security_repository.clone();
     let legacy_bootstrap_repository: Arc<dyn uc_core::membership::LegacyBootstrapRepositoryPort> =
-        security_repository;
+        security_repository.clone();
     let space_access_adapter = Arc::new(
         uc_infra::security::DefaultSpaceAccessAdapter::new_with_security_repositories(
             key_material.clone(),
@@ -40,7 +43,15 @@ pub(super) fn build_space_access_ports(
             legacy_bootstrap_repository,
         ),
     );
-    SpaceAccessPorts::from_adapter(space_access_adapter)
+    let legacy_protection: Arc<dyn uc_core::membership::LegacyProtectionPort> =
+        Arc::new(uc_infra::security::default_legacy_protection(
+            Arc::clone(&space_access_adapter),
+            security_repository,
+        ));
+    (
+        SpaceAccessPorts::from_adapter(space_access_adapter),
+        legacy_protection,
+    )
 }
 pub(super) fn build_peer_admission_port(
     session: &Arc<InMemorySession>,

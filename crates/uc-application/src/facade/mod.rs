@@ -22,6 +22,7 @@ pub mod diagnostics;
 pub mod encryption;
 pub mod file_transfer;
 pub mod host_event;
+pub mod legacy_upgrade;
 pub mod lifecycle;
 #[cfg(feature = "lan-compat")]
 pub mod mobile_sync;
@@ -110,6 +111,9 @@ pub use host_event::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError,
     FileTransferHostEventPublisher, HostEvent, HostEventBus, HostEventEmitterPort,
     OutboundEntryIdCache, TransferHostEvent,
+};
+pub use legacy_upgrade::{
+    AutomaticLegacyUpgrade, AutomaticLegacyUpgradeDeps, AutomaticLegacyUpgradeRuntime,
 };
 pub use lifecycle::{
     InMemoryLifecycleStatus, LifecycleFacade, LifecycleFacadeDeps, LifecycleFacadeError,

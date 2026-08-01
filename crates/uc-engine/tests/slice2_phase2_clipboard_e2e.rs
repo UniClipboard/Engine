@@ -798,7 +798,14 @@ async fn receiver_policy_blocks_then_restores_p2p_inbound_delivery() {
         )
         .await
         .expect("dispatch to policy-blocked receiver");
-    assert_eq!(blocked.total_accepted, 1, "wire delivery remains accepted");
+    assert_eq!(
+        blocked.total_accepted, 0,
+        "receiver-wide policy rejection must not be reported as accepted"
+    );
+    assert_eq!(
+        blocked.total_errored, 1,
+        "receiver-wide policy rejection must be reported to the sender"
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(500), joiner_notices.recv())
             .await
@@ -820,31 +827,37 @@ async fn receiver_policy_blocks_then_restores_p2p_inbound_delivery() {
     assert!(preferences.receive_enabled);
 
     let restored_text = "restored clipboard";
-    let restored = sponsor
-        .clipboard_sync
-        .dispatch_snapshot(
-            SystemClipboardSnapshot {
-                ts_ms: 1_700_000_000_001,
-                representations: vec![ObservedClipboardRepresentation::new(
-                    RepresentationId::new(),
-                    FormatId::from("text"),
-                    Some(MimeType("text/plain".to_string())),
-                    restored_text.as_bytes().to_vec(),
-                )],
-                file_content_digests: Vec::new(),
-                file_set_v1_component: None,
-            },
-            ClipboardChangeOrigin::LocalCapture,
-            None,
-            None,
-        )
-        .await
-        .expect("dispatch after receiver policy restore");
-    assert_eq!(restored.total_accepted, 1);
+    let sponsor_clipboard = Arc::clone(&sponsor.clipboard_sync);
+    let restored_dispatch = tokio::spawn(async move {
+        sponsor_clipboard
+            .dispatch_snapshot(
+                SystemClipboardSnapshot {
+                    ts_ms: 1_700_000_000_001,
+                    representations: vec![ObservedClipboardRepresentation::new(
+                        RepresentationId::new(),
+                        FormatId::from("text"),
+                        Some(MimeType("text/plain".to_string())),
+                        restored_text.as_bytes().to_vec(),
+                    )],
+                    file_content_digests: Vec::new(),
+                    file_set_v1_component: None,
+                },
+                ClipboardChangeOrigin::LocalCapture,
+                None,
+                None,
+            )
+            .await
+    });
     let notice = tokio::time::timeout(Duration::from_secs(5), joiner_notices.recv())
         .await
         .expect("restored receiver policy delivers inbound notice")
         .expect("inbound notice sender remains active");
+    assert!(notice.receipt.finish(InboundClipboardDisposition::Applied));
+    let restored = restored_dispatch
+        .await
+        .expect("restored dispatch task joins")
+        .expect("dispatch after receiver policy restore");
+    assert_eq!(restored.total_accepted, 1);
     let decoded = decode_v3_bytes_to_snapshot(&notice.plaintext)
         .expect("restored inbound notice is a V3 envelope");
     assert_eq!(
@@ -886,7 +899,14 @@ async fn receiver_policy_blocks_then_restores_p2p_inbound_delivery() {
         )
         .await
         .expect("dispatch to text-filtered receiver");
-    assert_eq!(filtered.total_accepted, 1, "wire delivery remains accepted");
+    assert_eq!(
+        filtered.total_accepted, 0,
+        "content-type rejection must not be reported as accepted"
+    );
+    assert_eq!(
+        filtered.total_errored, 1,
+        "content-type rejection must be reported to the sender"
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(500), joiner_notices.recv())
             .await

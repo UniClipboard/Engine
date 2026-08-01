@@ -169,6 +169,24 @@ impl std::fmt::Debug for CompletedMlsJoin {
 pub(crate) struct MlsGroupEngine;
 
 impl MlsGroupEngine {
+    pub(crate) fn validate_state(
+        client_state: &MlsClientState,
+        expected_space_id: &[u8],
+    ) -> Result<(), MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        if group_id != expected_space_id {
+            return Err(MlsGroupError::IdentityMismatch);
+        }
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        Ok(())
+    }
+
     pub(crate) fn create_sponsor(
         space_id: &[u8],
         device_identity: &[u8],

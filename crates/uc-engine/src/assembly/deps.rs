@@ -65,6 +65,8 @@ pub struct BackgroundRuntimeDeps {
 /// AppFacade path.
 #[derive(Clone)]
 pub struct SyncEngineDeps {
+    /// Automatic legacy protection is installed only with the P2P runtime.
+    pub legacy_protection: Arc<dyn uc_core::membership::LegacyProtectionPort>,
     /// Authoritative authorization check used by every inbound Iroh handler
     /// after it resolves an endpoint identity to a known device.
     pub peer_admission: Arc<dyn uc_core::membership::PeerAdmissionPort>,

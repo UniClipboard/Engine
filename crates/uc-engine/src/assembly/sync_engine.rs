@@ -47,11 +47,11 @@ use uc_application::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::clipboard_write::ClipboardWriteIntent;
 use uc_application::facade::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
-    ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, BlobTransferDeps,
-    BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
-    ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent, HostEventBus,
-    InboundClipboardApplyPort, IngestHandle, MemberRosterDeps, MemberRosterFacade, SpaceSetupDeps,
-    SpaceSetupFacade, TransferHostEvent,
+    ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, AutomaticLegacyUpgradeRuntime,
+    BlobTransferDeps, BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort,
+    ClipboardLiveIndexer, ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent,
+    HostEventBus, InboundClipboardApplyPort, IngestHandle, MemberRosterDeps, MemberRosterFacade,
+    SpaceSetupDeps, SpaceSetupFacade, TransferHostEvent,
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_application::{
@@ -83,6 +83,7 @@ pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 
 use crate::assembly::deps::{SharedRuntimeDeps, SyncEngineDeps};
+use crate::assembly::legacy_upgrade::install_automatic_legacy_upgrade;
 use uc_application::deps::AppDeps;
 
 #[cfg(not(feature = "lan-compat"))]
@@ -162,6 +163,7 @@ pub struct SyncEngineAssembly {
     /// Retries encrypted group updates after restart and whenever peers
     /// become reachable. Aborted explicitly during shutdown.
     group_update_retry: JoinHandle<()>,
+    automatic_legacy_upgrade: AutomaticLegacyUpgradeRuntime,
 }
 
 impl SyncEngineAssembly {
@@ -197,6 +199,7 @@ impl SyncEngineAssembly {
         self.active_clipboard_lifecycle.shutdown().await;
         self.outbound_progress_translator.abort();
         self.group_update_retry.abort();
+        self.automatic_legacy_upgrade.shutdown().await;
         self.facade.on_shutdown().await;
         self.iroh_node.shutdown().await;
     }
@@ -484,6 +487,15 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.security.fingerprint),
         Arc::clone(&deps.security.space_access_ports.group_revocation),
     )?;
+    let automatic_legacy_upgrade = install_automatic_legacy_upgrade(
+        &mut builder,
+        Arc::clone(&space_setup.peer_addr_repo),
+        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&deps.security.fingerprint),
+        Arc::clone(&deps.device.device_identity),
+        Arc::clone(&space_setup.legacy_protection),
+        presence.subscribe(),
+    )?;
     // Install the active-clipboard state ALPN (0xC3) as an independent
     // sibling on the same node. A lone `.accept()` deeper in the node would
     // not be reachable from here — the handler has to be installed on this
@@ -665,7 +677,6 @@ pub async fn build_sync_engine_assembly(
         warn!(error = %error, "legacy bootstrap recovery could not resume during startup");
     }
     let group_update_retry = spawn_group_update_retry(Arc::clone(&roster));
-
     // Slice 2 Phase 2 · T10:剪切板同步门面。`dispatch_entry` 共享同一份
     // `peer_addr_repo` / `presence` 让 F1 hook 喂的 presence 缓存直接生
     // 效;`transfer_cipher` 与已有 file_transfer 路径同享 V3 chunked
@@ -858,5 +869,6 @@ pub async fn build_sync_engine_assembly(
         active_clipboard_lifecycle,
         outbound_progress_translator,
         group_update_retry,
+        automatic_legacy_upgrade,
     })
 }

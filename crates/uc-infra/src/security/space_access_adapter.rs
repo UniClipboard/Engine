@@ -28,13 +28,14 @@ use super::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
 use super::secrets::{Kek, MasterKey};
 use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
 use uc_core::membership::{
-    BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult,
-    GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError, LegacyBootstrapProgress,
-    LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
-    LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus, PendingGroupUpdate,
-    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
-    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError,
-    SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
+    AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort,
+    GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
+    LegacyBootstrapProgress, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
+    LegacyBootstrapStage, LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus,
+    PendingGroupUpdate, ProtectionGroupAdmission, ProtectionGroupId, RevocationId,
+    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
+    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError, SpaceProtectionMode,
+    SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
@@ -56,8 +57,8 @@ const MAX_STALLED_REVOCATION_ITERATIONS: usize = 3;
 pub struct DefaultSpaceAccessAdapter {
     key_material: Arc<KeyMaterialStore>,
     current_profile: Arc<dyn CurrentProfilePort>,
-    session: Arc<InMemorySession>,
-    key_epoch_repository: Option<Arc<dyn RevocationRepositoryPort>>,
+    pub(super) session: Arc<InMemorySession>,
+    pub(super) key_epoch_repository: Option<Arc<dyn RevocationRepositoryPort>>,
     legacy_bootstrap_repository: Option<Arc<dyn LegacyBootstrapRepositoryPort>>,
     /// 本进程内是否已经确认 keychain 中存在与本机 keyslot 匹配的 KEK。
     ///
@@ -384,7 +385,7 @@ impl DefaultSpaceAccessAdapter {
             .map_err(map_encryption_error)
     }
 
-    async fn prepare_group_join(
+    pub(super) async fn prepare_group_join(
         &self,
         device_id: &DeviceId,
     ) -> Result<PreparedGroupJoin, SpaceAccessError> {
@@ -435,14 +436,15 @@ impl DefaultSpaceAccessAdapter {
         }
     }
 
-    async fn admit_group_member(
+    pub(super) async fn admit_group_member_with_replay(
         &self,
         space_id: &SpaceId,
         sponsor_device_id: &DeviceId,
         joiner_device_id: &DeviceId,
         existing_member_ids: &[DeviceId],
         key_package: &[u8],
-    ) -> Result<GroupAdmission, SpaceAccessError> {
+        admission_replay: Option<(DeviceId, AdmissionReplayId)>,
+    ) -> Result<(GroupAdmission, Option<ProtectionGroupAdmission>), SpaceAccessError> {
         let repository = self
             .key_epoch_repository
             .as_ref()
@@ -479,6 +481,7 @@ impl DefaultSpaceAccessAdapter {
             key_package,
         )
         .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let epoch = GroupEpoch::new(admission.epoch);
         let mut next = self
             .session
@@ -486,7 +489,7 @@ impl DefaultSpaceAccessAdapter {
                 &current,
                 admission.sponsor_state.into_bytes(),
                 epoch,
-                chrono::Utc::now().timestamp_millis(),
+                now_ms,
             )
             .map_err(map_encryption_error)?;
         let encrypted_key_catalog =
@@ -505,10 +508,28 @@ impl DefaultSpaceAccessAdapter {
                 PendingGroupUpdate::persistent(recipient, existing_member_update.clone())
             })
             .collect::<Vec<_>>();
-        next.add_pending_group_updates(
-            existing_member_updates.iter().cloned(),
-            chrono::Utc::now().timestamp_millis(),
-        );
+        next.add_pending_group_updates(existing_member_updates.iter().cloned(), now_ms);
+        let group_admission = GroupAdmission {
+            welcome: admission.welcome,
+            encrypted_key_catalog,
+            existing_member_updates,
+            group_epoch: admission.epoch,
+        };
+        let replay_admission = if let Some((receiver, replay_id)) = admission_replay {
+            let protection_group_id = next
+                .state()
+                .protection_group_id()
+                .cloned()
+                .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+            let cached = ProtectionGroupAdmission {
+                protection_group_id: protection_group_id.clone(),
+                admission: group_admission.clone(),
+            };
+            next.cache_group_admission(receiver, replay_id, cached.clone(), now_ms);
+            Some(cached)
+        } else {
+            None
+        };
 
         // Validate the complete material before making the durable generation
         // visible. The real session install after the write is then infallible
@@ -530,19 +551,30 @@ impl DefaultSpaceAccessAdapter {
         self.session
             .install_space_material(&next)
             .map_err(map_encryption_error)?;
-        self.acknowledge_bootstrap_readmission_after_admission(
-            space_id,
-            joiner_device_id,
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .await;
+        self.acknowledge_bootstrap_readmission_after_admission(space_id, joiner_device_id, now_ms)
+            .await;
 
-        Ok(GroupAdmission {
-            welcome: admission.welcome,
-            encrypted_key_catalog,
-            existing_member_updates,
-            group_epoch: admission.epoch,
-        })
+        Ok((group_admission, replay_admission))
+    }
+
+    async fn admit_group_member(
+        &self,
+        space_id: &SpaceId,
+        sponsor_device_id: &DeviceId,
+        joiner_device_id: &DeviceId,
+        existing_member_ids: &[DeviceId],
+        key_package: &[u8],
+    ) -> Result<GroupAdmission, SpaceAccessError> {
+        self.admit_group_member_with_replay(
+            space_id,
+            sponsor_device_id,
+            joiner_device_id,
+            existing_member_ids,
+            key_package,
+            None,
+        )
+        .await
+        .map(|(admission, _)| admission)
     }
 
     async fn install_group_join(
@@ -643,6 +675,42 @@ impl DefaultSpaceAccessAdapter {
         }
         self.kek_observed.store(true, Ordering::Release);
         Ok(())
+    }
+
+    pub(super) fn complete_group_join_material(
+        &self,
+        space_id: &SpaceId,
+        pending: PreparedGroupJoin,
+        welcome: &[u8],
+        encrypted_key_catalog: &[u8],
+        group_epoch: u64,
+    ) -> Result<SpaceKeyMaterial, SpaceAccessError> {
+        let (key_package, private_state) = pending.into_parts();
+        let completed = MlsGroupEngine::complete_join(
+            PendingMlsJoin {
+                key_package,
+                client_state: MlsClientState::from_bytes(private_state),
+            },
+            space_id.as_ref().as_bytes(),
+            welcome,
+        )
+        .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        if completed.epoch != group_epoch {
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+        let portable = open_group_catalog(
+            &completed.wrapping_key,
+            space_id,
+            group_epoch,
+            encrypted_key_catalog,
+        )
+        .map_err(map_encryption_error)?;
+        Ok(SpaceKeyMaterial::new(
+            portable.state,
+            completed.client_state.into_bytes(),
+            portable.key_catalog,
+            chrono::Utc::now().timestamp_millis(),
+        ))
     }
 
     async fn revoke_group_member(
@@ -1974,7 +2042,13 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
                 .map_err(|_| BootstrapError::CryptographicState)?;
                 let material = self
                     .session
-                    .create_legacy_bootstrap_material(&space_id, sponsor_state.into_bytes(), now_ms)
+                    .create_legacy_bootstrap_material_in_group(
+                        &space_id,
+                        ProtectionGroupId::from_string(record.bootstrap_id().as_str())
+                            .map_err(|_| BootstrapError::InvalidBootstrapId)?,
+                        sponsor_state.into_bytes(),
+                        now_ms,
+                    )
                     .map_err(|_| BootstrapError::CryptographicState)?;
                 let mut staged_record = record;
                 staged_record.transition_to(LegacyBootstrapStatus::Staged, now_ms)?;
@@ -2039,8 +2113,30 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
             BootstrapError::Repository("legacy bootstrap is not configured".into())
         })?;
         let records = repository.list_incomplete_legacy_bootstraps().await?;
+        let active_space_id = self
+            .session
+            .current_space_id()
+            .map_err(|_| BootstrapError::CryptographicState)?;
+        let active_material = self
+            .key_epoch_repository
+            .as_ref()
+            .ok_or_else(|| {
+                BootstrapError::Repository("key epoch repository is not configured".into())
+            })?
+            .load_space_material(&active_space_id)
+            .await
+            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
         let mut results = Vec::with_capacity(records.len());
         for record in records {
+            if active_material.as_ref().is_some_and(|material| {
+                material.state().mode() == SpaceSecurityMode::Ready
+                    && material
+                        .state()
+                        .protection_group_id()
+                        .is_some_and(|group_id| group_id.as_str() != record.bootstrap_id().as_str())
+            }) {
+                continue;
+            }
             match record.status() {
                 LegacyBootstrapStatus::Prepared | LegacyBootstrapStatus::Staged => {
                     results.push(
@@ -2123,6 +2219,15 @@ impl SpaceProtectionStatusPort for DefaultSpaceAccessAdapter {
                 .find(|record| {
                     record.space_id() == &space_id
                         && record.status() != LegacyBootstrapStatus::Complete
+                        && material.as_ref().is_none_or(|material| {
+                            material.state().mode() != SpaceSecurityMode::Ready
+                                || material
+                                    .state()
+                                    .protection_group_id()
+                                    .is_none_or(|group_id| {
+                                        group_id.as_str() == record.bootstrap_id().as_str()
+                                    })
+                        })
                 })
         } else {
             None
@@ -2208,14 +2313,21 @@ mod admission_tests {
     use uc_core::membership::{
         BeginRevocationOutcome, BootstrapError, BootstrapId, ContentKeyId, ContentKeyPurpose,
         GroupBootstrapPort, GroupBootstrapResult, KeyEpochError, LegacyBootstrapRecord,
-        LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus, RevocationId,
+        LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
+        LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult,
+        LegacyRequestInspection, LegacyUpgradeDescriptor, LegacyUpgradeRequest, RevocationId,
         RevocationRecord, RevocationStage, RevocationStatus,
     };
     use uc_core::pairing::InvitationCode;
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
+    use crate::db::executor::DieselSqliteExecutor;
+    use crate::db::pool::init_db_pool;
+    use crate::db::repositories::DieselSpaceSecurityStore;
     use crate::fs::key_slot_store::JsonKeySlotStore;
+    use crate::security::legacy_upgrade::proof::{request_id, request_transcript};
+    use crate::security::legacy_upgrade::DefaultLegacyProtection;
     use crate::security::DefaultCurrentProfile;
 
     mockall::mock! {
@@ -2654,6 +2766,14 @@ mod admission_tests {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(
+            stage
+                .material()
+                .state()
+                .protection_group_id()
+                .map(|id| id.as_str()),
+            Some(bootstrap_id.as_str())
+        );
         assert!(MlsGroupEngine::contains_active_member(
             &MlsClientState::from_bytes(stage.material().group_state().to_vec()),
             sponsor.as_str().as_bytes(),
@@ -2679,6 +2799,315 @@ mod admission_tests {
                 .unwrap(),
             GroupBootstrapResult::Complete { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn legacy_upgrade_request_is_verified_only_for_the_bound_peer_pair() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(
+            SpaceId::from("legacy-upgrade-space"),
+            MasterKey::from_bytes(&[0x31; 32]).unwrap(),
+        );
+        let (repository, _) = memory_revocation_repository(None);
+        let space_access = Arc::new(adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            repository,
+        ));
+        let pool = init_db_pool(":memory:").unwrap();
+        let attempt_store = Arc::new(DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(pool),
+            session.as_ref().clone(),
+        ));
+        let protection = DefaultLegacyProtection::new(space_access, attempt_store);
+
+        let request = protection
+            .begin_attempt(&DeviceId::new("device-a"), &DeviceId::new("device-b"))
+            .await
+            .unwrap();
+        assert_eq!(
+            protection.inspect_request(&request).await.unwrap(),
+            LegacyRequestInspection::Verified
+        );
+
+        let replay = LegacyUpgradeRequest::unsigned(
+            DeviceId::new("device-a"),
+            DeviceId::new("device-c"),
+            request.descriptor().clone(),
+            request.key_package().to_vec(),
+        )
+        .with_proof(request.proof().to_vec());
+        assert_eq!(
+            protection.inspect_request(&replay).await.unwrap(),
+            LegacyRequestInspection::Invalid
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_ready_material_without_group_id_is_backfilled_once() {
+        let directory = tempdir().unwrap();
+        let database_url = directory.path().join("legacy-ready-backfill.sqlite");
+        let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-ready-backfill-space");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x36; 32]).unwrap(),
+        );
+        let sponsor = DeviceId::new("device-a");
+        let sponsor_state = MlsGroupEngine::create_sponsor(
+            space_id.as_ref().as_bytes(),
+            sponsor.as_str().as_bytes(),
+        )
+        .unwrap();
+        let material = session
+            .create_legacy_bootstrap_material_in_group(
+                &space_id,
+                ProtectionGroupId::from_string("removed-by-old-format").unwrap(),
+                sponsor_state.into_bytes(),
+                100,
+            )
+            .unwrap();
+        let mut legacy_json = serde_json::to_value(material).unwrap();
+        let removed = legacy_json
+            .get_mut("state")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|state| state.remove("protection_group_id"));
+        assert!(removed.is_some());
+        let legacy_material: SpaceKeyMaterial = serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy_material.state().protection_group_id().is_none());
+
+        let repository = Arc::new(DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            session.as_ref().clone(),
+        ));
+        repository
+            .save_space_material(&legacy_material)
+            .await
+            .unwrap();
+        let repository_port: Arc<dyn RevocationRepositoryPort> = repository.clone();
+        let space_access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            repository_port,
+        ));
+        let protection = DefaultLegacyProtection::new(space_access, repository.clone());
+
+        let first = protection.snapshot(&[]).await.unwrap().descriptor;
+        assert!(first.is_ready());
+        let first_group_id = first.protection_group_id().cloned().unwrap();
+        let second = protection.snapshot(&[]).await.unwrap().descriptor;
+        assert_eq!(second.protection_group_id(), Some(&first_group_id));
+
+        drop(protection);
+        let reopened_repository = DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(pool),
+            session.as_ref().clone(),
+        );
+        let persisted = reopened_repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.state().protection_group_id(),
+            Some(&first_group_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_upgrade_request_is_reused_after_adapter_restart() {
+        let directory = tempdir().unwrap();
+        let database_url = directory.path().join("legacy-upgrade.sqlite");
+        let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(
+            SpaceId::from("legacy-upgrade-restart-space"),
+            MasterKey::from_bytes(&[0x35; 32]).unwrap(),
+        );
+        let (key_epoch_repository, _) = memory_revocation_repository(None);
+        let upgrade_repository = Arc::new(DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            session.as_ref().clone(),
+        ));
+        let first_space_access = Arc::new(adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::clone(&key_epoch_repository),
+        ));
+        let first_adapter = DefaultLegacyProtection::new(first_space_access, upgrade_repository);
+        let local = DeviceId::new("device-b");
+        let peer = DeviceId::new("device-a");
+        let first = first_adapter.begin_attempt(&local, &peer).await.unwrap();
+        drop(first_adapter);
+
+        let reopened_repository = Arc::new(DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(pool),
+            session.as_ref().clone(),
+        ));
+        let reopened_space_access = Arc::new(adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            key_epoch_repository,
+        ));
+        let reopened_adapter =
+            DefaultLegacyProtection::new(reopened_space_access, reopened_repository);
+        let restored = reopened_adapter.begin_attempt(&local, &peer).await.unwrap();
+
+        assert_eq!(restored, first);
+    }
+
+    #[tokio::test]
+    async fn legacy_admission_and_replay_response_share_one_durable_material() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-admission-cache-space");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x34; 32]).unwrap(),
+        );
+        let sponsor = DeviceId::new("device-a");
+        let joiner = DeviceId::new("device-b");
+        let sponsor_state = MlsGroupEngine::create_sponsor(
+            space_id.as_ref().as_bytes(),
+            sponsor.as_str().as_bytes(),
+        )
+        .unwrap();
+        let material = session
+            .create_legacy_bootstrap_material_in_group(
+                &space_id,
+                ProtectionGroupId::from_string("group-a").unwrap(),
+                sponsor_state.into_bytes(),
+                100,
+            )
+            .unwrap();
+        session.install_space_material(&material).unwrap();
+        let (repository, _) = memory_revocation_repository(Some(material));
+        let space_access = Arc::new(adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::clone(&session),
+            Arc::clone(&repository),
+        ));
+        let pending = space_access.prepare_group_join(&joiner).await.unwrap();
+        let unsigned = LegacyUpgradeRequest::unsigned(
+            joiner,
+            sponsor,
+            LegacyUpgradeDescriptor::legacy(session.legacy_upgrade_id().unwrap()),
+            pending.key_package.clone(),
+        );
+        let proof = session
+            .legacy_upgrade_proof(&request_transcript(&unsigned))
+            .unwrap();
+        let request = unsigned.with_proof(proof.to_vec());
+        let attempt_pool = init_db_pool(":memory:").unwrap();
+        let attempt_store = Arc::new(DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(attempt_pool),
+            session.as_ref().clone(),
+        ));
+        let protection = DefaultLegacyProtection::new(space_access, attempt_store);
+
+        let result = protection
+            .execute(LegacyProtectionCommand::AdmitMember {
+                sponsor,
+                existing_members: Vec::new(),
+                request: request.clone(),
+            })
+            .await
+            .unwrap();
+        let LegacyProtectionResult::MemberAdmitted(admission) = result else {
+            panic!("expected admitted member result");
+        };
+        let persisted = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            persisted
+                .cached_group_admission(request.source_device_id(), request_id(&request),)
+                .map(|cached| (
+                    &cached.protection_group_id,
+                    &cached.admission.welcome,
+                    &cached.admission.encrypted_key_catalog,
+                    cached.admission.group_epoch,
+                )),
+            Some((
+                &admission.protection_group_id,
+                &admission.admission.welcome,
+                &admission.admission.encrypted_key_catalog,
+                admission.admission.group_epoch,
+            ))
+        );
+        assert_eq!(
+            protection.inspect_request(&request).await.unwrap(),
+            LegacyRequestInspection::Replay(admission)
+        );
+    }
+
+    #[tokio::test]
+    async fn protection_status_ignores_a_superseded_local_bootstrap_after_convergence() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("legacy-convergence-space");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x32; 32]).unwrap(),
+        );
+        let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
+        let (key_epoch_repository, _) = memory_revocation_repository(None);
+        let key_epoch_port: Arc<dyn RevocationRepositoryPort> = key_epoch_repository.clone();
+        let adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            key_epoch_port,
+            bootstrap_repository,
+        );
+        let sponsor = DeviceId::new("device-b");
+        let retained = DeviceId::new("device-c");
+        adapter
+            .bootstrap_legacy_space(&sponsor, &[retained], 100)
+            .await
+            .unwrap();
+
+        let winning_state = MlsGroupEngine::create_sponsor(
+            space_id.as_ref().as_bytes(),
+            sponsor.as_str().as_bytes(),
+        )
+        .unwrap();
+        let winning_material = session
+            .create_legacy_bootstrap_material_in_group(
+                &space_id,
+                ProtectionGroupId::from_string("000-winning-group").unwrap(),
+                winning_state.into_bytes(),
+                200,
+            )
+            .unwrap();
+        key_epoch_repository
+            .save_space_material(&winning_material)
+            .await
+            .unwrap();
+        session.install_space_material(&winning_material).unwrap();
+
+        let snapshot = adapter
+            .query_space_protection(&[sponsor, retained])
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.mode, SpaceProtectionMode::Ready);
+        assert!(snapshot.legacy_bootstrap.is_none());
+        assert_eq!(
+            snapshot.members[1].status,
+            MemberProtectionStatus::RequiresReadmission
+        );
+        assert!(adapter
+            .resume_legacy_bootstraps(300)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2924,7 +3353,9 @@ mod admission_tests {
         );
         let mut state = SpaceKeyState::legacy(space_id);
         state.mark_migrating().unwrap();
-        state.mark_ready(ContentKeyId::generate()).unwrap();
+        state
+            .mark_ready(ContentKeyId::generate(), ProtectionGroupId::generate())
+            .unwrap();
         let material = SpaceKeyMaterial::new(state, Vec::new(), vec![0x01], 100);
         let (repository, _) = memory_revocation_repository(Some(material));
         let adapter = adapter(
