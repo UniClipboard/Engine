@@ -533,7 +533,7 @@ impl EngineRuntime for ProductionRuntime {
             #[cfg(feature = "lan-compat")]
             self.abort_all_mobile_file_uploads(session.mobile_sync.as_ref())
                 .await;
-            session.tasks.shutdown(Duration::from_secs(5)).await;
+            session.tasks.shutdown(Duration::from_millis(500)).await;
             session.sync_engine.shutdown().await;
         }
         Ok(())
