@@ -1715,7 +1715,7 @@ async fn partial_materialize_does_not_register_dedup_entry() {
 /// Verdict 8 — 真实文件缓存 materializer 会拉取 blob 内容,写入接收端缓存目录,
 /// 并把 file-list 表示改写为本机 `file://` URI。
 #[tokio::test]
-async fn file_cache_blob_materializer_writes_file_and_rewrites_file_uri_list() {
+async fn file_cache_blob_materializer_preserves_filename_in_local_uri_list() {
     let cache_dir = tempfile::tempdir().expect("tempdir");
     let entry_id = EntryId::from("entry-file");
     let ticket = BlobTicket::from_bytes(vec![1, 2, 3]);
@@ -1783,12 +1783,8 @@ async fn file_cache_blob_materializer_writes_file_and_rewrites_file_uri_list() {
     )
     .expect("uri-list should be UTF-8");
     assert!(uri_list.starts_with("file://"));
-    assert!(uri_list.ends_with("/00000000\n"));
+    assert!(uri_list.ends_with("/report.txt\n"));
     assert!(!uri_list.contains("/sender/"));
-    assert!(
-        !uri_list.contains("report.txt"),
-        "declared filename leaked into the managed cache path"
-    );
 
     let local_url = url::Url::parse(uri_list.trim()).expect("valid file URL");
     let local_path = local_url.to_file_path().expect("file URL to path");
@@ -1799,7 +1795,7 @@ async fn file_cache_blob_materializer_writes_file_and_rewrites_file_uri_list() {
 }
 
 #[tokio::test]
-async fn file_cache_blob_materializer_rekeys_display_name_metadata_to_local_path() {
+async fn file_cache_blob_materializer_aligns_display_metadata_with_local_filename() {
     let cache_dir = tempfile::tempdir().expect("tempdir");
     let entry_id = EntryId::from("entry-file-display-name");
     let ticket = BlobTicket::from_bytes(vec![7, 8, 9]);
@@ -1884,7 +1880,10 @@ async fn file_cache_blob_materializer_rekeys_display_name_metadata_to_local_path
         .and_then(|bytes| FileDisplayMetadata::decode(bytes).ok())
         .expect("rewritten file display metadata");
 
-    assert_eq!(metadata.display_name_for("00000000"), Some(expected_name));
+    assert_eq!(
+        metadata.display_name_for(expected_name),
+        Some(expected_name)
+    );
     assert_eq!(
         metadata.display_name_for("sender-private-storage-name"),
         None
@@ -2988,12 +2987,8 @@ async fn file_cache_blob_materializer_partial_on_cancel_mid_batch() {
     )
     .expect("uri-list should be UTF-8");
     assert!(
-        uri_list.contains("file://") && uri_list.contains("/00000000"),
+        uri_list.contains("file://") && uri_list.contains("/first.txt"),
         "completed file:// should be present in uri-list: {uri_list:?}"
-    );
-    assert!(
-        !uri_list.contains("first.txt"),
-        "completed filename leaked into the managed cache path: {uri_list:?}"
     );
     assert!(
         uri_list.contains("uniclip-missing:///second.iso"),

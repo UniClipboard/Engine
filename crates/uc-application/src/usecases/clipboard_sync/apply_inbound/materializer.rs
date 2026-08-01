@@ -1161,7 +1161,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         .join(sanitize_path_segment(blob_ref.entry_id.as_ref()));
                     tokio::fs::create_dir_all(&entry_dir).await?;
 
-                    let filename = opaque_managed_filename(idx, &mut used_names);
+                    let filename =
+                        managed_filename(blob_ref.filename.as_deref(), idx, &mut used_names);
                     entry_dir.join(filename)
                 }
             };
@@ -2592,20 +2593,47 @@ fn is_file_list_representation(rep: &ObservedClipboardRepresentation) -> bool {
         || rep.format_id.eq_ignore_ascii_case("public.file-url")
 }
 
-fn opaque_managed_filename(idx: usize, used_names: &mut HashSet<String>) -> String {
-    let base = format!("{idx:08}");
+fn managed_filename(
+    candidate: Option<&str>,
+    idx: usize,
+    used_names: &mut HashSet<String>,
+) -> String {
+    let base = candidate
+        .map(sanitize_path_segment)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("blob-{idx}"));
 
-    if used_names.insert(base.clone()) {
+    if used_names.insert(base.to_lowercase()) {
         return base;
     }
 
     let mut counter = 1usize;
     loop {
         let candidate = format!("{counter}-{base}");
-        if used_names.insert(candidate.clone()) {
+        if used_names.insert(candidate.to_lowercase()) {
             return candidate;
         }
         counter += 1;
+    }
+}
+
+#[cfg(test)]
+mod managed_filename_tests {
+    use super::managed_filename;
+    use std::collections::HashSet;
+
+    #[test]
+    fn avoids_case_insensitive_collisions() {
+        let mut used_names = HashSet::new();
+
+        assert_eq!(
+            managed_filename(Some("report.zip"), 0, &mut used_names),
+            "report.zip"
+        );
+        assert_eq!(
+            managed_filename(Some("REPORT.ZIP"), 1, &mut used_names),
+            "1-REPORT.ZIP"
+        );
     }
 }
 
