@@ -191,6 +191,7 @@ mod tests {
     use crate::db::repositories::DieselFileTransferRepository;
     use crate::file_transfer::receiver_store::SqliteReceiverFileTransferStore;
     use crate::file_transfer::SqliteFileTransferPrivacyMaintenance;
+    use diesel::connection::SimpleConnection;
     use diesel_migrations::MigrationHarness;
     use tempfile::{tempdir, TempDir};
     use uc_core::file_transfer::{FileTransferEventStorePort, FileTransferProgress};
@@ -423,6 +424,20 @@ mod tests {
         let database_path = tempdir.path().join("legacy-transfer.sqlite");
         let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
         let mut conn = pool.get().unwrap();
+
+        // This test needs a historical file-transfer schema. The current
+        // relationship migration is deliberately irreversible in production,
+        // so remove it explicitly from this empty test database before using
+        // Diesel's normal rollback path for older migrations.
+        conn.batch_execute(
+            "DROP TABLE relationship_privacy_maintenance;\
+             DROP TABLE encrypted_relationship;\
+             ALTER TABLE relationship_legacy_space_member RENAME TO space_member;\
+             ALTER TABLE relationship_legacy_trusted_peer RENAME TO trusted_peer;\
+             ALTER TABLE relationship_legacy_peer_address RENAME TO peer_address;\
+             DELETE FROM __diesel_schema_migrations WHERE version = '20260802000001';",
+        )
+        .unwrap();
 
         loop {
             let legacy_column = diesel::sql_query(

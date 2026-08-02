@@ -138,6 +138,11 @@ fn map_fresh_join_error(error: RedeemPairingInvitationError) -> EngineError {
         RedeemPairingInvitationError::ServiceUnavailable => {
             unavailable_error(JOIN_SPACE_SERVICE_UNAVAILABLE_CODE)
         }
+        RedeemPairingInvitationError::SponsorUpgradeRequired => error_with(
+            JOIN_SPACE_SPONSOR_UPGRADE_REQUIRED_CODE,
+            EngineErrorCategory::Conflict,
+            false,
+        ),
         RedeemPairingInvitationError::PassphraseMismatch => error_with(
             JOIN_SPACE_PASSPHRASE_MISMATCH_CODE,
             EngineErrorCategory::Unauthorized,
@@ -227,6 +232,11 @@ fn map_switch_space_error(error: SwitchSpaceError) -> EngineError {
         SwitchSpaceError::ServiceUnavailable => {
             unavailable_error(JOIN_SPACE_SERVICE_UNAVAILABLE_CODE)
         }
+        SwitchSpaceError::SponsorUpgradeRequired => error_with(
+            JOIN_SPACE_SPONSOR_UPGRADE_REQUIRED_CODE,
+            EngineErrorCategory::Conflict,
+            false,
+        ),
         SwitchSpaceError::InvalidCiphertext => error_with(
             JOIN_SPACE_INVALID_CIPHERTEXT_CODE,
             EngineErrorCategory::Internal,

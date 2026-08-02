@@ -7,6 +7,7 @@
 
 use super::*;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -14,7 +15,9 @@ use mockall::predicate;
 use uc_core::ports::pairing::DiscoveryChannel;
 
 use uc_core::ids::{DeviceId, EventId, RepresentationId};
-use uc_core::membership::{MembershipError, SpaceMember};
+use uc_core::membership::{
+    MembershipError, RelationshipStateResetError, RelationshipStateResetPort, SpaceMember,
+};
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::ports::PeerAddressError;
 use uc_core::security::IdentityFingerprint;
@@ -189,6 +192,25 @@ impl ClockPort for FixedClock {
     }
 }
 
+#[derive(Default)]
+struct RecordingRelationshipStateReset {
+    calls: AtomicUsize,
+}
+
+impl RecordingRelationshipStateReset {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RelationshipStateResetPort for RecordingRelationshipStateReset {
+    async fn clear_all_relationships(&self) -> Result<(), RelationshipStateResetError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 /// Records analytics-facade invocations so tests can assert *which*
 /// identity transition fired and how often. Other methods are inert.
 #[derive(Default)]
@@ -250,6 +272,7 @@ fn outcome_default() -> JoinerHandshakeOutcome {
         // Phase 098 默认 None：switch_space tests 关注迁移流程而非 person
         // 切换；PR 8 才接 switch_space 的 identify。
         sponsor_space_person_id: None,
+        membership_seeds: Vec::new(),
     }
 }
 fn already_setup() -> SetupStatus {
@@ -276,6 +299,7 @@ struct Env {
     member_repo: MockMemberRepo,
     trust_repo: MockTrustRepo,
     peer_addr_repo: MockPeerAddrRepo,
+    relationship_reset: Arc<RecordingRelationshipStateReset>,
 }
 
 impl Env {
@@ -290,6 +314,7 @@ impl Env {
             member_repo: MockMemberRepo::new(),
             trust_repo: MockTrustRepo::new(),
             peer_addr_repo: MockPeerAddrRepo::new(),
+            relationship_reset: Arc::new(RecordingRelationshipStateReset::default()),
         }
     }
 
@@ -314,6 +339,7 @@ impl Env {
             admit,
             trust,
             Arc::new(self.peer_addr_repo) as Arc<dyn PeerAddressRepositoryPort>,
+            self.relationship_reset,
             Arc::new(FixedClock(0)),
             analytics,
         )
@@ -362,6 +388,7 @@ async fn pre_flight_rejects_when_pending_migration() {
 #[tokio::test]
 async fn happy_path_executes_all_4_phases() {
     let mut env = Env::new();
+    let relationship_reset = Arc::clone(&env.relationship_reset);
 
     // Pre-flight
     env.setup_status
@@ -461,6 +488,7 @@ async fn happy_path_executes_all_4_phases() {
     assert_eq!(result.sponsor_device_id.as_str(), "sponsor-device");
     assert_eq!(result.self_device_id.as_str(), "local-device");
     assert_eq!(result.migrated_records, 1);
+    assert_eq!(relationship_reset.calls(), 1);
 }
 
 /// Phase 1 中途解密失败：清空 backup 表，**不**写 Prepared 状态——

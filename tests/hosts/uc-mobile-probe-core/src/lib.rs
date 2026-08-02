@@ -52,6 +52,7 @@ enum ProbeCommand {
     },
     IssueInvitation,
     ListDevices,
+    QueryMembershipConvergence,
     SendText {
         text: String,
     },
@@ -414,6 +415,9 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         }
         ProbeCommand::IssueInvitation => execute_operation(state, Operation::IssueInvitation).await,
         ProbeCommand::ListDevices => execute_operation(state, Operation::ListDevices).await,
+        ProbeCommand::QueryMembershipConvergence => {
+            execute_operation(state, Operation::QueryMembershipConvergence).await
+        }
         ProbeCommand::SendText { text } => {
             execute_operation(
                 state,
@@ -995,6 +999,22 @@ fn operation_response(result: OperationResult) -> Value {
             "online_count": devices.iter().filter(|device| device.online).count(),
             "device_ids": devices.into_iter().map(|device| device.device_id).collect::<Vec<_>>(),
         }),
+        OperationResult::MembershipConvergence(summary) => json!({
+            "ok": true,
+            "kind": "membership_convergence",
+            "state": match summary.state {
+                uc_engine::MembershipConvergenceStateSummary::Complete => "complete",
+                uc_engine::MembershipConvergenceStateSummary::Converging => "converging",
+                uc_engine::MembershipConvergenceStateSummary::WaitingForUpgrade => "waiting_for_upgrade",
+                uc_engine::MembershipConvergenceStateSummary::Blocked => "blocked",
+            },
+            "pending_count": summary.pending_count,
+            "waiting_for_peer_count": summary.waiting_for_peer_count,
+            "waiting_for_update_count": summary.waiting_for_update_count,
+            "version_incompatible_count": summary.version_incompatible_count,
+            "blocked_count": summary.blocked_count,
+            "rejected_count": summary.rejected_count,
+        }),
         OperationResult::MemberSyncPreferences(preferences) => json!({
             "ok": true,
             "kind": "member_sync_preferences",
@@ -1437,6 +1457,22 @@ mod tests {
     async fn query_active_clipboard_command_reaches_the_engine_boundary() {
         let command: ProbeCommand = serde_json::from_str(r#"{"command":"query_active_clipboard"}"#)
             .expect("query-active command must deserialize");
+        let mut state = ProbeState {
+            engine: None,
+            files: ProbeFiles::default(),
+            events: Arc::new(Mutex::new(EventSummary::default())),
+        };
+
+        let response = execute_command(&mut state, command).await;
+
+        assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn query_membership_convergence_command_reaches_the_engine_boundary() {
+        let command: ProbeCommand =
+            serde_json::from_str(r#"{"command":"query_membership_convergence"}"#)
+                .expect("membership convergence command must deserialize");
         let mut state = ProbeState {
             engine: None,
             files: ProbeFiles::default(),

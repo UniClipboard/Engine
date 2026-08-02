@@ -12,6 +12,9 @@ struct EngineProbeApp: App {
                     await model.startIfNeeded()
                     await model.runAutomatedAction()
                 }
+                .onOpenURL { url in
+                    Task { await model.handleCommandURL(url) }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     Task { await model.handleScenePhase(phase) }
                 }

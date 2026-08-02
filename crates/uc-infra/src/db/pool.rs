@@ -45,6 +45,13 @@ impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for SqlitePragma
                 QueryError(e)
             })?;
 
+        diesel::sql_query("PRAGMA secure_delete = ON")
+            .execute(conn)
+            .map_err(|e| {
+                warn!(error = %e, "Failed to set secure_delete=ON");
+                QueryError(e)
+            })?;
+
         Ok(())
     }
 }

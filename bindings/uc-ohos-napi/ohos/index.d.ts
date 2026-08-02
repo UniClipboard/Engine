@@ -62,6 +62,16 @@ export interface OhLocalDevice {
   displayName: string
 }
 
+export interface OhMembershipConvergence {
+  state: 'complete' | 'converging' | 'waiting_for_upgrade' | 'blocked'
+  pendingCount: number
+  waitingForPeerCount: number
+  waitingForUpdateCount: number
+  versionIncompatibleCount: number
+  blockedCount: number
+  rejectedCount: number
+}
+
 export interface OhSpaceCreated {
   spaceId: string
   selfDeviceId: string
@@ -77,6 +87,7 @@ export interface OhEngine {
   createSpace(deviceName: string | null, passphrase: string): Promise<OhSpaceCreated>
   recoverSession(allowSecureStorageUnlock: boolean): Promise<OhSessionRecovery>
   queryLocalDevice(): Promise<OhLocalDevice>
+  queryMembershipConvergence(): Promise<OhMembershipConvergence>
   queryActiveClipboard(): Promise<OhActiveClipboard | null>
   lifecycleState(): Promise<string>
   suspend(): Promise<void>

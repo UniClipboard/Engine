@@ -14,8 +14,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use uc_application::clipboard_write::MobileConsumableBackfill;
+use uc_application::facade::{
+    PairingMembershipGossipPort, SpaceMembershipGossipError, SponsorSeedBatchContext,
+};
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
 use uc_core::ids::{EventId, RepresentationId};
+use uc_core::membership::{
+    RelationshipStateResetError, RelationshipStateResetPort, SponsorCandidateSeed,
+};
 use uc_core::ports::clipboard::{BlobMigrationRepoError, BlobMigrationRepoPort, MigrationRecord};
 use uc_core::ports::security::{
     BlobCipherError, BlobCipherPort, KeyMigrationError, KeyMigrationPort,
@@ -36,6 +42,42 @@ impl MobileConsumableBackfill for NoopMobileConsumableBackfill {
 
 pub fn mobile_consumable_backfill_noop() -> Arc<dyn MobileConsumableBackfill> {
     Arc::new(NoopMobileConsumableBackfill)
+}
+
+pub struct NoopPairingMembershipGossip;
+
+#[async_trait]
+impl PairingMembershipGossipPort for NoopPairingMembershipGossip {
+    async fn prepare_sponsor_membership(
+        &self,
+        _context: SponsorSeedBatchContext,
+    ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError> {
+        Ok(Vec::new())
+    }
+
+    async fn accept_sponsor_seed_batch(
+        &self,
+        _seeds: Vec<SponsorCandidateSeed>,
+    ) -> Result<(), SpaceMembershipGossipError> {
+        Ok(())
+    }
+}
+
+pub fn membership_gossip_noop() -> Arc<dyn PairingMembershipGossipPort> {
+    Arc::new(NoopPairingMembershipGossip)
+}
+
+pub struct NoopRelationshipStateReset;
+
+#[async_trait]
+impl RelationshipStateResetPort for NoopRelationshipStateReset {
+    async fn clear_all_relationships(&self) -> Result<(), RelationshipStateResetError> {
+        Ok(())
+    }
+}
+
+pub fn relationship_state_reset_noop() -> Arc<dyn RelationshipStateResetPort> {
+    Arc::new(NoopRelationshipStateReset)
 }
 
 pub struct NoopMigrationState;

@@ -48,9 +48,7 @@ use uc_infra::db::mappers::{
     blob_mapper::BlobRowMapper, clipboard_entry_mapper::ClipboardEntryRowMapper,
     clipboard_event_mapper::ClipboardEventRowMapper,
     clipboard_selection_mapper::ClipboardSelectionRowMapper,
-    peer_address_mapper::PeerAddressRowMapper,
     snapshot_representation_mapper::RepresentationRowMapper,
-    space_member_mapper::SpaceMemberRowMapper, trusted_peer_mapper::TrustedPeerRowMapper,
 };
 use uc_infra::db::pool::{init_db_pool, DbPool};
 #[cfg(feature = "lan-compat")]
@@ -63,6 +61,8 @@ use uc_infra::db::repositories::{
     DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
     DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository,
     DieselSpaceSecurityStore, DieselThumbnailRepository, DieselTrustedPeerRepository,
+    EncryptedMembershipAnnouncementRepository, EncryptedMembershipCandidateRepository,
+    EncryptedMembershipOutboxRepository, EncryptedRelationshipStore,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
@@ -106,19 +106,6 @@ struct InfraLayer {
     db_executor: Arc<DieselSqliteExecutor>,
     representation_repo: Arc<dyn ClipboardRepresentationStore>,
     selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-
-    // Membership repository (phase 4b PR-4 起成为唯一持久成员层).
-    member_repo: Arc<dyn uc_core::MemberRepositoryPort>,
-
-    // Trusted-peer repository — authoritative write path from phase 0.4.2.
-    // Drives `TrustPeerOrchestrator` at the pairing handler's PersistPairedDevice
-    // boundary, replacing the previous `paired_device` upsert + `space_member`
-    // shadow-write.
-    trusted_peer_repo: Arc<dyn uc_core::TrustedPeerRepositoryPort>,
-
-    // Slice 2 Phase 1 · T5：peer address 仓库。pairing 收尾点 best-effort
-    // 写入对端传输地址，供 F1 `ensure_reachable_all` 直接拨号。
-    peer_addr_repo: Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
 
     // Slice 3 Phase 1:明文 hash → 密文 digest 去重缓存。
     blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,
@@ -256,7 +243,6 @@ pub fn wire_dependencies_from_inputs(
         profile_id,
         &vault_path,
         infra.blob_repository.clone(),
-        infra.member_repo.clone(),
         infra.clock.clone(),
         storage_config.clone(),
         system_clipboard,
@@ -264,13 +250,47 @@ pub fn wire_dependencies_from_inputs(
 
     // Space access — single session/key access entry. See
     // `build_space_access_ports` for the §8.3 single-adapter-reuse rationale.
-    let (space_access_ports, legacy_protection) = build_space_access_ports(
-        &infra.key_material,
-        &platform.current_profile,
-        &platform.session,
-        &infra.db_executor,
-    );
+    let (space_access_ports, legacy_protection, current_member_signatures) =
+        build_space_access_ports(
+            &infra.key_material,
+            &platform.current_profile,
+            &platform.session,
+            &infra.db_executor,
+        );
+    let membership_session = Arc::clone(&platform.session);
     let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
+
+    let relationship_store = Arc::new(EncryptedRelationshipStore::new(
+        Arc::clone(&infra.db_executor),
+        Arc::clone(&space_access_ports.derive_subkey),
+        Arc::clone(&platform.current_profile),
+    ));
+    let member_repo: Arc<dyn uc_core::MemberRepositoryPort> = Arc::new(
+        DieselSpaceMemberRepository::new(Arc::clone(&relationship_store)),
+    );
+    let trusted_peer_repo: Arc<dyn uc_core::TrustedPeerRepositoryPort> = Arc::new(
+        DieselTrustedPeerRepository::new(Arc::clone(&relationship_store)),
+    );
+    let peer_addr_repo: Arc<dyn uc_core::ports::PeerAddressRepositoryPort> = Arc::new(
+        DieselPeerAddressRepository::new(Arc::clone(&relationship_store)),
+    );
+    let membership_candidate_repo: Arc<dyn uc_core::membership::MembershipCandidateRepositoryPort> =
+        Arc::new(EncryptedMembershipCandidateRepository::new(Arc::clone(
+            &relationship_store,
+        )));
+    let membership_announcement_repo: Arc<
+        dyn uc_core::membership::MembershipAnnouncementRepositoryPort,
+    > = Arc::new(EncryptedMembershipAnnouncementRepository::new(Arc::clone(
+        &relationship_store,
+    )));
+    let membership_outbox_repo: Arc<dyn uc_core::membership::MembershipOutboxRepositoryPort> =
+        Arc::new(EncryptedMembershipOutboxRepository::new(Arc::clone(
+            &relationship_store,
+        )));
+    let verified_peer_promotion: Arc<dyn uc_core::membership::VerifiedPeerPromotionPort> =
+        relationship_store.clone();
+    let relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort> =
+        relationship_store;
 
     // Transfer metadata and event payloads are encrypted with two independent
     // profile-scoped subkeys, so their adapters are assembled only after space
@@ -531,7 +551,7 @@ pub fn wire_dependencies_from_inputs(
         },
         device: DevicePorts {
             device_identity: platform.device_identity,
-            member_repo: infra.member_repo,
+            member_repo: Arc::clone(&member_repo),
         },
         setup_status: infra.setup_status,
         config_migration,
@@ -603,7 +623,14 @@ pub fn wire_dependencies_from_inputs(
         sync_engine: SyncEngineDeps {
             legacy_protection,
             peer_admission,
-            peer_addr_repo: Arc::clone(&infra.peer_addr_repo),
+            peer_addr_repo: Arc::clone(&peer_addr_repo),
+            relationship_reset,
+            membership_candidate_repo,
+            verified_peer_promotion,
+            membership_announcement_repo,
+            membership_outbox_repo,
+            current_member_signatures,
+            membership_session,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             blob_migration_repo: Arc::clone(&infra.blob_migration_repo),
             migration_state: Arc::clone(&infra.migration_state),
@@ -623,7 +650,7 @@ pub fn wire_dependencies_from_inputs(
             file_transfer_facade,
             clipboard_write_coordinator: Arc::clone(&clipboard_write_coordinator),
             file_cache_dir: paths.file_cache_dir.clone(),
-            trusted_peer_repo: Arc::clone(&infra.trusted_peer_repo),
+            trusted_peer_repo: Arc::clone(&trusted_peer_repo),
             active_clipboard_sse_source,
         },
     };

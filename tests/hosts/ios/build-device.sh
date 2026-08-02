@@ -14,7 +14,7 @@ IPHONEOS_DEPLOYMENT_TARGET=17.0 \
 
 mkdir -p "$(dirname "$GENERATED_PROJECT")"
 GEM_HOME="/opt/homebrew/Cellar/cocoapods/1.16.2_2/libexec" \
-  ruby "$PROJECT_DIR/project.rb" "$GENERATED_PROJECT"
+  ruby "$PROJECT_DIR/project.rb" "$GENERATED_PROJECT" device
 
 xcodebuild \
   -project "$GENERATED_PROJECT" \

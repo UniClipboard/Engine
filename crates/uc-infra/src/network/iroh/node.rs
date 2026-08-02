@@ -36,7 +36,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
+    CurrentMemberSignaturePort, GroupRevocationPort, GroupUpdateDispatchPort,
+    LegacyUpgradeEndpointPort, MemberRepositoryPort, MembershipAttestationEndpointPort,
     PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
@@ -54,6 +55,7 @@ use uc_core::ports::{
 
 use crate::pairing::{IrohPairingSessionAdapter, PAIRING_ALPN};
 use crate::rendezvous::{RendezvousClient, RendezvousPairingInvitationAdapter};
+use crate::security::InMemorySession;
 
 use super::active_clipboard::{
     IrohActiveClipboardDispatchAdapter, IrohActiveClipboardPullClientAdapter,
@@ -70,6 +72,10 @@ use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
 use super::identity_store::IrohIdentityStore;
 use super::legacy_upgrade_adapter::{IrohLegacyUpgradeAdapter, LEGACY_UPGRADE_ALPN};
+use super::membership_attestation_adapter::{
+    IrohMembershipAttestationAdapter, IrohMembershipGossipTransportAdapter,
+    IrohMembershipIdentityAdapter, MEMBERSHIP_ATTESTATION_ALPN,
+};
 use super::net_recovery::DemandRecoveryCoordinator;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
 use super::transfer_progress_adapter::{
@@ -174,6 +180,26 @@ pub struct IrohNode {
 }
 
 impl IrohNode {
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn accepts_protocol_for_test(&self, alpn: &[u8]) -> bool {
+        let client = match Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+        {
+            Ok(client) => client,
+            Err(_) => return false,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.connect(self.endpoint.addr(), alpn),
+        )
+        .await;
+        let connected = matches!(result, Ok(Ok(_)));
+        client.close().await;
+        connected
+    }
+
     /// 优雅关闭 iroh 节点。两步序列均为信号驱动,不再用外层 timeout 与 iroh
     /// 内部状态机 race。
     ///
@@ -965,6 +991,84 @@ impl IrohNodeBuilder {
         Ok(())
     }
 
+    pub fn build_membership_attestation_adapter(
+        &self,
+        session: Arc<InMemorySession>,
+        device_identity: Arc<dyn DeviceIdentityPort>,
+        settings: Arc<dyn SettingsPort>,
+        signatures: Arc<dyn CurrentMemberSignaturePort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    ) -> Arc<IrohMembershipAttestationAdapter> {
+        let identity = Arc::new(IrohMembershipIdentityAdapter::new(
+            Arc::clone(&self.endpoint),
+            session,
+            device_identity,
+            settings,
+            Arc::clone(&fingerprint_factory),
+        ));
+        Arc::new(IrohMembershipAttestationAdapter::new(
+            Arc::clone(&self.endpoint),
+            identity,
+            signatures,
+            fingerprint_factory,
+        ))
+    }
+
+    pub fn build_membership_gossip_transport(
+        &self,
+        session: Arc<InMemorySession>,
+        device_identity: Arc<dyn DeviceIdentityPort>,
+        settings: Arc<dyn SettingsPort>,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    ) -> Arc<IrohMembershipGossipTransportAdapter> {
+        let identity = Arc::new(IrohMembershipIdentityAdapter::new(
+            Arc::clone(&self.endpoint),
+            session,
+            device_identity,
+            settings,
+            Arc::clone(&fingerprint_factory),
+        ));
+        Arc::new(IrohMembershipGossipTransportAdapter::new(
+            Arc::clone(&self.endpoint),
+            identity,
+            peer_addr_repo,
+            member_repo,
+            peer_admission,
+            fingerprint_factory,
+        ))
+    }
+
+    pub fn install_membership_attestation_handler(
+        &mut self,
+        adapter: &IrohMembershipAttestationAdapter,
+        application_endpoint: Arc<dyn MembershipAttestationEndpointPort>,
+    ) -> Result<(), IrohNodeError> {
+        let builder = self.take_router_builder()?;
+        self.router_builder = Some(builder.accept(
+            MEMBERSHIP_ATTESTATION_ALPN,
+            adapter.handler(application_endpoint),
+        ));
+        Ok(())
+    }
+
+    pub fn install_membership_handler(
+        &mut self,
+        attestation: &IrohMembershipAttestationAdapter,
+        attestation_endpoint: Arc<dyn MembershipAttestationEndpointPort>,
+        gossip: &IrohMembershipGossipTransportAdapter,
+        gossip_endpoint: Arc<dyn uc_core::membership::MembershipGossipEndpointPort>,
+    ) -> Result<(), IrohNodeError> {
+        let builder = self.take_router_builder()?;
+        self.router_builder = Some(builder.accept(
+            MEMBERSHIP_ATTESTATION_ALPN,
+            attestation.handler_with_gossip(attestation_endpoint, gossip, gossip_endpoint),
+        ));
+        Ok(())
+    }
+
     /// Install the active-clipboard state transport.
     ///
     /// * Registers [`IrohActiveClipboardReceiverHandler`] as the
@@ -1265,11 +1369,17 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
-    use uc_core::ids::DeviceId;
+    use uc_core::ids::{DeviceId, SpaceId};
+    use uc_core::membership::{
+        CurrentMemberSignatureError, CurrentMemberSignaturePort,
+        MembershipAttestationEndpointError, MembershipAttestationEndpointPort,
+        MembershipAttestationPort, MembershipGossipEndpointError, MembershipGossipEndpointPort,
+        MembershipGossipMessage, MembershipGossipTransportPort, VerifiedMembershipPeer,
+    };
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
     use uc_core::settings::model::Settings;
 
-    use crate::security::Sha256IdentityFingerprintFactory;
+    use crate::security::{InMemorySession, MasterKey, Sha256IdentityFingerprintFactory};
 
     #[derive(Default)]
     struct InMemorySecureStorage {
@@ -1316,6 +1426,64 @@ mod tests {
             Arc::new(InMemorySecureStorage::default()),
             Arc::new(Sha256IdentityFingerprintFactory),
         ))
+    }
+
+    struct UnavailableMemberSignatures;
+
+    #[async_trait]
+    impl CurrentMemberSignaturePort for UnavailableMemberSignatures {
+        async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
+            Err(CurrentMemberSignatureError::Unavailable)
+        }
+
+        async fn sign_current_member_payload(
+            &self,
+            _payload: &[u8],
+        ) -> Result<Vec<u8>, CurrentMemberSignatureError> {
+            Err(CurrentMemberSignatureError::Unavailable)
+        }
+
+        async fn verify_current_member_payload(
+            &self,
+            _member: &DeviceId,
+            _payload: &[u8],
+            _signature: &[u8],
+        ) -> Result<bool, CurrentMemberSignatureError> {
+            Err(CurrentMemberSignatureError::Unavailable)
+        }
+    }
+
+    struct RejectingMembershipEndpoint;
+
+    #[async_trait]
+    impl MembershipAttestationEndpointPort for RejectingMembershipEndpoint {
+        async fn apply_relayed_security_updates(
+            &self,
+            _space_id: &uc_core::ids::SpaceId,
+            _updates: &[uc_core::membership::RelayedSecurityUpdate],
+        ) -> Result<u64, MembershipAttestationEndpointError> {
+            Err(MembershipAttestationEndpointError::Rejected)
+        }
+
+        async fn accept_verified_peer(
+            &self,
+            _peer: VerifiedMembershipPeer,
+        ) -> Result<(), MembershipAttestationEndpointError> {
+            Err(MembershipAttestationEndpointError::Rejected)
+        }
+    }
+
+    struct RejectingGossipEndpoint;
+
+    #[async_trait]
+    impl MembershipGossipEndpointPort for RejectingGossipEndpoint {
+        async fn handle_message(
+            &self,
+            _source_device_id: &DeviceId,
+            _message: MembershipGossipMessage,
+        ) -> Result<MembershipGossipMessage, MembershipGossipEndpointError> {
+            Err(MembershipGossipEndpointError::Rejected)
+        }
     }
 
     /// UniClipboard#900: `bind_port` pins the iroh UDP socket to a fixed
@@ -1382,6 +1550,87 @@ mod tests {
         // Clean shutdown exits without hanging; the test runner's default
         // timeout would catch a deadlock.
         node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn membership_attestation_uses_two_step_installation_on_the_shared_router() {
+        let store = identity_store();
+        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+            .await
+            .expect("bind");
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(
+            SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[0x61; 32]).unwrap(),
+        );
+        let mut settings = Settings::default();
+        settings.general.device_name = Some("Device A".to_owned());
+
+        let adapter = builder.build_membership_attestation_adapter(
+            session,
+            Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
+            Arc::new(InMemorySettings(StdMutex::new(settings))),
+            Arc::new(UnavailableMemberSignatures),
+            Arc::new(Sha256IdentityFingerprintFactory),
+        );
+        let _outbound: Arc<dyn MembershipAttestationPort> = adapter.clone();
+        builder
+            .install_membership_attestation_handler(&adapter, Arc::new(RejectingMembershipEndpoint))
+            .expect("install membership attestation handler");
+
+        builder.spawn().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn membership_gossip_uses_the_same_identity_and_shared_router() {
+        let store = identity_store();
+        let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+            .await
+            .expect("bind");
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(
+            SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[0x61; 32]).unwrap(),
+        );
+        let device_identity: Arc<dyn DeviceIdentityPort> =
+            Arc::new(FixedDeviceIdentity(DeviceId::new("device-a")));
+        let mut settings_value = Settings::default();
+        settings_value.general.device_name = Some("Device A".to_owned());
+        let settings: Arc<dyn SettingsPort> =
+            Arc::new(InMemorySettings(StdMutex::new(settings_value)));
+        let fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort> =
+            Arc::new(Sha256IdentityFingerprintFactory);
+
+        let attestation = builder.build_membership_attestation_adapter(
+            Arc::clone(&session),
+            Arc::clone(&device_identity),
+            Arc::clone(&settings),
+            Arc::new(UnavailableMemberSignatures),
+            Arc::clone(&fingerprint_factory),
+        );
+        let gossip = builder.build_membership_gossip_transport(
+            session,
+            device_identity,
+            settings,
+            Arc::new(EmptyPeerAddressRepo),
+            Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            fingerprint_factory,
+        );
+        let _outbound: Arc<dyn MembershipGossipTransportPort> = gossip.clone();
+        let _announcement_material: Arc<
+            dyn uc_core::membership::CurrentMembershipAnnouncementPort,
+        > = gossip.clone();
+        builder
+            .install_membership_handler(
+                &attestation,
+                Arc::new(RejectingMembershipEndpoint),
+                &gossip,
+                Arc::new(RejectingGossipEndpoint),
+            )
+            .expect("install membership handler");
+
+        builder.spawn().shutdown().await;
     }
 
     #[tokio::test]

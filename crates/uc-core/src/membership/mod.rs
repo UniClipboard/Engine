@@ -1,6 +1,7 @@
 mod admission;
 mod bootstrap;
 mod error;
+mod gossip;
 mod member;
 mod ports;
 mod preferences;
@@ -14,10 +15,28 @@ pub use bootstrap::{
     LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
 };
 pub use error::MembershipError;
+pub use gossip::{
+    validate_sponsor_candidate_seed_batch, CandidateFailure, CandidateMergeError,
+    CandidateMergeOutcome, CandidateSource, CandidateStatus, DeviceAnnouncement, MembershipAck,
+    MembershipAnnouncementVersion, MembershipDigest, MembershipEvent, MembershipEventBatch,
+    MembershipGossipBoundsError, MembershipGossipMessage, MembershipRequestMissing,
+    PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate, SponsorCandidateSeed,
+    VerifiedMembershipPeer,
+};
 pub use member::SpaceMember;
 pub use ports::{
-    BeginRevocationOutcome, GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort,
-    MemberRepositoryPort, RevocationRepositoryPort,
+    BeginRevocationOutcome, CurrentMemberSignatureError, CurrentMemberSignaturePort,
+    CurrentMembershipAnnouncementMaterial, CurrentMembershipAnnouncementPort,
+    CurrentMembershipIdentity, CurrentMembershipIdentityError, CurrentMembershipIdentityPort,
+    GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, MemberRepositoryPort,
+    MembershipAnnouncementRepositoryError, MembershipAnnouncementRepositoryPort,
+    MembershipAttestationEndpointError, MembershipAttestationEndpointPort,
+    MembershipAttestationError, MembershipAttestationPort, MembershipCandidateRepositoryError,
+    MembershipCandidateRepositoryPort, MembershipGossipEndpointError, MembershipGossipEndpointPort,
+    MembershipGossipTransportError, MembershipGossipTransportPort, MembershipOutboxRepositoryError,
+    MembershipOutboxRepositoryPort, MembershipSecurityState, MembershipSecurityUpdateError,
+    MembershipSecurityUpdatePort, RelationshipStateResetError, RelationshipStateResetPort,
+    RevocationRepositoryPort, VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
 };
 pub use preferences::MemberSyncPreferences;
 pub use protection::{

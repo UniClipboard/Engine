@@ -297,6 +297,61 @@ async fn relay_settings_and_credential_save_through_one_engine_operation() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn membership_convergence_is_queryable_through_the_public_engine() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            temp.path().join("private"),
+            temp.path().join("cache"),
+            temp.path().join("temporary"),
+            temp.path().join("logs"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Convergence Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap();
+
+    let status = engine
+        .execute(crate::Operation::QueryMembershipConvergence)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        status,
+        crate::OperationResult::MembershipConvergence(crate::MembershipConvergenceSummary {
+            state: crate::MembershipConvergenceStateSummary::Complete,
+            pending_count: 0,
+            waiting_for_peer_count: 0,
+            waiting_for_update_count: 0,
+            version_incompatible_count: 0,
+            blocked_count: 0,
+            rejected_count: 0,
+        })
+    );
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
 struct FailingHostSecureStorage {
     category: crate::HostCapabilityErrorCategory,
 }
@@ -2047,6 +2102,13 @@ async fn engine_start_builds_a_resumable_real_session() {
         crate::EngineErrorCategory::NotFound
     );
 
+    assert_eq!(
+        engine
+            .execute(crate::Operation::LockEncryption)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionLocked
+    );
     assert_eq!(
         engine
             .execute(crate::Operation::FactoryResetSpace)

@@ -74,6 +74,11 @@ pub enum DialError {
     #[error("pairing invitation service unavailable")]
     ServiceUnavailable,
 
+    /// The sponsor is reachable but only accepts the previous pairing
+    /// protocol. No pairing state has been exchanged or persisted.
+    #[error("sponsor must upgrade before pairing")]
+    SponsorUpgradeRequired,
+
     /// Adapter-side failure; message is for logs only.
     #[error("internal dial error: {0}")]
     Internal(String),

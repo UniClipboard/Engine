@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use super::invitation::InvitationCode;
 use crate::ids::{DeviceId, SpaceId};
+use crate::membership::SponsorCandidateSeed;
 use crate::ports::pairing::PairingSessionId;
 use crate::security::IdentityFingerprint;
 
@@ -134,6 +135,7 @@ pub struct SponsorConfirm {
     pub welcome: Vec<u8>,
     pub encrypted_key_catalog: Vec<u8>,
     pub group_epoch: u64,
+    pub membership_seeds: Vec<SponsorCandidateSeed>,
 }
 
 /// Either side → other. Terminal message with a structured reason so the

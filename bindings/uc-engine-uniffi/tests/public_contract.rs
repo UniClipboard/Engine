@@ -7,7 +7,8 @@ use uc_engine_uniffi::{
     core_version, BindingClipboardRepresentation, BindingClipboardRestoreMode,
     BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
     BindingError, BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
-    BindingOperationTerminal, HostBindingError, InvitationIssued, MobileEngine, SendReport,
+    BindingOperationTerminal, HostBindingError, InvitationIssued, MembershipConvergenceState,
+    MobileEngine, SendReport,
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -489,6 +490,42 @@ fn mobile_host_recovers_the_same_identity_after_process_restart() {
     restarted
         .shutdown(5_000)
         .expect("restarted binding engine must shut down");
+}
+
+#[test]
+fn mobile_binding_exposes_membership_convergence() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-membership-convergence".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+    engine
+        .create_space(
+            Some("mobile-convergence-host".to_owned()),
+            "correct horse battery staple".to_owned(),
+        )
+        .expect("binding must create a space");
+
+    let status = engine
+        .query_membership_convergence()
+        .expect("binding must expose membership convergence");
+
+    assert_eq!(status.state, MembershipConvergenceState::Complete);
+    assert_eq!(status.pending_count, 0);
+    assert_eq!(status.waiting_for_peer_count, 0);
+    assert_eq!(status.waiting_for_update_count, 0);
+    assert_eq!(status.version_incompatible_count, 0);
+    assert_eq!(status.blocked_count, 0);
+    assert_eq!(status.rejected_count, 0);
+    engine
+        .shutdown(5_000)
+        .expect("binding engine must shut down within the deadline");
 }
 
 fn wait_for_state(engine: &MobileEngine, expected: BindingEngineState) {

@@ -16,8 +16,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhLocalDevice, OhMemberRevocation, OhSendReport, OhSessionRecovery, OhSpaceCreated,
-    OhSpaceJoined,
+    OhLocalDevice, OhMemberRevocation, OhMembershipConvergence, OhSendReport, OhSessionRecovery,
+    OhSpaceCreated, OhSpaceJoined,
 };
 
 #[napi]
@@ -104,6 +104,19 @@ impl OhEngine {
                 device_id: device.device_id,
                 display_name: device.display_name,
             }),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_membership_convergence(&self) -> napi::Result<OhMembershipConvergence> {
+        let result = self
+            .engine
+            .execute(Operation::QueryMembershipConvergence)
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::MembershipConvergence(summary) => membership_convergence(summary),
             _ => Err(unexpected_result()),
         }
     }
@@ -433,6 +446,32 @@ fn count(value: usize) -> napi::Result<u32> {
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 
+fn membership_convergence(
+    summary: uc_engine::MembershipConvergenceSummary,
+) -> napi::Result<OhMembershipConvergence> {
+    Ok(OhMembershipConvergence {
+        state: match summary.state {
+            uc_engine::MembershipConvergenceStateSummary::Complete => "complete",
+            uc_engine::MembershipConvergenceStateSummary::Converging => "converging",
+            uc_engine::MembershipConvergenceStateSummary::WaitingForUpgrade => {
+                "waiting_for_upgrade"
+            }
+            uc_engine::MembershipConvergenceStateSummary::Blocked => "blocked",
+        }
+        .to_owned(),
+        pending_count: count_u64(summary.pending_count)?,
+        waiting_for_peer_count: count_u64(summary.waiting_for_peer_count)?,
+        waiting_for_update_count: count_u64(summary.waiting_for_update_count)?,
+        version_incompatible_count: count_u64(summary.version_incompatible_count)?,
+        blocked_count: count_u64(summary.blocked_count)?,
+        rejected_count: count_u64(summary.rejected_count)?,
+    })
+}
+
+fn count_u64(value: u64) -> napi::Result<u32> {
+    u32::try_from(value).map_err(|_| unexpected_result())
+}
+
 fn map_event(event: EngineEvent) -> OhEngineEvent {
     let kind = event.kind().to_owned();
     let mut mapped = OhEngineEvent {
@@ -523,7 +562,7 @@ mod tests {
         EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
     };
 
-    use super::{count, map_event};
+    use super::{count, map_event, membership_convergence};
 
     #[test]
     fn refresh_event_keeps_only_the_stable_reason() {
@@ -573,5 +612,23 @@ mod tests {
     #[test]
     fn oversized_delivery_counts_are_rejected() {
         assert!(count(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn membership_convergence_maps_state_and_counts() {
+        let status = membership_convergence(uc_engine::MembershipConvergenceSummary {
+            state: uc_engine::MembershipConvergenceStateSummary::WaitingForUpgrade,
+            pending_count: 7,
+            waiting_for_peer_count: 2,
+            waiting_for_update_count: 1,
+            version_incompatible_count: 3,
+            blocked_count: 0,
+            rejected_count: 1,
+        })
+        .expect("membership convergence must map");
+
+        assert_eq!(status.state, "waiting_for_upgrade");
+        assert_eq!(status.pending_count, 7);
+        assert_eq!(status.version_incompatible_count, 3);
     }
 }

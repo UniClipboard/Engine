@@ -106,6 +106,10 @@ pub enum RedeemPairingInvitationError {
     /// Rendezvous 服务不可达。
     #[error("pairing invitation service unavailable")]
     ServiceUnavailable,
+    /// The sponsor is reachable but only supports the previous pairing
+    /// protocol. No local relationship state has been written.
+    #[error("sponsor must upgrade before pairing")]
+    SponsorUpgradeRequired,
 
     /// 口令错。覆盖两种来源:(a) 本机 `derive_master_key_for_proof` 解
     /// keyslot 失败；(b) sponsor 收到 proof 后 `verify_proof` 拒绝后发
@@ -295,6 +299,8 @@ pub enum SwitchSpaceError {
     DeviceNameRequired,
     #[error("pairing invitation service unavailable")]
     ServiceUnavailable,
+    #[error("sponsor must upgrade before pairing")]
+    SponsorUpgradeRequired,
     #[error("backup record decryption failed (corrupted ciphertext)")]
     InvalidCiphertext,
     #[error("storage failure: {0}")]

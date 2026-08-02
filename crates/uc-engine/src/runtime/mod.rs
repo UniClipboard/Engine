@@ -80,6 +80,7 @@ struct SessionFactory {
     paths: uc_application::facade::AppPaths,
     file_transfer_lifecycle: Arc<FileTransferLifecycle>,
     events: EventSender,
+    rendezvous_base_url: Option<String>,
 }
 
 struct ProductionSession {
@@ -157,6 +158,7 @@ impl ProductionRuntime {
         events: EventSender,
     ) -> Result<Self, EngineError> {
         let app_version = config.app_version().to_string();
+        let rendezvous_base_url = config.rendezvous_base_url_override();
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
         let HostWiring {
             wired,
@@ -175,6 +177,7 @@ impl ProductionRuntime {
             paths: paths.clone(),
             file_transfer_lifecycle: Arc::clone(&file_transfer_lifecycle),
             events: events.clone(),
+            rendezvous_base_url: rendezvous_base_url.clone(),
         })
         .await?;
         let task_registry = Arc::new(TaskRegistry::new());
@@ -215,6 +218,7 @@ impl ProductionRuntime {
             paths,
             file_transfer_lifecycle: Arc::clone(&file_transfer_lifecycle),
             events: events.clone(),
+            rendezvous_base_url,
         };
 
         Ok(Self {
@@ -245,9 +249,14 @@ impl ProductionRuntime {
         let paths = &factory.paths;
         let file_transfer_lifecycle = &factory.file_transfer_lifecycle;
         let events = factory.events.clone();
-        let lifecycle = build_daemon_lifecycle(&wired.deps, &wired.sync_engine, &wired.shared)
-            .await
-            .map_err(|error| startup_error("p2p session", error))?;
+        let lifecycle = build_daemon_lifecycle(
+            &wired.deps,
+            &wired.sync_engine,
+            &wired.shared,
+            factory.rendezvous_base_url.clone(),
+        )
+        .await
+        .map_err(|error| startup_error("p2p session", error))?;
         let sync_engine = lifecycle.sync_engine_assembly;
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         sync_engine.attach_restore_broadcast(restore_rx);
@@ -373,6 +382,17 @@ impl ProductionRuntime {
             .await
             .as_ref()
             .map(|session| Arc::clone(&session.sync_engine.active_clipboard))
+            .ok_or_else(operation_unavailable_error)
+    }
+
+    async fn current_membership_gossip(
+        &self,
+    ) -> Result<Arc<uc_application::facade::SpaceMembershipGossip>, EngineError> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| Arc::clone(&session.sync_engine.membership_gossip))
             .ok_or_else(operation_unavailable_error)
     }
 

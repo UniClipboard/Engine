@@ -1,116 +1,56 @@
 use async_trait::async_trait;
-use diesel::prelude::*;
+use std::sync::Arc;
 
 use uc_core::{DeviceId, TrustedPeer, TrustedPeerError, TrustedPeerRepositoryPort};
 
-use crate::db::models::{NewTrustedPeerRow, TrustedPeerRow};
-use crate::db::ports::{DbExecutor, InsertMapper, RowMapper};
-use crate::db::schema::trusted_peer::dsl::*;
+use crate::db::ports::DbExecutor;
 
-pub struct DieselTrustedPeerRepository<E, M> {
-    executor: E,
-    mapper: M,
+use super::EncryptedRelationshipStore;
+
+pub struct DieselTrustedPeerRepository<E> {
+    store: Arc<EncryptedRelationshipStore<E>>,
 }
 
-impl<E, M> DieselTrustedPeerRepository<E, M> {
-    pub fn new(executor: E, mapper: M) -> Self {
-        Self { executor, mapper }
+impl<E> DieselTrustedPeerRepository<E> {
+    pub fn new(store: Arc<EncryptedRelationshipStore<E>>) -> Self {
+        Self { store }
     }
 }
 
 #[async_trait]
-impl<E, M> TrustedPeerRepositoryPort for DieselTrustedPeerRepository<E, M>
+impl<E> TrustedPeerRepositoryPort for DieselTrustedPeerRepository<E>
 where
     E: DbExecutor,
-    M: InsertMapper<TrustedPeer, NewTrustedPeerRow>
-        + RowMapper<TrustedPeerRow, TrustedPeer>
-        + Send
-        + Sync,
 {
     async fn get(
         &self,
         peer_device_id_value: &DeviceId,
     ) -> Result<Option<TrustedPeer>, TrustedPeerError> {
-        let id = peer_device_id_value.as_str().to_string();
-        self.executor
-            .run(move |conn| {
-                let row = trusted_peer
-                    .filter(peer_device_id.eq(&id))
-                    .first::<TrustedPeerRow>(conn)
-                    .optional()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                match row {
-                    Some(r) => {
-                        let peer = self
-                            .mapper
-                            .to_domain(&r)
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        Ok(Some(peer))
-                    }
-                    None => Ok(None),
-                }
-            })
-            .map_err(|e| TrustedPeerError::Repository(e.to_string()))
+        self.store
+            .get_trusted_peer(peer_device_id_value)
+            .await
+            .map_err(|error| TrustedPeerError::Repository(error.to_string()))
     }
 
     async fn list(&self) -> Result<Vec<TrustedPeer>, TrustedPeerError> {
-        self.executor
-            .run(|conn| {
-                let rows = trusted_peer
-                    .load::<TrustedPeerRow>(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                let mut peers = Vec::with_capacity(rows.len());
-                for row in rows {
-                    let id = row.peer_device_id.clone();
-                    let peer = self.mapper.to_domain(&row).map_err(|e| {
-                        anyhow::anyhow!("Failed to map trusted_peer peer_device_id {}: {}", id, e)
-                    })?;
-                    peers.push(peer);
-                }
-
-                Ok(peers)
-            })
-            .map_err(|e| TrustedPeerError::Repository(e.to_string()))
+        self.store
+            .list_trusted_peers()
+            .await
+            .map_err(|error| TrustedPeerError::Repository(error.to_string()))
     }
 
     async fn save(&self, peer: &TrustedPeer) -> Result<(), TrustedPeerError> {
-        let row = self
-            .mapper
-            .to_row(peer)
-            .map_err(|e| TrustedPeerError::Repository(e.to_string()))?;
-
-        self.executor
-            .run(move |conn| {
-                diesel::insert_into(trusted_peer)
-                    .values(&row)
-                    .on_conflict(peer_device_id)
-                    .do_update()
-                    .set((
-                        local_device_id.eq(row.local_device_id.clone()),
-                        peer_fingerprint.eq(row.peer_fingerprint.clone()),
-                        trusted_at.eq(row.trusted_at),
-                    ))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                Ok(())
-            })
-            .map_err(|e| TrustedPeerError::Repository(e.to_string()))
+        self.store
+            .save_trusted_peer(peer)
+            .await
+            .map_err(|error| TrustedPeerError::Repository(error.to_string()))
     }
 
     async fn remove(&self, peer_device_id_value: &DeviceId) -> Result<bool, TrustedPeerError> {
-        let id = peer_device_id_value.as_str().to_string();
-        let affected = self
-            .executor
-            .run(move |conn| {
-                diesel::delete(trusted_peer.filter(peer_device_id.eq(&id)))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))
-            })
-            .map_err(|e| TrustedPeerError::Repository(e.to_string()))?;
-
-        Ok(affected > 0)
+        self.store
+            .remove_trusted_peer(peer_device_id_value)
+            .await
+            .map_err(|error| TrustedPeerError::Repository(error.to_string()))
     }
 }
 
@@ -118,22 +58,21 @@ where
 mod tests {
     use super::*;
     use crate::db::executor::DieselSqliteExecutor;
-    use crate::db::mappers::trusted_peer_mapper::TrustedPeerRowMapper;
     use crate::db::pool::init_db_pool;
+    use crate::db::repositories::relationship_store::test_relationship_store;
     use chrono::Utc;
     use tempfile::{tempdir, TempDir};
     use uc_core::security::IdentityFingerprint;
     use uc_core::{DeviceId, TrustedPeer};
 
     fn make_repo() -> (
-        DieselTrustedPeerRepository<DieselSqliteExecutor, TrustedPeerRowMapper>,
+        DieselTrustedPeerRepository<Arc<DieselSqliteExecutor>>,
         TempDir,
     ) {
         let tempdir = tempdir().unwrap();
         let database_url = tempdir.path().join("trusted-peer.sqlite");
         let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
-        let repo =
-            DieselTrustedPeerRepository::new(DieselSqliteExecutor::new(pool), TrustedPeerRowMapper);
+        let repo = DieselTrustedPeerRepository::new(test_relationship_store(pool));
         (repo, tempdir)
     }
 
@@ -214,5 +153,28 @@ mod tests {
         assert!(first);
         assert!(!second);
         assert!(repo.get(&peer.peer_device_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn saved_peer_fingerprint_is_not_persisted_in_plaintext() {
+        let (repo, tempdir) = make_repo();
+        let peer = fixture_peer("peer-privacy-probe", "local-privacy-probe");
+        let marker = peer.peer_fingerprint.as_raw();
+
+        repo.save(&peer).await.unwrap();
+
+        for entry in std::fs::read_dir(tempdir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(
+                    !bytes
+                        .windows(marker.len())
+                        .any(|window| window == marker.as_bytes()),
+                    "peer fingerprint leaked into {}",
+                    path.display()
+                );
+            }
+        }
     }
 }

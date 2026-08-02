@@ -25,6 +25,7 @@ pub(super) fn build_space_access_ports(
 ) -> (
     SpaceAccessPorts,
     Arc<dyn uc_core::membership::LegacyProtectionPort>,
+    Arc<dyn uc_core::membership::CurrentMemberSignaturePort>,
 ) {
     let security_repository = Arc::new(DieselSpaceSecurityStore::new(
         db_executor.clone(),
@@ -48,9 +49,12 @@ pub(super) fn build_space_access_ports(
             Arc::clone(&space_access_adapter),
             security_repository,
         ));
+    let current_member_signatures: Arc<dyn uc_core::membership::CurrentMemberSignaturePort> =
+        space_access_adapter.clone();
     (
         SpaceAccessPorts::from_adapter(space_access_adapter),
         legacy_protection,
+        current_member_signatures,
     )
 }
 pub(super) fn build_peer_admission_port(
@@ -307,20 +311,6 @@ pub(super) fn create_infra_layer(
     // `platform`. It is therefore constructed at the orchestrator level once
     // those exist (mirroring the search index), over `infra.db_executor`.
 
-    let member_repo_impl =
-        DieselSpaceMemberRepository::new(Arc::clone(&db_executor), SpaceMemberRowMapper);
-    let member_repo: Arc<dyn uc_core::MemberRepositoryPort> = Arc::new(member_repo_impl);
-
-    let trusted_peer_repo_impl =
-        DieselTrustedPeerRepository::new(Arc::clone(&db_executor), TrustedPeerRowMapper);
-    let trusted_peer_repo: Arc<dyn uc_core::TrustedPeerRepositoryPort> =
-        Arc::new(trusted_peer_repo_impl);
-
-    let peer_addr_repo_impl =
-        DieselPeerAddressRepository::new(Arc::clone(&db_executor), PeerAddressRowMapper);
-    let peer_addr_repo: Arc<dyn uc_core::ports::PeerAddressRepositoryPort> =
-        Arc::new(peer_addr_repo_impl);
-
     let blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort> =
         Arc::new(DieselBlobReferenceRepository::new(Arc::clone(&db_executor)));
 
@@ -416,9 +406,6 @@ pub(super) fn create_infra_layer(
         db_executor,
         representation_repo,
         selection_repo,
-        member_repo,
-        trusted_peer_repo,
-        peer_addr_repo,
         blob_reference_repo,
         migration_state,
         blob_migration_repo,

@@ -10,6 +10,9 @@ pub struct EngineConfig {
     profile_id: String,
     #[serde(default)]
     portable_storage: bool,
+    #[cfg(feature = "dev-tools")]
+    #[serde(skip)]
+    rendezvous_base_url: Option<String>,
 }
 
 impl EngineConfig {
@@ -18,6 +21,8 @@ impl EngineConfig {
             app_version: app_version.into(),
             profile_id: DEFAULT_PROFILE_ID.to_string(),
             portable_storage: false,
+            #[cfg(feature = "dev-tools")]
+            rendezvous_base_url: None,
         }
     }
 
@@ -42,15 +47,37 @@ impl EngineConfig {
     pub fn uses_portable_storage(&self) -> bool {
         self.portable_storage
     }
+
+    #[cfg(feature = "dev-tools")]
+    pub fn with_rendezvous_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.rendezvous_base_url = Some(base_url.into());
+        self
+    }
+
+    pub(crate) fn rendezvous_base_url_override(&self) -> Option<String> {
+        #[cfg(feature = "dev-tools")]
+        {
+            return self.rendezvous_base_url.clone();
+        }
+        #[cfg(not(feature = "dev-tools"))]
+        {
+            None
+        }
+    }
 }
 
 impl fmt::Debug for EngineConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("EngineConfig")
+        let mut debug = formatter.debug_struct("EngineConfig");
+        debug
             .field("app_version", &self.app_version)
             .field("profile_id", &"[REDACTED]")
-            .field("portable_storage", &self.portable_storage)
-            .finish()
+            .field("portable_storage", &self.portable_storage);
+        #[cfg(feature = "dev-tools")]
+        debug.field(
+            "has_rendezvous_override",
+            &self.rendezvous_base_url.is_some(),
+        );
+        debug.finish()
     }
 }

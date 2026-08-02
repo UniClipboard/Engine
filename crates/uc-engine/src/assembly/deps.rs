@@ -73,6 +73,21 @@ pub struct SyncEngineDeps {
     /// peer address repo — best-effort transport-address writes after pairing,
     /// dialed by F1 `ensure_reachable_all`.
     pub peer_addr_repo: Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
+    /// Whole-table reset used when switching away from the active space.
+    pub relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort>,
+    /// Encrypted, active-space-scoped candidate address book.
+    pub membership_candidate_repo: Arc<dyn uc_core::membership::MembershipCandidateRepositoryPort>,
+    /// Atomic persistence boundary for a fully verified peer relationship.
+    pub verified_peer_promotion: Arc<dyn uc_core::membership::VerifiedPeerPromotionPort>,
+    /// Encrypted self-signed membership announcements for digest exchange.
+    pub membership_announcement_repo:
+        Arc<dyn uc_core::membership::MembershipAnnouncementRepositoryPort>,
+    /// Encrypted pending membership batches for offline recipients.
+    pub membership_outbox_repo: Arc<dyn uc_core::membership::MembershipOutboxRepositoryPort>,
+    /// Independent member signatures from the current OpenMLS member tree.
+    pub current_member_signatures: Arc<dyn uc_core::membership::CurrentMemberSignaturePort>,
+    /// The same unlocked session used by space access and encrypted storage.
+    pub membership_session: Arc<uc_infra::security::InMemorySession>,
     /// plaintext-hash → ciphertext-digest dedupe cache (Slice 3 Phase 1).
     pub blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,
     /// switch-space backup table + main-table inline_data batch IO.

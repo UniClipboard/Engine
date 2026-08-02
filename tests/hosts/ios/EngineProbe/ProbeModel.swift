@@ -18,6 +18,7 @@ final class ProbeModel {
     private var started = false
     private var suspended = false
     private var automatedActionRan = false
+    private var activeRequestID: String?
 
     func startIfNeeded() async {
         guard !started else { return }
@@ -227,6 +228,40 @@ final class ProbeModel {
         }
     }
 
+    func handleCommandURL(_ url: URL) async {
+        guard url.scheme == "ucengineprobe",
+              url.host == "command",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let payload = components.queryItems?.first(where: { $0.name == "payload" })?.value,
+              let requestID = components.queryItems?.first(where: { $0.name == "request_id" })?.value,
+              !requestID.isEmpty,
+              let data = Self.decodeBase64URL(payload),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let command = object as? [String: Any]
+        else {
+            record(["ok": false, "kind": "invalid_command_url"])
+            return
+        }
+        activeRequestID = requestID
+        defer { activeRequestID = nil }
+        await runURLCommand(command)
+    }
+
+    private func runURLCommand(_ command: [String: Any]) async {
+        guard command["command"] as? String == "verify_text" else {
+            _ = await run(command)
+            return
+        }
+        guard let encoded = command["expected_base64"] as? String,
+              let expectedBytes = Data(base64Encoded: encoded) else {
+            record(["ok": false, "kind": "missing_expected_payload"])
+            return
+        }
+        isBusy = true
+        defer { isBusy = false }
+        await verifyTextReceived(expectedBytes: expectedBytes)
+    }
+
     func handleScenePhase(_ phase: ScenePhase) async {
         guard started, !isBusy else { return }
         switch phase {
@@ -244,12 +279,16 @@ final class ProbeModel {
     private func run(_ command: [String: Any]) async -> [String: Any] {
         isBusy = true
         defer { isBusy = false }
-        let bridge = bridge
-        let result = await Task.detached(priority: .userInitiated) {
-            bridge.command(command)
-        }.value
+        let result = await execute(command)
         record(result)
         return result
+    }
+
+    private func execute(_ command: [String: Any]) async -> [String: Any] {
+        let bridge = bridge
+        return await Task.detached(priority: .userInitiated) {
+            bridge.command(command)
+        }.value
     }
 
     private func verifyLatestPayload(
@@ -257,7 +296,7 @@ final class ProbeModel {
         expectedBytes: Data?,
         resultKind: String
     ) async {
-        let history = await run([
+        let history = await execute([
             "command": "query_history",
             "query": NSNull(),
             "limit": 50,
@@ -273,7 +312,8 @@ final class ProbeModel {
 
         let destination = FileManager.default.temporaryDirectory
             .appending(path: "received-\(UUID().uuidString)")
-        let exported = await run([
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let exported = await execute([
             "command": "export_entry",
             "entry_id": entryIDs[index],
             "path": destination.path,
@@ -301,16 +341,21 @@ final class ProbeModel {
         let kind = result["kind"] as? String ?? "unknown"
         let ok = result["ok"] as? Bool == true
         status = ok ? "Passed: \(kind)" : "Failed: \(kind)"
-        transcript.insert(evidenceLine(result), at: 0)
+        let evidence = evidenceLine(result)
+        transcript.insert(evidence, at: 0)
         if transcript.count > 20 { transcript.removeLast() }
-        print("UC_PROBE_EVIDENCE \(evidenceLine(result))")
+        persistEvidence(evidence)
+        print("UC_PROBE_EVIDENCE \(evidence)")
     }
 
     private func evidenceLine(_ result: [String: Any]) -> String {
         let allowed = [
             "ok", "kind", "code", "category", "retryable", "count", "online_count",
             "incoming_entries", "transfer_updates", "refresh_requests",
-            "completed_operations", "fatal_errors", "last_state", "has_next",
+            "completed_operations", "fatal_errors", "last_state", "has_next", "state",
+            "pending_count", "waiting_for_peer_count", "waiting_for_update_count",
+            "version_incompatible_count", "blocked_count", "rejected_count", "accepted",
+            "duplicate", "offline", "errored", "pending", "target_count",
         ]
         let evidence = result.filter { allowed.contains($0.key) }
         guard let data = try? JSONSerialization.data(
@@ -318,6 +363,43 @@ final class ProbeModel {
             options: [.sortedKeys]
         ) else { return "{\"ok\":false,\"kind\":\"evidence_failed\"}" }
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private func persistEvidence(_ evidence: String) {
+        guard let requestID = activeRequestID,
+              let evidenceData = evidence.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: evidenceData),
+              var result = object as? [String: Any]
+        else { return }
+        result["request_id"] = requestID
+        guard let resultData = try? JSONSerialization.data(
+            withJSONObject: result,
+            options: [.sortedKeys]
+        ) else { return }
+        let fileManager = FileManager.default
+        guard let support = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { return }
+        do {
+            try fileManager.createDirectory(at: support, withIntermediateDirectories: true)
+            try resultData.write(
+                to: support.appending(path: "probe-result.json"),
+                options: .atomic
+            )
+        } catch {
+            status = "Failed: evidence_write_failed"
+        }
+    }
+
+    private static func decodeBase64URL(_ encoded: String) -> Data? {
+        var base64 = encoded.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        return Data(base64Encoded: base64)
     }
 
     private static let samplePNG =

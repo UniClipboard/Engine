@@ -7,7 +7,8 @@ use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, LegacyBootstrapState,
     LegacyBootstrapView, MemberProtectionStatusView, MemberRevocationState, MemberRevocationView,
     MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    RosterError, SpaceProtectionModeView, SpaceProtectionView,
+    MembershipConvergenceState, RosterError, SpaceMembershipGossip, SpaceMembershipGossipError,
+    SpaceProtectionModeView, SpaceProtectionView,
 };
 use uc_core::ports::ReachabilityState;
 
@@ -15,13 +16,24 @@ use crate::{
     ContentTypesPatch, ContentTypesSummary, DeviceSummary, EngineError, EngineErrorCategory,
     LegacyBootstrapOutcome, LegacyBootstrapSummary, MemberProtectionStatusSummary,
     MemberProtectionSummary, MemberRevocationOutcome, MemberRevocationSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, OperationResult,
-    QueryLegacyBootstrapInput, QueryMemberRevocationInput, QueryMemberSyncPreferencesInput,
-    RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
-    UpdateMemberSyncPreferencesInput,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MembershipConvergenceStateSummary,
+    MembershipConvergenceSummary, OperationResult, QueryLegacyBootstrapInput,
+    QueryMemberRevocationInput, QueryMemberSyncPreferencesInput, RemoveMemberInput,
+    SpaceProtectionModeSummary, SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
 };
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
+    let encryption = facade.encryption.state().await.map_err(|_| {
+        error!(error_kind = "encryption_state", "device list query failed");
+        EngineError::new(
+            MEMBER_REPOSITORY_FAILED_CODE,
+            EngineErrorCategory::Internal,
+            false,
+        )
+    })?;
+    if !encryption.initialized {
+        return Ok(OperationResult::Devices(Vec::new()));
+    }
     let entries = facade
         .list_roster_entries()
         .await
@@ -37,6 +49,70 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
             })
             .collect(),
     ))
+}
+
+pub async fn execute_query_membership_convergence(
+    gossip: &SpaceMembershipGossip,
+) -> Result<OperationResult, EngineError> {
+    let status = gossip
+        .current_convergence_status()
+        .await
+        .map_err(map_membership_convergence_error)?;
+    Ok(OperationResult::MembershipConvergence(
+        MembershipConvergenceSummary {
+            state: match status.state {
+                MembershipConvergenceState::Complete => MembershipConvergenceStateSummary::Complete,
+                MembershipConvergenceState::Converging => {
+                    MembershipConvergenceStateSummary::Converging
+                }
+                MembershipConvergenceState::WaitingForUpgrade => {
+                    MembershipConvergenceStateSummary::WaitingForUpgrade
+                }
+                MembershipConvergenceState::Blocked => MembershipConvergenceStateSummary::Blocked,
+            },
+            pending_count: usize_to_u64(status.pending_count),
+            waiting_for_peer_count: usize_to_u64(status.waiting_for_peer_count),
+            waiting_for_update_count: usize_to_u64(status.waiting_for_update_count),
+            version_incompatible_count: usize_to_u64(status.version_incompatible_count),
+            blocked_count: usize_to_u64(status.blocked_count),
+            rejected_count: usize_to_u64(status.rejected_count),
+        },
+    ))
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn map_membership_convergence_error(error: SpaceMembershipGossipError) -> EngineError {
+    let (code, category, retryable, variant) = match error {
+        SpaceMembershipGossipError::CurrentIdentity(
+            uc_core::membership::CurrentMembershipIdentityError::Unavailable,
+        ) => (
+            QUERY_MEMBERSHIP_CONVERGENCE_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+            "current_identity_unavailable",
+        ),
+        SpaceMembershipGossipError::CurrentIdentity(
+            uc_core::membership::CurrentMembershipIdentityError::LoadFailed,
+        ) => (
+            QUERY_MEMBERSHIP_CONVERGENCE_FAILED_CODE,
+            EngineErrorCategory::Internal,
+            true,
+            "current_identity_load",
+        ),
+        _ => (
+            QUERY_MEMBERSHIP_CONVERGENCE_FAILED_CODE,
+            EngineErrorCategory::Internal,
+            true,
+            "membership_state",
+        ),
+    };
+    if category == EngineErrorCategory::Internal {
+        error!(variant, "membership convergence query failed");
+    }
+    EngineError::new(code, category, retryable)
 }
 
 pub async fn execute_query_member_sync_preferences(

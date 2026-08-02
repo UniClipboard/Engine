@@ -73,7 +73,6 @@ pub fn create_platform_layer(
     profile_id: ProfileId,
     config_dir: &PathBuf,
     blob_repository: Arc<dyn BlobRepositoryPort>,
-    _member_repo: Arc<dyn uc_core::MemberRepositoryPort>,
     clock: Arc<dyn ClockPort>,
     storage_config: Arc<ClipboardStorageConfig>,
     system_clipboard: SystemClipboardLayer,

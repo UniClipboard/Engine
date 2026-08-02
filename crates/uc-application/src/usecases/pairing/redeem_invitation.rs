@@ -9,10 +9,13 @@
 //!
 //! Mirrors sponsor-side P7f cleanup: `admit` → `trust` →
 //! `setup_status.set_status(completed)` all land **before** `execute`
-//! returns `Ok`. Any persistence failure short-circuits the remaining
-//! steps and surfaces as
+//! returns `Ok`. Required pairing-state failures short-circuit the remaining
+//! steps and surface as
 //! [`RedeemPairingInvitationError::Internal`] — the caller never gets
 //! a success result that isn't backed by fully committed local state.
+//! Sponsor-provided membership seeds are redundant discovery hints: if their
+//! local candidate write fails after the secure group join has landed, the
+//! sponsor's durable outbox lets existing members initiate convergence.
 //!
 //! `setup_status` is flipped **last**, because `has_completed=true` is
 //! the marker `UnlockSpaceUseCase` keys off on the next launch.
@@ -46,7 +49,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use uc_core::ports::pairing::DiscoveryChannel;
 use uc_core::ports::{ClockPort, PeerAddressRecord, PeerAddressRepositoryPort, SetupStatusPort};
@@ -57,6 +60,7 @@ use uc_observability_contract::analytics::events::{
 };
 use uc_observability_contract::analytics::AnalyticsFacade;
 
+use crate::facade::membership_gossip::PairingMembershipGossipPort;
 use crate::facade::space_setup::commands::RedeemPairingInvitationCommand;
 use crate::facade::space_setup::{RedeemPairingInvitationError, RedeemPairingInvitationResult};
 use crate::membership::errors::MembershipApplicationError;
@@ -75,6 +79,7 @@ pub(crate) struct RedeemPairingInvitationUseCase {
     admit_member: Arc<AdmitMemberUc>,
     trust_peer: Arc<TrustPeerUc>,
     setup_status: Arc<dyn SetupStatusPort>,
+    membership_gossip: Arc<dyn PairingMembershipGossipPort>,
     /// Slice 2 Phase 1 · T5：配对完成后 best-effort 把 sponsor 的传输地址
     /// blob 写入仓库。写失败不 fail join（presence 下轮会再拉）。
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
@@ -94,6 +99,7 @@ impl RedeemPairingInvitationUseCase {
         admit_member: Arc<AdmitMemberUc>,
         trust_peer: Arc<TrustPeerUc>,
         setup_status: Arc<dyn SetupStatusPort>,
+        membership_gossip: Arc<dyn PairingMembershipGossipPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         clock: Arc<dyn ClockPort>,
         analytics: Arc<dyn AnalyticsFacade>,
@@ -103,6 +109,7 @@ impl RedeemPairingInvitationUseCase {
             admit_member,
             trust_peer,
             setup_status,
+            membership_gossip,
             peer_addr_repo,
             clock,
             analytics,
@@ -152,7 +159,7 @@ impl RedeemPairingInvitationUseCase {
 
     async fn persist(
         &self,
-        outcome: JoinerHandshakeOutcome,
+        mut outcome: JoinerHandshakeOutcome,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
         let now = self.now_utc()?;
 
@@ -180,6 +187,22 @@ impl RedeemPairingInvitationUseCase {
             .execute(trust_input)
             .await
             .map_err(map_trust_err)?;
+
+        if self
+            .membership_gossip
+            .accept_sponsor_seed_batch(std::mem::take(&mut outcome.membership_seeds))
+            .await
+            .is_err()
+        {
+            // The secure group join is already durable at this point. Existing
+            // members also receive a sponsor outbox entry for this joiner, so a
+            // candidate-store failure must not turn a completed admission into
+            // a false setup failure.
+            warn!(
+                recovery_via_existing_member = true,
+                "sponsor membership seeds could not be persisted after group join"
+            );
+        }
 
         // Mark setup complete (ordering rationale: see module doc).
         // Adopt the sponsor's `space_id` — without this, future commands
@@ -298,6 +321,9 @@ fn map_redeem_error_to_pairing_failure_reason(
         RedeemPairingInvitationError::ServiceUnavailable => {
             PairingFailureReason::ServiceUnavailable
         }
+        RedeemPairingInvitationError::SponsorUpgradeRequired => {
+            PairingFailureReason::SponsorUpgradeRequired
+        }
         RedeemPairingInvitationError::PassphraseMismatch => {
             PairingFailureReason::PassphraseMismatch
         }
@@ -356,7 +382,7 @@ mod tests {
 
     use uc_core::crypto::domain::Passphrase;
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
-    use uc_core::membership::{MembershipError, SpaceMember};
+    use uc_core::membership::{MembershipError, SpaceMember, SponsorCandidateSeed};
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::session_message::{
         PairingSessionMessage, SponsorAdmissionOffer, SponsorConfirm,
@@ -379,6 +405,10 @@ mod tests {
 
     use chrono::DateTime;
     use tokio::time::Duration;
+
+    use crate::facade::membership_gossip::{
+        PairingMembershipGossipPort, SpaceMembershipGossipError, SponsorSeedBatchContext,
+    };
 
     // ── minimal wire fakes (for producing a happy-path outcome) ──────────
 
@@ -415,6 +445,7 @@ mod tests {
                     welcome: vec![1],
                     encrypted_key_catalog: vec![2],
                     group_epoch: 2,
+                    membership_seeds: Vec::new(),
                 }));
             me
         }
@@ -691,6 +722,50 @@ mod tests {
         }
     }
 
+    struct RecordingMembershipGossip {
+        fail_accept: bool,
+        accepted: StdMutex<Vec<Vec<SponsorCandidateSeed>>>,
+    }
+
+    impl RecordingMembershipGossip {
+        fn succeeding() -> Self {
+            Self {
+                fail_accept: false,
+                accepted: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                fail_accept: true,
+                accepted: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PairingMembershipGossipPort for RecordingMembershipGossip {
+        async fn prepare_sponsor_membership(
+            &self,
+            _context: SponsorSeedBatchContext,
+        ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError> {
+            Ok(Vec::new())
+        }
+
+        async fn accept_sponsor_seed_batch(
+            &self,
+            seeds: Vec<SponsorCandidateSeed>,
+        ) -> Result<(), SpaceMembershipGossipError> {
+            if self.fail_accept {
+                return Err(SpaceMembershipGossipError::Relationship(
+                    "candidate write failed".into(),
+                ));
+            }
+            self.accepted.lock().unwrap().push(seeds);
+            Ok(())
+        }
+    }
+
     // ── fixtures ─────────────────────────────────────────────────────────
 
     fn sponsor_fp() -> IdentityFingerprint {
@@ -871,6 +946,26 @@ mod tests {
             setup_status: Arc<RecordingSetupStatus>,
             peer_addr_repo: Arc<MockPeerAddrRepo>,
         ) -> (RedeemPairingInvitationUseCase, Self) {
+            Self::build_with_membership_gossip(
+                session,
+                session_handle,
+                member_repo,
+                trust_repo,
+                setup_status,
+                peer_addr_repo,
+                Arc::new(RecordingMembershipGossip::succeeding()),
+            )
+        }
+
+        fn build_with_membership_gossip(
+            session: Arc<dyn PairingSessionPort>,
+            session_handle: Arc<HappySession>,
+            member_repo: Arc<RecordingMemberRepo>,
+            trust_repo: Arc<RecordingTrustRepo>,
+            setup_status: Arc<RecordingSetupStatus>,
+            peer_addr_repo: Arc<MockPeerAddrRepo>,
+            membership_gossip: Arc<dyn PairingMembershipGossipPort>,
+        ) -> (RedeemPairingInvitationUseCase, Self) {
             let space_access = happy_space_access();
             let handshake = JoinerHandshakeCoordinator::new(
                 session,
@@ -904,6 +999,7 @@ mod tests {
                 admit_uc,
                 trust_uc,
                 setup_status.clone(),
+                membership_gossip,
                 peer_addr_repo.clone() as Arc<dyn PeerAddressRepositoryPort>,
                 Arc::new(FixedClock(fixed_now_ms())),
                 facade,
@@ -1041,8 +1137,33 @@ mod tests {
                 welcome: vec![1],
                 encrypted_key_catalog: vec![2],
                 group_epoch: 2,
+                membership_seeds: Vec::new(),
             }));
         me
+    }
+
+    fn session_with_membership_seed() -> Arc<HappySession> {
+        let session = session_with_sponsor_blob(Vec::new());
+        let mut received = session.recv.lock().unwrap();
+        let confirm = received.pop_back().unwrap();
+        let PairingSessionMessage::Confirm(mut confirm) = confirm else {
+            panic!("expected primed Confirm");
+        };
+        confirm.membership_seeds = vec![SponsorCandidateSeed {
+            space_id: SpaceId::from_str("space-xyz"),
+            device_id: DeviceId::new("existing-device"),
+            device_name_hint: "Existing Device".into(),
+            identity_fingerprint_hint: IdentityFingerprint::from_raw_string("CCCCCCCCCCCCCCCC")
+                .unwrap(),
+            transport_address_blob: b"existing-address".to_vec(),
+            address_observed_at_ms: fixed_now_ms(),
+            source_device_id: DeviceId::new("sponsor-device"),
+            security_updates: Vec::new(),
+            expires_at_ms: fixed_now_ms() + 60_000,
+        }];
+        received.push_back(PairingSessionMessage::Confirm(confirm));
+        drop(received);
+        session
     }
 
     #[tokio::test]
@@ -1103,6 +1224,7 @@ mod tests {
                 welcome: vec![1],
                 encrypted_key_catalog: vec![2],
                 group_epoch: 2,
+                membership_seeds: Vec::new(),
             }));
         me
     }
@@ -1212,6 +1334,7 @@ mod tests {
             admit_uc,
             trust_uc,
             setup_status,
+            Arc::new(RecordingMembershipGossip::succeeding()),
             peer_addr_repo,
             Arc::new(FixedClock(fixed_now_ms())),
             facade,
@@ -1445,6 +1568,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn membership_seed_failure_keeps_the_completed_group_join_usable() {
+        let session = session_with_membership_seed();
+        let peer_mock = {
+            let mut mock = MockPeerAddrRepo::new();
+            mock.expect_upsert().times(0);
+            Arc::new(mock)
+        };
+        let membership_gossip = Arc::new(RecordingMembershipGossip::failing());
+        let (use_case, harness) = Harness::build_with_membership_gossip(
+            session.clone(),
+            session,
+            Arc::new(RecordingMemberRepo::default()),
+            Arc::new(RecordingTrustRepo::default()),
+            Arc::new(RecordingSetupStatus::ok()),
+            peer_mock,
+            membership_gossip,
+        );
+
+        let result = use_case.execute(cmd("SEED-FAIL")).await.unwrap();
+
+        assert_eq!(result.space_id.inner(), "space-xyz");
+        assert_eq!(harness.member_repo.saved.lock().unwrap().len(), 1);
+        assert_eq!(harness.trust_repo.saved.lock().unwrap().len(), 1);
+        assert_eq!(*harness.setup_status.set_calls.lock().unwrap(), vec![true]);
+        assert_started_then_succeeded(&harness.analytics.snapshot());
+    }
+
+    #[tokio::test]
     async fn setup_status_failure_lands_admit_and_trust_but_surfaces_internal() {
         let session = Arc::new(HappySession::primed());
         let peer_mock = {
@@ -1494,6 +1645,7 @@ mod tests {
             (E::InvitationExpired, R::InvitationExpired),
             (E::SponsorUnreachable, R::SponsorUnreachable),
             (E::ServiceUnavailable, R::ServiceUnavailable),
+            (E::SponsorUpgradeRequired, R::SponsorUpgradeRequired),
             (E::PassphraseMismatch, R::PassphraseMismatch),
             (E::CorruptedKeyMaterial, R::CorruptedKeyMaterial),
             (E::DeviceNameRequired, R::DeviceNameRequired),

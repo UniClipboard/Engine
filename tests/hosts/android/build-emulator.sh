@@ -3,7 +3,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PROJECT_DIR="$REPO_ROOT/tests/hosts/android"
-TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/uni-desktop-android-probe-target}"
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  TARGET_DIR="$CARGO_TARGET_DIR"
+else
+  TARGET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/uc-android-probe.XXXXXX")"
+  trap 'rm -rf -- "$TARGET_DIR"' EXIT
+fi
 
 cd "$REPO_ROOT"
 CARGO_TARGET_DIR="$TARGET_DIR" cargo ndk \

@@ -61,8 +61,9 @@ use crate::rendezvous::{RendezvousClient, RendezvousHttpError};
 /// instead of unbounded memory growth.
 const EVENT_CHANNEL_CAPACITY: usize = 32;
 
-/// ALPN identifier for the Slice 1 pairing protocol (F-014).
-pub const PAIRING_ALPN: &[u8] = b"/uniclipboard/pairing/1";
+/// ALPN identifier for the v5 pairing protocol.
+pub const PAIRING_ALPN: &[u8] = b"/uniclipboard/pairing/2";
+pub(crate) const LEGACY_PAIRING_ALPN: &[u8] = b"/uniclipboard/pairing/1";
 
 const FRAME_LEN_BYTES: usize = 4;
 
@@ -74,6 +75,26 @@ const FRAME_LEN_BYTES: usize = 4;
 /// 等只会吊死。失败立刻 drop 让 iroh router 释放 socket,joiner 那侧
 /// retry 比慢失败健康。
 const INBOUND_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) async fn legacy_pairing_protocol_is_reachable(
+    endpoint: Arc<Endpoint>,
+    remote_addr: EndpointAddr,
+) -> bool {
+    match connect_with_staggered_retry(
+        endpoint,
+        remote_addr,
+        LEGACY_PAIRING_ALPN,
+        "pairing-compatibility-probe",
+    )
+    .await
+    {
+        Ok(connection) => {
+            connection.close(0u32.into(), b"upgrade-required");
+            true
+        }
+        Err(_) => false,
+    }
+}
 
 // ============================================================================
 // Adapter
@@ -561,7 +582,8 @@ async fn read_next_frame(
         | WireDecodeError::UnsupportedVersion { .. }
         | WireDecodeError::UnsupportedSecurityCapability(_)
         | WireDecodeError::InvalidFingerprint(_)
-        | WireDecodeError::InvalidSpacePersonId(_) => {
+        | WireDecodeError::InvalidSpacePersonId(_)
+        | WireDecodeError::InvalidMembershipSeeds(_) => {
             SessionError::Internal(format!("wire decode: {err}"))
         }
     })
@@ -621,21 +643,33 @@ impl PairingSessionPort for IrohPairingSessionAdapter {
             "pairing sponsor address resolved; dialing"
         );
 
-        let connection = connect_with_staggered_retry(
+        let connection = match connect_with_staggered_retry(
             Arc::clone(&self.endpoint),
-            sponsor_addr,
+            sponsor_addr.clone(),
             PAIRING_ALPN,
             "pairing",
         )
         .await
-        .map_err(|err| {
-            warn!(
-                error = %err,
-                sponsor = %sponsor_id,
-                "pairing sponsor connect failed"
-            );
-            DialError::SponsorUnreachable
-        })?;
+        {
+            Ok(connection) => connection,
+            Err(current_error) => {
+                if legacy_pairing_protocol_is_reachable(Arc::clone(&self.endpoint), sponsor_addr)
+                    .await
+                {
+                    warn!(
+                        sponsor = %sponsor_id,
+                        "pairing sponsor requires a protocol upgrade"
+                    );
+                    return Err(DialError::SponsorUpgradeRequired);
+                }
+                warn!(
+                    current_error = %current_error,
+                    sponsor = %sponsor_id,
+                    "pairing sponsor connect failed"
+                );
+                return Err(DialError::SponsorUnreachable);
+            }
+        };
         info!(
             sponsor = %sponsor_id,
             "pairing sponsor connection established; opening bi stream"
@@ -1093,6 +1127,40 @@ mod tests {
             Err(SessionError::NotFound(id)) => assert_eq!(id.as_str(), session.as_str()),
             other => panic!("expected NotFound after close, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dial_identifies_a_sponsor_that_only_supports_the_legacy_pairing_protocol() {
+        let server = MockServer::start().await;
+        let sponsor_endpoint = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .alpns(vec![LEGACY_PAIRING_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind legacy sponsor"),
+        );
+        wait_for_direct_addrs(&sponsor_endpoint).await;
+        let sponsor_addr = sponsor_endpoint.addr();
+        let sponsor_task = spawn_echo_sponsor(sponsor_endpoint.clone());
+        let code = InvitationCode::new("legacy1");
+        mock_resolve(
+            &server,
+            code.as_str(),
+            serde_json::to_string(&sponsor_addr).expect("encode sponsor address"),
+        )
+        .await;
+        let joiner_endpoint = bound_endpoint().await;
+        let adapter = adapter_with_rendezvous(joiner_endpoint, server.uri());
+
+        let error = adapter
+            .dial_by_invitation(&code)
+            .await
+            .expect_err("legacy sponsor must require an upgrade");
+
+        assert!(matches!(error, DialError::SponsorUpgradeRequired));
+        sponsor_task.abort();
+        sponsor_endpoint.close().await;
     }
 
     #[tokio::test]

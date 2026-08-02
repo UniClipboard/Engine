@@ -28,7 +28,8 @@ use super::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
 use super::secrets::{Kek, MasterKey};
 use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
 use uc_core::membership::{
-    AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort,
+    AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId,
+    CurrentMemberSignatureError, CurrentMemberSignaturePort, GroupBootstrapPort,
     GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
     LegacyBootstrapProgress, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
     LegacyBootstrapStage, LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus,
@@ -2317,6 +2318,64 @@ impl SpaceProtectionStatusPort for DefaultSpaceAccessAdapter {
     }
 }
 
+#[async_trait]
+impl CurrentMemberSignaturePort for DefaultSpaceAccessAdapter {
+    async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::current_epoch(&group).map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+
+    async fn sign_current_member_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::sign_member_payload(&group, payload)
+            .map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+
+    async fn verify_current_member_payload(
+        &self,
+        member: &DeviceId,
+        payload: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::verify_member_payload(
+            &group,
+            member.as_str().as_bytes(),
+            payload,
+            signature,
+        )
+        .map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+}
+
+impl DefaultSpaceAccessAdapter {
+    async fn current_member_group_state(
+        &self,
+    ) -> Result<MlsClientState, CurrentMemberSignatureError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|_| CurrentMemberSignatureError::Unavailable)?;
+        let repository = self
+            .key_epoch_repository
+            .as_ref()
+            .ok_or(CurrentMemberSignatureError::Unavailable)?;
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|error| CurrentMemberSignatureError::Repository(error.to_string()))?
+            .ok_or(CurrentMemberSignatureError::Unavailable)?;
+        if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty()
+        {
+            return Err(CurrentMemberSignatureError::InvalidState);
+        }
+        Ok(MlsClientState::from_bytes(material.group_state().to_vec()))
+    }
+}
+
 #[cfg(test)]
 mod admission_tests {
     use std::collections::HashMap;
@@ -3379,6 +3438,24 @@ mod admission_tests {
     }
 
     #[tokio::test]
+    async fn current_member_signature_port_uses_persisted_current_group() {
+        let (adapter, _session, _repository, _space_id, _directory) = sponsor_fixture();
+        let payload = b"member-attestation-transcript";
+
+        let signature = adapter.sign_current_member_payload(payload).await.unwrap();
+
+        assert_eq!(adapter.current_member_epoch().await.unwrap(), 1);
+        assert!(adapter
+            .verify_current_member_payload(&DeviceId::new("alice"), payload, &signature)
+            .await
+            .unwrap());
+        assert!(!adapter
+            .verify_current_member_payload(&DeviceId::new("missing"), payload, &signature)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
     async fn revocation_without_space_material_requires_legacy_bootstrap() {
         let directory = tempdir().unwrap();
         let session = Arc::new(InMemorySession::new());
@@ -3918,5 +3995,93 @@ mod admission_tests {
             .unwrap();
         assert_eq!(bob_key.epoch(), sponsor_key.epoch());
         assert_eq!(bob_key.key(), sponsor_key.key());
+    }
+
+    #[tokio::test]
+    async fn joiner_relays_admission_update_after_sponsor_stops() {
+        let (sponsor_b, _sponsor_session, _repository, space_id, _sponsor_dir) = sponsor_fixture();
+
+        let device_a_dir = tempdir().unwrap();
+        let device_a_session = Arc::new(InMemorySession::new());
+        let (device_a_repository, _) = memory_revocation_repository(None);
+        let device_a = adapter(
+            local_key_material(&device_a_dir, memory_secure_storage()),
+            Arc::clone(&device_a_session),
+            Arc::clone(&device_a_repository),
+        );
+        let device_a_id = DeviceId::new("device-a");
+        let device_a_pending = sponsor_b.prepare_group_join(&device_a_id).await.unwrap();
+        let device_a_admission = sponsor_b
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &device_a_id,
+                &[],
+                &device_a_pending.key_package,
+            )
+            .await
+            .unwrap();
+        device_a
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("shared passphrase for device a"),
+                device_a_pending,
+                &device_a_admission.welcome,
+                &device_a_admission.encrypted_key_catalog,
+                device_a_admission.group_epoch,
+            )
+            .await
+            .unwrap();
+
+        let device_c_dir = tempdir().unwrap();
+        let device_c_session = Arc::new(InMemorySession::new());
+        let (device_c_repository, _) = memory_revocation_repository(None);
+        let device_c = adapter(
+            local_key_material(&device_c_dir, memory_secure_storage()),
+            device_c_session,
+            device_c_repository,
+        );
+        let device_c_id = DeviceId::new("device-c");
+        let device_c_pending = device_c.prepare_group_join(&device_c_id).await.unwrap();
+        let device_c_admission = sponsor_b
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &device_c_id,
+                std::slice::from_ref(&device_a_id),
+                &device_c_pending.key_package,
+            )
+            .await
+            .unwrap();
+        device_c
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("shared passphrase for device c"),
+                device_c_pending,
+                &device_c_admission.welcome,
+                &device_c_admission.encrypted_key_catalog,
+                device_c_admission.group_epoch,
+            )
+            .await
+            .unwrap();
+        let relayed_update = device_c_admission.existing_member_updates[0]
+            .payload()
+            .to_vec();
+
+        drop(sponsor_b);
+
+        assert_eq!(
+            device_a
+                .apply_group_epoch_update(&relayed_update)
+                .await
+                .unwrap(),
+            GroupEpoch::new(device_c_admission.group_epoch)
+        );
+        let payload = b"member-attestation-after-relayed-update";
+        let signature = device_c.sign_current_member_payload(payload).await.unwrap();
+        assert!(device_a
+            .verify_current_member_payload(&device_c_id, payload, &signature)
+            .await
+            .unwrap());
     }
 }

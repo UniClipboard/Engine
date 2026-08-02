@@ -75,7 +75,9 @@ use tracing::{debug, info, instrument, warn};
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Passphrase};
 use uc_core::ids::SpaceId;
-use uc_core::membership::{MemberRepositoryPort, MemberSyncPreferences};
+use uc_core::membership::{
+    MemberRepositoryPort, MemberSyncPreferences, RelationshipStateResetPort,
+};
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::ports::clipboard::{BlobMigrationRepoError, BlobMigrationRepoPort, MigrationRecord};
 use uc_core::ports::security::{
@@ -150,6 +152,7 @@ pub(crate) struct SwitchSpaceUseCase {
     admit_member: Arc<AdmitMemberUc>,
     trust_peer: Arc<TrustPeerUc>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    relationship_reset: Arc<dyn RelationshipStateResetPort>,
     clock: Arc<dyn ClockPort>,
     /// Switches the local analytics identity to the target Space's
     /// person once commit phase has succeeded. `None` on the target
@@ -170,6 +173,7 @@ impl SwitchSpaceUseCase {
         admit_member: Arc<AdmitMemberUc>,
         trust_peer: Arc<TrustPeerUc>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        relationship_reset: Arc<dyn RelationshipStateResetPort>,
         clock: Arc<dyn ClockPort>,
         analytics: Arc<dyn AnalyticsFacade>,
     ) -> Self {
@@ -183,6 +187,7 @@ impl SwitchSpaceUseCase {
             admit_member,
             trust_peer,
             peer_addr_repo,
+            relationship_reset,
             clock,
             analytics,
         }
@@ -424,6 +429,10 @@ impl SwitchSpaceUseCase {
             .run(code, new_passphrase)
             .await
             .map_err(map_redeem_err)?;
+        self.relationship_reset
+            .clear_all_relationships()
+            .await
+            .map_err(|error| SwitchSpaceError::Storage(error.to_string()))?;
         let now = self.now_utc()?;
 
         let admit_input = AdmitMember {
@@ -628,6 +637,7 @@ fn map_redeem_err(err: RedeemPairingInvitationError) -> SwitchSpaceError {
         R::InvitationExpired => SwitchSpaceError::InvitationExpired,
         R::SponsorUnreachable => SwitchSpaceError::SponsorUnreachable,
         R::ServiceUnavailable => SwitchSpaceError::ServiceUnavailable,
+        R::SponsorUpgradeRequired => SwitchSpaceError::SponsorUpgradeRequired,
         R::PassphraseMismatch => SwitchSpaceError::PassphraseMismatch,
         R::CorruptedKeyMaterial => SwitchSpaceError::CorruptedKeyMaterial,
         R::DeviceNameRequired => SwitchSpaceError::DeviceNameRequired,

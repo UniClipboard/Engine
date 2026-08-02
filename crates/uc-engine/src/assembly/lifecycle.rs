@@ -45,6 +45,7 @@ pub async fn build_daemon_lifecycle(
     deps: &AppDeps,
     space_setup: &SyncEngineDeps,
     shared: &SharedRuntimeDeps,
+    rendezvous_base_url: Option<String>,
 ) -> anyhow::Result<DaemonLifecycle> {
     // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
     // member_repo 已不再持有的孤儿条目清掉,恢复设计意图的不变量
@@ -107,7 +108,7 @@ pub async fn build_daemon_lifecycle(
         allow_overlay_network_addrs,
         custom_relay_urls,
         congestion_controller,
-        None, // production 不 override rendezvous,使用默认 RENDEZVOUS_BASE_URL
+        rendezvous_base_url,
     );
     crate::assembly::network::load_relay_access_tokens(&mut iroh_config, &relay_credentials);
     // #900：从 env 读取直连可达性（固定 UDP 端口 + 广播公网地址）并写入。

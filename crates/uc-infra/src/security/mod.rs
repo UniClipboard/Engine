@@ -12,6 +12,7 @@ pub(crate) mod key_epoch_aad;
 mod key_material;
 mod key_migration_adapter;
 pub(crate) mod legacy_upgrade;
+mod membership_security_update_adapter;
 pub(crate) mod mls_group;
 mod peer_admission_adapter;
 mod scope_identifier;
@@ -41,6 +42,7 @@ pub use identity_fingerprint::{
 pub use key_material::KeyMaterialStore;
 pub use key_migration_adapter::DefaultKeyMigrationAdapter;
 pub use legacy_upgrade::DefaultLegacyProtection;
+pub use membership_security_update_adapter::DefaultMembershipSecurityUpdateAdapter;
 pub use peer_admission_adapter::MlsPeerAdmissionAdapter;
 pub(crate) use secrets::MasterKey;
 pub use session::InMemorySession;

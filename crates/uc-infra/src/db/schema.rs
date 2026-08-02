@@ -245,29 +245,17 @@ diesel::table! {
 }
 
 diesel::table! {
-    peer_address (device_id) {
-        device_id -> Text,
-        addr_blob -> Binary,
-        observed_at -> BigInt,
+    encrypted_relationship (kind, lookup_key) {
+        kind -> Text,
+        lookup_key -> Binary,
+        payload_ciphertext -> Binary,
     }
 }
 
 diesel::table! {
-    space_member (device_id) {
-        device_id -> Text,
-        device_name -> Text,
-        identity_fingerprint -> Text,
-        joined_at -> BigInt,
-        sync_preferences -> Text,
-    }
-}
-
-diesel::table! {
-    trusted_peer (peer_device_id) {
-        peer_device_id -> Text,
-        local_device_id -> Text,
-        peer_fingerprint -> Text,
-        trusted_at -> BigInt,
+    relationship_privacy_maintenance (id) {
+        id -> Integer,
+        state -> Text,
     }
 }
 
@@ -371,11 +359,10 @@ diesel::allow_tables_to_appear_in_same_query!(
     legacy_upgrade_pending_join,
     legacy_space_bootstrap_log,
     member_revocation_log,
-    peer_address,
+    encrypted_relationship,
     receive_artifact_log,
-    space_member,
+    relationship_privacy_maintenance,
     space_key_epoch_state,
-    trusted_peer,
     search_document,
     search_entry_tag,
     search_index_meta,

@@ -16,6 +16,7 @@ pub mod connection_channel_adapter;
 pub mod group_update_adapter;
 pub mod identity_store;
 pub mod legacy_upgrade_adapter;
+pub mod membership_attestation_adapter;
 mod net_recovery;
 pub mod node;
 pub mod persistable_addr;

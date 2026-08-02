@@ -366,6 +366,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
         setup_status: Arc::clone(&setup_status) as Arc<dyn SetupStatusPort>,
         settings: Arc::clone(&settings) as Arc<dyn SettingsPort>,
         clock: Arc::new(SystemClock),
+        membership_gossip: common::membership_gossip_noop(),
         mobile_consumable_backfill: common::mobile_consumable_backfill_noop(),
         pairing_invitation,
         pairing_invitation_addresses,
@@ -376,6 +377,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
         trusted_peer_repo: Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,
         peer_addr_repo: Arc::clone(&peer_addr_repo)
             as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
+        relationship_reset: common::relationship_state_reset_noop(),
         presence,
         migration_state,
         key_migration,

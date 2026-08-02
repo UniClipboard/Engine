@@ -612,7 +612,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
-    use uc_core::membership::{MembershipError, SpaceMember};
+    use uc_core::membership::{MembershipError, SpaceMember, SponsorCandidateSeed};
     use uc_core::pairing::invitation::{InvitationCode, PairingInvitation};
     use uc_core::pairing::session_message::{
         JoinerChallengeResponse, PairingReject, PairingSecurityCapability,
@@ -633,6 +633,10 @@ mod tests {
     use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
     use uc_observability_contract::analytics::{
         AnalyticsPort, DefaultAnalyticsFacade, NoopAnalyticsIdentity,
+    };
+
+    use crate::facade::{
+        PairingMembershipGossipPort, SpaceMembershipGossipError, SponsorSeedBatchContext,
     };
 
     // ── fakes ────────────────────────────────────────────────────────────
@@ -659,6 +663,25 @@ mod tests {
     impl ClockPort for FakeClock {
         fn now_ms(&self) -> i64 {
             self.0
+        }
+    }
+
+    struct NoopPairingMembershipGossip;
+
+    #[async_trait]
+    impl PairingMembershipGossipPort for NoopPairingMembershipGossip {
+        async fn prepare_sponsor_membership(
+            &self,
+            _context: SponsorSeedBatchContext,
+        ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError> {
+            Ok(Vec::new())
+        }
+
+        async fn accept_sponsor_seed_batch(
+            &self,
+            _seeds: Vec<SponsorCandidateSeed>,
+        ) -> Result<(), SpaceMembershipGossipError> {
+            Ok(())
         }
     }
 
@@ -1067,6 +1090,7 @@ mod tests {
                 space_access,
                 None,
                 self.member_repo.clone() as Arc<dyn MemberRepositoryPort>,
+                Arc::new(NoopPairingMembershipGossip),
                 Arc::new(ScriptedProof(StdMutex::new(self.proof_verdicts))),
                 Arc::new(FixedLocal(sponsor_fp())),
                 Arc::new(FixedDevice(DeviceId::new("sponsor-device"))),

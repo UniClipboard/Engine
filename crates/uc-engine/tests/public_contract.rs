@@ -3,13 +3,14 @@ use uc_engine::{
     EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
     EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
     JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary, LocalDeviceSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MigrationPhaseSummary,
-    MigrationProgressSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
-    QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, ResendEntryInput, SearchEntriesInput, SearchPageSummary,
-    SearchResultSummary, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary, SpaceProtectionSummary,
-    StorageStatsSummary, UnlockSpaceInput, UpdateMemberSyncPreferencesInput,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MembershipConvergenceStateSummary,
+    MembershipConvergenceSummary, MigrationPhaseSummary, MigrationProgressSummary, Operation,
+    OperationKind, OperationResult, QueryHistoryInput, QueryLegacyBootstrapInput,
+    QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    ResendEntryInput, SearchEntriesInput, SearchPageSummary, SearchResultSummary, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput, SetupInvitationSummary, SetupStateSummary,
+    SpaceProtectionModeSummary, SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
+    UpdateMemberSyncPreferencesInput,
 };
 
 #[test]
@@ -27,6 +28,18 @@ fn engine_config_has_stable_profile_and_version_inputs() {
     let debug = format!("{config:?}");
     assert!(debug.contains("1.2.3"));
     assert!(!debug.contains("private-profile-name"));
+}
+
+#[cfg(feature = "dev-tools")]
+#[test]
+fn development_rendezvous_override_is_redacted() {
+    let config =
+        EngineConfig::new("1.2.3").with_rendezvous_base_url("http://127.0.0.1:43123/private");
+
+    let debug = format!("{config:?}");
+    assert!(debug.contains("has_rendezvous_override: true"));
+    assert!(!debug.contains("127.0.0.1"));
+    assert!(!debug.contains("43123"));
 }
 
 #[test]
@@ -91,6 +104,10 @@ fn every_public_operation_has_a_stable_kind() {
             OperationKind::VerifySecureStorageAccess,
         ),
         (Operation::ListDevices, OperationKind::ListDevices),
+        (
+            Operation::QueryMembershipConvergence,
+            OperationKind::QueryMembershipConvergence,
+        ),
         (
             Operation::QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput {
                 device_id: "member-1".into(),
@@ -1299,6 +1316,35 @@ fn encryption_operations_expose_only_stable_state_and_outcomes() {
     assert!(format!("{locked:?}").contains("encryption_locked"));
     assert!(format!("{access:?}").contains("secure_storage_access"));
     assert!(format!("{factory_reset:?}").contains("space_factory_reset"));
+}
+
+#[test]
+fn membership_convergence_exposes_only_state_and_counts() {
+    let result = OperationResult::MembershipConvergence(MembershipConvergenceSummary {
+        state: MembershipConvergenceStateSummary::WaitingForUpgrade,
+        pending_count: 7,
+        waiting_for_peer_count: 2,
+        waiting_for_update_count: 1,
+        version_incompatible_count: 3,
+        blocked_count: 0,
+        rejected_count: 1,
+    });
+
+    assert_eq!(
+        result,
+        OperationResult::MembershipConvergence(MembershipConvergenceSummary {
+            state: MembershipConvergenceStateSummary::WaitingForUpgrade,
+            pending_count: 7,
+            waiting_for_peer_count: 2,
+            waiting_for_update_count: 1,
+            version_incompatible_count: 3,
+            blocked_count: 0,
+            rejected_count: 1,
+        })
+    );
+    let debug = format!("{result:?}");
+    assert!(debug.contains("membership_convergence"));
+    assert!(debug.contains("pending_count"));
 }
 
 #[test]

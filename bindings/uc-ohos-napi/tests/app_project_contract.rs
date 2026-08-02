@@ -115,6 +115,18 @@ fn ohos_probe_page_loads_the_engine_version_from_napi() {
 }
 
 #[test]
+fn ohos_probe_exposes_membership_convergence_from_the_engine() {
+    let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
+    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
+    let page = read("tests/hosts/ohos/entry/src/main/ets/pages/Index.ets");
+
+    assert!(declarations.contains("queryMembershipConvergence(): Promise<OhMembershipConvergence>"));
+    assert!(runtime.contains("active.queryMembershipConvergence()"));
+    assert!(runtime.contains("convergenceState"));
+    assert!(page.contains("snapshot.convergenceState"));
+}
+
+#[test]
 fn ohos_probe_uses_asset_store_without_a_plaintext_fallback() {
     let storage = read("tests/hosts/ohos/entry/src/main/ets/host/SecureAssetStorage.ets");
 

@@ -28,6 +28,65 @@ fn ios_and_android_share_one_probe_core() {
 }
 
 #[test]
+fn ios_probe_links_the_static_engine_archive() {
+    let root = workspace_root();
+    let project = read(root.join("tests/hosts/ios/project.rb"));
+
+    assert!(project.contains("-force_load"));
+    assert!(project.contains("libuc_mobile_probe_core.a"));
+    assert!(!project.contains("-luc_mobile_probe_core"));
+}
+
+#[test]
+fn ios_probe_supports_device_and_simulator_archives() {
+    let root = workspace_root();
+    let project = read(root.join("tests/hosts/ios/project.rb"));
+    let simulator_build = read(root.join("tests/hosts/ios/build-simulator.sh"));
+
+    assert!(project.contains("aarch64-apple-ios-sim"));
+    assert!(project.contains("iphonesimulator"));
+    assert!(simulator_build.contains("--target aarch64-apple-ios-sim"));
+    assert!(simulator_build.contains("CODE_SIGNING_ALLOWED=YES"));
+    assert!(!simulator_build.contains("CODE_SIGNING_ALLOWED=NO"));
+}
+
+#[test]
+fn ios_simulator_commands_publish_pollable_redacted_evidence() {
+    let root = workspace_root();
+    let model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
+    let app = read(root.join("tests/hosts/ios/EngineProbe/EngineProbeApp.swift"));
+    let info = read(root.join("tests/hosts/ios/EngineProbe/Info.plist"));
+    let command = read(root.join("tests/hosts/ios/probe-command-simulator.sh"));
+
+    assert!(app.contains(".onOpenURL"));
+    assert!(model.contains("probe-result.json"));
+    assert!(model.contains("handleCommandURL"));
+    assert!(model.contains("private func runURLCommand"));
+    assert!(model.contains("resultKind: \"text_received\""));
+    assert!(model.contains("activeRequestID"));
+    assert!(info.contains("ucengineprobe"));
+    assert!(command.contains("simctl openurl"));
+    assert!(command.contains("probe-result.json"));
+    assert!(command.contains("uuidgen"));
+    assert!(command.contains("request_id"));
+    assert!(!model.contains("invitation_code\", \"device_ids"));
+}
+
+#[test]
+fn android_probe_scripts_require_an_explicit_emulator() {
+    let root = workspace_root();
+    let command = read(root.join("tests/hosts/android/probe-command.sh"));
+    let install = read(root.join("tests/hosts/android/install-emulator.sh"));
+    let build = read(root.join("tests/hosts/android/build-emulator.sh"));
+
+    assert!(command.contains("ANDROID_SERIAL"));
+    assert!(command.contains("adb -s \"$ANDROID_SERIAL\""));
+    assert!(install.contains("ANDROID_SERIAL"));
+    assert!(install.contains("adb -s \"$ANDROID_SERIAL\""));
+    assert!(build.contains("mktemp -d"));
+}
+
+#[test]
 fn shared_probe_selects_each_platform_secure_storage() {
     let root = workspace_root();
     let source = read(root.join("tests/hosts/uc-mobile-probe-core/src/lib.rs"));

@@ -439,6 +439,7 @@ pub enum OperationResult {
         granted: bool,
     },
     Devices(Vec<DeviceSummary>),
+    MembershipConvergence(MembershipConvergenceSummary),
     MemberSyncPreferences(MemberSyncPreferencesSummary),
     MemberRemoved(MemberRevocationSummary),
     MemberRevocationStatus(Option<MemberRevocationSummary>),
@@ -620,6 +621,9 @@ impl fmt::Debug for OperationResult {
             Self::Devices(devices) => debug
                 .field("kind", &"devices")
                 .field("device_count", &devices.len()),
+            Self::MembershipConvergence(summary) => debug
+                .field("kind", &"membership_convergence")
+                .field("summary", summary),
             Self::MemberSyncPreferences(preferences) => debug
                 .field("kind", &"member_sync_preferences")
                 .field("preferences", preferences),
@@ -848,6 +852,25 @@ pub struct DeviceSummary {
     pub display_name: String,
     pub is_local: bool,
     pub online: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipConvergenceStateSummary {
+    Complete,
+    Converging,
+    WaitingForUpgrade,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipConvergenceSummary {
+    pub state: MembershipConvergenceStateSummary,
+    pub pending_count: u64,
+    pub waiting_for_peer_count: u64,
+    pub waiting_for_update_count: u64,
+    pub version_incompatible_count: u64,
+    pub blocked_count: u64,
+    pub rejected_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

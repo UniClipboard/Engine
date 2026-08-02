@@ -24,6 +24,7 @@ pub mod file_transfer;
 pub mod host_event;
 pub mod legacy_upgrade;
 pub mod lifecycle;
+pub mod membership_gossip;
 #[cfg(feature = "lan-compat")]
 pub mod mobile_sync;
 pub mod resource;
@@ -118,6 +119,12 @@ pub use legacy_upgrade::{
 pub use lifecycle::{
     InMemoryLifecycleStatus, LifecycleFacade, LifecycleFacadeDeps, LifecycleFacadeError,
     LifecycleStateView, LifecycleStatusGateway,
+};
+pub use membership_gossip::{
+    MembershipConvergenceState, MembershipConvergenceStatus, MembershipGossipPassOutcome,
+    MembershipGossipRuntimeError, PairingMembershipGossipPort, SpaceMembershipGossip,
+    SpaceMembershipGossipDeps, SpaceMembershipGossipError, SpaceMembershipGossipRuntime,
+    SponsorSeedBatchContext,
 };
 #[cfg(feature = "lan-compat")]
 pub use mobile_sync::mobile_sync_streaming_scope_nonce;

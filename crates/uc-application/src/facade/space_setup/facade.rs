@@ -16,7 +16,6 @@
 //! `Connection::closed` watchdog. Failures are surfaced through
 //! `tracing::warn!` so ops still sees them.
 
-use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,14 +25,16 @@ use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
 
 use uc_core::ids::{DeviceId, SpaceId};
-use uc_core::membership::{GroupRevocationPort, GroupUpdateDispatchPort};
+use uc_core::membership::{
+    GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort,
+};
 use uc_core::ports::space::{FactoryResetSpacePort, ResumeSpaceSessionPort, SpaceAccessError};
 use uc_core::ports::{
     PeerAddressRepositoryPort, PresenceError, PresencePort, ReachabilityState, SettingsPort,
     SetupStatusPort,
 };
 use uc_core::setup::SetupStatus;
-use uc_core::{MemberRepositoryPort, TrustedPeerRepositoryPort};
+use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard_write::MobileConsumableBackfill;
@@ -96,6 +97,7 @@ pub struct SpaceSetupFacade {
     /// Held for [`Self::factory_reset`] — wipes persisted key material before
     /// clearing setup status.
     factory_reset: Arc<dyn FactoryResetSpacePort>,
+    relationship_reset: Arc<dyn RelationshipStateResetPort>,
     setup_status: Arc<dyn SetupStatusPort>,
     mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
     /// Slice4 P3 T3.2 · `query_setup_state` reads `device_name` from
@@ -123,7 +125,6 @@ pub struct SpaceSetupFacade {
     migration_state: Arc<dyn MigrationStatePort>,
     blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
-    trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
     /// Held for the desktop keepalive scheduler — `list_paired_peer_device_ids`
     /// reads `peer_addr_repo.list()` and `ensure_reachable_one` forwards to
     /// `presence.ensure_reachable`. Both are thin wrappers driven by the
@@ -171,6 +172,7 @@ impl SpaceSetupFacade {
             setup_status,
             settings,
             clock,
+            membership_gossip,
             mobile_consumable_backfill,
             pairing_invitation,
             pairing_invitation_addresses,
@@ -180,6 +182,7 @@ impl SpaceSetupFacade {
             proof_port,
             trusted_peer_repo,
             peer_addr_repo,
+            relationship_reset,
             presence,
             migration_state,
             key_migration,
@@ -194,9 +197,9 @@ impl SpaceSetupFacade {
         // routing through a use case that would only wrap a single port call.
         let resume_session_for_facade = Arc::clone(&space_access.resume_session);
         let factory_reset_for_facade = Arc::clone(&space_access.factory_reset);
+        let relationship_reset_for_facade = Arc::clone(&relationship_reset);
         let setup_status_for_facade = Arc::clone(&setup_status);
         let member_repo_for_facade = Arc::clone(&member_repo);
-        let trusted_peer_repo_for_facade = Arc::clone(&trusted_peer_repo);
         // Slice4 P3 T3.2 · facade-local handle for `query_setup_state`
         // (reads `Settings.general.device_name`).
         let settings_for_facade = Arc::clone(&settings);
@@ -275,6 +278,7 @@ impl SpaceSetupFacade {
             Arc::clone(&space_access.group_admission),
             group_update_delivery,
             Arc::clone(&member_repo),
+            Arc::clone(&membership_gossip),
             Arc::clone(&proof_port),
             Arc::clone(&local_identity),
             Arc::clone(&device_identity),
@@ -331,6 +335,7 @@ impl SpaceSetupFacade {
             Arc::clone(&admit_member_uc),
             Arc::clone(&trust_peer_uc),
             Arc::clone(&peer_addr_repo),
+            relationship_reset,
             Arc::clone(&clock),
             Arc::clone(&analytics),
         ));
@@ -342,6 +347,7 @@ impl SpaceSetupFacade {
             admit_member_uc,
             trust_peer_uc,
             setup_status,
+            membership_gossip,
             peer_addr_repo,
             clock,
             analytics,
@@ -356,6 +362,7 @@ impl SpaceSetupFacade {
             pairing_outcome_tx,
             resume_session: resume_session_for_facade,
             factory_reset: factory_reset_for_facade,
+            relationship_reset: relationship_reset_for_facade,
             setup_status: setup_status_for_facade,
             mobile_consumable_backfill,
             settings: settings_for_facade,
@@ -365,7 +372,6 @@ impl SpaceSetupFacade {
             migration_state: migration_state_for_facade,
             blob_migration_repo: blob_migration_repo_for_facade,
             member_repo: member_repo_for_facade,
-            trusted_peer_repo: trusted_peer_repo_for_facade,
             peer_addr_repo: peer_addr_repo_for_facade,
             presence: presence_for_facade,
             local_device_id: local_device_id_for_facade,
@@ -457,6 +463,9 @@ impl SpaceSetupFacade {
                 )));
             }
             self.mobile_consumable_backfill.backfill_best_effort().await;
+            self.ensure_relationship_storage_ready()
+                .await
+                .map_err(TryResumeSessionError::Internal)?;
         }
 
         Ok(resumed)
@@ -477,6 +486,7 @@ impl SpaceSetupFacade {
     ) -> Result<SwitchSpaceResult, SwitchSpaceError> {
         let cmd: SwitchSpaceCommand = input.into();
         let result = self.switch_space.execute(cmd).await?;
+        self.presence.disconnect_all().await;
         // F1 hook: switch-space ends in a fresh sponsor relationship —
         // mirror A1/A2/B2 by priming presence cache so the UI roster
         // shows the new sponsor's online state without waiting on the
@@ -530,6 +540,9 @@ impl SpaceSetupFacade {
     ) -> Result<InitializeSpaceResult, InitializeSpaceError> {
         let cmd: InitializeSpaceCommand = input.into();
         let out = self.initialize_space.execute(cmd).await?;
+        self.ensure_relationship_storage_ready()
+            .await
+            .map_err(InitializeSpaceError::Internal)?;
         self.auto_prime_presence().await;
         Ok(out)
     }
@@ -557,6 +570,10 @@ impl SpaceSetupFacade {
             )));
         }
         self.mobile_consumable_backfill.backfill_best_effort().await;
+
+        self.ensure_relationship_storage_ready()
+            .await
+            .map_err(UnlockSpaceError::Internal)?;
 
         self.auto_prime_presence().await;
         Ok(out)
@@ -712,48 +729,10 @@ impl SpaceSetupFacade {
 
     async fn clear_space_peer_state(&self) -> Result<(), FactoryResetError> {
         self.presence.disconnect_all().await;
-        let members = self
-            .member_repo
-            .list()
+        self.relationship_reset
+            .clear_all_relationships()
             .await
-            .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
-        let trusted_peers = self
-            .trusted_peer_repo
-            .list()
-            .await
-            .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
-        let peer_addresses = self
-            .peer_addr_repo
-            .list()
-            .await
-            .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
-
-        let mut forgotten_devices = HashSet::new();
-        for address in peer_addresses {
-            forgotten_devices.insert(address.device_id);
-            self.peer_addr_repo
-                .remove(&address.device_id)
-                .await
-                .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
-        }
-        for peer in trusted_peers {
-            forgotten_devices.insert(peer.peer_device_id);
-            self.trusted_peer_repo
-                .remove(&peer.peer_device_id)
-                .await
-                .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
-        }
-        for member in members {
-            forgotten_devices.insert(member.device_id);
-            self.member_repo
-                .remove(&member.device_id)
-                .await
-                .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
-        }
-        for device in forgotten_devices {
-            self.presence.forget(&device).await;
-        }
-        Ok(())
+            .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))
     }
 
     /// Slice4 P3 T3.2 · Read-only snapshot of setup state for the
@@ -894,6 +873,14 @@ impl SpaceSetupFacade {
             }
         }
     }
+
+    async fn ensure_relationship_storage_ready(&self) -> Result<(), String> {
+        self.member_repo
+            .list()
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -914,7 +901,9 @@ mod tests {
     use tokio::sync::mpsc;
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SpaceId};
-    use uc_core::membership::{MembershipError, SpaceMember};
+    use uc_core::membership::{
+        MembershipError, RelationshipStateResetError, RelationshipStateResetPort, SpaceMember,
+    };
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::PairingSessionMessage;
     use uc_core::ports::pairing::{
@@ -1221,6 +1210,44 @@ mod tests {
         }
         async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
             Ok(true)
+        }
+    }
+
+    struct UnreadableMemberRepo;
+
+    #[async_trait]
+    impl uc_core::membership::MemberRepositoryPort for UnreadableMemberRepo {
+        async fn get(&self, _device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
+            Err(MembershipError::Repository(
+                "relationship store unavailable".into(),
+            ))
+        }
+
+        async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
+            Err(MembershipError::Repository(
+                "relationship store unavailable".into(),
+            ))
+        }
+
+        async fn save(&self, _member: &SpaceMember) -> Result<(), MembershipError> {
+            Err(MembershipError::Repository(
+                "relationship store unavailable".into(),
+            ))
+        }
+
+        async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
+            Err(MembershipError::Repository(
+                "relationship store unavailable".into(),
+            ))
+        }
+    }
+
+    struct NoopRelationshipStateReset;
+
+    #[async_trait]
+    impl RelationshipStateResetPort for NoopRelationshipStateReset {
+        async fn clear_all_relationships(&self) -> Result<(), RelationshipStateResetError> {
+            Ok(())
         }
     }
 
@@ -1652,6 +1679,28 @@ mod tests {
         }
     }
 
+    struct NoopPairingMembershipGossip;
+
+    #[async_trait]
+    impl crate::facade::PairingMembershipGossipPort for NoopPairingMembershipGossip {
+        async fn prepare_sponsor_membership(
+            &self,
+            _context: crate::facade::SponsorSeedBatchContext,
+        ) -> Result<
+            Vec<uc_core::membership::SponsorCandidateSeed>,
+            crate::facade::SpaceMembershipGossipError,
+        > {
+            Ok(Vec::new())
+        }
+
+        async fn accept_sponsor_seed_batch(
+            &self,
+            _seeds: Vec<uc_core::membership::SponsorCandidateSeed>,
+        ) -> Result<(), crate::facade::SpaceMembershipGossipError> {
+            Ok(())
+        }
+    }
+
     fn default_fingerprint() -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string("ABCDEFGHIJKLMNOP").unwrap()
     }
@@ -1706,6 +1755,28 @@ mod tests {
         Arc<FakeInvitationPort>,
         Arc<FakePeerAddrRepo>,
     ) {
+        make_facade_with_member_repo(
+            space_access,
+            setup_status,
+            settings,
+            migration_state,
+            mobile_consumable_backfill,
+            Arc::new(InMemoryMemberRepo::default()),
+        )
+    }
+
+    fn make_facade_with_member_repo(
+        space_access: Arc<MockSpaceAccess>,
+        setup_status: Arc<dyn SetupStatusPort>,
+        settings: Arc<dyn SettingsPort>,
+        migration_state: Arc<FakeMigrationState>,
+        mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+    ) -> (
+        SpaceSetupFacade,
+        Arc<FakeInvitationPort>,
+        Arc<FakePeerAddrRepo>,
+    ) {
         let pairing_invitation = Arc::new(FakeInvitationPort::default());
         let peer_addr_repo = Arc::new(FakePeerAddrRepo::default());
         let facade = SpaceSetupFacade::new(SpaceSetupDeps {
@@ -1716,10 +1787,11 @@ mod tests {
             device_identity: Arc::new(FixedDeviceIdentity {
                 id: DeviceId::new("device-1"),
             }),
-            member_repo: Arc::new(InMemoryMemberRepo::default()),
+            member_repo,
             setup_status,
             settings,
             clock: Arc::new(FixedClock(0)),
+            membership_gossip: Arc::new(NoopPairingMembershipGossip),
             mobile_consumable_backfill,
             pairing_invitation: pairing_invitation.clone(),
             pairing_invitation_addresses: pairing_invitation.clone(),
@@ -1730,6 +1802,7 @@ mod tests {
             trusted_peer_repo: Arc::new(NoopTrustedPeerRepo),
             peer_addr_repo: Arc::clone(&peer_addr_repo)
                 as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
+            relationship_reset: Arc::new(NoopRelationshipStateReset),
             presence: Arc::new(FakePresence),
             migration_state,
             key_migration: Arc::new(FakeKeyMigration),
@@ -1975,6 +2048,33 @@ mod tests {
             1,
             "A2 success must trigger ensure_reachable_all",
         );
+    }
+
+    #[tokio::test]
+    async fn unlock_fails_when_relationship_storage_is_unreadable() {
+        let setup_status = InMemorySetupStatus::default();
+        *setup_status.status.lock().unwrap() = SetupStatus {
+            has_completed: true,
+            space_id: None,
+        };
+        let (facade, _inv, peer) = make_facade_with_member_repo(
+            space_access(),
+            Arc::new(setup_status),
+            Arc::new(InMemorySettings::default()),
+            Arc::new(FakeMigrationState::default()),
+            Arc::new(NoopMobileConsumableBackfill),
+            Arc::new(UnreadableMemberRepo),
+        );
+
+        let error = facade
+            .unlock_space(UnlockSpaceInput {
+                passphrase: "hunter22hunter22".to_string(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, UnlockSpaceError::Internal(_)));
+        assert_eq!(peer.list_calls(), 0);
     }
 
     #[tokio::test]

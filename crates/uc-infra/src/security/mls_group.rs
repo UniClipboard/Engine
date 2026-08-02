@@ -6,7 +6,9 @@ use openmls::{
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_memory_storage::MemoryStorage;
 use openmls_rust_crypto::RustCrypto;
-use openmls_traits::{types::SignatureScheme, OpenMlsProvider};
+use openmls_traits::{
+    crypto::OpenMlsCrypto, signatures::Signer, types::SignatureScheme, OpenMlsProvider,
+};
 
 use super::secrets::MasterKey;
 
@@ -363,6 +365,66 @@ impl MlsGroupEngine {
         Ok(contains_member)
     }
 
+    pub(crate) fn sign_member_payload(
+        client_state: &MlsClientState,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let signer = restore_signer(&provider, &stored)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        signer.sign(payload).map_err(|_| MlsGroupError::Protocol)
+    }
+
+    pub(crate) fn current_epoch(client_state: &MlsClientState) -> Result<u64, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        Ok(group.epoch().as_u64())
+    }
+
+    pub(crate) fn verify_member_payload(
+        client_state: &MlsClientState,
+        expected_device_identity: &[u8],
+        payload: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Ok(false);
+        }
+        let signature_key = group.members().find_map(|member| {
+            let credential = BasicCredential::try_from(member.credential).ok()?;
+            (credential.identity() == expected_device_identity).then_some(member.signature_key)
+        });
+        let Some(signature_key) = signature_key else {
+            return Ok(false);
+        };
+        Ok(provider
+            .crypto()
+            .verify_signature(
+                CIPHERSUITE.signature_algorithm(),
+                payload,
+                &signature_key,
+                signature,
+            )
+            .is_ok())
+    }
+
     pub(crate) fn apply_commit(
         client_state: &MlsClientState,
         expected_space_id: &[u8],
@@ -577,5 +639,78 @@ mod tests {
             MlsGroupEngine::apply_commit(&charlie.client_state, b"space-a", &removal.commit,),
             Err(MlsGroupError::IdentityMismatch)
         ));
+    }
+
+    #[test]
+    fn member_signature_verifies_from_another_current_member_tree() {
+        let alice = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let bob_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let admission =
+            MlsGroupEngine::admit_member(&alice, b"bob", &bob_pending.key_package).unwrap();
+        let bob =
+            MlsGroupEngine::complete_join(bob_pending, b"space-a", &admission.welcome).unwrap();
+        let payload = b"member-attestation-transcript";
+
+        let signature =
+            MlsGroupEngine::sign_member_payload(&admission.sponsor_state, payload).unwrap();
+
+        assert!(MlsGroupEngine::verify_member_payload(
+            &bob.client_state,
+            b"alice",
+            payload,
+            &signature,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn member_signature_rejects_changed_payload_and_wrong_identity() {
+        let alice = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let bob_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let admission =
+            MlsGroupEngine::admit_member(&alice, b"bob", &bob_pending.key_package).unwrap();
+        let bob =
+            MlsGroupEngine::complete_join(bob_pending, b"space-a", &admission.welcome).unwrap();
+        let signature = MlsGroupEngine::sign_member_payload(
+            &admission.sponsor_state,
+            b"member-attestation-transcript",
+        )
+        .unwrap();
+
+        assert!(!MlsGroupEngine::verify_member_payload(
+            &bob.client_state,
+            b"alice",
+            b"changed-transcript",
+            &signature,
+        )
+        .unwrap());
+        assert!(!MlsGroupEngine::verify_member_payload(
+            &bob.client_state,
+            b"bob",
+            b"member-attestation-transcript",
+            &signature,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn removed_member_signature_is_rejected_by_current_member_tree() {
+        let alice = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let bob_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let admission =
+            MlsGroupEngine::admit_member(&alice, b"bob", &bob_pending.key_package).unwrap();
+        let bob =
+            MlsGroupEngine::complete_join(bob_pending, b"space-a", &admission.welcome).unwrap();
+        let payload = b"member-attestation-transcript";
+        let signature = MlsGroupEngine::sign_member_payload(&bob.client_state, payload).unwrap();
+        let removal = MlsGroupEngine::remove_member(&admission.sponsor_state, b"bob").unwrap();
+
+        assert!(!MlsGroupEngine::verify_member_payload(
+            &removal.sponsor_state,
+            b"bob",
+            payload,
+            &signature,
+        )
+        .unwrap());
     }
 }

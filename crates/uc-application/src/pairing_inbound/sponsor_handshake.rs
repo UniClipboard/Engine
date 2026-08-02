@@ -58,6 +58,7 @@ use uc_core::security::IdentityFingerprint;
 use uc_core::space_access::domain::{ProofDerivedKey, SpaceAccessProofArtifact};
 use uc_observability_contract::analytics::AnalyticsFacade;
 
+use crate::facade::{PairingMembershipGossipPort, SponsorSeedBatchContext};
 use crate::group_update_delivery::GroupUpdateDeliveryPort;
 
 /// Facts about the verified joiner, handed to the orchestrator so it can
@@ -106,6 +107,7 @@ pub(crate) struct SponsorHandshakeCoordinator {
     group_admission: Arc<dyn GroupAdmissionPort>,
     group_update_delivery: Option<Arc<dyn GroupUpdateDeliveryPort>>,
     member_repo: Arc<dyn MemberRepositoryPort>,
+    membership_gossip: Arc<dyn PairingMembershipGossipPort>,
     proof_port: Arc<dyn ProofPort>,
     local_identity: Arc<dyn LocalIdentityPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
@@ -138,6 +140,7 @@ impl SponsorHandshakeCoordinator {
         group_admission: Arc<dyn GroupAdmissionPort>,
         group_update_delivery: Option<Arc<dyn GroupUpdateDeliveryPort>>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        membership_gossip: Arc<dyn PairingMembershipGossipPort>,
         proof_port: Arc<dyn ProofPort>,
         local_identity: Arc<dyn LocalIdentityPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
@@ -152,6 +155,7 @@ impl SponsorHandshakeCoordinator {
             group_admission,
             group_update_delivery,
             member_repo,
+            membership_gossip,
             proof_port,
             local_identity,
             device_identity,
@@ -467,6 +471,21 @@ impl SponsorHandshakeCoordinator {
             )
             .await
             .map_err(|error| format!("admit_group_member: {error}"))?;
+        let membership_seeds = self
+            .membership_gossip
+            .prepare_sponsor_membership(SponsorSeedBatchContext {
+                space_id: ctx.space_id.clone(),
+                sponsor_device_id: sender_device_id,
+                sponsor_transport_address_blob: transport_address_blob.clone(),
+                joiner_device_id: ctx.joiner.device_id,
+                joiner_device_name: ctx.joiner.device_name.clone(),
+                joiner_identity_fingerprint: ctx.joiner.identity_fingerprint.clone(),
+                joiner_transport_address_blob: ctx.joiner.transport_address_blob.clone(),
+                group_epoch: admission.group_epoch,
+                existing_member_updates: admission.existing_member_updates,
+            })
+            .await
+            .map_err(|error| format!("prepare_sponsor_membership: {error}"))?;
         if let Some(delivery) = &self.group_update_delivery {
             if let Err(error) = delivery
                 .deliver_pending(chrono::Utc::now().timestamp_millis())
@@ -485,6 +504,7 @@ impl SponsorHandshakeCoordinator {
             welcome: admission.welcome,
             encrypted_key_catalog: admission.encrypted_key_catalog,
             group_epoch: admission.group_epoch,
+            membership_seeds,
         });
         self.pairing_session
             .send(session, confirm)
@@ -569,7 +589,9 @@ mod tests {
     use async_trait::async_trait;
 
     use uc_core::ids::DeviceId;
-    use uc_core::membership::{MemberRepositoryPort, MembershipError, SpaceMember};
+    use uc_core::membership::{
+        MemberRepositoryPort, MembershipError, SpaceMember, SponsorCandidateSeed,
+    };
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::ports::pairing::{DialError, DialOutcome, SessionError};
     use uc_core::ports::space::{GroupAdmissionPort, PrepareAdmissionOfferPort, SpaceAccessError};
@@ -577,6 +599,10 @@ mod tests {
     use uc_core::settings::model::Settings;
     use uc_core::space_access::domain::{
         GroupAdmission, PreparedAdmissionOffer, PreparedGroupJoin, ProofDerivedKey,
+    };
+
+    use crate::facade::{
+        PairingMembershipGossipPort, SpaceMembershipGossipError, SponsorSeedBatchContext,
     };
 
     // ── fakes ────────────────────────────────────────────────────────────
@@ -693,6 +719,22 @@ mod tests {
         }
     }
 
+    mockall::mock! {
+        PairingMembershipGossip {}
+
+        #[async_trait]
+        impl PairingMembershipGossipPort for PairingMembershipGossip {
+            async fn prepare_sponsor_membership(
+                &self,
+                context: SponsorSeedBatchContext,
+            ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError>;
+            async fn accept_sponsor_seed_batch(
+                &self,
+                seeds: Vec<SponsorCandidateSeed>,
+            ) -> Result<(), SpaceMembershipGossipError>;
+        }
+    }
+
     fn member_repo_with(members: Vec<SpaceMember>) -> Arc<MockMemberRepo> {
         let mut repo = MockMemberRepo::new();
         repo.expect_list().return_once(move || Ok(members));
@@ -712,6 +754,15 @@ mod tests {
             .times(1)
             .returning(|_| Ok(1));
         Arc::new(delivery)
+    }
+
+    fn empty_membership_gossip() -> Arc<MockPairingMembershipGossip> {
+        let mut gossip = MockPairingMembershipGossip::new();
+        gossip
+            .expect_prepare_sponsor_membership()
+            .times(0..=1)
+            .returning(|_| Ok(Vec::new()));
+        Arc::new(gossip)
     }
 
     fn space_access(
@@ -739,14 +790,25 @@ mod tests {
         } else {
             admission.times(0..=1);
         }
+        let update_recipient = expected_existing_members
+            .as_ref()
+            .and_then(|members| members.first())
+            .copied();
         if let Some(expected) = expected_existing_members {
             admission.withf(move |_, _, _, actual, _| actual == expected.as_slice());
         }
-        admission.returning(|_, _, _, _, _| {
+        admission.returning(move |_, _, _, _, _| {
             Ok(GroupAdmission {
                 welcome: vec![1],
                 encrypted_key_catalog: vec![2],
-                existing_member_updates: Vec::new(),
+                existing_member_updates: update_recipient
+                    .map(|recipient| {
+                        vec![uc_core::membership::PendingGroupUpdate::persistent(
+                            recipient,
+                            b"epoch-1-to-2".to_vec(),
+                        )]
+                    })
+                    .unwrap_or_default(),
                 group_epoch: 2,
             })
         });
@@ -880,6 +942,7 @@ mod tests {
             space_access,
             None,
             empty_member_repo(),
+            empty_membership_gossip(),
             proof,
             Arc::new(FixedLocal(sponsor_fp())),
             Arc::new(FixedDevice(DeviceId::new("sponsor-device"))),
@@ -1121,6 +1184,30 @@ mod tests {
         let pr = Arc::new(ScriptedProof(StdMutex::new(vec![Ok(true)])));
         let st = Arc::new(StubSettings::named("sponsor-mac"));
         let delivery = delivery_once();
+        let mut membership_gossip = MockPairingMembershipGossip::new();
+        membership_gossip
+            .expect_prepare_sponsor_membership()
+            .times(1)
+            .withf(|context| {
+                context.group_epoch == 2
+                    && context.joiner_device_id == DeviceId::new("joiner-device")
+                    && context.existing_member_updates.len() == 1
+                    && context.existing_member_updates[0].recipient()
+                        == &DeviceId::new("bob-device")
+            })
+            .returning(|context| {
+                Ok(vec![SponsorCandidateSeed {
+                    space_id: context.space_id,
+                    device_id: DeviceId::new("bob-device"),
+                    device_name_hint: "Bob".into(),
+                    identity_fingerprint_hint: sponsor_fp(),
+                    transport_address_blob: b"bob-address".to_vec(),
+                    address_observed_at_ms: 1,
+                    source_device_id: context.sponsor_device_id,
+                    security_updates: Vec::new(),
+                    expires_at_ms: i64::MAX,
+                }])
+            });
         let member = |device_id: &str| SpaceMember {
             device_id: DeviceId::new(device_id),
             device_name: device_id.to_string(),
@@ -1129,7 +1216,7 @@ mod tests {
             sync_preferences: uc_core::MemberSyncPreferences::default(),
         };
         let coord = SponsorHandshakeCoordinator::new(
-            sp,
+            sp.clone(),
             sa.clone(),
             sa.clone(),
             Some(delivery.clone()),
@@ -1138,6 +1225,7 @@ mod tests {
                 member("bob-device"),
                 member("joiner-device"),
             ]),
+            Arc::new(membership_gossip),
             pr,
             Arc::new(FixedLocal(sponsor_fp())),
             Arc::new(FixedDevice(DeviceId::new("sponsor-device"))),
@@ -1150,6 +1238,13 @@ mod tests {
         coord.begin(&session, joiner_request()).await.unwrap();
 
         coord.confirm(&session).await.unwrap();
+
+        let sent = sp.sent();
+        let PairingSessionMessage::Confirm(confirm) = &sent[1].1 else {
+            panic!("expected Confirm");
+        };
+        assert_eq!(confirm.membership_seeds.len(), 1);
+        assert_eq!(confirm.membership_seeds[0].device_id.as_str(), "bob-device");
     }
 
     #[tokio::test]

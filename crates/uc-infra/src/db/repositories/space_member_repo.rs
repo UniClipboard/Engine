@@ -1,117 +1,56 @@
 use async_trait::async_trait;
-use diesel::prelude::*;
+use std::sync::Arc;
 
 use uc_core::{DeviceId, MemberRepositoryPort, MembershipError, SpaceMember};
 
-use crate::db::models::{NewSpaceMemberRow, SpaceMemberRow};
-use crate::db::ports::{DbExecutor, InsertMapper, RowMapper};
-use crate::db::schema::space_member::dsl::*;
+use crate::db::ports::DbExecutor;
 
-pub struct DieselSpaceMemberRepository<E, M> {
-    executor: E,
-    mapper: M,
+use super::EncryptedRelationshipStore;
+
+pub struct DieselSpaceMemberRepository<E> {
+    store: Arc<EncryptedRelationshipStore<E>>,
 }
 
-impl<E, M> DieselSpaceMemberRepository<E, M> {
-    pub fn new(executor: E, mapper: M) -> Self {
-        Self { executor, mapper }
+impl<E> DieselSpaceMemberRepository<E> {
+    pub fn new(store: Arc<EncryptedRelationshipStore<E>>) -> Self {
+        Self { store }
     }
 }
 
 #[async_trait]
-impl<E, M> MemberRepositoryPort for DieselSpaceMemberRepository<E, M>
+impl<E> MemberRepositoryPort for DieselSpaceMemberRepository<E>
 where
     E: DbExecutor,
-    M: InsertMapper<SpaceMember, NewSpaceMemberRow>
-        + RowMapper<SpaceMemberRow, SpaceMember>
-        + Send
-        + Sync,
 {
     async fn get(
         &self,
         device_id_value: &DeviceId,
     ) -> Result<Option<SpaceMember>, MembershipError> {
-        let id = device_id_value.as_str().to_string();
-        self.executor
-            .run(move |conn| {
-                let row = space_member
-                    .filter(device_id.eq(&id))
-                    .first::<SpaceMemberRow>(conn)
-                    .optional()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                match row {
-                    Some(r) => {
-                        let member = self
-                            .mapper
-                            .to_domain(&r)
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        Ok(Some(member))
-                    }
-                    None => Ok(None),
-                }
-            })
-            .map_err(|e| MembershipError::Repository(e.to_string()))
+        self.store
+            .get_member(device_id_value)
+            .await
+            .map_err(|error| MembershipError::Repository(error.to_string()))
     }
 
     async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
-        self.executor
-            .run(|conn| {
-                let rows = space_member
-                    .load::<SpaceMemberRow>(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                let mut members = Vec::with_capacity(rows.len());
-                for row in rows {
-                    let id = row.device_id.clone();
-                    let member = self.mapper.to_domain(&row).map_err(|e| {
-                        anyhow::anyhow!("Failed to map space_member device_id {}: {}", id, e)
-                    })?;
-                    members.push(member);
-                }
-
-                Ok(members)
-            })
-            .map_err(|e| MembershipError::Repository(e.to_string()))
+        self.store
+            .list_members()
+            .await
+            .map_err(|error| MembershipError::Repository(error.to_string()))
     }
 
     async fn save(&self, member: &SpaceMember) -> Result<(), MembershipError> {
-        let row = self
-            .mapper
-            .to_row(member)
-            .map_err(|e| MembershipError::Repository(e.to_string()))?;
-
-        self.executor
-            .run(move |conn| {
-                diesel::insert_into(space_member)
-                    .values(&row)
-                    .on_conflict(device_id)
-                    .do_update()
-                    .set((
-                        device_name.eq(row.device_name.clone()),
-                        identity_fingerprint.eq(row.identity_fingerprint.clone()),
-                        joined_at.eq(row.joined_at),
-                        sync_preferences.eq(row.sync_preferences.clone()),
-                    ))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                Ok(())
-            })
-            .map_err(|e| MembershipError::Repository(e.to_string()))
+        self.store
+            .save_member(member)
+            .await
+            .map_err(|error| MembershipError::Repository(error.to_string()))
     }
 
     async fn remove(&self, device_id_value: &DeviceId) -> Result<bool, MembershipError> {
-        let id = device_id_value.as_str().to_string();
-        let affected = self
-            .executor
-            .run(move |conn| {
-                diesel::delete(space_member.filter(device_id.eq(&id)))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))
-            })
-            .map_err(|e| MembershipError::Repository(e.to_string()))?;
-
-        Ok(affected > 0)
+        self.store
+            .remove_member(device_id_value)
+            .await
+            .map_err(|error| MembershipError::Repository(error.to_string()))
     }
 }
 
@@ -119,22 +58,21 @@ where
 mod tests {
     use super::*;
     use crate::db::executor::DieselSqliteExecutor;
-    use crate::db::mappers::space_member_mapper::SpaceMemberRowMapper;
     use crate::db::pool::init_db_pool;
+    use crate::db::repositories::relationship_store::test_relationship_store;
     use chrono::Utc;
     use tempfile::{tempdir, TempDir};
     use uc_core::security::IdentityFingerprint;
     use uc_core::{DeviceId, MemberSyncPreferences, SpaceMember};
 
     fn make_repo() -> (
-        DieselSpaceMemberRepository<DieselSqliteExecutor, SpaceMemberRowMapper>,
+        DieselSpaceMemberRepository<Arc<DieselSqliteExecutor>>,
         TempDir,
     ) {
         let tempdir = tempdir().unwrap();
         let database_url = tempdir.path().join("space-member.sqlite");
         let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
-        let repo =
-            DieselSpaceMemberRepository::new(DieselSqliteExecutor::new(pool), SpaceMemberRowMapper);
+        let repo = DieselSpaceMemberRepository::new(test_relationship_store(pool));
         (repo, tempdir)
     }
 
@@ -216,6 +154,28 @@ mod tests {
         assert!(first);
         assert!(!second);
         assert!(repo.get(&member.device_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn saved_member_name_is_not_persisted_in_plaintext() {
+        let (repo, tempdir) = make_repo();
+        let mut member = fixture_member("privacy-probe-member");
+        member.device_name = "relationship-member-plaintext-probe-7f31".to_string();
+
+        repo.save(&member).await.unwrap();
+
+        let marker = member.device_name.as_bytes();
+        for entry in std::fs::read_dir(tempdir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(
+                    !bytes.windows(marker.len()).any(|window| window == marker),
+                    "member name leaked into {}",
+                    path.display()
+                );
+            }
+        }
     }
 
     // NOTE: 2026-04-18-000001_create_space_member 里从 `paired_device` 搬迁数据的

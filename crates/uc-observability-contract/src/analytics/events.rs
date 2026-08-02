@@ -627,6 +627,7 @@ pub enum PairingFailureReason {
     InvitationExpired,
     SponsorUnreachable,
     ServiceUnavailable,
+    SponsorUpgradeRequired,
     PassphraseMismatch,
     CorruptedKeyMaterial,
     DeviceNameRequired,
@@ -647,6 +648,7 @@ impl PairingFailureReason {
             Self::InvitationExpired => "invitation_expired",
             Self::SponsorUnreachable => "sponsor_unreachable",
             Self::ServiceUnavailable => "service_unavailable",
+            Self::SponsorUpgradeRequired => "sponsor_upgrade_required",
             Self::PassphraseMismatch => "passphrase_mismatch",
             Self::CorruptedKeyMaterial => "corrupted_key_material",
             Self::DeviceNameRequired => "device_name_required",
@@ -1359,6 +1361,10 @@ mod tests {
             (
                 PairingFailureReason::ServiceUnavailable,
                 "service_unavailable",
+            ),
+            (
+                PairingFailureReason::SponsorUpgradeRequired,
+                "sponsor_upgrade_required",
             ),
             (
                 PairingFailureReason::PassphraseMismatch,

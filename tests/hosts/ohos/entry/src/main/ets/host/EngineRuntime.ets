@@ -16,6 +16,7 @@ export interface EngineRuntimeSnapshot {
   status: string;
   details: string;
   ready: boolean;
+  convergenceState: string;
 }
 
 class EngineRuntime {
@@ -27,6 +28,7 @@ class EngineRuntime {
   private version: string = 'Loading';
   private status: string = 'Checking unified core';
   private details: string = '';
+  private convergenceState: string = 'complete';
 
   async start(context: common.UIAbilityContext): Promise<EngineRuntimeSnapshot> {
     if (this.activeEngine !== undefined) {
@@ -53,6 +55,7 @@ class EngineRuntime {
           'system-host-acceptance'
         )).selfDeviceId;
       }
+      this.convergenceState = (await active.queryMembershipConvergence()).state;
       this.activeEngine = active;
       this.status = 'Ready';
       this.details = '';
@@ -120,7 +123,8 @@ class EngineRuntime {
       version: this.version,
       status: this.status,
       details: this.details,
-      ready: this.activeEngine !== undefined && this.status === 'Ready'
+      ready: this.activeEngine !== undefined && this.status === 'Ready',
+      convergenceState: this.convergenceState
     };
   }
 
@@ -145,6 +149,7 @@ class EngineRuntime {
     if (recoveredIdentity !== this.identityDeviceId) {
       throw new Error('OHOS_IDENTITY_CHANGED');
     }
+    this.convergenceState = (await active.queryMembershipConvergence()).state;
     this.status = 'Ready';
     this.details = '';
   }

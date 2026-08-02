@@ -69,6 +69,17 @@ pub struct OhLocalDevice {
 }
 
 #[napi(object)]
+pub struct OhMembershipConvergence {
+    pub state: String,
+    pub pending_count: u32,
+    pub waiting_for_peer_count: u32,
+    pub waiting_for_update_count: u32,
+    pub version_incompatible_count: u32,
+    pub blocked_count: u32,
+    pub rejected_count: u32,
+}
+
+#[napi(object)]
 pub struct OhMemberRevocation {
     pub revocation_id: Option<String>,
     pub outcome: String,

@@ -51,7 +51,8 @@ use uc_application::facade::{
     BlobTransferDeps, BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort,
     ClipboardLiveIndexer, ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent,
     HostEventBus, InboundClipboardApplyPort, IngestHandle, MemberRosterDeps, MemberRosterFacade,
-    SpaceSetupDeps, SpaceSetupFacade, TransferHostEvent,
+    SpaceMembershipGossip, SpaceMembershipGossipDeps, SpaceMembershipGossipRuntime, SpaceSetupDeps,
+    SpaceSetupFacade, TransferHostEvent,
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_application::{
@@ -80,6 +81,7 @@ use uc_infra::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
 pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
+use uc_infra::security::DefaultMembershipSecurityUpdateAdapter;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 
 use crate::assembly::deps::{SharedRuntimeDeps, SyncEngineDeps};
@@ -164,9 +166,20 @@ pub struct SyncEngineAssembly {
     /// become reachable. Aborted explicitly during shutdown.
     group_update_retry: JoinHandle<()>,
     automatic_legacy_upgrade: AutomaticLegacyUpgradeRuntime,
+    pub(crate) membership_gossip: Arc<SpaceMembershipGossip>,
+    membership_gossip_runtime: SpaceMembershipGossipRuntime,
 }
 
 impl SyncEngineAssembly {
+    #[cfg(test)]
+    pub(crate) async fn membership_attestation_is_reachable_for_test(&self) -> bool {
+        self.iroh_node
+            .accepts_protocol_for_test(
+                uc_infra::network::iroh::membership_attestation_adapter::MEMBERSHIP_ATTESTATION_ALPN,
+            )
+            .await
+    }
+
     /// Attach the externally-created restore source to the Active Clipboard
     /// lifecycle. The lifecycle itself enforces its single-attachment rule.
     pub fn attach_restore_broadcast(
@@ -178,6 +191,18 @@ impl SyncEngineAssembly {
         if let Err(error) = self.active_clipboard_lifecycle.attach_restore_broadcast(rx) {
             warn!(error = %error, "active clipboard restore source attachment failed");
         }
+    }
+
+    pub(crate) async fn pause_membership_gossip(
+        &self,
+    ) -> Result<(), uc_application::facade::MembershipGossipRuntimeError> {
+        self.membership_gossip_runtime.pause().await
+    }
+
+    pub(crate) async fn resume_membership_gossip(
+        &self,
+    ) -> Result<(), uc_application::facade::MembershipGossipRuntimeError> {
+        self.membership_gossip_runtime.resume().await
     }
 
     /// Coordinated teardown. Order matters:
@@ -199,6 +224,7 @@ impl SyncEngineAssembly {
         self.active_clipboard_lifecycle.shutdown().await;
         self.outbound_progress_translator.abort();
         self.group_update_retry.abort();
+        self.membership_gossip_runtime.shutdown().await;
         self.automatic_legacy_upgrade.shutdown().await;
         self.facade.on_shutdown().await;
         self.iroh_node.shutdown().await;
@@ -447,6 +473,50 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.device.device_identity),
         Arc::clone(&deps.settings),
     );
+    let membership_attestation = builder.build_membership_attestation_adapter(
+        Arc::clone(&space_setup.membership_session),
+        Arc::clone(&deps.device.device_identity),
+        Arc::clone(&deps.settings),
+        Arc::clone(&space_setup.current_member_signatures),
+        Arc::clone(&deps.security.fingerprint),
+    );
+    let membership_transport = builder.build_membership_gossip_transport(
+        Arc::clone(&space_setup.membership_session),
+        Arc::clone(&deps.device.device_identity),
+        Arc::clone(&deps.settings),
+        Arc::clone(&space_setup.peer_addr_repo),
+        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&deps.security.fingerprint),
+    );
+    let membership_gossip = Arc::new(SpaceMembershipGossip::new(SpaceMembershipGossipDeps {
+        candidate_repo: Arc::clone(&space_setup.membership_candidate_repo),
+        announcement_repo: Arc::clone(&space_setup.membership_announcement_repo),
+        outbox_repo: Arc::clone(&space_setup.membership_outbox_repo),
+        security_updates: Arc::new(DefaultMembershipSecurityUpdateAdapter::new(
+            Arc::clone(&space_setup.membership_session),
+            Arc::clone(&space_setup.current_member_signatures),
+            Arc::clone(&deps.security.space_access_ports.group_revocation),
+        )),
+        transport: membership_transport.clone(),
+        clock: Arc::clone(&deps.system.clock),
+        device_identity: Arc::clone(&deps.device.device_identity),
+        announcement_material: membership_transport.clone(),
+        member_signatures: Arc::clone(&space_setup.current_member_signatures),
+        fingerprint_factory: Arc::clone(&deps.security.fingerprint),
+        attestation: membership_attestation.clone(),
+        verified_peer_promotion: Arc::clone(&space_setup.verified_peer_promotion),
+        member_repo: Arc::clone(&deps.device.member_repo),
+        trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
+        peer_address_repo: Arc::clone(&space_setup.peer_addr_repo),
+        hash: Arc::clone(&deps.system.hash),
+    }));
+    builder.install_membership_handler(
+        &membership_attestation,
+        membership_gossip.clone(),
+        &membership_transport,
+        membership_gossip.clone(),
+    )?;
     // Slice 2 Phase 1 · T8:在同一 iroh 节点上装 presence handler。must
     // be before `builder.spawn()`(install_* 要求 router 未 spawn)。
     // `Arc<dyn PresencePort>` 喂给 SpaceSetupDeps,facade 内部再构造
@@ -617,6 +687,7 @@ pub async fn build_sync_engine_assembly(
             setup_status: Arc::clone(&deps.setup_status),
             settings: Arc::clone(&deps.settings),
             clock: Arc::clone(&deps.system.clock),
+            membership_gossip: membership_gossip.clone(),
             mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
             pairing_invitation: handlers.invitation,
             pairing_invitation_addresses: handlers.invitation_addresses,
@@ -626,6 +697,7 @@ pub async fn build_sync_engine_assembly(
             proof_port,
             trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
+            relationship_reset: Arc::clone(&space_setup.relationship_reset),
             presence: Arc::clone(&presence),
             // Switch-space 4 阶段重加密迁移依赖（commit 4 接入）。`blob_cipher`
             // 复用既有 `EncryptingClipboardEventWriter` /
@@ -677,6 +749,9 @@ pub async fn build_sync_engine_assembly(
         warn!(error = %error, "legacy bootstrap recovery could not resume during startup");
     }
     let group_update_retry = spawn_group_update_retry(Arc::clone(&roster));
+    let membership_gossip_runtime = membership_gossip
+        .clone()
+        .start(roster.subscribe_presence_events());
     // Slice 2 Phase 2 · T10:剪切板同步门面。`dispatch_entry` 共享同一份
     // `peer_addr_repo` / `presence` 让 F1 hook 喂的 presence 缓存直接生
     // 效;`transfer_cipher` 与已有 file_transfer 路径同享 V3 chunked
@@ -870,5 +945,7 @@ pub async fn build_sync_engine_assembly(
         outbound_progress_translator,
         group_update_retry,
         automatic_legacy_upgrade,
+        membership_gossip,
+        membership_gossip_runtime,
     })
 }

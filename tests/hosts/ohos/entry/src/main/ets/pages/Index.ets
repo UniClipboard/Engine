@@ -12,6 +12,7 @@ struct Index {
   @State private details: string = '';
   @State private ready: boolean = false;
   @State private exporting: boolean = false;
+  @State private convergenceState: string = 'complete';
 
   aboutToAppear(): void {
     this.start().catch((error: Object) => this.fail(error));
@@ -27,6 +28,7 @@ struct Index {
     this.status = snapshot.status;
     this.details = snapshot.details;
     this.ready = snapshot.ready;
+    this.convergenceState = snapshot.convergenceState;
   }
 
   private fail(error: Object): void {
@@ -64,6 +66,9 @@ struct Index {
       Text(this.status)
         .fontSize(16)
         .fontColor(this.ready ? '#1F7A5A' : '#B3261E')
+      Text(this.convergenceState)
+        .fontSize(14)
+        .fontColor('#5B6570')
       if (this.ready) {
         Button(this.exporting ? 'Exporting' : 'Export sample')
           .enabled(!this.exporting)

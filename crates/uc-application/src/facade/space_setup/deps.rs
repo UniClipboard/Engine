@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use uc_core::membership::MemberRepositoryPort;
+use uc_core::membership::{MemberRepositoryPort, RelationshipStateResetPort};
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
 use uc_core::ports::pairing_invitation::{
@@ -25,6 +25,7 @@ use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard_write::MobileConsumableBackfill;
 use crate::deps::SpaceAccessPorts;
+use crate::facade::PairingMembershipGossipPort;
 
 /// Dependencies for [`super::SpaceSetupFacade`].
 ///
@@ -41,6 +42,7 @@ pub struct SpaceSetupDeps {
     pub setup_status: Arc<dyn SetupStatusPort>,
     pub settings: Arc<dyn SettingsPort>,
     pub clock: Arc<dyn ClockPort>,
+    pub membership_gossip: Arc<dyn PairingMembershipGossipPort>,
     pub mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
     /// Sponsor-side rendezvous client for issuing invitation codes (B1)
     /// and notifying the rendezvous of successful consumes (P7e inbound
@@ -83,6 +85,9 @@ pub struct SpaceSetupDeps {
     /// [`crate::usecases::pairing::redeem_invitation::RedeemPairingInvitationUseCase`]
     /// 在 `persist` 收尾处调用。写失败不 fail 配对，presence 下轮兜底。
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    /// Clears every relationship from the previous active space after a
+    /// switch-space handshake succeeds and before the new sponsor is saved.
+    pub relationship_reset: Arc<dyn RelationshipStateResetPort>,
     /// Slice 2 Phase 1 · T8：F1 hook 预连所有 paired peer(A1/A2/B2 成功后
     /// 自动触发),让 UI 查 roster 时 presence 状态立刻准。Facade 内部
     /// 会用它 + `peer_addr_repo` + `device_identity` 构造

@@ -128,6 +128,25 @@ pub struct Device {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MembershipConvergenceState {
+    Complete,
+    Converging,
+    WaitingForUpgrade,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MembershipConvergence {
+    pub state: MembershipConvergenceState,
+    pub pending_count: u64,
+    pub waiting_for_peer_count: u64,
+    pub waiting_for_update_count: u64,
+    pub version_incompatible_count: u64,
+    pub blocked_count: u64,
+    pub rejected_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum MemberRevocationOutcome {
     LocalOnly,
     Applied,
@@ -200,6 +219,9 @@ enum WorkerCommand {
     },
     ListDevices {
         response: mpsc::Sender<Result<Vec<Device>, BindingError>>,
+    },
+    QueryMembershipConvergence {
+        response: mpsc::Sender<Result<MembershipConvergence, BindingError>>,
     },
     RemoveMember {
         device_id: String,
@@ -458,6 +480,10 @@ impl MobileEngine {
 
     pub fn list_devices(&self) -> Result<Vec<Device>, BindingError> {
         self.request(|response| WorkerCommand::ListDevices { response })
+    }
+
+    pub fn query_membership_convergence(&self) -> Result<MembershipConvergence, BindingError> {
+        self.request(|response| WorkerCommand::QueryMembershipConvergence { response })
     }
 
     pub fn remove_member(&self, device_id: String) -> Result<MemberRevocationResult, BindingError> {
@@ -981,6 +1007,14 @@ async fn run_worker_loop(
                     .and_then(map_devices);
                 let _ = response.send(result);
             }
+            WorkerCommand::QueryMembershipConvergence { response } => {
+                let result = engine
+                    .execute(Operation::QueryMembershipConvergence)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_membership_convergence);
+                let _ = response.send(result);
+            }
             WorkerCommand::RemoveMember {
                 device_id,
                 response,
@@ -1404,6 +1438,36 @@ fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
                 online: device.online,
             })
             .collect()),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_membership_convergence(
+    result: OperationResult,
+) -> Result<MembershipConvergence, BindingError> {
+    match result {
+        OperationResult::MembershipConvergence(summary) => Ok(MembershipConvergence {
+            state: match summary.state {
+                uc_engine::MembershipConvergenceStateSummary::Complete => {
+                    MembershipConvergenceState::Complete
+                }
+                uc_engine::MembershipConvergenceStateSummary::Converging => {
+                    MembershipConvergenceState::Converging
+                }
+                uc_engine::MembershipConvergenceStateSummary::WaitingForUpgrade => {
+                    MembershipConvergenceState::WaitingForUpgrade
+                }
+                uc_engine::MembershipConvergenceStateSummary::Blocked => {
+                    MembershipConvergenceState::Blocked
+                }
+            },
+            pending_count: summary.pending_count,
+            waiting_for_peer_count: summary.waiting_for_peer_count,
+            waiting_for_update_count: summary.waiting_for_update_count,
+            version_incompatible_count: summary.version_incompatible_count,
+            blocked_count: summary.blocked_count,
+            rejected_count: summary.rejected_count,
+        }),
         _ => Err(BindingError::UnexpectedResult),
     }
 }

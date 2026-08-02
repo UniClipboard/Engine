@@ -1337,6 +1337,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn third_party_relayed_address_connects_after_relaying_peer_stops() {
+        let endpoint_a = bound_endpoint().await;
+        wait_for_direct_addrs(&endpoint_a).await;
+        let endpoint_b = bound_endpoint().await;
+        wait_for_direct_addrs(&endpoint_b).await;
+        let endpoint_c = bound_endpoint().await;
+        wait_for_direct_addrs(&endpoint_c).await;
+
+        let c_member_repo = Arc::new(MemMemberRepo::default());
+        c_member_repo.seed(member_for_endpoint(&endpoint_a, "device-a"));
+        let c_adapter = build_adapter_with_member_repo(
+            Arc::clone(&endpoint_c),
+            Arc::new(FakePeerAddressRepo::default()),
+            c_member_repo,
+        );
+        let router_c = Router::builder((*endpoint_c).clone())
+            .accept(PRESENCE_ALPN, c_adapter.handler())
+            .spawn();
+
+        let c_device_id = DeviceId::new("device-c");
+        let address_observed_by_b = endpoint_c.addr();
+        let relayed_blob = postcard::to_stdvec(&address_observed_by_b)
+            .expect("encode address observed by third party");
+
+        endpoint_b.close().await;
+
+        let a_repo = Arc::new(FakePeerAddressRepo::default());
+        a_repo.seed(record(&c_device_id, relayed_blob));
+        let a_adapter = build_adapter(Arc::clone(&endpoint_a), a_repo);
+
+        let state = timeout(DIAL_BUDGET, a_adapter.ensure_reachable(&c_device_id))
+            .await
+            .expect("third-party address dial completes within budget")
+            .expect("third-party address dial succeeds");
+        assert_eq!(state, ReachabilityState::Online);
+
+        router_c.shutdown().await.expect("router_c shutdown clean");
+        endpoint_a.close().await;
+    }
+
+    #[tokio::test]
     async fn ensure_reachable_on_unknown_device_returns_no_address() {
         let endpoint_a = bound_endpoint().await;
         let repo = Arc::new(FakePeerAddressRepo::default());

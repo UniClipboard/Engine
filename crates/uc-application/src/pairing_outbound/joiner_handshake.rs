@@ -45,6 +45,7 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{DeviceId, SessionId, SpaceId};
+use uc_core::membership::SponsorCandidateSeed;
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::pairing::session_message::{
     JoinerChallengeResponse, JoinerRequest, PairingRejectReason, PairingSecurityCapability,
@@ -93,6 +94,7 @@ pub(crate) struct JoinerHandshakeOutcome {
     /// joiner 端按 Solo 退化，等待下次 sponsor 自己发新设备 pairing 时再
     /// 通过 sponsor 派发统一切换（task_plan §开放问题 2 决策 A）。
     pub sponsor_space_person_id: Option<uuid::Uuid>,
+    pub membership_seeds: Vec<SponsorCandidateSeed>,
 }
 
 pub(crate) struct JoinerHandshakeCoordinator {
@@ -354,6 +356,7 @@ impl JoinerHandshakeCoordinator {
             self_identity_fingerprint: local_fp,
             sponsor_transport_address_blob: confirm.transport_address_blob,
             sponsor_space_person_id: confirm.sponsor_space_person_id,
+            membership_seeds: confirm.membership_seeds,
         })
     }
 
@@ -409,6 +412,7 @@ fn map_dial_err(err: DialError) -> RedeemPairingInvitationError {
         DialError::InvitationExpired => RedeemPairingInvitationError::InvitationExpired,
         DialError::SponsorUnreachable => RedeemPairingInvitationError::SponsorUnreachable,
         DialError::ServiceUnavailable => RedeemPairingInvitationError::ServiceUnavailable,
+        DialError::SponsorUpgradeRequired => RedeemPairingInvitationError::SponsorUpgradeRequired,
         DialError::Internal(m) => RedeemPairingInvitationError::Internal(m),
     }
 }
@@ -474,6 +478,7 @@ mod tests {
 
     use uc_core::crypto::domain::Passphrase;
     use uc_core::ids::{DeviceId, SpaceId};
+    use uc_core::membership::SponsorCandidateSeed;
     use uc_core::pairing::session_message::{
         JoinerChallengeResponse, JoinerRequest, PairingReject, SponsorAdmissionOffer,
         SponsorConfirm,
@@ -580,6 +585,7 @@ mod tests {
             DialError::InvitationExpired => DialError::InvitationExpired,
             DialError::SponsorUnreachable => DialError::SponsorUnreachable,
             DialError::ServiceUnavailable => DialError::ServiceUnavailable,
+            DialError::SponsorUpgradeRequired => DialError::SponsorUpgradeRequired,
             DialError::Internal(m) => DialError::Internal(m.clone()),
         }
     }
@@ -747,6 +753,18 @@ mod tests {
             welcome: vec![1],
             encrypted_key_catalog: vec![2],
             group_epoch: 2,
+            membership_seeds: vec![SponsorCandidateSeed {
+                space_id: SpaceId::from_str("space-xyz"),
+                device_id: DeviceId::new("existing-device"),
+                device_name_hint: "Existing device".into(),
+                identity_fingerprint_hint: IdentityFingerprint::from_raw_string("CCCCCCCCCCCCCCCC")
+                    .unwrap(),
+                transport_address_blob: b"existing-address".to_vec(),
+                address_observed_at_ms: 1_700_000_000_000,
+                source_device_id: DeviceId::new("sponsor-device"),
+                security_updates: Vec::new(),
+                expires_at_ms: 1_700_604_800_000,
+            }],
         }
     }
 
@@ -817,6 +835,11 @@ mod tests {
         assert_eq!(out.space_id.inner(), "space-xyz");
         assert_eq!(out.self_device_id.as_str(), "joiner-device");
         assert_eq!(out.self_identity_fingerprint, joiner_fp());
+        assert_eq!(out.membership_seeds.len(), 1);
+        assert_eq!(
+            out.membership_seeds[0].device_id,
+            DeviceId::new("existing-device")
+        );
 
         let sent = b.session.sent();
         assert_eq!(sent.len(), 2);
@@ -894,6 +917,24 @@ mod tests {
             err,
             RedeemPairingInvitationError::ServiceUnavailable
         ));
+    }
+
+    #[tokio::test]
+    async fn legacy_sponsor_requires_an_upgrade_before_any_wire_or_local_state_work() {
+        let b = Bundle::with_dial_err(DialError::SponsorUpgradeRequired);
+
+        let err = b
+            .build()
+            .handshake(&code("X"), &passphrase())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            RedeemPairingInvitationError::SponsorUpgradeRequired
+        ));
+        assert!(b.session.sent().is_empty());
+        assert!(b.session.closed().is_empty());
     }
 
     // ── sponsor rejects ──────────────────────────────────────────────────

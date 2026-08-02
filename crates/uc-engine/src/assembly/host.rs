@@ -489,9 +489,12 @@ pub(crate) fn wire_host_capabilities_with_emitter(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     use uc_core::file_transfer::FileTransferDirection;
+    use uc_core::ids::SpaceId;
+    use uc_core::membership::{CurrentMemberSignatureError, MembershipCandidateRepositoryError};
     use uc_core::ports::{
         ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, HostEvent,
         HostEventEmitterPort, TransferHostEvent,
@@ -499,12 +502,165 @@ mod tests {
 
     use crate::engine::event_stream::event_channel;
     use crate::{
-        ClipboardOriginSummary, DeliveryStatusChanged, EngineEvent, IncomingPendingEvent,
+        ClipboardOriginSummary, DeliveryStatusChanged, EngineConfig, EngineEvent, HostCapabilities,
+        HostCapabilityError, HostClipboard, HostClipboardSnapshot, HostDirectories, HostFileAccess,
+        HostFileHandle, HostFileMetadata, HostSecureStorage, IncomingPendingEvent,
         ReceiveAttemptStateChanged, TransferDirectionSummary, TransferProgress,
         TransferStatusChanged,
     };
 
-    use super::EngineHostEventEmitter;
+    use super::{wire_host_capabilities, EngineHostEventEmitter};
+    use crate::assembly::lifecycle::build_daemon_lifecycle;
+
+    #[derive(Default)]
+    struct TestSecureStorage(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl HostSecureStorage for TestSecureStorage {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, HostCapabilityError> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), HostCapabilityError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_vec());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> Result<(), HostCapabilityError> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    struct EmptyHostClipboard;
+
+    impl HostClipboard for EmptyHostClipboard {
+        fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
+            Ok(HostClipboardSnapshot {
+                observed_at_ms: 1,
+                representations: Vec::new(),
+            })
+        }
+
+        fn write(&self, _snapshot: HostClipboardSnapshot) -> Result<(), HostCapabilityError> {
+            Ok(())
+        }
+    }
+
+    struct EmptyHostFiles;
+
+    impl HostFileAccess for EmptyHostFiles {
+        fn metadata(
+            &self,
+            _handle: &HostFileHandle,
+        ) -> Result<HostFileMetadata, HostCapabilityError> {
+            Err(HostCapabilityError::new(
+                crate::HostCapabilityErrorCategory::InvalidHandle,
+                "test handle unavailable",
+            ))
+        }
+
+        fn read_chunk(
+            &self,
+            _handle: &HostFileHandle,
+            _offset: u64,
+            _max_bytes: u32,
+        ) -> Result<Vec<u8>, HostCapabilityError> {
+            Ok(Vec::new())
+        }
+
+        fn write_chunk(
+            &self,
+            _handle: &HostFileHandle,
+            _offset: u64,
+            _bytes: &[u8],
+        ) -> Result<(), HostCapabilityError> {
+            Ok(())
+        }
+
+        fn finish_write(&self, _handle: &HostFileHandle) -> Result<(), HostCapabilityError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn host_wiring_exposes_membership_runtime_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let host = HostCapabilities::new(
+            HostDirectories::new(
+                root.path().join("private"),
+                root.path().join("cache"),
+                root.path().join("temporary"),
+                root.path().join("logs"),
+            ),
+            Box::new(TestSecureStorage::default()),
+            Box::new(EmptyHostClipboard),
+            Box::new(EmptyHostFiles),
+        );
+
+        let wiring = wire_host_capabilities(&EngineConfig::new("test"), host).unwrap();
+
+        assert_eq!(
+            wiring
+                .wired
+                .sync_engine
+                .membership_candidate_repo
+                .list(&SpaceId::from("space-a"))
+                .await,
+            Err(MembershipCandidateRepositoryError::Locked)
+        );
+        assert_eq!(
+            wiring
+                .wired
+                .sync_engine
+                .current_member_signatures
+                .current_member_epoch()
+                .await,
+            Err(CurrentMemberSignatureError::Unavailable)
+        );
+        assert!(!wiring.wired.sync_engine.membership_session.is_ready());
+    }
+
+    #[tokio::test]
+    async fn production_engine_assembly_registers_membership_attestation_protocol() {
+        let root = tempfile::tempdir().unwrap();
+        let host = HostCapabilities::new(
+            HostDirectories::new(
+                root.path().join("private"),
+                root.path().join("cache"),
+                root.path().join("temporary"),
+                root.path().join("logs"),
+            ),
+            Box::new(TestSecureStorage::default()),
+            Box::new(EmptyHostClipboard),
+            Box::new(EmptyHostFiles),
+        );
+        let wiring = wire_host_capabilities(&EngineConfig::new("test"), host).unwrap();
+        let mut settings = wiring.wired.deps.settings.load().await.unwrap();
+        settings.network.allow_relay_fallback = false;
+        wiring.wired.deps.settings.save(&settings).await.unwrap();
+
+        let lifecycle = build_daemon_lifecycle(
+            &wiring.wired.deps,
+            &wiring.wired.sync_engine,
+            &wiring.wired.shared,
+            None,
+        )
+        .await
+        .unwrap();
+        let reachable = lifecycle
+            .sync_engine_assembly
+            .membership_attestation_is_reachable_for_test()
+            .await;
+        lifecycle.sync_engine_assembly.shutdown().await;
+
+        assert!(
+            reachable,
+            "membership attestation protocol was not installed"
+        );
+    }
 
     #[tokio::test]
     async fn engine_event_emitter_forwards_transfer_progress() {

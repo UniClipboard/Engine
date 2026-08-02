@@ -5,109 +5,57 @@
 //! the caller (iroh adapter) owns the encoding.
 
 use async_trait::async_trait;
-use diesel::prelude::*;
+use std::sync::Arc;
 
 use uc_core::ids::DeviceId;
 use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
 
-use crate::db::models::{NewPeerAddressRow, PeerAddressRow};
-use crate::db::ports::{DbExecutor, InsertMapper, RowMapper};
-use crate::db::schema::peer_address::dsl::*;
+use crate::db::ports::DbExecutor;
 
-pub struct DieselPeerAddressRepository<E, M> {
-    executor: E,
-    mapper: M,
+use super::EncryptedRelationshipStore;
+
+pub struct DieselPeerAddressRepository<E> {
+    store: Arc<EncryptedRelationshipStore<E>>,
 }
 
-impl<E, M> DieselPeerAddressRepository<E, M> {
-    pub fn new(executor: E, mapper: M) -> Self {
-        Self { executor, mapper }
+impl<E> DieselPeerAddressRepository<E> {
+    pub fn new(store: Arc<EncryptedRelationshipStore<E>>) -> Self {
+        Self { store }
     }
 }
 
 #[async_trait]
-impl<E, M> PeerAddressRepositoryPort for DieselPeerAddressRepository<E, M>
+impl<E> PeerAddressRepositoryPort for DieselPeerAddressRepository<E>
 where
     E: DbExecutor,
-    M: InsertMapper<PeerAddressRecord, NewPeerAddressRow>
-        + RowMapper<PeerAddressRow, PeerAddressRecord>
-        + Send
-        + Sync,
 {
     async fn get(&self, device: &DeviceId) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
-        let id = device.as_str().to_string();
-        self.executor
-            .run(move |conn| {
-                let row = peer_address
-                    .filter(device_id.eq(&id))
-                    .first::<PeerAddressRow>(conn)
-                    .optional()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                Ok(row)
-            })
-            .map_err(|e| PeerAddressError::Internal(e.to_string()))
-            .and_then(|row_opt| match row_opt {
-                Some(r) => self
-                    .mapper
-                    .to_domain(&r)
-                    .map(Some)
-                    .map_err(|e| PeerAddressError::Internal(e.to_string())),
-                None => Ok(None),
-            })
+        self.store
+            .get_peer_address(device)
+            .await
+            .map_err(|error| PeerAddressError::Internal(error.to_string()))
     }
 
     async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
-        let row = self
-            .mapper
-            .to_row(record)
-            .map_err(|e| PeerAddressError::Internal(e.to_string()))?;
-
-        self.executor
-            .run(move |conn| {
-                diesel::insert_into(peer_address)
-                    .values(&row)
-                    .on_conflict(device_id)
-                    .do_update()
-                    .set((
-                        addr_blob.eq(row.addr_blob.clone()),
-                        observed_at.eq(row.observed_at),
-                    ))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                Ok(())
-            })
-            .map_err(|e| PeerAddressError::Internal(e.to_string()))
+        self.store
+            .save_peer_address(record)
+            .await
+            .map_err(|error| PeerAddressError::Internal(error.to_string()))
     }
 
     async fn list(&self) -> Result<Vec<PeerAddressRecord>, PeerAddressError> {
-        let rows = self
-            .executor
-            .run(|conn| {
-                peer_address
-                    .load::<PeerAddressRow>(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))
-            })
-            .map_err(|e| PeerAddressError::Internal(e.to_string()))?;
-
-        rows.iter()
-            .map(|r| {
-                self.mapper
-                    .to_domain(r)
-                    .map_err(|e| PeerAddressError::Internal(e.to_string()))
-            })
-            .collect()
+        self.store
+            .list_peer_addresses()
+            .await
+            .map_err(|error| PeerAddressError::Internal(error.to_string()))
     }
 
     async fn remove(&self, device: &DeviceId) -> Result<(), PeerAddressError> {
-        let id = device.as_str().to_string();
-        self.executor
-            .run(move |conn| {
-                diesel::delete(peer_address.filter(device_id.eq(&id)))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                Ok(())
-            })
-            .map_err(|e| PeerAddressError::Internal(e.to_string()))
+        self.store
+            .remove_peer_address(device)
+            .await
+            .map(|_| ())
+            .map_err(|error| PeerAddressError::Internal(error.to_string()))
     }
 }
 
@@ -115,20 +63,19 @@ where
 mod tests {
     use super::*;
     use crate::db::executor::DieselSqliteExecutor;
-    use crate::db::mappers::peer_address_mapper::PeerAddressRowMapper;
     use crate::db::pool::init_db_pool;
+    use crate::db::repositories::relationship_store::test_relationship_store;
     use chrono::{TimeZone, Utc};
     use tempfile::{tempdir, TempDir};
 
     fn make_repo() -> (
-        DieselPeerAddressRepository<DieselSqliteExecutor, PeerAddressRowMapper>,
+        DieselPeerAddressRepository<Arc<DieselSqliteExecutor>>,
         TempDir,
     ) {
         let tempdir = tempdir().unwrap();
         let database_url = tempdir.path().join("peer-address.sqlite");
         let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
-        let repo =
-            DieselPeerAddressRepository::new(DieselSqliteExecutor::new(pool), PeerAddressRowMapper);
+        let repo = DieselPeerAddressRepository::new(test_relationship_store(pool));
         (repo, tempdir)
     }
 
@@ -202,5 +149,26 @@ mod tests {
         let (repo, _tempdir) = make_repo();
         let rows = repo.list().await.unwrap();
         assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn saved_address_is_not_persisted_in_plaintext() {
+        let (repo, tempdir) = make_repo();
+        let marker = b"relationship-address-plaintext-probe-4d92";
+        let record = fixture_record("address-privacy-probe", marker);
+
+        repo.upsert(&record).await.unwrap();
+
+        for entry in std::fs::read_dir(tempdir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(
+                    !bytes.windows(marker.len()).any(|window| window == marker),
+                    "peer address leaked into {}",
+                    path.display()
+                );
+            }
+        }
     }
 }
