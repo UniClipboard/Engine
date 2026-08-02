@@ -16,7 +16,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.20.0-rc.16"
+version = "0.20.0-rc.17"
 license = "Apache-2.0"
 
 [workspace.lints.clippy]
