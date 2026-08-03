@@ -161,10 +161,9 @@ pub use roster::{
     PresenceEvent, RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{
-    map_search_error, ManualRebuildResult, SearchCoordinator, SearchCoordinatorDeps,
-    SearchCoordinatorEvent, SearchFacade, SearchFacadeDeps, SearchFacadeError, SearchPageView,
-    SearchProjectionBuilder, SearchQueryInput, SearchRebuildAcceptedView,
-    SearchRebuildProgressView, SearchResultView, SearchStatusSnapshot, SearchStatusView,
+    map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,
+    SearchQueryInput, SearchRebuildAcceptedView, SearchRebuildProgressView, SearchResultView,
+    SearchRuntime, SearchRuntimeDeps, SearchRuntimeError, SearchStatusSnapshot, SearchStatusView,
     SearchTagView,
 };
 // Note: `RelayDiagnosticPort` is intentionally NOT re-exported here. The port

@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::FutureExt;
@@ -141,7 +142,7 @@ impl Default for CoordinatorState {
     }
 }
 
-pub struct SearchCoordinator {
+pub(super) struct SearchCoordinator {
     deps: Arc<SearchCoordinatorDeps>,
     event_tx: broadcast::Sender<SearchCoordinatorEvent>,
     rebuild_lock: Arc<Mutex<()>>,
@@ -153,14 +154,29 @@ pub struct SearchCoordinator {
     /// table) failing to decode cannot fan out into hundreds of concurrent
     /// repair tasks hammering the shared database.
     repair_semaphore: Arc<Semaphore>,
-    task_cancel: CancellationToken,
-    tasks: TaskTracker,
-    task_scope_open: std::sync::Mutex<bool>,
+    task_scope: std::sync::Mutex<SearchTaskScope>,
+    runtime_stopped: AtomicBool,
 }
 
 struct SearchTaskPermit {
     cancel: CancellationToken,
     tracker: TaskTrackerToken,
+}
+
+struct SearchTaskScope {
+    cancel: CancellationToken,
+    tasks: TaskTracker,
+    open: bool,
+}
+
+impl SearchTaskScope {
+    fn open() -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            tasks: TaskTracker::new(),
+            open: true,
+        }
+    }
 }
 
 /// Maximum re-projection repairs running concurrently. Corruption is an
@@ -178,28 +194,72 @@ impl SearchCoordinator {
             state: Arc::new(Mutex::new(CoordinatorState::default())),
             repair_in_flight: Arc::new(Mutex::new(HashSet::new())),
             repair_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REPAIRS)),
-            task_cancel: CancellationToken::new(),
-            tasks: TaskTracker::new(),
-            task_scope_open: std::sync::Mutex::new(true),
+            task_scope: std::sync::Mutex::new(SearchTaskScope::open()),
+            runtime_stopped: AtomicBool::new(false),
         }
     }
 
     fn enter_task_scope(&self) -> Option<SearchTaskPermit> {
-        let task_scope_open = match self.task_scope_open.lock() {
+        let task_scope = match self.task_scope.lock() {
             Ok(guard) => guard,
             Err(_) => {
                 warn!("search task scope lock was poisoned; refusing search task");
                 return None;
             }
         };
-        if !*task_scope_open {
+        if !task_scope.open {
             return None;
         }
 
         Some(SearchTaskPermit {
-            cancel: self.task_cancel.child_token(),
-            tracker: self.tasks.token(),
+            cancel: task_scope.cancel.child_token(),
+            tracker: task_scope.tasks.token(),
         })
+    }
+
+    fn reopen_task_scope(&self) -> bool {
+        if self.runtime_stopped.load(Ordering::SeqCst) {
+            return false;
+        }
+        let mut task_scope = match self.task_scope.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                warn!("search task scope lock was poisoned; refusing search resume");
+                return false;
+            }
+        };
+        if !task_scope.open {
+            *task_scope = SearchTaskScope::open();
+        }
+        true
+    }
+
+    async fn close_task_scope(&self, permanent: bool) {
+        if permanent {
+            self.runtime_stopped.store(true, Ordering::SeqCst);
+        }
+        let tasks = {
+            let mut task_scope = match self.task_scope.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    warn!("search task scope lock was poisoned during shutdown");
+                    poisoned.into_inner()
+                }
+            };
+            task_scope.open = false;
+            task_scope.cancel.cancel();
+            task_scope.tasks.close();
+            task_scope.tasks.clone()
+        };
+        tasks.wait().await;
+    }
+
+    #[cfg(test)]
+    fn tracked_tasks_empty(&self) -> bool {
+        match self.task_scope.lock() {
+            Ok(task_scope) => task_scope.tasks.is_empty(),
+            Err(_) => false,
+        }
     }
 
     fn spawn_task<F>(&self, name: &'static str, future: F) -> bool
@@ -230,10 +290,6 @@ impl SearchCoordinator {
             }
         });
         true
-    }
-
-    pub fn subscribe_events(&self) -> broadcast::Receiver<SearchCoordinatorEvent> {
-        self.event_tx.subscribe()
     }
 
     pub async fn status_snapshot(&self) -> SearchStatusSnapshot {
@@ -431,6 +487,9 @@ impl SearchCoordinator {
     /// restart. This drives them the moment the session unlocks. Guarded so a
     /// rebuild already in progress is not duplicated.
     pub async fn on_session_ready(&self) {
+        if !self.reopen_task_scope() {
+            return;
+        }
         // If a rebuild is already running it holds the rebuild lock; it will run
         // the purge itself on completion, so there is nothing to do here.
         match self.rebuild_lock.try_lock() {
@@ -445,6 +504,10 @@ impl SearchCoordinator {
             }
         }
         self.startup_evaluation().await;
+    }
+
+    pub async fn pause_background_activity(&self) {
+        self.close_task_scope(false).await;
     }
 
     /// Schedule a re-projection repair for entries whose stored render payload
@@ -638,19 +701,7 @@ impl SearchCoordinator {
                 cancel.cancelled().await;
             } => {}
         }
-        {
-            let mut task_scope_open = match self.task_scope_open.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    warn!("search task scope lock was poisoned during shutdown");
-                    poisoned.into_inner()
-                }
-            };
-            *task_scope_open = false;
-            self.task_cancel.cancel();
-            self.tasks.close();
-        }
-        self.tasks.wait().await;
+        self.close_task_scope(true).await;
         info!("search coordinator cancelled");
         Ok(())
     }
@@ -1253,8 +1304,8 @@ mod tests {
         }
     }
 
-    fn blocking_coordinator() -> (
-        Arc<SearchCoordinator>,
+    fn blocking_coordinator_deps() -> (
+        SearchCoordinatorDeps,
         Arc<tokio::sync::Notify>,
         Arc<AtomicBool>,
     ) {
@@ -1287,6 +1338,15 @@ mod tests {
             Arc::new(FakeFileSetRepo),
             CURRENT_INDEX_VERSION,
         );
+        (deps, rebuild_started, rebuild_dropped)
+    }
+
+    fn blocking_coordinator() -> (
+        Arc<SearchCoordinator>,
+        Arc<tokio::sync::Notify>,
+        Arc<AtomicBool>,
+    ) {
+        let (deps, rebuild_started, rebuild_dropped) = blocking_coordinator_deps();
         (
             Arc::new(SearchCoordinator::new(deps)),
             rebuild_started,
@@ -1507,11 +1567,72 @@ mod tests {
         });
 
         assert!(
-            coordinator.tasks.is_empty(),
+            coordinator.tracked_tasks_empty(),
             "shutdown must prevent new background tasks from being registered"
         );
         tokio::task::yield_now().await;
         assert!(!task_ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn search_runtime_shutdown_waits_for_work_and_permanently_closes_it() {
+        let (deps, rebuild_started, rebuild_dropped) = blocking_coordinator_deps();
+        let runtime = crate::facade::search::SearchRuntime::start(deps);
+        let facade = runtime.facade();
+
+        tokio::time::timeout(Duration::from_secs(1), rebuild_started.notified())
+            .await
+            .expect("runtime did not start search coordination");
+        runtime
+            .shutdown()
+            .await
+            .expect("search runtime did not shut down");
+
+        assert!(
+            rebuild_dropped.load(Ordering::SeqCst),
+            "runtime returned before its rebuild task stopped"
+        );
+        assert_eq!(
+            facade.request_rebuild().await,
+            Err(
+                crate::facade::search::SearchFacadeError::ServiceUnavailable(
+                    "search coordinator stopped".to_string()
+                )
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn search_runtime_pauses_for_lock_and_restarts_after_session_resume() {
+        let (deps, rebuild_started, rebuild_dropped) = blocking_coordinator_deps();
+        let runtime = crate::facade::search::SearchRuntime::start(deps);
+        let facade = runtime.facade();
+
+        tokio::time::timeout(Duration::from_secs(1), rebuild_started.notified())
+            .await
+            .expect("runtime did not start search coordination");
+        facade.pause_background_activity().await;
+        assert!(
+            rebuild_dropped.load(Ordering::SeqCst),
+            "session pause returned before the active rebuild stopped"
+        );
+        assert_eq!(
+            facade.request_rebuild().await,
+            Err(
+                crate::facade::search::SearchFacadeError::ServiceUnavailable(
+                    "search coordinator stopped".to_string()
+                )
+            )
+        );
+
+        facade.on_session_ready().await;
+        tokio::time::timeout(Duration::from_secs(1), rebuild_started.notified())
+            .await
+            .expect("session resume did not restart search coordination");
+        runtime
+            .shutdown()
+            .await
+            .expect("search runtime did not shut down");
     }
 
     /// Counts `get_entry` calls and holds each in-flight for `delay`, so a repair

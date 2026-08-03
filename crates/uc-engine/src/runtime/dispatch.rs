@@ -519,6 +519,9 @@ impl EngineRuntime for ProductionRuntime {
             self.abort_all_mobile_file_uploads(session.mobile_sync.as_ref())
                 .await;
             session.tasks.shutdown(Duration::from_millis(500)).await;
+            if let Err(error) = session.search_runtime.shutdown().await {
+                tracing::error!(error = %error, "search runtime stopped with error");
+            }
             session.sync_engine.shutdown().await;
         }
         Ok(())

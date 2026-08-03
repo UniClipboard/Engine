@@ -1,11 +1,7 @@
-use std::sync::Arc;
+use uc_application::facade::{SearchRuntime, SearchRuntimeDeps};
 
-use uc_application::facade::{SearchCoordinator, SearchCoordinatorDeps};
-
-pub(crate) fn build_search_coordinator(
-    deps: &uc_application::deps::AppDeps,
-) -> Arc<SearchCoordinator> {
-    Arc::new(SearchCoordinator::new(SearchCoordinatorDeps::new(
+pub(crate) fn build_search_runtime(deps: &uc_application::deps::AppDeps) -> SearchRuntime {
+    SearchRuntime::start(SearchRuntimeDeps::new(
         deps.search.search_index.clone(),
         deps.search.search_maintenance.clone(),
         deps.search.search_key_derivation.clone(),
@@ -17,5 +13,5 @@ pub(crate) fn build_search_coordinator(
         deps.clipboard.clipboard_event_reader_repo.clone(),
         deps.storage.entry_file_set_repo.clone(),
         uc_infra::search::constants::CURRENT_INDEX_VERSION,
-    )))
+    ))
 }

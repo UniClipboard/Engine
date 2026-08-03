@@ -32,6 +32,7 @@ use crate::assembly::deps::WiredDependencies;
 use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::facade::{
     build_app_facade_from_deps, AppFacadeAssemblyOptions, ClipboardRestoreAssembly,
+    SearchFacadeAssemblyMode,
 };
 use crate::assembly::file_transfer::FileTransferLifecycle;
 use crate::assembly::host::{
@@ -40,7 +41,7 @@ use crate::assembly::host::{
 use crate::assembly::lifecycle::build_daemon_lifecycle;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
-use crate::assembly::search::build_search_coordinator;
+use crate::assembly::search::build_search_runtime;
 use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
 use crate::subsystems::history_maintenance::spawn_history_maintenance_task;
@@ -85,6 +86,7 @@ struct SessionFactory {
 
 struct ProductionSession {
     facade: Arc<AppFacade>,
+    search_runtime: uc_application::facade::SearchRuntime,
     #[cfg(feature = "lan-compat")]
     mobile_sync: Arc<uc_application::facade::MobileSyncFacade>,
     clipboard: ClipboardRuntime,
@@ -260,7 +262,7 @@ impl ProductionRuntime {
         let sync_engine = lifecycle.sync_engine_assembly;
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         sync_engine.attach_restore_broadcast(restore_rx);
-        let search_coordinator = build_search_coordinator(&wired.deps);
+        let search_runtime = build_search_runtime(&wired.deps);
         let clipboard = build_clipboard_runtime(wired, &sync_engine);
         #[cfg(feature = "lan-compat")]
         let mobile_sync = build_mobile_sync_facade(
@@ -294,7 +296,6 @@ impl ProductionRuntime {
                 }
             })
             .await;
-        let search = Arc::clone(&search_coordinator);
         let facade = build_app_facade_from_deps(
             &wired.deps,
             paths,
@@ -316,7 +317,7 @@ impl ProductionRuntime {
                         uc_application::clipboard_write::RestoreBroadcastTrigger::new(restore_tx),
                     ),
                 }),
-                search_coordinator: Some(search_coordinator),
+                search: SearchFacadeAssemblyMode::Runtime(search_runtime.facade()),
                 clipboard_outbound: Some(Arc::clone(&clipboard.outbound)),
                 ..Default::default()
             },
@@ -334,13 +335,6 @@ impl ProductionRuntime {
             events,
         )
         .await;
-        tasks
-            .spawn("search_coordinator", move |cancel| async move {
-                if let Err(error) = search.start(cancel).await {
-                    error!(error = %error, "search coordinator stopped with error");
-                }
-            })
-            .await;
         let lifecycle = Arc::clone(file_transfer_lifecycle);
         let blob_transfer = Arc::clone(&sync_engine.blob);
         tasks
@@ -360,6 +354,7 @@ impl ProductionRuntime {
 
         Ok(ProductionSession {
             facade,
+            search_runtime,
             #[cfg(feature = "lan-compat")]
             mobile_sync,
             clipboard,

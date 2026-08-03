@@ -1,9 +1,10 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use thiserror::Error;
 
 mod coordinator;
 mod projection;
+mod runtime;
 
 use uc_core::ids::DeviceId;
 use uc_core::ports::SearchIndexPort;
@@ -12,11 +13,12 @@ use uc_core::search::{ContentType, QueryOperator, SearchError, SearchQuery, Time
 
 use crate::usecases::search::SearchClipboardEntriesUseCase;
 
+use coordinator::{ManualRebuildResult, SearchCoordinator};
 pub use coordinator::{
-    ManualRebuildResult, SearchCoordinator, SearchCoordinatorDeps, SearchCoordinatorEvent,
-    SearchRebuildProgressView, SearchStatusSnapshot,
+    SearchCoordinatorDeps as SearchRuntimeDeps, SearchRebuildProgressView, SearchStatusSnapshot,
 };
 pub use projection::SearchProjectionBuilder;
+pub use runtime::{SearchRuntime, SearchRuntimeError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchQueryInput {
@@ -124,48 +126,39 @@ pub enum SearchFacadeError {
     Internal(String),
 }
 
-/// Dependency bundle for `SearchFacade`. Composition roots build this once
-/// and pass it to `SearchFacade::new`. The query side runs through the
-/// internal `SearchClipboardEntriesUseCase`; status/rebuild delegate to the
-/// optional `SearchCoordinator` which manages background reindexing.
-pub struct SearchFacadeDeps {
-    pub search_index: Arc<dyn SearchIndexPort>,
-    pub coordinator: Option<Arc<SearchCoordinator>>,
+enum SearchFacadeMode {
+    ReadOnly,
+    Runtime(Arc<SearchCoordinator>),
 }
 
 pub struct SearchFacade {
     query_uc: SearchClipboardEntriesUseCase,
-    /// daemon-lifecycle 资源: GUI shell 启动期为空, daemon 启动时由
-    /// `set_coordinator` 一次性装入 (方案 C 后 daemon 进程内只起一次)。
-    /// 进程退出 = Arc drop, 无需显式 clear。GUI command (search_status
-    /// / search_rebuild) 通过 facade 访问。
-    coordinator: OnceLock<Arc<SearchCoordinator>>,
+    mode: SearchFacadeMode,
 }
 
 impl SearchFacade {
-    pub fn new(deps: SearchFacadeDeps) -> Self {
-        let SearchFacadeDeps {
-            search_index,
-            coordinator,
-        } = deps;
-        let coordinator_cell = OnceLock::new();
-        if let Some(coordinator) = coordinator {
-            let _ = coordinator_cell.set(coordinator);
-        }
+    pub fn read_only(search_index: Arc<dyn SearchIndexPort>) -> Self {
         Self {
             query_uc: SearchClipboardEntriesUseCase::from_port(search_index),
-            coordinator: coordinator_cell,
+            mode: SearchFacadeMode::ReadOnly,
         }
     }
 
-    /// 由 daemon-lifecycle 装配在 daemon 启动时调,装入绑 daemon search
-    /// assembly 的 coordinator。方案 C 后 daemon 进程内只装一次, 重复装入
-    /// 视为编程错误。
-    pub fn set_coordinator(&self, coordinator: Arc<SearchCoordinator>) {
-        self.coordinator
-            .set(coordinator)
-            .map_err(|_| ())
-            .expect("search coordinator already installed; daemon is process-singleton");
+    fn with_runtime(
+        search_index: Arc<dyn SearchIndexPort>,
+        coordinator: Arc<SearchCoordinator>,
+    ) -> Self {
+        Self {
+            query_uc: SearchClipboardEntriesUseCase::from_port(search_index),
+            mode: SearchFacadeMode::Runtime(coordinator),
+        }
+    }
+
+    fn coordinator(&self) -> Option<&Arc<SearchCoordinator>> {
+        match &self.mode {
+            SearchFacadeMode::ReadOnly => None,
+            SearchFacadeMode::Runtime(coordinator) => Some(coordinator),
+        }
     }
 
     pub async fn query(
@@ -185,7 +178,7 @@ impl SearchFacade {
                 // hand their ids to the coordinator for a coalesced re-projection
                 // repair. Non-blocking and best-effort.
                 if !page.corrupted_entry_ids.is_empty() {
-                    if let Some(coordinator) = self.coordinator.get() {
+                    if let Some(coordinator) = self.coordinator() {
                         coordinator.schedule_repair(page.corrupted_entry_ids.clone());
                     }
                 }
@@ -196,8 +189,7 @@ impl SearchFacade {
             // query instead surfaces a stable rebuilding error.
             Err(SearchError::IndexNotReady) if pure_browse => {
                 let coordinator = self
-                    .coordinator
-                    .get()
+                    .coordinator()
                     .ok_or(SearchFacadeError::IndexRebuilding)?;
                 let page = coordinator
                     .browse_projection(limit, offset)
@@ -226,7 +218,7 @@ impl SearchFacade {
     }
 
     pub async fn status(&self) -> Result<SearchStatusView, SearchFacadeError> {
-        if let Some(coordinator) = self.coordinator.get() {
+        if let Some(coordinator) = self.coordinator() {
             return coordinator.status_view().await.map_err(map_search_error);
         }
 
@@ -246,17 +238,22 @@ impl SearchFacade {
 
     /// Notify the search subsystem that the encryption session just became ready.
     ///
-    /// Drives any rebuild/purge that a locked cold start could not run. No-op when
-    /// the coordinator is not installed (e.g. the GUI shell before the daemon
-    /// assembles its search stack).
-    pub async fn on_session_ready(&self) {
-        if let Some(coordinator) = self.coordinator.get() {
+    /// Drives any rebuild or purge that a locked cold start could not run. The
+    /// explicit read-only mode has no background work to resume.
+    pub(crate) async fn on_session_ready(&self) {
+        if let Some(coordinator) = self.coordinator() {
             coordinator.on_session_ready().await;
         }
     }
 
+    pub(crate) async fn pause_background_activity(&self) {
+        if let Some(coordinator) = self.coordinator() {
+            coordinator.pause_background_activity().await;
+        }
+    }
+
     pub async fn request_rebuild(&self) -> Result<SearchRebuildAcceptedView, SearchFacadeError> {
-        let coordinator = self.coordinator.get().ok_or_else(|| {
+        let coordinator = self.coordinator().ok_or_else(|| {
             SearchFacadeError::ServiceUnavailable("search coordinator unavailable".to_string())
         })?;
 
@@ -270,7 +267,7 @@ impl SearchFacade {
     }
 
     pub async fn rebuild_now(&self) -> Result<SearchRebuildAcceptedView, SearchFacadeError> {
-        let coordinator = self.coordinator.get().ok_or_else(|| {
+        let coordinator = self.coordinator().ok_or_else(|| {
             SearchFacadeError::ServiceUnavailable("search coordinator unavailable".to_string())
         })?;
 

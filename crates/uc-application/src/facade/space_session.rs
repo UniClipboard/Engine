@@ -22,6 +22,7 @@ pub(crate) trait MembershipActivityPort: Send + Sync {
 
 #[async_trait]
 pub(crate) trait SearchSessionActivityPort: Send + Sync {
+    async fn pause(&self) -> Result<(), String>;
     async fn resume(&self) -> Result<(), String>;
 }
 
@@ -119,16 +120,22 @@ impl SpaceActivityCoordinator {
             .await
             .map_err(SpaceActivityError::Membership)?;
         self.receive.close_receive_gate();
+        self.search
+            .pause()
+            .await
+            .map_err(SpaceActivityError::Search)?;
         Ok(())
     }
 
     async fn restore_after_failed_lock(&self) -> Result<(), SpaceSessionError> {
+        let search = self.search.resume().await;
         let receive = self.receive.ensure_receive_ready().await;
         let membership = self.membership.resume().await;
-        match (receive, membership) {
-            (Ok(()), Ok(())) => Ok(()),
-            (receive, membership) => Err(SpaceSessionError::RecoveryFailed(format!(
-                "receive={}, membership={}",
+        match (search, receive, membership) {
+            (Ok(()), Ok(()), Ok(())) => Ok(()),
+            (search, receive, membership) => Err(SpaceSessionError::RecoveryFailed(format!(
+                "search={}, receive={}, membership={}",
+                search.err().unwrap_or_else(|| "restored".to_string()),
                 receive
                     .err()
                     .map(|error| error.to_string())
@@ -352,6 +359,11 @@ impl SpaceSessionAccessPort for DefaultSpaceSessionAccess {
 
 #[async_trait]
 impl SearchSessionActivityPort for SearchFacade {
+    async fn pause(&self) -> Result<(), String> {
+        self.pause_background_activity().await;
+        Ok(())
+    }
+
     async fn resume(&self) -> Result<(), String> {
         self.on_session_ready().await;
         Ok(())
@@ -423,6 +435,11 @@ mod tests {
 
     #[async_trait]
     impl SearchSessionActivityPort for RecordingSearchActivity {
+        async fn pause(&self) -> Result<(), String> {
+            self.calls.push("search.pause");
+            Ok(())
+        }
+
         async fn resume(&self) -> Result<(), String> {
             self.calls.push("search.resume");
             Ok(())
@@ -529,7 +546,9 @@ mod tests {
             vec![
                 "membership.pause",
                 "receive.pause",
+                "search.pause",
                 "session.lock",
+                "search.resume",
                 "receive.resume",
                 "membership.resume",
             ]

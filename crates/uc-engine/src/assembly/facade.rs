@@ -23,9 +23,8 @@ use uc_application::facade::{
     ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade, DeviceFacade,
     DiagnosticsFacade, DiagnosticsFacadeDeps, EncryptionFacade, EncryptionFacadeDeps,
     FileTransferFacade, LifecycleFacade, LifecycleFacadeDeps, LifecycleStatusGateway,
-    MemberRosterFacade, ResourceFacade, ResourceFacadeDeps, SearchCoordinator, SearchFacade,
-    SearchFacadeDeps, SettingsFacade, StorageFacade, StorageFacadeDeps, UpgradeFacade,
-    UpgradeFacadeDeps,
+    MemberRosterFacade, ResourceFacade, ResourceFacadeDeps, SearchFacade, SettingsFacade,
+    StorageFacade, StorageFacadeDeps, UpgradeFacade, UpgradeFacadeDeps,
 };
 #[cfg(feature = "lan-compat")]
 use uc_application::ApplyInboundClipboardUseCase;
@@ -235,7 +234,18 @@ pub struct AppFacadeAssemblyOptions {
     /// 此时 untag 直接跳过。
     pub blob_transfer_port: Option<Arc<dyn uc_core::ports::blob::BlobTransferPort>>,
     pub clipboard_restore: Option<ClipboardRestoreAssembly>,
-    pub search_coordinator: Option<Arc<SearchCoordinator>>,
+    pub search: SearchFacadeAssemblyMode,
+}
+
+pub enum SearchFacadeAssemblyMode {
+    ReadOnly,
+    Runtime(Arc<SearchFacade>),
+}
+
+impl Default for SearchFacadeAssemblyMode {
+    fn default() -> Self {
+        Self::ReadOnly
+    }
 }
 
 /// 从已注入的 application deps 构造统一业务入口。
@@ -335,10 +345,12 @@ pub fn build_app_facade_from_deps(
         clipboard_outbound: options.clipboard_outbound,
         file_transfer: options.file_transfer,
         clipboard_restore,
-        search: Arc::new(SearchFacade::new(SearchFacadeDeps {
-            search_index: deps.search.search_index.clone(),
-            coordinator: options.search_coordinator,
-        })),
+        search: match options.search {
+            SearchFacadeAssemblyMode::ReadOnly => {
+                Arc::new(SearchFacade::read_only(deps.search.search_index.clone()))
+            }
+            SearchFacadeAssemblyMode::Runtime(search) => search,
+        },
         settings: Arc::new({
             // Relay 诊断 adapter 在 daemon 启动期一次性装配。infra 探测器
             // 初始化失败(TLS provider 缺失等)不应阻断整个 daemon 启动 ——
