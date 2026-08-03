@@ -1,5 +1,40 @@
 # Progress
 
+## Session: 2026-08-04（Phase 9）
+
+### Phase: 删除旧实现并做架构验收
+
+- **Status:** in_progress
+- Actions taken:
+  - Phase 8 已独立提交为 `598ca6d`，用户原有成员移除内容仍未提交。
+  - 审计通用生命周期空壳、搜索旧构造、剪贴板入站、文件传输恢复、移动上传和搜索/成员活动边界。
+  - 确认只删除无调用者的生命周期空壳、只读搜索构造和同步重建转发；保留有明确恢复或平台接线职责的运行对象。
+- Next:
+  - 先增加最终架构检查并确认旧空壳红灯，再删除旧实现和旧测试。
+- TDD:
+  - 新增四项整体验收架构测试；首次运行 19 项通过，唯一失败为通用生命周期空壳仍存在，红灯原因正确。
+- Implemented:
+  - 删除无生产调用者的通用生命周期模块、导出和 4 项旧单元测试。
+  - 搜索入口改为始终持有运行协调能力，删除只读半模式、同步重建对外入口和只服务旧入口的测试路径。
+  - 新增剪贴板入站、文件传输会话、移动上传状态、搜索/成员活动和应用总入口的防回退架构检查。
+- Focused verification:
+  - `cargo check -p uc-engine --all-targets --all-features --locked`：通过，无提醒。
+  - `cargo test -p uc-engine --test dependency_firewall --locked`：20 项通过。
+- Full verification:
+  - `cargo test -p uc-application --all-features --locked`：通过（958 项单元测试、8 项集成测试）。
+  - `cargo test -p uc-engine --all-features --locked`：通过；局域网组播测试按测试定义跳过 1 项，未计为通过。
+  - `cargo metadata --locked --format-version 1`：通过。
+  - `cargo check --workspace --all-targets --locked`：通过，无提醒。
+  - `cargo fmt --all -- --check`：通过。
+  - `node scripts/architecture/check-engine-repository.mjs`：通过。
+  - `git diff --check`：通过。
+  - 旧生命周期、只读搜索、同步重建、可选装配、后装入口和 Engine 内部步骤扫描：除稳定 Engine 生命周期契约外无匹配。
+  - 新增禁止项扫描：只有架构测试使用 `expect` 读取源码；生产改动未新增强制解包、控制台输出或日志语句。
+  - iOS、Android 和 HarmonyOS 真机项目：跳过；总计划未改变平台公开接口，未计为通过。
+- Phase result:
+  - 详细实施计划 Phase 9 和总任务 Phase 7 已完成。
+  - 规格完成标准全部满足，总计划完成。
+
 ## Session: 2026-08-04（Phase 8）
 
 ### Phase: 收紧 AppFacade

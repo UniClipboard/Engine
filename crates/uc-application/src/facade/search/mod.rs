@@ -126,38 +126,19 @@ pub enum SearchFacadeError {
     Internal(String),
 }
 
-enum SearchFacadeMode {
-    ReadOnly,
-    Runtime(Arc<SearchCoordinator>),
-}
-
 pub struct SearchFacade {
     query_uc: SearchClipboardEntriesUseCase,
-    mode: SearchFacadeMode,
+    coordinator: Arc<SearchCoordinator>,
 }
 
 impl SearchFacade {
-    pub fn read_only(search_index: Arc<dyn SearchIndexPort>) -> Self {
-        Self {
-            query_uc: SearchClipboardEntriesUseCase::from_port(search_index),
-            mode: SearchFacadeMode::ReadOnly,
-        }
-    }
-
     fn with_runtime(
         search_index: Arc<dyn SearchIndexPort>,
         coordinator: Arc<SearchCoordinator>,
     ) -> Self {
         Self {
             query_uc: SearchClipboardEntriesUseCase::from_port(search_index),
-            mode: SearchFacadeMode::Runtime(coordinator),
-        }
-    }
-
-    fn coordinator(&self) -> Option<&Arc<SearchCoordinator>> {
-        match &self.mode {
-            SearchFacadeMode::ReadOnly => None,
-            SearchFacadeMode::Runtime(coordinator) => Some(coordinator),
+            coordinator,
         }
     }
 
@@ -178,9 +159,8 @@ impl SearchFacade {
                 // hand their ids to the coordinator for a coalesced re-projection
                 // repair. Non-blocking and best-effort.
                 if !page.corrupted_entry_ids.is_empty() {
-                    if let Some(coordinator) = self.coordinator() {
-                        coordinator.schedule_repair(page.corrupted_entry_ids.clone());
-                    }
+                    self.coordinator
+                        .schedule_repair(page.corrupted_entry_ids.clone());
                 }
                 Ok(search_page_to_view(page, SEARCH_STATE_READY))
             }
@@ -188,10 +168,8 @@ impl SearchFacade {
             // the user keeps browsing during a rebuild; a keyword or filtered
             // query instead surfaces a stable rebuilding error.
             Err(SearchError::IndexNotReady) if pure_browse => {
-                let coordinator = self
-                    .coordinator()
-                    .ok_or(SearchFacadeError::IndexRebuilding)?;
-                let page = coordinator
+                let page = self
+                    .coordinator
                     .browse_projection(limit, offset)
                     .await
                     .map_err(map_search_error)?;
@@ -218,60 +196,25 @@ impl SearchFacade {
     }
 
     pub async fn status(&self) -> Result<SearchStatusView, SearchFacadeError> {
-        if let Some(coordinator) = self.coordinator() {
-            return coordinator.status_view().await.map_err(map_search_error);
-        }
-
-        let meta = self.query_uc.index_meta().await.map_err(map_search_error)?;
-        let state = if meta.search_blocked {
-            "unavailable"
-        } else {
-            "ready"
-        };
-        Ok(SearchStatusView {
-            state: state.to_string(),
-            reason: meta.search_blocked.then(|| "search_blocked".to_string()),
-            last_rebuild_started_at_ms: meta.last_rebuild_started_at_ms,
-            last_rebuild_completed_at_ms: meta.last_rebuild_completed_at_ms,
-        })
+        self.coordinator
+            .status_view()
+            .await
+            .map_err(map_search_error)
     }
 
     /// Notify the search subsystem that the encryption session just became ready.
     ///
-    /// Drives any rebuild or purge that a locked cold start could not run. The
-    /// explicit read-only mode has no background work to resume.
+    /// Drives any rebuild or purge that a locked cold start could not run.
     pub(crate) async fn on_session_ready(&self) {
-        if let Some(coordinator) = self.coordinator() {
-            coordinator.on_session_ready().await;
-        }
+        self.coordinator.on_session_ready().await;
     }
 
     pub(crate) async fn pause_background_activity(&self) {
-        if let Some(coordinator) = self.coordinator() {
-            coordinator.pause_background_activity().await;
-        }
+        self.coordinator.pause_background_activity().await;
     }
 
     pub async fn request_rebuild(&self) -> Result<SearchRebuildAcceptedView, SearchFacadeError> {
-        let coordinator = self.coordinator().ok_or_else(|| {
-            SearchFacadeError::ServiceUnavailable("search coordinator unavailable".to_string())
-        })?;
-
-        match coordinator.request_manual_rebuild().await {
-            ManualRebuildResult::Accepted => Ok(SearchRebuildAcceptedView { accepted: true }),
-            ManualRebuildResult::AlreadyInProgress => Err(SearchFacadeError::RebuildAlreadyRunning),
-            ManualRebuildResult::Unavailable => Err(SearchFacadeError::ServiceUnavailable(
-                "search coordinator stopped".to_string(),
-            )),
-        }
-    }
-
-    pub async fn rebuild_now(&self) -> Result<SearchRebuildAcceptedView, SearchFacadeError> {
-        let coordinator = self.coordinator().ok_or_else(|| {
-            SearchFacadeError::ServiceUnavailable("search coordinator unavailable".to_string())
-        })?;
-
-        match coordinator.run_manual_rebuild_now().await {
+        match self.coordinator.request_manual_rebuild().await {
             ManualRebuildResult::Accepted => Ok(SearchRebuildAcceptedView { accepted: true }),
             ManualRebuildResult::AlreadyInProgress => Err(SearchFacadeError::RebuildAlreadyRunning),
             ManualRebuildResult::Unavailable => Err(SearchFacadeError::ServiceUnavailable(

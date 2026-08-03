@@ -590,11 +590,6 @@ impl AppFacade {
         self.search.status().await
     }
 
-    /// 在当前进程内同步重建搜索索引。
-    pub async fn rebuild_search_now(&self) -> Result<SearchRebuildAcceptedView, SearchFacadeError> {
-        self.search.rebuild_now().await
-    }
-
     pub async fn request_search_rebuild(
         &self,
     ) -> Result<SearchRebuildAcceptedView, SearchFacadeError> {

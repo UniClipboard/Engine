@@ -351,6 +351,86 @@ fn app_facade_is_the_only_application_path_used_by_engine_operations() {
     }
 }
 
+#[test]
+fn obsolete_application_shells_are_removed() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let lifecycle = workspace_root.join("crates/uc-application/src/facade/lifecycle/mod.rs");
+    let application = read_rs_sources(&workspace_root.join("crates/uc-application/src"));
+
+    assert!(
+        !lifecycle.exists(),
+        "the unused generic lifecycle shell and its tests must be deleted"
+    );
+    for forbidden in ["pub fn read_only(", "pub async fn rebuild_search_now("] {
+        assert!(
+            !application.contains(forbidden),
+            "obsolete application entry must be deleted: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn engine_does_not_reassemble_clipboard_inbound_or_transfer_sessions() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in [
+        "subscribe_inbound_clipboard_notices",
+        "InboundNoticeSubscription",
+        "spawn_ingest_loop",
+        "FileTransferSession",
+        "BeginReceiverTransfer",
+        ".report_progress(",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "Engine must not reassemble application workflow step {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn engine_does_not_own_mobile_upload_state() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let upload = std::fs::read_to_string(
+        workspace_root.join("crates/uc-engine/src/runtime/mobile_upload.rs"),
+    )
+    .expect("mobile upload operation source must be readable");
+
+    for forbidden in [
+        "HashMap<",
+        "ActiveMobileUpload",
+        "staging_handle",
+        "bytes_written",
+        "last_progress",
+    ] {
+        assert!(
+            !upload.contains(forbidden),
+            "application upload coordinator must own {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn engine_does_not_restore_search_or_membership_activity_steps() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runtime = read_rs_sources(&workspace_root.join("crates/uc-engine/src/runtime"));
+
+    for forbidden in [
+        "on_session_ready",
+        "pause_background_activity",
+        "resume_membership_gossip",
+        "pause_membership_gossip",
+        "resume_incomplete_revocations",
+        "resume_legacy_bootstraps",
+    ] {
+        assert!(
+            !runtime.contains(forbidden),
+            "space application runtime must own activity step {forbidden}"
+        );
+    }
+}
+
 fn read_rs_sources(root: &Path) -> String {
     let mut pending = vec![root.to_path_buf()];
     let mut source = String::new();

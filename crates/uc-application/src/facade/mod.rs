@@ -23,7 +23,6 @@ pub mod encryption;
 pub mod file_transfer;
 pub mod host_event;
 pub mod legacy_upgrade;
-pub mod lifecycle;
 mod membership_connectivity;
 pub mod membership_gossip;
 #[cfg(feature = "lan-compat")]
@@ -119,10 +118,6 @@ pub use host_event::{
 };
 pub use legacy_upgrade::{
     AutomaticLegacyUpgrade, AutomaticLegacyUpgradeDeps, AutomaticLegacyUpgradeRuntime,
-};
-pub use lifecycle::{
-    InMemoryLifecycleStatus, LifecycleFacade, LifecycleFacadeDeps, LifecycleFacadeError,
-    LifecycleStateView, LifecycleStatusGateway,
 };
 pub use membership_connectivity::{
     start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,

@@ -372,36 +372,6 @@ impl SearchCoordinator {
         }
     }
 
-    /// Run a manual rebuild on the caller task.
-    ///
-    /// CLI uses this path because there is no daemon process to own a
-    /// detached background rebuild after the CLI exits.
-    #[instrument(name = "search.run_manual_rebuild_now", level = "info", skip(self))]
-    pub async fn run_manual_rebuild_now(&self) -> ManualRebuildResult {
-        let Some(permit) = self.enter_task_scope() else {
-            return ManualRebuildResult::Unavailable;
-        };
-        let SearchTaskPermit { cancel, tracker } = permit;
-        let result = match self.rebuild_lock.clone().try_lock_owned() {
-            Ok(guard) => {
-                let deps = Arc::clone(&self.deps);
-                let event_tx = self.event_tx.clone();
-                let state = Arc::clone(&self.state);
-                let _guard = guard;
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => ManualRebuildResult::Unavailable,
-                    _ = Self::run_rebuild(deps, event_tx, state, REASON_MANUAL_REBUILD) => {
-                        ManualRebuildResult::Accepted
-                    }
-                }
-            }
-            Err(_) => ManualRebuildResult::AlreadyInProgress,
-        };
-        drop(tracker);
-        result
-    }
-
     #[instrument(name = "search.startup_evaluation", level = "info", skip(self))]
     async fn startup_evaluation(&self) {
         let meta = match self.deps.search_index.get_index_meta().await {
@@ -1552,14 +1522,6 @@ mod tests {
             coordinator.request_manual_rebuild().await,
             ManualRebuildResult::Unavailable
         );
-        let inline_result = tokio::time::timeout(
-            Duration::from_millis(100),
-            coordinator.run_manual_rebuild_now(),
-        )
-        .await
-        .expect("inline rebuild did not reject after shutdown");
-        assert_eq!(inline_result, ManualRebuildResult::Unavailable);
-
         let task_ran = Arc::new(AtomicBool::new(false));
         let task_ran_clone = Arc::clone(&task_ran);
         coordinator.spawn_task("search.test.after_shutdown", async move {
