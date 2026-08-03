@@ -36,11 +36,12 @@
 
 | 行为 | 当前证据 | 状态 | 后续门槛 |
 |---|---|---|---|
-| 固定执行顺序 | `later_pass_failure_does_not_change_the_fixed_order` | 规则已保护，待迁移 | Phase 7 迁到 `HistoryMaintenanceRuntime` Interface |
-| reconcile 失败跳过剩余步骤 | `reconciliation_failure_stops_delete_capable_passes` | 规则已保护，待迁移 | Phase 7 从最终 Interface 保持行为 |
-| cleanup 失败仍执行 retention | `later_pass_failure_does_not_change_the_fixed_order` | 规则已保护，待迁移 | Phase 7 从最终 Interface 保持行为 |
-| 关闭立即唤醒并等待退出 | 当前引擎任务注册表提供通用关闭，未从历史负责人观察 | 待最终负责人补齐 | Phase 7 用暂停时间验证 `HistoryMaintenanceRuntime::shutdown` 不等待五分钟定时器 |
+| 固定执行顺序 | `runtime_keeps_fixed_order_when_later_passes_fail` | 最终边界已证明 | 后续阶段保持通过 |
+| reconcile 失败跳过剩余步骤 | `runtime_skips_delete_passes_when_reconciliation_fails` | 最终边界已证明 | 后续阶段保持通过 |
+| cleanup 失败仍执行 retention | `runtime_keeps_fixed_order_when_later_passes_fail` | 最终边界已证明 | 后续阶段保持通过 |
+| 失败后下一轮继续维护 | `periodic_pass_retries_after_a_failed_startup_pass` | 最终边界已证明 | 后续阶段保持单轮失败不终止运行期 |
+| 关闭立即唤醒并等待退出 | `shutdown_interrupts_the_long_interval_wait`、`shutdown_waits_for_an_inflight_pass_to_finish` | 最终边界已证明 | 后续阶段保持等待中立即退出、在途单轮完成后退出 |
 
 ## Phase 1 结论
 
-Phase 1 仍为进行中。剪贴板入站、文件传输和移动上传已经从稳定 Engine 与最终负责人边界完整保护；仅历史维护的最终负责人和关闭立即唤醒仍绑定 Phase 7，未记为通过。
+Phase 1 行为保护已经完成。剪贴板入站、文件传输、移动上传和历史维护都已从稳定 Engine 或最终负责人边界证明；后续阶段只需保持这些证据通过，不再依赖将被删除的旧内部步骤。

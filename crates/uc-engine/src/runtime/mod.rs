@@ -15,7 +15,9 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::error;
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
-use uc_application::facade::{AppFacade, InMemoryLifecycleStatus, PairingOutcome};
+use uc_application::facade::{
+    AppFacade, HistoryMaintenanceRuntime, InMemoryLifecycleStatus, PairingOutcome,
+};
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
@@ -38,7 +40,6 @@ use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
 use crate::assembly::search::build_search_runtime;
 use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
-use crate::subsystems::history_maintenance::spawn_history_maintenance_task;
 use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
@@ -73,6 +74,7 @@ struct SessionFactory {
 
 struct ProductionSession {
     facade: Arc<AppFacade>,
+    history_maintenance: HistoryMaintenanceRuntime,
     search_runtime: uc_application::facade::SearchRuntime,
     #[cfg(feature = "lan-compat")]
     mobile_sync: Arc<uc_application::facade::MobileSyncFacade>,
@@ -306,7 +308,7 @@ impl ProductionRuntime {
             .subscribe_pairing_completion()
             .map_err(|error| startup_error("pairing completion subscription", error))?;
         spawn_pairing_completion_events(pairing_outcomes, &tasks, events.clone()).await;
-        spawn_history_maintenance_task(Arc::clone(&facade.clipboard_history), &tasks).await;
+        let history_maintenance = facade.start_history_maintenance().await;
         spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
         let lifecycle = Arc::clone(file_transfer_lifecycle);
         let blob_transfer = Arc::clone(&sync_engine.blob);
@@ -327,6 +329,7 @@ impl ProductionRuntime {
 
         Ok(ProductionSession {
             facade,
+            history_maintenance,
             search_runtime,
             #[cfg(feature = "lan-compat")]
             mobile_sync,

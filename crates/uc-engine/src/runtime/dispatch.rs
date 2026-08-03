@@ -523,6 +523,9 @@ impl EngineRuntime for ProductionRuntime {
             {
                 tracing::warn!("mobile file upload shutdown finished with an error");
             }
+            if let Err(error) = session.history_maintenance.shutdown().await {
+                tracing::warn!(error = %error, "history maintenance stopped with an error");
+            }
             session.tasks.shutdown(Duration::from_millis(500)).await;
             if let Err(error) = session.search_runtime.shutdown().await {
                 tracing::error!(error = %error, "search runtime stopped with error");

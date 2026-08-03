@@ -54,11 +54,11 @@ use crate::facade::{
     ClipboardOutboundFacade, ClipboardRestoreFacade, ClipboardSyncError, ClipboardSyncFacade,
     DeviceFacade, DiagnosticsFacade, DispatchEntryOutcome, EncryptionFacade, EncryptionFacadeError,
     EncryptionStateView, FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand,
-    FetchBlobToPathResult, LifecycleFacade, MemberRosterFacade, PublishBlobCommand,
-    PublishBlobPathCommand, PublishBlobResult, ResendEntryCommand, ResendEntryError, ResendReport,
-    ResourceFacade, SearchFacade, SearchFacadeError, SearchPageView, SearchQueryInput,
-    SearchRebuildAcceptedView, SearchStatusView, SettingsFacade, SettingsFacadeError, SpaceFacade,
-    StorageFacade,
+    FetchBlobToPathResult, HistoryMaintenanceRuntime, LifecycleFacade, MemberRosterFacade,
+    PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult, ResendEntryCommand,
+    ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
+    SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
+    SettingsFacadeError, SpaceFacade, StorageFacade,
 };
 use crate::facade::{
     MembershipConvergenceFacadeError, MembershipConvergenceStatus, SpaceApplicationHandle,
@@ -196,6 +196,10 @@ impl AppFacade {
             #[cfg(feature = "lan-compat")]
             mobile_sync: once_lock_from(parts.mobile_sync),
         }
+    }
+
+    pub async fn start_history_maintenance(&self) -> HistoryMaintenanceRuntime {
+        HistoryMaintenanceRuntime::start(Arc::clone(&self.clipboard_history)).await
     }
 
     /// A1:初始化空间。外部业务入口从 `AppFacade` 进入,不直接拿 `SpaceFacade`。

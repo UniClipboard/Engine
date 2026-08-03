@@ -32,6 +32,12 @@ use crate::usecases::clipboard_history::{
     ToggleFavoriteClipboardEntryUseCase,
 };
 
+mod runtime;
+#[cfg(test)]
+mod runtime_tests;
+
+pub use runtime::{HistoryMaintenanceRuntime, HistoryMaintenanceRuntimeError};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardListInput {
     pub limit: usize,
@@ -551,7 +557,7 @@ impl ClipboardHistoryFacade {
     /// Returns `Ok(default())` when the facade was assembled without a
     /// `file_cache_dir` (typical for headless test contexts) — there is no
     /// cache to clean.
-    pub async fn cleanup_expired_files(&self) -> Result<CleanupResultView, ClipboardHistoryError> {
+    async fn cleanup_expired_files(&self) -> Result<CleanupResultView, ClipboardHistoryError> {
         let Some(uc) = self.cleanup_uc.as_ref() else {
             return Ok(CleanupResultView::default());
         };
@@ -570,9 +576,7 @@ impl ClipboardHistoryFacade {
     ///
     /// Returns `Ok(default())` when the facade was assembled without a
     /// `file_cache_dir` (headless / test contexts have nothing to drift).
-    pub async fn reconcile_missing_files(
-        &self,
-    ) -> Result<ReconcileResultView, ClipboardHistoryError> {
+    async fn reconcile_missing_files(&self) -> Result<ReconcileResultView, ClipboardHistoryError> {
         let Some(uc) = self.reconcile_uc.as_ref() else {
             return Ok(ReconcileResultView::default());
         };
@@ -589,7 +593,7 @@ impl ClipboardHistoryFacade {
     /// walks the full clipboard history, not just disk-backed entries.
     ///
     /// Returns `Ok(default())` when the policy is disabled.
-    pub async fn enforce_retention_policy(
+    async fn enforce_retention_policy(
         &self,
     ) -> Result<RetentionEnforcementResultView, ClipboardHistoryError> {
         let result = self

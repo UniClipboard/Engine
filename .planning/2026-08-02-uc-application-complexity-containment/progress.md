@@ -1,5 +1,42 @@
 # Progress
 
+## Session: 2026-08-04（Phase 7）
+
+### Phase: 收口历史维护运行期
+
+- **Status:** complete
+- Actions taken:
+  - 恢复总计划并确认 Phase 6 已由独立提交完成。
+  - 保护用户原有成员移除方案和对应架构记录，不修改或提交。
+  - 审计引擎层启动时维护、定时间隔、三步顺序、失败分流、日志和关闭循环。
+  - 指定历史功能内部的 `HistoryMaintenanceRuntime` 为唯一负责人；调用方只启动和关闭运行期。
+- TDD:
+  - 先从最终运行期边界补固定顺序、失败策略、周期重试、立即关闭和等待在途维护测试。
+  - 首次聚焦测试按预期编译失败：历史模块尚不存在 `runtime` 及最终负责人入口；红灯原因正确，没有测试拼写或环境错误。
+  - 新负责人和装配路径完成后，同一组 5 项测试全部通过。
+- Implemented:
+  - 新增历史维护运行期，启动时先执行一轮，再按固定间隔复用同一单轮流程。
+  - 核对失败跳过本轮后续删除；文件清理失败仍执行保留策略；任何单轮失败不终止下一轮。
+  - 维护结果在应用层统一汇总为不含内容和路径的统计日志。
+  - 关闭会立即打断定时等待，并等待已经开始的一轮结束。
+  - 总入口只暴露一次启动动作，Engine 会话只持有和关闭运行期；旧引擎维护模块及其内部测试已删除。
+- Focused verification:
+  - `cargo test -p uc-application --lib clipboard_history::runtime_tests --locked`：5 项通过。
+  - `cargo check -p uc-engine --all-targets --all-features --locked`：通过。
+- Full verification:
+  - `cargo test -p uc-application --all-features --locked`：通过（962 项单元测试、8 项文件传输集成测试）。
+  - `cargo test -p uc-engine --all-features --locked`：通过；局域网组播测试按测试定义跳过 1 项，未计为通过。
+  - `cargo metadata --locked --format-version 1`：通过。
+  - `cargo check --workspace --all-targets --locked`：通过。
+  - `cargo fmt --all -- --check`：通过。
+  - `node scripts/architecture/check-engine-repository.mjs`：通过。
+  - `git diff --check`：通过。
+  - 旧路径扫描：Engine 历史维护模块、启动函数、循环和三个公开逐步入口均不存在；应用层只保留最终运行期内部的单轮与循环实现。
+  - iOS、Android 和 HarmonyOS 真机项目：跳过；本阶段不改变设备接口或平台行为，未计为通过。
+- Phase result:
+  - 详细实施计划 Phase 7 已完成。
+  - 总任务 Phase 1 和 Phase 5 已完成；总计划仍在进行，下一阶段为详细 Phase 8 收紧 `AppFacade`。
+
 ## Session: 2026-08-04（Phase 6）
 
 ### Phase: 收口移动文件上传
