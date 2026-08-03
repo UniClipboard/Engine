@@ -148,10 +148,35 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     )
                     .bind::<Text, _>(&lookup_token)
                     .load::<RevocationRow>(conn)?;
-                    let has_incomplete = !rows.is_empty();
+                    let mut has_incomplete = false;
                     for row in rows {
                         let existing = decode_record(&master_key, &row)
                             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        if existing.status() == RevocationStatus::Prepared
+                            && existing.previous_epoch() < prepared.previous_epoch()
+                        {
+                            let affected = diesel::sql_query(
+                                "DELETE FROM member_revocation_log \
+                                 WHERE revocation_id = ? AND status = 'prepared' \
+                                 AND previous_epoch = ?",
+                            )
+                            .bind::<Text, _>(existing.revocation_id().as_str())
+                            .bind::<BigInt, _>(epoch_to_i64(existing.previous_epoch().value())?)
+                            .execute(conn)?;
+                            if affected != 1 {
+                                return Err(anyhow::anyhow!(
+                                    "obsolete prepared revocation could not be replaced"
+                                ));
+                            }
+                            tracing::warn!(
+                                event = "member_revocation.obsolete_prepared_replaced",
+                                previous_epoch = existing.previous_epoch().value(),
+                                current_epoch = prepared.previous_epoch().value(),
+                                "obsolete prepared member revocation was replaced"
+                            );
+                            continue;
+                        }
+                        has_incomplete = true;
                         if existing.target_device_id() == prepared.target_device_id() {
                             return Ok(BeginRevocationOutcome::Existing(existing));
                         }

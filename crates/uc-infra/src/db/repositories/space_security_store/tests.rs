@@ -140,6 +140,49 @@ async fn begin_is_idempotent_for_the_same_space_and_target() {
 }
 
 #[tokio::test]
+async fn begin_replaces_an_obsolete_prepared_revocation_after_the_epoch_advances() {
+    let (repo, _pool, _tempdir) = make_repo();
+    let current = seed_current_space(&repo).await;
+    let stale = prepared("revocation-stale");
+    repo.begin_revocation(&stale).await.unwrap();
+
+    let mut advanced_state = current.state().clone();
+    advanced_state
+        .rotate(ContentKeyId::from_string("content-key-advanced").unwrap())
+        .unwrap();
+    repo.save_space_material(&SpaceKeyMaterial::new(
+        advanced_state,
+        b"advanced-group-state-sensitive".to_vec(),
+        b"advanced-key-catalog-sensitive".to_vec(),
+        150,
+    ))
+    .await
+    .unwrap();
+    let replacement = RevocationRecord::prepare(
+        RevocationId::from_string("revocation-replacement").unwrap(),
+        SpaceId::from_str("space-sensitive"),
+        DeviceId::new("removed-device-sensitive"),
+        GroupEpoch::new(2),
+        200,
+    )
+    .unwrap();
+
+    assert_eq!(
+        repo.begin_revocation(&replacement).await.unwrap(),
+        BeginRevocationOutcome::Begun(replacement.clone())
+    );
+    assert!(repo
+        .get_revocation(stale.revocation_id())
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        repo.list_incomplete_revocations().await.unwrap(),
+        vec![replacement]
+    );
+}
+
+#[tokio::test]
 async fn begin_rejects_a_concurrent_revocation_for_another_member() {
     let (repo, _pool, _tempdir) = make_repo();
     seed_current_space(&repo).await;
