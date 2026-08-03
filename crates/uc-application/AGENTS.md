@@ -637,7 +637,7 @@ External (daemon / tauri / CLI / bootstrap)
 ### 11.4.2 Facade 目录的组织规则
 
 * 所有 Facade 类型必须定义在 `src/facade/` 目录下
-* 顶层 `AppFacade` 聚合各域 Facade；每个域 Facade（`SpaceSetupFacade`、`ClipboardSyncFacade`、`PairingFacade` 等）暴露该域的应用动作
+* 顶层 `AppFacade` 聚合各域 Facade；每个域 Facade（`SpaceFacade`、`ClipboardSyncFacade`、`PairingFacade` 等）暴露该域的应用动作
 * `src/facade/mod.rs` 的 `pub use` 是 crate 对外的**白名单**。只允许导出：
   * Facade 类型本身（`AppFacade`、`<Domain>Facade`）
   * Facade 方法的输入输出类型：Command / Query / Result / Error / 显式状态枚举

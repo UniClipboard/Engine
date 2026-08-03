@@ -1,0 +1,70 @@
+# Findings
+
+- `SpaceSetupDeps` 有 24 个顶层字段，其中 `SpaceAccessPorts` 还包含 14 个能力。
+- `SpaceSetupFacade` 同时承担空间生命周期、邀请与配对、切换空间迁移、在线探测、数据回填和统计。
+- `uc-engine` 当前仍手工安排成员传播的启动、暂停、恢复、失败补偿和关闭。
+- 新增成员传播和关系清理后，四个无关端到端测试被迫增加空实现，证明构造知识已经外溢。
+- `SpaceMembershipGossip` 的既有规格要求它独自拥有传播、确认、重试、恢复和关闭。
+- 单纯把字段分成若干 `Deps` 小包不会减少调用方必须理解的知识。
+- `EncryptionFacade` 与 `SpaceSetupFacade` 重复拥有初始化、解锁和恢复职责，不能再新增第三个生命周期入口。
+- `uc-engine` 的空间操作还会在应用入口之外继续安排接收准备、搜索恢复、在线探测和成员传播；新负责人必须把这些成功条件一并收口。
+- 网络协议必须在节点启动前注册，这是无法删除的装配约束；设计应只让引擎知道“注册一次并交出运行权”，不能让它参与后续业务生命周期。
+- 现有引擎公开操作及结果应保持不变，本次只调整内部责任归属。
+- 推荐采用“一个调用入口、四个内部负责人、一个运行期所有者”的混合方案。
+- 共享网络节点不属于空间模块；应用任务先停止、共享节点后关闭的总顺序仍由 Engine 的 Session Runtime 保证。
+- 会话依赖活动使用具名接口和固定顺序，不采用通用 participant 列表，避免失败策略再次隐式依赖注册顺序。
+- 成员自动配对实现已在 `704471d` 建立独立 checkpoint，后续重构可以逐阶段与该基线比较。
+- 当前稳定空间动作位于 `crates/uc-engine/src/operations/space/`，已有公开契约覆盖分布在 `crates/uc-engine/tests/public_contract.rs`、Engine 测试驱动和 UniFFI 公开契约测试中。
+- Phase 1 应优先通过稳定 `Engine` operation 和现有 Engine 测试驱动补行为保护，避免把未来会删除的 `SpaceSetupFacade` 内部接口固化成测试契约。
+- `crates/uc-engine/tests/common/mod.rs` 明确记录了四个与 switch-space 无关测试被迫补 `SpaceSetupDeps` 空实现；该文件是 Phase 6/7 应删除的复杂度外溢证据，本阶段不扩大它。
+- `space_membership_auto_pairing_e2e.rs` 已经通过稳定 Engine operation 覆盖创建、加入、锁定、恢复和最终关闭，可在此基础上补成员活动的自动恢复与关闭收敛断言。
+- 当前 `HEAD` 是成员自动配对 checkpoint `704471d`；`origin/main` 另有发布提交 `3ef1145`。本阶段基于 checkpoint 工作，不在测试阶段混入远端发布提交。
+- 现有 Engine 测试已覆盖创建后身份返回、错误口令、解锁、工厂重置后可重新创建、重启后安全存储恢复和搜索恢复；Phase 1 应复用这些真实路径并补足可观察的活动生命周期断言。
+- 当前稳定锁定入口名仍为 `Operation::LockEncryption`，恢复入口为 `Operation::RecoverSession`；本次必须保护这些现有名称和结果，不能为了设计稿提前改公开契约。
+- 成员自动配对端到端场景已经证明恢复后成员列表收敛且可继续双向发送，但尚未单独证明锁定期间在途传播停止、失败锁定补偿和关闭后没有遗留成员任务。
+- `runtime/dispatch.rs` 当前在解锁/恢复后显式恢复成员传播，在锁定前显式暂停，锁定失败时再恢复；这正是 Phase 1 需要先固定、Phase 2 才迁移的现有顺序。
+- 稳定 `JoinSpace` 当前传入内部 `JoinSpaceMode::Automatic`，再由引擎层查询 setup 状态并选择 `Fresh` 或 `Switch`；Phase 1 可以直接保护自动选择结果与错误码，Phase 4 才移动这项判断。
+- `SyncEngineAssembly` 直接持有 `SpaceMembershipGossip` 及其运行期，并在关闭时等待运行期结束；关闭行为可以通过现有 Engine 入口和任务可观察状态验证，不应为测试新增公开控制接口。
+- 锁定流程当前先等待成员传播暂停，再关闭接收通道并锁定会话；锁定失败后只恢复成员传播，其他活动的完整反向补偿尚不存在，Phase 1 测试应准确固定当前可观察行为并暴露缺口，不能虚构未来语义。
+- 解锁和恢复会在原操作成功后等待成员传播恢复；因此稳定操作的成功结果已经隐含“成员传播恢复成功”，适合通过恢复后真实成员收敛验证。
+- 生产关闭顺序当前是 Engine 会话任务、剪贴板运行期、`SyncEngineAssembly`；后者依次停止成员传播、配对入口和共享节点。测试可利用关闭返回及端口释放/后续连接失败判断是否有遗留任务。
+- `execute_lock_encryption` 只有在会话锁定成功后才关闭接收通道；会话锁定失败时接收通道保持原状，Engine 只需恢复此前暂停的成员传播。这是当前“完整恢复”的实际范围。
+- 成员传播模块自身已有“暂停会等待并中断在途网络轮次”“恢复后继续运行”“关闭后任务结束”的单元测试；Phase 1 还需增加从稳定 Engine 动作触发这些行为的保护，而不是重复模块内部测试。
+- `join_space.rs` 已为首次加入和切换空间的主要失败原因分配稳定且互不混淆的错误码，但现有测试只直接测试错误映射，没有通过稳定 Engine `JoinSpace` 保护自动路由。
+- LAN 兼容能力位于独立 `compatibility/` 路径；Engine 的 P2P 会话启动失败直接返回不可用错误，现有搜索未发现任何 P2P 失败后启动 LAN 的生产分支。Phase 1 应增加防回归检查，而不是搭建不存在的双通道运行时。
+- `Engine::shutdown` 会先阻止新操作并等待在途 Engine 操作排空，再停止会话任务、成员传播和网络节点，最后关闭事件流；已有事件流断言可作为“关闭完成”的稳定外部证据。
+- 生产运行期的 `suspend` 与 `shutdown` 复用同一会话清理路径，后续恢复会重新构建完整会话；Phase 1 需要区分“暂停后可恢复”和“关闭后永久停止”两个结果。
+- 当前生产 `LockSpacePort` 实现只清除内存会话并始终成功，无法通过真实 Engine 装配触发“锁定失败”；不应为 Phase 1 向生产路径添加测试专用失败开关。失败补偿需由可注入活动协调者在 Phase 2 以应用层行为测试固定。
+- 可以用三个真实 Engine 实例保护自动加入路由：未 setup 设备首次加入应返回 `migrated_records: None`，已 setup 设备再次加入另一个空间应自动走切换并返回 `migrated_records: Some(_)`。
+- 仓库的公开契约测试会直接断言数字错误码，因此 Phase 1 可把 `JoinSpace` 的对外数字码作为稳定契约保护，不需要导出内部常量。
+- Phase 1 的计划要求同时覆盖创建、解锁、恢复、锁定、重置、自动加入/切换、活动停恢复、关闭和禁止 P2P 自动切 LAN；实现时应组合现有测试与新增测试，不重复已经充分覆盖的真实流程。
+- `dependency_firewall.rs` 已固定默认 Engine 依赖闭包不启用 `lan-compat`，移动绑定也不得启用；`check-engine-repository.mjs` 另有“源码出现自动 P2P-to-LAN fallback”检查，Phase 1 无需再写重复扫描。
+- Engine 已公开 `QueryReceiveReadiness` 状态，可在成员端到端场景中断言锁定后关闭、恢复后重新可用，作为稳定入口层面的活动生命周期证据。
+- 架构脚本明确拒绝 `fallback_to_lan`、`automatic_lan_fallback`、`p2p_failed_to_lan` 等运行期分支，并结合默认依赖隔离形成双重保护。
+- `RecoverSession` 和 `UnlockSpace` 都会在成功返回前恢复搜索与接收准备；因此对 `QueryReceiveReadiness` 的前后断言能保护完整动作，而不是依赖时序等待。
+- `engine_start_builds_a_resumable_real_session` 已经是创建、锁定、口令解锁、工厂重置、暂停/恢复和最终关闭的真实 Engine 综合场景；新增状态断言应留在这里，避免再建一套昂贵装配。
+- Phase 1 以“固定当前可发生的行为”为边界完成。锁定失败后的活动补偿不是当前可触发现象，已设为 Phase 2 引入可注入协调者前的首个失败测试。
+- 工作区检查只报告一条既有的 `InboundSnapshotRebuild` 未使用导入提醒；本次未扩大范围处理。
+- `AppFacade` 已是应用层统一入口，但当前仍公开持有 `space_setup: OnceLock<Arc<SpaceSetupFacade>>` 和 `encryption: Arc<EncryptionFacade>`，外部空间动作由二者重复承载。
+- 当前装配先构造 `SpaceSetupFacade`，随后才启动 `SpaceMembershipGossipRuntime`；Phase 2 若要把活动控制交给应用层，需要把可克隆控制句柄与唯一任务所有者分离。
+- Phase 2 应先在应用层引入会话负责人并由 `AppFacade` 转发稳定动作；`uc-engine` 只做错误码/结果翻译，不能继续调用成员传播的单项 pause/resume。
+- `space_setup` 相关直接访问约 78 处，但真正跨层泄漏集中在 Engine operation、assembly 和少数集成测试；应用内部 use case 对命令/错误类型的引用可在最终重命名阶段机械迁移。
+- `EncryptionFacade` 的外部直接使用范围较小，主要是 Engine 加密状态/锁定、成员查询与剪贴板运行期；会话锁定和恢复可先改走新的空间会话负责人，状态查询暂时保留到 Phase 7 删除重复入口。
+- `SpaceMembershipGossipRuntime` 已把控制命令集中在单一 channel，拆出可克隆 `MembershipActivity` 句柄不需要复制任务所有权，适合 Phase 2/3 分别完成控制下沉和运行期所有权迁移。
+- `build_app_facade_from_deps` 在成员运行期启动后才构造最终 `AppFacade`，因此可以把成员活动句柄与接收/搜索依赖一起交给应用层负责人，不受旧 `SpaceSetupFacade` 的早期装配顺序限制。
+- `AppFacadeParts`/`AppFacadeAssemblyOptions` 是现成的唯一装配入口；Phase 2 可新增可选 `space_activity` 依赖并只在完整 Engine 会话中启用，CLI/查询场景保持明确的 unavailable 结果。
+- 成员运行期 pause 已保证在回复前丢弃在途 reconcile future；新的会话负责人只需固定跨活动的调用顺序和反向补偿，不应重复实现成员内部取消逻辑。
+- 搜索当前只有 `on_session_ready` 恢复钩子，没有显式锁定钩子；查询本身依赖加密会话保护。Phase 2 可把搜索恢复纳入协调者，但不应虚构无效果的 pause 接口。
+- 接收准备已有 `EnsureReceiveReadyPort`，关闭是同步且不会失败、恢复是异步且可失败；锁定补偿应在密钥锁定失败时重新执行 `ensure_receive_ready`。
+- Presence 已提供 `disconnect_all`，而恢复预连在旧空间入口内部完成；Phase 2 先保留这一既有完整动作，Phase 6 再把在线维护完整归入成员传播。
+- `AppFacadeParts` 和完整 Engine 的 facade 装配各只有一个构造点，新增私有会话负责人不会引发多入口同步修改。
+- `DaemonLifecycleFacades` 当前没有实际构造调用，属于历史接口；Phase 7 可随旧 `space_setup` 字段一起删除，不应让 Phase 2 围绕它增加新复杂度。
+- Phase 2 已证明成员传播运行期可以继续唯一持有任务，同时把可克隆活动句柄交给会话负责人；Engine 分发无需再知道暂停、恢复或失败补偿步骤。
+- 恢复动作需继续区分接收恢复失败的稳定错误码；应用层用具名活动错误保留该边界，Engine 只做现有数字码转换。
+- `SpaceApplicationRuntime` 可以在不改变 Iroh 协议注册时机的前提下接管成员任务和配对入站任务；Engine 只需在共享节点关闭前调用一次空间运行期关闭。
+- 首次加入和切换的输出可由应用层用 Fresh/Switched 结果区分，Engine 只据此保留既有 `migrated_records: None/Some` 契约，无需再知道路由条件。
+- 在线维护不需要 Engine 业务对象；应用层可以直接持有成员地址、presence 和本机设备编号，Engine 只订阅并翻译状态事件。
+- 旧平铺依赖已按会话、配对和迁移拆分；成员传播运行期有独立依赖，后续增加传播能力不会再迫使空间或剪贴板集成测试修改同一个大包。
+- `EncryptionFacade` 的初始化、解锁和锁定逻辑已移入唯一会话负责人；状态查询和安全存储权限检查仍保留为独立只读/系统动作。
+- `space_membership_auto_pairing_e2e` 整个测试目标受 `dev-tools` 功能开关保护；不启用时会成功退出但实际运行 0 条，Phase 8 必须显式启用该开关。
+- 代码、测试和绑定中的旧空间入口已清零；最终核对发现应用层维护说明仍举例使用旧名称，已同步为唯一的 `SpaceFacade`。
