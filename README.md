@@ -542,6 +542,7 @@ node scripts/release/verify-release-bundle.mjs <release-assets-directory>
 
 ## 进一步阅读
 
+- [UniClipboard 架构圣经](docs/architecture/architecture-bible.md)
 - [项目愿景](VISION.md)
 - [架构原则](docs/architecture/principles.md)
 - [uc-engine 跨平台核心接口](docs/architecture/uc-engine-interface.md)
