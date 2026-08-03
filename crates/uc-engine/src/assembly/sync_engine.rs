@@ -44,7 +44,6 @@ use tracing::debug;
 const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
 use uc_application::clipboard_capture::CaptureClipboardUseCase;
-use uc_application::clipboard_write::ClipboardWriteIntent;
 use uc_application::facade::{
     build_active_clipboard_pull_serve_port, build_space_membership_gossip,
     start_membership_connectivity, ActiveClipboardDeps, ActiveClipboardFacade,
@@ -58,8 +57,8 @@ use uc_application::facade::{
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_application::{
-    ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundCapture as ApplyInboundCapture,
-    InboundWrite as ApplyInboundWrite,
+    ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
+    InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps, StoreOnlyPullDeps,
 };
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferDirection, OutboundProgressStatus,
@@ -403,25 +402,6 @@ fn spawn_outbound_progress_translator(
             }
         }
     })
-}
-
-/// No-op `InboundWrite` for the active-clipboard pull store path (issue #1017
-/// PR8). The store only needs to persist a pulled entry; the active-clipboard
-/// convergence tail (`spawn_write_then_converge`) does the authoritative OS
-/// write whose success couples the register advance + re-broadcast. Doing an
-/// OS write here too would be a redundant best-effort write before the real
-/// one, so this returns `Ok(())` without touching the OS clipboard.
-struct NoopPullStoreWrite;
-
-#[async_trait::async_trait]
-impl ApplyInboundWrite for NoopPullStoreWrite {
-    async fn write(
-        &self,
-        _snapshot: uc_core::SystemClipboardSnapshot,
-        _intent: ClipboardWriteIntent,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
 }
 
 /// Failures during Slice 1 assembly. Bootstrap callers surface these as
@@ -814,10 +794,10 @@ pub async fn build_sync_engine_assembly(
 
     // Store-only inbound apply path for pulled content (issue #1017 PR8). It
     // reuses the same inbound pipeline the bulk 0xC1 path uses (decode V3 →
-    // materialize blobs → capture) but **without** `with_active_register`: the
-    // active-clipboard convergence tail owns the register advance (coupled to
-    // OS-write success), so a capture-commit advance here would race it with a
-    // newer reconstruct timestamp and starve the correct same-key advance.
+    // materialize blobs → capture) through the named store-only mode. That mode
+    // has no system-clipboard writer or active-register capability: the
+    // active-clipboard convergence tail owns both actions and couples them to
+    // OS-write success.
     let pull_store_capture = Arc::new(
         CaptureClipboardUseCase::new(
             Arc::clone(&deps.clipboard.entry_ports.save),
@@ -868,29 +848,28 @@ pub async fn build_sync_engine_assembly(
             entry_file_set_repo: Arc::clone(&deps.storage.entry_file_set_repo),
         }));
     let pull_store_apply: Arc<dyn InboundClipboardApplyPort> = Arc::new(
-        ApplyInboundClipboardUseCase::new(
-            Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
-            pull_store_capture as Arc<dyn ApplyInboundCapture>,
-            // The store only persists; the convergence tail does the
-            // authoritative OS write, so this path's OS write is a no-op.
-            Arc::new(NoopPullStoreWrite) as Arc<dyn ApplyInboundWrite>,
-        )
-        .with_blob_materializer(pull_store_materializer)
-        .with_receive_attempt_ports(
-            Arc::clone(&deps.storage.directory_receive.get_attempt),
-            Arc::clone(&deps.storage.directory_receive.begin_receive),
-            Arc::clone(&deps.storage.directory_receive.claim_commit),
-            Arc::clone(&deps.storage.directory_receive.request_cancel),
-            Arc::clone(&deps.storage.directory_receive.begin_failure),
-            Arc::clone(&deps.storage.directory_receive.commit_inbound),
-            Arc::clone(&deps.system.clock),
-        )
-        .with_receive_artifact_cleanup(Arc::new(uc_infra::fs::FsReceiveArtifactCleaner))
-        .with_receive_readiness(Arc::clone(&shared.receive_readiness))
-        .with_host_event_emitter(Arc::clone(&shared.host_event_bus))
-        .with_search_live_index(pull_store_indexer)
-        .with_check_entry_availability(Arc::clone(&deps.clipboard.entry_ports.availability))
-        .with_entry_identity_coordinator(Arc::clone(&deps.clipboard.entry_identity_coordinator)),
+        ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
+            common: InboundApplyCommonDeps {
+                entry_repo: Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
+                capture: pull_store_capture as Arc<dyn ApplyInboundCapture>,
+                blob_materializer: pull_store_materializer,
+                receive_attempts: InboundReceiveAttemptDeps {
+                    get: Arc::clone(&deps.storage.directory_receive.get_attempt),
+                    begin: Arc::clone(&deps.storage.directory_receive.begin_receive),
+                    claim_commit: Arc::clone(&deps.storage.directory_receive.claim_commit),
+                    request_cancel: Arc::clone(&deps.storage.directory_receive.request_cancel),
+                    begin_failure: Arc::clone(&deps.storage.directory_receive.begin_failure),
+                    commit: Arc::clone(&deps.storage.directory_receive.commit_inbound),
+                    clock: Arc::clone(&deps.system.clock),
+                },
+                receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
+                receive_readiness: Arc::clone(&shared.receive_readiness),
+                host_event_emitter: Arc::clone(&shared.host_event_bus),
+                search_live_index: pull_store_indexer,
+                availability: Arc::clone(&deps.clipboard.entry_ports.availability),
+                entry_identity_coordinator: Arc::clone(&deps.clipboard.entry_identity_coordinator),
+            },
+        }),
     );
 
     // Active-clipboard register convergence (issue #1017). The module owns

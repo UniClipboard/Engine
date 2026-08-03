@@ -1,5 +1,44 @@
 # Progress
 
+## Session: 2026-08-03（Phase 3）
+
+### Phase: 建立完整剪贴板入站模式
+
+- **Status:** complete
+- Actions taken:
+  - 审计普通 P2P 入站、活动剪贴板按需拉取和应用层细分测试的全部构造路径。
+  - 确认普通接收仍由引擎层连续可选拼装，只保存拉取仍靠引擎层假写入器表达“不写系统剪贴板”。
+  - 确定本阶段建立 `InteractiveReceive` 与 `StoreOnlyPull` 两个完整构造入口，旧自由拼装仅保留给应用层单元测试。
+- Scope protection:
+  - 保留并不修改成员移除恢复计划及其架构维护记录。
+  - 本阶段不迁移引擎层通知订阅和确认循环，该工作留给实施计划 Phase 4。
+- TDD:
+  - 先增加最终模式入口和只保存成功行为测试；首次运行因两个依赖类型和两个命名构造入口不存在而编译失败，确认红灯原因正确。
+- Implemented:
+  - 建立普通接收与只保存拉取两个完整生产模式，并集中声明各自必需能力。
+  - 普通接收生产装配改为单一命名入口；按需拉取改为不具备系统剪贴板写入能力的单一命名入口。
+  - 删除引擎层假写入器；旧自由拼装入口及仍有价值的细分开关只在应用层单元测试中可用。
+  - 删除迁移后无调用者的测试开关和无意义的测试重导出。
+- Verification:
+  - 入站模式聚焦测试：passed（73 tests，无提醒）。
+  - 只保存成功行为：passed；新内容已保存并进入搜索，构造过程未提供系统剪贴板写入对象。
+  - 活动剪贴板按需拉取原有策略测试：passed（1 test）。
+  - 稳定 Engine 双端接收、重复和关闭场景：passed（1 test）。
+  - `cargo check -p uc-engine --all-targets --locked`：passed。
+  - `cargo test -p uc-application --locked`：passed（785 unit tests + 10 integration tests）。
+  - `cargo test -p uc-engine --lib --features dev-tools,lan-compat --locked`：passed（116 tests）。
+  - `cargo metadata --locked --format-version 1`：passed。
+  - `cargo check --workspace --all-targets --locked`：passed，无提醒。
+  - `cargo fmt --all -- --check`：passed。
+  - `node scripts/architecture/check-engine-repository.mjs`：passed。
+  - `git diff --check`：passed。
+  - 生产构造扫描：普通接收和只保存拉取各一处；旧 `new` 调用仅存在于两个 `#[cfg(test)]` 模块及入站单元测试。
+- Phase result:
+  - 详细实施计划 Phase 3 已完成。
+  - 总任务 Phase 3 保持 `in_progress`；通知订阅、确认、事件和关闭循环仍属于详细实施计划 Phase 4。
+- Errors:
+  - 清理未使用测试重导出时首次补丁上下文与实际导入形状不匹配；重新读取准确内容后完成修改，首次尝试未产生文件改动。
+
 ## Session: 2026-08-03（Phase 2）
 
 ### Phase: 收口搜索构造与运行期

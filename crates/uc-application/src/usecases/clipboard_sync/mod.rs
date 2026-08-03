@@ -39,8 +39,9 @@ pub(crate) use payload_codec::encode_snapshot_to_v3_bytes;
 // behind `pub(crate)`.
 pub use apply_inbound::{
     ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
-    FileCacheBlobMaterializer, InboundBlobFetcher, InboundBlobMaterializer, InboundCapture,
-    InboundWrite,
+    FileCacheBlobMaterializer, InboundApplyCommonDeps, InboundBlobFetcher, InboundBlobMaterializer,
+    InboundCapture, InboundReceiveAttemptDeps, InboundWrite, InteractiveReceiveDeps,
+    StoreOnlyPullDeps,
 };
 
 // Startup governance, reached only through `ClipboardSyncFacade` — the sweep

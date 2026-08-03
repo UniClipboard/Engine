@@ -14,7 +14,7 @@
 | 重复内容不生成第二条历史 | 同上；sender 重发结果为 duplicate，receiver 历史仍为一条 | 稳定入口已证明 | Phase 4 保持通过 |
 | 解码失败 | `decode_failed_on_truncated_envelope` | 规则已保护，待迁移 | Phase 4 在 `ClipboardInboundRuntime` Interface 验证 rejected receipt 和终态 |
 | 文件失败与部分成功 | `partial_materialize_persists_entry_but_skips_os_write`、`file_cache_blob_materializer_removes_reserved_placeholder_on_fetch_error` | 规则已保护，待迁移 | Phase 3/4 在明确模式和运行期 Interface 验证清理、事件和终态 |
-| 普通接收与只保存拉取差异 | 普通接收由稳定双端场景覆盖；只保存装配使用 `NoopPullStoreWrite`，策略拒绝测试覆盖持久化前拒绝 | 规则已保护，待迁移 | Phase 3 必须从 `StoreOnlyPull` Interface 证明只保存不提前写系统剪贴板 |
+| 普通接收与只保存拉取差异 | 普通接收由稳定双端场景覆盖；`store_only_pull_persists_without_a_clipboard_write_dependency` 从最终入口证明新内容会保存并进入搜索，且构造参数中不存在系统剪贴板写入能力 | 稳定入口已证明 | Phase 4 保持普通接收行为；活动剪贴板收敛继续负责拉取后的系统剪贴板写入 |
 | 关闭等待入站任务退出 | 稳定双端场景中双方 `shutdown` 均在期限内完成 | 稳定入口已证明 | Phase 4 还需直接证明桥接与接收任务均退出 |
 
 ## 文件传输与移动上传

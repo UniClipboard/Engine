@@ -54,7 +54,7 @@ const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
 pub struct ApplyInboundClipboardUseCase {
     entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
     capture: Arc<dyn InboundCapture>,
-    write: Arc<dyn InboundWrite>,
+    mode: InboundApplyMode,
     blob_materializer: Option<Arc<dyn InboundBlobMaterializer>>,
     receive_attempts: Option<ReceiveAttemptPorts>,
     receive_artifact_cleanup: Option<Arc<dyn CleanupReceiveArtifactsPort>>,
@@ -70,9 +70,9 @@ pub struct ApplyInboundClipboardUseCase {
     /// representations). TTL = `VISIBLE_DUPLICATE_WINDOW` (see [`super::timing`]).
     recent_visible_content: Cache<String, EntryId>,
     /// Serializes "find entry by content hash → create / replace / skip" across
-    /// every writer of the same content (the two inbound channels here, and —
-    /// once shared via [`Self::with_entry_identity_coordinator`] — local
-    /// capture). Holding its per-identity lock across the find + materialize +
+    /// every writer of the same content (the two inbound channels here and
+    /// local capture). Production modes receive the shared coordinator during
+    /// construction. Holding its per-identity lock across the find + materialize +
     /// commit section is what makes the dedup atomic. Defaults to a private
     /// instance (sufficient for inbound-vs-inbound); the composition root
     /// overrides it with the shared one so capture-vs-inbound is covered too.
@@ -88,23 +88,64 @@ pub struct ApplyInboundClipboardUseCase {
     /// before the fetch+capture pipeline finishes. Wired only in daemon
     /// mode; tests / CLI leave it `None`.
     host_event_emitter: Option<SharedHostEventEmitter>,
-    /// Optional cross-device active-clipboard register. When wired, a freshly
-    /// applied inbound entry advances the register at capture-commit (the OS
-    /// write that trails it is best-effort and intentionally not gated on).
-    /// `None` in tests / contexts that don't track active state.
-    active_register: Option<Arc<dyn AdvanceActiveClipboardPort>>,
-    mobile_consumability: Option<MobileConsumabilityProbe>,
     /// Optional search live-indexer. When wired, a freshly applied inbound
     /// entry is indexed for full-text search (best-effort), so remote-origin
     /// clipboard is searchable just like local captures. `None` in tests /
     /// contexts without a search subsystem.
     search_live_index: Option<Arc<dyn ClipboardLiveIndexPort>>,
-    /// Optional resurface support for the fully-held dedup hit: rebuild the
-    /// held entry's snapshot and bump it to the top of history. Both ports are
-    /// wired together or not at all ([`Self::with_resurface`]). `None` degrades
-    /// a dedup hit to a plain skip — correct for the store-only paths (pull /
-    /// CLI), whose OS write is a no-op anyway.
-    resurface: Option<ResurfacePorts>,
+}
+
+enum InboundApplyMode {
+    InteractiveReceive {
+        write: Arc<dyn InboundWrite>,
+        active_register: Arc<dyn AdvanceActiveClipboardPort>,
+        mobile_consumability: MobileConsumabilityProbe,
+        resurface: ResurfacePorts,
+    },
+    StoreOnlyPull,
+    #[cfg(test)]
+    Test {
+        write: Arc<dyn InboundWrite>,
+        resurface: Option<ResurfacePorts>,
+    },
+}
+
+pub struct InboundReceiveAttemptDeps {
+    pub get: Arc<dyn GetEntryAttemptPort>,
+    pub begin: Arc<dyn BeginReceiveAttemptPort>,
+    pub claim_commit: Arc<dyn ClaimReceiveCommitPort>,
+    pub request_cancel: Arc<dyn RequestReceiveCancellationPort>,
+    pub begin_failure: Arc<dyn BeginReceiveFailurePort>,
+    pub commit: Arc<dyn CommitInboundReceivePort>,
+    pub clock: Arc<dyn ClockPort>,
+}
+
+pub struct InboundApplyCommonDeps {
+    pub entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
+    pub capture: Arc<dyn InboundCapture>,
+    pub blob_materializer: Arc<dyn InboundBlobMaterializer>,
+    pub receive_attempts: InboundReceiveAttemptDeps,
+    pub receive_artifact_cleanup: Arc<dyn CleanupReceiveArtifactsPort>,
+    pub receive_readiness: Arc<ReceiveReadinessCoordinator>,
+    pub host_event_emitter: SharedHostEventEmitter,
+    pub search_live_index: Arc<dyn ClipboardLiveIndexPort>,
+    pub availability: Arc<dyn CheckEntryAvailabilityPort>,
+    pub entry_identity_coordinator: Arc<EntryIdentityCoordinator>,
+}
+
+pub struct InteractiveReceiveDeps {
+    pub common: InboundApplyCommonDeps,
+    pub write: Arc<dyn InboundWrite>,
+    pub provisional_receive: Arc<dyn FinalizeProvisionalReceivePort>,
+    pub outbound_progress_reporter: Arc<dyn OutboundProgressReporterPort>,
+    pub active_register: Arc<dyn AdvanceActiveClipboardPort>,
+    pub mobile_consumability: MobileConsumabilityProbe,
+    pub snapshot_deps: ClipboardSnapshotDeps,
+    pub touch_entry: Arc<dyn TouchClipboardEntryPort>,
+}
+
+pub struct StoreOnlyPullDeps {
+    pub common: InboundApplyCommonDeps,
 }
 
 /// Ports needed to re-activate an already-held entry on a dedup hit.
@@ -127,8 +168,124 @@ struct ReceiveAttemptPorts {
     clock: Arc<dyn ClockPort>,
 }
 
+impl From<InboundReceiveAttemptDeps> for ReceiveAttemptPorts {
+    fn from(deps: InboundReceiveAttemptDeps) -> Self {
+        Self {
+            get: deps.get,
+            begin: deps.begin,
+            claim_commit: deps.claim_commit,
+            request_cancel: deps.request_cancel,
+            begin_failure: deps.begin_failure,
+            commit: deps.commit,
+            clock: deps.clock,
+        }
+    }
+}
+
 impl ApplyInboundClipboardUseCase {
-    pub fn new(
+    fn write_port(&self) -> Option<&Arc<dyn InboundWrite>> {
+        match &self.mode {
+            InboundApplyMode::InteractiveReceive { write, .. } => Some(write),
+            InboundApplyMode::StoreOnlyPull => None,
+            #[cfg(test)]
+            InboundApplyMode::Test { write, .. } => Some(write),
+        }
+    }
+
+    fn active_registration(
+        &self,
+    ) -> Option<(
+        &Arc<dyn AdvanceActiveClipboardPort>,
+        &MobileConsumabilityProbe,
+    )> {
+        match &self.mode {
+            InboundApplyMode::InteractiveReceive {
+                active_register,
+                mobile_consumability,
+                ..
+            } => Some((active_register, mobile_consumability)),
+            InboundApplyMode::StoreOnlyPull => None,
+            #[cfg(test)]
+            InboundApplyMode::Test { .. } => None,
+        }
+    }
+
+    fn resurface_ports(&self) -> Option<&ResurfacePorts> {
+        match &self.mode {
+            InboundApplyMode::InteractiveReceive { resurface, .. } => Some(resurface),
+            InboundApplyMode::StoreOnlyPull => None,
+            #[cfg(test)]
+            InboundApplyMode::Test { resurface, .. } => resurface.as_ref(),
+        }
+    }
+
+    pub fn interactive_receive(deps: InteractiveReceiveDeps) -> Self {
+        let resurface = ResurfacePorts {
+            rebuild: Arc::new(deps.snapshot_deps.into_reconstructor()),
+            touch_entry: deps.touch_entry,
+        };
+        Self::from_common(
+            deps.common,
+            InboundApplyMode::InteractiveReceive {
+                write: deps.write,
+                active_register: deps.active_register,
+                mobile_consumability: deps.mobile_consumability,
+                resurface,
+            },
+            Some(deps.provisional_receive),
+            Some(deps.outbound_progress_reporter),
+        )
+    }
+
+    pub fn store_only_pull(deps: StoreOnlyPullDeps) -> Self {
+        Self::from_common(deps.common, InboundApplyMode::StoreOnlyPull, None, None)
+    }
+
+    fn from_common(
+        deps: InboundApplyCommonDeps,
+        mode: InboundApplyMode,
+        provisional_receive: Option<Arc<dyn FinalizeProvisionalReceivePort>>,
+        outbound_progress_reporter: Option<Arc<dyn OutboundProgressReporterPort>>,
+    ) -> Self {
+        let InboundApplyCommonDeps {
+            entry_repo,
+            capture,
+            blob_materializer,
+            receive_attempts,
+            receive_artifact_cleanup,
+            receive_readiness,
+            host_event_emitter,
+            search_live_index,
+            availability,
+            entry_identity_coordinator,
+        } = deps;
+        Self {
+            entry_repo,
+            capture,
+            mode,
+            blob_materializer: Some(blob_materializer),
+            receive_attempts: Some(receive_attempts.into()),
+            receive_artifact_cleanup: Some(receive_artifact_cleanup),
+            provisional_receive,
+            outbound_progress_reporter,
+            receive_readiness: Some(receive_readiness),
+            coordinator: entry_identity_coordinator,
+            availability: Some(availability),
+            host_event_emitter: Some(host_event_emitter),
+            search_live_index: Some(search_live_index),
+            recent_snapshot_hashes: Cache::builder()
+                .max_capacity(RECENT_INBOUND_MAX_RECORDS)
+                .time_to_live(RAPID_DUPLICATE_WINDOW)
+                .build(),
+            recent_visible_content: Cache::builder()
+                .max_capacity(RECENT_INBOUND_MAX_RECORDS)
+                .time_to_live(VISIBLE_DUPLICATE_WINDOW)
+                .build(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(
         entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
         capture: Arc<dyn InboundCapture>,
         write: Arc<dyn InboundWrite>,
@@ -136,7 +293,10 @@ impl ApplyInboundClipboardUseCase {
         Self {
             entry_repo,
             capture,
-            write,
+            mode: InboundApplyMode::Test {
+                write,
+                resurface: None,
+            },
             blob_materializer: None,
             receive_attempts: None,
             receive_artifact_cleanup: None,
@@ -146,10 +306,7 @@ impl ApplyInboundClipboardUseCase {
             coordinator: Arc::new(EntryIdentityCoordinator::new()),
             availability: None,
             host_event_emitter: None,
-            active_register: None,
-            mobile_consumability: None,
             search_live_index: None,
-            resurface: None,
             recent_snapshot_hashes: Cache::builder()
                 .max_capacity(RECENT_INBOUND_MAX_RECORDS)
                 .time_to_live(RAPID_DUPLICATE_WINDOW)
@@ -164,7 +321,8 @@ impl ApplyInboundClipboardUseCase {
     /// Wire the availability query so a hash match against a partial entry
     /// triggers an in-place upgrade rather than a skip. Without it, any hash
     /// match is treated as already-held (prior behavior).
-    pub fn with_check_entry_availability(
+    #[cfg(test)]
+    pub(crate) fn with_check_entry_availability(
         mut self,
         availability: Arc<dyn CheckEntryAvailabilityPort>,
     ) -> Self {
@@ -172,7 +330,8 @@ impl ApplyInboundClipboardUseCase {
         self
     }
 
-    pub fn with_outbound_progress_reporter(
+    #[cfg(test)]
+    pub(crate) fn with_outbound_progress_reporter(
         mut self,
         reporter: Arc<dyn OutboundProgressReporterPort>,
     ) -> Self {
@@ -180,17 +339,8 @@ impl ApplyInboundClipboardUseCase {
         self
     }
 
-    /// Override the per-identity coordinator with a shared instance so local
-    /// capture and inbound apply serialize on the same content lock (R5-F3).
-    pub fn with_entry_identity_coordinator(
-        mut self,
-        coordinator: Arc<EntryIdentityCoordinator>,
-    ) -> Self {
-        self.coordinator = coordinator;
-        self
-    }
-
-    pub fn with_blob_materializer(
+    #[cfg(test)]
+    pub(crate) fn with_blob_materializer(
         mut self,
         blob_materializer: Arc<dyn InboundBlobMaterializer>,
     ) -> Self {
@@ -198,7 +348,8 @@ impl ApplyInboundClipboardUseCase {
         self
     }
 
-    pub fn with_receive_attempt_ports(
+    #[cfg(test)]
+    pub(crate) fn with_receive_attempt_ports(
         mut self,
         get: Arc<dyn GetEntryAttemptPort>,
         begin: Arc<dyn BeginReceiveAttemptPort>,
@@ -220,15 +371,8 @@ impl ApplyInboundClipboardUseCase {
         self
     }
 
-    pub fn with_receive_artifact_cleanup(
-        mut self,
-        cleanup: Arc<dyn CleanupReceiveArtifactsPort>,
-    ) -> Self {
-        self.receive_artifact_cleanup = Some(cleanup);
-        self
-    }
-
-    pub fn with_provisional_receive(
+    #[cfg(test)]
+    pub(crate) fn with_provisional_receive(
         mut self,
         provisional_receive: Arc<dyn FinalizeProvisionalReceivePort>,
     ) -> Self {
@@ -236,38 +380,13 @@ impl ApplyInboundClipboardUseCase {
         self
     }
 
-    pub fn with_receive_readiness(mut self, readiness: Arc<ReceiveReadinessCoordinator>) -> Self {
-        self.receive_readiness = Some(readiness);
-        self
-    }
-
     /// Wire a host-event emitter cell. When set, ApplyInbound emits
     /// `ClipboardHostEvent::IncomingPending` immediately after V3 decode
     /// (before blob fetch starts) and a failure status on capture errors,
     /// so the UI can render a placeholder card with a live progress bar.
-    pub fn with_host_event_emitter(mut self, emitter: SharedHostEventEmitter) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_host_event_emitter(mut self, emitter: SharedHostEventEmitter) -> Self {
         self.host_event_emitter = Some(emitter);
-        self
-    }
-
-    /// Wire the cross-device active-clipboard register. When set, a newly
-    /// applied inbound entry advances the register so this device reflects
-    /// that the peer's content is now its active clipboard state.
-    pub fn with_active_register(
-        mut self,
-        register: Arc<dyn AdvanceActiveClipboardPort>,
-        mobile_consumability: MobileConsumabilityProbe,
-    ) -> Self {
-        self.active_register = Some(register);
-        self.mobile_consumability = Some(mobile_consumability);
-        self
-    }
-
-    /// Wire the search live-indexer. When set, a successfully applied inbound
-    /// entry is indexed for full-text search on a best-effort basis, so
-    /// remote-origin clipboard shows up in search like local captures.
-    pub fn with_search_live_index(mut self, index: Arc<dyn ClipboardLiveIndexPort>) -> Self {
-        self.search_live_index = Some(index);
         self
     }
 
@@ -275,28 +394,21 @@ impl ApplyInboundClipboardUseCase {
     /// locally still re-activates it (OS write + register advance + history
     /// bump) instead of being dropped.
     ///
-    /// Required on any path that owns the user's pasteboard. Leaving it unwired
-    /// keeps the prior skip-on-match behavior, which is what the store-only
-    /// paths (pull / CLI) want — they pair it with a no-op write port.
-    pub fn with_resurface(
-        self,
-        snapshot_deps: ClipboardSnapshotDeps,
-        touch_entry: Arc<dyn TouchClipboardEntryPort>,
-    ) -> Self {
-        self.with_resurface_ports(Arc::new(snapshot_deps.into_reconstructor()), touch_entry)
-    }
-
-    /// [`Self::with_resurface`] against the narrow rebuild seam, so tests can
-    /// mock one method instead of standing up six repository ports.
-    pub fn with_resurface_ports(
+    /// Test-only resurface seam, so focused tests can mock one method instead
+    /// of standing up six repository ports. Production modes encode whether
+    /// resurfacing exists in their constructors.
+    #[cfg(test)]
+    pub(crate) fn with_resurface_ports(
         mut self,
         rebuild: Arc<dyn InboundSnapshotRebuild>,
         touch_entry: Arc<dyn TouchClipboardEntryPort>,
     ) -> Self {
-        self.resurface = Some(ResurfacePorts {
-            rebuild,
-            touch_entry,
-        });
+        if let InboundApplyMode::Test { resurface, .. } = &mut self.mode {
+            *resurface = Some(ResurfacePorts {
+                rebuild,
+                touch_entry,
+            });
+        }
         self
     }
 
@@ -339,15 +451,14 @@ impl ApplyInboundClipboardUseCase {
         activated_by: uc_core::ids::DeviceId,
         activated_at_ms: i64,
     ) {
-        let Some(register) = self.active_register.as_ref() else {
+        let Some((register, mobile_consumability)) = self.active_registration() else {
             return;
         };
         let state =
             ActiveClipboardState::new(snapshot_hash, entry_id, activated_at_ms, activated_by);
-        let mobile_consumable = match self.mobile_consumability.as_ref() {
-            Some(probe) => probe.is_mobile_consumable(&state.entry_id).await,
-            None => false,
-        };
+        let mobile_consumable = mobile_consumability
+            .is_mobile_consumable(&state.entry_id)
+            .await;
         if let Err(e) = register.advance(&state, mobile_consumable).await {
             warn!(
                 error = %e,
@@ -645,7 +756,7 @@ impl ApplyInboundClipboardUseCase {
         existing_id: &EntryId,
         activated_at_ms: i64,
     ) -> ApplyOutcome {
-        let Some(resurface) = self.resurface.as_ref() else {
+        let Some(resurface) = self.resurface_ports() else {
             debug!(
                 existing_entry_id = %existing_id,
                 "inbound dropped: duplicate of existing, fully-held local entry (resurface unwired)"
@@ -695,7 +806,13 @@ impl ApplyInboundClipboardUseCase {
             }
         };
 
-        if let Err(err) = self.write.write(snapshot, input.resurface_intent).await {
+        let Some(write) = self.write_port() else {
+            return ApplyOutcome::DuplicateSkipped {
+                snapshot_hash: input.snapshot_hash.clone(),
+                existing_entry_id: existing_id.clone(),
+            };
+        };
+        if let Err(err) = write.write(snapshot, input.resurface_intent).await {
             warn!(
                 event = "inbound_os_write_failed",
                 error_kind = "inbound_os_write_failed",
@@ -1412,48 +1529,41 @@ impl ApplyInboundClipboardUseCase {
             self.index_for_search(&entry_id, Arc::clone(&snapshot_for_write))
                 .await;
 
-            debug!(entry_id = %entry_id, "inbound: entry persisted, scheduling background OS clipboard write");
-            let write_port = Arc::clone(&self.write);
-            let entry_id_for_write = entry_id.clone();
-            let from_device_for_write = input.from_device;
-            let snapshot_hash_for_write = input.snapshot_hash.clone();
-            let origin_guard_key_for_write = snapshot_for_write.origin_guard_key();
-            // `.in_current_span()` keeps the spawned task under `apply_inbound.execute`
-            // so trace_id / from_device / snapshot_hash propagate into the failure event.
-            // Without this the background failure was a context-less orphan in Sentry —
-            // the missing peer_id field is exactly what made the recent UNICLIPBOARD-RUST-F
-            // triage take an extra hour (couldn't tell whether 50 failures were one peer
-            // hammering or many peers each pushing once).
-            uc_observability_contract::spawn_supervised(
-                "clipboard_sync.inbound_os_write",
-                async move {
-                    // The live-index pass above already awaited and dropped its
-                    // `Arc` clone, so this reclaims sole ownership without
-                    // copying. The fallback clone is unreachable in practice
-                    // (refcount is 1 here) and only guards a future second holder.
-                    let snapshot_for_write = Arc::try_unwrap(snapshot_for_write)
-                        .unwrap_or_else(|shared| (*shared).clone());
-                    // Fresh content is always a remote push regardless of which
-                    // channel delivered it: this write must not be re-captured
-                    // and re-dispatched by our own watcher.
-                    if let Err(e) = write_port
-                        .write(snapshot_for_write, ClipboardWriteIntent::RemotePush)
-                        .await
-                    {
-                        error!(
-                            event = "inbound_os_write_failed",
-                            error_kind = "inbound_os_write_failed",
-                            error = %e,
-                            entry_id = %entry_id_for_write,
-                            from_device = %from_device_for_write,
-                            snapshot_hash = %snapshot_hash_for_write,
-                            origin_guard_key = %origin_guard_key_for_write,
-                            "inbound: OS clipboard background write failed after capture"
-                        );
+            if let Some(write_port) = self.write_port().cloned() {
+                debug!(entry_id = %entry_id, "inbound: entry persisted, scheduling background OS clipboard write");
+                let entry_id_for_write = entry_id.clone();
+                let from_device_for_write = input.from_device;
+                let snapshot_hash_for_write = input.snapshot_hash.clone();
+                let origin_guard_key_for_write = snapshot_for_write.origin_guard_key();
+                // `.in_current_span()` keeps the spawned task under `apply_inbound.execute`
+                // so trace_id / from_device / snapshot_hash propagate into the failure event.
+                uc_observability_contract::spawn_supervised(
+                    "clipboard_sync.inbound_os_write",
+                    async move {
+                        let snapshot_for_write = Arc::try_unwrap(snapshot_for_write)
+                            .unwrap_or_else(|shared| (*shared).clone());
+                        if let Err(e) = write_port
+                            .write(snapshot_for_write, ClipboardWriteIntent::RemotePush)
+                            .await
+                        {
+                            error!(
+                                event = "inbound_os_write_failed",
+                                error_kind = "inbound_os_write_failed",
+                                error = %e,
+                                entry_id = %entry_id_for_write,
+                                from_device = %from_device_for_write,
+                                snapshot_hash = %snapshot_hash_for_write,
+                                origin_guard_key = %origin_guard_key_for_write,
+                                "inbound: OS clipboard background write failed after capture"
+                            );
+                        }
                     }
-                }
-                .in_current_span(),
-            );
+                    .in_current_span(),
+                );
+            } else {
+                debug!(entry_id = %entry_id, "inbound: store-only mode persisted entry without writing the system clipboard");
+                drop(snapshot_for_write);
+            }
         } else {
             info!(
                 entry_id = %entry_id,

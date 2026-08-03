@@ -9,8 +9,9 @@ use uc_application::facade::{
     InboundClipboardNoticeInput, InboundNotice,
 };
 use uc_application::{
-    ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundCapture as ApplyInboundCapture,
-    InboundWrite as ApplyInboundWrite,
+    ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
+    InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps,
+    InboundWrite as ApplyInboundWrite, InteractiveReceiveDeps,
 };
 use uc_core::ports::{InboundClipboardDisposition, InboundClipboardReceipt};
 use uc_core::TaskRegistry;
@@ -104,36 +105,35 @@ pub(crate) fn build_clipboard_runtime(
         .with_save_dir_resolver(FsInboundFileTarget::new(deps.settings.clone()))
         .with_hidden_marker(FsHiddenPathMarker::new()),
     );
-    let apply_inbound = Arc::new(
-        ApplyInboundClipboardUseCase::new(
-            deps.clipboard.entry_ports.find_by_snapshot_hash.clone(),
-            Arc::clone(&capture) as Arc<dyn ApplyInboundCapture>,
-            Arc::clone(&wired.shared.clipboard_write_coordinator) as Arc<dyn ApplyInboundWrite>,
-        )
-        .with_blob_materializer(blob_materializer)
-        .with_receive_attempt_ports(
-            deps.storage.directory_receive.get_attempt.clone(),
-            deps.storage.directory_receive.begin_receive.clone(),
-            deps.storage.directory_receive.claim_commit.clone(),
-            deps.storage.directory_receive.request_cancel.clone(),
-            deps.storage.directory_receive.begin_failure.clone(),
-            deps.storage.directory_receive.commit_inbound.clone(),
-            deps.system.clock.clone(),
-        )
-        .with_receive_artifact_cleanup(Arc::new(uc_infra::fs::FsReceiveArtifactCleaner))
-        .with_provisional_receive(deps.storage.file_transfer.finalize_provisional.clone())
-        .with_receive_readiness(wired.shared.receive_readiness.clone())
-        .with_host_event_emitter(wired.shared.host_event_bus.clone())
-        .with_active_register(
-            deps.clipboard.active_register.clone(),
-            deps.clipboard.mobile_consumability.clone(),
-        )
-        .with_search_live_index(Arc::clone(&search_live_indexer))
-        .with_check_entry_availability(deps.clipboard.entry_ports.availability.clone())
-        .with_outbound_progress_reporter(Arc::clone(&sync_engine.outbound_progress_reporter))
-        .with_entry_identity_coordinator(deps.clipboard.entry_identity_coordinator.clone())
-        .with_resurface(
-            uc_application::facade::ClipboardSnapshotDeps {
+    let apply_inbound = Arc::new(ApplyInboundClipboardUseCase::interactive_receive(
+        InteractiveReceiveDeps {
+            common: InboundApplyCommonDeps {
+                entry_repo: deps.clipboard.entry_ports.find_by_snapshot_hash.clone(),
+                capture: Arc::clone(&capture) as Arc<dyn ApplyInboundCapture>,
+                blob_materializer,
+                receive_attempts: InboundReceiveAttemptDeps {
+                    get: deps.storage.directory_receive.get_attempt.clone(),
+                    begin: deps.storage.directory_receive.begin_receive.clone(),
+                    claim_commit: deps.storage.directory_receive.claim_commit.clone(),
+                    request_cancel: deps.storage.directory_receive.request_cancel.clone(),
+                    begin_failure: deps.storage.directory_receive.begin_failure.clone(),
+                    commit: deps.storage.directory_receive.commit_inbound.clone(),
+                    clock: deps.system.clock.clone(),
+                },
+                receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
+                receive_readiness: wired.shared.receive_readiness.clone(),
+                host_event_emitter: wired.shared.host_event_bus.clone(),
+                search_live_index: Arc::clone(&search_live_indexer),
+                availability: deps.clipboard.entry_ports.availability.clone(),
+                entry_identity_coordinator: deps.clipboard.entry_identity_coordinator.clone(),
+            },
+            write: Arc::clone(&wired.shared.clipboard_write_coordinator)
+                as Arc<dyn ApplyInboundWrite>,
+            provisional_receive: deps.storage.file_transfer.finalize_provisional.clone(),
+            outbound_progress_reporter: Arc::clone(&sync_engine.outbound_progress_reporter),
+            active_register: deps.clipboard.active_register.clone(),
+            mobile_consumability: deps.clipboard.mobile_consumability.clone(),
+            snapshot_deps: uc_application::facade::ClipboardSnapshotDeps {
                 entry_repo: deps.clipboard.entry_ports.get.clone(),
                 selection_repo: deps.clipboard.selection_repo.clone(),
                 representation_repo: deps.clipboard.representation_ports.get.clone(),
@@ -145,9 +145,9 @@ pub(crate) fn build_clipboard_runtime(
                 payload_resolver: deps.clipboard.payload_resolver.clone(),
                 blob_store: deps.storage.blob_store.clone(),
             },
-            deps.clipboard.entry_ports.touch.clone(),
-        ),
-    );
+            touch_entry: deps.clipboard.entry_ports.touch.clone(),
+        },
+    ));
 
     ClipboardRuntime {
         capture: Arc::new(ClipboardCaptureFacade::new(

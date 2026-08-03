@@ -1046,9 +1046,8 @@ mod tests {
 
     use uc_core::ports::clipboard::FindEntryIdBySnapshotHashPort;
 
-    use crate::usecases::clipboard_sync::apply_inbound::{
-        InboundCapture, InboundSnapshotRebuild, InboundWrite,
-    };
+    use crate::usecases::clipboard_sync::apply_inbound::ports::InboundSnapshotRebuild;
+    use crate::usecases::clipboard_sync::apply_inbound::{InboundCapture, InboundWrite};
 
     use uc_core::mobile_sync::{StagedFile, StagedFileUri};
     use uc_observability_contract::analytics::NoopAnalyticsSink;

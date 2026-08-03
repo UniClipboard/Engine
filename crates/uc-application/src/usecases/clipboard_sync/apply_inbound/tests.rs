@@ -47,7 +47,10 @@ use super::materializer::{
     InboundFileSetMember, MaterializeOutcome, MaterializeResult, RollbackOutcome,
 };
 use super::ports::{InboundCapture, InboundSnapshotRebuild, InboundWrite};
-use super::usecase::ApplyInboundClipboardUseCase;
+use super::usecase::{
+    ApplyInboundClipboardUseCase, InboundApplyCommonDeps, InboundReceiveAttemptDeps,
+    InteractiveReceiveDeps, StoreOnlyPullDeps,
+};
 use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -625,6 +628,98 @@ mockall::mock! {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
+
+#[test]
+fn production_inbound_modes_have_named_complete_constructors() {
+    let _: fn(InteractiveReceiveDeps) -> ApplyInboundClipboardUseCase =
+        ApplyInboundClipboardUseCase::interactive_receive;
+    let _: fn(StoreOnlyPullDeps) -> ApplyInboundClipboardUseCase =
+        ApplyInboundClipboardUseCase::store_only_pull;
+}
+
+struct NoopReceiveArtifactCleanup;
+
+#[async_trait]
+impl uc_core::ports::CleanupReceiveArtifactsPort for NoopReceiveArtifactCleanup {
+    async fn cleanup_receive_artifacts(
+        &self,
+        _artifacts: &[uc_core::ports::ReceiveArtifact],
+    ) -> std::result::Result<(), uc_core::ports::ReceiveArtifactLogError> {
+        Ok(())
+    }
+}
+
+struct RecordingLiveIndex {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl crate::facade::ClipboardLiveIndexPort for RecordingLiveIndex {
+    async fn index_capture(
+        &self,
+        _input: crate::facade::ClipboardLiveIndexInput,
+    ) -> std::result::Result<
+        crate::facade::ClipboardLiveIndexOutcome,
+        crate::facade::ClipboardLiveIndexError,
+    > {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::facade::ClipboardLiveIndexOutcome::Indexed)
+    }
+}
+
+#[tokio::test]
+async fn store_only_pull_persists_without_a_clipboard_write_dependency() {
+    let (input, _) = fixture_input("store only pull");
+    let mut repo = MockEntryRepo::new();
+    repo.expect_find_entry_id_by_snapshot_hash()
+        .times(1)
+        .returning(|_| Ok(None));
+    let mut capture = MockCapture::new();
+    capture
+        .expect_capture()
+        .times(1)
+        .returning(|_, _, _| Ok(Some(EntryId::from("store-only-entry"))));
+    let materializer = MockBlobMaterializer::new();
+    let attempts = AttemptGate::empty();
+    let readiness = Arc::new(crate::receive_reconciliation::ReceiveReadinessCoordinator::new());
+    readiness.mark_ready();
+    let live_index = Arc::new(RecordingLiveIndex {
+        calls: AtomicUsize::new(0),
+    });
+
+    let use_case = ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
+        common: InboundApplyCommonDeps {
+            entry_repo: Arc::new(repo),
+            capture: Arc::new(capture),
+            blob_materializer: Arc::new(materializer),
+            receive_attempts: InboundReceiveAttemptDeps {
+                get: attempts.clone(),
+                begin: attempts.clone(),
+                claim_commit: attempts.clone(),
+                request_cancel: attempts.clone(),
+                begin_failure: attempts.clone(),
+                commit: attempts.clone(),
+                clock: attempts,
+            },
+            receive_artifact_cleanup: Arc::new(NoopReceiveArtifactCleanup),
+            receive_readiness: readiness,
+            host_event_emitter: Arc::new(HostEventBus::new()),
+            search_live_index: live_index.clone(),
+            availability: Arc::new(FakeAvailability { available: true }),
+            entry_identity_coordinator: Arc::new(
+                crate::entry_identity::EntryIdentityCoordinator::new(),
+            ),
+        },
+    });
+
+    assert_eq!(
+        use_case.execute(input).await.expect("store-only apply"),
+        ApplyOutcome::Applied {
+            entry_id: EntryId::from("store-only-entry"),
+        }
+    );
+    assert_eq!(live_index.calls.load(Ordering::SeqCst), 1);
+}
 
 fn fixture_input(text: &str) -> (ApplyInboundInput, String) {
     let snapshot = SystemClipboardSnapshot {

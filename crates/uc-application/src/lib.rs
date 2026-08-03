@@ -29,8 +29,9 @@ pub use deps::{
 // re-export only the small public surface here.
 pub use usecases::clipboard_sync::{
     ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
-    FileCacheBlobMaterializer, InboundBlobFetcher, InboundBlobMaterializer, InboundCapture,
-    InboundWrite,
+    FileCacheBlobMaterializer, InboundApplyCommonDeps, InboundBlobFetcher, InboundBlobMaterializer,
+    InboundCapture, InboundReceiveAttemptDeps, InboundWrite, InteractiveReceiveDeps,
+    StoreOnlyPullDeps,
 };
 
 // Note: V3 envelope codec helpers (decode_v3_bytes_to_snapshot,

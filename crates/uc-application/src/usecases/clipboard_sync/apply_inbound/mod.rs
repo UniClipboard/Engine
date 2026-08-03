@@ -69,7 +69,7 @@ use uc_observability_contract::FlowId;
 use crate::clipboard_write::ClipboardWriteIntent;
 
 mod materializer;
-mod ports;
+pub(crate) mod ports;
 mod timing;
 mod usecase;
 
@@ -82,8 +82,11 @@ pub use materializer::{
     FileCacheBlobMaterializer, InboundBlobFetcher, InboundBlobMaterializer, InboundFileSetManifest,
     InboundFileSetMember,
 };
-pub use ports::{InboundCapture, InboundSnapshotRebuild, InboundWrite};
-pub use usecase::ApplyInboundClipboardUseCase;
+pub use ports::{InboundCapture, InboundWrite};
+pub use usecase::{
+    ApplyInboundClipboardUseCase, InboundApplyCommonDeps, InboundReceiveAttemptDeps,
+    InteractiveReceiveDeps, StoreOnlyPullDeps,
+};
 
 /// Caller-supplied input mapped from the facade's public `InboundNotice`.
 ///
