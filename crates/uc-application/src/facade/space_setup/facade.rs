@@ -1,4 +1,4 @@
-//! `SpaceSetupFacade` — space-lifecycle entry point (A1 + A2 + shutdown).
+//! `SpaceFacade` — space-lifecycle entry point (A1 + A2 + shutdown).
 //!
 //! Owns the two use cases so A1/A2 success can prime presence cache (F1) via
 //! `ensure_reachable_all`. Also owns the sponsor-side inbound orchestrator so
@@ -24,19 +24,6 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
 
-use uc_core::ids::{DeviceId, SpaceId};
-use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort,
-};
-use uc_core::ports::space::{FactoryResetSpacePort, ResumeSpaceSessionPort, SpaceAccessError};
-use uc_core::ports::{
-    PeerAddressRepositoryPort, PresenceError, PresencePort, ReachabilityState, SettingsPort,
-    SetupStatusPort,
-};
-use uc_core::setup::SetupStatus;
-use uc_core::MemberRepositoryPort;
-use uc_observability_contract::analytics::AnalyticsFacade;
-
 use crate::clipboard_write::MobileConsumableBackfill;
 use crate::facade::space_setup::commands::{
     CurrentInvitation, InitializeSpaceCommand, InitializeSpaceInput, InitializeSpaceResult,
@@ -47,7 +34,9 @@ use crate::facade::space_setup::commands::{
 use crate::facade::space_setup::commands::{
     RedeemPairingInvitationCommand, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
 };
-use crate::facade::space_setup::deps::SpaceSetupDeps;
+use crate::facade::space_setup::deps::{
+    SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
+};
 use crate::facade::space_setup::errors::{
     CancelInvitationError, FactoryResetError, QueryMigrationProgressError, QuerySetupStateError,
     RedeemPairingInvitationError, ResetSpaceError, SwitchSpaceError,
@@ -71,12 +60,23 @@ use crate::usecases::presence::ensure_reachable_all::{
 use crate::usecases::setup::initialize_space::InitializeSpaceUseCase;
 use crate::usecases::setup::switch_space::{JoinerHandshakeRunner, SwitchSpaceUseCase};
 use crate::usecases::setup::unlock_space::UnlockSpaceUseCase;
+use uc_core::ids::{DeviceId, SpaceId};
+use uc_core::membership::{
+    GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort,
+};
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::setup::MigrationStatePort;
+use uc_core::ports::space::{FactoryResetSpacePort, ResumeSpaceSessionPort, SpaceAccessError};
+use uc_core::ports::{
+    PeerAddressRepositoryPort, PresenceError, PresencePort, ReachabilityState, SettingsPort,
+    SetupStatusPort,
+};
+use uc_core::setup::SetupStatus;
+use uc_core::MemberRepositoryPort;
 
 /// Space-lifecycle facade (A1 initialise, A2 unlock, B1 issue invitation,
 /// B2 redeem invitation, P7e inbound subscriber, F2 shutdown).
-pub struct SpaceSetupFacade {
+pub struct SpaceFacade {
     initialize_space: Arc<InitializeSpaceUseCase>,
     unlock_space: Arc<UnlockSpaceUseCase>,
     issue_pairing_invitation: Arc<IssuePairingInvitationUseCase>,
@@ -136,22 +136,17 @@ pub struct SpaceSetupFacade {
     /// `list_paired_peer_device_ids` can self-filter without grabbing the
     /// `DeviceIdentityPort` lock on every call.
     local_device_id: DeviceId,
-    /// Analytics entry point. Held directly on the facade so
-    /// `reset_telemetry_identity` (a cross-cutting operation that doesn't
-    /// belong to any single use case) can call `analytics.reset_identity()`
-    /// without routing through a use case wrapper.
-    analytics: Arc<dyn AnalyticsFacade>,
 }
 
-impl SpaceSetupFacade {
-    /// Wire all use cases from a single [`SpaceSetupDeps`] bundle and
+impl SpaceFacade {
+    /// Wire all use cases from a single [`SpaceFacadeDeps`] bundle and
     /// spawn the sponsor-side inbound pairing orchestrator.
-    pub fn new(deps: SpaceSetupDeps) -> Self {
+    pub fn new(deps: SpaceFacadeDeps) -> Self {
         Self::new_internal(deps, None)
     }
 
     pub fn new_with_group_delivery(
-        deps: SpaceSetupDeps,
+        deps: SpaceFacadeDeps,
         outbox: Arc<dyn GroupRevocationPort>,
         dispatch: Arc<dyn GroupUpdateDispatchPort>,
     ) -> Self {
@@ -161,19 +156,26 @@ impl SpaceSetupFacade {
     }
 
     fn new_internal(
-        deps: SpaceSetupDeps,
+        deps: SpaceFacadeDeps,
         group_update_delivery: Option<Arc<dyn GroupUpdateDeliveryPort>>,
     ) -> Self {
-        let SpaceSetupDeps {
+        let SpaceFacadeDeps {
+            session,
+            admission,
+            transition,
+        } = deps;
+        let SpaceSessionDeps {
             space_access,
+            setup_status,
+            mobile_consumable_backfill,
+        } = session;
+        let SpaceAdmissionDeps {
             local_identity,
             device_identity,
             member_repo,
-            setup_status,
             settings,
             clock,
             membership_gossip,
-            mobile_consumable_backfill,
             pairing_invitation,
             pairing_invitation_addresses,
             pairing_invitation_by_address,
@@ -182,14 +184,16 @@ impl SpaceSetupFacade {
             proof_port,
             trusted_peer_repo,
             peer_addr_repo,
-            relationship_reset,
             presence,
+            analytics,
+        } = admission;
+        let SpaceTransitionDeps {
+            relationship_reset,
             migration_state,
             key_migration,
             blob_migration_repo,
             blob_cipher,
-            analytics,
-        } = deps;
+        } = transition;
 
         // Stash the narrow slices the facade itself drives (`try_resume_session`
         // / `factory_reset`) before the bundle's other slices are handed to the
@@ -339,9 +343,6 @@ impl SpaceSetupFacade {
             Arc::clone(&clock),
             Arc::clone(&analytics),
         ));
-        // Facade-local handle for `reset_telemetry_identity`. Cloned
-        // before `analytics` is moved into the last use case below.
-        let analytics_for_facade = Arc::clone(&analytics);
         let redeem_pairing_invitation = Arc::new(RedeemPairingInvitationUseCase::new(
             joiner_handshake,
             admit_member_uc,
@@ -375,27 +376,7 @@ impl SpaceSetupFacade {
             peer_addr_repo: peer_addr_repo_for_facade,
             presence: presence_for_facade,
             local_device_id: local_device_id_for_facade,
-            analytics: analytics_for_facade,
         }
-    }
-
-    /// User-initiated telemetry identity reset.
-    ///
-    /// Clears the locally-persisted `space_person_id`, regenerates the
-    /// anonymous identifiers, rebuilds the global EventContext, and emits
-    /// `$identify` so PostHog merges recent events under the new
-    /// anonymous person.
-    ///
-    /// Only this device is affected; peers in the same Space keep their
-    /// `space_person_id` and the Space's PostHog group continues to exist
-    /// — this device just falls back to Solo.
-    #[instrument(skip(self))]
-    pub fn reset_telemetry_identity(
-        &self,
-    ) -> Result<(), crate::facade::space_setup::ResetTelemetryError> {
-        self.analytics
-            .reset_identity()
-            .map_err(|e| crate::facade::space_setup::ResetTelemetryError::Storage(e.to_string()))
     }
 
     /// Try to restore the in-memory space session silently, using the
@@ -887,7 +868,7 @@ impl SpaceSetupFacade {
 mod tests {
     //! Thin smoke tests — the two use cases themselves are covered
     //! exhaustively in `usecases::setup::{initialize_space,unlock_space}`.
-    //! Here we only prove that `SpaceSetupFacade` wires them up and
+    //! Here we only prove that `SpaceFacade` wires them up and
     //! forwards arguments and error codes unchanged.
 
     use super::*;
@@ -1509,7 +1490,7 @@ mod tests {
 
     // ── Switch-space minimal fakes (smoke-test scope only) ────────────────
     //
-    // 既有 A1/A2/B1 smoke tests 不走 switch-space 路径，但 SpaceSetupDeps
+    // 既有 A1/A2/B1 smoke tests 不走 switch-space 路径，但 SpaceFacadeDeps
     // 现在要求 4 个新 ports；下面 4 个 fake 全部返回中性默认值（None /
     // 空 vec / Ok），让 facade 构造器跑得通。switch-space 自身的契约
     // 验证留给 `usecases::setup::switch_space::tests` 与下面的
@@ -1711,11 +1692,7 @@ mod tests {
         space_access: Arc<MockSpaceAccess>,
         setup_status: Arc<dyn SetupStatusPort>,
         settings: Arc<dyn SettingsPort>,
-    ) -> (
-        SpaceSetupFacade,
-        Arc<FakeInvitationPort>,
-        Arc<FakePeerAddrRepo>,
-    ) {
+    ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         make_facade_with(
             space_access,
             setup_status,
@@ -1730,11 +1707,7 @@ mod tests {
         setup_status: Arc<dyn SetupStatusPort>,
         settings: Arc<dyn SettingsPort>,
         migration_state: Arc<FakeMigrationState>,
-    ) -> (
-        SpaceSetupFacade,
-        Arc<FakeInvitationPort>,
-        Arc<FakePeerAddrRepo>,
-    ) {
+    ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         make_facade_with(
             space_access,
             setup_status,
@@ -1750,11 +1723,7 @@ mod tests {
         settings: Arc<dyn SettingsPort>,
         migration_state: Arc<FakeMigrationState>,
         mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
-    ) -> (
-        SpaceSetupFacade,
-        Arc<FakeInvitationPort>,
-        Arc<FakePeerAddrRepo>,
-    ) {
+    ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         make_facade_with_member_repo(
             space_access,
             setup_status,
@@ -1772,43 +1741,45 @@ mod tests {
         migration_state: Arc<FakeMigrationState>,
         mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-    ) -> (
-        SpaceSetupFacade,
-        Arc<FakeInvitationPort>,
-        Arc<FakePeerAddrRepo>,
-    ) {
+    ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         let pairing_invitation = Arc::new(FakeInvitationPort::default());
         let peer_addr_repo = Arc::new(FakePeerAddrRepo::default());
-        let facade = SpaceSetupFacade::new(SpaceSetupDeps {
-            space_access: SpaceAccessPorts::from_adapter(space_access),
-            local_identity: Arc::new(FakeLocalIdentity {
-                fp: default_fingerprint(),
-            }),
-            device_identity: Arc::new(FixedDeviceIdentity {
-                id: DeviceId::new("device-1"),
-            }),
-            member_repo,
-            setup_status,
-            settings,
-            clock: Arc::new(FixedClock(0)),
-            membership_gossip: Arc::new(NoopPairingMembershipGossip),
-            mobile_consumable_backfill,
-            pairing_invitation: pairing_invitation.clone(),
-            pairing_invitation_addresses: pairing_invitation.clone(),
-            pairing_invitation_by_address: pairing_invitation.clone(),
-            pairing_session: Arc::new(NoopSessionPort),
-            pairing_events: Arc::new(IdleEventPort::new()),
-            proof_port: Arc::new(NoopProofPort),
-            trusted_peer_repo: Arc::new(NoopTrustedPeerRepo),
-            peer_addr_repo: Arc::clone(&peer_addr_repo)
-                as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
-            relationship_reset: Arc::new(NoopRelationshipStateReset),
-            presence: Arc::new(FakePresence),
-            migration_state,
-            key_migration: Arc::new(FakeKeyMigration),
-            blob_migration_repo: Arc::new(FakeBlobMigrationRepo),
-            blob_cipher: Arc::new(FakeBlobCipher),
-            analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
+        let facade = SpaceFacade::new(SpaceFacadeDeps {
+            session: SpaceSessionDeps {
+                space_access: SpaceAccessPorts::from_adapter(space_access),
+                setup_status,
+                mobile_consumable_backfill,
+            },
+            admission: SpaceAdmissionDeps {
+                local_identity: Arc::new(FakeLocalIdentity {
+                    fp: default_fingerprint(),
+                }),
+                device_identity: Arc::new(FixedDeviceIdentity {
+                    id: DeviceId::new("device-1"),
+                }),
+                member_repo,
+                settings,
+                clock: Arc::new(FixedClock(0)),
+                membership_gossip: Arc::new(NoopPairingMembershipGossip),
+                pairing_invitation: pairing_invitation.clone(),
+                pairing_invitation_addresses: pairing_invitation.clone(),
+                pairing_invitation_by_address: pairing_invitation.clone(),
+                pairing_session: Arc::new(NoopSessionPort),
+                pairing_events: Arc::new(IdleEventPort::new()),
+                proof_port: Arc::new(NoopProofPort),
+                trusted_peer_repo: Arc::new(NoopTrustedPeerRepo),
+                peer_addr_repo: Arc::clone(&peer_addr_repo)
+                    as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
+                presence: Arc::new(FakePresence),
+                analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
+            },
+            transition: SpaceTransitionDeps {
+                relationship_reset: Arc::new(NoopRelationshipStateReset),
+                migration_state,
+                key_migration: Arc::new(FakeKeyMigration),
+                blob_migration_repo: Arc::new(FakeBlobMigrationRepo),
+                blob_cipher: Arc::new(FakeBlobCipher),
+            },
         });
         (facade, pairing_invitation, peer_addr_repo)
     }

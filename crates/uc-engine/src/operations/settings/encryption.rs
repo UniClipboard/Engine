@@ -4,7 +4,6 @@ use crate::error_codes::*;
 
 use tracing::error;
 use uc_application::facade::AppFacade;
-use uc_application::receive_reconciliation::EnsureReceiveReadyPort;
 
 use crate::{EncryptionStateSummary, EngineError, EngineErrorCategory, OperationResult};
 
@@ -22,15 +21,11 @@ pub async fn execute_query_encryption_state(
     }))
 }
 
-pub async fn execute_lock_encryption(
-    facade: &AppFacade,
-    receive_readiness: &dyn EnsureReceiveReadyPort,
-) -> Result<OperationResult, EngineError> {
-    facade.encryption.lock().await.map_err(|error| {
+pub async fn execute_lock_encryption(facade: &AppFacade) -> Result<OperationResult, EngineError> {
+    facade.lock_space_session().await.map_err(|error| {
         error!(error = %error, "lock encryption session failed");
         stable_internal_error(LOCK_ENCRYPTION_FAILED_CODE)
     })?;
-    receive_readiness.close_receive_gate();
 
     Ok(OperationResult::EncryptionLocked)
 }

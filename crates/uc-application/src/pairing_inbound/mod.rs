@@ -18,7 +18,7 @@
 //!
 //! Per `uc-application/AGENTS.md` §11.4 the orchestrator is `pub(crate)`
 //! only: external callers reach it indirectly through the owning facade
-//! (`SpaceSetupFacade` spawns it during construction).
+//! (`SpaceFacade` spawns it during construction).
 
 pub(crate) mod orchestrator;
 pub(crate) mod sponsor_handshake;

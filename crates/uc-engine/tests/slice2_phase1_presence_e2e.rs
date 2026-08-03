@@ -47,7 +47,8 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use uc_application::deps::SpaceAccessPorts;
 use uc_application::facade::roster::{MemberRosterDeps, MemberRosterFacade};
 use uc_application::facade::space_setup::{
-    InitializeSpaceInput, RedeemPairingInvitationInput, SpaceSetupDeps, SpaceSetupFacade,
+    InitializeSpaceInput, RedeemPairingInvitationInput, SpaceAdmissionDeps, SpaceFacade,
+    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_core::ids::DeviceId;
@@ -309,7 +310,7 @@ impl Respond for GetPairing {
 // ─── per-side assembly ──────────────────────────────────────────────────────
 
 struct Side {
-    facade: Arc<SpaceSetupFacade>,
+    facade: Arc<SpaceFacade>,
     /// T11:`MemberRosterFacade` 是本测试的主要断言面——用它的
     /// `list_with_presence()` 打印/比对 roster。真实 bootstrap
     /// 在 `build_sync_engine_assembly` 里同时构造二者;这里为保持与 slice1
@@ -405,7 +406,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
     let proof_port: Arc<dyn ProofPort> = Arc::new(HmacProofAdapter::new());
     let local_identity: Arc<dyn LocalIdentityPort> = Arc::clone(&identity_store) as _;
 
-    // Clone the presence + local_identity handles before moving into SpaceSetupDeps
+    // Clone the presence + local_identity handles before moving into SpaceFacadeDeps
     // so MemberRosterDeps can reuse them. All three Arcs (member_repo, local_identity,
     // presence) are shared between the two facades — mirrors production wiring in
     // `build_sync_engine_assembly` (`uc-bootstrap/src/sync_engine.rs`).
@@ -414,32 +415,38 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
 
     let (migration_state, key_migration, blob_migration_repo, blob_cipher) =
         common::migration_noop_deps();
-    let facade = Arc::new(SpaceSetupFacade::new(SpaceSetupDeps {
-        space_access: SpaceAccessPorts::from_adapter(space_access),
-        local_identity,
-        device_identity,
-        member_repo: Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
-        setup_status: Arc::clone(&setup_status) as Arc<dyn SetupStatusPort>,
-        settings: Arc::clone(&settings) as Arc<dyn SettingsPort>,
-        clock: Arc::new(SystemClock),
-        membership_gossip: common::membership_gossip_noop(),
-        mobile_consumable_backfill: common::mobile_consumable_backfill_noop(),
-        pairing_invitation,
-        pairing_invitation_addresses,
-        pairing_invitation_by_address,
-        pairing_session: Arc::clone(&pairing_session) as Arc<dyn PairingSessionPort>,
-        pairing_events,
-        proof_port,
-        trusted_peer_repo: Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,
-        peer_addr_repo: Arc::clone(&peer_addr_repo)
-            as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
-        relationship_reset: common::relationship_state_reset_noop(),
-        presence,
-        migration_state,
-        key_migration,
-        blob_migration_repo,
-        blob_cipher,
-        analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
+    let facade = Arc::new(SpaceFacade::new(SpaceFacadeDeps {
+        session: SpaceSessionDeps {
+            space_access: SpaceAccessPorts::from_adapter(space_access),
+            setup_status: Arc::clone(&setup_status) as Arc<dyn SetupStatusPort>,
+            mobile_consumable_backfill: common::mobile_consumable_backfill_noop(),
+        },
+        admission: SpaceAdmissionDeps {
+            local_identity,
+            device_identity,
+            member_repo: Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
+            settings: Arc::clone(&settings) as Arc<dyn SettingsPort>,
+            clock: Arc::new(SystemClock),
+            membership_gossip: common::membership_gossip_noop(),
+            pairing_invitation,
+            pairing_invitation_addresses,
+            pairing_invitation_by_address,
+            pairing_session: Arc::clone(&pairing_session) as Arc<dyn PairingSessionPort>,
+            pairing_events,
+            proof_port,
+            trusted_peer_repo: Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,
+            peer_addr_repo: Arc::clone(&peer_addr_repo)
+                as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
+            presence,
+            analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
+        },
+        transition: SpaceTransitionDeps {
+            relationship_reset: common::relationship_state_reset_noop(),
+            migration_state,
+            key_migration,
+            blob_migration_repo,
+            blob_cipher,
+        },
     }));
 
     let roster = Arc::new(MemberRosterFacade::new(MemberRosterDeps {

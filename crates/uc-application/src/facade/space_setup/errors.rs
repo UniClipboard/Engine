@@ -187,7 +187,7 @@ pub enum UnlockSpaceError {
     Internal(String),
 }
 
-/// Failure modes of [`crate::facade::space_setup::SpaceSetupFacade::cancel_invitation`]
+/// Failure modes of [`crate::facade::space_setup::SpaceFacade::cancel_invitation`]
 /// (Slice4 P3 T3.2).
 #[derive(Debug, Error)]
 pub enum CancelInvitationError {
@@ -202,7 +202,7 @@ pub enum CancelInvitationError {
     Internal(String),
 }
 
-/// Failure modes of [`crate::facade::space_setup::SpaceSetupFacade::reset`]
+/// Failure modes of [`crate::facade::space_setup::SpaceFacade::reset`]
 /// (Slice4 P3 T3.2).
 #[derive(Debug, Error)]
 pub enum ResetSpaceError {
@@ -216,7 +216,7 @@ pub enum ResetSpaceError {
     Internal(String),
 }
 
-/// Failure modes of [`crate::facade::space_setup::SpaceSetupFacade::factory_reset`].
+/// Failure modes of [`crate::facade::space_setup::SpaceFacade::factory_reset`].
 ///
 /// 用户级"重置并重新开始"的失败原因。与 `ResetSpaceError` 不同,本路径
 /// 还会调 `FactoryResetSpacePort::factory_reset` 删 keyslot + KEK,所以多了
@@ -244,7 +244,7 @@ pub enum FactoryResetError {
     Internal(String),
 }
 
-/// Failure modes of [`crate::facade::space_setup::SpaceSetupFacade::query_setup_state`]
+/// Failure modes of [`crate::facade::space_setup::SpaceFacade::query_setup_state`]
 /// (Slice4 P3 T3.2).
 #[derive(Debug, Error)]
 pub enum QuerySetupStateError {
@@ -257,7 +257,7 @@ pub enum QuerySetupStateError {
     Internal(String),
 }
 
-/// Failure modes of [`crate::facade::space_setup::SpaceSetupFacade::switch_space`].
+/// Failure modes of [`crate::facade::space_setup::SpaceFacade::switch_space`].
 ///
 /// 已 setup 设备加入另一个空间的 4 阶段重加密流程的失败原因。语义粒度与
 /// `RedeemPairingInvitationError` 对齐——大部分变体是 redeem 错误的
@@ -309,7 +309,7 @@ pub enum SwitchSpaceError {
     Internal(String),
 }
 
-/// Failure modes of [`crate::facade::space_setup::SpaceSetupFacade::query_migration_progress`].
+/// Failure modes of [`crate::facade::space_setup::SpaceFacade::query_migration_progress`].
 ///
 /// 进度查询是只读操作，唯一失败来源是底层持久化故障——粒度与
 /// `QuerySetupStateError` 对齐。
@@ -322,7 +322,7 @@ pub enum QueryMigrationProgressError {
     Internal(String),
 }
 
-/// Failure modes of [`crate::facade::space_setup::SpaceSetupFacade::try_resume_session`].
+/// Failure modes of [`crate::facade::space_setup::SpaceFacade::try_resume_session`].
 ///
 /// Kept narrow on purpose: "nothing to resume" (setup never completed
 /// or keyslot absent) is a **normal** signal returned as `Ok(false)`,
@@ -346,15 +346,4 @@ pub enum TryResumeSessionError {
     /// Uncategorised infra / adapter failure.
     #[error("internal error: {0}")]
     Internal(String),
-}
-
-/// Phase 098 / PR 8 · `SpaceSetupFacade::reset_telemetry_identity` 失败原因。
-///
-/// 唯一变体：底层 IO 写盘失败（清 `space_person_id` 文件 / 重新生成 anonymous
-/// 身份等步骤的任一步）。UI 层应提示用户重试；reset 流程对其它子系统无副作用，
-/// 重试是安全的。
-#[derive(Debug, Error)]
-pub enum ResetTelemetryError {
-    #[error("storage failure during reset: {0}")]
-    Storage(String),
 }

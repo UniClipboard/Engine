@@ -8,7 +8,7 @@
 //! All types here are `pub(crate)` per `uc-application/AGENTS.md` §11.4:
 //! the holder is a cross-use-case flow-state component, not an external
 //! boundary. External callers interact with invitations exclusively
-//! through [`crate::facade::space_setup::SpaceSetupFacade`].
+//! through [`crate::facade::space_setup::SpaceFacade`].
 
 pub(crate) mod holder;
 

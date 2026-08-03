@@ -40,7 +40,7 @@ use crate::facade::roster::commands::{
 use crate::facade::roster::errors::RosterError;
 use crate::group_update_delivery::{GroupUpdateDelivery, GroupUpdateDeliveryPort};
 
-/// 构造 `MemberRosterFacade` 时需要的 port 束。对齐 `SpaceSetupDeps`
+/// 构造 `MemberRosterFacade` 时需要的 port 束。对齐 `SpaceFacadeDeps`
 /// 的风格,便于 bootstrap 分步 construct 各 facade。
 pub struct MemberRosterDeps {
     pub member_repo: Arc<dyn MemberRepositoryPort>,

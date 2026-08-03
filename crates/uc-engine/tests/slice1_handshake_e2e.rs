@@ -25,7 +25,8 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use uc_application::deps::SpaceAccessPorts;
 use uc_application::facade::space_setup::{
-    InitializeSpaceInput, RedeemPairingInvitationInput, SpaceSetupDeps, SpaceSetupFacade,
+    InitializeSpaceInput, RedeemPairingInvitationInput, SpaceAdmissionDeps, SpaceFacade,
+    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_core::ids::DeviceId;
@@ -289,7 +290,7 @@ impl Respond for GetPairing {
 // ─── per-side assembly ──────────────────────────────────────────────────────
 
 struct Side {
-    facade: Arc<SpaceSetupFacade>,
+    facade: Arc<SpaceFacade>,
     iroh_node: IrohNode,
     member_repo: Arc<InMemoryMemberRepo>,
     trusted_peer_repo: Arc<InMemoryTrustedPeerRepo>,
@@ -395,32 +396,38 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
 
     let (migration_state, key_migration, blob_migration_repo, blob_cipher) =
         common::migration_noop_deps();
-    let facade = Arc::new(SpaceSetupFacade::new(SpaceSetupDeps {
-        space_access: SpaceAccessPorts::from_adapter(space_access),
-        local_identity,
-        device_identity,
-        member_repo: Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
-        setup_status: Arc::clone(&setup_status) as Arc<dyn SetupStatusPort>,
-        settings: Arc::clone(&settings) as Arc<dyn SettingsPort>,
-        clock: Arc::new(SystemClock),
-        membership_gossip: common::membership_gossip_noop(),
-        mobile_consumable_backfill: common::mobile_consumable_backfill_noop(),
-        pairing_invitation,
-        pairing_invitation_addresses,
-        pairing_invitation_by_address,
-        pairing_session: Arc::clone(&pairing_session) as Arc<dyn PairingSessionPort>,
-        pairing_events,
-        proof_port,
-        trusted_peer_repo: Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,
-        peer_addr_repo: Arc::clone(&peer_addr_repo)
-            as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
-        relationship_reset: common::relationship_state_reset_noop(),
-        presence,
-        migration_state,
-        key_migration,
-        blob_migration_repo,
-        blob_cipher,
-        analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
+    let facade = Arc::new(SpaceFacade::new(SpaceFacadeDeps {
+        session: SpaceSessionDeps {
+            space_access: SpaceAccessPorts::from_adapter(space_access),
+            setup_status: Arc::clone(&setup_status) as Arc<dyn SetupStatusPort>,
+            mobile_consumable_backfill: common::mobile_consumable_backfill_noop(),
+        },
+        admission: SpaceAdmissionDeps {
+            local_identity,
+            device_identity,
+            member_repo: Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
+            settings: Arc::clone(&settings) as Arc<dyn SettingsPort>,
+            clock: Arc::new(SystemClock),
+            membership_gossip: common::membership_gossip_noop(),
+            pairing_invitation,
+            pairing_invitation_addresses,
+            pairing_invitation_by_address,
+            pairing_session: Arc::clone(&pairing_session) as Arc<dyn PairingSessionPort>,
+            pairing_events,
+            proof_port,
+            trusted_peer_repo: Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,
+            peer_addr_repo: Arc::clone(&peer_addr_repo)
+                as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
+            presence,
+            analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
+        },
+        transition: SpaceTransitionDeps {
+            relationship_reset: common::relationship_state_reset_noop(),
+            migration_state,
+            key_migration,
+            blob_migration_repo,
+            blob_cipher,
+        },
     }));
 
     Side {
@@ -485,7 +492,7 @@ async fn sponsor_joiner_end_to_end_pairing_persists_both_sides() {
     let joiner = build_side("joiner", server.uri()).await;
 
     // 3. The sponsor-side inbound orchestrator spawns in
-    //    `SpaceSetupFacade::new` and installs its subscriber via an async
+    //    `SpaceFacade::new` and installs its subscriber via an async
     //    `subscribe().await` in the run loop. A brief yield gives the
     //    runtime enough time to reach that await before the joiner dials,
     //    avoiding the "event dropped: no subscriber installed" path in the

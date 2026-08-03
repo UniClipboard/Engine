@@ -62,6 +62,12 @@ pub struct SpaceMembershipGossip {
     wake: Arc<Notify>,
 }
 
+pub fn build_space_membership_gossip(
+    deps: SpaceMembershipGossipDeps,
+) -> Arc<SpaceMembershipGossip> {
+    Arc::new(SpaceMembershipGossip::new(deps))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MembershipGossipPassOutcome {
     pub delivered_batches: usize,
@@ -102,8 +108,13 @@ pub enum MembershipGossipRuntimeError {
 }
 
 pub struct SpaceMembershipGossipRuntime {
-    commands: mpsc::UnboundedSender<MembershipGossipRuntimeCommand>,
+    activity: SpaceMembershipGossipActivity,
     task: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+pub struct SpaceMembershipGossipActivity {
+    commands: mpsc::UnboundedSender<MembershipGossipRuntimeCommand>,
 }
 
 pub struct SponsorSeedBatchContext {
@@ -1135,7 +1146,7 @@ impl SpaceMembershipGossip {
             }
         });
         SpaceMembershipGossipRuntime {
-            commands,
+            activity: SpaceMembershipGossipActivity { commands },
             task: Some(task),
         }
     }
@@ -1448,6 +1459,42 @@ fn gossip_reconcile_delay(device_id: &uc_core::ids::DeviceId) -> Duration {
 }
 
 impl SpaceMembershipGossipRuntime {
+    pub fn activity(&self) -> SpaceMembershipGossipActivity {
+        self.activity.clone()
+    }
+
+    pub async fn pause(&self) -> Result<(), MembershipGossipRuntimeError> {
+        self.activity.pause().await
+    }
+
+    pub async fn resume(&self) -> Result<(), MembershipGossipRuntimeError> {
+        self.activity.resume().await
+    }
+
+    pub async fn shutdown(mut self) {
+        let (completed, response) = oneshot::channel();
+        if self
+            .activity
+            .commands
+            .send(MembershipGossipRuntimeCommand::Shutdown(completed))
+            .is_ok()
+        {
+            let _ = response.await;
+        }
+        if let Some(task) = self.task.take() {
+            if let Err(error) = task.await {
+                if !error.is_cancelled() {
+                    warn!(
+                        error_kind = "membership_gossip_runtime_panic",
+                        "membership gossip runtime stopped unexpectedly"
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl SpaceMembershipGossipActivity {
     pub async fn pause(&self) -> Result<(), MembershipGossipRuntimeError> {
         let (completed, response) = oneshot::channel();
         self.commands
@@ -1467,26 +1514,16 @@ impl SpaceMembershipGossipRuntime {
             .await
             .map_err(|_| MembershipGossipRuntimeError::Stopped)
     }
+}
 
-    pub async fn shutdown(mut self) {
-        let (completed, response) = oneshot::channel();
-        if self
-            .commands
-            .send(MembershipGossipRuntimeCommand::Shutdown(completed))
-            .is_ok()
-        {
-            let _ = response.await;
-        }
-        if let Some(task) = self.task.take() {
-            if let Err(error) = task.await {
-                if !error.is_cancelled() {
-                    warn!(
-                        error_kind = "membership_gossip_runtime_panic",
-                        "membership gossip runtime stopped unexpectedly"
-                    );
-                }
-            }
-        }
+#[async_trait]
+impl crate::facade::space_session::MembershipActivityPort for SpaceMembershipGossipActivity {
+    async fn pause(&self) -> Result<(), String> {
+        self.pause().await.map_err(|error| error.to_string())
+    }
+
+    async fn resume(&self) -> Result<(), String> {
+        self.resume().await.map_err(|error| error.to_string())
     }
 }
 
@@ -3846,6 +3883,7 @@ mod tests {
         }));
         let (presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
         let runtime = gossip.start(presence_rx);
+        let activity = runtime.activity();
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
@@ -3857,7 +3895,7 @@ mod tests {
         })
         .await
         .unwrap();
-        runtime.pause().await.unwrap();
+        activity.pause().await.unwrap();
         presence_tx
             .send(uc_core::ports::PresenceEvent {
                 device_id: DeviceId::new("device-b"),
@@ -3878,7 +3916,7 @@ mod tests {
             .is_err()
         );
 
-        runtime.resume().await.unwrap();
+        activity.resume().await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if transport.sent.lock().unwrap().len() >= 4 {
@@ -4039,11 +4077,12 @@ mod tests {
         }));
         let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(1);
         let runtime = gossip.start(presence_rx);
+        let activity = runtime.activity();
         tokio::time::timeout(Duration::from_secs(1), started.notified())
             .await
             .unwrap();
 
-        tokio::time::timeout(Duration::from_secs(1), runtime.pause())
+        tokio::time::timeout(Duration::from_secs(1), activity.pause())
             .await
             .unwrap()
             .unwrap();

@@ -8,7 +8,7 @@
 //!
 //! # Current scope (Slice 1 · P4)
 //!
-//! * [`SpaceSetupFacade`] — A1 `initialize_space`, A2 `unlock_space`
+//! * [`SpaceFacade`] — A1 `initialize_space`, A2 `unlock_space`
 //!
 //! # Deferred
 //!
@@ -35,6 +35,11 @@ use crate::facade::file_transfer::FileTransferFacade;
 use crate::facade::mobile_sync::MobileSyncFacade;
 use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
 use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
+use crate::facade::space_admission::SpaceAdmissionCoordinator;
+use crate::facade::space_session::{
+    build_space_session_coordinator, RecoverSpaceSessionResult, SpaceSessionAccessDeps,
+    SpaceSessionActivityDeps, SpaceSessionCoordinator, SpaceSessionError,
+};
 use crate::facade::space_setup::{EnsureReachableAllError, EnsureReachableAllReport};
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
@@ -54,7 +59,10 @@ use crate::facade::{
     PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult, ResendEntryCommand,
     ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
     SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
-    SettingsFacadeError, SpaceSetupFacade, StorageFacade,
+    SettingsFacadeError, SpaceFacade, StorageFacade,
+};
+use crate::facade::{
+    MembershipConvergenceFacadeError, MembershipConvergenceStatus, SpaceApplicationHandle,
 };
 use crate::usecases::clipboard_sync::V3BlobRef;
 use uc_core::ids::DeviceId;
@@ -85,7 +93,10 @@ use uc_core::SystemClipboardSnapshot;
 /// daemon worker 高频访问, set-once 语义恰好匹配 "启动期装入, 进程内不再
 /// 切换" 的真实生命周期, 比 `RwLock` 省一次锁且语义更紧。
 pub struct AppFacade {
-    pub space_setup: OnceLock<Arc<SpaceSetupFacade>>,
+    space: OnceLock<Arc<SpaceFacade>>,
+    space_session: OnceLock<Arc<SpaceSessionCoordinator>>,
+    space_application: OnceLock<SpaceApplicationHandle>,
+    space_admission: OnceLock<Arc<SpaceAdmissionCoordinator>>,
     pub member_roster: OnceLock<Arc<MemberRosterFacade>>,
     pub lifecycle: Arc<LifecycleFacade>,
     pub encryption: Arc<EncryptionFacade>,
@@ -141,31 +152,38 @@ pub struct AppFacade {
     pub mobile_sync: OnceLock<Arc<MobileSyncFacade>>,
 }
 
-/// 一次性把 daemon-lifecycle 资源装进 [`AppFacade`] 的 6 个 OnceLock 字段。
-///
-/// 由 daemon 启动装配在 daemon 启动时调用 [`AppFacade::install_daemon_lifecycle`]
-/// 触发。daemon 是进程级单例 (没有 in-process reload), 整个进程生命周期里
-/// install 只会被调一次。ADR-008 P3-3 (B2'-3) 后 `AppFacade` 只存在于 daemon
-/// 进程 (GUI 已是纯客户端,不再持有进程内 facade);CLI 的 in-process 置备
-/// 同样走这条 path。
-pub struct DaemonLifecycleFacades {
-    pub space_setup: Arc<SpaceSetupFacade>,
-    pub member_roster: Arc<MemberRosterFacade>,
-    pub clipboard_sync: Arc<ClipboardSyncFacade>,
-    pub blob_transfer: Arc<BlobTransferFacade>,
-    pub clipboard_outbound: Arc<ClipboardOutboundFacade>,
-    #[cfg(feature = "lan-compat")]
-    pub mobile_sync: Arc<MobileSyncFacade>,
-}
-
 impl AppFacade {
     /// Compose from already-constructed sub-facades.
     ///
     /// Bootstrap builds each sub-facade from its own `*Deps` bundle and
     /// hands them here — the aggregator never sees raw ports.
     pub fn new(parts: AppFacadeParts) -> Self {
+        let space_session = match (
+            parts.space.as_ref(),
+            parts.space_session_activity,
+            parts.space_session_access,
+        ) {
+            (Some(space_setup), Some(activities), Some(access)) => {
+                Some(build_space_session_coordinator(
+                    Arc::clone(space_setup),
+                    Arc::clone(&parts.search),
+                    activities,
+                    access,
+                ))
+            }
+            _ => None,
+        };
+        let space_admission = parts.space.as_ref().map(|space_setup| {
+            Arc::new(SpaceAdmissionCoordinator::new(
+                Arc::clone(space_setup),
+                Arc::clone(&parts.settings),
+            ))
+        });
         Self {
-            space_setup: once_lock_from(parts.space_setup),
+            space: once_lock_from(parts.space),
+            space_session: once_lock_from(space_session),
+            space_application: once_lock_from(parts.space_application),
+            space_admission: once_lock_from(space_admission),
             member_roster: once_lock_from(parts.member_roster),
             lifecycle: parts.lifecycle,
             encryption: parts.encryption,
@@ -189,56 +207,15 @@ impl AppFacade {
         }
     }
 
-    /// 把 daemon 启动时构造好的 6 份 lifecycle facade 一次性装入 AppFacade。
-    ///
-    /// 方案 C 后 daemon 进程内只起一次, 这条 path 每进程调一次。同一份
-    /// `AppFacade` 整个进程生命周期共享; GUI command 与 daemon worker 都
-    /// 从这一份读 —— LAN listener 写入的 endpoint_info、daemon 端 dispatch
-    /// 的事件, GUI 都能立刻读到, 不再依赖跨多份 deps 共享 Arc。
-    ///
-    /// # Panics
-    ///
-    /// 重复调用 (6 个 OnceLock 中任一已被装入) panic, 视为编程错误 ——
-    /// daemon 没有 reload 路径, 不该有第二次装入。
-    pub fn install_daemon_lifecycle(&self, facades: DaemonLifecycleFacades) {
-        self.space_setup
-            .set(facades.space_setup)
-            .map_err(|_| ())
-            .expect("space_setup facade already installed; daemon is process-singleton");
-        self.member_roster
-            .set(facades.member_roster)
-            .map_err(|_| ())
-            .expect("member_roster facade already installed; daemon is process-singleton");
-        self.clipboard_sync
-            .set(facades.clipboard_sync)
-            .map_err(|_| ())
-            .expect("clipboard_sync facade already installed; daemon is process-singleton");
-        self.blob_transfer
-            .set(facades.blob_transfer)
-            .map_err(|_| ())
-            .expect("blob_transfer facade already installed; daemon is process-singleton");
-        self.clipboard_outbound
-            .set(facades.clipboard_outbound)
-            .map_err(|_| ())
-            .expect("clipboard_outbound facade already installed; daemon is process-singleton");
-        #[cfg(feature = "lan-compat")]
-        self.mobile_sync
-            .set(facades.mobile_sync)
-            .map_err(|_| ())
-            .expect("mobile_sync facade already installed; daemon is process-singleton");
-    }
-
-    /// A1:初始化空间。外部业务入口从 `AppFacade` 进入,不直接拿 `SpaceSetupFacade`。
+    /// A1:初始化空间。外部业务入口从 `AppFacade` 进入,不直接拿 `SpaceFacade`。
     pub async fn initialize_space(
         &self,
         input: InitializeSpaceInput,
     ) -> Result<InitializeSpaceResult, InitializeSpaceError> {
-        self.space_setup
+        self.space_session
             .get()
             .cloned()
-            .ok_or_else(|| {
-                InitializeSpaceError::Internal("space setup facade unavailable".to_string())
-            })?
+            .ok_or_else(|| InitializeSpaceError::Internal("space session unavailable".to_string()))?
             .initialize_space(input)
             .await
     }
@@ -248,19 +225,75 @@ impl AppFacade {
         &self,
         input: UnlockSpaceInput,
     ) -> Result<UnlockSpaceResult, UnlockSpaceError> {
-        self.space_setup
+        self.space_session
             .get()
             .cloned()
-            .ok_or_else(|| {
-                UnlockSpaceError::Internal("space setup facade unavailable".to_string())
-            })?
+            .ok_or_else(|| UnlockSpaceError::Internal("space session unavailable".to_string()))?
             .unlock_space(input)
             .await
     }
 
+    pub async fn recover_space_session(
+        &self,
+        allow_secure_storage_unlock: bool,
+    ) -> Result<RecoverSpaceSessionResult, SpaceSessionError> {
+        self.space_session
+            .get()
+            .cloned()
+            .ok_or_else(|| SpaceSessionError::Recovery("space session unavailable".to_string()))?
+            .recover_session(allow_secure_storage_unlock)
+            .await
+    }
+
+    pub async fn lock_space_session(&self) -> Result<(), SpaceSessionError> {
+        self.space_session
+            .get()
+            .cloned()
+            .ok_or_else(|| SpaceSessionError::Recovery("space session unavailable".to_string()))?
+            .lock_space()
+            .await
+    }
+
+    pub async fn membership_convergence(
+        &self,
+    ) -> Result<MembershipConvergenceStatus, MembershipConvergenceFacadeError> {
+        self.space_application
+            .get()
+            .cloned()
+            .ok_or(MembershipConvergenceFacadeError::Unavailable)?
+            .membership_convergence()
+            .await
+            .map_err(MembershipConvergenceFacadeError::from)
+    }
+
+    pub async fn join_space(
+        &self,
+        input: crate::facade::JoinSpaceInput,
+    ) -> Result<crate::facade::JoinSpaceResult, crate::facade::JoinSpaceError> {
+        let result = self
+            .space_admission
+            .get()
+            .cloned()
+            .ok_or_else(|| {
+                crate::facade::JoinSpaceError::Setup("space admission is unavailable".to_string())
+            })?
+            .join_space(input)
+            .await?;
+        self.space_session
+            .get()
+            .cloned()
+            .ok_or_else(|| {
+                crate::facade::JoinSpaceError::Activity("space session is unavailable".to_string())
+            })?
+            .resume_after_space_change()
+            .await
+            .map_err(|error| crate::facade::JoinSpaceError::Activity(error.to_string()))?;
+        Ok(result)
+    }
+
     /// Read setup state through the top-level application facade.
     pub async fn query_setup_state(&self) -> Result<SetupStateView, QuerySetupStateError> {
-        self.space_setup
+        self.space
             .get()
             .cloned()
             .ok_or_else(|| {
@@ -270,9 +303,31 @@ impl AppFacade {
             .await
     }
 
+    pub async fn factory_reset_space(&self) -> Result<(), crate::facade::FactoryResetError> {
+        self.space_session
+            .get()
+            .cloned()
+            .ok_or_else(|| {
+                crate::facade::FactoryResetError::Internal("space session unavailable".to_string())
+            })?
+            .factory_reset()
+            .await
+    }
+
+    pub async fn reset_space(&self) -> Result<(), crate::facade::ResetSpaceError> {
+        self.space
+            .get()
+            .cloned()
+            .ok_or_else(|| {
+                crate::facade::ResetSpaceError::Internal("space session unavailable".to_string())
+            })?
+            .reset()
+            .await
+    }
+
     /// 尝试静默恢复空间会话。
     pub async fn try_resume_session(&self) -> Result<bool, TryResumeSessionError> {
-        self.space_setup
+        self.space
             .get()
             .cloned()
             .ok_or_else(|| {
@@ -286,7 +341,7 @@ impl AppFacade {
     pub async fn refresh_presence(
         &self,
     ) -> Result<EnsureReachableAllReport, EnsureReachableAllError> {
-        self.space_setup
+        self.space
             .get()
             .cloned()
             .ok_or(EnsureReachableAllError::Repository(
@@ -298,11 +353,11 @@ impl AppFacade {
 
     /// 列出已配对 peer 的 `DeviceId`(本机已过滤)。供 desktop keepalive
     /// 调度器用来发现新 peer / 收回已删除 peer。Thin wrapper over
-    /// [`SpaceSetupFacade::list_paired_peer_device_ids`].
+    /// [`SpaceFacade::list_paired_peer_device_ids`].
     pub async fn list_paired_peer_device_ids(
         &self,
     ) -> Result<Vec<DeviceId>, EnsureReachableAllError> {
-        self.space_setup
+        self.space
             .get()
             .cloned()
             .ok_or(EnsureReachableAllError::Repository(
@@ -314,12 +369,12 @@ impl AppFacade {
 
     /// 对单个 peer 触发一次 `ensure_reachable`。供 desktop keepalive 调度
     /// 器在退避到期时按需拨号。Thin wrapper over
-    /// [`SpaceSetupFacade::ensure_reachable_one`].
+    /// [`SpaceFacade::ensure_reachable_one`].
     pub async fn ensure_reachable_one(
         &self,
         device: &DeviceId,
     ) -> Result<ReachabilityState, PresenceError> {
-        self.space_setup
+        self.space
             .get()
             .cloned()
             .ok_or_else(|| PresenceError::Internal("space setup facade unavailable".to_string()))?
@@ -331,13 +386,13 @@ impl AppFacade {
     pub async fn issue_pairing_invitation(
         &self,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.space_setup
+        self.space_admission
             .get()
             .cloned()
             .ok_or_else(|| {
-                IssuePairingInvitationError::Internal("space setup facade unavailable".to_string())
+                IssuePairingInvitationError::Internal("space admission unavailable".to_string())
             })?
-            .issue_pairing_invitation()
+            .issue_invitation()
             .await
     }
 
@@ -346,13 +401,13 @@ impl AppFacade {
         &self,
         selected_ip: IpAddr,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.space_setup
+        self.space_admission
             .get()
             .cloned()
             .ok_or_else(|| {
-                IssuePairingInvitationError::Internal("space setup facade unavailable".to_string())
+                IssuePairingInvitationError::Internal("space admission unavailable".to_string())
             })?
-            .issue_pairing_invitation_for_address(selected_ip)
+            .issue_invitation_for_address(selected_ip)
             .await
     }
 
@@ -360,13 +415,13 @@ impl AppFacade {
     pub async fn list_pairing_invitation_addresses(
         &self,
     ) -> Result<Vec<PairingInvitationAddressCandidate>, IssuePairingInvitationError> {
-        self.space_setup
+        self.space_admission
             .get()
             .cloned()
             .ok_or_else(|| {
-                IssuePairingInvitationError::Internal("space setup facade unavailable".to_string())
+                IssuePairingInvitationError::Internal("space admission unavailable".to_string())
             })?
-            .list_pairing_invitation_addresses()
+            .list_invitation_addresses()
             .await
     }
 
@@ -375,13 +430,13 @@ impl AppFacade {
         &self,
         input: RedeemPairingInvitationInput,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
-        self.space_setup
+        self.space_admission
             .get()
             .cloned()
             .ok_or_else(|| {
-                RedeemPairingInvitationError::Internal("space setup facade unavailable".to_string())
+                RedeemPairingInvitationError::Internal("space admission unavailable".to_string())
             })?
-            .redeem_pairing_invitation(input)
+            .redeem_invitation(input)
             .await
     }
 
@@ -391,7 +446,7 @@ impl AppFacade {
         &self,
         input: SwitchSpaceInput,
     ) -> Result<SwitchSpaceResult, SwitchSpaceError> {
-        self.space_setup
+        self.space_admission
             .get()
             .cloned()
             .ok_or_else(|| {
@@ -405,7 +460,7 @@ impl AppFacade {
     pub async fn query_migration_progress(
         &self,
     ) -> Result<MigrationProgress, QueryMigrationProgressError> {
-        self.space_setup
+        self.space
             .get()
             .cloned()
             .ok_or_else(|| {
@@ -419,13 +474,26 @@ impl AppFacade {
     pub fn subscribe_pairing_completion(
         &self,
     ) -> Result<broadcast::Receiver<PairingOutcome>, IssuePairingInvitationError> {
-        self.space_setup
+        self.space_admission
             .get()
             .cloned()
-            .map(|facade| facade.subscribe_pairing_completion())
+            .map(|admission| admission.subscribe_pairing_completion())
             .ok_or_else(|| {
-                IssuePairingInvitationError::Internal("space setup facade unavailable".to_string())
+                IssuePairingInvitationError::Internal("space admission unavailable".to_string())
             })
+    }
+
+    pub async fn cancel_invitation(&self) -> Result<(), crate::facade::CancelInvitationError> {
+        self.space_admission
+            .get()
+            .cloned()
+            .ok_or_else(|| {
+                crate::facade::CancelInvitationError::Internal(
+                    "space admission unavailable".to_string(),
+                )
+            })?
+            .cancel_invitation()
+            .await
     }
 
     /// 列出对外成员摘要。外部调用只经过 `AppFacade`,不直接依赖 roster 子 facade。
@@ -811,7 +879,10 @@ fn reachability_state_to_string(state: ReachabilityState) -> String {
 }
 
 pub struct AppFacadeParts {
-    pub space_setup: Option<Arc<SpaceSetupFacade>>,
+    pub space: Option<Arc<SpaceFacade>>,
+    pub space_session_activity: Option<SpaceSessionActivityDeps>,
+    pub space_session_access: Option<SpaceSessionAccessDeps>,
+    pub space_application: Option<SpaceApplicationHandle>,
     pub member_roster: Option<Arc<MemberRosterFacade>>,
     pub lifecycle: Arc<LifecycleFacade>,
     pub encryption: Arc<EncryptionFacade>,

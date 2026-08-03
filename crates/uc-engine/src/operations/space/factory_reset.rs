@@ -4,27 +4,16 @@ use crate::error_codes::*;
 
 use tracing::error;
 use uc_application::facade::{AppFacade, FactoryResetError};
-use uc_application::receive_reconciliation::EnsureReceiveReadyPort;
 
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 pub async fn execute_factory_reset_space(
     facade: &AppFacade,
-    receive_readiness: &dyn EnsureReceiveReadyPort,
 ) -> Result<OperationResult, EngineError> {
-    let setup = facade.space_setup.get().ok_or_else(|| {
-        EngineError::new(
-            FACTORY_RESET_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-        )
-    })?;
-    setup
-        .factory_reset()
+    facade
+        .factory_reset_space()
         .await
         .map_err(map_factory_reset_error)?;
-    receive_readiness.close_receive_gate();
-
     Ok(OperationResult::SpaceFactoryReset)
 }
 

@@ -44,7 +44,7 @@ use crate::assembly::search::build_search_coordinator;
 use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
 use crate::subsystems::history_maintenance::spawn_history_maintenance_task;
-use crate::subsystems::peer_keepalive::spawn_peer_keepalive_task;
+use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
 #[cfg(feature = "lan-compat")]
@@ -300,7 +300,10 @@ impl ProductionRuntime {
             paths,
             Arc::new(InMemoryLifecycleStatus::new()),
             AppFacadeAssemblyOptions {
-                space_setup: Some(Arc::clone(&sync_engine.facade)),
+                space: Some(Arc::clone(&sync_engine.facade)),
+                space_application: Some(sync_engine.space_application_handle()),
+                space_receive_activity: Some(Arc::clone(file_transfer_lifecycle)
+                    as Arc<dyn uc_application::receive_reconciliation::EnsureReceiveReadyPort>),
                 member_roster: Some(Arc::clone(&sync_engine.roster)),
                 clipboard_sync: Some(Arc::clone(&sync_engine.clipboard_sync)),
                 blob_transfer: Some(Arc::clone(&sync_engine.blob)),
@@ -323,7 +326,7 @@ impl ProductionRuntime {
             .map_err(|error| startup_error("pairing completion subscription", error))?;
         spawn_pairing_completion_events(pairing_outcomes, &tasks, events.clone()).await;
         spawn_history_maintenance_task(Arc::clone(&facade.clipboard_history), &tasks).await;
-        spawn_peer_keepalive_task(Arc::clone(&facade), &tasks, events.clone()).await;
+        spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
         spawn_clipboard_runtime_tasks(
             &clipboard,
             Arc::clone(&sync_engine.clipboard_sync),
@@ -382,17 +385,6 @@ impl ProductionRuntime {
             .await
             .as_ref()
             .map(|session| Arc::clone(&session.sync_engine.active_clipboard))
-            .ok_or_else(operation_unavailable_error)
-    }
-
-    async fn current_membership_gossip(
-        &self,
-    ) -> Result<Arc<uc_application::facade::SpaceMembershipGossip>, EngineError> {
-        self.session
-            .lock()
-            .await
-            .as_ref()
-            .map(|session| Arc::clone(&session.sync_engine.membership_gossip))
             .ok_or_else(operation_unavailable_error)
     }
 

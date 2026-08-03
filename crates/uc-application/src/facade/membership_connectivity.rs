@@ -1,0 +1,266 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio::sync::broadcast;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
+use uc_core::ids::DeviceId;
+use uc_core::ports::{
+    PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort, ReachabilityState,
+};
+
+const BASE_INTERVAL: Duration = Duration::from_secs(25);
+const BACKOFF_LADDER: [Duration; 3] = [
+    BASE_INTERVAL,
+    Duration::from_secs(60),
+    Duration::from_secs(5 * 60),
+];
+const SLEEP_AFTER_FAILURES: u32 = 3;
+const SLEEP_FALLBACK_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+pub struct MembershipConnectivityDeps {
+    pub peer_addresses: Arc<dyn PeerAddressRepositoryPort>,
+    pub presence: Arc<dyn PresencePort>,
+    pub local_device_id: DeviceId,
+}
+
+pub struct MembershipConnectivityRuntime {
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BackoffState {
+    Active {
+        consecutive_failures: u32,
+        next_dial_at: Instant,
+    },
+    Sleeping,
+}
+
+impl BackoffState {
+    fn ready_now(now: Instant) -> Self {
+        Self::Active {
+            consecutive_failures: 0,
+            next_dial_at: now,
+        }
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        match self {
+            Self::Active { next_dial_at, .. } => now >= *next_dial_at,
+            Self::Sleeping => false,
+        }
+    }
+
+    fn is_sleeping(&self) -> bool {
+        matches!(self, Self::Sleeping)
+    }
+
+    fn on_success(&mut self, now: Instant) {
+        *self = Self::Active {
+            consecutive_failures: 0,
+            next_dial_at: now + BACKOFF_LADDER[0],
+        };
+    }
+
+    fn on_failure(&mut self, now: Instant) {
+        if let Self::Active {
+            consecutive_failures,
+            ..
+        } = self
+        {
+            let failures = consecutive_failures.saturating_add(1);
+            if failures >= SLEEP_AFTER_FAILURES {
+                *self = Self::Sleeping;
+            } else {
+                *self = Self::Active {
+                    consecutive_failures: failures,
+                    next_dial_at: now + BACKOFF_LADDER[failures as usize],
+                };
+            }
+        }
+    }
+}
+
+struct MembershipConnectivity {
+    deps: MembershipConnectivityDeps,
+}
+
+impl MembershipConnectivity {
+    async fn run(
+        self,
+        mut presence_events: broadcast::Receiver<PresenceEvent>,
+        cancel: CancellationToken,
+    ) {
+        let mut ticker = tokio::time::interval(BASE_INTERVAL);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        ticker.tick().await;
+        let mut fallback_ticker = tokio::time::interval(SLEEP_FALLBACK_INTERVAL);
+        fallback_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        fallback_ticker.tick().await;
+        let mut backoff = HashMap::new();
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                event = presence_events.recv() => match event {
+                    Ok(event) if event.state == ReachabilityState::Online => {
+                        let now = Instant::now();
+                        backoff
+                            .entry(event.device_id.as_str().to_string())
+                            .or_insert_with(|| BackoffState::ready_now(now))
+                            .on_success(now);
+                        let _ = self.deps.presence.ensure_reachable(&event.device_id).await;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                _ = ticker.tick() => {
+                    if !self.dial_due_peers(&mut backoff, false, &cancel).await {
+                        break;
+                    }
+                }
+                _ = fallback_ticker.tick() => {
+                    if !self.dial_due_peers(&mut backoff, true, &cancel).await {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn dial_due_peers(
+        &self,
+        backoff: &mut HashMap<String, BackoffState>,
+        sleeping_only: bool,
+        cancel: &CancellationToken,
+    ) -> bool {
+        let Ok(records) = self.deps.peer_addresses.list().await else {
+            warn!("failed to list paired peers for membership connectivity");
+            return true;
+        };
+        let peers = records
+            .into_iter()
+            .map(|record| record.device_id)
+            .filter(|device| device != &self.deps.local_device_id)
+            .collect::<Vec<_>>();
+        let paired = peers
+            .iter()
+            .map(|device| device.as_str().to_string())
+            .collect::<HashSet<_>>();
+        backoff.retain(|device, _| paired.contains(device));
+
+        let now = Instant::now();
+        let due = peers
+            .into_iter()
+            .filter(|device| {
+                let state = backoff
+                    .entry(device.as_str().to_string())
+                    .or_insert_with(|| BackoffState::ready_now(now));
+                if sleeping_only {
+                    state.is_sleeping()
+                } else {
+                    state.ready(now)
+                }
+            })
+            .collect::<Vec<_>>();
+        self.dispatch_dials(due, backoff, cancel).await
+    }
+
+    async fn dispatch_dials(
+        &self,
+        devices: Vec<DeviceId>,
+        backoff: &mut HashMap<String, BackoffState>,
+        cancel: &CancellationToken,
+    ) -> bool {
+        let mut dials: JoinSet<(DeviceId, Result<ReachabilityState, PresenceError>)> =
+            JoinSet::new();
+        for device in devices {
+            let presence = Arc::clone(&self.deps.presence);
+            dials.spawn(async move {
+                let result = presence.ensure_reachable(&device).await;
+                (device, result)
+            });
+        }
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    dials.abort_all();
+                    while dials.join_next().await.is_some() {}
+                    return false;
+                }
+                joined = dials.join_next() => {
+                    let Some(joined) = joined else { return true; };
+                    match joined {
+                        Ok((device, Ok(ReachabilityState::Online))) => {
+                            if let Some(state) = backoff.get_mut(device.as_str()) {
+                                state.on_success(Instant::now());
+                            }
+                        }
+                        Ok((device, _)) => {
+                            if let Some(state) = backoff.get_mut(device.as_str()) {
+                                state.on_failure(Instant::now());
+                            }
+                        }
+                        Err(_) => warn!("membership connectivity dial task failed"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn start_membership_connectivity(
+    deps: MembershipConnectivityDeps,
+    presence_events: broadcast::Receiver<PresenceEvent>,
+) -> MembershipConnectivityRuntime {
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        info!("membership connectivity started");
+        MembershipConnectivity { deps }
+            .run(presence_events, task_cancel)
+            .await;
+        debug!("membership connectivity stopped");
+    });
+    MembershipConnectivityRuntime { cancel, task }
+}
+
+impl MembershipConnectivityRuntime {
+    pub async fn shutdown(self) {
+        self.cancel.cancel();
+        let _ = self.task.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failures_walk_the_ladder_then_sleep() {
+        let now = Instant::now();
+        let mut state = BackoffState::ready_now(now);
+        state.on_failure(now);
+        assert!(!state.ready(now + Duration::from_secs(59)));
+        assert!(state.ready(now + Duration::from_secs(60)));
+        state.on_failure(now);
+        assert!(state.ready(now + Duration::from_secs(5 * 60)));
+        state.on_failure(now);
+        assert!(state.is_sleeping());
+    }
+
+    #[test]
+    fn sleeping_failure_keeps_the_peer_asleep() {
+        let mut state = BackoffState::Sleeping;
+        state.on_failure(Instant::now());
+        assert!(state.is_sleeping());
+    }
+}

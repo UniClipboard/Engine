@@ -5,17 +5,14 @@
 
 use crate::error_codes::*;
 
+use crate::{CreateSpaceInput, EngineError, EngineErrorCategory, OperationResult};
 use tracing::error;
 use uc_application::facade::{
     AppFacade, InitializeSpaceError, InitializeSpaceInput as AppInitializeSpaceInput,
 };
-use uc_application::receive_reconciliation::EnsureReceiveReadyPort;
-
-use crate::{CreateSpaceInput, EngineError, EngineErrorCategory, OperationResult};
 
 pub async fn execute_create_space(
     facade: &AppFacade,
-    receive_readiness: &dyn EnsureReceiveReadyPort,
     input: CreateSpaceInput,
 ) -> Result<OperationResult, EngineError> {
     let result = facade
@@ -26,18 +23,6 @@ pub async fn execute_create_space(
         })
         .await
         .map_err(map_create_space_error)?;
-
-    receive_readiness
-        .ensure_receive_ready()
-        .await
-        .map_err(|error| {
-            error!(error = %error, "receive recovery failed after space creation");
-            EngineError::new(
-                CREATE_SPACE_FAILED_CODE,
-                EngineErrorCategory::Unavailable,
-                true,
-            )
-        })?;
 
     Ok(OperationResult::SpaceCreated {
         space_id: result.space_id.as_ref().to_string(),

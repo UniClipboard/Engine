@@ -151,7 +151,7 @@ impl From<RedeemPairingInvitationInput> for RedeemPairingInvitationCommand {
 // ---------------------------------------------------------------------------
 
 /// Read-only view of setup state surfaced by
-/// [`crate::facade::space_setup::SpaceSetupFacade::query_setup_state`].
+/// [`crate::facade::space_setup::SpaceFacade::query_setup_state`].
 ///
 /// Replaces the legacy stateful FSM snapshot exposed via
 /// `SetupFacade::get_state`. The new shape carries only what the

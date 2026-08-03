@@ -60,7 +60,7 @@ pub struct BackgroundRuntimeDeps {
 
 /// P2P / iroh sync-engine assembly inputs. Sole consumer:
 /// The internal sync-engine assembly consumes these ports and paths. They never
-/// flow through `AppDeps` — the `SpaceSetupFacade` they assemble lives in
+/// flow through `AppDeps` — the `SpaceFacade` they assemble lives in
 /// uc-application and is injected by this bundle at wire time, not by the
 /// AppFacade path.
 #[derive(Clone)]

@@ -7,9 +7,9 @@
 //!
 //! Per `uc-application/AGENTS.md` §11.4 everything here is `pub(crate)`;
 //! external callers reach joiner pairing exclusively through
-//! [`SpaceSetupFacade::redeem_pairing_invitation`].
+//! [`SpaceFacade::redeem_pairing_invitation`].
 //!
-//! [`SpaceSetupFacade::redeem_pairing_invitation`]:
-//!     crate::facade::space_setup::SpaceSetupFacade::redeem_pairing_invitation
+//! [`SpaceFacade::redeem_pairing_invitation`]:
+//!     crate::facade::space_setup::SpaceFacade::redeem_pairing_invitation
 
 pub(crate) mod joiner_handshake;

@@ -23,7 +23,7 @@
 //! not leak ahead of the local state it should have already committed.
 //!
 //! Per `uc-application/AGENTS.md` §11.4 everything here is `pub(crate)`;
-//! the facade constructs the orchestrator during `SpaceSetupFacade::new`
+//! the facade constructs the orchestrator during `SpaceFacade::new`
 //! and external callers reach pairing exclusively through that facade.
 
 use std::collections::HashMap;

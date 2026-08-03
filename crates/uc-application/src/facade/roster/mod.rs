@@ -4,7 +4,7 @@
 //! (online / offline / unknown)和本机标记 (`is_local`)。是个典型的 thin
 //! facade——不主动拨号、不管 rename / revoke、不做跨 use case 编排。主动
 //! 拨号由 T6 `EnsureReachableAllUseCase` 负责,在
-//! `SpaceSetupFacade::auto_start_network` (T8) 成功后一次性触发。
+//! `SpaceFacade::auto_start_network` (T8) 成功后一次性触发。
 //!
 //! ## 为什么 `list_with_presence` 不拨号
 //!

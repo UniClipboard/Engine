@@ -5,17 +5,14 @@
 
 use crate::error_codes::*;
 
+use crate::{EngineError, EngineErrorCategory, OperationResult, UnlockSpaceInput};
 use tracing::error;
 use uc_application::facade::{
     AppFacade, UnlockSpaceError, UnlockSpaceInput as AppUnlockSpaceInput,
 };
-use uc_application::receive_reconciliation::EnsureReceiveReadyPort;
-
-use crate::{EngineError, EngineErrorCategory, OperationResult, UnlockSpaceInput};
 
 pub async fn execute_unlock_space(
     facade: &AppFacade,
-    receive_readiness: &dyn EnsureReceiveReadyPort,
     input: UnlockSpaceInput,
 ) -> Result<OperationResult, EngineError> {
     let result = facade
@@ -24,18 +21,6 @@ pub async fn execute_unlock_space(
         })
         .await
         .map_err(map_unlock_space_error)?;
-    facade.search.on_session_ready().await;
-    receive_readiness
-        .ensure_receive_ready()
-        .await
-        .map_err(|error| {
-            error!(error = %error, "receive recovery failed after space unlock");
-            EngineError::new(
-                UNLOCK_SPACE_FAILED_CODE,
-                EngineErrorCategory::Unavailable,
-                true,
-            )
-        })?;
 
     Ok(OperationResult::SpaceUnlocked {
         space_id: result.space_id.as_ref().to_string(),

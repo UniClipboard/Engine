@@ -11,7 +11,7 @@ use uc_application::deps::AppDeps;
 use uc_application::facade::settings::{
     RelayAccessToken, RelayCredentials, RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
 };
-use uc_application::facade::space_setup::SpaceSetupFacade;
+use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
 use uc_application::facade::{
     ActiveClipboardFacade, IncomingMobileBuffer, MobileSyncFacade, MobileSyncFacadeDeps,
@@ -210,7 +210,10 @@ pub fn build_mobile_sync_facade(
 /// 手写一份相同的子 facade 拼装。
 #[derive(Default)]
 pub struct AppFacadeAssemblyOptions {
-    pub space_setup: Option<Arc<SpaceSetupFacade>>,
+    pub space: Option<Arc<SpaceFacade>>,
+    pub space_application: Option<uc_application::facade::SpaceApplicationHandle>,
+    pub space_receive_activity:
+        Option<Arc<dyn uc_application::receive_reconciliation::EnsureReceiveReadyPort>>,
     pub member_roster: Option<Arc<MemberRosterFacade>>,
     pub clipboard_sync: Option<Arc<ClipboardSyncFacade>>,
     pub blob_transfer: Option<Arc<BlobTransferFacade>>,
@@ -263,24 +266,41 @@ pub fn build_app_facade_from_deps(
         }))
     });
 
+    let space_session_activity = match (
+        options.space_application.as_ref(),
+        options.space_receive_activity,
+    ) {
+        (Some(application), Some(receive)) => {
+            Some(uc_application::facade::SpaceSessionActivityDeps {
+                membership: application.membership_activity(),
+                receive,
+            })
+        }
+        _ => None,
+    };
+
     Arc::new(AppFacade::new(AppFacadeParts {
-        space_setup: options.space_setup,
+        space: options.space,
+        space_session_activity,
+        space_session_access: Some(uc_application::facade::SpaceSessionAccessDeps {
+            setup_status: Arc::clone(&deps.setup_status),
+            resume_session: Arc::clone(&deps.security.space_access_ports.resume_session),
+            lock: Arc::clone(&deps.security.space_access_ports.lock),
+            mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
+        }),
+        space_application: options.space_application,
         member_roster: options.member_roster,
         lifecycle: Arc::new(LifecycleFacade::new(LifecycleFacadeDeps {
             status: lifecycle_status,
         })),
         encryption: Arc::new(EncryptionFacade::new(EncryptionFacadeDeps {
             setup_status: deps.setup_status.clone(),
-            initialize: deps.security.space_access_ports.initialize.clone(),
-            resume_session: deps.security.space_access_ports.resume_session.clone(),
             is_unlocked: deps.security.space_access_ports.is_unlocked.clone(),
-            lock: deps.security.space_access_ports.lock.clone(),
             verify_keychain_access: deps
                 .security
                 .space_access_ports
                 .verify_keychain_access
                 .clone(),
-            mobile_consumable_backfill: deps.clipboard.mobile_consumable_backfill.clone(),
         })),
         resource: Arc::new(ResourceFacade::new(ResourceFacadeDeps {
             representation_by_blob_id: deps.clipboard.representation_ports.get_by_blob_id.clone(),

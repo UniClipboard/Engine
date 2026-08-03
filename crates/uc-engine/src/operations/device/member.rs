@@ -7,8 +7,8 @@ use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, LegacyBootstrapState,
     LegacyBootstrapView, MemberProtectionStatusView, MemberRevocationState, MemberRevocationView,
     MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    MembershipConvergenceState, RosterError, SpaceMembershipGossip, SpaceMembershipGossipError,
-    SpaceProtectionModeView, SpaceProtectionView,
+    MembershipConvergenceFacadeError, MembershipConvergenceState, RosterError,
+    SpaceMembershipGossipError, SpaceProtectionModeView, SpaceProtectionView,
 };
 use uc_core::ports::ReachabilityState;
 
@@ -52,12 +52,19 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
 }
 
 pub async fn execute_query_membership_convergence(
-    gossip: &SpaceMembershipGossip,
+    facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let status = gossip
-        .current_convergence_status()
+    let status = facade
+        .membership_convergence()
         .await
-        .map_err(map_membership_convergence_error)?;
+        .map_err(|error| match error {
+            MembershipConvergenceFacadeError::Unavailable => {
+                EngineError::new(1103, EngineErrorCategory::Unavailable, false)
+            }
+            MembershipConvergenceFacadeError::Query(error) => {
+                map_membership_convergence_error(error)
+            }
+        })?;
     Ok(OperationResult::MembershipConvergence(
         MembershipConvergenceSummary {
             state: match status.state {

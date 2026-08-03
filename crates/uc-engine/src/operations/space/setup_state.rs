@@ -10,14 +10,7 @@ use crate::{
 };
 
 pub async fn execute_query_setup_state(facade: &AppFacade) -> Result<OperationResult, EngineError> {
-    let setup = facade.space_setup.get().ok_or_else(|| {
-        EngineError::new(
-            QUERY_SETUP_STATE_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-        )
-    })?;
-    let state = setup
+    let state = facade
         .query_setup_state()
         .await
         .map_err(|error| match error {

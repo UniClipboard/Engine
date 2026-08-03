@@ -8,14 +8,7 @@ use uc_application::facade::{AppFacade, CancelInvitationError};
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 pub async fn execute_cancel_invitation(facade: &AppFacade) -> Result<OperationResult, EngineError> {
-    let setup = facade.space_setup.get().ok_or_else(|| {
-        EngineError::new(
-            CANCEL_INVITATION_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-        )
-    })?;
-    setup
+    facade
         .cancel_invitation()
         .await
         .map_err(|error| match error {

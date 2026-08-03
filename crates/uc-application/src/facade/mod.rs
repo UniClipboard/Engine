@@ -24,6 +24,7 @@ pub mod file_transfer;
 pub mod host_event;
 pub mod legacy_upgrade;
 pub mod lifecycle;
+mod membership_connectivity;
 pub mod membership_gossip;
 #[cfg(feature = "lan-compat")]
 pub mod mobile_sync;
@@ -32,6 +33,9 @@ pub mod roster;
 pub mod search;
 pub mod settings;
 pub mod setup_status;
+mod space_admission;
+mod space_runtime;
+mod space_session;
 pub mod space_setup;
 pub mod storage;
 pub mod upgrade;
@@ -44,7 +48,7 @@ pub use active_clipboard::{
 };
 pub use app_facade::{
     AppFacade, AppFacadeParts, AppPresenceEvent, AppPresenceSubscription,
-    AppPresenceSubscriptionError, DaemonLifecycleFacades,
+    AppPresenceSubscriptionError,
 };
 pub use app_paths::AppPaths;
 pub use blob_transfer::{
@@ -120,11 +124,14 @@ pub use lifecycle::{
     InMemoryLifecycleStatus, LifecycleFacade, LifecycleFacadeDeps, LifecycleFacadeError,
     LifecycleStateView, LifecycleStatusGateway,
 };
+pub use membership_connectivity::{
+    start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
+};
 pub use membership_gossip::{
-    MembershipConvergenceState, MembershipConvergenceStatus, MembershipGossipPassOutcome,
-    MembershipGossipRuntimeError, PairingMembershipGossipPort, SpaceMembershipGossip,
-    SpaceMembershipGossipDeps, SpaceMembershipGossipError, SpaceMembershipGossipRuntime,
-    SponsorSeedBatchContext,
+    build_space_membership_gossip, MembershipConvergenceState, MembershipConvergenceStatus,
+    MembershipGossipPassOutcome, MembershipGossipRuntimeError, PairingMembershipGossipPort,
+    SpaceMembershipGossip, SpaceMembershipGossipActivity, SpaceMembershipGossipDeps,
+    SpaceMembershipGossipError, SpaceMembershipGossipRuntime, SponsorSeedBatchContext,
 };
 #[cfg(feature = "lan-compat")]
 pub use mobile_sync::mobile_sync_streaming_scope_nonce;
@@ -174,13 +181,22 @@ pub use settings::{
     SyncFrequencyView, SyncSettingsPatch, SyncSettingsView, ThemeView, UpdateChannelView,
 };
 pub use setup_status::SetupStatusFacade;
+pub use space_admission::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
+pub use space_runtime::{
+    MembershipConvergenceFacadeError, SpaceApplicationHandle, SpaceApplicationRuntime,
+};
+pub use space_session::{
+    RecoverSpaceSessionResult, SpaceActivityError, SpaceSessionAccessDeps,
+    SpaceSessionActivityDeps, SpaceSessionError,
+};
 pub use space_setup::{
     CancelInvitationError, CurrentInvitation, FactoryResetError, InitializeSpaceError,
     InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
     IssuePairingInvitationResult, PairingFailureReason, PairingInvitationAddressCandidate,
     PairingOutcome, QuerySetupStateError, RedeemPairingInvitationError,
     RedeemPairingInvitationInput, RedeemPairingInvitationResult, ResetSpaceError, SetupStateView,
-    SpaceSetupDeps, SpaceSetupFacade, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
+    UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use storage::{
     ClearCacheResultView, StorageFacade, StorageFacadeDeps, StorageFacadeError, StorageStatsView,

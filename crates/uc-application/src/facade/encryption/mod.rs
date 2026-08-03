@@ -1,15 +1,9 @@
 use std::sync::Arc;
 
 use tracing::instrument;
-use uc_core::crypto::model::Passphrase;
 use uc_core::ids::SpaceId;
 use uc_core::ports::setup::SetupStatusPort;
-use uc_core::ports::space::{
-    InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, ResumeSpaceSessionPort,
-    SpaceAccessError, VerifyKeychainAccessPort,
-};
-
-use crate::clipboard_write::MobileConsumableBackfill;
+use uc_core::ports::space::{IsSpaceUnlockedPort, SpaceAccessError, VerifyKeychainAccessPort};
 
 const DEFAULT_SPACE_ID: &str = "space";
 
@@ -18,12 +12,8 @@ const DEFAULT_SPACE_ID: &str = "space";
 #[derive(Clone)]
 pub struct EncryptionFacadeDeps {
     pub setup_status: Arc<dyn SetupStatusPort>,
-    pub initialize: Arc<dyn InitializeSpacePort>,
-    pub resume_session: Arc<dyn ResumeSpaceSessionPort>,
     pub is_unlocked: Arc<dyn IsSpaceUnlockedPort>,
-    pub lock: Arc<dyn LockSpacePort>,
     pub verify_keychain_access: Arc<dyn VerifyKeychainAccessPort>,
-    pub mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +28,6 @@ pub enum EncryptionFacadeError {
     SetupStatus(String),
     #[error("space access failed: {0}")]
     SpaceAccess(String),
-    #[error("encryption is already initialized")]
-    AlreadyInitialized,
 }
 
 pub struct EncryptionFacade {
@@ -69,68 +57,6 @@ impl EncryptionFacade {
             initialized,
             session_ready,
         })
-    }
-
-    /// 首次初始化加密空间 —— 创建本地 space + 解锁 + 标记 setup 完成。
-    ///
-    /// 三步合并为单一原子动作:
-    /// 1. `space_access.initialize` 用 passphrase 创建本地空间并解锁会话
-    /// 2. `setup_status.set_status(has_completed=true)` 标记本设备已完成 setup
-    ///
-    /// 第 1 步失败立即返回错误,不写 setup_status。
-    #[instrument(skip_all)]
-    pub async fn initialize(&self, passphrase: Passphrase) -> Result<(), EncryptionFacadeError> {
-        let space_id = default_space_id();
-        let domain_passphrase = uc_core::crypto::domain::Passphrase::new(passphrase.0);
-
-        self.deps
-            .initialize
-            .initialize(&space_id, &domain_passphrase)
-            .await
-            .map_err(|err| match err {
-                SpaceAccessError::AlreadyInitialized => EncryptionFacadeError::AlreadyInitialized,
-                other => space_access_error(other),
-            })?;
-
-        let mut status = self
-            .deps
-            .setup_status
-            .get_status()
-            .await
-            .map_err(|err| EncryptionFacadeError::SetupStatus(err.to_string()))?;
-        status.has_completed = true;
-        self.deps
-            .setup_status
-            .set_status(&status)
-            .await
-            .map_err(|err| EncryptionFacadeError::SetupStatus(err.to_string()))?;
-
-        Ok(())
-    }
-
-    #[instrument(skip_all)]
-    pub async fn unlock(&self) -> Result<bool, EncryptionFacadeError> {
-        let (_, space_id) = self.setup_state().await?;
-        match self.deps.resume_session.try_resume_session(&space_id).await {
-            Ok(Some(_)) => {
-                self.deps
-                    .mobile_consumable_backfill
-                    .backfill_best_effort()
-                    .await;
-                Ok(true)
-            }
-            Ok(None) => Ok(false),
-            Err(err) => Err(space_access_error(err)),
-        }
-    }
-
-    #[instrument(skip_all)]
-    pub async fn lock(&self) -> Result<(), EncryptionFacadeError> {
-        self.deps
-            .lock
-            .lock(&default_space_id())
-            .await
-            .map_err(space_access_error)
     }
 
     #[instrument(skip_all)]
@@ -171,6 +97,7 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Mutex;
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
+    use uc_core::ports::space::{InitializeSpacePort, LockSpacePort, ResumeSpaceSessionPort};
     use uc_core::setup::SetupStatus;
 
     use crate::test_support::CountingMobileConsumableBackfill;
@@ -296,12 +223,8 @@ mod tests {
         (
             EncryptionFacade::new(EncryptionFacadeDeps {
                 setup_status,
-                initialize: space_access.clone(),
-                resume_session: space_access.clone(),
                 is_unlocked: space_access.clone(),
-                lock: space_access.clone(),
                 verify_keychain_access: space_access.clone(),
-                mobile_consumable_backfill: backfill.clone(),
             }),
             space_access,
             backfill,
@@ -346,41 +269,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unlock_returns_whether_session_was_resumed() {
-        let (resumed, _, resumed_backfill) = facade_with(true, false, true, false);
-        let (not_resumed, _, not_resumed_backfill) = facade_with(true, false, false, false);
-
-        assert!(resumed.unlock().await.expect("resumed"));
-        assert!(!not_resumed.unlock().await.expect("not resumed"));
-        assert_eq!(resumed_backfill.calls(), 1);
-        assert_eq!(not_resumed_backfill.calls(), 0);
-    }
-
-    #[tokio::test]
-    async fn unlock_resumes_the_canonical_setup_space() {
-        let (facade, space_access, _) = facade_with(true, false, true, false);
-
-        assert!(facade.unlock().await.expect("resume canonical space"));
-        assert_eq!(
-            *space_access
-                .resume_space_ids
-                .lock()
-                .expect("resume space ids lock"),
-            vec![SpaceId::from("canonical-space")]
-        );
-    }
-
-    #[tokio::test]
-    async fn lock_clears_session() {
-        let (facade, space_access, _) = facade_with(true, true, false, false);
-
-        facade.lock().await.expect("lock");
-
-        assert!(!*space_access.unlocked.lock().expect("unlocked lock"));
-        assert_eq!(*space_access.lock_calls.lock().expect("lock calls lock"), 1);
-    }
-
-    #[tokio::test]
     async fn verify_keychain_access_returns_grant_state() {
         let (facade, _, _) = facade_with(true, false, false, true);
 
@@ -388,39 +276,5 @@ mod tests {
             .verify_keychain_access()
             .await
             .expect("verify keychain"));
-    }
-
-    #[tokio::test]
-    async fn initialize_creates_space_and_marks_setup_complete() {
-        use uc_core::crypto::model::Passphrase as ModelPassphrase;
-
-        let (facade, space_access, _) = facade_with(false, false, false, false);
-
-        facade
-            .initialize(ModelPassphrase("hunter2".to_string()))
-            .await
-            .expect("initialize");
-
-        assert_eq!(*space_access.init_calls.lock().expect("init calls"), 1);
-        let state = facade.state().await.expect("state");
-        assert!(state.initialized);
-    }
-
-    #[tokio::test]
-    async fn initialize_maps_already_initialized_error() {
-        use uc_core::crypto::model::Passphrase as ModelPassphrase;
-
-        let (facade, space_access, _) = facade_with(false, false, false, false);
-        *space_access.init_already_initialized.lock().expect("flag") = true;
-
-        let err = facade
-            .initialize(ModelPassphrase("hunter2".to_string()))
-            .await
-            .expect_err("initialize should fail");
-
-        assert!(matches!(err, EncryptionFacadeError::AlreadyInitialized));
-        // setup_status must remain unchanged when initialization aborts.
-        let state = facade.state().await.expect("state");
-        assert!(!state.initialized);
     }
 }

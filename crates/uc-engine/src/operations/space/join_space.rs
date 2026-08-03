@@ -1,101 +1,44 @@
-//! Shared join-space and switch-space implementation.
-//!
-//! The daemon uses the explicit modes while it migrates to `Engine`; the
-//! stable operation uses automatic routing based on persisted setup state.
+//! Shared join-space implementation.
 
 use crate::error_codes::*;
 
 use tracing::error;
-use uc_application::facade::space_setup::{SwitchSpaceError, SwitchSpaceInput, SwitchSpaceResult};
+use uc_application::facade::space_setup::{SwitchSpaceError, SwitchSpaceResult};
 use uc_application::facade::{
-    AppFacade, RedeemPairingInvitationError, RedeemPairingInvitationInput,
+    AppFacade, JoinSpaceError as AppJoinSpaceError, JoinSpaceInput as AppJoinSpaceInput,
+    JoinSpaceResult as AppJoinSpaceResult, RedeemPairingInvitationError,
     RedeemPairingInvitationResult,
 };
-use uc_application::receive_reconciliation::EnsureReceiveReadyPort;
 
 use crate::{EngineError, EngineErrorCategory, JoinSpaceInput, OperationResult};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JoinSpaceMode {
-    Automatic,
-    Fresh,
-    Switch,
-}
-
 pub async fn execute_join_space(
     facade: &AppFacade,
-    receive_readiness: &dyn EnsureReceiveReadyPort,
     input: JoinSpaceInput,
-    mode: JoinSpaceMode,
 ) -> Result<OperationResult, EngineError> {
-    if let Some(device_name) = input.device_name {
-        let device_name = device_name.trim().to_owned();
-        if device_name.is_empty() {
-            return Err(device_name_required_error());
-        }
-        facade
-            .set_device_name(device_name)
-            .await
-            .map_err(|error| join_internal_error("save join device name", error))?;
-    }
-
-    let mode = match mode {
-        JoinSpaceMode::Automatic => {
-            let setup = facade
-                .query_setup_state()
-                .await
-                .map_err(|error| join_internal_error("route join operation", error))?;
-            if setup.has_completed {
-                JoinSpaceMode::Switch
-            } else {
-                JoinSpaceMode::Fresh
-            }
-        }
-        explicit => explicit,
-    };
-
-    let result = match mode {
-        JoinSpaceMode::Fresh => {
-            let result = facade
-                .redeem_pairing_invitation(RedeemPairingInvitationInput {
-                    code: input.invitation_code,
-                    passphrase: input.passphrase.expose().to_owned(),
-                })
-                .await
-                .map_err(map_fresh_join_error)?;
-            fresh_join_result(result)
-        }
-        JoinSpaceMode::Switch => {
-            let result = facade
-                .switch_space(SwitchSpaceInput {
-                    code: input.invitation_code,
-                    new_passphrase: input.passphrase.expose().to_owned(),
-                })
-                .await
-                .map_err(map_switch_space_error)?;
-            switch_join_result(result)
-        }
-        JoinSpaceMode::Automatic => {
-            return Err(error_with(
-                JOIN_SPACE_FAILED_CODE,
-                EngineErrorCategory::Internal,
-                false,
-            ));
-        }
-    };
-
-    receive_readiness
-        .ensure_receive_ready()
+    let result = facade
+        .join_space(AppJoinSpaceInput {
+            invitation_code: input.invitation_code,
+            device_name: input.device_name,
+            passphrase: input.passphrase.expose().to_owned(),
+        })
         .await
-        .map_err(|error| {
-            error!(error = %error, "receive recovery failed after joining space");
-            EngineError::new(
-                JOIN_SPACE_FAILED_CODE,
-                EngineErrorCategory::Unavailable,
-                true,
-            )
-        })?;
-    Ok(result)
+        .map_err(map_join_space_error)?;
+    Ok(match result {
+        AppJoinSpaceResult::Fresh(result) => fresh_join_result(result),
+        AppJoinSpaceResult::Switched(result) => switch_join_result(result),
+    })
+}
+
+fn map_join_space_error(error: AppJoinSpaceError) -> EngineError {
+    match error {
+        AppJoinSpaceError::DeviceNameRequired => device_name_required_error(),
+        AppJoinSpaceError::Fresh(error) => map_fresh_join_error(error),
+        AppJoinSpaceError::Switch(error) => map_switch_space_error(error),
+        AppJoinSpaceError::Settings(_)
+        | AppJoinSpaceError::Setup(_)
+        | AppJoinSpaceError::Activity(_) => join_internal_error("join space", error),
+    }
 }
 
 fn fresh_join_result(result: RedeemPairingInvitationResult) -> OperationResult {

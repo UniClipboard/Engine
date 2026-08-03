@@ -1,10 +1,10 @@
-//! Slice 1 composition root for [`SpaceSetupFacade`].
+//! Slice 1 composition root for [`SpaceFacade`].
 //!
 //! Assembles the pairing stack (rendezvous client + iroh session adapter +
 //! identity store + proof verifier) plus the pre-existing persistence /
 //! identity ports from [`WiredDependencies`] into a single
 //! [`SyncEngineAssembly`] that external callers (Tauri commands, CLI, daemon)
-//! can drive through `Arc<SpaceSetupFacade>`.
+//! can drive through `Arc<SpaceFacade>`.
 //!
 //! Everything iroh-specific stays inside
 //! [`uc_infra::network::iroh::IrohNode`] so this module depends only on
@@ -46,13 +46,15 @@ const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 use uc_application::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::clipboard_write::ClipboardWriteIntent;
 use uc_application::facade::{
-    build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
+    build_active_clipboard_pull_serve_port, build_space_membership_gossip,
+    start_membership_connectivity, ActiveClipboardDeps, ActiveClipboardFacade,
     ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, AutomaticLegacyUpgradeRuntime,
     BlobTransferDeps, BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort,
     ClipboardLiveIndexer, ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent,
     HostEventBus, InboundClipboardApplyPort, IngestHandle, MemberRosterDeps, MemberRosterFacade,
-    SpaceMembershipGossip, SpaceMembershipGossipDeps, SpaceMembershipGossipRuntime, SpaceSetupDeps,
-    SpaceSetupFacade, TransferHostEvent,
+    MembershipConnectivityDeps, SpaceAdmissionDeps, SpaceApplicationRuntime, SpaceFacade,
+    SpaceFacadeDeps, SpaceMembershipGossipDeps, SpaceSessionDeps, SpaceTransitionDeps,
+    TransferHostEvent,
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_application::{
@@ -108,7 +110,7 @@ impl uc_core::ports::FindMobileDeviceByIdPort for UnavailableMobileDeviceLookup 
 /// user-facing commands through [`Self::facade`] / [`Self::roster`] and
 /// run [`Self::shutdown`] once on exit.
 pub struct SyncEngineAssembly {
-    pub facade: Arc<SpaceSetupFacade>,
+    pub facade: Arc<SpaceFacade>,
     /// Slice 2 Phase 1 · T9:roster 查询门面(`list_with_presence` +
     /// `subscribe_presence_events`)。CLI `members` 命令从这里拿状态,
     /// tauri `get_roster` 将来也走同一条。共享同一个 `peer_addr_repo` /
@@ -166,8 +168,7 @@ pub struct SyncEngineAssembly {
     /// become reachable. Aborted explicitly during shutdown.
     group_update_retry: JoinHandle<()>,
     automatic_legacy_upgrade: AutomaticLegacyUpgradeRuntime,
-    pub(crate) membership_gossip: Arc<SpaceMembershipGossip>,
-    membership_gossip_runtime: SpaceMembershipGossipRuntime,
+    space_application_runtime: SpaceApplicationRuntime,
 }
 
 impl SyncEngineAssembly {
@@ -193,21 +194,15 @@ impl SyncEngineAssembly {
         }
     }
 
-    pub(crate) async fn pause_membership_gossip(
+    pub(crate) fn space_application_handle(
         &self,
-    ) -> Result<(), uc_application::facade::MembershipGossipRuntimeError> {
-        self.membership_gossip_runtime.pause().await
-    }
-
-    pub(crate) async fn resume_membership_gossip(
-        &self,
-    ) -> Result<(), uc_application::facade::MembershipGossipRuntimeError> {
-        self.membership_gossip_runtime.resume().await
+    ) -> uc_application::facade::SpaceApplicationHandle {
+        self.space_application_runtime.handle()
     }
 
     /// Coordinated teardown. Order matters:
     ///
-    /// 1. [`SpaceSetupFacade::on_shutdown`] aborts the sponsor-side inbound
+    /// 1. [`SpaceFacade::on_shutdown`] aborts the sponsor-side inbound
     ///    orchestrator task so the `pairing_events` receiver is dropped
     ///    before the adapter is torn down.
     /// 2. [`IrohNode::shutdown`] shuts the iroh router, which fires
@@ -224,9 +219,8 @@ impl SyncEngineAssembly {
         self.active_clipboard_lifecycle.shutdown().await;
         self.outbound_progress_translator.abort();
         self.group_update_retry.abort();
-        self.membership_gossip_runtime.shutdown().await;
+        self.space_application_runtime.shutdown().await;
         self.automatic_legacy_upgrade.shutdown().await;
-        self.facade.on_shutdown().await;
         self.iroh_node.shutdown().await;
     }
 }
@@ -438,7 +432,7 @@ pub enum SyncEngineAssemblyError {
     IrohNode(#[from] IrohNodeError),
 }
 
-/// Assemble the Slice 1 `SpaceSetupFacade` from an already-wired dependency
+/// Assemble the Slice 1 `SpaceFacade` from an already-wired dependency
 /// graph. Blocking responsibility: binds an iroh `Endpoint` and spawns its
 /// router, so must be called inside a tokio runtime.
 ///
@@ -465,7 +459,7 @@ pub async fn build_sync_engine_assembly(
     ));
 
     // Bind the shared iroh node + install the pairing transport. The
-    // returned PairingHandlers carry the trait objects SpaceSetupDeps
+    // returned PairingHandlers carry the trait objects SpaceFacadeDeps
     // wants; the iroh Router stays inside `IrohNode` so iroh types don't
     // leak out of this module.
     let mut builder = IrohNodeBuilder::bind(&identity_store, iroh_config).await?;
@@ -489,7 +483,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
     );
-    let membership_gossip = Arc::new(SpaceMembershipGossip::new(SpaceMembershipGossipDeps {
+    let membership_gossip = build_space_membership_gossip(SpaceMembershipGossipDeps {
         candidate_repo: Arc::clone(&space_setup.membership_candidate_repo),
         announcement_repo: Arc::clone(&space_setup.membership_announcement_repo),
         outbox_repo: Arc::clone(&space_setup.membership_outbox_repo),
@@ -510,7 +504,7 @@ pub async fn build_sync_engine_assembly(
         trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
         peer_address_repo: Arc::clone(&space_setup.peer_addr_repo),
         hash: Arc::clone(&deps.system.hash),
-    }));
+    });
     builder.install_membership_handler(
         &membership_attestation,
         membership_gossip.clone(),
@@ -519,7 +513,7 @@ pub async fn build_sync_engine_assembly(
     )?;
     // Slice 2 Phase 1 · T8:在同一 iroh 节点上装 presence handler。must
     // be before `builder.spawn()`(install_* 要求 router 未 spawn)。
-    // `Arc<dyn PresencePort>` 喂给 SpaceSetupDeps,facade 内部再构造
+    // `Arc<dyn PresencePort>` 喂给 SpaceFacadeDeps,facade 内部再构造
     // `EnsureReachableAllUseCase` 给 F1 hook 用。
     let presence: Arc<dyn PresencePort> = builder.install_presence(
         Arc::clone(&space_setup.peer_addr_repo),
@@ -678,41 +672,38 @@ pub async fn build_sync_engine_assembly(
 
     let local_identity: Arc<dyn LocalIdentityPort> = identity_store;
 
-    let facade = Arc::new(SpaceSetupFacade::new_with_group_delivery(
-        SpaceSetupDeps {
-            space_access: deps.security.space_access_ports.clone(),
-            local_identity: Arc::clone(&local_identity),
-            device_identity: Arc::clone(&deps.device.device_identity),
-            member_repo: Arc::clone(&deps.device.member_repo),
-            setup_status: Arc::clone(&deps.setup_status),
-            settings: Arc::clone(&deps.settings),
-            clock: Arc::clone(&deps.system.clock),
-            membership_gossip: membership_gossip.clone(),
-            mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
-            pairing_invitation: handlers.invitation,
-            pairing_invitation_addresses: handlers.invitation_addresses,
-            pairing_invitation_by_address: handlers.invitation_by_address,
-            pairing_session: handlers.session,
-            pairing_events: handlers.events,
-            proof_port,
-            trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
-            peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
-            relationship_reset: Arc::clone(&space_setup.relationship_reset),
-            presence: Arc::clone(&presence),
-            // Switch-space 4 阶段重加密迁移依赖（commit 4 接入）。`blob_cipher`
-            // 复用既有 `EncryptingClipboardEventWriter` /
-            // `DecryptingClipboardRepresentationRepository` 同款 adapter Arc，
-            // 共享 master_key session。
-            migration_state: Arc::clone(&space_setup.migration_state),
-            key_migration: Arc::clone(&space_setup.key_migration),
-            blob_migration_repo: Arc::clone(&space_setup.blob_migration_repo),
-            blob_cipher: Arc::clone(&deps.security.blob_cipher),
-            // Single facade covering both capture and identity transitions.
-            // The capture sink + identity store are composed inside the
-            // bootstrap so the application layer never wires them
-            // separately. Sink is installed once; the gate inside the
-            // wrapper handles enable/disable transitions.
-            analytics: Arc::clone(&space_setup.analytics_facade),
+    let facade = Arc::new(SpaceFacade::new_with_group_delivery(
+        SpaceFacadeDeps {
+            session: SpaceSessionDeps {
+                space_access: deps.security.space_access_ports.clone(),
+                setup_status: Arc::clone(&deps.setup_status),
+                mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
+            },
+            admission: SpaceAdmissionDeps {
+                local_identity: Arc::clone(&local_identity),
+                device_identity: Arc::clone(&deps.device.device_identity),
+                member_repo: Arc::clone(&deps.device.member_repo),
+                settings: Arc::clone(&deps.settings),
+                clock: Arc::clone(&deps.system.clock),
+                membership_gossip: membership_gossip.clone(),
+                pairing_invitation: handlers.invitation,
+                pairing_invitation_addresses: handlers.invitation_addresses,
+                pairing_invitation_by_address: handlers.invitation_by_address,
+                pairing_session: handlers.session,
+                pairing_events: handlers.events,
+                proof_port,
+                trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
+                peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
+                presence: Arc::clone(&presence),
+                analytics: Arc::clone(&space_setup.analytics_facade),
+            },
+            transition: SpaceTransitionDeps {
+                relationship_reset: Arc::clone(&space_setup.relationship_reset),
+                migration_state: Arc::clone(&space_setup.migration_state),
+                key_migration: Arc::clone(&space_setup.key_migration),
+                blob_migration_repo: Arc::clone(&space_setup.blob_migration_repo),
+                blob_cipher: Arc::clone(&deps.security.blob_cipher),
+            },
         },
         Arc::clone(&deps.security.space_access_ports.group_revocation),
         Arc::clone(&group_update_dispatch),
@@ -752,6 +743,20 @@ pub async fn build_sync_engine_assembly(
     let membership_gossip_runtime = membership_gossip
         .clone()
         .start(roster.subscribe_presence_events());
+    let connectivity_runtime = start_membership_connectivity(
+        MembershipConnectivityDeps {
+            peer_addresses: Arc::clone(&space_setup.peer_addr_repo),
+            presence: Arc::clone(&presence),
+            local_device_id: deps.device.device_identity.current_device_id(),
+        },
+        roster.subscribe_presence_events(),
+    );
+    let space_application_runtime = SpaceApplicationRuntime::new(
+        Arc::clone(&membership_gossip),
+        membership_gossip_runtime,
+        connectivity_runtime,
+        Arc::clone(&facade),
+    );
     // Slice 2 Phase 2 · T10:剪切板同步门面。`dispatch_entry` 共享同一份
     // `peer_addr_repo` / `presence` 让 F1 hook 喂的 presence 缓存直接生
     // 效;`transfer_cipher` 与已有 file_transfer 路径同享 V3 chunked
@@ -930,7 +935,7 @@ pub async fn build_sync_engine_assembly(
     }));
     let active_clipboard_lifecycle = active_clipboard.start_background_workers();
 
-    info!("Slice 2/3 SpaceSetupFacade + MemberRosterFacade + ClipboardSyncFacade + BlobTransferFacade assembled");
+    info!("Slice 2/3 SpaceFacade + MemberRosterFacade + ClipboardSyncFacade + BlobTransferFacade assembled");
     Ok(SyncEngineAssembly {
         facade,
         roster,
@@ -945,7 +950,6 @@ pub async fn build_sync_engine_assembly(
         outbound_progress_translator,
         group_update_retry,
         automatic_legacy_upgrade,
-        membership_gossip,
-        membership_gossip_runtime,
+        space_application_runtime,
     })
 }

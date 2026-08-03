@@ -1,6 +1,6 @@
 //! Slice 2 Phase 1 · T6 — `EnsureReachableAllUseCase`.
 //!
-//! F1 钩子:`SpaceSetupFacade::auto_start_network` 在 `start_network` 成功
+//! F1 钩子:`SpaceFacade::auto_start_network` 在 `start_network` 成功
 //! 之后调用本 usecase,对所有已配对设备并发拨号,填满
 //! `IrohPresenceAdapter` 的状态缓存,让后续 `MemberRosterFacade::list_with_presence`
 //! 可以直接从缓存读 online/offline 而不再触发拨号。

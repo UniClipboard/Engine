@@ -1,5 +1,5 @@
 //! Sponsor-side pairing lifecycle events broadcast by
-//! [`SpaceSetupFacade::subscribe_pairing_completion`].
+//! [`SpaceFacade::subscribe_pairing_completion`].
 //!
 //! A single `PairingOutcome` fires per matched invitation: either `Success`
 //! after admit + trust + Confirm landed, or `Failure` if any post-match step

@@ -14,14 +14,7 @@ use crate::{
 pub async fn execute_query_migration_progress(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let setup = facade.space_setup.get().ok_or_else(|| {
-        EngineError::new(
-            QUERY_MIGRATION_PROGRESS_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-        )
-    })?;
-    let progress = setup
+    let progress = facade
         .query_migration_progress()
         .await
         .map_err(|error| match error {

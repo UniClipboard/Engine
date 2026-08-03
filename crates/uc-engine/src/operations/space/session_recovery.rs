@@ -5,72 +5,51 @@
 
 use crate::error_codes::*;
 
-use tracing::{error, warn};
-use uc_application::facade::AppFacade;
-use uc_application::receive_reconciliation::EnsureReceiveReadyPort;
+use tracing::error;
+use uc_application::facade::{AppFacade, SpaceActivityError, SpaceSessionError};
 
 use crate::{EngineError, EngineErrorCategory, OperationResult, RecoverSessionInput};
 
 pub async fn execute_recover_session(
     facade: &AppFacade,
-    receive_readiness: &dyn EnsureReceiveReadyPort,
     input: RecoverSessionInput,
 ) -> Result<OperationResult, EngineError> {
-    if !input.allow_secure_storage_unlock {
-        return Ok(OperationResult::SessionRecovered {
-            unlocked: false,
-            resumed: false,
-        });
-    }
-
-    let unlocked = facade
-        .encryption
-        .unlock()
+    let result = facade
+        .recover_space_session(input.allow_secure_storage_unlock)
         .await
-        .map_err(|error| recover_session_error("unlock encryption session", error))?;
-    if !unlocked {
-        return Ok(OperationResult::SessionRecovered {
-            unlocked: false,
-            resumed: false,
-        });
-    }
-
-    let resumed = facade
-        .try_resume_session()
-        .await
-        .map_err(|error| recover_session_error("resume space session", error))?;
-    if resumed {
-        if let Err(error) = facade.refresh_presence().await {
-            warn!(error = %error, "presence refresh failed after session recovery");
-        }
-    }
-    facade.search.on_session_ready().await;
-
-    receive_readiness
-        .ensure_receive_ready()
-        .await
-        .map_err(|error| {
-            error!(error = %error, "receive recovery failed after space access");
-            EngineError::new(
-                RECOVER_SESSION_RECEIVE_UNAVAILABLE_CODE,
-                EngineErrorCategory::Unavailable,
-                true,
-            )
-        })?;
+        .map_err(map_recover_session_error)?;
 
     Ok(OperationResult::SessionRecovered {
-        unlocked: true,
-        resumed,
+        unlocked: result.unlocked,
+        resumed: result.resumed,
     })
 }
 
-fn recover_session_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
-    error!(context, error = %error, "engine session recovery failed");
-    EngineError::new(
+fn map_recover_session_error(error: SpaceSessionError) -> EngineError {
+    if matches!(
+        error,
+        SpaceSessionError::Activity(SpaceActivityError::Receive(_))
+    ) {
+        return recover_session_error(
+            RECOVER_SESSION_RECEIVE_UNAVAILABLE_CODE,
+            "restore receive activity",
+            error,
+        );
+    }
+    recover_session_error(
         RECOVER_SESSION_UNAVAILABLE_CODE,
-        EngineErrorCategory::Unavailable,
-        true,
+        "recover space session",
+        error,
     )
+}
+
+fn recover_session_error(
+    code: u32,
+    context: &'static str,
+    error: impl std::fmt::Display,
+) -> EngineError {
+    error!(context, error = %error, "engine session recovery failed");
+    EngineError::new(code, EngineErrorCategory::Unavailable, true)
 }
 
 #[cfg(test)]

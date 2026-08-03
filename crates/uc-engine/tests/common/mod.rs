@@ -1,6 +1,6 @@
 //! 集成测试共享 helper：switch-space 4 个新 port 的最小 noop 实现。
 //!
-//! 现有 slice1/2 e2e 流程不驱动 switch-space，但 `SpaceSetupDeps` 现在
+//! 现有 slice1/2 e2e 流程不驱动 switch-space，但 `SpaceFacadeDeps` 现在
 //! 强制要求这 4 个字段；本模块给出 trivial 替身让旧测试继续编译，无需
 //! 给每个 e2e 拆出一组拷贝。
 //!
@@ -183,12 +183,12 @@ impl BlobCipherPort for NoopBlobCipher {
     }
 }
 
-/// Convenience tuple for splatting all 4 new SpaceSetupDeps fields at once.
+/// Convenience tuple for splatting all 4 new SpaceFacadeDeps fields at once.
 ///
 /// 用法：
 /// ```ignore
 /// let mig = common::migration_noop_deps();
-/// SpaceSetupDeps {
+/// SpaceFacadeDeps {
 ///     // ... 旧字段
 ///     migration_state: mig.0,
 ///     key_migration: mig.1,

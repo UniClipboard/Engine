@@ -94,7 +94,7 @@ impl InMemoryPairingInvitationHolder {
     /// Snapshot the **earliest-expiring** outstanding invitation, if any.
     ///
     /// Returned without consuming, intended for read-only query paths
-    /// (Slice4 P3 T3.2 `SpaceSetupFacade::query_setup_state`). Callers
+    /// (Slice4 P3 T3.2 `SpaceFacade::query_setup_state`). Callers
     /// must not assume a single pending invitation exists; this just
     /// gives a deterministic representative when multiple are parked.
     pub(crate) async fn snapshot_earliest(&self) -> Option<(InvitationCode, DateTime<Utc>)> {
@@ -109,7 +109,7 @@ impl InMemoryPairingInvitationHolder {
 
     /// Drop every outstanding invitation, returning the count removed.
     ///
-    /// Used by Slice4 P3 T3.2 `SpaceSetupFacade::cancel_invitation` and
+    /// Used by Slice4 P3 T3.2 `SpaceFacade::cancel_invitation` and
     /// `reset` to wipe in-flight pairing state. Aggregates already
     /// `Consumed` are not present in the holder (they are removed at
     /// `take_matching` time), so this only clears `Pending` entries.

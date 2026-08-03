@@ -1,10 +1,9 @@
 use std::time::Duration;
 
-use super::{operation_error_with_code, ProductionRuntime};
+#[cfg(feature = "dev-tools")]
+use super::operation_error_with_code;
+use super::ProductionRuntime;
 use crate::engine::EngineRuntime;
-use crate::error_codes::{
-    LOCK_ENCRYPTION_FAILED_CODE, RECOVER_SESSION_UNAVAILABLE_CODE, UNLOCK_SPACE_FAILED_CODE,
-};
 use crate::operations::clipboard::capture::execute_capture_current_clipboard;
 use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
@@ -60,7 +59,7 @@ use crate::operations::space::cancel_invitation::execute_cancel_invitation;
 use crate::operations::space::create_space::execute_create_space;
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
-use crate::operations::space::join_space::{execute_join_space, JoinSpaceMode};
+use crate::operations::space::join_space::execute_join_space;
 use crate::operations::space::reset_space::execute_reset_space;
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
@@ -80,74 +79,24 @@ impl EngineRuntime for ProductionRuntime {
     ) -> Result<OperationResult, EngineError> {
         match operation {
             Operation::CreateSpace(input) => {
-                execute_create_space(
-                    self.current_facade().await?.as_ref(),
-                    self.file_transfer_lifecycle.as_ref(),
-                    input,
-                )
-                .await
+                execute_create_space(self.current_facade().await?.as_ref(), input).await
             }
             Operation::UnlockSpace(input) => {
                 let session = self.session.lock().await;
                 let session = session
                     .as_ref()
                     .ok_or_else(super::operation_unavailable_error)?;
-                let result = execute_unlock_space(
-                    session.facade.as_ref(),
-                    self.file_transfer_lifecycle.as_ref(),
-                    input,
-                )
-                .await?;
-                session
-                    .sync_engine
-                    .resume_membership_gossip()
-                    .await
-                    .map_err(|error| {
-                        operation_error_with_code(
-                            UNLOCK_SPACE_FAILED_CODE,
-                            "resume membership after space unlock",
-                            error,
-                        )
-                    })?;
-                Ok(result)
+                execute_unlock_space(session.facade.as_ref(), input).await
             }
             Operation::RecoverSession(input) => {
                 let session = self.session.lock().await;
                 let session = session
                     .as_ref()
                     .ok_or_else(super::operation_unavailable_error)?;
-                let result = execute_recover_session(
-                    session.facade.as_ref(),
-                    self.file_transfer_lifecycle.as_ref(),
-                    input,
-                )
-                .await?;
-                if matches!(
-                    result,
-                    OperationResult::SessionRecovered { unlocked: true, .. }
-                ) {
-                    session
-                        .sync_engine
-                        .resume_membership_gossip()
-                        .await
-                        .map_err(|error| {
-                            operation_error_with_code(
-                                RECOVER_SESSION_UNAVAILABLE_CODE,
-                                "resume membership after session recovery",
-                                error,
-                            )
-                        })?;
-                }
-                Ok(result)
+                execute_recover_session(session.facade.as_ref(), input).await
             }
             Operation::JoinSpace(input) => {
-                execute_join_space(
-                    self.current_facade().await?.as_ref(),
-                    self.file_transfer_lifecycle.as_ref(),
-                    input,
-                    JoinSpaceMode::Automatic,
-                )
-                .await
+                execute_join_space(self.current_facade().await?.as_ref(), input).await
             }
             Operation::IssueInvitation => {
                 execute_issue_invitation(self.current_facade().await?.as_ref()).await
@@ -159,11 +108,7 @@ impl EngineRuntime for ProductionRuntime {
                 execute_reset_space(self.current_facade().await?.as_ref()).await
             }
             Operation::FactoryResetSpace => {
-                execute_factory_reset_space(
-                    self.current_facade().await?.as_ref(),
-                    self.file_transfer_lifecycle.as_ref(),
-                )
-                .await
+                execute_factory_reset_space(self.current_facade().await?.as_ref()).await
             }
             Operation::QuerySetupState => {
                 execute_query_setup_state(self.current_facade().await?.as_ref()).await
@@ -314,26 +259,7 @@ impl EngineRuntime for ProductionRuntime {
                 let session = session
                     .as_ref()
                     .ok_or_else(super::operation_unavailable_error)?;
-                session
-                    .sync_engine
-                    .pause_membership_gossip()
-                    .await
-                    .map_err(|error| {
-                        operation_error_with_code(
-                            LOCK_ENCRYPTION_FAILED_CODE,
-                            "pause membership before encryption lock",
-                            error,
-                        )
-                    })?;
-                let result = execute_lock_encryption(
-                    session.facade.as_ref(),
-                    self.file_transfer_lifecycle.as_ref(),
-                )
-                .await;
-                if result.is_err() {
-                    let _ = session.sync_engine.resume_membership_gossip().await;
-                }
-                result
+                execute_lock_encryption(session.facade.as_ref()).await
             }
             Operation::VerifySecureStorageAccess => {
                 execute_verify_secure_storage_access(self.current_facade().await?.as_ref()).await
@@ -342,10 +268,7 @@ impl EngineRuntime for ProductionRuntime {
                 execute_list_devices(self.current_facade().await?.as_ref()).await
             }
             Operation::QueryMembershipConvergence => {
-                execute_query_membership_convergence(
-                    self.current_membership_gossip().await?.as_ref(),
-                )
-                .await
+                execute_query_membership_convergence(self.current_facade().await?.as_ref()).await
             }
             Operation::QueryMemberSyncPreferences(input) => {
                 execute_query_member_sync_preferences(self.current_facade().await?.as_ref(), input)

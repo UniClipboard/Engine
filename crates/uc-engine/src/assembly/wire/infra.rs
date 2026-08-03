@@ -362,7 +362,7 @@ pub(super) fn create_infra_layer(
     );
 
     // Switch-space backup 表 + 主表 inline_data 批量 IO；常态业务代码不
-    // 应触碰，由 SpaceSetupFacade::switch_space 内部使用。
+    // 应触碰，由 SpaceFacade::switch_space 内部使用。
     let blob_migration_repo: Arc<dyn uc_core::ports::clipboard::BlobMigrationRepoPort> =
         Arc::new(DieselBlobMigrationRepository::new(Arc::clone(&db_executor)));
 
