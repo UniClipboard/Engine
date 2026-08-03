@@ -8,6 +8,12 @@ use thiserror::Error;
 /// 不承担底层存储实现或传输实现的细节语义。
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum FileTransferApplicationError {
+    /// The process-wide transfer lifecycle no longer accepts new sessions.
+    #[error("file transfer lifecycle is closed")]
+    LifecycleClosed,
+    /// An active session already owns the transfer id with different metadata.
+    #[error("transfer `{transfer_id}` is already active with different metadata")]
+    SessionConflict { transfer_id: String },
     /// 持久化历史事件失败。
     #[error("file transfer event store failed: {0}")]
     Store(String),

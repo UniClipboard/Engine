@@ -1,5 +1,47 @@
 # Progress
 
+## Session: 2026-08-03（Phase 5）
+
+### Phase: 建立文件传输会话
+
+- **Status:** complete
+- Actions taken:
+  - 恢复活动计划，核对前四个独立提交和当前工作区。
+  - 重读文件传输规格、详细实施计划和应用层边界规则。
+  - 明确本阶段只迁移移动上传的文件传输会话使用，活动表、暂存和清理所有权仍留给详细 Phase 6。
+  - 盘点五个独立状态动作、receiver projection 入口、旧测试形状和三类真实调用者。
+  - 确认分步 use case 存在并发双终态窗口，选定远端 Blob 拉取作为第一条真实迁移路径。
+  - 区分新会话的进程内互斥/关闭职责与现有数据库超时、启动恢复职责。
+  - 确认现有事件发布器已覆盖宿主进度通知，Blob 直发进度属于可删除的重复路径。
+  - 确认批量 Blob 拉取需要跨多次调用复用同一会话，取消仍由 Blob 先停止网络再结算会话。
+- TDD:
+  - 先将旧五动作集成测试替换为最终会话入口测试；首次运行按预期因会话类型、创建入口和关闭入口不存在而编译失败，红灯原因正确。
+  - 新测试覆盖绑定与临时接收创建、进度倒退、并发不同终态、重复同终态、批次复用、关闭取消和通知失败后的会话保留。
+- Implemented:
+  - 新增进程级活动会话登记和单传输串行状态，创建时一次完成接收登记与 Started。
+  - 完成、失败和取消互斥；相同终态重复调用不重复保存，持久化成功后即使通知失败也不会遗忘本地状态。
+  - Blob 拉取改为批次复用会话，累计进度统一进入事件发布器；删除单独 seed/start/complete/fail/cancel、重试和直接进度通知路径。
+  - 移动流式上传只迁移文件传输会话句柄，完整上传所有权仍留给详细 Phase 6。
+  - Engine 暂停时取消剩余活动会话，最终关闭后拒绝新会话；`AppFacade` 不再公开文件传输对象。
+  - 删除五个旧状态 use case、10 项旧边界测试及目录接收预先单独 seed 的第二入口。
+- Focused verification:
+  - `cargo test -p uc-application --test file_transfer --locked`：8 项通过。
+  - `cargo test -p uc-application --all-features --lib blob_transfer --locked`：7 项通过。
+  - `cargo test -p uc-application --all-features --lib apply_inbound --locked`：83 项通过。
+  - `cargo test -p uc-engine --all-features --lib mobile_upload --locked`：5 项通过。
+  - `cargo check -p uc-engine --all-targets --all-features --locked`：通过。
+  - `cargo test -p uc-application --all-features --locked`：947 项单元测试和 8 项集成测试通过。
+  - `cargo test -p uc-engine --all-features --locked`：单元、稳定接口、配对、迁移和跨设备场景全部通过；需要真实局域网组播的 1 项测试按套件声明跳过，不计通过。
+  - `cargo metadata --locked --format-version 1`：通过。
+  - `cargo check --workspace --all-targets --locked`：通过。
+  - `cargo fmt --all -- --check`：通过。
+  - `node scripts/architecture/check-engine-repository.mjs`：通过。
+  - `git diff --check`：通过。
+- Result:
+  - 详细 Phase 5 退出条件全部满足，下一阶段为详细 Phase 6 移动文件上传完整所有权收口。
+- Scope protection:
+  - 保留并不修改成员移除恢复计划及其架构维护记录。
+
 ## Session: 2026-08-03（Phase 4）
 
 ### Phase: 收口剪贴板入站运行期

@@ -52,7 +52,7 @@ use uc_core::ports::{ClockPort, ReceiveItemRole};
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uc_observability_contract::analytics::{AnalyticsPort, Direction, Event, PayloadSizeBucket};
 
-use crate::facade::file_transfer::{CompleteTransfer, FailTransfer, FileTransferFacade};
+use crate::facade::file_transfer::{FileTransferFacade, FileTransferSession};
 use crate::usecases::clipboard_sync::apply_inbound::{
     ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
 };
@@ -729,69 +729,52 @@ impl ApplyIncomingMobileClipUseCase {
         let Some(transfer_id) = transfer_id else {
             return;
         };
-        let peer_id = format!("mobile:{}", source_device_id);
+        let Some(session) = facade.active_session(&transfer_id).await else {
+            warn!(
+                transfer_id,
+                source_device_id = %source_device_id,
+                "mobile_sync apply_incoming: active transfer session is missing"
+            );
+            return;
+        };
         match dispatch {
             Ok(ApplyIncomingMobileClipOutcome::Applied { .. }) => {
-                self.complete_transfer(facade, &transfer_id, &peer_id).await;
+                self.complete_transfer(&session).await;
             }
             Ok(ApplyIncomingMobileClipOutcome::Resurfaced { .. })
             | Ok(ApplyIncomingMobileClipOutcome::DuplicateSkipped { .. }) => {
-                self.complete_transfer(facade, &transfer_id, &peer_id).await;
+                self.complete_transfer(&session).await;
             }
             Ok(ApplyIncomingMobileClipOutcome::DecodeFailed { reason }) => {
-                self.fail_transfer(facade, &transfer_id, &peer_id, reason.clone())
-                    .await;
+                self.fail_transfer(&session, reason.clone()).await;
             }
             Ok(ApplyIncomingMobileClipOutcome::Buffered) => {
                 // SyncDoc 路径不会产 Buffered;若 dispatch 真返 Buffered 是
                 // bug 但不影响 lifecycle 状态。沉默即可。
             }
             Err(err) => {
-                self.fail_transfer(facade, &transfer_id, &peer_id, err.to_string())
-                    .await;
+                self.fail_transfer(&session, err.to_string()).await;
             }
         }
     }
 
-    async fn complete_transfer(
-        &self,
-        facade: &FileTransferFacade,
-        transfer_id: &str,
-        peer_id: &str,
-    ) {
-        if let Err(err) = facade
-            .complete(CompleteTransfer {
-                transfer_id: transfer_id.to_string(),
-                peer_id: peer_id.to_string(),
-            })
-            .await
-        {
+    async fn complete_transfer(&self, session: &FileTransferSession) {
+        if let Err(err) = session.complete().await {
             warn!(
-                transfer_id,
+                transfer_id = session.transfer_id(),
                 error = %err,
                 "mobile_sync apply_incoming: complete lifecycle failed"
             );
         }
     }
 
-    async fn fail_transfer(
-        &self,
-        facade: &FileTransferFacade,
-        transfer_id: &str,
-        peer_id: &str,
-        detail: String,
-    ) {
-        if let Err(err) = facade
-            .fail(FailTransfer {
-                transfer_id: transfer_id.to_string(),
-                peer_id: peer_id.to_string(),
-                reason: FileTransferFailureReason::Unknown,
-                detail: Some(detail),
-            })
+    async fn fail_transfer(&self, session: &FileTransferSession, detail: String) {
+        if let Err(err) = session
+            .fail(FileTransferFailureReason::Unknown, Some(detail))
             .await
         {
             warn!(
-                transfer_id,
+                transfer_id = session.transfer_id(),
                 error = %err,
                 "mobile_sync apply_incoming: fail lifecycle failed"
             );

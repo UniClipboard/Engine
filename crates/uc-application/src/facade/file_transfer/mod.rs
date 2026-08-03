@@ -6,9 +6,10 @@
 //! 不向外暴露。
 
 mod facade;
+mod session;
 
-pub use crate::file_transfer::{
-    CancelTransfer, CompleteTransfer, FailTransfer, FileTransferApplicationError,
-    ReportTransferProgress, StartTransfer,
+pub use crate::file_transfer::FileTransferApplicationError;
+pub use facade::{
+    BeginReceiverTransfer, FileTransferFacade, FileTransferFacadeDeps, ReceiverTransferRegistration,
 };
-pub use facade::{FileTransferFacade, FileTransferFacadeDeps, SeedReceiverContext};
+pub use session::FileTransferSession;

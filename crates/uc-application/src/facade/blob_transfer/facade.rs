@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -21,15 +20,12 @@ use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::ContentHashPort;
 
 use crate::facade::file_transfer::{
-    CancelTransfer, CompleteTransfer, FailTransfer, FileTransferFacade, SeedReceiverContext,
-    StartTransfer,
+    BeginReceiverTransfer, FileTransferFacade, FileTransferSession, ReceiverTransferRegistration,
 };
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::usecases::blob_transfer::{
     FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput, PublishBlobUseCase,
 };
-
-const LIFECYCLE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// 共享的 host event 总线。
 ///
@@ -53,11 +49,8 @@ pub struct BlobTransferDeps {
     /// 推一帧给数据来源端(sender),让 sender UI 能实时展示对端接收字节进度。
     /// 不提供则 fetch_blob 退化为只发本地 host event。
     pub outbound_progress_reporter: Option<Arc<dyn OutboundProgressReporterPort>>,
-    /// 可选 file-transfer lifecycle facade。提供时,带 `transfer_context` 的
-    /// fetch_blob / fetch_blob_to_path 会调 `start` / `complete` / `fail`
-    /// 让事件落进 file_transfer 表与 domain timeline,前端 status 切换
-    /// 由 `FileTransferHostEventPublisher` 统一发出。不提供则状态变更被
-    /// 静默忽略(用于不需要 lifecycle 跟踪的内部场景,例如 CLI 工具)。
+    /// Optional process-wide file-transfer session owner. Tracked fetches use
+    /// one session for registration, progress, terminal settlement, and cancel.
     pub file_transfer: Option<Arc<FileTransferFacade>>,
 }
 
@@ -103,9 +96,7 @@ pub struct PublishBlobResult {
 /// - `peer_id` 是来源设备 ID,前端用它做"来自谁"的展示;
 /// - `total_bytes` 来自 V3 envelope 的 advertised size,用于前端进度百分比与 ETA。
 /// - `filename` 是 receiver-side projection 已经 seed 好的真实文件名;
-///   `BlobTransferFacade::fetch_*` 调 `FileTransferFacade::start` 时会把
-///   它一起塞进 `Started` 事件,projection apply 时会把这个值原样
-///   写回 `file_transfer.filename`(避免覆盖 seed 时填入的真实值)。
+///   The receiver session records it in the initial event and projection.
 ///   rep-bound blob / 没有显式文件名的场景填空字符串。
 /// - `outbound_transfer_id` / `outbound_target`:可选的反向上报上下文。
 ///   设置时,sink 在每次进度回调上会通过 `OutboundProgressReporterPort`
@@ -132,12 +123,8 @@ pub struct FetchTransferContext {
     pub filename: String,
     pub outbound_transfer_id: Option<String>,
     pub outbound_target: Option<DeviceId>,
-    /// 当多个 blob fetch 共享同一个 `transfer_id`(例如 inbound materializer
-    /// 处理含 N 个 blob_ref 的 envelope)时,只有 batch 的第一个 fetch 应
-    /// 该 seed + start lifecycle,只有最后一个 fetch 应该 complete +
-    /// 反向通知 sender Completed。否则 receiver 端 lifecycle 会反复触发
-    /// `WARN start lifecycle failed` / `WARN complete lifecycle failed`,
-    /// sender 端 UI 也会在 batch 的第一个 fetch 完成时就提前显示"传输完成"。
+    /// Multiple blob fetches may share one transfer session. The first fetch
+    /// creates it, middle fetches reuse it, and the last fetch settles it.
     ///
     /// 单 blob 调用者(CLI `uniclip recv`、子 facade 内部转发)保留默认
     /// `Only`,行为与改造前完全一致。
@@ -149,30 +136,28 @@ pub struct FetchTransferContext {
 
 /// 位置标志:在一个共享 `transfer_id` 的 fetch batch 里,本次 fetch 处在哪个位置。
 ///
-/// 用 `is_first()` 决定是否 seed + start lifecycle,用 `is_last()` 决定是否
-/// complete lifecycle + 推送 outbound terminal。
+/// Controls when a shared transfer session is created and settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BatchPosition {
     /// 这次 fetch 是 batch 里唯一一次(单 blob 调用者默认),seed+start 和
     /// complete+outbound terminal 都执行。
     #[default]
     Only,
-    /// Batch 的第一次 fetch,后面还有更多 —— 只 seed + start,不 complete。
+    /// First fetch in a multi-fetch session.
     First,
-    /// Batch 中间一次,既不是第一次也不是最后一次 —— 既不 seed/start,也不 complete。
+    /// Middle fetch in a multi-fetch session.
     Middle,
-    /// Batch 最后一次 —— 不再 seed/start,只 complete + 推 outbound terminal。
+    /// Last fetch in a multi-fetch session.
     Last,
 }
 
 impl BatchPosition {
-    /// 是否需要 seed + start lifecycle?第一次或唯一一次 fetch 才需要。
+    /// Whether this fetch creates the shared session.
     pub fn is_first(self) -> bool {
         matches!(self, Self::Only | Self::First)
     }
 
-    /// 是否需要 complete lifecycle + 反向通知 sender Completed?
-    /// 最后一次或唯一一次 fetch 才需要。
+    /// Whether this fetch settles the shared session.
     pub fn is_last(self) -> bool {
         matches!(self, Self::Only | Self::Last)
     }
@@ -251,8 +236,7 @@ pub enum BlobTransferError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundCancelOutcome {
     /// The fetch was live; it has been torn down and a `Cancelled` domain
-    /// event has been appended (provided the registry entry carried a
-    /// `peer_id`).
+    /// event has been appended when the fetch owns a tracked session.
     Cancelled,
     /// No live fetch was registered for this `transfer_id` — nothing was
     /// torn down and no event was emitted.
@@ -267,11 +251,8 @@ struct InflightFetch {
     /// 把 iroh-blobs Downloader 内部 actor task 用的那条 QUIC connection
     /// 也撕掉(只 break caller 没用 —— actor 还会继续下载完整 blob)。
     ticket: BlobTicket,
-    /// 发 `Cancelled` lifecycle event 时需要 peer_id 才能落事件 ——
-    /// `cancel_inbound_transfer` 入参只有 `transfer_id`,所以 fetch 注册
-    /// 时把 peer_id 一起塞进 registry。`None` 表示这次 fetch 没带
-    /// `transfer_context`(纯静默拉取,无需发 cancel event)。
-    peer_id: Option<String>,
+    /// The same session used by fetch progress and terminal settlement.
+    session: Option<Arc<FileTransferSession>>,
     /// Directory receive attempt that owns this member fetch.
     attempt_id: Option<String>,
     /// 反向上报通道。`cancel_inbound_transfer` 在撕 QUIC connection
@@ -324,159 +305,62 @@ impl BlobTransferFacade {
         }
     }
 
-    fn emit_host_event(&self, event: HostEvent) {
-        let Some(bus) = self.host_event_emitter.as_ref() else {
-            return;
-        };
-        bus.emit_or_warn(event);
-    }
-
-    /// 发一帧 receiving-direction Progress host event。
-    ///
-    /// fetch 入口的"0 字节起始帧"和 fetch 收尾的"final-size 帧"显式
-    /// 通过这条路径发——`HostEventProgressSink` 已经做了字节阈值/时间窗
-    /// 节流,通常不会刚好落在 0 字节起点和最后一个字节,所以这两帧由
-    /// facade 主路径直接补,确保前端进度条立刻显示和最终停在 100%。
-    /// `entry_id` 字段直接复用 `ctx.transfer_id`(协议约定 == receiver_entry_id)。
-    fn emit_progress(
-        &self,
-        ctx: &FetchTransferContext,
-        bytes_transferred: u64,
-        total_bytes: Option<u64>,
-    ) {
-        self.emit_host_event(HostEvent::Transfer(TransferHostEvent::Progress {
-            transfer_id: ctx.transfer_id.clone(),
-            entry_id: Some(ctx.entry_id.clone()),
-            attempt_id: ctx.attempt_id.clone(),
-            peer_id: ctx.peer_id.clone(),
-            direction: FileTransferDirection::Receiving,
-            bytes_transferred,
-            total_bytes,
-        }));
-    }
-
-    /// 在 receiver-side projection 表里 upsert 一条 `pending` 行,让
-    /// `FileTransferHostEventPublisher::resolve_entry_id` 能在后续
-    /// `Started` / `Completed` / `Failed` 事件里查到 entry_id 把
-    /// `StatusChanged` host event 发出去。iroh 路径里
-    /// `transfer_id == receiver_entry_id`,所以两个字段填同一个值。
-    /// `cached_path` 仅 fetch_blob_to_path 路径有意义(blob 落盘的目标
-    /// 路径);fetch_blob 写回 representation bytes,留空。
-    async fn seed_lifecycle(
+    async fn begin_lifecycle(
         &self,
         ctx: &FetchTransferContext,
         cached_path: String,
-    ) -> Result<(), BlobTransferError> {
+    ) -> Result<Option<Arc<FileTransferSession>>, BlobTransferError> {
         let Some(facade) = self.file_transfer.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
-        let input = SeedReceiverContext {
-            transfer_id: ctx.transfer_id.clone(),
-            entry_id: ctx.entry_id.clone(),
-            attempt_id: ctx.attempt_id.clone(),
-            origin_device_id: ctx.peer_id.clone(),
-            filename: ctx.filename.clone(),
-            file_size: ctx.total_bytes,
-            cached_path,
-        };
-        if let Err(first_err) = facade.seed_receiver_context(input.clone()).await {
-            tokio::time::sleep(LIFECYCLE_RETRY_DELAY).await;
-            if let Err(retry_err) = facade.seed_receiver_context(input).await {
-                warn!(
-                    transfer_id = %ctx.transfer_id,
-                    first_error = %first_err,
-                    error = %retry_err,
-                    "blob fetch: seed receiver context failed after retry"
-                );
-                return Err(BlobTransferError::Persistence(retry_err.to_string()));
-            }
-        }
-        Ok(())
+        facade
+            .begin_receiver_transfer(BeginReceiverTransfer {
+                transfer_id: ctx.transfer_id.clone(),
+                peer_id: ctx.peer_id.clone(),
+                filename: ctx.filename.clone(),
+                file_size: ctx.total_bytes,
+                registration: ReceiverTransferRegistration::Entry {
+                    entry_id: ctx.entry_id.clone(),
+                    attempt_id: ctx.attempt_id.clone(),
+                    cached_path,
+                },
+            })
+            .await
+            .map(Some)
+            .map_err(|error| BlobTransferError::Persistence(error.to_string()))
     }
 
-    pub(crate) async fn seed_pending_transfer(
+    async fn existing_lifecycle(
         &self,
-        context: &FetchTransferContext,
-    ) -> Result<(), BlobTransferError> {
-        self.seed_lifecycle(context, String::new()).await
-    }
-
-    /// Record `Started` via `FileTransferFacade::start`. Retries once after
-    /// a short delay to tolerate transient SQLite lock contention.
-    async fn start_lifecycle(&self, ctx: &FetchTransferContext) {
+        ctx: &FetchTransferContext,
+    ) -> Result<Option<Arc<FileTransferSession>>, BlobTransferError> {
         let Some(facade) = self.file_transfer.as_ref() else {
-            return;
+            return Ok(None);
         };
-        let input = StartTransfer {
-            transfer_id: ctx.transfer_id.clone(),
-            peer_id: ctx.peer_id.clone(),
-            filename: ctx.filename.clone(),
-            file_size: ctx.total_bytes,
-        };
-        if let Err(first_err) = facade.start(input.clone()).await {
-            tokio::time::sleep(LIFECYCLE_RETRY_DELAY).await;
-            if let Err(retry_err) = facade.start(input).await {
-                warn!(
-                    transfer_id = %ctx.transfer_id,
-                    first_error = %first_err,
-                    error = %retry_err,
-                    "blob fetch: start lifecycle failed after retry"
-                );
-            }
-        }
-    }
-
-    async fn complete_lifecycle(&self, ctx: &FetchTransferContext) {
-        let Some(facade) = self.file_transfer.as_ref() else {
-            return;
-        };
-        let input = CompleteTransfer {
-            transfer_id: ctx.transfer_id.clone(),
-            peer_id: ctx.peer_id.clone(),
-        };
-        if let Err(first_err) = facade.complete(input.clone()).await {
-            tokio::time::sleep(LIFECYCLE_RETRY_DELAY).await;
-            if let Err(retry_err) = facade.complete(input).await {
-                warn!(
-                    transfer_id = %ctx.transfer_id,
-                    first_error = %first_err,
-                    error = %retry_err,
-                    "blob fetch: complete lifecycle failed after retry"
-                );
-            }
-        }
-    }
-
-    async fn fail_lifecycle(&self, ctx: &FetchTransferContext, detail: String) {
-        let Some(facade) = self.file_transfer.as_ref() else {
-            return;
-        };
-        let input = FailTransfer {
-            transfer_id: ctx.transfer_id.clone(),
-            peer_id: ctx.peer_id.clone(),
-            reason: FileTransferFailureReason::Unknown,
-            detail: Some(detail),
-        };
-        if let Err(first_err) = facade.fail(input.clone()).await {
-            tokio::time::sleep(LIFECYCLE_RETRY_DELAY).await;
-            if let Err(retry_err) = facade.fail(input).await {
-                warn!(
-                    transfer_id = %ctx.transfer_id,
-                    first_error = %first_err,
-                    error = %retry_err,
-                    "blob fetch: fail lifecycle failed after retry"
-                );
-            }
-        }
+        facade
+            .active_session(&ctx.transfer_id)
+            .await
+            .map(Some)
+            .ok_or_else(|| {
+                BlobTransferError::Persistence("active file transfer session is missing".into())
+            })
     }
 
     pub async fn record_unfetched_failure(&self, ctx: FetchTransferContext, detail: String) {
-        if let Err(error) = self.seed_lifecycle(&ctx, String::new()).await {
-            warn!(error = %error, transfer_id = %ctx.transfer_id, "could not record unfetched transfer failure");
-            return;
+        match self.begin_lifecycle(&ctx, String::new()).await {
+            Ok(Some(session)) => {
+                if let Err(error) = session
+                    .fail(FileTransferFailureReason::Unknown, Some(detail))
+                    .await
+                {
+                    warn!(error = %error, transfer_id = %ctx.transfer_id, "could not finish unfetched transfer failure");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(error = %error, transfer_id = %ctx.transfer_id, "could not begin unfetched transfer failure");
+            }
         }
-        self.start_lifecycle(&ctx).await;
-        self.fail_lifecycle(&ctx, detail).await;
     }
 
     /// 取消一次进行中的 inbound fetch。
@@ -495,8 +379,7 @@ impl BlobTransferFacade {
     /// 3. 通过 `BlobTransferPort::shutdown_inflight_fetch(&ticket)` 撕掉
     ///    iroh-blobs Downloader actor 内部用的 QUIC connection,让 actor
     ///    task 也真的退出(否则它会继续把整个 blob 下完);
-    /// 4. 通过 `FileTransferFacade::cancel` 落 `Cancelled` domain event,
-    ///    projection 翻成 `cancelled`,前端 status 切换。
+    /// 4. Settle the same file-transfer session as cancelled.
     ///
     /// 幂等:同一个 `transfer_id` 不在 registry(没有进行中的 fetch,或者
     /// 已经被取消过)时返回 `Ok(())`,不重复发事件。
@@ -571,9 +454,10 @@ impl BlobTransferFacade {
 
         // Step 4: 落 Cancelled 事件。peer_id 在 fetch 入口注册时一起存进
         // registry,这里取出来直接发,避免编一个污染事件流。
-        if let Some(peer_id) = entry.peer_id {
-            self.cancel_lifecycle_inner(transfer_id, &peer_id, reason)
-                .await;
+        if let Some(session) = entry.session {
+            if let Err(error) = session.cancel(reason).await {
+                warn!(transfer_id, error = %error, "cancel_inbound_transfer: session cancel failed");
+            }
         }
 
         Ok(InboundCancelOutcome::Cancelled)
@@ -610,33 +494,6 @@ impl BlobTransferFacade {
         match first_error {
             Some(error) => Err(error),
             None => Ok(cancelled),
-        }
-    }
-
-    /// 内部辅助:`cancel_inbound_transfer` 路径下,registry 已经被移除,
-    /// 没有 `FetchTransferContext` 对象可用,只能从 entry 字段直接拼。
-    async fn cancel_lifecycle_inner(
-        &self,
-        transfer_id: &str,
-        peer_id: &str,
-        reason: FileTransferCancellationReason,
-    ) {
-        let Some(facade) = self.file_transfer.as_ref() else {
-            return;
-        };
-        if let Err(err) = facade
-            .cancel(CancelTransfer {
-                transfer_id: transfer_id.to_string(),
-                peer_id: peer_id.to_string(),
-                reason,
-            })
-            .await
-        {
-            warn!(
-                transfer_id,
-                error = %err,
-                "cancel_inbound_transfer: cancel lifecycle failed"
-            );
         }
     }
 
@@ -689,32 +546,24 @@ impl BlobTransferFacade {
     ) -> Result<FetchBlobResult, BlobTransferError> {
         let iroh_tag_entry_id = command.entry_id.clone();
         let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
-        let progress_sink: Option<Arc<dyn BlobProgressSink>> = command
-            .transfer_context
-            .as_ref()
-            .filter(|_| self.host_event_emitter.is_some())
-            .map(|ctx| {
-                let sink: Arc<dyn BlobProgressSink> = Arc::new(HostEventProgressSink {
-                    bus: self.host_event_emitter.clone().unwrap(),
-                    transfer_id: ctx.transfer_id.clone(),
-                    entry_id: ctx.entry_id.clone(),
-                    attempt_id: ctx.attempt_id.clone(),
-                    peer_id: ctx.peer_id.clone(),
-                    fallback_total: ctx.total_bytes,
-                    outbound: outbound_ctx.clone(),
-                });
-                sink
-            });
-
-        // seed/start/0-byte placeholder 只在 batch 的第一次 fetch 触发。
-        // 中间或最后一次共享 `transfer_id` 的 fetch 不再重复 seed,否则
-        // receiver projection 行已经 `transferring`/`completed`,upsert
-        // 会 fail-soft 但 warn 流满天飞。
-        if let Some(ctx) = command.transfer_context.as_ref() {
+        let lifecycle_session = match command.transfer_context.as_ref() {
+            Some(ctx) if ctx.individual_lifecycle || ctx.batch_position.is_first() => {
+                self.begin_lifecycle(ctx, String::new()).await?
+            }
+            Some(ctx) => self.existing_lifecycle(ctx).await?,
+            None => None,
+        };
+        let progress_sink = self
+            .build_progress_sink(
+                command.transfer_context.as_ref(),
+                lifecycle_session.clone(),
+                outbound_ctx.clone(),
+            )
+            .await;
+        if let (Some(ctx), Some(sink)) = (command.transfer_context.as_ref(), progress_sink.as_ref())
+        {
             if ctx.individual_lifecycle || ctx.batch_position.is_first() {
-                self.seed_lifecycle(ctx, String::new()).await?;
-                self.start_lifecycle(ctx).await;
-                self.emit_progress(ctx, 0, ctx.total_bytes);
+                sink.report(0, ctx.total_bytes).await;
             }
         }
 
@@ -730,7 +579,7 @@ impl BlobTransferFacade {
                     InflightFetch {
                         token: cancel_token.clone(),
                         ticket: command.ticket.clone(),
-                        peer_id: Some(ctx.peer_id.clone()),
+                        session: lifecycle_session.clone(),
                         attempt_id: ctx.attempt_id.clone(),
                         outbound: outbound_ctx.clone(),
                     },
@@ -743,7 +592,7 @@ impl BlobTransferFacade {
             result = self.fetch_uc.execute(FetchBlobInput {
                 ticket: command.ticket,
                 entry_id: iroh_tag_entry_id,
-                progress: progress_sink,
+                progress: progress_sink.clone(),
             }) => result.map_err(|error| BlobTransferError::Fetch(error.to_string())),
         };
 
@@ -764,13 +613,23 @@ impl BlobTransferFacade {
                     // 最终一帧 100% Progress 每次都推(进度条 UI 体验),
                     // 但 complete lifecycle + outbound terminal Completed
                     // 只在 batch 收尾时发,避免提前告诉 sender"完成了"。
-                    self.emit_progress(ctx, final_size, total);
+                    if let Some(sink) = progress_sink.as_ref() {
+                        sink.report(final_size, total).await;
+                    }
                     if ctx.individual_lifecycle {
-                        self.complete_lifecycle(ctx).await;
+                        if let Some(session) = lifecycle_session.as_ref() {
+                            if let Err(error) = session.complete().await {
+                                warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session completion failed");
+                            }
+                        }
                     }
                     if ctx.batch_position.is_last() {
                         if !ctx.individual_lifecycle {
-                            self.complete_lifecycle(ctx).await;
+                            if let Some(session) = lifecycle_session.as_ref() {
+                                if let Err(error) = session.complete().await {
+                                    warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: batch session completion failed");
+                                }
+                            }
                         }
                         self.report_outbound_terminal(
                             ctx,
@@ -791,7 +650,14 @@ impl BlobTransferFacade {
             Err(BlobTransferError::Cancelled) => Err(BlobTransferError::Cancelled),
             Err(BlobTransferError::Fetch(msg)) => {
                 if let Some(ctx) = command.transfer_context.as_ref() {
-                    self.fail_lifecycle(ctx, msg.clone()).await;
+                    if let Some(session) = lifecycle_session.as_ref() {
+                        if let Err(error) = session
+                            .fail(FileTransferFailureReason::Unknown, Some(msg.clone()))
+                            .await
+                        {
+                            warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session failure settlement failed");
+                        }
+                    }
                     self.report_outbound_terminal(
                         ctx,
                         0,
@@ -817,36 +683,29 @@ impl BlobTransferFacade {
     ) -> Result<FetchBlobToPathResult, BlobTransferError> {
         let iroh_tag_entry_id = command.entry_id.clone();
         let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
-        let progress_sink: Option<Arc<dyn BlobProgressSink>> = command
-            .transfer_context
-            .as_ref()
-            .filter(|_| self.host_event_emitter.is_some())
-            .map(|ctx| {
-                let sink: Arc<dyn BlobProgressSink> = Arc::new(HostEventProgressSink {
-                    bus: self.host_event_emitter.clone().unwrap(),
-                    transfer_id: ctx.transfer_id.clone(),
-                    entry_id: ctx.entry_id.clone(),
-                    attempt_id: ctx.attempt_id.clone(),
-                    peer_id: ctx.peer_id.clone(),
-                    fallback_total: ctx.total_bytes,
-                    outbound: outbound_ctx.clone(),
-                });
-                sink
-            });
-
-        // seed 用 target_path 当 cached_path —— blob 落盘的实际位置,
-        // dashboard `cached_path` 字段直接显示为本地副本路径。
-        // 仅 batch 首帧时 seed/start,见 `BatchPosition` doc。
-        if let Some(ctx) = command.transfer_context.as_ref() {
-            if ctx.individual_lifecycle || ctx.batch_position.is_first() {
+        let lifecycle_session = match command.transfer_context.as_ref() {
+            Some(ctx) if ctx.individual_lifecycle || ctx.batch_position.is_first() => {
                 let cached_path = if ctx.attempt_id.is_some() {
                     String::new()
                 } else {
                     command.target_path.to_string_lossy().into_owned()
                 };
-                self.seed_lifecycle(ctx, cached_path).await?;
-                self.start_lifecycle(ctx).await;
-                self.emit_progress(ctx, 0, ctx.total_bytes);
+                self.begin_lifecycle(ctx, cached_path).await?
+            }
+            Some(ctx) => self.existing_lifecycle(ctx).await?,
+            None => None,
+        };
+        let progress_sink = self
+            .build_progress_sink(
+                command.transfer_context.as_ref(),
+                lifecycle_session.clone(),
+                outbound_ctx.clone(),
+            )
+            .await;
+        if let (Some(ctx), Some(sink)) = (command.transfer_context.as_ref(), progress_sink.as_ref())
+        {
+            if ctx.individual_lifecycle || ctx.batch_position.is_first() {
+                sink.report(0, ctx.total_bytes).await;
             }
         }
 
@@ -868,7 +727,7 @@ impl BlobTransferFacade {
                     InflightFetch {
                         token: cancel_token.clone(),
                         ticket: command.ticket.clone(),
-                        peer_id: Some(ctx.peer_id.clone()),
+                        session: lifecycle_session.clone(),
                         attempt_id: ctx.attempt_id.clone(),
                         outbound: outbound_ctx.clone(),
                     },
@@ -887,7 +746,7 @@ impl BlobTransferFacade {
                 ticket: command.ticket,
                 entry_id: iroh_tag_entry_id,
                 target_path: command.target_path,
-                progress: progress_sink,
+                progress: progress_sink.clone(),
             }) => {
                 res.map_err(|e| BlobTransferError::Fetch(e.to_string()))
             }
@@ -909,13 +768,23 @@ impl BlobTransferFacade {
                 if let Some(ctx) = command.transfer_context.as_ref() {
                     let final_size = outcome.bytes_written;
                     let total = ctx.total_bytes.or(Some(final_size));
-                    self.emit_progress(ctx, final_size, total);
+                    if let Some(sink) = progress_sink.as_ref() {
+                        sink.report(final_size, total).await;
+                    }
                     if ctx.individual_lifecycle {
-                        self.complete_lifecycle(ctx).await;
+                        if let Some(session) = lifecycle_session.as_ref() {
+                            if let Err(error) = session.complete().await {
+                                warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session completion failed");
+                            }
+                        }
                     }
                     if ctx.batch_position.is_last() {
                         if !ctx.individual_lifecycle {
-                            self.complete_lifecycle(ctx).await;
+                            if let Some(session) = lifecycle_session.as_ref() {
+                                if let Err(error) = session.complete().await {
+                                    warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: batch session completion failed");
+                                }
+                            }
                         }
                         self.report_outbound_terminal(
                             ctx,
@@ -944,7 +813,14 @@ impl BlobTransferFacade {
             Err(e) => {
                 let msg = e.to_string();
                 if let Some(ctx) = command.transfer_context.as_ref() {
-                    self.fail_lifecycle(ctx, msg.clone()).await;
+                    if let Some(session) = lifecycle_session.as_ref() {
+                        if let Err(error) = session
+                            .fail(FileTransferFailureReason::Unknown, Some(msg.clone()))
+                            .await
+                        {
+                            warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session failure settlement failed");
+                        }
+                    }
                     self.report_outbound_terminal(
                         ctx,
                         0,
@@ -977,6 +853,33 @@ impl BlobTransferFacade {
             transfer_id,
             target,
         })
+    }
+
+    async fn build_progress_sink(
+        &self,
+        ctx: Option<&FetchTransferContext>,
+        session: Option<Arc<FileTransferSession>>,
+        outbound: Option<OutboundReportContext>,
+    ) -> Option<Arc<dyn BlobProgressSink>> {
+        let ctx = ctx?;
+        let base_bytes = match session.as_ref() {
+            Some(session) => session.bytes_transferred().await,
+            None => 0,
+        };
+        if session.is_none() && self.host_event_emitter.is_none() && outbound.is_none() {
+            return None;
+        }
+        Some(Arc::new(FileTransferProgressSink {
+            fallback_bus: self.host_event_emitter.clone(),
+            session,
+            transfer_id: ctx.transfer_id.clone(),
+            entry_id: ctx.entry_id.clone(),
+            attempt_id: ctx.attempt_id.clone(),
+            peer_id: ctx.peer_id.clone(),
+            base_bytes,
+            fallback_total: ctx.total_bytes,
+            outbound,
+        }))
     }
 
     /// fetch 收尾时把最终状态(Completed/Failed)推回 sender。中间进度
@@ -1024,50 +927,56 @@ fn flip_cancel_reason_perspective(
     }
 }
 
-/// 把 adapter 字节级进度上报转发为 host event 的 sink 实现。
-///
-/// adapter 已经做了字节阈值/时间窗节流,这里只负责把每次回调翻译成
-/// `TransferHostEvent::Progress`,并填充上下文字段(transfer_id /
-/// peer_id / direction)。`entry_id` identifies the owning clipboard entry;
-/// directory members may use distinct transfer ids. `fallback_total` 用于补全 adapter 不知
-/// 道总大小(`total_bytes == None`)的场景——iroh 拉取过程中 size 通
-/// 常要等到 PartComplete 才已知,所以前端的进度百分比依赖这个 fallback。
-///
-/// 同一次回调还会通过 `outbound`(若配置)把 progress 推回数据来源端,
-/// 让 sender UI 看到对端真实接收字节进度。reporter 自己会处理失败
-/// (内部 log + return),不会让 fetch 主路径感知。
-struct HostEventProgressSink {
-    bus: SharedHostEventEmitter,
+struct FileTransferProgressSink {
+    fallback_bus: Option<SharedHostEventEmitter>,
+    session: Option<Arc<FileTransferSession>>,
     transfer_id: String,
     entry_id: String,
     attempt_id: Option<String>,
     peer_id: String,
+    base_bytes: u64,
     fallback_total: Option<u64>,
     outbound: Option<OutboundReportContext>,
 }
 
 #[async_trait]
-impl BlobProgressSink for HostEventProgressSink {
+impl BlobProgressSink for FileTransferProgressSink {
     async fn report(&self, bytes_transferred: u64, total_bytes: Option<u64>) {
-        let total = total_bytes.or(self.fallback_total);
-        let event = HostEvent::Transfer(TransferHostEvent::Progress {
-            transfer_id: self.transfer_id.clone(),
-            entry_id: Some(self.entry_id.clone()),
-            attempt_id: self.attempt_id.clone(),
-            peer_id: self.peer_id.clone(),
-            direction: FileTransferDirection::Receiving,
-            bytes_transferred,
-            total_bytes: total,
-        });
-        self.bus.emit_or_warn(event);
+        let cumulative_bytes = self.base_bytes.saturating_add(bytes_transferred);
+        let cumulative_total = total_bytes
+            .or(self.fallback_total)
+            .map(|total| self.base_bytes.saturating_add(total));
+
+        if let Some(session) = self.session.as_ref() {
+            if let Err(error) = session
+                .report_progress(cumulative_bytes, cumulative_total)
+                .await
+            {
+                warn!(
+                    transfer_id = %self.transfer_id,
+                    error = %error,
+                    "blob fetch: progress settlement failed"
+                );
+            }
+        } else if let Some(bus) = self.fallback_bus.as_ref() {
+            bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::Progress {
+                transfer_id: self.transfer_id.clone(),
+                entry_id: Some(self.entry_id.clone()),
+                attempt_id: self.attempt_id.clone(),
+                peer_id: self.peer_id.clone(),
+                direction: FileTransferDirection::Receiving,
+                bytes_transferred: cumulative_bytes,
+                total_bytes: cumulative_total,
+            }));
+        }
 
         if let Some(ob) = self.outbound.as_ref() {
             ob.reporter
                 .report(
                     &ob.target,
                     &ob.transfer_id,
-                    bytes_transferred,
-                    total,
+                    cumulative_bytes,
+                    cumulative_total,
                     OutboundProgressStatus::InProgress,
                 )
                 .await;

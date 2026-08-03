@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-#[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
 use super::ProductionRuntime;
 use crate::engine::EngineRuntime;
@@ -524,6 +523,15 @@ impl EngineRuntime for ProductionRuntime {
             }
             session.clipboard.shutdown().await;
             session.sync_engine.shutdown().await;
+            self.session_factory
+                .wired
+                .shared
+                .file_transfer_facade
+                .cancel_active_sessions()
+                .await
+                .map_err(|error| {
+                    operation_error_with_code(1104, "cancel active file transfers", error)
+                })?;
         }
         Ok(())
     }
@@ -536,6 +544,13 @@ impl EngineRuntime for ProductionRuntime {
 
     async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
         self.suspend().await?;
+        self.session_factory
+            .wired
+            .shared
+            .file_transfer_facade
+            .close()
+            .await
+            .map_err(|error| operation_error_with_code(1104, "close file transfers", error))?;
         self.task_registry.shutdown(deadline).await;
         if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {
             if error.kind() != std::io::ErrorKind::NotFound {

@@ -14,17 +14,17 @@ use uc_application::facade::settings::{
 use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
 use uc_application::facade::{
-    ActiveClipboardFacade, IncomingMobileBuffer, MobileSyncFacade, MobileSyncFacadeDeps,
-    MobileSyncSnapshotPorts,
+    ActiveClipboardFacade, FileTransferFacade, IncomingMobileBuffer, MobileSyncFacade,
+    MobileSyncFacadeDeps, MobileSyncSnapshotPorts,
 };
 use uc_application::facade::{
     AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardCaptureFacade,
     ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardOutboundFacade,
     ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade, DeviceFacade,
     DiagnosticsFacade, DiagnosticsFacadeDeps, EncryptionFacade, EncryptionFacadeDeps,
-    FileTransferFacade, LifecycleFacade, LifecycleFacadeDeps, LifecycleStatusGateway,
-    MemberRosterFacade, ResourceFacade, ResourceFacadeDeps, SearchFacade, SettingsFacade,
-    StorageFacade, StorageFacadeDeps, UpgradeFacade, UpgradeFacadeDeps,
+    LifecycleFacade, LifecycleFacadeDeps, LifecycleStatusGateway, MemberRosterFacade,
+    ResourceFacade, ResourceFacadeDeps, SearchFacade, SettingsFacade, StorageFacade,
+    StorageFacadeDeps, UpgradeFacade, UpgradeFacadeDeps,
 };
 #[cfg(feature = "lan-compat")]
 use uc_application::ApplyInboundClipboardUseCase;
@@ -220,10 +220,6 @@ pub struct AppFacadeAssemblyOptions {
     /// 通过它落地 resend。GUI shell / CLI fallback 留 `None`,
     /// daemon 启动后 `install_daemon_lifecycle` 装入。
     pub clipboard_outbound: Option<Arc<ClipboardOutboundFacade>>,
-    /// 文件传输 lifecycle 入口(5 个动作 + seed + link)。daemon 入口
-    /// 必传;CLI / 单元测试可留 `None`。详见
-    /// [`AppFacade::file_transfer`](uc_application::facade::AppFacade)。
-    pub file_transfer: Option<Arc<FileTransferFacade>>,
     /// 底层 `BlobTransferPort`(`IrohBlobTransferAdapter`)直连引用,供
     /// `ClipboardHistoryFacade` 在 `delete_entry` / `clear_history` 时
     /// 调 `untag` 释放对应 entry 对 iroh-blobs 的引用。与 `blob_transfer`
@@ -343,7 +339,6 @@ pub fn build_app_facade_from_deps(
         // GUI shell 启动期为空; daemon 起来后由
         // `AppFacade::install_daemon_lifecycle` 装入。
         clipboard_outbound: options.clipboard_outbound,
-        file_transfer: options.file_transfer,
         clipboard_restore,
         search: match options.search {
             SearchFacadeAssemblyMode::ReadOnly => {

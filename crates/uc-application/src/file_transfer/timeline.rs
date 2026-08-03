@@ -1,4 +1,4 @@
-use uc_core::file_transfer::{FileTransferEventPublisherPort, FileTransferEventStorePort};
+use uc_core::file_transfer::FileTransferEventStorePort;
 use uc_core::FileTransferEvent;
 
 use crate::file_transfer::errors::FileTransferApplicationError;
@@ -25,6 +25,10 @@ pub(crate) struct TransferTimeline {
 }
 
 impl TransferTimeline {
+    pub(crate) fn is_finished(&self) -> bool {
+        self.terminal_state.is_some()
+    }
+
     /// Rebuild the minimal state needed by the application layer.
     ///
     /// 从事件历史中恢复应用层所需的最小状态。
@@ -164,22 +168,6 @@ pub(crate) async fn load_timeline(
         .await
         .map_err(|error| FileTransferApplicationError::Store(error.to_string()))?;
     TransferTimeline::from_history(transfer_id, &history)
-}
-
-pub(crate) async fn persist_and_publish(
-    store: &dyn FileTransferEventStorePort,
-    publisher: &dyn FileTransferEventPublisherPort,
-    event: FileTransferEvent,
-) -> Result<FileTransferEvent, FileTransferApplicationError> {
-    store
-        .append(event.clone())
-        .await
-        .map_err(|error| FileTransferApplicationError::Store(error.to_string()))?;
-    publisher
-        .publish(event.clone())
-        .await
-        .map_err(|error| FileTransferApplicationError::Publish(error.to_string()))?;
-    Ok(event)
 }
 
 #[cfg(test)]

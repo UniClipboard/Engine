@@ -52,9 +52,8 @@ pub struct BackgroundRuntimeDeps {
     /// Event-sourced file transfer lifecycle: receiver-side projection
     /// plumbing + sweep/reconcile runtime tasks. Holds a clone of the shared
     /// `host_event_bus` so it automatically picks up emitters registered
-    /// later (Tauri webview, daemon WS). The 5 lifecycle actions
-    /// (start/report_progress/complete/fail/cancel) live inside the
-    /// `file_transfer_facade` carried on [`WiredDependencies`].
+    /// later (Tauri webview, daemon WS). Active transfer sessions live inside
+    /// the `file_transfer_facade` carried on [`WiredDependencies`].
     pub file_transfer_lifecycle: Arc<crate::assembly::file_transfer::FileTransferLifecycle>,
 }
 

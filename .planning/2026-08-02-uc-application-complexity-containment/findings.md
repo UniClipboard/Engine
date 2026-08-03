@@ -1,5 +1,33 @@
 # Findings
 
+## 2026-08-03 Phase 5 文件传输会话审计
+
+- 本阶段只建立文件传输的完整负责人并迁移一条真实入站路径；移动上传的活动表、临时文件和稳定四动作留给详细 Phase 6。
+- 退出条件要求创建时建立开始状态，进度由会话校验，完成、失败和取消互斥且幂等，关闭时所有活动会话必须得到终态。
+- 工作区仅有用户既存的成员移除方案和对应架构维护记录；本阶段不修改、删除或提交这些内容。
+- 当前 `FileTransferFacade` 公开 `start`、`report_progress`、`complete`、`fail`、`cancel` 五个独立动作，并分别持有五个 use case；调用方必须自行保证顺序和终态。
+- receiver projection 的 pending/provisional 建立与 lifecycle 开始状态也是独立入口，真实调用方可以建立其中一半后失败，留下半流程。
+- 现有 10 项集成测试直接构造和调用五个 use case，保护了旧分步 Interface；本阶段必须迁到最终 `FileTransferSession` 边界后删除旧测试形状。
+- 真实调用者包括 Blob 拉取、移动同步导入和后续移动流式上传；详细 Phase 5 要先迁移一条 Blob 入站路径，移动流式上传留给 Phase 6。
+- `AppFacade` 和 Engine 运行期仍直接持有并公开 `FileTransferFacade`，后续审计需区分真正需要的内部装配与应删除的公共逐步入口。
+- 五个 use case 每次都先加载历史再追加事件，没有跨动作的共享互斥；两个终态并发时可能都基于 active 历史继续，单靠 `TransferTimeline` 不能保证唯一终态。
+- 远端 Blob 拉取是首条合适迁移路径：当前 seed、start、complete/fail/cancel 和各自重试分散在 `BlobTransferFacade`，调用方掌握完整状态推进知识。
+- Engine 侧现有 `FileTransferLifecycle` 负责 pending/transferring 超时、启动时遗留失败和缓存清理；它是数据库恢复与健康维护，不提供同进程会话互斥，也不替代会话关闭。
+- 新会话应复用现有事件存储和宿主发布，不复制数据库恢复；关闭时只终结当前进程登记的活动会话，重启后的遗留仍由现有启动恢复处理。
+- `FileTransferHostEventPublisher` 已能把 Progress 事件转换为完整宿主进度通知；Blob 的 `HostEventProgressSink` 当前绕过它直接发同类事件，迁移后应只经会话上报，避免两套进度路径。
+- Blob 批量拉取会在多次调用间共享同一 `transfer_id`，第一项开始、最后一项结束；会话必须由 facade 注册表持有，不能只靠单次 fetch 的局部对象生命周期。
+- 取消流程还需要先反向通知发送方并停止网络拉取，再让会话记录取消；会话只隐藏状态推进，不接管 Blob 网络取消顺序。
+- `FileTransferEventStorePort` 只有独立 load/append，没有事务性 compare-and-append；唯一终态必须通过进程内同 transfer 互斥保证，跨重启遗留由启动恢复先收尾。
+- 最终实现由 `FileTransferFacade` 登记活动会话，`FileTransferSession` 固定传输编号、对端、接收登记方式和进度；同一会话内所有写入串行执行。
+- 创建会话会在同一个入口写 receiver pending 或 provisional 上下文和 Started；Started 保存成功但发布失败时会话仍保留，重试只会复用，不会追加第二个 Started。
+- 完成、失败和取消以持久化成功为本地状态切换点；相同终态重复调用幂等，不同终态并发只允许第一个写入。
+- Blob 批量拉取通过活动表跨调用复用会话，并把每一段局部进度换算为累计进度；带会话时所有本地进度都经现有事件发布器，不再直接旁路宿主事件。
+- Blob 取消继续保持发送方通知、网络取消、连接关闭、会话结算的既有顺序；会话没有接管网络细节。
+- 为删除旧五动作入口，移动流式上传本阶段只提前迁移文件传输会话句柄；活动上传表、暂存句柄、节流和失败清理仍在 Engine，完整迁移继续属于详细 Phase 6。
+- 稳定 `AppFacade` 已删除文件传输对象字段；应用内部真实使用者只通过会话推进，五个旧 use case 及其 10 项旧边界测试已删除。
+- Engine 暂停在网络运行期退出后取消剩余会话，最终关闭停止接受新会话；数据库超时和启动恢复仍由原 `FileTransferLifecycle` 负责，没有复制职责。
+- 删除检查通过：若删除 `FileTransferSession`，同一传输的互斥、累计进度、幂等终态、批次复用和关闭终结会重新散落到 Blob、移动上传和 Engine；当前对象隐藏了真实复杂度。
+
 ## 2026-08-03 Phase 4 剪贴板入站运行期审计
 
 - 当前引擎层 `spawn_clipboard_runtime_tasks` 仍订阅解密后的通知、生成宿主事件、调用入站应用、把结果映射为 sender receipt，并由引擎任务表取消循环。

@@ -2,11 +2,8 @@
 //!
 //! Wires the durable event store + host-event publisher + receiver-side
 //! projection plumbing + runtime-health tasks (timeout sweep + startup
-//! reconcile). The 5 lifecycle use cases (Start / ReportProgress / Complete
-//! / Fail / Cancel) live inside [`FileTransferFacade`] (application layer)
-//! built alongside this lifecycle by [`build_file_transfer_assembly`] —
-//! external callers reach those actions through the facade, not through
-//! the lifecycle struct.
+//! reconcile). [`FileTransferFacade`] owns process-local transfer sessions;
+//! this module only assembles that application owner and durable recovery.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,9 +85,7 @@ pub struct FileTransferLifecycle {
 /// Assembled file-transfer plumbing returned by
 /// [`build_file_transfer_assembly`].
 ///
-/// Hands the composition root both halves at once: the runtime-health
-/// `lifecycle` (sweep / reconcile workers) and the application-layer
-/// `facade` that exposes the 5 lifecycle actions plus seed / link.
+/// Hands the composition root both runtime recovery and the session owner.
 pub struct FileTransferAssembly {
     pub lifecycle: Arc<FileTransferLifecycle>,
     pub facade: Arc<FileTransferFacade>,

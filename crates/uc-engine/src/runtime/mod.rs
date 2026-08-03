@@ -306,7 +306,6 @@ impl ProductionRuntime {
                 member_roster: Some(Arc::clone(&sync_engine.roster)),
                 clipboard_sync: Some(Arc::clone(&sync_engine.clipboard_sync)),
                 blob_transfer: Some(Arc::clone(&sync_engine.blob)),
-                file_transfer: Some(Arc::clone(&wired.shared.file_transfer_facade)),
                 blob_transfer_port: Some(Arc::clone(&sync_engine.blob_transfer)),
                 clipboard_restore: Some(ClipboardRestoreAssembly {
                     write_coordinator: Arc::clone(&wired.shared.clipboard_write_coordinator),

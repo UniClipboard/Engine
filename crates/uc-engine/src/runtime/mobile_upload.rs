@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::warn;
 use uc_application::facade::{
-    FailTransfer, ReportTransferProgress, SeedReceiverContext, StartTransfer,
+    BeginReceiverTransfer, FileTransferSession, ReceiverTransferRegistration,
 };
 use uc_core::mobile_sync::StagingHandle;
 use uc_core::ports::MobileFileStagingError;
-use uc_core::{FileTransferDirection, FileTransferFailureReason, FileTransferProgress};
+use uc_core::FileTransferFailureReason;
 
 use super::ProductionRuntime;
 use crate::compatibility::mobile_lan::content_operations::{map_apply_error, map_apply_outcome};
@@ -30,6 +30,7 @@ pub(super) struct ActiveMobileFileUpload {
     total_bytes: Option<u64>,
     bytes_received: u64,
     last_progress_at: Instant,
+    session: Arc<FileTransferSession>,
 }
 
 pub(super) type ActiveMobileFileUploadState = Arc<Mutex<Option<ActiveMobileFileUpload>>>;
@@ -86,7 +87,7 @@ impl ProductionRuntime {
             return Err(mobile_upload_invalid_input_error());
         }
         let facade = self.current_mobile_sync().await?;
-        self.start_mobile_file_upload_lifecycle(&input).await?;
+        let session = self.begin_mobile_file_upload_lifecycle(&input).await?;
         let scope_id = uc_application::facade::mobile_sync_streaming_scope_nonce();
         let staging = match facade
             .begin_file_upload(&scope_id, &input.data_name, &input.media_type)
@@ -94,12 +95,8 @@ impl ProductionRuntime {
         {
             Ok(staging) => staging,
             Err(error) => {
-                self.fail_mobile_file_upload_lifecycle(
-                    &input.source_device_id,
-                    &input.transfer_id,
-                    "mobile upload staging failed",
-                )
-                .await;
+                self.fail_mobile_file_upload_lifecycle(&session, "mobile upload staging failed")
+                    .await;
                 return Err(map_mobile_upload_error(error));
             }
         };
@@ -111,6 +108,7 @@ impl ProductionRuntime {
             total_bytes: input.total_bytes,
             bytes_received: 0,
             last_progress_at: Instant::now(),
+            session,
         })));
         let public_handle = loop {
             let candidate = new_mobile_file_upload_handle();
@@ -123,74 +121,38 @@ impl ProductionRuntime {
         Ok(OperationResult::MobileFileUploadStarted(public_handle))
     }
 
-    async fn start_mobile_file_upload_lifecycle(
+    async fn begin_mobile_file_upload_lifecycle(
         &self,
         input: &BeginMobileFileUploadInput,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Arc<FileTransferSession>, EngineError> {
         let peer_id = mobile_upload_peer_id(&input.source_device_id);
-        let lifecycle = self.file_transfer_facade.as_ref();
-        lifecycle
-            .seed_provisional_receiver_context(SeedReceiverContext {
-                transfer_id: input.transfer_id.clone(),
-                entry_id: String::new(),
-                attempt_id: None,
-                origin_device_id: peer_id.clone(),
-                filename: input.data_name.clone(),
-                file_size: input.total_bytes,
-                cached_path: String::new(),
-            })
-            .await
-            .map_err(|_| mobile_upload_failed_error())?;
-        lifecycle
-            .start(StartTransfer {
-                transfer_id: input.transfer_id.clone(),
-                peer_id: peer_id.clone(),
-                filename: input.data_name.clone(),
-                file_size: input.total_bytes,
-            })
-            .await
-            .map_err(|_| mobile_upload_failed_error())?;
-        if lifecycle
-            .report_progress(ReportTransferProgress {
+        let session = self
+            .file_transfer_facade
+            .begin_receiver_transfer(BeginReceiverTransfer {
                 transfer_id: input.transfer_id.clone(),
                 peer_id,
-                progress: FileTransferProgress {
-                    direction: FileTransferDirection::Receiving,
-                    bytes_transferred: 0,
-                    total_bytes: input.total_bytes,
-                },
+                filename: input.data_name.clone(),
+                file_size: input.total_bytes,
+                registration: ReceiverTransferRegistration::Provisional,
             })
             .await
-            .is_err()
-        {
-            self.fail_mobile_file_upload_lifecycle(
-                &input.source_device_id,
-                &input.transfer_id,
-                "mobile upload progress failed",
-            )
-            .await;
+            .map_err(|_| mobile_upload_failed_error())?;
+        if session.report_progress(0, input.total_bytes).await.is_err() {
+            self.fail_mobile_file_upload_lifecycle(&session, "mobile upload progress failed")
+                .await;
             return Err(mobile_upload_failed_error());
         }
-        Ok(())
+        Ok(session)
     }
 
     async fn report_mobile_file_upload_progress(
         &self,
-        source_device_id: &str,
-        transfer_id: &str,
+        session: &FileTransferSession,
         bytes_received: u64,
         total_bytes: Option<u64>,
     ) -> Result<(), EngineError> {
-        self.file_transfer_facade
-            .report_progress(ReportTransferProgress {
-                transfer_id: transfer_id.to_owned(),
-                peer_id: mobile_upload_peer_id(source_device_id),
-                progress: FileTransferProgress {
-                    direction: FileTransferDirection::Receiving,
-                    bytes_transferred: bytes_received,
-                    total_bytes,
-                },
-            })
+        session
+            .report_progress(bytes_received, total_bytes)
             .await
             .map(|_| ())
             .map_err(|_| mobile_upload_failed_error())
@@ -198,12 +160,11 @@ impl ProductionRuntime {
 
     async fn fail_mobile_file_upload_lifecycle(
         &self,
-        source_device_id: &str,
-        transfer_id: &str,
+        session: &FileTransferSession,
         detail: &'static str,
     ) {
         if self
-            .try_fail_mobile_file_upload_lifecycle(source_device_id, transfer_id, detail)
+            .try_fail_mobile_file_upload_lifecycle(session, detail)
             .await
             .is_err()
         {
@@ -213,17 +174,11 @@ impl ProductionRuntime {
 
     async fn try_fail_mobile_file_upload_lifecycle(
         &self,
-        source_device_id: &str,
-        transfer_id: &str,
+        session: &FileTransferSession,
         detail: &'static str,
     ) -> Result<(), EngineError> {
-        self.file_transfer_facade
-            .fail(FailTransfer {
-                transfer_id: transfer_id.to_owned(),
-                peer_id: mobile_upload_peer_id(source_device_id),
-                reason: FileTransferFailureReason::Unknown,
-                detail: Some(detail.to_owned()),
-            })
+        session
+            .fail(FileTransferFailureReason::Unknown, Some(detail.to_owned()))
             .await
             .map(|_| ())
             .map_err(|_| mobile_upload_failed_error())
@@ -274,8 +229,7 @@ impl ProductionRuntime {
             if let Some(failed) = failed {
                 facade.abort_file_upload(failed.staging).await;
                 self.fail_mobile_file_upload_lifecycle(
-                    &failed.source_device_id,
-                    &failed.transfer_id,
+                    &failed.session,
                     "mobile upload append failed",
                 )
                 .await;
@@ -287,21 +241,15 @@ impl ProductionRuntime {
             active.bytes_received = active.bytes_received.saturating_add(appended_bytes);
             (active.last_progress_at.elapsed() >= MOBILE_UPLOAD_PROGRESS_THROTTLE).then(|| {
                 (
-                    active.source_device_id.clone(),
-                    active.transfer_id.clone(),
+                    Arc::clone(&active.session),
                     active.bytes_received,
                     active.total_bytes,
                 )
             })
         });
-        if let Some((source_device_id, transfer_id, bytes_received, total_bytes)) = progress {
+        if let Some((session, bytes_received, total_bytes)) = progress {
             if self
-                .report_mobile_file_upload_progress(
-                    &source_device_id,
-                    &transfer_id,
-                    bytes_received,
-                    total_bytes,
-                )
+                .report_mobile_file_upload_progress(&session, bytes_received, total_bytes)
                 .await
                 .is_err()
             {
@@ -312,8 +260,7 @@ impl ProductionRuntime {
                 if let Some(failed) = failed {
                     facade.abort_file_upload(failed.staging).await;
                     self.fail_mobile_file_upload_lifecycle(
-                        &failed.source_device_id,
-                        &failed.transfer_id,
+                        &failed.session,
                         "mobile upload progress failed",
                     )
                     .await;
@@ -348,8 +295,7 @@ impl ProductionRuntime {
             .ok_or_else(mobile_upload_invalid_handle_error)?;
         if self
             .report_mobile_file_upload_progress(
-                &upload.source_device_id,
-                &upload.transfer_id,
+                &upload.session,
                 upload.bytes_received,
                 upload.total_bytes.or(Some(upload.bytes_received)),
             )
@@ -358,8 +304,7 @@ impl ProductionRuntime {
         {
             facade.abort_file_upload(upload.staging).await;
             self.fail_mobile_file_upload_lifecycle(
-                &upload.source_device_id,
-                &upload.transfer_id,
+                &upload.session,
                 "mobile upload progress failed",
             )
             .await;
@@ -378,8 +323,7 @@ impl ProductionRuntime {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.fail_mobile_file_upload_lifecycle(
-                    &upload.source_device_id,
-                    &upload.transfer_id,
+                    &upload.session,
                     "mobile upload finalize failed",
                 )
                 .await;
@@ -406,8 +350,7 @@ impl ProductionRuntime {
             if let Some(upload) = upload.lock().await.take() {
                 facade.abort_file_upload(upload.staging).await;
                 self.try_fail_mobile_file_upload_lifecycle(
-                    &upload.source_device_id,
-                    &upload.transfer_id,
+                    &upload.session,
                     "mobile upload aborted",
                 )
                 .await?;
@@ -425,8 +368,7 @@ impl ProductionRuntime {
             if let Some(upload) = upload.lock().await.take() {
                 facade.abort_file_upload(upload.staging).await;
                 self.fail_mobile_file_upload_lifecycle(
-                    &upload.source_device_id,
-                    &upload.transfer_id,
+                    &upload.session,
                     "mobile upload lifecycle stopped",
                 )
                 .await;

@@ -604,11 +604,6 @@ mockall::mock! {
     pub BlobFetcher {}
     #[async_trait]
     impl InboundBlobFetcher for BlobFetcher {
-        async fn seed_pending_transfer(
-            &self,
-            context: crate::facade::blob_transfer::FetchTransferContext,
-        ) -> Result<()>;
-
         async fn fetch_blob(
             &self,
             command: crate::facade::blob_transfer::FetchBlobCommand,
@@ -3962,11 +3957,7 @@ async fn cancelled_attempt_stops_before_first_member_fetch() {
     let save_dir = tempfile::tempdir().expect("save dir");
     let publisher = Arc::new(FakeAtomicPublisher::default());
     let gate = AttemptGate::new(AttemptState::Cancelled, None);
-    let mut fetcher = writing_fetcher(0);
-    fetcher
-        .expect_seed_pending_transfer()
-        .times(2)
-        .returning(|_| Ok(()));
+    let fetcher = writing_fetcher(0);
     let materializer = gated_directory_materializer(
         fetcher,
         cache_dir.path(),
@@ -4001,10 +3992,6 @@ async fn cancelled_member_does_not_mark_remaining_members_failed() {
     let publisher = Arc::new(FakeAtomicPublisher::default());
     let gate = AttemptGate::new(AttemptState::Receiving, None);
     let mut fetcher = MockBlobFetcher::new();
-    fetcher
-        .expect_seed_pending_transfer()
-        .times(2)
-        .returning(|_| Ok(()));
     fetcher.expect_fetch_blob_to_path().times(1).returning(|_| {
         Err(anyhow::Error::from(
             crate::facade::blob_transfer::BlobTransferError::Cancelled,
@@ -4044,11 +4031,7 @@ async fn cancellation_after_all_members_still_wins_before_promotion() {
     // Two members produce five active checks; the sixth is immediately
     // before the Publishing log and promotion CAS.
     let gate = AttemptGate::new(AttemptState::Receiving, Some(6));
-    let mut fetcher = writing_fetcher(2);
-    fetcher
-        .expect_seed_pending_transfer()
-        .times(2)
-        .returning(|_| Ok(()));
+    let fetcher = writing_fetcher(2);
     let materializer = gated_directory_materializer(
         fetcher,
         cache_dir.path(),
@@ -4119,10 +4102,6 @@ async fn directory_representation_blob_belongs_to_the_directory_attempt() {
                 digest: BlobDigest::from_bytes([9; 32]),
             })
         });
-    fetcher
-        .expect_seed_pending_transfer()
-        .times(3)
-        .returning(|_| Ok(()));
     let materializer =
         gated_directory_materializer(fetcher, cache_dir.path(), save_dir.path(), publisher, gate);
 
@@ -4142,127 +4121,12 @@ async fn directory_representation_blob_belongs_to_the_directory_attempt() {
 }
 
 #[tokio::test]
-async fn directory_payload_is_fully_seeded_before_its_first_fetch() {
-    let cache_dir = tempfile::tempdir().expect("cache dir");
-    let save_dir = tempfile::tempdir().expect("save dir");
-    let publisher = Arc::new(FakeAtomicPublisher::default());
-    let gate = AttemptGate::new(AttemptState::Receiving, None);
-    let (mut blob_refs, manifest, mut snapshot) = two_root_payload();
-    let representation_index = snapshot.representations.len();
-    snapshot
-        .representations
-        .push(ObservedClipboardRepresentation::new(
-            RepresentationId::new(),
-            FormatId::from("image"),
-            Some(MimeType("image/png".to_owned())),
-            Vec::new(),
-        ));
-    blob_refs.push(V3BlobRef {
-        ticket: BlobTicket::from_bytes(vec![9]),
-        entry_id: EntryId::from("sender-image"),
-        filename: None,
-        mime: Some("image/png".to_owned()),
-        size_bytes: 4,
-        representation_index: Some(representation_index as u32),
-    });
-
-    let seeded = Arc::new(AtomicUsize::new(0));
-    let mut fetcher = writing_fetcher(2);
-    fetcher.expect_seed_pending_transfer().times(3).returning({
-        let seeded = Arc::clone(&seeded);
-        move |_| {
-            seeded.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    });
-    fetcher.expect_fetch_blob().times(1).returning({
-        let seeded = Arc::clone(&seeded);
-        move |command| {
-            assert_eq!(
-                seeded.load(Ordering::SeqCst),
-                3,
-                "every payload item must be durable before the first fetch"
-            );
-            Ok(crate::facade::blob_transfer::FetchBlobResult {
-                plaintext: Bytes::from_static(b"img!"),
-                entry_id: command.entry_id,
-                plaintext_hash: PlaintextHash::from_bytes([8; 32]),
-                digest: BlobDigest::from_bytes([9; 32]),
-            })
-        }
-    });
-    let materializer =
-        gated_directory_materializer(fetcher, cache_dir.path(), save_dir.path(), publisher, gate);
-
-    let result = materializer
-        .materialize(
-            DeviceId::new("peer-with-image"),
-            EntryId::from("entry-preseeded"),
-            snapshot,
-            blob_refs,
-            Some(manifest),
-            Some("attempt-1".to_owned()),
-            None,
-        )
-        .await;
-
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn directory_seed_failure_stops_before_any_fetch() {
-    let cache_dir = tempfile::tempdir().expect("cache dir");
-    let save_dir = tempfile::tempdir().expect("save dir");
-    let publisher = Arc::new(FakeAtomicPublisher::default());
-    let gate = AttemptGate::new(AttemptState::Receiving, None);
-    let (blob_refs, manifest, snapshot) = two_root_payload();
-    let mut fetcher = MockBlobFetcher::new();
-    fetcher
-        .expect_seed_pending_transfer()
-        .times(1)
-        .returning(|_| Err(anyhow::anyhow!("seed failed")));
-    fetcher.expect_fetch_blob().times(0);
-    fetcher.expect_fetch_blob_to_path().times(0);
-    let materializer = gated_directory_materializer(
-        fetcher,
-        cache_dir.path(),
-        save_dir.path(),
-        Arc::clone(&publisher),
-        gate,
-    );
-
-    let result = materializer
-        .materialize(
-            DeviceId::new("peer-seed-failure"),
-            EntryId::from("entry-seed-failure"),
-            snapshot,
-            blob_refs,
-            Some(manifest),
-            Some("attempt-1".to_owned()),
-            None,
-        )
-        .await;
-
-    assert!(result.is_err());
-    assert_eq!(publisher.publish_count(), 0);
-}
-
-#[tokio::test]
 async fn promotion_is_confirmed_before_first_final_path_move() {
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let save_dir = tempfile::tempdir().expect("save dir");
     let gate = AttemptGate::new(AttemptState::Receiving, None);
     let publisher = FakeAtomicPublisher::requiring_promotion(gate.clone());
-    let mut fetcher = writing_fetcher(2);
-    fetcher
-        .expect_seed_pending_transfer()
-        .times(2)
-        .withf(|context| {
-            context.attempt_id.as_deref() == Some("attempt-1")
-                && context.transfer_id.contains(":attempt:attempt-1:member:")
-                && context.total_bytes == Some(5)
-        })
-        .returning(|_| Ok(()));
+    let fetcher = writing_fetcher(2);
     let materializer = gated_directory_materializer(
         fetcher,
         cache_dir.path(),
@@ -4305,11 +4169,7 @@ async fn gated_publication_updates_recovery_log_before_collision_retry() {
     let save_dir = tempfile::tempdir().expect("save dir");
     let gate = AttemptGate::new(AttemptState::Receiving, None);
     let publisher = FakeAtomicPublisher::losing_a_race_at(1);
-    let mut fetcher = writing_fetcher(2);
-    fetcher
-        .expect_seed_pending_transfer()
-        .times(2)
-        .returning(|_| Ok(()));
+    let fetcher = writing_fetcher(2);
     let materializer = gated_directory_materializer(
         fetcher,
         cache_dir.path(),

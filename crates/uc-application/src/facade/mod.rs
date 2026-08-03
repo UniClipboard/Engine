@@ -109,9 +109,8 @@ pub use encryption::{
     EncryptionFacade, EncryptionFacadeDeps, EncryptionFacadeError, EncryptionStateView,
 };
 pub use file_transfer::{
-    CancelTransfer, CompleteTransfer, FailTransfer, FileTransferApplicationError,
-    FileTransferFacade, FileTransferFacadeDeps, ReportTransferProgress, SeedReceiverContext,
-    StartTransfer,
+    BeginReceiverTransfer, FileTransferApplicationError, FileTransferFacade,
+    FileTransferFacadeDeps, FileTransferSession, ReceiverTransferRegistration,
 };
 pub use host_event::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError,

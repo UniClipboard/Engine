@@ -269,11 +269,6 @@ pub trait InboundBlobMaterializer: Send + Sync {
 
 #[async_trait]
 pub trait InboundBlobFetcher: Send + Sync {
-    /// Seed durable metadata for a transfer before its fetch becomes active.
-    async fn seed_pending_transfer(&self, _context: FetchTransferContext) -> Result<()> {
-        Ok(())
-    }
-
     /// In-memory fetch path — used by representation-bound blobs (e.g.
     /// oversized images that we splice back into `snapshot.representations`).
     async fn fetch_blob(&self, command: FetchBlobCommand) -> Result<FetchBlobResult>;
@@ -573,12 +568,6 @@ async fn discard_staging(staging: &std::path::Path) {
 
 #[async_trait]
 impl InboundBlobFetcher for BlobTransferFacade {
-    async fn seed_pending_transfer(&self, context: FetchTransferContext) -> Result<()> {
-        BlobTransferFacade::seed_pending_transfer(self, &context)
-            .await
-            .map_err(anyhow::Error::from)
-    }
-
     async fn fetch_blob(&self, command: FetchBlobCommand) -> Result<FetchBlobResult> {
         // 保留 thiserror 类型链:materializer 用 `is_cancel_error` downcast
         // 判断是否 user-cancel,与真正的 fetch 失败区分对待。
@@ -816,72 +805,11 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             .into_iter()
             .partition(|r| r.representation_index.is_some());
 
-        // 全部 blob_ref 共享同一个 receiver_entry_id == transfer_id。facade 内
-        // 的 lifecycle (seed / start / complete) 是 per-transfer-id 单次状态机,
-        // 第二次调用会被 fail-soft 但仍 warn(`upsert_pending_transfer: skipping`
-        // / `start lifecycle failed` / `complete lifecycle failed`),且 sender
-        // 端会在 batch 第一个 fetch 完成时就提前收到 `OutboundProgressStatus::
-        // Completed` —— UI 显示"传输完成"但实际后续 blob 还在拉。
-        //
-        // 给每次 fetch 一个 `BatchPosition`,让 facade 只在 First/Only 时 seed,
-        // 只在 Last/Only 时 complete + 反向通知 sender。
+        // Flat payload blobs share one receiver transfer id. BatchPosition lets
+        // the blob facade create one session, reuse it across fetches, and only
+        // settle it after the last blob.
         let batch_total = rep_refs.len() + file_refs.len();
         let mut batch_idx = 0usize;
-
-        if let Some(attempt_id) = attempt_id.as_deref() {
-            for (representation_index, blob_ref) in rep_refs.iter().enumerate() {
-                let context = directory_representation_transfer_context(
-                    &receiver_entry_id,
-                    attempt_id,
-                    representation_index,
-                    blob_ref,
-                    &from_device,
-                    position_in_batch(representation_index, batch_total),
-                );
-                self.fetcher.seed_pending_transfer(context).await?;
-            }
-
-            if let Some(manifest) = file_set_manifest.as_ref() {
-                let all_blob_refs = manifest_blob_refs
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("directory payload is missing blob references"))?;
-                let mut file_offset = rep_refs.len();
-                for (member_index, member) in manifest.members.iter().enumerate() {
-                    if member.kind == FileSetMemberKind::EmptyDirectory {
-                        continue;
-                    }
-                    let blob_index = member
-                        .blob_ref_index
-                        .ok_or_else(|| anyhow!("file member is missing its blob reference"))?
-                        as usize;
-                    let blob_ref = all_blob_refs.get(blob_index).ok_or_else(|| {
-                        anyhow!("directory blob reference index {blob_index} is out of bounds")
-                    })?;
-                    let context = directory_member_transfer_context(
-                        &receiver_entry_id,
-                        Some(attempt_id),
-                        member_index,
-                        blob_ref,
-                        &from_device,
-                        position_in_batch(file_offset, batch_total),
-                    );
-                    self.fetcher.seed_pending_transfer(context).await?;
-                    file_offset += 1;
-                }
-            } else {
-                for (file_index, blob_ref) in file_refs.iter().enumerate() {
-                    let context = directory_member_transfer_context(
-                        &receiver_entry_id,
-                        Some(attempt_id),
-                        file_index,
-                        blob_ref,
-                        &from_device,
-                        position_in_batch(rep_refs.len() + file_index, batch_total),
-                    );
-                    self.fetcher.seed_pending_transfer(context).await?;
-                }
-            }
-        }
 
         // 收集 partial cancel 时的"未完成"轨迹:
         // - `incomplete_rep_idxs`:rep_refs 阶段被取消的 representation index,
