@@ -10,9 +10,9 @@
 
 mod activation_announce_adapter;
 mod facade;
+mod file_upload;
 mod outbound_adapter;
 
-pub use facade::streaming_scope_nonce as mobile_sync_streaming_scope_nonce;
 pub use facade::{
     ApplyIncomingMobileClipError, ApplyIncomingMobileClipInput, ApplyIncomingMobileClipOutcome,
     AuthenticateBasicAuthError, AuthenticateBasicAuthInput, AuthenticatedDevice,
@@ -28,3 +28,4 @@ pub use facade::{
     UpdateMobileSyncSettingsError, UpdateMobileSyncSettingsInput, UpdateMobileSyncSettingsOutput,
     SYNC_CLIPBOARD_EX_INSTALL_URL,
 };
+pub use file_upload::{BeginMobileFileUpload, MobileFileUploadError, MobileFileUploadHandle};

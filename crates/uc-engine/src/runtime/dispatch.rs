@@ -515,8 +515,14 @@ impl EngineRuntime for ProductionRuntime {
         let session = self.session.lock().await.take();
         if let Some(session) = session {
             #[cfg(feature = "lan-compat")]
-            self.abort_all_mobile_file_uploads(session.mobile_sync.as_ref())
-                .await;
+            if session
+                .mobile_sync
+                .shutdown_mobile_file_uploads()
+                .await
+                .is_err()
+            {
+                tracing::warn!("mobile file upload shutdown finished with an error");
+            }
             session.tasks.shutdown(Duration::from_millis(500)).await;
             if let Err(error) = session.search_runtime.shutdown().await {
                 tracing::error!(error = %error, "search runtime stopped with error");

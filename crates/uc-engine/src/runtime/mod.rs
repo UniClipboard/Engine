@@ -7,8 +7,6 @@ mod lan_compatibility;
 #[cfg(feature = "lan-compat")]
 mod mobile_upload;
 
-#[cfg(feature = "lan-compat")]
-use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,8 +15,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::error;
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
-#[cfg(feature = "lan-compat")]
-use uc_application::facade::FileTransferFacade;
 use uc_application::facade::{AppFacade, InMemoryLifecycleStatus, PairingOutcome};
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
@@ -46,9 +42,6 @@ use crate::subsystems::history_maintenance::spawn_history_maintenance_task;
 use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
-#[cfg(feature = "lan-compat")]
-use mobile_upload::ActiveMobileFileUploadState;
-
 const START_FAILED_CODE: u32 = 1101;
 const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
@@ -59,8 +52,6 @@ pub(crate) struct ProductionRuntime {
     task_registry: Arc<TaskRegistry>,
     file_transfer_lifecycle: Arc<FileTransferLifecycle>,
     #[cfg(feature = "lan-compat")]
-    file_transfer_facade: Arc<FileTransferFacade>,
-    #[cfg(feature = "lan-compat")]
     mobile_lan_endpoint: MobileLanEndpointUpdater,
     clock: Arc<dyn ClockPort>,
     file_cache_dir: PathBuf,
@@ -70,8 +61,6 @@ pub(crate) struct ProductionRuntime {
     clipboard_change_runtime: HostClipboardChangeRuntime,
     #[cfg(feature = "lan-compat")]
     events: EventSender,
-    #[cfg(feature = "lan-compat")]
-    mobile_file_uploads: Mutex<HashMap<String, ActiveMobileFileUploadState>>,
 }
 
 struct SessionFactory {
@@ -206,8 +195,6 @@ impl ProductionRuntime {
         }
 
         #[cfg(feature = "lan-compat")]
-        let file_transfer_facade = Arc::clone(&wired.shared.file_transfer_facade);
-        #[cfg(feature = "lan-compat")]
         let mobile_lan_endpoint = MobileLanEndpointUpdater::new(Arc::clone(
             &wired.daemon_runtime.mobile_sync_endpoint_info,
         ));
@@ -228,8 +215,6 @@ impl ProductionRuntime {
             task_registry,
             file_transfer_lifecycle,
             #[cfg(feature = "lan-compat")]
-            file_transfer_facade,
-            #[cfg(feature = "lan-compat")]
             mobile_lan_endpoint,
             clock,
             file_cache_dir,
@@ -239,8 +224,6 @@ impl ProductionRuntime {
             clipboard_change_runtime,
             #[cfg(feature = "lan-compat")]
             events,
-            #[cfg(feature = "lan-compat")]
-            mobile_file_uploads: Mutex::new(HashMap::new()),
         })
     }
 
@@ -419,8 +402,6 @@ mod tests {
         SearchResultView, StorageFacadeError, StorageStatsView,
     };
     use uc_core::ids::DeviceId;
-    #[cfg(feature = "lan-compat")]
-    use uc_core::mobile_sync::StagingHandle;
     use uc_core::security::IdentityFingerprint;
 
     use super::*;
@@ -430,8 +411,6 @@ mod tests {
     };
     use crate::operations::settings::storage::{map_storage_error, storage_stats_result};
     use crate::runtime::host_operations::send_report_result;
-    #[cfg(feature = "lan-compat")]
-    use crate::runtime::mobile_upload::new_mobile_file_upload_handle;
     use crate::{EntrySummary, OperationResult, QueryHistoryInput, StorageStatsSummary};
 
     #[test]
@@ -527,25 +506,6 @@ mod tests {
                 lan_port: Some(51234),
             })
         );
-    }
-
-    #[cfg(feature = "lan-compat")]
-    #[test]
-    fn mobile_upload_handle_is_owned_by_engine_instead_of_exposing_staging_token() {
-        let staging = StagingHandle::new();
-        let handle = new_mobile_file_upload_handle();
-
-        assert_ne!(handle.as_str(), staging.to_string());
-        assert!(handle.as_str().starts_with("uc-mobile-upload-v1:"));
-    }
-
-    #[cfg(feature = "lan-compat")]
-    #[test]
-    fn mobile_upload_handles_are_unique() {
-        let first = new_mobile_file_upload_handle();
-        let second = new_mobile_file_upload_handle();
-
-        assert_ne!(first, second);
     }
 
     #[test]

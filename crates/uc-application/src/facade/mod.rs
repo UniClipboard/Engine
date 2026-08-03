@@ -134,17 +134,17 @@ pub use membership_gossip::{
     SpaceMembershipGossipError, SpaceMembershipGossipRuntime, SponsorSeedBatchContext,
 };
 #[cfg(feature = "lan-compat")]
-pub use mobile_sync::mobile_sync_streaming_scope_nonce;
-#[cfg(feature = "lan-compat")]
 pub use mobile_sync::{
     ApplyIncomingMobileClipError, ApplyIncomingMobileClipInput, ApplyIncomingMobileClipOutcome,
     AuthenticateBasicAuthError, AuthenticateBasicAuthInput, AuthenticatedDevice,
-    CheckContentAvailableError, GetLatestMobileSyncDocError, GetMobileSyncFileError,
-    GetMobileSyncFileOutput, GetMobileSyncSettingsError, IncomingMobileBuffer,
-    IncomingMobileClipEvent, LanInterfaceOption as MobileSyncLanInterfaceOption,
+    BeginMobileFileUpload, CheckContentAvailableError, GetLatestMobileSyncDocError,
+    GetMobileSyncFileError, GetMobileSyncFileOutput, GetMobileSyncSettingsError,
+    IncomingMobileBuffer, IncomingMobileClipEvent,
+    LanInterfaceOption as MobileSyncLanInterfaceOption,
     ListLanInterfacesError as MobileSyncListLanInterfacesError, ListMobileDevicesError,
-    MobileDeviceSummary, MobileSyncFacade, MobileSyncFacadeDeps, MobileSyncSettingsView,
-    MobileSyncSnapshotPorts, RegisterMobileShortcutDeviceError, RegisterMobileShortcutDeviceInput,
+    MobileDeviceSummary, MobileFileUploadError, MobileFileUploadHandle, MobileSyncFacade,
+    MobileSyncFacadeDeps, MobileSyncSettingsView, MobileSyncSnapshotPorts,
+    RegisterMobileShortcutDeviceError, RegisterMobileShortcutDeviceInput,
     RegisterMobileShortcutDeviceOutput, RevokeMobileDeviceError, RevokeMobileDeviceInput,
     ShortcutInstallMethod, ShortcutInstallMethodOption, SyncClipboardItemType, SyncClipboardMeta,
     UpdateMobileSyncSettingsError, UpdateMobileSyncSettingsInput, UpdateMobileSyncSettingsOutput,

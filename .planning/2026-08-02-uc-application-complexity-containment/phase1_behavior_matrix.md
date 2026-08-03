@@ -25,12 +25,12 @@
 
 | 行为 | 当前证据 | 状态 | 后续门槛 |
 |---|---|---|---|
-| 文件传输开始、进度、完成 | `crates/uc-application/tests/file_transfer/` 完整流程测试 | 规则已保护，待迁移 | Phase 5 迁到 `FileTransferSession` Interface |
-| 文件传输只有一个终态 | 时间线三终态测试、第二终态拒绝测试、既有终态后副作用测试 | 规则已保护，待迁移 | Phase 5 从 Session Interface 验证互斥和幂等 |
-| 移动上传开始、追加、完成、取消 | `engine_mobile_content_round_trips_and_drops_uploads_on_suspend`、`engine_mobile_upload_owns_transfer_lifecycle_events` | 稳定入口已证明 | Phase 6 保持 operation、结果和事件兼容 |
-| 移动上传进度失败 | `engine_mobile_upload_progress_failure_cleans_up_and_invalidates_handle` | 稳定入口已证明 | Phase 6 保持错误码、清理和句柄失效 |
-| 移动上传关闭清理 | `engine_shutdown_removes_unfinished_mobile_upload_files` | 稳定入口已证明 | Phase 6 保持真实暂存区无残留 |
-| 移动上传 append I/O 失败 | 当前真实文件系统无法安全稳定注入 | 待最终负责人补齐 | Phase 6 用可控 `MobileFileStagingPort` 从 `MobileFileUploadCoordinator` Interface 验证自动清理和失败终态 |
+| 文件传输开始、进度、完成 | `beginning_receiver_transfer_records_context_and_started_event`、`progress_is_monotonic_inside_one_session`、`repeating_same_terminal_call_is_idempotent` | 最终边界已证明 | 后续阶段保持通过 |
+| 文件传输只有一个终态 | `concurrent_terminal_calls_append_only_one_terminal_event`、`closing_facade_cancels_every_active_session_and_rejects_new_sessions` | 最终边界已证明 | 后续阶段保持通过 |
+| 移动上传开始、追加、完成、取消 | 稳定 Engine 两项场景保持通过；负责人成功、并发完成和重复取消测试覆盖内部完整结果 | 最终边界已证明 | 后续阶段保持四动作兼容 |
+| 移动上传进度失败 | `engine_mobile_upload_progress_failure_cleans_up_and_invalidates_handle` 迁移后保持错误码、清理和句柄失效 | 最终边界已证明 | 后续阶段保持通过 |
+| 移动上传关闭清理 | 真实暂存区清理场景保持通过；`close_waits_for_an_inflight_append_before_cancelling_the_upload` 证明等待在途操作 | 最终边界已证明 | 后续阶段保持通过 |
+| 移动上传 append I/O 失败 | `append_failure_aborts_staging_marks_failed_and_invalidates_the_handle` 从最终负责人入口注入可控写盘失败 | 最终边界已证明 | 后续阶段保持统一清理 |
 
 ## 历史维护
 
@@ -43,4 +43,4 @@
 
 ## Phase 1 结论
 
-Phase 1 仍为进行中。剪贴板入站行为已经从稳定 Engine 和最终运行期边界完整保护；移动上传 append I/O 失败、文件传输会话和历史维护关闭仍绑定到后续负责人的退出条件，未记为通过。
+Phase 1 仍为进行中。剪贴板入站、文件传输和移动上传已经从稳定 Engine 与最终负责人边界完整保护；仅历史维护的最终负责人和关闭立即唤醒仍绑定 Phase 7，未记为通过。

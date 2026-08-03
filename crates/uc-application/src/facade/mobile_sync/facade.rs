@@ -20,7 +20,10 @@
 //! | [`MobileSyncFacade::get_latest_sync_doc`] | `GetLatestMobileSyncDocUseCase` | `GET /SyncClipboard.json` |
 //! | [`MobileSyncFacade::put_sync_doc`] | `ApplyIncomingMobileClipUseCase` (`SyncDoc`) | `PUT /SyncClipboard.json` |
 //! | [`MobileSyncFacade::get_clipboard_file`] | `GetMobileSyncFileUseCase` | `GET /file/{name}` |
-//! | [`MobileSyncFacade::put_clipboard_file`] | `ApplyIncomingMobileClipUseCase` (`BufferFile`) | `PUT /file/{name}` |
+//! | [`MobileSyncFacade::begin_mobile_file_upload`] | `MobileFileUploadCoordinator` | 开始一笔流式文件上传 |
+//! | [`MobileSyncFacade::append_mobile_file_upload`] | `MobileFileUploadCoordinator` | 追加上传字节 |
+//! | [`MobileSyncFacade::finish_mobile_file_upload`] | `MobileFileUploadCoordinator` | 完成暂存并进入移动入站流程 |
+//! | [`MobileSyncFacade::abort_mobile_file_upload`] | `MobileFileUploadCoordinator` | 取消并清理上传 |
 //!
 //! ## 错误暴露策略
 //!
@@ -57,6 +60,10 @@ use crate::facade::active_clipboard::ActiveClipboardFacade;
 use crate::facade::clipboard_outbound::ClipboardOutboundFacade;
 use crate::facade::file_transfer::FileTransferFacade;
 use crate::facade::mobile_sync::activation_announce_adapter::MobileActivationAnnounceAdapter;
+use crate::facade::mobile_sync::file_upload::{
+    BeginMobileFileUpload, MobileFileUploadApplyPort, MobileFileUploadCoordinator,
+    MobileFileUploadError, MobileFileUploadHandle,
+};
 use crate::facade::mobile_sync::outbound_adapter::ClipboardOutboundFanOutAdapter;
 use crate::usecases::clipboard_sync::apply_inbound::ApplyInboundClipboardUseCase;
 use crate::usecases::mobile_sync::apply_incoming::{
@@ -277,15 +284,10 @@ pub struct MobileSyncFacade {
     update_settings: UpdateMobileSyncSettingsUseCase,
     list_lan_interfaces: ListLanInterfacesUseCase,
     authenticate_basic: AuthenticateBasicAuthUseCase,
-    apply_incoming: ApplyIncomingMobileClipUseCase,
+    apply_incoming: Arc<ApplyIncomingMobileClipUseCase>,
     get_latest_doc: GetLatestMobileSyncDocUseCase,
     get_file: GetMobileSyncFileUseCase,
-    /// `PUT /file` 流式上传入口持有的 staging port 引用。webserver 端
-    /// `put_clipboard_file` handler 在收 body 期间通过 facade 的
-    /// `begin_file_upload` / `append_file_chunk` / `finalize_file_upload` /
-    /// `abort_file_upload` 转发到本 port,字节流不再绕道 use case 层的内存
-    /// buffer。与 `apply_incoming` / `get_file` 共用同一份 Arc。
-    file_staging: Arc<dyn MobileFileStagingPort>,
+    file_uploads: MobileFileUploadCoordinator,
     /// 见 [`MobileSyncFacadeDeps::lan_lifecycle`]。`None` 表示当前装配不要求
     /// 即时生效(CLI fallback / 单测),`update_settings` 写盘后不调 apply。
     lan_lifecycle: Option<Arc<dyn MobileLanLifecyclePort>>,
@@ -335,6 +337,29 @@ impl MobileSyncFacade {
         let snapshot_port: Arc<dyn LatestClipboardSnapshotPort> =
             Arc::new(LatestClipboardSnapshotAdapter::new(snapshot_ports));
 
+        let apply_incoming = Arc::new(ApplyIncomingMobileClipUseCase::new(
+            apply_inbound,
+            incoming_buffer,
+            file_staging.clone(),
+            clock.clone(),
+            file_transfer.clone(),
+            clipboard_outbound.map(|outbound| {
+                Arc::new(ClipboardOutboundFanOutAdapter::new(outbound))
+                    as Arc<dyn MobileInboundFanOutPort>
+            }),
+            analytics.clone(),
+            active_clipboard.map(|active_clipboard| {
+                Arc::new(MobileActivationAnnounceAdapter::new(active_clipboard))
+                    as Arc<dyn MobileActivationAnnouncePort>
+            }),
+        ));
+        let file_upload_apply: Arc<dyn MobileFileUploadApplyPort> = apply_incoming.clone();
+        let file_uploads = MobileFileUploadCoordinator::new(
+            file_staging.clone(),
+            file_upload_apply,
+            file_transfer,
+        );
+
         Self {
             register_device: RegisterMobileShortcutDeviceUseCase::new(
                 credentials_minter.clone(),
@@ -366,36 +391,10 @@ impl MobileSyncFacade {
                 password_hasher,
                 analytics.clone(),
             ),
-            // facade 装配处只能拿到 `ClipboardOutboundFacade`(由 daemon
-            // runtime_assembly 装好),但 use case 依赖的是 use-case-local 的
-            // `MobileInboundFanOutPort` trait。这里就是 facade 层的薄装配点:
-            // 把 facade 包成 adapter, 让 use case 的依赖 surface 不必随出站
-            // 管线演化而膨胀。详见 [`ClipboardOutboundFanOutAdapter`] 与
-            // [`MobileInboundFanOutPort`] 的设计文档。
-            apply_incoming: ApplyIncomingMobileClipUseCase::new(
-                apply_inbound,
-                incoming_buffer,
-                file_staging.clone(),
-                clock,
-                file_transfer,
-                clipboard_outbound.map(|outbound| {
-                    Arc::new(ClipboardOutboundFanOutAdapter::new(outbound))
-                        as Arc<dyn MobileInboundFanOutPort>
-                }),
-                analytics,
-                // Mobile-activation announce (issue #1017 PR7): converges the
-                // activation onto peers via the send-gated 0xC3 path. The OS
-                // write itself belongs to the inbound pipeline, so only the
-                // active-clipboard facade is needed here; `None` → no announce
-                // (mobile upload lands locally only).
-                active_clipboard.map(|active_clipboard| {
-                    Arc::new(MobileActivationAnnounceAdapter::new(active_clipboard))
-                        as Arc<dyn MobileActivationAnnouncePort>
-                }),
-            ),
+            apply_incoming,
             get_latest_doc: GetLatestMobileSyncDocUseCase::new(snapshot_port.clone()),
             get_file: GetMobileSyncFileUseCase::new(snapshot_port, file_staging.clone()),
-            file_staging,
+            file_uploads,
             lan_lifecycle,
             endpoint_info,
             device_find_by_id: devices.find_by_id,
@@ -598,132 +597,39 @@ impl MobileSyncFacade {
         self.get_file.execute(data_name).await
     }
 
-    /// `PUT /file/{dataName}` 全量字节出口(CLI debug / 测试用)。
-    ///
-    /// 生产路径(uc-webserver)走 [`Self::begin_file_upload`] →
-    /// [`Self::append_file_chunk`] → [`Self::finalize_file_upload`] 三段式
-    /// 流式上传,不进本入口。本入口内部仍走相同的 streaming staging API,
-    /// 把整个 bytes 一次 append 进去, 再 finalize → 喂 BufferFile event,
-    /// 这样应用层只剩"已 staged 文件"这一种路径(无两套并行)。
-    ///
-    /// 失败时调 [`Self::abort_file_upload`] 释放半写入的 staging 资源。
-    pub async fn put_clipboard_file(
+    pub async fn begin_mobile_file_upload(
         &self,
-        data_name: String,
-        mime: String,
-        bytes: Vec<u8>,
-        source_device_id: MobileDeviceId,
-        transfer_id: String,
-    ) -> Result<ApplyIncomingMobileClipOutcome, ApplyIncomingMobileClipError> {
-        let scope_id = streaming_scope_nonce();
-        let handle = self
-            .file_staging
-            .begin_stage(&scope_id, &data_name, &mime)
-            .await
-            .map_err(|err| {
-                ApplyIncomingMobileClipError::Internal(format!(
-                    "put_clipboard_file: begin_stage failed: {err}"
-                ))
-            })?;
-        if let Err(err) = self.file_staging.append_stage_chunk(&handle, &bytes).await {
-            self.file_staging.abort_stage(handle).await;
-            return Err(ApplyIncomingMobileClipError::Internal(format!(
-                "put_clipboard_file: append_stage_chunk failed: {err}"
-            )));
-        }
-        let staged = match self.file_staging.finalize_stage(handle).await {
-            Ok(staged) => staged,
-            Err(err) => {
-                return Err(ApplyIncomingMobileClipError::Internal(format!(
-                    "put_clipboard_file: finalize_stage failed: {err}"
-                )));
-            }
-        };
-        self.apply_incoming
-            .execute(ApplyIncomingMobileClipInput {
-                source_device_id,
-                event: IncomingMobileClipEvent::BufferFile {
-                    data_name,
-                    mime,
-                    staged,
-                    transfer_id,
-                },
-            })
-            .await
+        input: BeginMobileFileUpload,
+    ) -> Result<MobileFileUploadHandle, MobileFileUploadError> {
+        self.file_uploads.begin_upload(input).await
     }
 
-    /// 开启一次 `PUT /file/{dataName}` 流式上传。返回的 [`StagingHandle`]
-    /// 用于后续 chunk append / finalize / abort。`scope_id` 由调用方按
-    /// "每次入站事件取一段独立 nonce"语义生成,典型用 [`streaming_scope_nonce`]。
-    pub async fn begin_file_upload(
+    pub async fn append_mobile_file_upload(
         &self,
-        scope_id: &str,
-        data_name: &str,
-        mime: &str,
-    ) -> Result<uc_core::mobile_sync::StagingHandle, uc_core::ports::MobileFileStagingError> {
-        self.file_staging
-            .begin_stage(scope_id, data_name, mime)
-            .await
-    }
-
-    /// 把一个 body chunk 喂进流式 staging 会话。0 字节 chunk 合法且为 no-op。
-    /// 单笔会话只允许**串行** append,并发同 handle 行为未定义。
-    pub async fn append_file_chunk(
-        &self,
-        handle: &uc_core::mobile_sync::StagingHandle,
+        handle: &MobileFileUploadHandle,
         chunk: &[u8],
-    ) -> Result<(), uc_core::ports::MobileFileStagingError> {
-        self.file_staging.append_stage_chunk(handle, chunk).await
+    ) -> Result<(), MobileFileUploadError> {
+        self.file_uploads.append_chunk(handle, chunk).await
     }
 
-    /// 收齐字节后调用,消费 `handle` 完成 staging 并把"已 staged 文件"
-    /// 挂进 IncomingMobileBuffer 等 SyncDoc 配对。返回 `Buffered` 或
-    /// `DecodeFailed` 等 use case outcome,路由层据此映射 HTTP 响应。
-    pub async fn finalize_file_upload(
+    pub async fn finish_mobile_file_upload(
         &self,
-        handle: uc_core::mobile_sync::StagingHandle,
-        data_name: String,
-        mime: String,
-        source_device_id: MobileDeviceId,
-        transfer_id: String,
-    ) -> Result<ApplyIncomingMobileClipOutcome, ApplyIncomingMobileClipError> {
-        let staged = self
-            .file_staging
-            .finalize_stage(handle)
-            .await
-            .map_err(|err| {
-                ApplyIncomingMobileClipError::Internal(format!(
-                    "finalize_file_upload: staging finalize failed: {err}"
-                ))
-            })?;
-        self.apply_incoming
-            .execute(ApplyIncomingMobileClipInput {
-                source_device_id,
-                event: IncomingMobileClipEvent::BufferFile {
-                    data_name,
-                    mime,
-                    staged,
-                    transfer_id,
-                },
-            })
-            .await
+        handle: MobileFileUploadHandle,
+        media_type: String,
+    ) -> Result<ApplyIncomingMobileClipOutcome, MobileFileUploadError> {
+        self.file_uploads.finish_upload(handle, media_type).await
     }
 
-    /// 放弃一次 `PUT /file/{dataName}` 流式上传 —— body 中断 / 客户端断流 /
-    /// 任一 append 失败时调用,释放半写入的 staging 资源。fire-and-forget,
-    /// 二次失败由 adapter 内部 log,不向上抛。
-    pub async fn abort_file_upload(&self, handle: uc_core::mobile_sync::StagingHandle) {
-        self.file_staging.abort_stage(handle).await;
+    pub async fn abort_mobile_file_upload(
+        &self,
+        handle: MobileFileUploadHandle,
+    ) -> Result<bool, MobileFileUploadError> {
+        self.file_uploads.abort_upload(handle).await
     }
-}
 
-/// 生成 12 hex 字符的 staging scope nonce(uuid v4 simple 形态前 12 位)。
-/// 调用方按"每次入站 PUT /file 取一段独立 nonce"语义使用,与 entry_id
-/// 解耦(entry_id 在 ApplyInbound 内部生成,本阶段还不知道)。
-pub fn streaming_scope_nonce() -> String {
-    let id = uuid::Uuid::new_v4();
-    let s = id.simple().to_string();
-    s[..12].to_string()
+    pub async fn shutdown_mobile_file_uploads(&self) -> Result<(), MobileFileUploadError> {
+        self.file_uploads.close().await
+    }
 }
 
 #[cfg(test)]

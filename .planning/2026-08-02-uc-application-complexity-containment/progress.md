@@ -1,5 +1,47 @@
 # Progress
 
+## Session: 2026-08-04（Phase 6）
+
+### Phase: 收口移动文件上传
+
+- **Status:** complete
+- Actions taken:
+  - 恢复活动计划并确认 Phase 5 已独立提交。
+  - 保护用户既有成员移除恢复计划和对应架构维护记录，不修改或提交。
+  - 审计稳定四动作、错误编号、暂停恢复、真实暂存清理和文件传输终态路径。
+  - 确认 Engine 仍拥有活动表、句柄、暂存对象、字节统计、节流和重复失败清理。
+  - 确认 `Buffered` 只是文件两步协议的中间结果，最终终态仍由后续 SyncDoc 应用负责。
+  - 选定移动同步应用入口内部的 `MobileFileUploadCoordinator` 作为唯一负责人，Engine 只保留输入、结果和错误转换。
+- TDD:
+  - 未启用 `lan-compat` 的首次测试命令过滤出 0 项；修正为实际生产功能组合后，测试按预期因 `MobileFileUploadCoordinator` 及其输入、句柄和错误不存在而编译失败。
+  - 初版负责人进入编译后发现一次锁临时借用生命周期和测试终态判断写法错误，并有一个多余导入；按编译器提示做局部修正后继续同一测试，不改变负责人设计。
+  - 引擎迁移后的首次完整编译发现 `clock` 和 `analytics` 在移动入站与其他用例之间共享时被提前移动；改为克隆共享引用，首次尝试未产生其他结构性错误。
+  - 首次修正共享引用时机械替换误命中参数解构，格式化在解析阶段停止且未写入其他文件；按准确行恢复解构字段，并在移动入站构造参数处克隆。
+- Implemented:
+  - 新增移动上传最终负责人，内部拥有不透明句柄、活动表、暂存对象、字节统计、进度节流和文件传输会话。
+  - 开始、追加、进度和完成暂存失败统一清理并记录失败；显式取消和关闭统一清理并记录取消。
+  - 四个动作通过共享运行门与关闭协调；关闭等待已开始动作退出，再取消剩余上传，关闭后拒绝新上传。
+  - 移动同步入口只转发四个用户动作和一次关闭；删除全量字节上传及四个暴露暂存步骤。
+  - Engine 删除活动上传表、暂存句柄、句柄生成、进度节流、会话推进和重复失败清理，只保留稳定输入、结果和错误编号转换。
+- Focused verification:
+  - `cargo test -p uc-application --lib --features lan-compat facade::mobile_sync::file_upload::tests --locked`：10 项通过。
+  - `cargo test -p uc-engine --lib --features lan-compat mobile_upload --locked`：3 项通过。
+  - `engine_mobile_content_round_trips_and_drops_uploads_on_suspend`：通过。
+  - `engine_shutdown_removes_unfinished_mobile_upload_files`：通过。
+  - `cargo check -p uc-engine --all-targets --all-features --locked`：通过。
+- Full verification:
+  - `cargo test -p uc-application --all-features --locked`：通过（957 项单元测试、8 项文件传输集成测试）。
+  - `cargo test -p uc-engine --all-features --locked`：通过；局域网组播测试按测试定义跳过 1 项，未计为通过。
+  - `cargo metadata --locked --format-version 1`：通过。
+  - `cargo check --workspace --all-targets --locked`：通过。
+  - `cargo fmt --all -- --check`：通过。
+  - `node scripts/architecture/check-engine-repository.mjs`：通过。
+  - `git diff --check`：通过。
+  - 旧入口和 Engine 上传状态扫描：只剩应用负责人内部活动状态；旧五个入口、范围编号和 Engine 上传表均不存在。
+- Phase result:
+  - 详细实施计划 Phase 6 已完成。
+  - 总任务 Phase 4 已完成；Phase 1 仍等待历史维护最终负责人补齐，下一阶段为详细实施计划 Phase 7。
+
 ## Session: 2026-08-03（Phase 5）
 
 ### Phase: 建立文件传输会话
