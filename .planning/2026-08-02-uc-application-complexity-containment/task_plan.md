@@ -22,7 +22,7 @@
 
 ## Current Phase
 
-Phase 1：固定剩余功能行为，已完成；Phase 2：搜索运行期收口，已完成；Phase 3：剪贴板入站模式和运行期收口，已完成；Phase 4：文件传输和移动上传收口已完成；Phase 5：历史维护收口已完成；下一步为 Phase 6 收紧应用总入口
+Phase 1：固定剩余功能行为，已完成；Phase 2：搜索运行期收口，已完成；Phase 3：剪贴板入站模式和运行期收口，已完成；Phase 4：文件传输和移动上传收口已完成；Phase 5：历史维护收口已完成；Phase 6：收紧应用总入口已完成；下一步为 Phase 7 删除与整体验收
 
 ## Phases
 
@@ -68,10 +68,10 @@ Phase 1：固定剩余功能行为，已完成；Phase 2：搜索运行期收口
 
 ### Phase 6：收紧应用总入口
 
-- [ ] 隐藏内部对象
-- [ ] 删除重复入口和半就绪构造
-- [ ] 保持每个 Engine operation 只有一条应用调用路径
-- **Status:** pending
+- [x] 隐藏内部对象
+- [x] 删除重复入口和半就绪构造
+- [x] 保持每个 Engine operation 只有一条应用调用路径
+- **Status:** complete
 
 ### Phase 7：删除与整体验收
 

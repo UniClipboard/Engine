@@ -3,7 +3,9 @@
 use crate::error_codes::*;
 
 use tracing::error;
-use uc_application::facade::{AppFacade, ClipboardRestoreError};
+use uc_application::facade::{
+    AppFacade, ClipboardRestoreError, ClipboardRestoreMode as AppClipboardRestoreMode,
+};
 
 use crate::{
     ClipboardRestoreMode, ClipboardRestoreOutcome, EngineError, EngineErrorCategory,
@@ -14,22 +16,12 @@ pub async fn execute_restore_clipboard(
     facade: &AppFacade,
     input: RestoreClipboardInput,
 ) -> Result<OperationResult, EngineError> {
-    let restore = facade.clipboard_restore.as_ref().ok_or_else(|| {
-        EngineError::new(
-            RESTORE_CLIPBOARD_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-        )
-    })?;
-    let result = match input.mode {
-        ClipboardRestoreMode::Standard => restore.restore_entry(&input.entry_id).await,
-        ClipboardRestoreMode::PlainText => {
-            restore.restore_entry_as_plain_text(&input.entry_id).await
-        }
-        ClipboardRestoreMode::FilePaths => {
-            restore.restore_entry_as_file_paths(&input.entry_id).await
-        }
+    let mode = match input.mode {
+        ClipboardRestoreMode::Standard => AppClipboardRestoreMode::Standard,
+        ClipboardRestoreMode::PlainText => AppClipboardRestoreMode::PlainText,
+        ClipboardRestoreMode::FilePaths => AppClipboardRestoreMode::FilePaths,
     };
+    let result = facade.restore_clipboard(&input.entry_id, mode).await;
 
     map_restore_result(result)
 }

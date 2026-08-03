@@ -64,14 +64,7 @@ pub async fn execute_cancel_inbound_transfer(
     input: CancelInboundTransferInput,
 ) -> Result<OperationResult, EngineError> {
     validate_id(&input.transfer_id)?;
-    let transfer = facade.blob_transfer.get().cloned().ok_or_else(|| {
-        EngineError::new(
-            TRANSFER_CANCEL_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-        )
-    })?;
-    let outcome = transfer
+    let outcome = facade
         .cancel_inbound_transfer(&input.transfer_id, transfer_reason(input.reason))
         .await
         .map_err(map_transfer_cancel_error)?;

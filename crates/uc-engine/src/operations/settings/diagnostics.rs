@@ -16,8 +16,7 @@ pub(crate) async fn execute_query_diagnostics(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let status = facade
-        .diagnostics
-        .debug_status()
+        .diagnostics_status()
         .await
         .map_err(|_| internal_error(QUERY_DIAGNOSTICS_FAILED_CODE))?;
     Ok(OperationResult::DiagnosticsStatus(
@@ -34,8 +33,7 @@ pub(crate) async fn execute_update_debug_mode(
     input: UpdateDebugModeInput,
 ) -> Result<OperationResult, EngineError> {
     let result = facade
-        .diagnostics
-        .set_debug_mode(input.enabled)
+        .update_debug_mode(input.enabled)
         .await
         .map_err(|_| internal_error(UPDATE_DEBUG_MODE_FAILED_CODE))?;
     Ok(OperationResult::DebugModeUpdated(DebugModeUpdateSummary {
@@ -55,8 +53,7 @@ pub(crate) async fn execute_export_diagnostic_logs(
         .map_err(|_| internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE))?;
 
     let exported = facade
-        .diagnostics
-        .export_logs_to_dir(input.since_hours, export_dir.clone())
+        .export_diagnostic_logs(input.since_hours, export_dir.clone())
         .await;
     let result = match exported {
         Ok(exported) => copy_path_to_host(files, &input.destination, Path::new(&exported.path))

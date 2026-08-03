@@ -22,9 +22,8 @@ use uc_application::facade::{
     ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardOutboundFacade,
     ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade, DeviceFacade,
     DiagnosticsFacade, DiagnosticsFacadeDeps, EncryptionFacade, EncryptionFacadeDeps,
-    LifecycleFacade, LifecycleFacadeDeps, LifecycleStatusGateway, MemberRosterFacade,
-    ResourceFacade, ResourceFacadeDeps, SearchFacade, SettingsFacade, StorageFacade,
-    StorageFacadeDeps, UpgradeFacade, UpgradeFacadeDeps,
+    MemberRosterFacade, ResourceFacade, ResourceFacadeDeps, SearchFacade, SettingsFacade,
+    StorageFacade, StorageFacadeDeps, UpgradeFacade, UpgradeFacadeDeps,
 };
 #[cfg(feature = "lan-compat")]
 use uc_application::ApplyInboundClipboardUseCase;
@@ -202,46 +201,25 @@ pub fn build_mobile_sync_facade(
     }))
 }
 
-/// 通用 `AppFacade` 装配选项。
-///
-/// 不同桌面入口只在这些可选能力上有差异。共同 facade 由
-/// [`build_app_facade_from_deps`] 统一创建，避免 daemon、Tauri、CLI 各自
-/// 手写一份相同的子 facade 拼装。
-#[derive(Default)]
-pub struct AppFacadeAssemblyOptions {
-    pub space: Option<Arc<SpaceFacade>>,
-    pub space_application: Option<uc_application::facade::SpaceApplicationHandle>,
+/// 生产运行期构造完整 [`AppFacade`] 所需的全部能力。
+pub struct RuntimeAppFacadeAssembly {
+    pub space: Arc<SpaceFacade>,
+    pub space_application: uc_application::facade::SpaceApplicationHandle,
     pub space_receive_activity:
-        Option<Arc<dyn uc_application::receive_reconciliation::EnsureReceiveReadyPort>>,
-    pub member_roster: Option<Arc<MemberRosterFacade>>,
-    pub clipboard_sync: Option<Arc<ClipboardSyncFacade>>,
-    pub blob_transfer: Option<Arc<BlobTransferFacade>>,
-    /// daemon 启动期构造好的 outbound facade(commit D)。`AppFacade.resend_entry`
-    /// 通过它落地 resend。GUI shell / CLI fallback 留 `None`,
-    /// daemon 启动后 `install_daemon_lifecycle` 装入。
-    pub clipboard_outbound: Option<Arc<ClipboardOutboundFacade>>,
+        Arc<dyn uc_application::receive_reconciliation::EnsureReceiveReadyPort>,
+    pub member_roster: Arc<MemberRosterFacade>,
+    pub clipboard_sync: Arc<ClipboardSyncFacade>,
+    pub blob_transfer: Arc<BlobTransferFacade>,
+    pub clipboard_outbound: Arc<ClipboardOutboundFacade>,
     /// 底层 `BlobTransferPort`(`IrohBlobTransferAdapter`)直连引用,供
     /// `ClipboardHistoryFacade` 在 `delete_entry` / `clear_history` 时
     /// 调 `untag` 释放对应 entry 对 iroh-blobs 的引用。与 `blob_transfer`
     /// 字段(承载发布/拉取 use case 的 facade)分开装配:facade 用于
     /// "发布、拉取 blob"业务动作,这个 port 用于"释放 blob 引用"基础
     /// 设施动作,两者共享同一个底层 adapter 实例。
-    /// `None` 表示该装配场景不接入 blob 系统(纯文本 / 测试场景),
-    /// 此时 untag 直接跳过。
-    pub blob_transfer_port: Option<Arc<dyn uc_core::ports::blob::BlobTransferPort>>,
-    pub clipboard_restore: Option<ClipboardRestoreAssembly>,
-    pub search: SearchFacadeAssemblyMode,
-}
-
-pub enum SearchFacadeAssemblyMode {
-    ReadOnly,
-    Runtime(Arc<SearchFacade>),
-}
-
-impl Default for SearchFacadeAssemblyMode {
-    fn default() -> Self {
-        Self::ReadOnly
-    }
+    pub blob_transfer_port: Arc<dyn uc_core::ports::blob::BlobTransferPort>,
+    pub clipboard_restore: ClipboardRestoreAssembly,
+    pub search: Arc<SearchFacade>,
 }
 
 /// 从已注入的 application deps 构造统一业务入口。
@@ -252,53 +230,39 @@ impl Default for SearchFacadeAssemblyMode {
 pub fn build_app_facade_from_deps(
     deps: &AppDeps,
     storage_paths: &AppPaths,
-    lifecycle_status: Arc<dyn LifecycleStatusGateway>,
-    options: AppFacadeAssemblyOptions,
+    runtime: RuntimeAppFacadeAssembly,
 ) -> Arc<AppFacade> {
-    let clipboard_restore = options.clipboard_restore.map(|restore| {
-        Arc::new(ClipboardRestoreFacade::new(ClipboardRestoreFacadeDeps {
-            selection_repo: deps.clipboard.selection_repo.clone(),
-            entry_ports: deps.clipboard.entry_ports.clone(),
-            representation_ports: deps.clipboard.representation_ports.clone(),
-            payload_resolver: deps.clipboard.payload_resolver.clone(),
-            blob_store: deps.storage.blob_store.clone(),
-            clock: deps.system.clock.clone(),
-            device_identity: deps.device.device_identity.clone(),
-            active_register: deps.clipboard.active_register.clone(),
-            mobile_consumability: deps.clipboard.mobile_consumability.clone(),
-            restore_broadcast: restore.restore_broadcast,
-            write_coordinator: restore.write_coordinator,
-            integration_mode: restore.integration_mode,
-        }))
-    });
+    let clipboard_restore = Arc::new(ClipboardRestoreFacade::new(ClipboardRestoreFacadeDeps {
+        selection_repo: deps.clipboard.selection_repo.clone(),
+        entry_ports: deps.clipboard.entry_ports.clone(),
+        representation_ports: deps.clipboard.representation_ports.clone(),
+        payload_resolver: deps.clipboard.payload_resolver.clone(),
+        blob_store: deps.storage.blob_store.clone(),
+        clock: deps.system.clock.clone(),
+        device_identity: deps.device.device_identity.clone(),
+        active_register: deps.clipboard.active_register.clone(),
+        mobile_consumability: deps.clipboard.mobile_consumability.clone(),
+        restore_broadcast: runtime.clipboard_restore.restore_broadcast,
+        write_coordinator: runtime.clipboard_restore.write_coordinator,
+        integration_mode: runtime.clipboard_restore.integration_mode,
+    }));
 
-    let space_session_activity = match (
-        options.space_application.as_ref(),
-        options.space_receive_activity,
-    ) {
-        (Some(application), Some(receive)) => {
-            Some(uc_application::facade::SpaceSessionActivityDeps {
-                membership: application.membership_activity(),
-                receive,
-            })
-        }
-        _ => None,
+    let space_session_activity = uc_application::facade::SpaceSessionActivityDeps {
+        membership: runtime.space_application.membership_activity(),
+        receive: runtime.space_receive_activity,
     };
 
     Arc::new(AppFacade::new(AppFacadeParts {
-        space: options.space,
+        space: runtime.space,
         space_session_activity,
-        space_session_access: Some(uc_application::facade::SpaceSessionAccessDeps {
+        space_session_access: uc_application::facade::SpaceSessionAccessDeps {
             setup_status: Arc::clone(&deps.setup_status),
             resume_session: Arc::clone(&deps.security.space_access_ports.resume_session),
             lock: Arc::clone(&deps.security.space_access_ports.lock),
             mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
-        }),
-        space_application: options.space_application,
-        member_roster: options.member_roster,
-        lifecycle: Arc::new(LifecycleFacade::new(LifecycleFacadeDeps {
-            status: lifecycle_status,
-        })),
+        },
+        space_application: runtime.space_application,
+        member_roster: runtime.member_roster,
         encryption: Arc::new(EncryptionFacade::new(EncryptionFacadeDeps {
             setup_status: deps.setup_status.clone(),
             is_unlocked: deps.security.space_access_ports.is_unlocked.clone(),
@@ -327,25 +291,18 @@ pub fn build_app_facade_from_deps(
             entry_file_set_repo: deps.storage.entry_file_set_repo.clone(),
             search_index: Some(deps.search.search_index.clone()),
             file_cache_dir: Some(storage_paths.file_cache_dir.clone()),
-            blob_transfer: options.blob_transfer_port.clone(),
+            blob_transfer: Some(runtime.blob_transfer_port),
             settings: deps.settings.clone(),
             device_identity: deps.device.device_identity.clone(),
             clock: deps.system.clock.clone(),
             cache_fs: deps.system.cache_fs.clone(),
         })),
         clipboard_capture: build_clipboard_capture_facade(deps),
-        clipboard_sync: options.clipboard_sync,
-        blob_transfer: options.blob_transfer,
-        // GUI shell 启动期为空; daemon 起来后由
-        // `AppFacade::install_daemon_lifecycle` 装入。
-        clipboard_outbound: options.clipboard_outbound,
+        clipboard_sync: runtime.clipboard_sync,
+        blob_transfer: runtime.blob_transfer,
+        clipboard_outbound: runtime.clipboard_outbound,
         clipboard_restore,
-        search: match options.search {
-            SearchFacadeAssemblyMode::ReadOnly => {
-                Arc::new(SearchFacade::read_only(deps.search.search_index.clone()))
-            }
-            SearchFacadeAssemblyMode::Runtime(search) => search,
-        },
+        search: runtime.search,
         settings: Arc::new({
             // Relay 诊断 adapter 在 daemon 启动期一次性装配。infra 探测器
             // 初始化失败(TLS provider 缺失等)不应阻断整个 daemon 启动 ——
@@ -394,7 +351,5 @@ pub fn build_app_facade_from_deps(
             app_version_state: deps.app_version_state.clone(),
             setup_status: deps.setup_status.clone(),
         })),
-        #[cfg(feature = "lan-compat")]
-        mobile_sync: None,
     }))
 }

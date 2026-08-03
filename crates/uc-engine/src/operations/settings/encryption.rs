@@ -10,7 +10,7 @@ use crate::{EncryptionStateSummary, EngineError, EngineErrorCategory, OperationR
 pub async fn execute_query_encryption_state(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let state = facade.encryption.state().await.map_err(|error| {
+    let state = facade.encryption_state().await.map_err(|error| {
         error!(error = %error, "query encryption state failed");
         stable_internal_error(QUERY_ENCRYPTION_STATE_FAILED_CODE)
     })?;
@@ -34,8 +34,7 @@ pub async fn execute_verify_secure_storage_access(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let granted = facade
-        .encryption
-        .verify_keychain_access()
+        .verify_secure_storage_access()
         .await
         .map_err(|error| {
             error!(error = %error, "verify secure storage access failed");

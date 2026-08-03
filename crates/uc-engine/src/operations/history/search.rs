@@ -25,8 +25,7 @@ pub async fn execute_search_entries(
     input: SearchEntriesInput,
 ) -> Result<OperationResult, EngineError> {
     let page = facade
-        .search
-        .query(SearchQueryInput {
+        .search_query(SearchQueryInput {
             query: input.query,
             operator: input.operator,
             time_preset: input.time_preset,
@@ -52,8 +51,7 @@ pub async fn execute_search_entries(
 
 pub async fn execute_query_search_tags(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     let tags = facade
-        .search
-        .tags()
+        .search_tags()
         .await
         .map_err(map_search_error)?
         .into_iter()
@@ -69,7 +67,7 @@ pub async fn execute_query_search_tags(facade: &AppFacade) -> Result<OperationRe
 pub async fn execute_query_search_status(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let status = facade.search.status().await.map_err(map_search_error)?;
+    let status = facade.search_status().await.map_err(map_search_error)?;
     Ok(OperationResult::SearchStatus(SearchStatusSummary {
         state: status.state,
         reason: status.reason,
@@ -82,8 +80,7 @@ pub async fn execute_rebuild_search_index(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let accepted = facade
-        .search
-        .request_rebuild()
+        .request_search_rebuild()
         .await
         .map_err(map_search_error)?;
     Ok(OperationResult::SearchRebuildAccepted {

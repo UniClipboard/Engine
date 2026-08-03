@@ -23,7 +23,7 @@ pub(crate) async fn execute_export_config(
 ) -> Result<OperationResult, EngineError> {
     let operation_dir = create_operation_dir(temporary_root, "config-export")?;
     let bundle_path = operation_dir.join("bundle.ucbundle");
-    let exported = facade.config_migration.export_config(&bundle_path).await;
+    let exported = facade.export_config(&bundle_path).await;
     let result = match exported {
         Ok(path) => copy_path_to_host(files, &input.destination, &path)
             .await
@@ -55,11 +55,7 @@ pub(crate) async fn execute_preview_config_import(
     let result = match copied {
         Ok(()) => {
             let password = Passphrase::new(input.password.expose().to_string());
-            match facade
-                .config_migration
-                .preview_import(&password, &bundle_path)
-                .await
-            {
+            match facade.preview_config_import(&password, &bundle_path).await {
                 Ok(preview) => Ok(OperationResult::ConfigImportPreview(
                     ConfigImportPreviewOutcome::Ready(ConfigImportPreviewSummary {
                         app_version: preview.app_version,
@@ -105,11 +101,7 @@ pub(crate) async fn execute_stage_config_import(
     let result = match copied {
         Ok(()) => {
             let password = Passphrase::new(input.password.expose().to_string());
-            match facade
-                .config_migration
-                .stage_import(&password, &bundle_path)
-                .await
-            {
+            match facade.stage_config_import(&password, &bundle_path).await {
                 Ok(staged) => Ok(OperationResult::ConfigImportStaged(
                     ConfigImportStageOutcome::Staged {
                         unlock_required_after_apply: staged.unlock_required_after_apply,

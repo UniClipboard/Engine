@@ -9,8 +9,7 @@ pub(crate) async fn execute_query_upgrade_status(
     app_version: &str,
 ) -> Result<OperationResult, EngineError> {
     let status = facade
-        .upgrade
-        .detect_on_startup(app_version)
+        .upgrade_status(app_version)
         .await
         .map_err(|_| internal_error(QUERY_UPGRADE_STATUS_FAILED_CODE))?;
     Ok(OperationResult::UpgradeStatus(map_status(
@@ -24,8 +23,7 @@ pub(crate) async fn execute_acknowledge_upgrade(
     app_version: &str,
 ) -> Result<OperationResult, EngineError> {
     facade
-        .upgrade
-        .acknowledge(app_version)
+        .acknowledge_upgrade(app_version)
         .await
         .map_err(|_| internal_error(ACKNOWLEDGE_UPGRADE_FAILED_CODE))?;
     Ok(OperationResult::UpgradeAcknowledged {

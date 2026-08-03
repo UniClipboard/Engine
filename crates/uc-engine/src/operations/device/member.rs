@@ -23,7 +23,7 @@ use crate::{
 };
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
-    let encryption = facade.encryption.state().await.map_err(|_| {
+    let encryption = facade.encryption_state().await.map_err(|_| {
         error!(error_kind = "encryption_state", "device list query failed");
         EngineError::new(
             MEMBER_REPOSITORY_FAILED_CODE,
@@ -127,8 +127,8 @@ pub async fn execute_query_member_sync_preferences(
     input: QueryMemberSyncPreferencesInput,
 ) -> Result<OperationResult, EngineError> {
     validate_device_id(&input.device_id)?;
-    let preferences = member_roster(facade)?
-        .get_sync_preferences(&input.device_id)
+    let preferences = facade
+        .member_sync_preferences(&input.device_id)
         .await
         .map_err(map_roster_error)?;
     Ok(member_preferences_result(preferences))
@@ -139,8 +139,8 @@ pub async fn execute_update_member_sync_preferences(
     input: UpdateMemberSyncPreferencesInput,
 ) -> Result<OperationResult, EngineError> {
     validate_device_id(&input.device_id)?;
-    let preferences = member_roster(facade)?
-        .update_sync_preferences(&input.device_id, into_app_patch(input.patch))
+    let preferences = facade
+        .update_member_sync_preferences(&input.device_id, into_app_patch(input.patch))
         .await
         .map_err(map_roster_error)?;
     Ok(member_preferences_result(preferences))
@@ -151,8 +151,8 @@ pub async fn execute_remove_member(
     input: RemoveMemberInput,
 ) -> Result<OperationResult, EngineError> {
     validate_device_id(&input.device_id)?;
-    let result = member_roster(facade)?
-        .revoke_member(&input.device_id)
+    let result = facade
+        .remove_member(&input.device_id)
         .await
         .map_err(map_roster_error)?;
     Ok(member_revocation_result(result))
@@ -163,7 +163,7 @@ pub async fn execute_secure_remove_legacy_member(
     input: RemoveMemberInput,
 ) -> Result<OperationResult, EngineError> {
     validate_device_id(&input.device_id)?;
-    let result = member_roster(facade)?
+    let result = facade
         .secure_remove_legacy_member(&input.device_id)
         .await
         .map_err(map_roster_error)?;
@@ -175,10 +175,7 @@ pub async fn execute_secure_remove_legacy_member(
 pub async fn execute_query_space_protection(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let result = member_roster(facade)?
-        .query_space_protection()
-        .await
-        .map_err(map_roster_error)?;
+    let result = facade.space_protection().await.map_err(map_roster_error)?;
     Ok(OperationResult::SpaceProtection(space_protection_summary(
         result,
     )))
@@ -189,8 +186,8 @@ pub async fn execute_query_legacy_bootstrap(
     input: QueryLegacyBootstrapInput,
 ) -> Result<OperationResult, EngineError> {
     validate_bootstrap_id(&input.bootstrap_id)?;
-    let result = member_roster(facade)?
-        .query_legacy_bootstrap(&input.bootstrap_id)
+    let result = facade
+        .legacy_bootstrap(&input.bootstrap_id)
         .await
         .map_err(map_roster_error)?;
     Ok(OperationResult::LegacyBootstrapStatus(
@@ -209,8 +206,8 @@ pub async fn execute_query_member_revocation(
             false,
         ));
     }
-    let result = member_roster(facade)?
-        .query_revocation(&input.revocation_id)
+    let result = facade
+        .member_revocation(&input.revocation_id)
         .await
         .map_err(map_roster_error)?;
     Ok(OperationResult::MemberRevocationStatus(
@@ -282,18 +279,6 @@ fn member_revocation_summary(result: MemberRevocationView) -> MemberRevocationSu
         outcome,
         pending_recipients: u64::try_from(result.pending_recipients).unwrap_or(u64::MAX),
     }
-}
-
-fn member_roster(
-    facade: &AppFacade,
-) -> Result<&std::sync::Arc<uc_application::facade::MemberRosterFacade>, EngineError> {
-    facade.member_roster.get().ok_or_else(|| {
-        EngineError::new(
-            MEMBER_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-        )
-    })
 }
 
 fn validate_bootstrap_id(bootstrap_id: &str) -> Result<(), EngineError> {

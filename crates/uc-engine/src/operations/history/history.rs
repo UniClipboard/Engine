@@ -25,8 +25,7 @@ pub async fn execute_list_history_entries(
     }
     let offset = usize::try_from(input.offset).map_err(|_| invalid_input_error())?;
     let entries = facade
-        .clipboard_history
-        .list_entries(ClipboardListInput {
+        .list_history_entries(ClipboardListInput {
             limit: input.limit as usize,
             offset,
         })
@@ -43,8 +42,7 @@ pub async fn execute_get_history_entry(
 ) -> Result<OperationResult, EngineError> {
     validate_entry_id(&input.entry_id)?;
     let detail = facade
-        .clipboard_history
-        .get_entry(&input.entry_id)
+        .get_history_entry(&input.entry_id)
         .await
         .map_err(map_history_error)?;
     Ok(OperationResult::HistoryEntry(history_entry_detail(detail)))
@@ -56,8 +54,7 @@ pub async fn execute_delete_history_entry(
 ) -> Result<OperationResult, EngineError> {
     validate_entry_id(&input.entry_id)?;
     facade
-        .clipboard_history
-        .delete_entry(&input.entry_id)
+        .delete_history_entry(&input.entry_id)
         .await
         .map_err(map_history_error)?;
     Ok(OperationResult::HistoryEntryDeleted)
@@ -69,8 +66,7 @@ pub async fn execute_set_history_entry_favorite(
 ) -> Result<OperationResult, EngineError> {
     validate_entry_id(&input.entry_id)?;
     let found = facade
-        .clipboard_history
-        .toggle_favorite(&input.entry_id, input.is_favorited)
+        .set_history_entry_favorite(&input.entry_id, input.is_favorited)
         .await
         .map_err(map_history_error)?;
     if !found {
@@ -82,11 +78,7 @@ pub async fn execute_set_history_entry_favorite(
 pub async fn execute_query_history_stats(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let stats = facade
-        .clipboard_history
-        .stats()
-        .await
-        .map_err(map_history_error)?;
+    let stats = facade.history_stats().await.map_err(map_history_error)?;
     Ok(OperationResult::HistoryStats(HistoryStatsSummary {
         total_items: stats.total_items,
         total_size: stats.total_size,
@@ -99,8 +91,7 @@ pub async fn execute_get_history_entry_resource(
 ) -> Result<OperationResult, EngineError> {
     validate_entry_id(&input.entry_id)?;
     let resource = facade
-        .clipboard_history
-        .get_entry_resource(&input.entry_id)
+        .get_history_entry_resource(&input.entry_id)
         .await
         .map_err(map_history_error)?;
     Ok(OperationResult::HistoryEntryResource(
@@ -109,11 +100,7 @@ pub async fn execute_get_history_entry_resource(
 }
 
 pub async fn execute_clear_history(facade: &AppFacade) -> Result<OperationResult, EngineError> {
-    let result = facade
-        .clipboard_history
-        .clear_history()
-        .await
-        .map_err(map_history_error)?;
+    let result = facade.clear_history().await.map_err(map_history_error)?;
     Ok(OperationResult::HistoryCleared(HistoryClearSummary {
         deleted_count: result.deleted_count,
         failed_entry_ids: result

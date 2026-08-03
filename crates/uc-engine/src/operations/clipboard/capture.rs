@@ -11,8 +11,7 @@ pub async fn execute_capture_current_clipboard(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let entry_id = facade
-        .clipboard_capture
-        .capture_current()
+        .capture_current_clipboard()
         .await
         .map_err(map_capture_error)?
         .map(|captured| captured.entry_id);

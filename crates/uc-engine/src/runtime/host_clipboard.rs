@@ -96,8 +96,7 @@ impl HostClipboardChangeRuntime {
             )
         };
         let encryption = facade
-            .encryption
-            .state()
+            .encryption_state()
             .await
             .map_err(|error| observe_error("clipboard encryption state", error))?;
         if !encryption.session_ready {

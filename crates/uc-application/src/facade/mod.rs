@@ -48,7 +48,7 @@ pub use active_clipboard::{
 };
 pub use app_facade::{
     AppFacade, AppFacadeParts, AppPresenceEvent, AppPresenceSubscription,
-    AppPresenceSubscriptionError,
+    AppPresenceSubscriptionError, ClipboardRestoreMode,
 };
 pub use app_paths::AppPaths;
 pub use blob_transfer::{

@@ -1,5 +1,47 @@
 # Progress
 
+## Session: 2026-08-04（Phase 8）
+
+### Phase: 收紧 AppFacade
+
+- **Status:** in_progress
+- Actions taken:
+  - 确认 Phase 7 已独立提交，用户原有成员移除内容仍未提交。
+  - 审计 `AppFacade` 公开字段、可空装配、过时后装注释、唯一生产构造点和 Engine 直达路径。
+  - 确认仓内已没有运行中安装入口；当前半就绪状态来自 `OnceLock`、`Option` 和可默认装配配置。
+  - 指定 Engine 唯一 assembly 文件负责完整构造；恢复和重启复用同一构造，不允许后装。
+- TDD:
+  - 新增三项架构约束测试，覆盖内部对象私有、生产装配能力必填，以及 Engine operation 只能调用一个顶层应用动作。
+  - 首次聚焦测试按预期三项均失败：分别命中公开字段、缺少唯一完整装配输入，以及剪贴板恢复直达内部对象；红灯原因正确。
+  - 完整装配和调用迁移后，同一组三项架构约束测试全部通过。
+- Implemented:
+  - `AppFacade` 改为一次持有全部生产能力，内部字段全部私有，删除 `OnceLock`、生产必需能力的 `Option` 和运行中补装旧注释。
+  - 新增完整生产装配输入，删除默认补空选项和只读搜索装配模式；运行期缺少任何必需能力时直接无法编译。
+  - Engine 的稳定动作、运行调度和宿主文件处理全部改为只调用顶层应用动作，原输入校验、结果和错误编号保持不变。
+  - 删除无调用者的生命周期占位和从未装入的移动同步槽位；移动同步继续由运行会话单独持有。
+- Verification so far:
+  - `cargo check -p uc-engine --all-targets --all-features --locked`：通过。
+  - `cargo test -p uc-engine --test dependency_firewall app_facade --locked`：3 项通过。
+- Full verification:
+  - `cargo test -p uc-application --all-features --locked`：通过（962 项单元测试、8 项集成测试）。
+  - `cargo test -p uc-engine --all-features --locked`：通过；局域网组播测试按测试定义跳过 1 项，未计为通过。
+  - `cargo metadata --locked --format-version 1`：通过。
+  - `cargo check --workspace --all-targets --locked`：通过。
+  - `cargo fmt --all -- --check`：通过。
+  - `node scripts/architecture/check-engine-repository.mjs`：通过。
+  - `git diff --check`：通过。
+  - 旧装配模式、后装入口、半就绪字段和 Engine 内部对象直达扫描：无匹配。
+  - 新增禁止项扫描：仅架构测试使用 `expect` 读取源码，生产改动未新增强制解包或控制台输出。
+  - iOS、Android 和 HarmonyOS 真机项目：跳过；本阶段不改变设备接口或平台行为，未计为通过。
+- Phase result:
+  - 详细实施计划 Phase 8 已完成。
+  - 总任务 Phase 6 已完成；总计划仍在进行，下一阶段为 Phase 7 删除与整体验收。
+- Errors:
+  - 首次整组替换半就绪访问时，补丁上下文与实际换行不一致，补丁被拒绝且未产生方法改动；改为按连续小段迁移。
+  - 首次完整编译发现运行调度和宿主文件处理仍有 6 处直达内部对象；补齐相应顶层动作后继续编译。
+- Next:
+  - 将生产必需能力改为编译期必填，删除重复直达路径和无实际所有权的聚合字段。
+
 ## Session: 2026-08-04（Phase 7）
 
 ### Phase: 收口历史维护运行期

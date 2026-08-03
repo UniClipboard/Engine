@@ -278,6 +278,79 @@ fn create_space_is_one_application_action() {
     );
 }
 
+#[test]
+fn app_facade_does_not_expose_internal_objects_or_half_ready_slots() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = std::fs::read_to_string(
+        workspace_root.join("crates/uc-application/src/facade/app_facade.rs"),
+    )
+    .expect("AppFacade source must be readable");
+    let start = source
+        .find("pub struct AppFacade {")
+        .expect("AppFacade declaration must exist");
+    let end = source[start..]
+        .find("\n}\n\nimpl AppFacade")
+        .map(|offset| start + offset)
+        .expect("AppFacade declaration must have an impl");
+    let fields = &source[start..end];
+
+    for forbidden in ["    pub ", "OnceLock<", "Option<Arc<"] {
+        assert!(
+            !fields.contains(forbidden),
+            "AppFacade must be complete and keep internal objects private: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn app_facade_runtime_assembly_requires_every_production_capability() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let assembly =
+        std::fs::read_to_string(workspace_root.join("crates/uc-engine/src/assembly/facade.rs"))
+            .expect("AppFacade assembly source must be readable");
+    let runtime =
+        std::fs::read_to_string(workspace_root.join("crates/uc-engine/src/runtime/mod.rs"))
+            .expect("Engine runtime source must be readable");
+
+    assert!(
+        assembly.contains("struct RuntimeAppFacadeAssembly"),
+        "the unique runtime assembly must have an explicit complete input"
+    );
+    for forbidden in ["AppFacadeAssemblyOptions", "SearchFacadeAssemblyMode"] {
+        assert!(
+            !assembly.contains(forbidden),
+            "runtime assembly must not retain optional mode {forbidden}"
+        );
+    }
+    assert!(
+        !runtime.contains("..Default::default()"),
+        "production AppFacade construction must not fill missing capabilities from defaults"
+    );
+}
+
+#[test]
+fn app_facade_is_the_only_application_path_used_by_engine_operations() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let operations = read_rs_sources(&workspace_root.join("crates/uc-engine/src/operations"));
+    let compact = operations.split_whitespace().collect::<String>();
+
+    for forbidden in [
+        "facade.clipboard_restore.",
+        "facade.config_migration.",
+        "facade.settings.",
+        "facade.encryption.",
+        "facade.search.",
+        "facade.device.",
+        "facade.member_roster.",
+        "facade.blob_transfer.",
+    ] {
+        assert!(
+            !compact.contains(forbidden),
+            "Engine operation must call one AppFacade action instead of {forbidden}"
+        );
+    }
+}
+
 fn read_rs_sources(root: &Path) -> String {
     let mut pending = vec![root.to_path_buf()];
     let mut source = String::new();

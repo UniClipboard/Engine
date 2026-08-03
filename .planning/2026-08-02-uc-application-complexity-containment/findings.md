@@ -1,5 +1,17 @@
 # Findings
 
+## 2026-08-04 Phase 8 AppFacade 收紧审计
+
+- 当前 `AppFacade` 仍公开 16 个内部字段，其中空间、成员、剪贴板同步、Blob、出站和移动能力还用 `OnceLock` 或 `Option` 表达“以后可能装入”；但仓内已经没有 `install_daemon_lifecycle` 实现或调用，只剩过时注释。
+- `build_app_facade_from_deps` 只有 Engine 生产会话一个调用者，却仍接收可默认的 `AppFacadeAssemblyOptions`，生产调用用多个 `Some(...)` 加 `..Default::default()` 拼出对象；类型系统无法阻止遗漏空间、成员、接收、Blob、恢复或搜索能力。
+- 唯一完整构造负责人应是 `crates/uc-engine/src/assembly/facade.rs` 的生产装配函数。调用方只提供必需的完整运行能力，成功后得到可立即使用的 `AppFacade`；恢复或重启重新执行同一完整装配，不存在运行中补装或重复安装。
+- Engine 当前仍直接访问恢复、配置迁移、设置、加密、搜索、设备、成员和 Blob 内部对象。搜索状态、加密状态和传输取消已经有等价 `AppFacade` 动作，属于明确重复路径；其余稳定动作需要补齐顶层动作后再私有化字段。
+- `lifecycle`、`resource`、`clipboard_capture`、`diagnostics`、`storage`、`upgrade` 和 `mobile_sync` 字段在 `AppFacade` 内没有动作读取，仓内也没有 Engine 直达调用；若确认没有其他稳定路径依赖，应从聚合对象和构造参数删除，而不是私有化后保留无效所有权。
+- 多行调用和运行调度复核后确认，`resource`、`clipboard_capture`、`diagnostics`、`storage` 和 `upgrade` 都有真实稳定动作，不能删除；它们应由 `AppFacade` 提供顶层动作并保持内部对象私有。真正无调用者的是 `lifecycle` 占位和从未装入的 `mobile_sync` 槽位，已从聚合对象删除。
+- 生产构造所需的空间、空间活动、空间访问、空间应用、成员、剪贴板同步、Blob、出站、恢复和运行期搜索都应改为必填；删除只读搜索默认模式和 `Default` 装配，缺少能力应在编译期失败。
+- 本阶段不得改变稳定 Engine operation、结果和错误码；原先只会在半装配对象出现的 unavailable 分支可保留在应用动作结果映射中，但生产对象不再能构造出该状态。
+- 工作区继续保留用户原有成员移除方案及其架构记录，不修改或提交。
+
 ## 2026-08-04 Phase 7 历史维护运行期审计
 
 - 当前 `uc-engine/src/subsystems/history_maintenance.rs` 同时掌握启动时立即执行、固定五分钟间隔、三步顺序、失败分流、结果日志和取消循环；应用层只暴露缺失文件核对、过期文件清理和保留策略三个独立动作。

@@ -406,8 +406,7 @@ fn map_send_host_error(error: crate::HostCapabilityError) -> EngineError {
 
 async fn load_export_bytes(facade: &AppFacade, entry_id: &str) -> Result<Vec<u8>, EngineError> {
     let resource = facade
-        .clipboard_history
-        .get_entry_resource(entry_id)
+        .get_history_entry_resource(entry_id)
         .await
         .map_err(map_export_history_error)?;
     let file_list = resource.mime_type.as_deref().is_some_and(|mime| {
@@ -415,8 +414,7 @@ async fn load_export_bytes(facade: &AppFacade, entry_id: &str) -> Result<Vec<u8>
     });
     if file_list {
         return facade
-            .resource
-            .entry_file(entry_id)
+            .read_entry_file_resource(entry_id)
             .await
             .map(|file| file.bytes)
             .map_err(map_export_resource_error);
@@ -426,8 +424,7 @@ async fn load_export_bytes(facade: &AppFacade, entry_id: &str) -> Result<Vec<u8>
     }
     if let Some(blob_id) = resource.blob_id {
         return facade
-            .resource
-            .blob(&blob_id)
+            .read_blob_resource(&blob_id)
             .await
             .map(|blob| blob.bytes)
             .map_err(map_export_resource_error);

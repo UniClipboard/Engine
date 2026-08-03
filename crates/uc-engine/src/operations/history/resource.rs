@@ -15,8 +15,7 @@ pub async fn execute_read_blob(
     input: BlobResourceInput,
 ) -> Result<OperationResult, EngineError> {
     facade
-        .resource
-        .blob(&input.blob_id)
+        .read_blob_resource(&input.blob_id)
         .await
         .map(|resource| {
             OperationResult::BlobRead(BinaryResourceSummary {
@@ -32,8 +31,7 @@ pub async fn execute_read_thumbnail(
     input: ThumbnailResourceInput,
 ) -> Result<OperationResult, EngineError> {
     facade
-        .resource
-        .thumbnail(&input.representation_id)
+        .read_thumbnail_resource(&input.representation_id)
         .await
         .map(|resource| {
             OperationResult::ThumbnailRead(BinaryResourceSummary {
@@ -49,8 +47,7 @@ pub async fn execute_read_entry_file(
     input: HistoryEntryInput,
 ) -> Result<OperationResult, EngineError> {
     facade
-        .resource
-        .entry_file(&input.entry_id)
+        .read_entry_file_resource(&input.entry_id)
         .await
         .map(|resource| {
             OperationResult::EntryFileRead(EntryFileResourceSummary {

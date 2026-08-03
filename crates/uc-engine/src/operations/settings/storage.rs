@@ -11,8 +11,7 @@ pub async fn execute_query_storage_stats(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     facade
-        .storage
-        .stats()
+        .storage_stats()
         .await
         .map(storage_stats_result)
         .map_err(map_storage_error)
@@ -22,8 +21,7 @@ pub async fn execute_clear_storage_cache(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let result = facade
-        .storage
-        .clear_cache()
+        .clear_storage_cache()
         .await
         .map_err(map_storage_error)?;
     Ok(OperationResult::StorageCacheCleared {

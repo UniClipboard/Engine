@@ -24,14 +24,13 @@
 //!   through `PairingInboundOrchestrator`.
 
 use std::net::IpAddr;
-use std::sync::{Arc, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::sync::broadcast;
 
 use crate::facade::config_migration::ConfigMigrationFacade;
-#[cfg(feature = "lan-compat")]
-use crate::facade::mobile_sync::MobileSyncFacade;
 use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
 use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
 use crate::facade::space_admission::SpaceAdmissionCoordinator;
@@ -51,10 +50,10 @@ use crate::facade::space_setup::{
 use crate::facade::upgrade::UpgradeFacade;
 use crate::facade::{
     BlobTransferError, BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade,
-    ClipboardOutboundFacade, ClipboardRestoreFacade, ClipboardSyncError, ClipboardSyncFacade,
-    DeviceFacade, DiagnosticsFacade, DispatchEntryOutcome, EncryptionFacade, EncryptionFacadeError,
-    EncryptionStateView, FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand,
-    FetchBlobToPathResult, HistoryMaintenanceRuntime, LifecycleFacade, MemberRosterFacade,
+    ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade, ClipboardSyncError,
+    ClipboardSyncFacade, DeviceFacade, DiagnosticsFacade, DispatchEntryOutcome, EncryptionFacade,
+    EncryptionFacadeError, EncryptionStateView, FetchBlobCommand, FetchBlobResult,
+    FetchBlobToPathCommand, FetchBlobToPathResult, HistoryMaintenanceRuntime, MemberRosterFacade,
     PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult, ResendEntryCommand,
     ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
     SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
@@ -71,77 +70,36 @@ use uc_core::SystemClipboardSnapshot;
 
 /// 应用层统一入口。
 ///
-/// 新增外部业务调用应优先通过本文件中的顶层方法进入。公开子字段是历史兼容
-/// 状态,后续收口 daemon / Tauri 路径时应继续减少直接访问。
-///
-/// # daemon-lifecycle 字段(启动期一次性装入)
-///
-/// 下面 6 个字段绑定 daemon-lifecycle 资源(iroh node、clipboard_sync 链、
-/// LAN PUT 入站等)。方案 C (2026-05-11) 取消 in-process daemon reload 后,
-/// daemon 在进程内只起一次, 这 6 个字段也只装入一次 —— GUI shell 启动期
-/// 为空, daemon 启动时由 [`Self::install_daemon_lifecycle`] set 进
-/// [`OnceLock`], daemon (= 进程) 退出时由 Arc drop 自然回收。
-///
-/// - `space_setup`、`member_roster` —— iroh 网络栈相关
-/// - `clipboard_sync`、`blob_transfer` —— iroh 上的同步业务
-/// - `clipboard_outbound` —— 用户主动 resend 入口 (ADR-005 §2.5)
-/// - `mobile_sync` —— 因绑 enhanced apply_inbound (带 blob_materializer +
-///   host_event_emitter) 也是 daemon-lifecycle
-///
-/// 用 [`OnceLock`] 而非 `RwLock<Option<Arc<X>>>`:读路径 GUI command +
-/// daemon worker 高频访问, set-once 语义恰好匹配 "启动期装入, 进程内不再
-/// 切换" 的真实生命周期, 比 `RwLock` 省一次锁且语义更紧。
+/// 外部业务调用只能通过本文件中的顶层方法进入。生产装配一次提供全部能力，
+/// 因此运行期拿到的对象始终可以立即处理所有稳定 Engine 动作。
 pub struct AppFacade {
-    space: OnceLock<Arc<SpaceFacade>>,
-    space_session: OnceLock<Arc<SpaceSessionCoordinator>>,
-    space_application: OnceLock<SpaceApplicationHandle>,
-    space_admission: OnceLock<Arc<SpaceAdmissionCoordinator>>,
-    pub member_roster: OnceLock<Arc<MemberRosterFacade>>,
-    pub lifecycle: Arc<LifecycleFacade>,
-    pub encryption: Arc<EncryptionFacade>,
-    pub resource: Arc<ResourceFacade>,
-    pub clipboard_history: Arc<ClipboardHistoryFacade>,
-    /// On-demand "capture whatever is on the OS clipboard right now" entry
-    /// point, distinct from the watcher-driven capture that reacts to OS
-    /// clipboard-changed events. Every desktop entry point wires this from
-    /// `AppDeps` alone, so unlike the daemon-lifecycle fields it is not
-    /// `Option`/`OnceLock`.
-    pub clipboard_capture: Arc<ClipboardCaptureFacade>,
-    pub clipboard_sync: OnceLock<Arc<ClipboardSyncFacade>>,
-    pub blob_transfer: OnceLock<Arc<BlobTransferFacade>>,
-    /// 用户主动 resend 的入口(对应 commit B3 的 [`ResendEntryUseCase`])。
-    /// daemon-lifecycle 字段:GUI shell 启动期为空, daemon 启动时由
-    /// [`Self::install_daemon_lifecycle`] 装入。GUI / Tauri command /
-    /// CLI `uniclip send --resend` 都从这一份读;未装入(daemon 未启)
-    /// 场景下调用方拿到 None 应给"功能未启用"反馈。
-    pub clipboard_outbound: OnceLock<Arc<ClipboardOutboundFacade>>,
-    /// CLI / 仅查询场景下 daemon/Tauri 不构造 restore facade,这里是 None。
-    /// daemon API handler 取出前需做存在性检查。
-    ///
-    /// 不在 daemon-lifecycle 范围 —— 它绑 ClipboardWriteCoordinator
-    /// (进程级) 与 integration_mode (静态),GUI shell 启动期一次性装入。
-    pub clipboard_restore: Option<Arc<ClipboardRestoreFacade>>,
-    pub search: Arc<SearchFacade>,
-    pub settings: Arc<SettingsFacade>,
-    pub diagnostics: Arc<DiagnosticsFacade>,
-    pub device: Arc<DeviceFacade>,
-    pub storage: Arc<StorageFacade>,
-    /// 整机配置迁移 facade（导出 / 导入预览 / 暂存导入）。所有桌面入口共享
-    /// 同一份;daemon HTTP `/config/*` 端点经它执行。装配在
-    /// `wire_dependencies`,与 `encryption` / `storage` 同流向。
-    pub config_migration: Arc<ConfigMigrationFacade>,
-    /// 升级检测 facade（P1 thin）。所有桌面入口（GUI / daemon / CLI）共享同
-    /// 一份；启动期 host 调一次 `upgrade.detect_on_startup()` 决定是否触发
-    /// 重新配对引导等动作。
-    pub upgrade: Arc<UpgradeFacade>,
-    /// 移动端同步 facade（v1：iOS Shortcut）。
-    ///
-    /// daemon-lifecycle 字段:GUI shell 启动期为空, daemon 启动时由
-    /// [`Self::install_daemon_lifecycle`] 装入 enhanced 版本 (绑 daemon
-    /// worker apply_inbound)。daemon 未启动场景下调用方拿到 `None` 应
-    /// 直接给用户报"功能未启用 / daemon 未就绪"。
-    #[cfg(feature = "lan-compat")]
-    pub mobile_sync: OnceLock<Arc<MobileSyncFacade>>,
+    space: Arc<SpaceFacade>,
+    space_session: Arc<SpaceSessionCoordinator>,
+    space_application: SpaceApplicationHandle,
+    space_admission: Arc<SpaceAdmissionCoordinator>,
+    member_roster: Arc<MemberRosterFacade>,
+    encryption: Arc<EncryptionFacade>,
+    resource: Arc<ResourceFacade>,
+    clipboard_history: Arc<ClipboardHistoryFacade>,
+    clipboard_capture: Arc<ClipboardCaptureFacade>,
+    clipboard_sync: Arc<ClipboardSyncFacade>,
+    blob_transfer: Arc<BlobTransferFacade>,
+    clipboard_outbound: Arc<ClipboardOutboundFacade>,
+    clipboard_restore: Arc<ClipboardRestoreFacade>,
+    search: Arc<SearchFacade>,
+    settings: Arc<SettingsFacade>,
+    diagnostics: Arc<DiagnosticsFacade>,
+    device: Arc<DeviceFacade>,
+    storage: Arc<StorageFacade>,
+    config_migration: Arc<ConfigMigrationFacade>,
+    upgrade: Arc<UpgradeFacade>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardRestoreMode {
+    Standard,
+    PlainText,
+    FilePaths,
 }
 
 impl AppFacade {
@@ -150,41 +108,29 @@ impl AppFacade {
     /// Bootstrap builds each sub-facade from its own `*Deps` bundle and
     /// hands them here — the aggregator never sees raw ports.
     pub fn new(parts: AppFacadeParts) -> Self {
-        let space_session = match (
-            parts.space.as_ref(),
+        let space_session = build_space_session_coordinator(
+            Arc::clone(&parts.space),
+            Arc::clone(&parts.search),
             parts.space_session_activity,
             parts.space_session_access,
-        ) {
-            (Some(space_setup), Some(activities), Some(access)) => {
-                Some(build_space_session_coordinator(
-                    Arc::clone(space_setup),
-                    Arc::clone(&parts.search),
-                    activities,
-                    access,
-                ))
-            }
-            _ => None,
-        };
-        let space_admission = parts.space.as_ref().map(|space_setup| {
-            Arc::new(SpaceAdmissionCoordinator::new(
-                Arc::clone(space_setup),
-                Arc::clone(&parts.settings),
-            ))
-        });
+        );
+        let space_admission = Arc::new(SpaceAdmissionCoordinator::new(
+            Arc::clone(&parts.space),
+            Arc::clone(&parts.settings),
+        ));
         Self {
-            space: once_lock_from(parts.space),
-            space_session: once_lock_from(space_session),
-            space_application: once_lock_from(parts.space_application),
-            space_admission: once_lock_from(space_admission),
-            member_roster: once_lock_from(parts.member_roster),
-            lifecycle: parts.lifecycle,
+            space: parts.space,
+            space_session,
+            space_application: parts.space_application,
+            space_admission,
+            member_roster: parts.member_roster,
             encryption: parts.encryption,
             resource: parts.resource,
             clipboard_history: parts.clipboard_history,
             clipboard_capture: parts.clipboard_capture,
-            clipboard_sync: once_lock_from(parts.clipboard_sync),
-            blob_transfer: once_lock_from(parts.blob_transfer),
-            clipboard_outbound: once_lock_from(parts.clipboard_outbound),
+            clipboard_sync: parts.clipboard_sync,
+            blob_transfer: parts.blob_transfer,
+            clipboard_outbound: parts.clipboard_outbound,
             clipboard_restore: parts.clipboard_restore,
             search: parts.search,
             settings: parts.settings,
@@ -193,8 +139,6 @@ impl AppFacade {
             storage: parts.storage,
             config_migration: parts.config_migration,
             upgrade: parts.upgrade,
-            #[cfg(feature = "lan-compat")]
-            mobile_sync: once_lock_from(parts.mobile_sync),
         }
     }
 
@@ -202,17 +146,130 @@ impl AppFacade {
         HistoryMaintenanceRuntime::start(Arc::clone(&self.clipboard_history)).await
     }
 
+    pub async fn capture_current_clipboard(
+        &self,
+    ) -> Result<
+        Option<crate::facade::CapturedClipboardEntryView>,
+        crate::facade::ClipboardCaptureFacadeError,
+    > {
+        self.clipboard_capture.capture_current().await
+    }
+
+    pub async fn capture_file_paths_for_diagnostics(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> Result<crate::facade::CapturedFileSetView, crate::facade::ClipboardCaptureFacadeError>
+    {
+        self.clipboard_capture
+            .capture_file_paths_for_diagnostics(paths)
+            .await
+    }
+
+    pub async fn restore_clipboard(
+        &self,
+        entry_id: &str,
+        mode: ClipboardRestoreMode,
+    ) -> Result<(), ClipboardRestoreError> {
+        match mode {
+            ClipboardRestoreMode::Standard => self.clipboard_restore.restore_entry(entry_id).await,
+            ClipboardRestoreMode::PlainText => {
+                self.clipboard_restore
+                    .restore_entry_as_plain_text(entry_id)
+                    .await
+            }
+            ClipboardRestoreMode::FilePaths => {
+                self.clipboard_restore
+                    .restore_entry_as_file_paths(entry_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn list_history_entries(
+        &self,
+        input: crate::facade::ClipboardListInput,
+    ) -> Result<Vec<crate::facade::EntryProjectionView>, crate::facade::ClipboardHistoryError> {
+        self.clipboard_history.list_entries(input).await
+    }
+
+    pub async fn seed_history_text(
+        &self,
+        text: &str,
+    ) -> Result<String, crate::facade::ClipboardHistoryError> {
+        self.clipboard_history.seed_text_entry(text).await
+    }
+
+    pub async fn get_history_entry(
+        &self,
+        entry_id: &str,
+    ) -> Result<crate::facade::EntryDetailView, crate::facade::ClipboardHistoryError> {
+        self.clipboard_history.get_entry(entry_id).await
+    }
+
+    pub async fn delete_history_entry(
+        &self,
+        entry_id: &str,
+    ) -> Result<(), crate::facade::ClipboardHistoryError> {
+        self.clipboard_history.delete_entry(entry_id).await
+    }
+
+    pub async fn set_history_entry_favorite(
+        &self,
+        entry_id: &str,
+        is_favorited: bool,
+    ) -> Result<bool, crate::facade::ClipboardHistoryError> {
+        self.clipboard_history
+            .toggle_favorite(entry_id, is_favorited)
+            .await
+    }
+
+    pub async fn history_stats(
+        &self,
+    ) -> Result<crate::facade::ClipboardStatsView, crate::facade::ClipboardHistoryError> {
+        self.clipboard_history.stats().await
+    }
+
+    pub async fn get_history_entry_resource(
+        &self,
+        entry_id: &str,
+    ) -> Result<crate::facade::EntryResourceView, crate::facade::ClipboardHistoryError> {
+        self.clipboard_history.get_entry_resource(entry_id).await
+    }
+
+    pub async fn clear_history(
+        &self,
+    ) -> Result<crate::facade::ClipboardClearHistoryResultView, crate::facade::ClipboardHistoryError>
+    {
+        self.clipboard_history.clear_history().await
+    }
+
+    pub async fn read_blob_resource(
+        &self,
+        blob_id: &str,
+    ) -> Result<crate::facade::BinaryResourceView, crate::facade::ResourceFacadeError> {
+        self.resource.blob(blob_id).await
+    }
+
+    pub async fn read_thumbnail_resource(
+        &self,
+        representation_id: &str,
+    ) -> Result<crate::facade::BinaryResourceView, crate::facade::ResourceFacadeError> {
+        self.resource.thumbnail(representation_id).await
+    }
+
+    pub async fn read_entry_file_resource(
+        &self,
+        entry_id: &str,
+    ) -> Result<crate::facade::FileResourceView, crate::facade::ResourceFacadeError> {
+        self.resource.entry_file(entry_id).await
+    }
+
     /// A1:初始化空间。外部业务入口从 `AppFacade` 进入,不直接拿 `SpaceFacade`。
     pub async fn initialize_space(
         &self,
         input: InitializeSpaceInput,
     ) -> Result<InitializeSpaceResult, InitializeSpaceError> {
-        self.space_session
-            .get()
-            .cloned()
-            .ok_or_else(|| InitializeSpaceError::Internal("space session unavailable".to_string()))?
-            .initialize_space(input)
-            .await
+        self.space_session.initialize_space(input).await
     }
 
     /// A2: unlock a space through the top-level application facade.
@@ -220,12 +277,7 @@ impl AppFacade {
         &self,
         input: UnlockSpaceInput,
     ) -> Result<UnlockSpaceResult, UnlockSpaceError> {
-        self.space_session
-            .get()
-            .cloned()
-            .ok_or_else(|| UnlockSpaceError::Internal("space session unavailable".to_string()))?
-            .unlock_space(input)
-            .await
+        self.space_session.unlock_space(input).await
     }
 
     pub async fn recover_space_session(
@@ -233,29 +285,18 @@ impl AppFacade {
         allow_secure_storage_unlock: bool,
     ) -> Result<RecoverSpaceSessionResult, SpaceSessionError> {
         self.space_session
-            .get()
-            .cloned()
-            .ok_or_else(|| SpaceSessionError::Recovery("space session unavailable".to_string()))?
             .recover_session(allow_secure_storage_unlock)
             .await
     }
 
     pub async fn lock_space_session(&self) -> Result<(), SpaceSessionError> {
-        self.space_session
-            .get()
-            .cloned()
-            .ok_or_else(|| SpaceSessionError::Recovery("space session unavailable".to_string()))?
-            .lock_space()
-            .await
+        self.space_session.lock_space().await
     }
 
     pub async fn membership_convergence(
         &self,
     ) -> Result<MembershipConvergenceStatus, MembershipConvergenceFacadeError> {
         self.space_application
-            .get()
-            .cloned()
-            .ok_or(MembershipConvergenceFacadeError::Unavailable)?
             .membership_convergence()
             .await
             .map_err(MembershipConvergenceFacadeError::from)
@@ -265,21 +306,8 @@ impl AppFacade {
         &self,
         input: crate::facade::JoinSpaceInput,
     ) -> Result<crate::facade::JoinSpaceResult, crate::facade::JoinSpaceError> {
-        let result = self
-            .space_admission
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                crate::facade::JoinSpaceError::Setup("space admission is unavailable".to_string())
-            })?
-            .join_space(input)
-            .await?;
+        let result = self.space_admission.join_space(input).await?;
         self.space_session
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                crate::facade::JoinSpaceError::Activity("space session is unavailable".to_string())
-            })?
             .resume_after_space_change()
             .await
             .map_err(|error| crate::facade::JoinSpaceError::Activity(error.to_string()))?;
@@ -288,62 +316,27 @@ impl AppFacade {
 
     /// Read setup state through the top-level application facade.
     pub async fn query_setup_state(&self) -> Result<SetupStateView, QuerySetupStateError> {
-        self.space
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                QuerySetupStateError::Internal("space setup facade unavailable".to_string())
-            })?
-            .query_setup_state()
-            .await
+        self.space.query_setup_state().await
     }
 
     pub async fn factory_reset_space(&self) -> Result<(), crate::facade::FactoryResetError> {
-        self.space_session
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                crate::facade::FactoryResetError::Internal("space session unavailable".to_string())
-            })?
-            .factory_reset()
-            .await
+        self.space_session.factory_reset().await
     }
 
     pub async fn reset_space(&self) -> Result<(), crate::facade::ResetSpaceError> {
-        self.space
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                crate::facade::ResetSpaceError::Internal("space session unavailable".to_string())
-            })?
-            .reset()
-            .await
+        self.space.reset().await
     }
 
     /// 尝试静默恢复空间会话。
     pub async fn try_resume_session(&self) -> Result<bool, TryResumeSessionError> {
-        self.space
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                TryResumeSessionError::Internal("space setup facade unavailable".to_string())
-            })?
-            .try_resume_session()
-            .await
+        self.space.try_resume_session().await
     }
 
     /// 刷新成员在线状态。
     pub async fn refresh_presence(
         &self,
     ) -> Result<EnsureReachableAllReport, EnsureReachableAllError> {
-        self.space
-            .get()
-            .cloned()
-            .ok_or(EnsureReachableAllError::Repository(
-                "space setup facade unavailable".to_string(),
-            ))?
-            .refresh_presence()
-            .await
+        self.space.refresh_presence().await
     }
 
     /// 列出已配对 peer 的 `DeviceId`(本机已过滤)。供 desktop keepalive
@@ -352,14 +345,7 @@ impl AppFacade {
     pub async fn list_paired_peer_device_ids(
         &self,
     ) -> Result<Vec<DeviceId>, EnsureReachableAllError> {
-        self.space
-            .get()
-            .cloned()
-            .ok_or(EnsureReachableAllError::Repository(
-                "space setup facade unavailable".to_string(),
-            ))?
-            .list_paired_peer_device_ids()
-            .await
+        self.space.list_paired_peer_device_ids().await
     }
 
     /// 对单个 peer 触发一次 `ensure_reachable`。供 desktop keepalive 调度
@@ -369,26 +355,14 @@ impl AppFacade {
         &self,
         device: &DeviceId,
     ) -> Result<ReachabilityState, PresenceError> {
-        self.space
-            .get()
-            .cloned()
-            .ok_or_else(|| PresenceError::Internal("space setup facade unavailable".to_string()))?
-            .ensure_reachable_one(device)
-            .await
+        self.space.ensure_reachable_one(device).await
     }
 
     /// B1:签发配对邀请。
     pub async fn issue_pairing_invitation(
         &self,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.space_admission
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                IssuePairingInvitationError::Internal("space admission unavailable".to_string())
-            })?
-            .issue_invitation()
-            .await
+        self.space_admission.issue_invitation().await
     }
 
     /// 按指定本机地址签发配对邀请。
@@ -397,11 +371,6 @@ impl AppFacade {
         selected_ip: IpAddr,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
         self.space_admission
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                IssuePairingInvitationError::Internal("space admission unavailable".to_string())
-            })?
             .issue_invitation_for_address(selected_ip)
             .await
     }
@@ -410,14 +379,7 @@ impl AppFacade {
     pub async fn list_pairing_invitation_addresses(
         &self,
     ) -> Result<Vec<PairingInvitationAddressCandidate>, IssuePairingInvitationError> {
-        self.space_admission
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                IssuePairingInvitationError::Internal("space admission unavailable".to_string())
-            })?
-            .list_invitation_addresses()
-            .await
+        self.space_admission.list_invitation_addresses().await
     }
 
     /// B2:兑换配对邀请。
@@ -425,14 +387,7 @@ impl AppFacade {
         &self,
         input: RedeemPairingInvitationInput,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
-        self.space_admission
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                RedeemPairingInvitationError::Internal("space admission unavailable".to_string())
-            })?
-            .redeem_invitation(input)
-            .await
+        self.space_admission.redeem_invitation(input).await
     }
 
     /// 已 setup 设备加入另一个 sponsor 空间，4 阶段重加密迁移。详见
@@ -441,76 +396,37 @@ impl AppFacade {
         &self,
         input: SwitchSpaceInput,
     ) -> Result<SwitchSpaceResult, SwitchSpaceError> {
-        self.space_admission
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                SwitchSpaceError::Internal("space setup facade unavailable".to_string())
-            })?
-            .switch_space(input)
-            .await
+        self.space_admission.switch_space(input).await
     }
 
     /// 查询当前 switch-space 迁移进度（粗粒度——只返回阶段和备份表条目数）。
     pub async fn query_migration_progress(
         &self,
     ) -> Result<MigrationProgress, QueryMigrationProgressError> {
-        self.space
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                QueryMigrationProgressError::Internal("space setup facade unavailable".to_string())
-            })?
-            .query_migration_progress()
-            .await
+        self.space.query_migration_progress().await
     }
 
     /// 订阅配对完成事件。
     pub fn subscribe_pairing_completion(
         &self,
     ) -> Result<broadcast::Receiver<PairingOutcome>, IssuePairingInvitationError> {
-        self.space_admission
-            .get()
-            .cloned()
-            .map(|admission| admission.subscribe_pairing_completion())
-            .ok_or_else(|| {
-                IssuePairingInvitationError::Internal("space admission unavailable".to_string())
-            })
+        Ok(self.space_admission.subscribe_pairing_completion())
     }
 
     pub async fn cancel_invitation(&self) -> Result<(), crate::facade::CancelInvitationError> {
-        self.space_admission
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                crate::facade::CancelInvitationError::Internal(
-                    "space admission unavailable".to_string(),
-                )
-            })?
-            .cancel_invitation()
-            .await
+        self.space_admission.cancel_invitation().await
     }
 
     /// 列出对外成员摘要。外部调用只经过 `AppFacade`,不直接依赖 roster 子 facade。
     pub async fn list_members(&self) -> Result<Vec<MemberSummary>, RosterError> {
-        self.member_roster
-            .get()
-            .cloned()
-            .ok_or(RosterError::Unavailable)?
-            .list_members()
-            .await
+        self.member_roster.list_members().await
     }
 
     /// 列出带 presence 的 roster entry。
     pub async fn list_roster_entries(
         &self,
     ) -> Result<Vec<crate::facade::roster::RosterEntry>, RosterError> {
-        self.member_roster
-            .get()
-            .cloned()
-            .ok_or(RosterError::Unavailable)?
-            .list_with_presence()
-            .await
+        self.member_roster.list_with_presence().await
     }
 
     /// 发送一个剪贴板快照到在线 peer。
@@ -528,11 +444,6 @@ impl AppFacade {
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<crate::facade::DispatchEntryOutcome, ClipboardSyncError> {
         self.clipboard_sync
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                ClipboardSyncError::Repository("clipboard sync facade unavailable".to_string())
-            })?
             // CLI / 直接调用方不与某条 entry 绑定,跳过 delivery 落盘;
             // target_filter 透传到下层 dispatch_entry。
             .dispatch_snapshot(snapshot, origin, None, target_filter)
@@ -545,12 +456,7 @@ impl AppFacade {
         &self,
         entry_id: &uc_core::ids::EntryId,
     ) -> Result<crate::facade::EntryDeliveryView, crate::facade::GetEntryDeliveryViewError> {
-        let facade = self.clipboard_sync.get().cloned().ok_or_else(|| {
-            crate::facade::GetEntryDeliveryViewError::Storage(
-                "clipboard sync facade unavailable".to_string(),
-            )
-        })?;
-        facade.get_entry_delivery_view(entry_id).await
+        self.clipboard_sync.get_entry_delivery_view(entry_id).await
     }
 
     pub async fn get_entry_receive_progress(
@@ -558,24 +464,16 @@ impl AppFacade {
         entry_id: &uc_core::ids::EntryId,
     ) -> Result<Option<uc_core::ports::EntryReceiveProgress>, crate::facade::CancelEntryReceiveError>
     {
-        let facade = self
-            .clipboard_sync
-            .get()
-            .cloned()
-            .ok_or(crate::facade::CancelEntryReceiveError::Unavailable)?;
-        facade.get_entry_receive_progress(entry_id).await
+        self.clipboard_sync
+            .get_entry_receive_progress(entry_id)
+            .await
     }
 
     pub async fn list_entry_receive_progress(
         &self,
     ) -> Result<Vec<uc_core::ports::EntryReceiveProgress>, crate::facade::CancelEntryReceiveError>
     {
-        let facade = self
-            .clipboard_sync
-            .get()
-            .cloned()
-            .ok_or(crate::facade::CancelEntryReceiveError::Unavailable)?;
-        facade.list_entry_receive_progress().await
+        self.clipboard_sync.list_entry_receive_progress().await
     }
 
     pub async fn cancel_entry_receive(
@@ -584,12 +482,7 @@ impl AppFacade {
         expected_attempt_id: &str,
     ) -> Result<crate::facade::CancelEntryReceiveOutcome, crate::facade::CancelEntryReceiveError>
     {
-        let facade = self
-            .clipboard_sync
-            .get()
-            .cloned()
-            .ok_or(crate::facade::CancelEntryReceiveError::Unavailable)?;
-        facade
+        self.clipboard_sync
             .cancel_entry_receive(entry_id, expected_attempt_id)
             .await
     }
@@ -598,17 +491,11 @@ impl AppFacade {
     /// `uniclip send --resend` 都从这里进。详细语义见
     /// [`ClipboardOutboundFacade::resend_entry`]。
     ///
-    /// daemon 未启动场景下 `clipboard_outbound` OnceLock 为空, 返回
-    /// `ResendEntryError::Dispatch("clipboard outbound facade unavailable")`,
-    /// 调用方应给"daemon 未就绪"反馈。
     pub async fn resend_entry(
         &self,
         cmd: ResendEntryCommand,
     ) -> Result<ResendReport, ResendEntryError> {
-        let facade = self.clipboard_outbound.get().cloned().ok_or_else(|| {
-            ResendEntryError::Dispatch("clipboard outbound facade unavailable".to_string())
-        })?;
-        facade.resend_entry(cmd).await
+        self.clipboard_outbound.resend_entry(cmd).await
     }
 
     /// 发布 blob。
@@ -616,12 +503,7 @@ impl AppFacade {
         &self,
         command: PublishBlobCommand,
     ) -> Result<PublishBlobResult, BlobTransferError> {
-        self.blob_transfer
-            .get()
-            .cloned()
-            .ok_or_else(|| BlobTransferError::Publish("blob facade unavailable".to_string()))?
-            .publish_blob(command)
-            .await
+        self.blob_transfer.publish_blob(command).await
     }
 
     /// 拉取 blob。
@@ -629,12 +511,7 @@ impl AppFacade {
         &self,
         command: FetchBlobCommand,
     ) -> Result<FetchBlobResult, BlobTransferError> {
-        self.blob_transfer
-            .get()
-            .cloned()
-            .ok_or_else(|| BlobTransferError::Fetch("blob facade unavailable".to_string()))?
-            .fetch_blob(command)
-            .await
+        self.blob_transfer.fetch_blob(command).await
     }
 
     /// 流式 publish 一个磁盘文件作为 blob。
@@ -645,12 +522,7 @@ impl AppFacade {
         &self,
         command: PublishBlobPathCommand,
     ) -> Result<PublishBlobResult, BlobTransferError> {
-        self.blob_transfer
-            .get()
-            .cloned()
-            .ok_or_else(|| BlobTransferError::Publish("blob facade unavailable".to_string()))?
-            .publish_blob_path(command)
-            .await
+        self.blob_transfer.publish_blob_path(command).await
     }
 
     /// 流式 fetch 一个 blob 到指定本地文件。
@@ -662,12 +534,7 @@ impl AppFacade {
         &self,
         command: FetchBlobToPathCommand,
     ) -> Result<FetchBlobToPathResult, BlobTransferError> {
-        self.blob_transfer
-            .get()
-            .cloned()
-            .ok_or_else(|| BlobTransferError::Fetch("blob facade unavailable".to_string()))?
-            .fetch_blob_to_path(command)
-            .await
+        self.blob_transfer.fetch_blob_to_path(command).await
     }
 
     /// 把一个剪贴板快照连同已 publish 的 blob 引用一起 dispatch。
@@ -682,11 +549,6 @@ impl AppFacade {
         origin: ClipboardChangeOrigin,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
         self.clipboard_sync
-            .get()
-            .cloned()
-            .ok_or_else(|| {
-                ClipboardSyncError::Repository("clipboard sync facade unavailable".to_string())
-            })?
             .dispatch_snapshot_with_blob_refs(snapshot, blob_refs, origin, None, None)
             .await
     }
@@ -705,9 +567,6 @@ impl AppFacade {
         reason: uc_core::FileTransferCancellationReason,
     ) -> Result<crate::facade::InboundCancelOutcome, BlobTransferError> {
         self.blob_transfer
-            .get()
-            .cloned()
-            .ok_or_else(|| BlobTransferError::Fetch("blob facade unavailable".to_string()))?
             .cancel_inbound_transfer(transfer_id, reason)
             .await
     }
@@ -720,6 +579,12 @@ impl AppFacade {
         self.search.query(input).await
     }
 
+    pub async fn search_tags(
+        &self,
+    ) -> Result<Vec<crate::facade::SearchTagView>, SearchFacadeError> {
+        self.search.tags().await
+    }
+
     /// 查询本地搜索状态。
     pub async fn search_status(&self) -> Result<SearchStatusView, SearchFacadeError> {
         self.search.status().await
@@ -730,9 +595,192 @@ impl AppFacade {
         self.search.rebuild_now().await
     }
 
+    pub async fn request_search_rebuild(
+        &self,
+    ) -> Result<SearchRebuildAcceptedView, SearchFacadeError> {
+        self.search.request_rebuild().await
+    }
+
     /// 查询加密/初始化状态。
     pub async fn encryption_state(&self) -> Result<EncryptionStateView, EncryptionFacadeError> {
         self.encryption.state().await
+    }
+
+    pub async fn verify_secure_storage_access(&self) -> Result<bool, EncryptionFacadeError> {
+        self.encryption.verify_keychain_access().await
+    }
+
+    pub async fn local_device_info(
+        &self,
+    ) -> Result<crate::facade::LocalDeviceInfoView, crate::facade::DeviceFacadeError> {
+        self.device.local_device_info().await
+    }
+
+    pub async fn settings(&self) -> Result<crate::facade::SettingsView, SettingsFacadeError> {
+        self.settings.get().await
+    }
+
+    pub async fn update_settings(
+        &self,
+        patch: SettingsPatch,
+    ) -> Result<crate::facade::SettingsView, SettingsFacadeError> {
+        self.settings.update(patch).await
+    }
+
+    pub async fn probe_relay_url(
+        &self,
+        url: &str,
+        credential: crate::facade::settings::RelayProbeCredential,
+    ) -> Result<crate::facade::RelayProbeReportView, SettingsFacadeError> {
+        self.settings.probe_relay_url(url, credential).await
+    }
+
+    pub async fn save_relay(
+        &self,
+        patch: SettingsPatch,
+        edit: crate::facade::settings::RelayCredentialEdit,
+    ) -> Result<crate::facade::settings::RelaySaveView, SettingsFacadeError> {
+        self.settings.save_relay(patch, edit).await
+    }
+
+    pub fn relay_credential_status(
+        &self,
+        url: &str,
+    ) -> Result<crate::facade::settings::RelayCredentialStatusView, SettingsFacadeError> {
+        self.settings.relay_credential_status(url)
+    }
+
+    pub async fn export_config(
+        &self,
+        destination: &Path,
+    ) -> Result<PathBuf, uc_core::ports::config_migration::ConfigMigrationError> {
+        self.config_migration.export_config(destination).await
+    }
+
+    pub async fn preview_config_import(
+        &self,
+        password: &uc_core::crypto::domain::Passphrase,
+        source: &Path,
+    ) -> Result<
+        uc_core::ports::config_migration::ConfigImportPreview,
+        uc_core::ports::config_migration::ConfigMigrationError,
+    > {
+        self.config_migration.preview_import(password, source).await
+    }
+
+    pub async fn stage_config_import(
+        &self,
+        password: &uc_core::crypto::domain::Passphrase,
+        source: &Path,
+    ) -> Result<
+        uc_core::ports::config_migration::StagedConfigImport,
+        uc_core::ports::config_migration::ConfigMigrationError,
+    > {
+        self.config_migration.stage_import(password, source).await
+    }
+
+    pub async fn member_sync_preferences(
+        &self,
+        device_id: &str,
+    ) -> Result<crate::facade::MemberSyncPreferencesView, RosterError> {
+        self.member_roster.get_sync_preferences(device_id).await
+    }
+
+    pub async fn update_member_sync_preferences(
+        &self,
+        device_id: &str,
+        patch: crate::facade::MemberSyncPreferencesPatch,
+    ) -> Result<crate::facade::MemberSyncPreferencesView, RosterError> {
+        self.member_roster
+            .update_sync_preferences(device_id, patch)
+            .await
+    }
+
+    pub async fn remove_member(
+        &self,
+        device_id: &str,
+    ) -> Result<crate::facade::MemberRevocationView, RosterError> {
+        self.member_roster.revoke_member(device_id).await
+    }
+
+    pub async fn secure_remove_legacy_member(
+        &self,
+        device_id: &str,
+    ) -> Result<crate::facade::LegacyBootstrapView, RosterError> {
+        self.member_roster
+            .secure_remove_legacy_member(device_id)
+            .await
+    }
+
+    pub async fn space_protection(
+        &self,
+    ) -> Result<crate::facade::SpaceProtectionView, RosterError> {
+        self.member_roster.query_space_protection().await
+    }
+
+    pub async fn legacy_bootstrap(
+        &self,
+        bootstrap_id: &str,
+    ) -> Result<Option<crate::facade::LegacyBootstrapView>, RosterError> {
+        self.member_roster
+            .query_legacy_bootstrap(bootstrap_id)
+            .await
+    }
+
+    pub async fn member_revocation(
+        &self,
+        revocation_id: &str,
+    ) -> Result<Option<crate::facade::MemberRevocationView>, RosterError> {
+        self.member_roster.query_revocation(revocation_id).await
+    }
+
+    pub async fn diagnostics_status(
+        &self,
+    ) -> Result<crate::facade::DebugStatusView, crate::facade::DiagnosticsFacadeError> {
+        self.diagnostics.debug_status().await
+    }
+
+    pub async fn update_debug_mode(
+        &self,
+        enabled: bool,
+    ) -> Result<crate::facade::UpdateDebugModeView, crate::facade::DiagnosticsFacadeError> {
+        self.diagnostics.set_debug_mode(enabled).await
+    }
+
+    pub async fn export_diagnostic_logs(
+        &self,
+        since_hours: Option<u32>,
+        destination: PathBuf,
+    ) -> Result<crate::facade::LogExportView, crate::facade::DiagnosticsFacadeError> {
+        self.diagnostics
+            .export_logs_to_dir(since_hours, destination)
+            .await
+    }
+
+    pub async fn storage_stats(
+        &self,
+    ) -> Result<crate::facade::StorageStatsView, crate::facade::StorageFacadeError> {
+        self.storage.stats().await
+    }
+
+    pub async fn clear_storage_cache(
+        &self,
+    ) -> Result<crate::facade::ClearCacheResultView, crate::facade::StorageFacadeError> {
+        self.storage.clear_cache().await
+    }
+
+    pub async fn upgrade_status(
+        &self,
+        current_version: &str,
+    ) -> Result<crate::facade::UpgradeStatus, crate::facade::DetectUpgradeError> {
+        self.upgrade.detect_on_startup(current_version).await
+    }
+
+    pub async fn acknowledge_upgrade(
+        &self,
+        current_version: &str,
+    ) -> Result<(), crate::facade::AcknowledgeUpgradeError> {
+        self.upgrade.acknowledge(current_version).await
     }
 
     /// 更新本机设备名。
@@ -778,22 +826,12 @@ impl AppFacade {
 
     /// 列出对外 peer 快照。外部调用只经过 `AppFacade`,不直接依赖 roster 子 facade。
     pub async fn list_peer_snapshots(&self) -> Result<Vec<PeerSnapshotView>, RosterError> {
-        self.member_roster
-            .get()
-            .cloned()
-            .ok_or(RosterError::Unavailable)?
-            .list_peer_snapshots()
-            .await
+        self.member_roster.list_peer_snapshots().await
     }
 
     /// 订阅成员在线状态变化。外部拿到的是 application 事件,不暴露 core 事件类型。
     pub fn subscribe_peer_presence_events(&self) -> Result<AppPresenceSubscription, RosterError> {
-        let inner = self
-            .member_roster
-            .get()
-            .cloned()
-            .ok_or(RosterError::Unavailable)?
-            .subscribe_presence_events();
+        let inner = self.member_roster.subscribe_presence_events();
         Ok(AppPresenceSubscription { inner })
     }
 }
@@ -835,14 +873,6 @@ impl AppPresenceSubscription {
     }
 }
 
-fn once_lock_from<T>(value: Option<T>) -> OnceLock<T> {
-    let cell = OnceLock::new();
-    if let Some(v) = value {
-        let _ = cell.set(v);
-    }
-    cell
-}
-
 fn presence_event_to_app(event: PresenceEvent) -> AppPresenceEvent {
     AppPresenceEvent {
         device_id: event.device_id.as_str().to_string(),
@@ -861,20 +891,19 @@ fn reachability_state_to_string(state: ReachabilityState) -> String {
 }
 
 pub struct AppFacadeParts {
-    pub space: Option<Arc<SpaceFacade>>,
-    pub space_session_activity: Option<SpaceSessionActivityDeps>,
-    pub space_session_access: Option<SpaceSessionAccessDeps>,
-    pub space_application: Option<SpaceApplicationHandle>,
-    pub member_roster: Option<Arc<MemberRosterFacade>>,
-    pub lifecycle: Arc<LifecycleFacade>,
+    pub space: Arc<SpaceFacade>,
+    pub space_session_activity: SpaceSessionActivityDeps,
+    pub space_session_access: SpaceSessionAccessDeps,
+    pub space_application: SpaceApplicationHandle,
+    pub member_roster: Arc<MemberRosterFacade>,
     pub encryption: Arc<EncryptionFacade>,
     pub resource: Arc<ResourceFacade>,
     pub clipboard_history: Arc<ClipboardHistoryFacade>,
     pub clipboard_capture: Arc<ClipboardCaptureFacade>,
-    pub clipboard_sync: Option<Arc<ClipboardSyncFacade>>,
-    pub blob_transfer: Option<Arc<BlobTransferFacade>>,
-    pub clipboard_outbound: Option<Arc<ClipboardOutboundFacade>>,
-    pub clipboard_restore: Option<Arc<ClipboardRestoreFacade>>,
+    pub clipboard_sync: Arc<ClipboardSyncFacade>,
+    pub blob_transfer: Arc<BlobTransferFacade>,
+    pub clipboard_outbound: Arc<ClipboardOutboundFacade>,
+    pub clipboard_restore: Arc<ClipboardRestoreFacade>,
     pub search: Arc<SearchFacade>,
     pub settings: Arc<SettingsFacade>,
     pub diagnostics: Arc<DiagnosticsFacade>,
@@ -882,6 +911,4 @@ pub struct AppFacadeParts {
     pub storage: Arc<StorageFacade>,
     pub config_migration: Arc<ConfigMigrationFacade>,
     pub upgrade: Arc<UpgradeFacade>,
-    #[cfg(feature = "lan-compat")]
-    pub mobile_sync: Option<Arc<MobileSyncFacade>>,
 }

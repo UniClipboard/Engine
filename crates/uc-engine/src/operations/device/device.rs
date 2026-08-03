@@ -10,7 +10,7 @@ use crate::{EngineError, EngineErrorCategory, LocalDeviceSummary, OperationResul
 pub async fn execute_query_local_device(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let info = facade.device.local_device_info().await.map_err(|error| {
+    let info = facade.local_device_info().await.map_err(|error| {
         let variant = match error {
             DeviceFacadeError::DeviceIdentity(_) => "device_identity",
         };

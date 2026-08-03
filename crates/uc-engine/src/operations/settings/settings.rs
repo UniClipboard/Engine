@@ -22,8 +22,7 @@ pub(crate) async fn execute_query_settings(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let settings = facade
-        .settings
-        .get()
+        .settings()
         .await
         .map_err(|_| internal_error(QUERY_SETTINGS_FAILED_CODE))?;
     Ok(OperationResult::Settings(Box::new(map_settings(settings))))
@@ -41,7 +40,7 @@ pub(crate) async fn execute_update_settings(
             ));
         }
     };
-    match facade.settings.update(patch).await {
+    match facade.update_settings(patch).await {
         Ok(settings) => Ok(OperationResult::SettingsUpdated(
             SettingsUpdateOutcome::Updated(Box::new(map_settings(settings))),
         )),
@@ -70,11 +69,7 @@ pub(crate) async fn execute_probe_relay(
             }
         }
     };
-    let outcome = match facade
-        .settings
-        .probe_relay_url(&input.url, credential)
-        .await
-    {
+    let outcome = match facade.probe_relay_url(&input.url, credential).await {
         Ok(report) => RelayProbeOutcome::Success {
             latency_ms: report.latency_ms,
         },
@@ -130,7 +125,7 @@ pub(crate) async fn execute_save_relay(
         RelayCredentialEdit::Delete { url } => app::RelayCredentialEdit::Delete { url },
     };
 
-    match facade.settings.save_relay(patch, credential).await {
+    match facade.save_relay(patch, credential).await {
         Ok(saved) => Ok(OperationResult::RelaySaved(SaveRelayOutcome::Saved {
             settings: Box::new(map_settings(saved.settings)),
             credential_status: RelayCredentialStatus {
@@ -165,7 +160,6 @@ pub(crate) async fn execute_query_relay_credential(
     input: RelayCredentialInput,
 ) -> Result<OperationResult, EngineError> {
     let status = facade
-        .settings
         .relay_credential_status(&input.url)
         .map_err(|error| map_relay_credential_error(error, QUERY_RELAY_CREDENTIAL_FAILED_CODE))?;
     Ok(OperationResult::RelayCredentialStatus(

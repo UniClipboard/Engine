@@ -407,13 +407,11 @@ impl EngineRuntime for ProductionRuntime {
         let facade = self.current_facade().await?;
         match operation {
             crate::DevOperation::SeedText { text } => facade
-                .clipboard_history
-                .seed_text_entry(&text)
+                .seed_history_text(&text)
                 .await
                 .map(|entry_id| crate::DevOperationResult::TextSeeded { entry_id })
                 .map_err(|error| operation_error_with_code(1903, "seed text", error)),
             crate::DevOperation::CaptureFilePaths { paths } => facade
-                .clipboard_capture
                 .capture_file_paths_for_diagnostics(paths)
                 .await
                 .map(|captured| {

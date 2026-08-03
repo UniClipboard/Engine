@@ -15,9 +15,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::error;
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
-use uc_application::facade::{
-    AppFacade, HistoryMaintenanceRuntime, InMemoryLifecycleStatus, PairingOutcome,
-};
+use uc_application::facade::{AppFacade, HistoryMaintenanceRuntime, PairingOutcome};
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
@@ -27,8 +25,7 @@ use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::facade::{
-    build_app_facade_from_deps, AppFacadeAssemblyOptions, ClipboardRestoreAssembly,
-    SearchFacadeAssemblyMode,
+    build_app_facade_from_deps, ClipboardRestoreAssembly, RuntimeAppFacadeAssembly,
 };
 use crate::assembly::file_transfer::FileTransferLifecycle;
 use crate::assembly::host::{
@@ -282,26 +279,24 @@ impl ProductionRuntime {
         let facade = build_app_facade_from_deps(
             &wired.deps,
             paths,
-            Arc::new(InMemoryLifecycleStatus::new()),
-            AppFacadeAssemblyOptions {
-                space: Some(Arc::clone(&sync_engine.facade)),
-                space_application: Some(sync_engine.space_application_handle()),
-                space_receive_activity: Some(Arc::clone(file_transfer_lifecycle)
-                    as Arc<dyn uc_application::receive_reconciliation::EnsureReceiveReadyPort>),
-                member_roster: Some(Arc::clone(&sync_engine.roster)),
-                clipboard_sync: Some(Arc::clone(&sync_engine.clipboard_sync)),
-                blob_transfer: Some(Arc::clone(&sync_engine.blob)),
-                blob_transfer_port: Some(Arc::clone(&sync_engine.blob_transfer)),
-                clipboard_restore: Some(ClipboardRestoreAssembly {
+            RuntimeAppFacadeAssembly {
+                space: Arc::clone(&sync_engine.facade),
+                space_application: sync_engine.space_application_handle(),
+                space_receive_activity: Arc::clone(file_transfer_lifecycle)
+                    as Arc<dyn uc_application::receive_reconciliation::EnsureReceiveReadyPort>,
+                member_roster: Arc::clone(&sync_engine.roster),
+                clipboard_sync: Arc::clone(&sync_engine.clipboard_sync),
+                blob_transfer: Arc::clone(&sync_engine.blob),
+                blob_transfer_port: Arc::clone(&sync_engine.blob_transfer),
+                clipboard_restore: ClipboardRestoreAssembly {
                     write_coordinator: Arc::clone(&wired.shared.clipboard_write_coordinator),
                     integration_mode: uc_core::clipboard::ClipboardIntegrationMode::Full,
                     restore_broadcast: Some(
                         uc_application::clipboard_write::RestoreBroadcastTrigger::new(restore_tx),
                     ),
-                }),
-                search: SearchFacadeAssemblyMode::Runtime(search_runtime.facade()),
-                clipboard_outbound: Some(Arc::clone(&clipboard.outbound)),
-                ..Default::default()
+                },
+                search: search_runtime.facade(),
+                clipboard_outbound: Arc::clone(&clipboard.outbound),
             },
         );
         let pairing_outcomes = facade
