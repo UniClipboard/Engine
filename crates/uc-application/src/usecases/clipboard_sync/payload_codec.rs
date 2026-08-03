@@ -8,8 +8,8 @@
 //!   the V3 envelope, return the plaintext `Bytes` to feed
 //!   `ClipboardSyncFacade::dispatch_entry` + the dedup hash string.
 //! * [`decode_v3_bytes_to_snapshot`] — inverse of the above: consume the
-//!   plaintext from `IngestInboundClipboardUseCase`'s `InboundNotice` and
-//!   produce a fresh `SystemClipboardSnapshot` with new
+//!   plaintext from the inbound runtime and produce a fresh
+//!   `SystemClipboardSnapshot` with new
 //!   `RepresentationId`s (receiver-local identity, since representations
 //!   from a peer have no meaningful ID continuity).
 //!

@@ -179,8 +179,7 @@ fn lan_target_from_settings(out: &UpdateMobileSyncSettingsOutput) -> MobileLanTa
 ///
 /// `apply_inbound` 与 `incoming_buffer` / `snapshot_ports` 是 P5a.6 引入
 /// 的新字段:
-/// - `apply_inbound`:PUT 路径的真实剪贴板入站 use case 实例。bootstrap
-///   把它装配一份后,同时喂给本 facade 与 `InboundClipboardFacade` 共享。
+/// - `apply_inbound`:PUT 路径的真实剪贴板入站 use case 实例。
 /// - `incoming_buffer`:两步 PUT 协议(file → json)之间的字节暂存 ——
 ///   bootstrap 端 `Arc::new(IncomingMobileBuffer::new())` 即可,无外部资源。
 /// - `snapshot_ports`:GET 路径用 `LatestClipboardSnapshotAdapter` 组合的

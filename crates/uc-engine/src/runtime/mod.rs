@@ -24,9 +24,7 @@ use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
 use crate::assembly::blob_tasks::{spawn_blob_processing_tasks, BlobProcessingPorts};
-use crate::assembly::clipboard_runtime::{
-    build_clipboard_runtime, spawn_clipboard_runtime_tasks, ClipboardRuntime,
-};
+use crate::assembly::clipboard_runtime::{build_clipboard_runtime, ClipboardRuntime};
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::facade::build_mobile_sync_facade;
@@ -263,7 +261,7 @@ impl ProductionRuntime {
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         sync_engine.attach_restore_broadcast(restore_rx);
         let search_runtime = build_search_runtime(&wired.deps);
-        let clipboard = build_clipboard_runtime(wired, &sync_engine);
+        let clipboard = build_clipboard_runtime(wired, &sync_engine, events.clone());
         #[cfg(feature = "lan-compat")]
         let mobile_sync = build_mobile_sync_facade(
             &wired.deps,
@@ -328,13 +326,6 @@ impl ProductionRuntime {
         spawn_pairing_completion_events(pairing_outcomes, &tasks, events.clone()).await;
         spawn_history_maintenance_task(Arc::clone(&facade.clipboard_history), &tasks).await;
         spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
-        spawn_clipboard_runtime_tasks(
-            &clipboard,
-            Arc::clone(&sync_engine.clipboard_sync),
-            &tasks,
-            events,
-        )
-        .await;
         let lifecycle = Arc::clone(file_transfer_lifecycle);
         let blob_transfer = Arc::clone(&sync_engine.blob);
         tasks

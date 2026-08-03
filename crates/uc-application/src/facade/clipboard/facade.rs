@@ -1,31 +1,21 @@
-//! Slice 2 Phase 2 · T9 — `ClipboardSyncFacade` implementation.
-//!
-//! Thin wrapper over the two use cases. Job is:
-//!
-//! * Hold `Arc<DispatchClipboardEntryUseCase>` and
-//!   `Arc<IngestInboundClipboardUseCase>`, so the facade controls lifetime.
-//! * Translate between public (`pub`) and internal (`pub(crate)`) types so
-//!   AGENTS.md §11.4 stays intact (external crates never touch the
-//!   underlying use case structs).
-//! * Expose `spawn_ingest_loop` for bootstrap to call right after F1
-//!   `auto_start_network` succeeds — same lifecycle hook pattern as Phase
-//!   1's `ensure_reachable_all` but for the clipboard receiver.
+//! Outbound clipboard dispatch, delivery views, and receive cancellation.
+//! The complete inbound receive lifecycle is owned separately by
+//! `ClipboardInboundRuntime`.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tokio::sync::broadcast;
 use tracing::instrument;
 
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     CancelDirectoryAttemptTransfersPort, CleanupDirectoryStagingPort, ClipboardDispatchPort,
-    ClipboardHeader, ClipboardReceiverPort, ClockPort, CommitInboundReceivePort,
-    DeviceIdentityPort, DispatchAck, EntryDeliveryRepositoryPort, FindMobileDeviceByIdPort,
-    FirstSyncStatePort, GetDirectoryPublishRecordPort, GetEntryAttemptPort,
-    GetEntryReceiveProgressPort, ListNonTerminalAttemptsPort, LocalIdentityPort,
-    PeerAddressRepositoryPort, PresencePort, RequestReceiveCancellationPort, SettingsPort,
+    ClipboardHeader, ClockPort, CommitInboundReceivePort, DeviceIdentityPort, DispatchAck,
+    EntryDeliveryRepositoryPort, FindMobileDeviceByIdPort, FirstSyncStatePort,
+    GetDirectoryPublishRecordPort, GetEntryAttemptPort, GetEntryReceiveProgressPort,
+    ListNonTerminalAttemptsPort, LocalIdentityPort, PeerAddressRepositoryPort, PresencePort,
+    RequestReceiveCancellationPort, SettingsPort,
 };
 use uc_core::MemberRepositoryPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
@@ -44,14 +34,12 @@ use crate::usecases::clipboard_sync::payload_codec::{
 };
 use crate::usecases::clipboard_sync::{
     encode_snapshot_to_v3_bytes, DispatchClipboardEntryInput, DispatchClipboardEntryUseCase,
-    DispatchOutcome, DispatchPerTarget, DispatchSyncError, InboundAction as UcInboundAction,
-    InboundClipboardNotice as UcInboundNotice, IngestInboundClipboardUseCase, IngestSpawnHandle,
+    DispatchOutcome, DispatchPerTarget, DispatchSyncError,
 };
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ports::clipboard::GetClipboardEntryPort;
 use uc_core::ports::ClipboardEventRepositoryPort;
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
-use uc_observability_contract::FlowId;
 
 /// Construction bundle, mirrors `MemberRosterDeps` pattern so bootstrap
 /// wiring stays consistent across facades.
@@ -61,7 +49,6 @@ pub struct ClipboardSyncDeps {
     pub presence: Arc<dyn PresencePort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
     pub clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
-    pub clipboard_receiver: Arc<dyn ClipboardReceiverPort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
     pub local_identity: Arc<dyn LocalIdentityPort>,
     pub settings: Arc<dyn SettingsPort>,
@@ -160,99 +147,9 @@ impl From<DispatchSyncError> for ClipboardSyncError {
     }
 }
 
-/// Public view of one inbound clipboard delivery.
-#[derive(Debug, Clone)]
-pub struct InboundNotice {
-    pub from_device: DeviceId,
-    pub snapshot_hash: String,
-    pub plaintext: Bytes,
-    pub flow_id: Option<FlowId>,
-    pub action: InboundAction,
-    pub at_ms: i64,
-    pub receipt: uc_core::ports::InboundClipboardReceipt,
-}
-
-/// Public mirror of the internal `InboundAction` enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InboundAction {
-    NewEntry,
-    DuplicateIgnored,
-}
-
-/// Public re-export of the ingest spawn handle. Drop or call `abort()`
-/// to stop the background loop.
-pub struct IngestHandle {
-    inner: IngestSpawnHandle,
-}
-
-impl IngestHandle {
-    pub fn abort(&self) {
-        self.inner.abort();
-    }
-}
-
-/// A live subscription to the inbound-notice broadcast, returned by
-/// [`ClipboardSyncFacade::subscribe_inbound_notices`].
-///
-/// Wraps the public [`broadcast::Receiver`] and owns the background bridge
-/// task that relays internal notices onto it. The wrapper ties the bridge
-/// task's lifetime to the subscriber: dropping the subscription aborts the
-/// bridge, so a subscriber that goes away does not leave a task looping until
-/// the whole facade is torn down. `Deref`/`DerefMut` expose the underlying
-/// receiver, so callers use `.recv()` exactly as before.
-pub struct InboundNoticeSubscription {
-    rx: broadcast::Receiver<InboundNotice>,
-    bridge: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl std::ops::Deref for InboundNoticeSubscription {
-    type Target = broadcast::Receiver<InboundNotice>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.rx
-    }
-}
-
-impl std::ops::DerefMut for InboundNoticeSubscription {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.rx
-    }
-}
-
-impl Drop for InboundNoticeSubscription {
-    fn drop(&mut self) {
-        let Some(handle) = self.bridge.take() else {
-            return;
-        };
-        handle.abort();
-        // Surface a bridge panic instead of letting it vanish with the aborted
-        // handle (observability requirement — a silently dead task is a bug we
-        // must be able to see). Awaiting must happen off-thread since `drop`
-        // is sync; guard on a live runtime so dropping outside async context
-        // (e.g. in a sync test teardown) degrades to a plain abort rather than
-        // panicking. Cancellation is expected here — only a real panic warns.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(async move {
-                if let Err(err) = handle.await {
-                    if !err.is_cancelled() {
-                        tracing::warn!(
-                            event = "task.panicked",
-                            task = "clipboard.inbound_bridge",
-                            error = %err,
-                            "inbound-notice bridge task panicked"
-                        );
-                    }
-                }
-            });
-        }
-    }
-}
-
-/// Clipboard sync facade — the single public entry point for Slice 2
-/// Phase 2.
+/// Clipboard sync facade for outbound and receive-management commands.
 pub struct ClipboardSyncFacade {
     dispatch_uc: Arc<DispatchClipboardEntryUseCase>,
-    ingest_uc: Arc<IngestInboundClipboardUseCase>,
     view_uc: Arc<GetEntryDeliveryViewUseCase>,
     cancel_entry_receive_uc: Option<Arc<CancelEntryReceiveUseCase>>,
     receive_progress: Option<Arc<dyn GetEntryReceiveProgressPort>>,
@@ -301,12 +198,6 @@ impl ClipboardSyncFacade {
             Arc::clone(&deps.entry_delivery_repo),
             Arc::clone(&deps.host_event_bus),
         ));
-        let ingest_uc = Arc::new(IngestInboundClipboardUseCase::new(
-            Arc::clone(&deps.clipboard_receiver),
-            Arc::clone(&deps.member_repo),
-            Arc::clone(&deps.transfer_cipher),
-            Arc::clone(&deps.clock),
-        ));
         let view_uc = Arc::new(GetEntryDeliveryViewUseCase::new(
             Arc::clone(&deps.entry_repo),
             Arc::clone(&deps.event_repo),
@@ -318,7 +209,6 @@ impl ClipboardSyncFacade {
         ));
         Self {
             dispatch_uc,
-            ingest_uc,
             view_uc,
             cancel_entry_receive_uc: None,
             receive_progress: None,
@@ -583,59 +473,6 @@ impl ClipboardSyncFacade {
         .await
     }
 
-    /// Subscribe to the inbound-notice broadcast. CLI `watch` / future
-    /// daemon subscribers attach here.
-    pub fn subscribe_inbound_notices(&self) -> InboundNoticeSubscription {
-        // Bridge from the internal broadcast to the public-type broadcast
-        // via a relay task. This keeps public types independent of
-        // `usecases::*` renames while still letting lagging subscribers
-        // recover per broadcast semantics. The returned
-        // `InboundNoticeSubscription` owns this task's handle and aborts it
-        // on drop, so the bridge stops when its subscriber goes away rather
-        // than looping until the whole facade is dropped.
-        let (public_tx, public_rx) = broadcast::channel(64);
-        let mut internal_rx = self.ingest_uc.subscribe_notices();
-        let bridge = tokio::spawn(async move {
-            loop {
-                match internal_rx.recv().await {
-                    Ok(internal) => {
-                        let lifted = lift_notice(internal);
-                        if public_tx.send(lifted).is_err() {
-                            // No public receiver right now. While the
-                            // subscription is alive this cannot happen (the
-                            // guard holds one receiver); it is only reachable
-                            // in the brief window after the subscriber drops
-                            // the guard but before the abort lands. Keep
-                            // consuming so the internal broadcast doesn't lag —
-                            // the next `internal_rx.recv().await` is where the
-                            // pending abort takes effect.
-                            continue;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            tracing::debug!(
-                event = "clipboard.inbound_bridge_stopped",
-                reason = "internal_broadcast_closed",
-                "inbound-notice bridge task exiting"
-            );
-        });
-        InboundNoticeSubscription {
-            rx: public_rx,
-            bridge: Some(bridge),
-        }
-    }
-
-    /// Spawn the ingest background loop. Caller owns the returned handle;
-    /// dropping it (or `abort()`) terminates the loop. Typically called by
-    /// bootstrap after F1 `auto_start_network` completes.
-    pub fn spawn_ingest_loop(&self) -> IngestHandle {
-        let inner = Arc::clone(&self.ingest_uc).spawn_run();
-        IngestHandle { inner }
-    }
-
     /// Crate-internal accessor — hand the inner dispatch use case to
     /// callers that need to feed `DispatchClipboardEntryInput` directly
     /// (currently only [`ResendEntryUseCase`] via
@@ -676,21 +513,6 @@ fn lift_per_target(internal: DispatchPerTarget) -> DispatchEntryPerTarget {
     }
 }
 
-fn lift_notice(internal: UcInboundNotice) -> InboundNotice {
-    InboundNotice {
-        from_device: internal.from_device,
-        snapshot_hash: internal.snapshot_hash,
-        plaintext: internal.plaintext,
-        flow_id: internal.flow_id,
-        action: match internal.action {
-            UcInboundAction::NewEntry => InboundAction::NewEntry,
-            UcInboundAction::DuplicateIgnored => InboundAction::DuplicateIgnored,
-        },
-        at_ms: internal.at_ms,
-        receipt: internal.receipt,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -701,25 +523,20 @@ fn lift_notice(internal: UcInboundNotice) -> InboundNotice {
 //   values: `PeerAddressRepositoryPort`, `TransferCipherPort`,
 //   `ClipboardDispatchPort`, `PresencePort`, `DeviceIdentityPort`,
 //   `LocalIdentityPort`, `SettingsPort`.
-// * Hand-write `FakeReceiver` because `ClipboardReceiverPort::subscribe`
-//   returns a non-Clone broadcast `Receiver` and the test needs an
-//   `emit(...)` helper to drive the loop. Same trade-off as Phase 1
-//   `FakePresence` in `roster/facade.rs`.
 // * Trivial sync `FixedClock` stays hand-written (4 lines).
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::time::Duration;
-
     use async_trait::async_trait;
     use mockall::predicate::*;
+    use tokio::sync::broadcast;
     use uc_core::ports::security::TransferCipherError;
     use uc_core::ports::{
         ClipboardDispatchError, ClipboardHeader, ConnectionChannel, DispatchAck, DispatchReport,
-        FirstSyncStateError, InboundClipboard, LocalIdentityError, PeerAddressError,
-        PeerAddressRecord, PresenceError, PresenceEvent, ReachabilityState, SyncPayload,
+        FirstSyncStateError, LocalIdentityError, PeerAddressError, PeerAddressRecord,
+        PresenceError, PresenceEvent, ReachabilityState, SyncPayload,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -954,30 +771,6 @@ mod tests {
         m
     }
 
-    // ── hand-written: ClipboardReceiverPort + ClockPort ─────────────────
-
-    /// `subscribe()` returns a non-Clone `broadcast::Receiver` and the
-    /// tests need an `emit(...)` helper — same trade-off as Phase 1's
-    /// `FakePresence`.
-    struct FakeReceiver {
-        tx: broadcast::Sender<InboundClipboard>,
-    }
-    impl FakeReceiver {
-        fn new() -> Self {
-            let (tx, _) = broadcast::channel(16);
-            Self { tx }
-        }
-        fn publish(&self, inbound: InboundClipboard) {
-            let _ = self.tx.send(inbound);
-        }
-    }
-    #[async_trait]
-    impl ClipboardReceiverPort for FakeReceiver {
-        fn subscribe(&self) -> broadcast::Receiver<InboundClipboard> {
-            self.tx.subscribe()
-        }
-    }
-
     struct FixedClock(i64);
     impl ClockPort for FixedClock {
         fn now_ms(&self) -> i64 {
@@ -1062,10 +855,7 @@ mod tests {
         m
     }
 
-    /// Wire the facade with the given mock ports + a `FakeReceiver`. The
-    /// FakeReceiver is returned alongside so the caller can `publish(...)`
-    /// during the test. `member_repo` defaults to "all peers allowed"
-    /// because the two facade verdicts here predate per-device gating.
+    /// Wire the outbound facade with the given mock ports.
     fn build_facade(
         peer_addr_repo: MockPeerAddrRepo,
         presence: MockPresence,
@@ -1074,15 +864,13 @@ mod tests {
         device_identity: MockDeviceId_,
         local_identity: MockLocalIdentity,
         settings: MockSettings_,
-    ) -> (ClipboardSyncFacade, Arc<FakeReceiver>) {
-        let receiver = Arc::new(FakeReceiver::new());
-        let facade = ClipboardSyncFacade::new(ClipboardSyncDeps {
+    ) -> ClipboardSyncFacade {
+        ClipboardSyncFacade::new(ClipboardSyncDeps {
             peer_addr_repo: Arc::new(peer_addr_repo),
             member_repo: Arc::new(make_member_repo_all_enabled()),
             presence: Arc::new(presence),
             transfer_cipher: Arc::new(cipher),
             clipboard_dispatch: Arc::new(dispatch),
-            clipboard_receiver: receiver.clone() as Arc<dyn ClipboardReceiverPort>,
             device_identity: Arc::new(device_identity),
             local_identity: Arc::new(local_identity),
             settings: Arc::new(settings),
@@ -1095,8 +883,7 @@ mod tests {
             trusted_peer_repo: Arc::new(make_noop_trusted_peer_repo()),
             mobile_device_repo: Arc::new(make_noop_mobile_device_repo()),
             host_event_bus: Arc::new(crate::facade::host_event::HostEventBus::new()),
-        });
-        (facade, receiver)
+        })
     }
 
     // ── verdicts ────────────────────────────────────────────────────────
@@ -1128,7 +915,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
 
-        let (facade, _receiver) = build_facade(
+        let facade = build_facade(
             repo,
             presence,
             cipher,
@@ -1150,108 +937,6 @@ mod tests {
         assert_eq!(outcome.total_accepted, 1);
         assert_eq!(outcome.per_target.len(), 1);
         assert_eq!(outcome.per_target[0].device_id.as_str(), "peer-a");
-    }
-
-    /// Verdict 2 — `subscribe_inbound_notices` bridges the internal
-    /// broadcast to a public-typed one. Decrypt is mocked once; the
-    /// public `InboundNotice` round-trips with `InboundAction::NewEntry`.
-    #[tokio::test]
-    async fn subscribe_inbound_notices_bridges_internal_to_public_type() {
-        // Dispatch path is unused in this test; register no expectations.
-        // peer_addr_repo / presence likewise unused.
-        let repo = MockPeerAddrRepo::new();
-        let presence = make_presence_unknown();
-        let dispatch = MockDispatch::new();
-
-        let mut cipher = MockCipher::new();
-        // Decrypt called once when the published frame reaches the loop.
-        cipher
-            .expect_decrypt()
-            .times(1)
-            .returning(|ct| Ok(ct.to_vec()));
-
-        let (facade, receiver) = build_facade(
-            repo,
-            presence,
-            cipher,
-            dispatch,
-            make_device_identity("self"),
-            make_local_identity(),
-            make_settings(),
-        );
-        let mut notices = facade.subscribe_inbound_notices();
-        let _ingest = facade.spawn_ingest_loop();
-
-        tokio::time::sleep(Duration::from_millis(30)).await;
-
-        let (receipt, _result) = uc_core::ports::InboundClipboardReceipt::pending();
-        receiver.publish(InboundClipboard {
-            peer_device_id: DeviceId::new("peer-x"),
-            header: ClipboardHeader {
-                version: ClipboardHeader::CURRENT_VERSION,
-                snapshot_hash: "xx".repeat(32),
-                captured_at_ms: 42,
-                origin_device_id: "peer-x".to_string(),
-                origin_device_name: "Peer X".to_string(),
-                payload_version: 3,
-                flow_id: None,
-            },
-            ciphertext: Bytes::from_static(b"hello"),
-            receipt,
-        });
-
-        let notice = tokio::time::timeout(Duration::from_secs(2), notices.recv())
-            .await
-            .expect("notice arrives")
-            .expect("sender alive");
-        assert_eq!(notice.from_device.as_str(), "peer-x");
-        assert_eq!(notice.plaintext, Bytes::from_static(b"hello"));
-        assert_eq!(notice.action, InboundAction::NewEntry);
-    }
-
-    /// Dropping an `InboundNoticeSubscription` must abort its bridge task so
-    /// the internal notice receiver is released — otherwise every subscribe
-    /// leaks a task looping until the whole facade is torn down (the bug this
-    /// wrapper fixes). Observed via the internal broadcast's receiver count.
-    #[tokio::test]
-    async fn dropping_subscription_aborts_bridge_and_releases_internal_receiver() {
-        let (facade, _receiver) = build_facade(
-            MockPeerAddrRepo::new(),
-            make_presence_unknown(),
-            MockCipher::new(),
-            MockDispatch::new(),
-            make_device_identity("self"),
-            make_local_identity(),
-            make_settings(),
-        );
-
-        let before = facade.ingest_uc.notice_receiver_count();
-
-        // `subscribe_inbound_notices` subscribes to the internal broadcast
-        // synchronously (before spawning the bridge), so the count rises
-        // immediately and deterministically.
-        let subscription = facade.subscribe_inbound_notices();
-        assert_eq!(
-            facade.ingest_uc.notice_receiver_count(),
-            before + 1,
-            "bridge task should hold one internal notice receiver while subscribed"
-        );
-
-        drop(subscription);
-
-        // `abort()` is asynchronous: the aborted task releases its captured
-        // internal receiver only once the runtime polls it. Poll the count
-        // until it settles rather than assuming a fixed delay.
-        let mut waited_ms = 0;
-        while facade.ingest_uc.notice_receiver_count() > before && waited_ms < 1000 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            waited_ms += 5;
-        }
-        assert_eq!(
-            facade.ingest_uc.notice_receiver_count(),
-            before,
-            "dropping the subscription must abort the bridge and release its internal receiver"
-        );
     }
 
     /// Verdict 3 — `dispatch_snapshot` encodes the snapshot into the V3
@@ -1296,7 +981,7 @@ mod tests {
             .withf(|_target, header, _payload| header.payload_version == 3)
             .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
 
-        let (facade, _receiver) = build_facade(
+        let facade = build_facade(
             repo,
             presence,
             cipher,
@@ -1334,40 +1019,6 @@ mod tests {
         );
     }
 
-    /// Verdict 4 — `spawn_ingest_loop` returns a handle whose `Drop`
-    /// aborts the background task. Decrypt has zero expectations: if the
-    /// loop kept consuming after the handle drop, mockall would observe
-    /// an unexpected decrypt and panic.
-    #[tokio::test]
-    async fn spawn_ingest_handle_drops_clean() {
-        let repo = MockPeerAddrRepo::new();
-        let presence = make_presence_unknown();
-        let dispatch = MockDispatch::new();
-        // Zero decrypt expectations — no inbound is published, so decrypt
-        // must never be called even by a leaked task.
-        let cipher = MockCipher::new();
-
-        let (facade, receiver) = build_facade(
-            repo,
-            presence,
-            cipher,
-            dispatch,
-            make_device_identity("self"),
-            make_local_identity(),
-            make_settings(),
-        );
-        {
-            let _handle = facade.spawn_ingest_loop();
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        // Handle dropped. Briefly sleep so the abort settles. If a leaked
-        // task touched the receiver after this point, no decrypt is set
-        // up to handle it — mockall's `Drop` would panic. Safe to publish
-        // here as the (already-aborted) loop would no longer consume it.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let _ = receiver; // keep the receiver alive so tx isn't dropped early
-    }
-
     /// Verdict 5 — `DispatchEntryInput.target_filter = Some([peer-b])` threads
     /// through to the use case. peer-a is listed in `peer_addr_repo` but the
     /// filter excludes it, so `MockDispatch` registers an expectation only for
@@ -1396,7 +1047,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
 
-        let (facade, _receiver) = build_facade(
+        let facade = build_facade(
             repo,
             presence,
             cipher,

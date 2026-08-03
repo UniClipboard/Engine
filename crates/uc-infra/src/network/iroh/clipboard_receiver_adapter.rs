@@ -1,7 +1,7 @@
 //! Iroh-backed implementation of [`ClipboardReceiverPort`] (Slice 2 Phase 2).
 //!
-//! The adapter publishes an [`InboundClipboard`] broadcast stream that
-//! ingest use cases subscribe to. Actual inbound connections are handled by
+//! The adapter publishes an [`InboundClipboard`] broadcast stream that the
+//! application inbound runtime subscribes to. Actual connections are handled by
 //! [`IrohClipboardReceiverHandler`] — the same `ProtocolHandler` split
 //! pattern we use for pairing / presence (see `uc-infra/AGENTS.md` §4.3):
 //! adapter owns the broadcast `Sender` and the domain dependencies, the
@@ -22,8 +22,8 @@
 //!
 //! Unknown peers (fingerprint not in `member_repo`) receive
 //! [`AckCode::Rejected`] and the connection is closed. They never make it
-//! to the broadcast stream, so `IngestInboundClipboardUseCase` does not
-//! need a second rejection path.
+//! to the broadcast stream, so the application runtime does not need a
+//! second identity rejection path.
 //!
 //! ## Failure semantics
 //!

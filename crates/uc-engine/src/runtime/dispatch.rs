@@ -522,6 +522,7 @@ impl EngineRuntime for ProductionRuntime {
             if let Err(error) = session.search_runtime.shutdown().await {
                 tracing::error!(error = %error, "search runtime stopped with error");
             }
+            session.clipboard.shutdown().await;
             session.sync_engine.shutdown().await;
         }
         Ok(())

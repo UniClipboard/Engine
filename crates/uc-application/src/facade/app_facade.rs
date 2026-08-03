@@ -55,11 +55,11 @@ use crate::facade::{
     ClipboardOutboundFacade, ClipboardRestoreFacade, ClipboardSyncError, ClipboardSyncFacade,
     DeviceFacade, DiagnosticsFacade, DispatchEntryOutcome, EncryptionFacade, EncryptionFacadeError,
     EncryptionStateView, FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand,
-    FetchBlobToPathResult, InboundNoticeSubscription, LifecycleFacade, MemberRosterFacade,
-    PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult, ResendEntryCommand,
-    ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
-    SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
-    SettingsFacadeError, SpaceFacade, StorageFacade,
+    FetchBlobToPathResult, LifecycleFacade, MemberRosterFacade, PublishBlobCommand,
+    PublishBlobPathCommand, PublishBlobResult, ResendEntryCommand, ResendEntryError, ResendReport,
+    ResourceFacade, SearchFacade, SearchFacadeError, SearchPageView, SearchQueryInput,
+    SearchRebuildAcceptedView, SearchStatusView, SettingsFacade, SettingsFacadeError, SpaceFacade,
+    StorageFacade,
 };
 use crate::facade::{
     MembershipConvergenceFacadeError, MembershipConvergenceStatus, SpaceApplicationHandle,
@@ -542,19 +542,6 @@ impl AppFacade {
             // target_filter 透传到下层 dispatch_entry。
             .dispatch_snapshot(snapshot, origin, None, target_filter)
             .await
-    }
-
-    /// 订阅入站剪贴板通知。
-    pub fn subscribe_inbound_clipboard_notices(
-        &self,
-    ) -> Result<InboundNoticeSubscription, ClipboardSyncError> {
-        self.clipboard_sync
-            .get()
-            .cloned()
-            .map(|facade| facade.subscribe_inbound_notices())
-            .ok_or_else(|| {
-                ClipboardSyncError::Repository("clipboard sync facade unavailable".to_string())
-            })
     }
 
     /// 取一条 entry 的"来源 + 每个对端同步状态"完整视图。GUI detail

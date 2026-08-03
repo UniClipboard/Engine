@@ -1,20 +1,17 @@
 use std::sync::Arc;
 
-use tracing::{debug, info, warn};
 use uc_application::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::{
-    ClipboardCaptureFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexFacade,
-    ClipboardLiveIndexPort, ClipboardLiveIndexer, ClipboardOutboundDeps, ClipboardOutboundFacade,
-    ClipboardSyncFacade, InboundAction, InboundClipboardApplyOutcome, InboundClipboardFacade,
-    InboundClipboardNoticeInput, InboundNotice,
+    ClipboardCaptureFacade, ClipboardInboundEvent, ClipboardInboundEventAction,
+    ClipboardInboundEventPort, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
+    ClipboardLiveIndexDeps, ClipboardLiveIndexFacade, ClipboardLiveIndexPort, ClipboardLiveIndexer,
+    ClipboardOutboundDeps, ClipboardOutboundFacade, InboundClipboardApplyPort,
 };
 use uc_application::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
     InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps,
     InboundWrite as ApplyInboundWrite, InteractiveReceiveDeps,
 };
-use uc_core::ports::{InboundClipboardDisposition, InboundClipboardReceipt};
-use uc_core::TaskRegistry;
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 
 use crate::assembly::deps::WiredDependencies;
@@ -28,7 +25,7 @@ pub(crate) struct ClipboardRuntime {
     pub capture: Arc<ClipboardCaptureFacade>,
     pub live_index: Arc<ClipboardLiveIndexFacade>,
     pub outbound: Arc<ClipboardOutboundFacade>,
-    pub inbound: Arc<InboundClipboardFacade>,
+    inbound_runtime: ClipboardInboundRuntime,
     #[cfg(feature = "lan-compat")]
     pub apply_inbound: Arc<ApplyInboundClipboardUseCase>,
 }
@@ -36,6 +33,7 @@ pub(crate) struct ClipboardRuntime {
 pub(crate) fn build_clipboard_runtime(
     wired: &WiredDependencies,
     sync_engine: &SyncEngineAssembly,
+    events: EventSender,
 ) -> ClipboardRuntime {
     let deps = &wired.deps;
     let capture = Arc::new(
@@ -148,6 +146,14 @@ pub(crate) fn build_clipboard_runtime(
             touch_entry: deps.clipboard.entry_ports.touch.clone(),
         },
     ));
+    let inbound_runtime = ClipboardInboundRuntime::start(ClipboardInboundRuntimeDeps {
+        receiver: sync_engine.clipboard_receiver(),
+        member_repo: deps.device.member_repo.clone(),
+        transfer_cipher: deps.security.transfer_cipher.clone(),
+        clock: deps.system.clock.clone(),
+        apply: apply_inbound.clone() as Arc<dyn InboundClipboardApplyPort>,
+        events: Arc::new(EngineClipboardInboundEvents { events }),
+    });
 
     ClipboardRuntime {
         capture: Arc::new(ClipboardCaptureFacade::new(
@@ -156,222 +162,46 @@ pub(crate) fn build_clipboard_runtime(
         )),
         live_index: Arc::new(ClipboardLiveIndexFacade::new(search_live_indexer)),
         outbound,
-        inbound: Arc::new(InboundClipboardFacade::new(apply_inbound.clone())),
+        inbound_runtime,
         #[cfg(feature = "lan-compat")]
         apply_inbound,
     }
 }
 
-pub(crate) async fn spawn_clipboard_runtime_tasks(
-    runtime: &ClipboardRuntime,
-    clipboard_sync: Arc<ClipboardSyncFacade>,
-    tasks: &TaskRegistry,
+impl ClipboardRuntime {
+    pub(crate) async fn shutdown(self) {
+        if let Err(error) = self.inbound_runtime.shutdown().await {
+            tracing::error!(error = %error, "clipboard inbound runtime stopped with error");
+        }
+    }
+}
+
+struct EngineClipboardInboundEvents {
     events: EventSender,
-) {
-    let inbound = Arc::clone(&runtime.inbound);
-    tasks
-        .spawn("inbound_clipboard_sync", move |cancel| async move {
-            let mut notices = clipboard_sync.subscribe_inbound_notices();
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    notice = notices.recv() => match notice {
-                        Ok(notice) => {
-                            events.send(engine_event_for_inbound_notice(&notice));
-                            let input = InboundClipboardNoticeInput {
-                                from_device: notice.from_device.as_str().to_string(),
-                                snapshot_hash: notice.snapshot_hash,
-                                plaintext: notice.plaintext,
-                                flow_id: notice.flow_id,
-                            };
-                            let apply_result = inbound.apply_notice(input).await;
-                            settle_inbound_receipt(&notice.receipt, &apply_result);
-                            match apply_result {
-                                Ok(InboundClipboardApplyOutcome::Applied { entry_id }) => {
-                                    info!(entry_id = %entry_id, "inbound clipboard applied");
-                                }
-                                Ok(InboundClipboardApplyOutcome::Resurfaced {
-                                    existing_entry_id,
-                                    os_write_succeeded,
-                                    ..
-                                }) => {
-                                    debug!(entry_id = %existing_entry_id, os_write_succeeded, "inbound clipboard resurfaced");
-                                }
-                                Ok(InboundClipboardApplyOutcome::DuplicateSkipped { .. }) => {
-                                    debug!("inbound clipboard duplicate skipped");
-                                }
-                                Ok(InboundClipboardApplyOutcome::DecodeFailed { reason }) => {
-                                    debug!(reason, "inbound clipboard decode failed");
-                                }
-                                Err(error) => warn!(error = %error, "inbound clipboard apply failed"),
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                            warn!(missed, "inbound clipboard notices lagged");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+}
+
+impl ClipboardInboundEventPort for EngineClipboardInboundEvents {
+    fn emit(&self, event: ClipboardInboundEvent) {
+        self.events
+            .send(EngineEvent::InboundNotice(InboundNoticeEvent {
+                from_device: event.from_device.as_str().to_owned(),
+                snapshot_hash: event.snapshot_hash,
+                text_preview: event.text_preview,
+                representations: event
+                    .representations
+                    .into_iter()
+                    .map(|representation| InboundRepresentationSummary {
+                        mime_type: representation.mime_type,
+                        size_bytes: representation.size_bytes,
+                    })
+                    .collect(),
+                action: match event.action {
+                    ClipboardInboundEventAction::NewEntry => InboundNoticeActionSummary::NewEntry,
+                    ClipboardInboundEventAction::DuplicateIgnored => {
+                        InboundNoticeActionSummary::DuplicateIgnored
                     }
-                }
-            }
-        })
-        .await;
-}
-
-fn settle_inbound_receipt(
-    receipt: &InboundClipboardReceipt,
-    result: &Result<
-        InboundClipboardApplyOutcome,
-        uc_application::facade::InboundClipboardApplyError,
-    >,
-) {
-    let disposition = match result {
-        Ok(InboundClipboardApplyOutcome::Applied { .. })
-        | Ok(InboundClipboardApplyOutcome::Resurfaced { .. }) => {
-            InboundClipboardDisposition::Applied
-        }
-        Ok(InboundClipboardApplyOutcome::DuplicateSkipped { .. }) => {
-            InboundClipboardDisposition::Duplicate
-        }
-        Ok(InboundClipboardApplyOutcome::DecodeFailed { .. }) | Err(_) => {
-            InboundClipboardDisposition::Rejected
-        }
-    };
-    receipt.finish(disposition);
-}
-
-fn engine_event_for_inbound_notice(notice: &InboundNotice) -> EngineEvent {
-    let (text_preview, representations) = summarize_inbound_notice(&notice.plaintext);
-    EngineEvent::InboundNotice(InboundNoticeEvent {
-        from_device: notice.from_device.as_str().to_string(),
-        snapshot_hash: notice.snapshot_hash.clone(),
-        text_preview,
-        representations,
-        action: match notice.action {
-            InboundAction::NewEntry => InboundNoticeActionSummary::NewEntry,
-            InboundAction::DuplicateIgnored => InboundNoticeActionSummary::DuplicateIgnored,
-        },
-        at_ms: notice.at_ms,
-    })
-}
-
-fn summarize_inbound_notice(
-    plaintext: &[u8],
-) -> (Option<String>, Vec<InboundRepresentationSummary>) {
-    let Ok(snapshot) =
-        uc_application::usecases::clipboard_sync::decode_v3_bytes_to_snapshot(plaintext)
-    else {
-        return (None, Vec::new());
-    };
-
-    let text_preview = snapshot.representations.iter().find_map(|representation| {
-        let mime = representation.mime.as_ref()?.as_str();
-        let is_text = mime.eq_ignore_ascii_case("text/plain")
-            || mime.eq_ignore_ascii_case("public.utf8-plain-text")
-            || mime.to_ascii_lowercase().starts_with("text/");
-        if !is_text {
-            return None;
-        }
-        let text = std::str::from_utf8(representation.inline_bytes()?).ok()?;
-        Some(text.chars().take(200).collect())
-    });
-    let representations = snapshot
-        .representations
-        .into_iter()
-        .map(|representation| {
-            let size_bytes = representation.size_bytes();
-            InboundRepresentationSummary {
-                mime_type: representation.mime.map(|mime| mime.0),
-                size_bytes,
-            }
-        })
-        .collect();
-
-    (text_preview, representations)
-}
-
-#[cfg(test)]
-mod tests {
-    use uc_application::facade::{InboundAction, InboundNotice};
-    use uc_core::ids::DeviceId;
-    use uc_core::ports::{
-        InboundClipboardDisposition, InboundClipboardReceipt, InboundClipboardResult,
-    };
-
-    use crate::{EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent};
-
-    use super::{engine_event_for_inbound_notice, settle_inbound_receipt};
-
-    fn pending_receipt() -> (InboundClipboardReceipt, InboundClipboardResult) {
-        InboundClipboardReceipt::pending()
-    }
-
-    #[test]
-    fn inbound_notice_event_preserves_the_existing_daemon_watch_contract() {
-        let (receipt, _result) = pending_receipt();
-        let notice = InboundNotice {
-            from_device: DeviceId::new("peer-1"),
-            snapshot_hash: "hash-1".into(),
-            plaintext: vec![1, 2, 3].into(),
-            flow_id: None,
-            action: InboundAction::DuplicateIgnored,
-            at_ms: 42,
-            receipt,
-        };
-
-        assert_eq!(
-            engine_event_for_inbound_notice(&notice),
-            EngineEvent::InboundNotice(InboundNoticeEvent {
-                from_device: "peer-1".into(),
-                snapshot_hash: "hash-1".into(),
-                text_preview: None,
-                representations: Vec::new(),
-                action: InboundNoticeActionSummary::DuplicateIgnored,
-                at_ms: 42,
-            })
-        );
-    }
-
-    #[test]
-    fn inbound_notice_event_size_does_not_scale_with_clipboard_payload() {
-        let (receipt, _result) = pending_receipt();
-        let notice = InboundNotice {
-            from_device: DeviceId::new("peer-1"),
-            snapshot_hash: "hash-1".into(),
-            plaintext: vec![0; 20 * 1024 * 1024].into(),
-            flow_id: None,
-            action: InboundAction::NewEntry,
-            at_ms: 42,
-            receipt,
-        };
-
-        let EngineEvent::InboundNotice(event) = engine_event_for_inbound_notice(&notice) else {
-            panic!("expected inbound notice event");
-        };
-        let encoded = serde_json::to_vec(&event).expect("serialize inbound notice event");
-
-        assert!(
-            encoded.len() < 64 * 1024,
-            "inbound notice unexpectedly contains {} bytes",
-            encoded.len()
-        );
-    }
-
-    #[tokio::test]
-    async fn applied_inbound_settles_sender_receipt_as_applied() {
-        let (receipt, result) = pending_receipt();
-
-        settle_inbound_receipt(
-            &receipt,
-            &Ok(
-                uc_application::facade::InboundClipboardApplyOutcome::Applied {
-                    entry_id: "entry-1".to_string(),
                 },
-            ),
-        );
-
-        assert_eq!(
-            result.wait().await,
-            Some(InboundClipboardDisposition::Applied)
-        );
+                at_ms: event.at_ms,
+            }));
     }
 }

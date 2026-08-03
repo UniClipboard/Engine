@@ -60,8 +60,7 @@ pub use clipboard::{
     CancelEntryReceiveError, CancelEntryReceiveOutcome, ClipboardSyncDeps, ClipboardSyncError,
     ClipboardSyncFacade, DispatchEntryInput, DispatchEntryOutcome, DispatchEntryPerTarget,
     EntryDeliveryStatusView, EntryDeliveryTargetView, EntryDeliveryView, EntrySource,
-    GetEntryDeliveryViewError, InboundAction, InboundNotice, InboundNoticeSubscription,
-    IngestHandle,
+    GetEntryDeliveryViewError,
 };
 // V3 envelope codec helpers — surfaced through the facade per §11.4.3 so
 // external CLI / test consumers don't reach into `crate::usecases::*`
@@ -81,8 +80,10 @@ pub use clipboard_history::{
     ReconcileResultView as ClipboardReconcileResultView,
 };
 pub use clipboard_inbound::{
-    InboundClipboardApplyError, InboundClipboardApplyInput, InboundClipboardApplyOutcome,
-    InboundClipboardApplyPort, InboundClipboardFacade, InboundClipboardNoticeInput,
+    ClipboardInboundEvent, ClipboardInboundEventAction, ClipboardInboundEventPort,
+    ClipboardInboundRepresentationSummary, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
+    ClipboardInboundRuntimeError, InboundClipboardApplyError, InboundClipboardApplyInput,
+    InboundClipboardApplyOutcome, InboundClipboardApplyPort,
 };
 pub use clipboard_live_index::{
     ClipboardLiveIndexDeps, ClipboardLiveIndexError, ClipboardLiveIndexFacade,

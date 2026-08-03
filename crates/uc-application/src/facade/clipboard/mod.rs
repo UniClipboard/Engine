@@ -1,11 +1,4 @@
-//! `ClipboardSyncFacade` — Slice 2 Phase 2 public entry point.
-//!
-//! Per `uc-application/AGENTS.md` §11.4, the facade is the only type
-//! external crates may hold. Internally it wraps
-//! [`DispatchClipboardEntryUseCase`] and [`IngestInboundClipboardUseCase`]
-//! and re-exports their public-shape types (`DispatchOutcome`,
-//! `InboundClipboardNotice`, …) so CLI / daemon / Tauri never import
-//! from `usecases::*` directly.
+//! Outbound clipboard dispatch and receive-management facade.
 
 mod cancel_entry_receive;
 mod facade;
@@ -13,8 +6,7 @@ mod facade;
 pub use cancel_entry_receive::{CancelEntryReceiveError, CancelEntryReceiveOutcome};
 pub use facade::{
     ClipboardSyncDeps, ClipboardSyncError, ClipboardSyncFacade, DispatchEntryInput,
-    DispatchEntryOutcome, DispatchEntryPerTarget, InboundAction, InboundNotice,
-    InboundNoticeSubscription, IngestHandle,
+    DispatchEntryOutcome, DispatchEntryPerTarget,
 };
 
 // 投递状态视图相关类型——外部 crate 通过 `ClipboardSyncFacade::get_entry_delivery_view`

@@ -1,5 +1,36 @@
 # Findings
 
+## 2026-08-03 Phase 4 剪贴板入站运行期审计
+
+- 当前引擎层 `spawn_clipboard_runtime_tasks` 仍订阅解密后的通知、生成宿主事件、调用入站应用、把结果映射为 sender receipt，并由引擎任务表取消循环。
+- 应用层当前分成两段：`IngestInboundClipboardUseCase` 只负责订阅原始接收、成员策略、解密和广播；`InboundClipboardFacade` 只负责单条通知到应用结果的转换，中间完整流程仍由引擎拼接。
+- 最终 `ClipboardInboundRuntime` 必须同时持有原始 ingest 和内容应用，并自行拥有后台任务与关闭等待；否则删除引擎循环后相同知识会重新散落到调用方。
+- 宿主通知必须继续使用收到时的元数据和轻量摘要，不得携带完整剪贴板正文；sender receipt 必须由最终应用结果唯一映射为成功、重复或拒绝。
+- 本阶段需要先从最终运行入口固定四类结果与关闭等待，再迁移生产装配；不能保留旧订阅入口作为第二套生产路径。
+- `ClipboardSyncFacade::subscribe_inbound_notices` 目前为每个调用者再启动一条桥接任务，并由订阅对象在 Drop 时中止；生产接收只需要一个消费者，这层广播和桥接在最终运行期中应删除。
+- `ClipboardSyncFacade::spawn_ingest_loop` 返回的句柄当前存放在 `SyncEngineAssembly`，网络关闭时直接 abort；最终运行期需要显式关闭信号并等待原始 ingest 与应用循环退出，而不是依赖 Drop 中止。
+- `AppFacade` 仍公开原始通知订阅，旧 Engine 端到端测试也直接订阅并手工完成 receipt；这些都是 Phase 4 结束时必须审计、删除或限制到测试范围的旧内部步骤入口。
+- 生产启动当前分裂成两处：网络装配时立即启动原始 ingest，Engine 会话启动后再把通知应用循环注册进全局任务表；两者关闭顺序也分别位于 `SyncEngineAssembly::shutdown` 和全局任务表。
+- `SyncEngineAssembly::shutdown` 在网络路由关闭前直接 abort ingest；最终运行期若仍依赖该顺序，必须由自身显式取消并 await 两个任务，网络路由关闭只作为发送端自然关闭的后备信号。
+- `build_sync_engine_assembly` 在应用内容处理依赖装配完成之前就启动 ingest，因此 Phase 4 需要把启动推迟到完整 `ClipboardInboundRuntime` 构造完成之后，防止启动期间出现无消费者而拒绝帧的窗口。
+- 最终设计采用单任务 `ClipboardInboundRuntime`：直接订阅原始接收流，依次执行成员策略、解密、内容类型策略、应用、宿主通知和 receipt settlement；不再保留解密后广播与每订阅者桥接任务。
+- 原 ingest 规则将保留为运行期内部的单条准备步骤，但旧 `spawn_ingest_loop`、`subscribe_inbound_notices`、`IngestHandle`、`InboundNoticeSubscription` 和引擎任务注册入口必须删除。
+- 运行期宿主通知使用应用层定义的轻量事件端口；引擎只把该事件转换为稳定 `EngineEvent`，不再知道应用结果分支或 receipt 映射。
+- 最终关闭由运行期取消令牌和所持 join handle 实现；Drop 仅作为兜底取消，正常 `shutdown` 必须 await 任务退出，并在网络路由关闭之前执行。
+- Engine 会话构造时已经同时拿到 `EventSender`、完整应用依赖和网络接收器，因此可以在 `build_clipboard_runtime` 中一次启动最终运行期，不需要让网络装配提前启动半条流程。
+- `AppFacade::subscribe_inbound_clipboard_notices` 当前没有调用者；删除它不会改变稳定 `uc-engine` operation 或事件契约，并能关闭一条绕过最终运行期的内部入口。
+- Engine 暂停/关闭当前先结束全局任务表、再关闭搜索和网络；迁移后需在网络关闭前新增 `clipboard.shutdown().await`，并从全局任务表删除旧入站任务，保持其余任务顺序不变。
+- 网络接收器目前被移动进 `ClipboardSyncFacade` 只为旧 ingest 使用；迁移后它应由网络装配保留为仅供完整运行期构造的能力，而 outbound `ClipboardSyncFacade` 不再持有或暴露入站生命周期。
+- `ClipboardSyncFacade` 仍需要成员、密钥和时钟用于 outbound 规则，因此只删除 `clipboard_receiver` 与 ingest 字段，不改变发送、投递视图或接收取消能力。
+- `usecases::clipboard_sync::ingest_inbound` 的八项策略/解密测试不能简单丢失；其可观察规则需要迁到最终运行期测试后才能删除旧模块。
+- `slice2_phase2_clipboard_e2e.rs` 的三项测试全部以已删除的原始通知订阅和手工 receipt 为核心，其中“相同内容接收两次”的断言已经与当前 receiver-side 去重事实相反；该文件应整体删除，而不是适配旧步骤。
+- 该旧 E2E 的有效覆盖分为两类：真实双端成功/重复/关闭已有稳定 Engine 场景保护；接收总开关和内容类型策略需要在最终运行期增加直接测试后再删除旧文件。
+- 最终运行期已补齐接收总开关、成员缺失、成员读取失败、解密失败后继续处理和文字类型拒绝测试；策略拒绝均在内容应用前完成并产生 rejected receipt。
+- 旧 E2E 已整体删除；真实双端成功、重复、历史不增和关闭继续由稳定 Engine 场景保护，不再保留与当前去重事实相反的内部订阅测试。
+- 全仓旧名称扫描无匹配；原 ingest、公开订阅、桥接任务、薄应用包装、引擎循环和手工 receipt 映射均已删除。
+- 删除检查通过：若移除 `ClipboardInboundRuntime`，成员策略、解密、分类、应用、事件、receipt 和关闭顺序会重新散落到引擎或其他调用方；当前模块隐藏了完整流程，不是转发层。
+- 关闭循环使用取消优先的选择顺序：允许当前正在应用的内容完成，但取消后不再启动已排队内容；直接测试证明只产生当前内容的应用结果。
+
 ## 2026-08-03 Phase 3 入站模式审计
 
 - Phase 3 实现后，生产代码只剩两个构造位置：普通 P2P 接收使用 `interactive_receive`，活动剪贴板按需拉取使用 `store_only_pull`；`ApplyInboundClipboardUseCase::new` 的剩余调用全部位于 `#[cfg(test)]` 模块。

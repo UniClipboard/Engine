@@ -35,7 +35,7 @@ pub struct ClipboardHeader {
     pub version: u8,
     /// Whole-snapshot identity hash as a `"blake3v1:<hex>"` string. Shared
     /// with [`ClipboardEntry`](crate::clipboard::ClipboardEntry) for dedup
-    /// (see `IngestInboundClipboardUseCase`).
+    /// in the application inbound runtime.
     pub snapshot_hash: String,
     pub captured_at_ms: i64,
     pub origin_device_id: String,

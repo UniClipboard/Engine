@@ -1,5 +1,46 @@
 # Progress
 
+## Session: 2026-08-03（Phase 4）
+
+### Phase: 收口剪贴板入站运行期
+
+- **Status:** complete
+- Actions taken:
+  - 审计原始接收、解密广播、公开订阅桥接、引擎应用循环、sender receipt、Engine 事件和两处分裂的关闭接线。
+  - 决定使用单任务 `ClipboardInboundRuntime` 直接拥有完整流程，删除中间广播和每订阅者桥接。
+  - 明确运行期在网络路由关闭前显式取消并等待当前应用完成，Drop 只做兜底取消。
+- Scope protection:
+  - 保留并不修改成员移除恢复计划及其架构维护记录。
+- TDD:
+  - 先增加最终运行入口测试，覆盖 applied、duplicate、decode failed、apply error 的 receipt 与事件映射，以及关闭等待在途应用。
+  - 首次聚焦测试按预期编译失败：`ClipboardInboundRuntime`、完整依赖、运行期事件和错误类型均不存在，确认红灯原因正确。
+- Implemented so far:
+  - 新增单任务完整运行对象，统一成员策略、解密、内容分类、应用结果、轻量通知、receipt 和关闭等待。
+  - 最终运行入口三项测试已通过：完整构造、四类结果映射、关闭等待在途应用。
+  - 删除旧 ingest 广播模块、公开通知订阅、独立 ingest 句柄和 `AppFacade` 绕过入口；outbound 与接收管理能力保持不变。
+  - 恢复会话后核对计划、工作区与三个已提交阶段，确认当前唯一编译阻塞来自仍依赖旧流程的过时端到端测试。
+  - 补齐接收总开关、成员资料不可用、解密失败后继续处理和内容类型关闭的最终运行期测试。
+  - 删除旧薄应用包装、过时端到端测试和所有仍指向旧 ingest 流程的说明。
+  - 更新架构正文、行为矩阵和阶段状态；保留成员移除方案及其维护记录。
+- Verification so far:
+  - 最终运行期聚焦测试：passed（8 tests），包括关闭不再启动排队内容。
+  - `cargo check -p uc-engine --all-targets --locked`：passed。
+  - `cargo test -p uc-application --locked`：passed（780 unit tests + 10 integration tests）。
+  - `cargo test -p uc-engine --lib --features dev-tools,lan-compat --locked`：passed（113 tests），包含真实双端入站成功、重复、历史不增和关闭。
+  - 旧 ingest、通知订阅、桥接、引擎循环和薄包装名称扫描：无匹配。
+  - `cargo metadata --locked --format-version 1`：passed。
+  - `cargo check --workspace --all-targets --locked`：passed，无提醒。
+  - `cargo fmt --all -- --check`：passed。
+  - `node scripts/architecture/check-engine-repository.mjs`：passed。
+  - `git diff --check`：passed。
+- Phase result:
+  - 详细实施计划 Phase 4 已完成。
+  - 总任务 Phase 3 三项全部完成并标记 complete；总计划仍在进行中。
+- Errors:
+  - 首次实现生成表示摘要时先移动 MIME 再读取大小，编译失败；调整为先读取大小后解决。
+  - 修正摘要读取顺序的首个补丁上下文与格式化前实际代码不匹配；重新读取准确行后完成，首次补丁未产生改动。
+  - 首次从暂存区排除成员移除维护记录时补丁行数标记错误，Git 拒绝且未改变暂存区；改用准确行数后重试。
+
 ## Session: 2026-08-03（Phase 3）
 
 ### Phase: 建立完整剪贴板入站模式

@@ -2,9 +2,8 @@
 //!
 //! Complement to [`ClipboardDispatchPort`](super::sync_dispatch) — exposes
 //! inbound payloads from peers on the clipboard ALPN as a broadcast event
-//! stream. The application's `IngestInboundClipboardUseCase` subscribes
-//! once at F1 `auto_start_network` completion and drives a background loop
-//! that decrypts, dedupes and persists each arrival.
+//! stream. The application inbound runtime subscribes once and owns
+//! decryption, policy checks, persistence, receipts, and shutdown.
 //!
 //! `peer_device_id` is resolved by the adapter from the iroh connection's
 //! remote endpoint id; unresolvable peers are rejected at the ALPN boundary

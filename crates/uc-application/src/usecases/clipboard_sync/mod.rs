@@ -2,19 +2,12 @@
 //!
 //! * [`DispatchClipboardEntryUseCase`] — encrypt + fan-out a freshly
 //!   captured clipboard entry to every reachable member.
-//! * [`IngestInboundClipboardUseCase`] — subscribe to the receiver port,
-//!   decrypt + re-broadcast each inbound payload as an application-level
-//!   notice.
-//!
-//! Both are `pub(crate)` per `uc-application/AGENTS.md` §11.4. External
-//! consumers (daemon / Tauri / CLI) reach them through
-//! `ClipboardSyncFacade`.
+//! Inbound runtime ownership lives in `facade::clipboard_inbound`.
 
 pub(crate) mod active_state;
 pub(crate) mod apply_inbound;
 pub(crate) mod dispatch_entry;
 pub(crate) mod get_entry_delivery_view;
-pub(crate) mod ingest_inbound;
 /// `pub` (not `pub(crate)`) because `decode_v3_bytes_to_snapshot` needs
 /// a fully-public path for the CLI `watch` re-export at lib.rs root.
 /// Individual private helpers inside stay scoped via their own
@@ -28,9 +21,6 @@ pub(crate) mod snapshot_from_entry;
 pub(crate) use dispatch_entry::{
     DispatchClipboardEntryInput, DispatchClipboardEntryUseCase, DispatchOutcome, DispatchPerTarget,
     DispatchSyncError,
-};
-pub(crate) use ingest_inbound::{
-    InboundAction, InboundClipboardNotice, IngestInboundClipboardUseCase, IngestSpawnHandle,
 };
 pub(crate) use payload_codec::encode_snapshot_to_v3_bytes;
 

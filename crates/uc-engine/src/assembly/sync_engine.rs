@@ -50,7 +50,7 @@ use uc_application::facade::{
     ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, AutomaticLegacyUpgradeRuntime,
     BlobTransferDeps, BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort,
     ClipboardLiveIndexer, ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent,
-    HostEventBus, InboundClipboardApplyPort, IngestHandle, MemberRosterDeps, MemberRosterFacade,
+    HostEventBus, InboundClipboardApplyPort, MemberRosterDeps, MemberRosterFacade,
     MembershipConnectivityDeps, SpaceAdmissionDeps, SpaceApplicationRuntime, SpaceFacade,
     SpaceFacadeDeps, SpaceMembershipGossipDeps, SpaceSessionDeps, SpaceTransitionDeps,
     TransferHostEvent,
@@ -115,8 +115,7 @@ pub struct SyncEngineAssembly {
     /// tauri `get_roster` 将来也走同一条。共享同一个 `peer_addr_repo` /
     /// `presence` 实例,所以 F1 hook 填好的缓存这里能直接读到。
     pub roster: Arc<MemberRosterFacade>,
-    /// Slice 2 Phase 2 · T10:剪切板同步门面(`dispatch_entry` +
-    /// `subscribe_inbound_notices`)。CLI `send` / `watch` 通过这里走。
+    /// Slice 2 Phase 2 · T10:剪切板同步门面。CLI `send` 通过这里走。
     /// 与 `roster` 同样共享 `peer_addr_repo` / `presence`,所以 F1 hook
     /// 喂好的 presence 缓存,`dispatch_entry` 能直接读到。
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
@@ -148,12 +147,10 @@ pub struct SyncEngineAssembly {
     /// node or install additional handlers after `spawn` — that would
     /// fragment peer identity (§"共用网络栈" decision, Slice 1 planning).
     iroh_node: IrohNode,
-    /// Slice 2 Phase 2 · T10:ingest loop 的 join handle。装配时立即起一
-    /// 次,与 receiver handler 同生命周期(handler 装在 `iroh_node` 的
-    /// router 上,router shutdown 时 broadcast Sender 释放,loop 自然退
-    /// 出 `RecvError::Closed`)。`shutdown` 显式 abort 一次走在 router
-    /// 关闭之前,加快进程退出。
-    ingest_handle: IngestHandle,
+    /// Bulk clipboard receiver installed on the shared node. The complete
+    /// application runtime subscribes after all apply and event dependencies
+    /// are ready; network assembly never starts a partial inbound flow.
+    clipboard_receiver: Arc<dyn ClipboardReceiverPort>,
     /// Owns the complete Active Clipboard worker topology: inbound
     /// convergence, peer-online resync, restore broadcast, and history
     /// resurface. This is the assembly's sole lifecycle seam for that module.
@@ -161,7 +158,7 @@ pub struct SyncEngineAssembly {
     /// 反向"传输进度"翻译 worker 的 join handle。订阅
     /// `IrohTransferProgressAdapter` 的 inbound 流,将每帧 progress 翻译
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
-    /// 与 ingest_handle 同生命周期。
+    /// 与 sync assembly 同生命周期。
     outbound_progress_translator: JoinHandle<()>,
     /// Retries encrypted group updates after restart and whenever peers
     /// become reachable. Aborted explicitly during shutdown.
@@ -199,6 +196,10 @@ impl SyncEngineAssembly {
         self.space_application_runtime.handle()
     }
 
+    pub(crate) fn clipboard_receiver(&self) -> Arc<dyn ClipboardReceiverPort> {
+        Arc::clone(&self.clipboard_receiver)
+    }
+
     /// Coordinated teardown. Order matters:
     ///
     /// 1. [`SpaceFacade::on_shutdown`] aborts the sponsor-side inbound
@@ -209,12 +210,6 @@ impl SyncEngineAssembly {
     ///    `CONNECTION_CLOSE` to any live peer.
     #[instrument(skip_all)]
     pub async fn shutdown(self) {
-        // Abort ingest loop ahead of router shutdown so the broadcast
-        // receiver task exits before its sender (the receiver adapter
-        // owned by the router) drops. Drop on `IngestHandle` would do the
-        // same when `self` falls out of scope; the explicit call only
-        // shaves a tick off teardown latency and makes ordering obvious.
-        self.ingest_handle.abort();
         self.active_clipboard_lifecycle.shutdown().await;
         self.outbound_progress_translator.abort();
         self.group_update_retry.abort();
@@ -640,7 +635,7 @@ pub async fn build_sync_engine_assembly(
     // Translator worker:从 sender 端的反向通道收 InboundProgressEvent,
     // 翻译为 application 层 HostEvent(Sending 方向)发到 host_event_bus。
     // 每次 progress → `TransferHostEvent::Progress`;终态 → 额外一帧
-    // `StatusChanged`。任务跟 ingest_handle 同生命周期,shutdown 显式 abort。
+    // `StatusChanged`。shutdown 会显式停止并等待该任务。
     let outbound_progress_translator = spawn_outbound_progress_translator(
         outbound_progress_events,
         Arc::clone(&shared.host_event_bus),
@@ -756,7 +751,6 @@ pub async fn build_sync_engine_assembly(
             presence: Arc::clone(&presence),
             transfer_cipher: Arc::clone(&deps.security.transfer_cipher),
             clipboard_dispatch,
-            clipboard_receiver,
             device_identity: Arc::clone(&deps.device.device_identity),
             local_identity,
             settings: Arc::clone(&deps.settings),
@@ -790,8 +784,6 @@ pub async fn build_sync_engine_assembly(
             Arc::clone(&deps.system.clock),
         ),
     );
-    let ingest_handle = clipboard_sync.spawn_ingest_loop();
-
     // Store-only inbound apply path for pulled content (issue #1017 PR8). It
     // reuses the same inbound pipeline the bulk 0xC1 path uses (decode V3 →
     // materialize blobs → capture) through the named store-only mode. That mode
@@ -924,7 +916,7 @@ pub async fn build_sync_engine_assembly(
         blob_transfer,
         active_clipboard,
         iroh_node,
-        ingest_handle,
+        clipboard_receiver,
         active_clipboard_lifecycle,
         outbound_progress_translator,
         group_update_retry,
