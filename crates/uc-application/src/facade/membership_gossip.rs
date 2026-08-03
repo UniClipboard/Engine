@@ -187,11 +187,40 @@ impl SpaceMembershipGossip {
             .purge_expired(&seed.space_id, now_ms)
             .await?;
 
+        let formal_member = self
+            .deps
+            .member_repo
+            .get(&seed.device_id)
+            .await
+            .map_err(|error| SpaceMembershipGossipError::Relationship(error.to_string()))?;
+        if let Some(member) = formal_member.as_ref() {
+            if member.identity_fingerprint != seed.identity_fingerprint_hint {
+                return Err(SpaceMembershipGossipError::VerificationRejected);
+            }
+        }
+
         let existing = self
             .deps
             .candidate_repo
             .get(&seed.space_id, &seed.device_id)
             .await?;
+        if let Some(member) = formal_member {
+            return match existing {
+                Some(mut candidate) => {
+                    if candidate.identity_fingerprint_hint() != &member.identity_fingerprint {
+                        return Err(SpaceMembershipGossipError::VerificationRejected);
+                    }
+                    let outcome = candidate.merge_sponsor_seed(seed, now_ms)?;
+                    candidate.mark_ready(now_ms);
+                    self.deps.candidate_repo.save(&candidate).await?;
+                    Ok(outcome)
+                }
+                None => {
+                    SpaceMembershipCandidate::from_sponsor_seed(seed, now_ms)?;
+                    Ok(CandidateMergeOutcome::Unchanged)
+                }
+            };
+        }
         match existing {
             Some(mut candidate) => {
                 let outcome = candidate.merge_sponsor_seed(seed, now_ms)?;
@@ -515,6 +544,17 @@ impl SpaceMembershipGossip {
         }
 
         let now_ms = self.deps.clock.now_ms();
+        let formal_member = self
+            .deps
+            .member_repo
+            .get(&announcement.device_id)
+            .await
+            .map_err(|error| SpaceMembershipGossipError::Relationship(error.to_string()))?;
+        if let Some(member) = formal_member.as_ref() {
+            if member.identity_fingerprint != announcement.identity_fingerprint {
+                return Err(SpaceMembershipGossipError::VerificationRejected);
+            }
+        }
         let existing_announcement = self
             .deps
             .announcement_repo
@@ -537,6 +577,27 @@ impl SpaceMembershipGossip {
             .candidate_repo
             .get(&announcement.space_id, &announcement.device_id)
             .await?;
+        if let Some(member) = formal_member {
+            return match existing_candidate {
+                Some(mut candidate) => {
+                    if candidate.identity_fingerprint_hint() != &member.identity_fingerprint {
+                        return Err(SpaceMembershipGossipError::VerificationRejected);
+                    }
+                    let outcome =
+                        candidate.merge_verified_announcement(announcement.clone(), now_ms)?;
+                    candidate.mark_ready(now_ms);
+                    if should_persist_merge(outcome) {
+                        self.deps.announcement_repo.save(&announcement).await?;
+                    }
+                    self.deps.candidate_repo.save(&candidate).await?;
+                    Ok(outcome)
+                }
+                None => {
+                    self.deps.announcement_repo.save(&announcement).await?;
+                    Ok(CandidateMergeOutcome::Updated)
+                }
+            };
+        }
         let (candidate, outcome) = match existing_candidate {
             Some(mut candidate) => {
                 let outcome =
@@ -2398,6 +2459,20 @@ mod tests {
         announcements: Arc<InMemoryAnnouncementRepository>,
         signatures: Arc<dyn CurrentMemberSignaturePort>,
     ) -> SpaceMembershipGossip {
+        announcement_gossip_with_members(
+            candidates,
+            announcements,
+            signatures,
+            Arc::new(InMemoryMemberRepository::default()),
+        )
+    }
+
+    fn announcement_gossip_with_members(
+        candidates: Arc<InMemoryCandidateRepository>,
+        announcements: Arc<InMemoryAnnouncementRepository>,
+        signatures: Arc<dyn CurrentMemberSignaturePort>,
+        members: Arc<InMemoryMemberRepository>,
+    ) -> SpaceMembershipGossip {
         SpaceMembershipGossip::new(SpaceMembershipGossipDeps {
             candidate_repo: candidates,
             announcement_repo: announcements,
@@ -2411,7 +2486,7 @@ mod tests {
             fingerprint_factory: Arc::new(FixedFingerprintFactory),
             attestation: Arc::new(FixedAttestation(Ok(verified_peer()))),
             verified_peer_promotion: Arc::new(NoopVerifiedPeerPromotion),
-            member_repo: Arc::new(InMemoryMemberRepository::default()),
+            member_repo: members,
             trusted_peer_repo: Arc::new(InMemoryTrustedPeerRepository::default()),
             peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
             hash: Arc::new(Blake3Hasher),
@@ -2445,6 +2520,198 @@ mod tests {
             transport_public_key: b"transport-key-c".to_vec(),
             transport_address_blob: b"address-c-verified".to_vec(),
         }
+    }
+
+    #[tokio::test]
+    async fn sponsor_seed_for_formal_member_does_not_create_pending_candidate() {
+        let candidates = Arc::new(InMemoryCandidateRepository::default());
+        let members = Arc::new(InMemoryMemberRepository::default());
+        members
+            .save(&SpaceMember {
+                device_id: DeviceId::new("device-c"),
+                device_name: "Device C".to_owned(),
+                identity_fingerprint: fingerprint("CANDIDATEFP00001"),
+                joined_at: chrono::DateTime::from_timestamp_millis(500).unwrap(),
+                sync_preferences: uc_core::MemberSyncPreferences::default(),
+            })
+            .await
+            .unwrap();
+        let gossip = SpaceMembershipGossip::new(SpaceMembershipGossipDeps {
+            candidate_repo: candidates.clone(),
+            announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+            outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+            security_updates: membership_security(4),
+            transport: membership_transport(),
+            clock: Arc::new(FixedClock(1_000)),
+            device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
+            announcement_material: Arc::new(FixedAnnouncementMaterial),
+            member_signatures: Arc::new(AcceptingMemberSignatures),
+            fingerprint_factory: Arc::new(FixedFingerprintFactory),
+            attestation: Arc::new(FixedAttestation(Ok(verified_peer()))),
+            verified_peer_promotion: Arc::new(NoopVerifiedPeerPromotion),
+            member_repo: members,
+            trusted_peer_repo: Arc::new(InMemoryTrustedPeerRepository::default()),
+            peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
+            hash: Arc::new(FixedHasher),
+        });
+
+        assert_eq!(
+            gossip.accept_sponsor_seed(seed(100)).await.unwrap(),
+            CandidateMergeOutcome::Unchanged
+        );
+        assert!(candidates
+            .get(&SpaceId::from("space-a"), &DeviceId::new("device-c"))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            gossip
+                .convergence_status(&SpaceId::from("space-a"))
+                .await
+                .unwrap()
+                .state,
+            MembershipConvergenceState::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn sponsor_seed_cannot_replace_formal_member_identity() {
+        let candidates = Arc::new(InMemoryCandidateRepository::default());
+        let members = Arc::new(InMemoryMemberRepository::default());
+        members
+            .save(&SpaceMember {
+                device_id: DeviceId::new("device-c"),
+                device_name: "Device C".to_owned(),
+                identity_fingerprint: fingerprint("FORMALMEMBERFP01"),
+                joined_at: chrono::DateTime::from_timestamp_millis(500).unwrap(),
+                sync_preferences: uc_core::MemberSyncPreferences::default(),
+            })
+            .await
+            .unwrap();
+        let gossip = SpaceMembershipGossip::new(SpaceMembershipGossipDeps {
+            candidate_repo: candidates.clone(),
+            announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+            outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+            security_updates: membership_security(4),
+            transport: membership_transport(),
+            clock: Arc::new(FixedClock(1_000)),
+            device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
+            announcement_material: Arc::new(FixedAnnouncementMaterial),
+            member_signatures: Arc::new(AcceptingMemberSignatures),
+            fingerprint_factory: Arc::new(FixedFingerprintFactory),
+            attestation: Arc::new(FixedAttestation(Ok(verified_peer()))),
+            verified_peer_promotion: Arc::new(NoopVerifiedPeerPromotion),
+            member_repo: members,
+            trusted_peer_repo: Arc::new(InMemoryTrustedPeerRepository::default()),
+            peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
+            hash: Arc::new(FixedHasher),
+        });
+
+        assert!(matches!(
+            gossip.accept_sponsor_seed(seed(100)).await,
+            Err(SpaceMembershipGossipError::VerificationRejected)
+        ));
+        assert!(candidates
+            .get(&SpaceId::from("space-a"), &DeviceId::new("device-c"))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn newer_announcement_for_formal_member_keeps_candidate_ready() {
+        let candidates = Arc::new(InMemoryCandidateRepository::default());
+        let announcements = Arc::new(InMemoryAnnouncementRepository::default());
+        let members = Arc::new(InMemoryMemberRepository::default());
+        members
+            .save(&SpaceMember {
+                device_id: DeviceId::new("device-c"),
+                device_name: "Device C".to_owned(),
+                identity_fingerprint: fingerprint("ANNOUNCEMENTFP01"),
+                joined_at: chrono::DateTime::from_timestamp_millis(500).unwrap(),
+                sync_preferences: uc_core::MemberSyncPreferences::default(),
+            })
+            .await
+            .unwrap();
+        let mut candidate = SpaceMembershipCandidate::from_verified_announcement(
+            signed_announcement(1, "Device C"),
+            900,
+        )
+        .unwrap();
+        candidate.mark_ready(950);
+        candidates.save(&candidate).await.unwrap();
+        let gossip = announcement_gossip_with_members(
+            candidates.clone(),
+            announcements.clone(),
+            Arc::new(AcceptingMemberSignatures),
+            members,
+        );
+
+        assert_eq!(
+            gossip
+                .accept_verified_announcement(signed_announcement(2, "Device C updated"))
+                .await
+                .unwrap(),
+            CandidateMergeOutcome::Updated
+        );
+        assert_eq!(
+            candidates
+                .get(&SpaceId::from("space-a"), &DeviceId::new("device-c"))
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
+            CandidateStatus::Ready
+        );
+        assert_eq!(
+            announcements
+                .get(&SpaceId::from("space-a"), &DeviceId::new("device-c"))
+                .await
+                .unwrap()
+                .unwrap()
+                .sequence,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn announcement_cannot_replace_formal_member_identity() {
+        let candidates = Arc::new(InMemoryCandidateRepository::default());
+        let announcements = Arc::new(InMemoryAnnouncementRepository::default());
+        let members = Arc::new(InMemoryMemberRepository::default());
+        members
+            .save(&SpaceMember {
+                device_id: DeviceId::new("device-c"),
+                device_name: "Device C".to_owned(),
+                identity_fingerprint: fingerprint("FORMALMEMBERFP01"),
+                joined_at: chrono::DateTime::from_timestamp_millis(500).unwrap(),
+                sync_preferences: uc_core::MemberSyncPreferences::default(),
+            })
+            .await
+            .unwrap();
+        let gossip = announcement_gossip_with_members(
+            candidates.clone(),
+            announcements.clone(),
+            Arc::new(AcceptingMemberSignatures),
+            members,
+        );
+
+        assert!(matches!(
+            gossip
+                .accept_verified_announcement(signed_announcement(1, "Device C"))
+                .await,
+            Err(SpaceMembershipGossipError::VerificationRejected)
+        ));
+        assert!(announcements
+            .list(&SpaceId::from("space-a"))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(candidates
+            .list(&SpaceId::from("space-a"))
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
