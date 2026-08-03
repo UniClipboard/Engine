@@ -148,6 +148,155 @@ fn core_repository_engine_consumers_do_not_enable_lan_compat() {
     }
 }
 
+#[test]
+fn engine_dispatch_does_not_control_membership_activity_steps() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dispatch =
+        std::fs::read_to_string(workspace_root.join("crates/uc-engine/src/runtime/dispatch.rs"))
+            .expect("engine dispatch source must be readable");
+
+    for forbidden in ["pause_membership_gossip", "resume_membership_gossip"] {
+        assert!(
+            !dispatch.contains(forbidden),
+            "engine dispatch must call one application action instead of {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn engine_does_not_own_membership_gossip_or_its_runtime() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine_source = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+
+    for forbidden in ["SpaceMembershipGossipRuntime", "SpaceMembershipGossip,"] {
+        assert!(
+            !engine_source.contains(forbidden),
+            "application runtime must own {forbidden} instead of uc-engine"
+        );
+    }
+}
+
+#[test]
+fn engine_join_space_does_not_select_an_internal_route() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let join = std::fs::read_to_string(
+        workspace_root.join("crates/uc-engine/src/operations/space/join_space.rs"),
+    )
+    .expect("join-space operation source must be readable");
+
+    for forbidden in ["JoinSpaceMode", "query_setup_state", "ensure_receive_ready"] {
+        assert!(
+            !join.contains(forbidden),
+            "application join action must own {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn engine_space_operations_do_not_reach_into_space_setup() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let operations = read_rs_sources(&workspace_root.join("crates/uc-engine/src/operations/space"));
+    assert!(
+        !operations.contains(".space_setup"),
+        "space operations must use one AppFacade action"
+    );
+}
+
+#[test]
+fn engine_runtime_does_not_start_space_connectivity_maintenance() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runtime =
+        std::fs::read_to_string(workspace_root.join("crates/uc-engine/src/runtime/mod.rs"))
+            .expect("engine runtime source must be readable");
+    assert!(
+        !runtime.contains("spawn_peer_keepalive_task"),
+        "space application runtime must start connectivity maintenance"
+    );
+}
+
+#[test]
+fn legacy_space_setup_types_are_removed() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = format!(
+        "{}{}",
+        read_rs_sources(&workspace_root.join("crates/uc-application/src")),
+        read_rs_sources(&workspace_root.join("crates/uc-engine/src")),
+    );
+    for forbidden in [
+        ["Space", "Setup", "Facade"].concat(),
+        ["Space", "Setup", "Deps"].concat(),
+    ] {
+        assert!(
+            !source.contains(&forbidden),
+            "legacy type {forbidden} must be removed"
+        );
+    }
+}
+
+#[test]
+fn encryption_facade_does_not_duplicate_space_lifecycle_actions() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let encryption = std::fs::read_to_string(
+        workspace_root.join("crates/uc-application/src/facade/encryption/mod.rs"),
+    )
+    .expect("encryption facade source must be readable");
+    for forbidden in [
+        "pub async fn initialize(",
+        "pub async fn unlock(",
+        "pub async fn lock(",
+    ] {
+        assert!(
+            !encryption.contains(forbidden),
+            "space lifecycle action must not remain on EncryptionFacade: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn factory_reset_is_one_application_action() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let reset = std::fs::read_to_string(
+        workspace_root.join("crates/uc-engine/src/operations/space/factory_reset.rs"),
+    )
+    .expect("factory-reset operation source must be readable");
+    assert!(
+        !reset.contains("EnsureReceiveReadyPort") && !reset.contains("close_receive_gate"),
+        "application session owner must quiet activities for factory reset"
+    );
+}
+
+#[test]
+fn create_space_is_one_application_action() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let create = std::fs::read_to_string(
+        workspace_root.join("crates/uc-engine/src/operations/space/create_space.rs"),
+    )
+    .expect("create-space operation source must be readable");
+    assert!(
+        !create.contains("EnsureReceiveReadyPort") && !create.contains("ensure_receive_ready"),
+        "application session owner must activate all activities after create"
+    );
+}
+
+fn read_rs_sources(root: &Path) -> String {
+    let mut pending = vec![root.to_path_buf()];
+    let mut source = String::new();
+    while let Some(path) = pending.pop() {
+        let entries = std::fs::read_dir(path).expect("engine source directory must be readable");
+        for entry in entries {
+            let path = entry.expect("engine source entry must be readable").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                source.push_str(
+                    &std::fs::read_to_string(path).expect("engine source file must be readable"),
+                );
+            }
+        }
+    }
+    source
+}
+
 fn package<'a>(
     metadata: &'a cargo_metadata::Metadata,
     package_name: &str,

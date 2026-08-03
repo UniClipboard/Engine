@@ -1561,10 +1561,30 @@ async fn engine_start_builds_a_resumable_real_session() {
     );
     assert_eq!(
         engine
+            .execute(crate::Operation::QueryReceiveReadiness)
+            .await
+            .unwrap(),
+        crate::OperationResult::ReceiveReadiness(crate::ReceiveReadinessSummary {
+            ready: true,
+            degraded: false,
+        })
+    );
+    assert_eq!(
+        engine
             .execute(crate::Operation::LockEncryption)
             .await
             .unwrap(),
         crate::OperationResult::EncryptionLocked
+    );
+    assert_eq!(
+        engine
+            .execute(crate::Operation::QueryReceiveReadiness)
+            .await
+            .unwrap(),
+        crate::OperationResult::ReceiveReadiness(crate::ReceiveReadinessSummary {
+            ready: false,
+            degraded: false,
+        })
     );
     assert_eq!(
         engine
@@ -1585,6 +1605,16 @@ async fn engine_start_builds_a_resumable_real_session() {
             .unwrap(),
         crate::OperationResult::SpaceUnlocked { .. }
     ));
+    assert_eq!(
+        engine
+            .execute(crate::Operation::QueryReceiveReadiness)
+            .await
+            .unwrap(),
+        crate::OperationResult::ReceiveReadiness(crate::ReceiveReadinessSummary {
+            ready: true,
+            degraded: false,
+        })
+    );
     let invitation = engine
         .execute(crate::Operation::IssueInvitation)
         .await

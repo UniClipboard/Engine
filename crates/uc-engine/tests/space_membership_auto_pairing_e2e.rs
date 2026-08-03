@@ -255,6 +255,7 @@ async fn offline_members_learn_about_each_other_and_keep_syncing_after_restart()
             .expect("lock A before membership recovery"),
         OperationResult::EncryptionLocked
     );
+    assert_receive_ready(&engine_a, false).await;
     assert!(
         engine_a
             .execute(Operation::QueryMembershipConvergence)
@@ -263,6 +264,7 @@ async fn offline_members_learn_about_each_other_and_keep_syncing_after_restart()
         "locked membership state must not be decrypted"
     );
     recover(&engine_a).await;
+    assert_receive_ready(&engine_a, true).await;
     wait_for_converged_members(&engine_a, &engine_c, &a_id, &c_id).await;
 
     send_and_verify(
@@ -320,6 +322,56 @@ async fn offline_members_learn_about_each_other_and_keep_syncing_after_restart()
         .expect("final C shutdown");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn stable_join_routes_a_fresh_device_then_switches_an_existing_device() {
+    let rendezvous = mount_rendezvous().await;
+    let first_sponsor = DeviceHarness::new(rendezvous.uri());
+    let joining_device = DeviceHarness::new(rendezvous.uri());
+    let second_sponsor = DeviceHarness::new(rendezvous.uri());
+
+    let first_sponsor = first_sponsor.start().await;
+    let joining_device = joining_device.start().await;
+    let second_sponsor = second_sponsor.start().await;
+    let (first_space_id, _) = create_space(&first_sponsor, "First Sponsor").await;
+    let (second_space_id, _) = create_space(&second_sponsor, "Second Sponsor").await;
+
+    let invalid_name = joining_device
+        .execute(Operation::JoinSpace(JoinSpaceInput {
+            invitation_code: "unused-for-invalid-input".to_owned(),
+            device_name: Some("  ".to_owned()),
+            passphrase: SecretString::new(PASSPHRASE),
+        }))
+        .await
+        .expect_err("blank join device name must be rejected");
+    assert_eq!(invalid_name.code(), 1231);
+
+    let fresh = join_through_with_result(
+        &first_sponsor,
+        &joining_device,
+        "Joining Device",
+        &first_space_id,
+    )
+    .await;
+    assert_eq!(fresh.migrated_records, None);
+
+    let switched = join_through_with_result(
+        &second_sponsor,
+        &joining_device,
+        "Joining Device",
+        &second_space_id,
+    )
+    .await;
+    assert_eq!(switched.migrated_records, Some(0));
+    assert!(!switched.self_device_id.is_empty());
+
+    for engine in [&first_sponsor, &joining_device, &second_sponsor] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down automatic join routing test engine");
+    }
+}
+
 async fn create_space(engine: &Engine, device_name: &str) -> (String, String) {
     let result = engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
@@ -345,6 +397,25 @@ async fn join_through(
     device_name: &str,
     expected_space_id: &str,
 ) -> String {
+    let result = join_through_with_result(sponsor, joiner, device_name, expected_space_id).await;
+    assert_eq!(
+        result.migrated_records, None,
+        "a fresh join must not report migrated records"
+    );
+    result.self_device_id
+}
+
+struct JoinResult {
+    self_device_id: String,
+    migrated_records: Option<u64>,
+}
+
+async fn join_through_with_result(
+    sponsor: &Engine,
+    joiner: &Engine,
+    device_name: &str,
+    expected_space_id: &str,
+) -> JoinResult {
     let addresses = sponsor
         .execute_dev(DevOperation::ListPairingInvitationAddresses)
         .await
@@ -379,10 +450,14 @@ async fn join_through(
             Ok(OperationResult::SpaceJoined {
                 space_id,
                 self_device_id,
+                migrated_records,
                 ..
             }) => {
                 assert_eq!(space_id, expected_space_id);
-                return self_device_id;
+                return JoinResult {
+                    self_device_id,
+                    migrated_records,
+                };
             }
             Ok(other) => panic!("unexpected join result: {other:?}"),
             Err(error) => last_error = Some(error),
@@ -404,6 +479,20 @@ async fn recover(engine: &Engine) {
             unlocked: true,
             resumed: true,
         }
+    );
+}
+
+async fn assert_receive_ready(engine: &Engine, expected: bool) {
+    let result = engine
+        .execute(Operation::QueryReceiveReadiness)
+        .await
+        .expect("query receive readiness");
+    assert_eq!(
+        result,
+        OperationResult::ReceiveReadiness(uc_engine::ReceiveReadinessSummary {
+            ready: expected,
+            degraded: false,
+        })
     );
 }
 
