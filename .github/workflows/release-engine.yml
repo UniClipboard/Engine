@@ -164,6 +164,10 @@ jobs:
     name: Verify and publish one release bundle
     needs: [prepare, ios-android, harmonyos]
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ needs.prepare.outputs.tag }}
+      commit: ${{ needs.prepare.outputs.commit }}
+      published: ${{ steps.publication.outputs.published }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -191,7 +195,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Create immutable GitHub Release
+      - id: publication
+        name: Create immutable GitHub Release
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -209,3 +214,138 @@ jobs:
             --generate-notes \
             "${prerelease_flag[@]}" \
             "$ASSET_DIR"/*
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+  version-interop:
+    name: Verify previous and new Engine interoperability
+    needs: assemble
+    if: ${{ needs.assemble.outputs.published == 'true' }}
+    runs-on: macos-14
+    outputs:
+      tag: ${{ needs.assemble.outputs.tag }}
+      commit: ${{ needs.assemble.outputs.commit }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CURRENT_TAG: ${{ needs.assemble.outputs.tag }}
+      CURRENT_COMMIT: ${{ needs.assemble.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.assemble.outputs.commit }}
+          path: engine
+
+      - uses: actions/checkout@v4
+        with:
+          repository: UniClipboard/UniClipboard
+          ref: main
+          path: desktop
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - id: previous
+        name: Resolve the previous Engine release
+        shell: bash
+        run: |
+          previous_tag=""
+          for candidate in $(gh release list --repo UniClipboard/Engine --limit 50 --json tagName,isDraft --jq '.[] | select(.isDraft == false) | .tagName'); do
+            if [[ "$candidate" =~ ^v[0-9] ]] && [[ "$candidate" != "$CURRENT_TAG" ]]; then
+              previous_tag="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$previous_tag" ]]; then
+            echo "No previous Engine release exists for interoperability verification" >&2
+            exit 1
+          fi
+          reference=$(gh api "repos/UniClipboard/Engine/git/ref/tags/$previous_tag")
+          previous_commit=$(jq -r '.object.sha' <<<"$reference")
+          if [[ "$(jq -r '.object.type' <<<"$reference")" == "tag" ]]; then
+            previous_commit=$(gh api "repos/UniClipboard/Engine/git/tags/$previous_commit" --jq '.object.sha')
+          fi
+          if [[ ! "$previous_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Previous Engine tag did not resolve to a full commit" >&2
+            exit 1
+          fi
+          echo "tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$previous_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Create isolated desktop consumers
+        run: |
+          git clone --local desktop old-desktop
+          git clone --local desktop new-desktop
+
+      - name: Build the previous Engine consumer
+        env:
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+          PREVIOUS_COMMIT: ${{ steps.previous.outputs.commit }}
+        run: |
+          node old-desktop/scripts/adopt-engine-release.mjs \
+            --root old-desktop \
+            --version "$PREVIOUS_TAG" \
+            --source-commit "$PREVIOUS_COMMIT"
+          cargo update --manifest-path old-desktop/Cargo.toml -p uc-engine --precise "$PREVIOUS_COMMIT"
+          cargo build \
+            --manifest-path old-desktop/Cargo.toml \
+            --target-dir "$RUNNER_TEMP/old-target" \
+            -p uc-daemon -p uc-cli \
+            --features uc-cli/dev-tools \
+            --locked
+
+      - name: Build the new Engine consumer
+        run: |
+          node new-desktop/scripts/adopt-engine-release.mjs \
+            --root new-desktop \
+            --version "$CURRENT_TAG" \
+            --source-commit "$CURRENT_COMMIT"
+          cargo update --manifest-path new-desktop/Cargo.toml -p uc-engine --precise "$CURRENT_COMMIT"
+          cargo build \
+            --manifest-path new-desktop/Cargo.toml \
+            --target-dir "$RUNNER_TEMP/new-target" \
+            -p uc-daemon -p uc-cli \
+            --features uc-cli/dev-tools \
+            --locked
+
+      - name: Pair old sponsor with new joiner and transfer both ways
+        env:
+          PROFILE_PREFIX: old-new-${{ github.run_id }}
+          ALICE_CLI: ${{ runner.temp }}/old-target/debug/uniclip
+          BOB_CLI: ${{ runner.temp }}/new-target/debug/uniclip
+        run: bash new-desktop/scripts/test_pair_e2e.sh
+
+      - name: Pair new sponsor with old joiner and transfer both ways
+        env:
+          PROFILE_PREFIX: new-old-${{ github.run_id }}
+          ALICE_CLI: ${{ runner.temp }}/new-target/debug/uniclip
+          BOB_CLI: ${{ runner.temp }}/old-target/debug/uniclip
+        run: bash new-desktop/scripts/test_pair_e2e.sh
+
+  notify-consumers:
+    name: Notify desktop and mobile consumers
+    needs: version-interop
+    runs-on: ubuntu-latest
+    steps:
+      - id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.ENGINE_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ENGINE_RELEASE_APP_PRIVATE_KEY }}
+          owner: UniClipboard
+          repositories: |-
+            UniClipboard
+            UniClip
+          permission-contents: write
+
+      - name: Dispatch verified Engine release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ENGINE_VERSION: ${{ needs.version-interop.outputs.tag }}
+          ENGINE_COMMIT: ${{ needs.version-interop.outputs.commit }}
+        shell: bash
+        run: |
+          payload=$(jq -n \
+            --arg version "$ENGINE_VERSION" \
+            --arg commit "$ENGINE_COMMIT" \
+            '{event_type: "engine_release_published", client_payload: {repository: "UniClipboard/Engine", version: $version, source_commit: $commit}}')
+          for repository in UniClipboard/UniClipboard UniClipboard/UniClip; do
+            gh api --method POST "repos/$repository/dispatches" --input - <<<"$payload"
+          done
