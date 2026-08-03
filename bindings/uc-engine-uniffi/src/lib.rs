@@ -94,6 +94,45 @@ pub enum HostBindingError {
     Io,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum BindingAnalyticsHostError {
+    #[error("analytics context unavailable")]
+    ContextUnavailable,
+    #[error("analytics delivery failed")]
+    DeliveryFailed,
+    #[error("analytics identity persistence failed")]
+    PersistenceFailed,
+    #[error("analytics identity invalid")]
+    InvalidIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingAnalyticsEvent {
+    pub name: String,
+    pub properties_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingAnalyticsIdentityChange {
+    pub previous_distinct_id: String,
+    pub new_distinct_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingAnalyticsIdentify {
+    pub old_distinct_id: String,
+    pub new_distinct_id: String,
+    pub set_json: String,
+    pub set_once_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingAnalyticsGroupIdentify {
+    pub group_type: String,
+    pub group_key: String,
+    pub set_json: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BindingConfig {
     pub app_version: String,
@@ -340,6 +379,27 @@ pub trait BindingHost: Send + Sync {
     fn file_finish_write(&self, handle: String) -> Result<(), HostBindingError>;
     fn clipboard_read(&self) -> Result<BindingClipboardSnapshot, HostBindingError>;
     fn clipboard_write(&self, snapshot: BindingClipboardSnapshot) -> Result<(), HostBindingError>;
+}
+
+#[uniffi::export(with_foreign)]
+pub trait BindingAnalyticsHost: Send + Sync {
+    fn capture(&self, event: BindingAnalyticsEvent) -> Result<(), BindingAnalyticsHostError>;
+    fn identify(&self, payload: BindingAnalyticsIdentify) -> Result<(), BindingAnalyticsHostError>;
+    fn group_identify(
+        &self,
+        payload: BindingAnalyticsGroupIdentify,
+    ) -> Result<(), BindingAnalyticsHostError>;
+    fn adopt_space_person(
+        &self,
+        space_person_id: String,
+    ) -> Result<BindingAnalyticsIdentityChange, BindingAnalyticsHostError>;
+    fn release_space_person(
+        &self,
+    ) -> Result<BindingAnalyticsIdentityChange, BindingAnalyticsHostError>;
+    fn current_space_person_id(&self) -> Result<Option<String>, BindingAnalyticsHostError>;
+    fn reset_telemetry_identity(
+        &self,
+    ) -> Result<BindingAnalyticsIdentityChange, BindingAnalyticsHostError>;
 }
 
 #[uniffi::export]

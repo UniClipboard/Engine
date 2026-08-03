@@ -4,11 +4,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use uc_engine::{EngineError, EngineErrorCategory};
 
 use uc_engine_uniffi::{
-    core_version, BindingClipboardRepresentation, BindingClipboardRestoreMode,
-    BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
-    BindingError, BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
-    BindingOperationTerminal, HostBindingError, InvitationIssued, MembershipConvergenceState,
-    MobileEngine, SendReport,
+    core_version, BindingAnalyticsEvent, BindingAnalyticsGroupIdentify, BindingAnalyticsHost,
+    BindingAnalyticsHostError, BindingAnalyticsIdentify, BindingAnalyticsIdentityChange,
+    BindingClipboardRepresentation, BindingClipboardRestoreMode, BindingClipboardRestoreOutcome,
+    BindingClipboardSnapshot, BindingConfig, BindingEngineState, BindingError,
+    BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost, BindingOperationTerminal,
+    HostBindingError, InvitationIssued, MembershipConvergenceState, MobileEngine, SendReport,
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -245,19 +246,112 @@ impl BindingHost for MemoryHost {
     }
 }
 
+struct RecordingAnalyticsHost {
+    events: Mutex<Vec<BindingAnalyticsEvent>>,
+    identifies: Mutex<Vec<BindingAnalyticsIdentify>>,
+    group_identifies: Mutex<Vec<BindingAnalyticsGroupIdentify>>,
+    anonymous_id: Mutex<String>,
+    space_person_id: Mutex<Option<String>>,
+}
+
+impl RecordingAnalyticsHost {
+    fn new() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            identifies: Mutex::new(Vec::new()),
+            group_identifies: Mutex::new(Vec::new()),
+            anonymous_id: Mutex::new("018f47de-4a26-7d31-a7d8-93c20d64f813".to_owned()),
+            space_person_id: Mutex::new(None),
+        }
+    }
+
+    fn event_names(&self) -> Vec<String> {
+        lock(&self.events)
+            .iter()
+            .map(|event| event.name.clone())
+            .collect()
+    }
+}
+
+impl BindingAnalyticsHost for RecordingAnalyticsHost {
+    fn capture(&self, event: BindingAnalyticsEvent) -> Result<(), BindingAnalyticsHostError> {
+        lock(&self.events).push(event);
+        Ok(())
+    }
+
+    fn identify(&self, payload: BindingAnalyticsIdentify) -> Result<(), BindingAnalyticsHostError> {
+        lock(&self.identifies).push(payload);
+        Ok(())
+    }
+
+    fn group_identify(
+        &self,
+        payload: BindingAnalyticsGroupIdentify,
+    ) -> Result<(), BindingAnalyticsHostError> {
+        lock(&self.group_identifies).push(payload);
+        Ok(())
+    }
+
+    fn adopt_space_person(
+        &self,
+        space_person_id: String,
+    ) -> Result<BindingAnalyticsIdentityChange, BindingAnalyticsHostError> {
+        let mut current = lock(&self.space_person_id);
+        let previous_distinct_id = current
+            .clone()
+            .unwrap_or_else(|| lock(&self.anonymous_id).clone());
+        *current = Some(space_person_id.clone());
+        Ok(BindingAnalyticsIdentityChange {
+            previous_distinct_id,
+            new_distinct_id: space_person_id,
+        })
+    }
+
+    fn release_space_person(
+        &self,
+    ) -> Result<BindingAnalyticsIdentityChange, BindingAnalyticsHostError> {
+        let mut current = lock(&self.space_person_id);
+        let anonymous_id = lock(&self.anonymous_id).clone();
+        let previous_distinct_id = current.take().unwrap_or_else(|| anonymous_id.clone());
+        Ok(BindingAnalyticsIdentityChange {
+            previous_distinct_id,
+            new_distinct_id: anonymous_id,
+        })
+    }
+
+    fn current_space_person_id(&self) -> Result<Option<String>, BindingAnalyticsHostError> {
+        Ok(lock(&self.space_person_id).clone())
+    }
+
+    fn reset_telemetry_identity(
+        &self,
+    ) -> Result<BindingAnalyticsIdentityChange, BindingAnalyticsHostError> {
+        let mut current = lock(&self.space_person_id);
+        let mut anonymous_id = lock(&self.anonymous_id);
+        let previous_distinct_id = current.take().unwrap_or_else(|| anonymous_id.clone());
+        *anonymous_id = "018f47de-4a26-7d31-a7d8-93c20d64f814".to_owned();
+        Ok(BindingAnalyticsIdentityChange {
+            previous_distinct_id,
+            new_distinct_id: anonymous_id.clone(),
+        })
+    }
+}
+
 #[test]
-fn mobile_host_can_create_a_space_and_shutdown_through_the_binding() {
+fn mobile_host_can_create_a_space_with_analytics_and_shutdown_through_the_binding() {
     let _test_guard = engine_test_guard();
     let root = tempfile::tempdir().expect("temporary host root must be available");
     let host = Arc::new(MemoryHost::new(root.path()));
-    let engine = MobileEngine::start(
+    let analytics = Arc::new(RecordingAnalyticsHost::new());
+    let engine = MobileEngine::start_with_analytics(
         BindingConfig {
             app_version: "1.2.3".to_owned(),
             profile_id: "binding-contract".to_owned(),
         },
         host.clone(),
+        analytics.clone(),
     )
-    .expect("binding engine must start");
+    .expect("analytics-enabled binding engine must start");
 
     let created = engine
         .create_space(
@@ -272,6 +366,25 @@ fn mobile_host_can_create_a_space_and_shutdown_through_the_binding() {
         !host.values().is_empty(),
         "create-space must persist secrets through the host callback"
     );
+
+    let event_names = analytics.event_names();
+    assert!(event_names.iter().any(|name| name == "setup_started"));
+    assert!(event_names.iter().any(|name| name == "device_name_set"));
+    assert!(event_names.iter().any(|name| name == "setup_completed"));
+    let device_name_event = lock(&analytics.events)
+        .iter()
+        .find(|event| event.name == "device_name_set")
+        .cloned()
+        .expect("device name event must be captured");
+    assert!(device_name_event
+        .properties_json
+        .contains("name_length_bucket"));
+    assert!(!device_name_event
+        .properties_json
+        .contains("mobile-contract-host"));
+    assert_eq!(lock(&analytics.identifies).len(), 1);
+    assert_eq!(lock(&analytics.group_identifies).len(), 1);
+    assert!(lock(&analytics.space_person_id).is_some());
 
     engine
         .shutdown(5_000)

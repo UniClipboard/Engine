@@ -6,6 +6,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use uc_engine::observability::{
+    AdoptOutcome, AnalyticsIdentityError, AnalyticsIdentityPort, AnalyticsPort, Event,
+    GroupIdentifyPayload, IdentifyPayload, ReleaseOutcome,
+};
 use uc_engine::{
     ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
     ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
@@ -18,11 +22,11 @@ use uc_engine::{
 use zeroize::Zeroizing;
 
 use crate::{
-    BindingClipboardOrigin, BindingClipboardRepresentation, BindingClipboardRestoreMode,
-    BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
-    BindingError, BindingEvent, BindingFailure, BindingFileMetadata, BindingHost,
-    BindingLifecycleAction, BindingOperationTerminal, BindingRefreshReason,
-    BindingTransferDirection, HostBindingError,
+    BindingAnalyticsHost, BindingClipboardOrigin, BindingClipboardRepresentation,
+    BindingClipboardRestoreMode, BindingClipboardRestoreOutcome, BindingClipboardSnapshot,
+    BindingConfig, BindingEngineState, BindingError, BindingEvent, BindingFailure,
+    BindingFileMetadata, BindingHost, BindingLifecycleAction, BindingOperationTerminal,
+    BindingRefreshReason, BindingTransferDirection, HostBindingError,
 };
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
@@ -328,6 +332,155 @@ struct EventQueue {
     ready: Condvar,
 }
 
+struct BindingAnalyticsAdapter {
+    host: Arc<dyn BindingAnalyticsHost>,
+}
+
+impl BindingAnalyticsAdapter {
+    fn new(host: Arc<dyn BindingAnalyticsHost>) -> Self {
+        Self { host }
+    }
+
+    fn map_identity_error(error: crate::BindingAnalyticsHostError) -> AnalyticsIdentityError {
+        match error {
+            crate::BindingAnalyticsHostError::ContextUnavailable => {
+                AnalyticsIdentityError::ContextNotInitialised
+            }
+            crate::BindingAnalyticsHostError::DeliveryFailed
+            | crate::BindingAnalyticsHostError::PersistenceFailed
+            | crate::BindingAnalyticsHostError::InvalidIdentity => {
+                AnalyticsIdentityError::PersistFailed(
+                    std::io::Error::other("mobile analytics identity operation failed").into(),
+                )
+            }
+        }
+    }
+
+    fn parse_adopt_outcome(
+        change: crate::BindingAnalyticsIdentityChange,
+        expected_new_id: uuid::Uuid,
+    ) -> Result<AdoptOutcome, AnalyticsIdentityError> {
+        let previous_distinct_id = change.previous_distinct_id.parse().map_err(|_| {
+            Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
+        })?;
+        let new_distinct_id = change.new_distinct_id.parse().map_err(|_| {
+            Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
+        })?;
+        if new_distinct_id != expected_new_id {
+            return Err(Self::map_identity_error(
+                crate::BindingAnalyticsHostError::InvalidIdentity,
+            ));
+        }
+        Ok(AdoptOutcome {
+            previous_distinct_id,
+            new_distinct_id,
+        })
+    }
+
+    fn parse_release_outcome(
+        change: crate::BindingAnalyticsIdentityChange,
+    ) -> Result<ReleaseOutcome, AnalyticsIdentityError> {
+        let previous_distinct_id = change.previous_distinct_id.parse().map_err(|_| {
+            Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
+        })?;
+        let new_distinct_id = change.new_distinct_id.parse().map_err(|_| {
+            Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
+        })?;
+        Ok(ReleaseOutcome {
+            previous_distinct_id,
+            new_distinct_id,
+        })
+    }
+
+    fn warn_callback(scope: &'static str, error: &crate::BindingAnalyticsHostError) {
+        tracing::warn!(scope, error = %error, "mobile analytics callback failed");
+    }
+}
+
+impl AnalyticsPort for BindingAnalyticsAdapter {
+    fn capture(&self, event: Event) {
+        let event = crate::BindingAnalyticsEvent {
+            name: event.name().to_owned(),
+            properties_json: serde_json::Value::Object(event.properties()).to_string(),
+        };
+        if let Err(error) = self.host.capture(event) {
+            Self::warn_callback("capture", &error);
+        }
+    }
+
+    fn identify(&self, payload: IdentifyPayload) {
+        let payload = crate::BindingAnalyticsIdentify {
+            old_distinct_id: payload.old_distinct_id.to_string(),
+            new_distinct_id: payload.new_distinct_id.to_string(),
+            set_json: serde_json::Value::Object(payload.set).to_string(),
+            set_once_json: serde_json::Value::Object(payload.set_once).to_string(),
+        };
+        if let Err(error) = self.host.identify(payload) {
+            Self::warn_callback("identify", &error);
+        }
+    }
+
+    fn group_identify(&self, payload: GroupIdentifyPayload) {
+        let payload = crate::BindingAnalyticsGroupIdentify {
+            group_type: payload.group_type,
+            group_key: payload.group_key,
+            set_json: serde_json::Value::Object(payload.set).to_string(),
+        };
+        if let Err(error) = self.host.group_identify(payload) {
+            Self::warn_callback("group_identify", &error);
+        }
+    }
+}
+
+impl AnalyticsIdentityPort for BindingAnalyticsAdapter {
+    fn adopt_space_person(
+        &self,
+        space_person_id: uuid::Uuid,
+    ) -> Result<AdoptOutcome, AnalyticsIdentityError> {
+        let change = self
+            .host
+            .adopt_space_person(space_person_id.to_string())
+            .map_err(Self::map_identity_error)?;
+        Self::parse_adopt_outcome(change, space_person_id)
+    }
+
+    fn release_space_person(&self) -> Result<ReleaseOutcome, AnalyticsIdentityError> {
+        let change = self
+            .host
+            .release_space_person()
+            .map_err(Self::map_identity_error)?;
+        Self::parse_release_outcome(change)
+    }
+
+    fn current_space_person_id(&self) -> Option<uuid::Uuid> {
+        match self.host.current_space_person_id() {
+            Ok(Some(value)) => match value.parse() {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    Self::warn_callback(
+                        "current_space_person_id",
+                        &crate::BindingAnalyticsHostError::InvalidIdentity,
+                    );
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(error) => {
+                Self::warn_callback("current_space_person_id", &error);
+                None
+            }
+        }
+    }
+
+    fn reset_telemetry_identity(&self) -> Result<ReleaseOutcome, AnalyticsIdentityError> {
+        let change = self
+            .host
+            .reset_telemetry_identity()
+            .map_err(Self::map_identity_error)?;
+        Self::parse_release_outcome(change)
+    }
+}
+
 impl EventQueue {
     fn new(capacity: usize) -> Self {
         Self {
@@ -389,14 +542,13 @@ impl EventQueue {
     }
 }
 
-#[uniffi::export]
 impl MobileEngine {
-    #[uniffi::constructor]
-    pub fn start(
+    fn start_inner(
         config: BindingConfig,
         host: Arc<dyn BindingHost>,
+        analytics: Option<Arc<dyn BindingAnalyticsHost>>,
     ) -> Result<Arc<Self>, BindingError> {
-        let capabilities = host_capabilities(Arc::clone(&host))?;
+        let capabilities = host_capabilities(Arc::clone(&host), analytics)?;
         let config = EngineConfig::new(config.app_version).with_profile_id(config.profile_id);
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -433,6 +585,26 @@ impl MobileEngine {
                 Err(BindingError::RuntimeUnavailable)
             }
         }
+    }
+}
+
+#[uniffi::export]
+impl MobileEngine {
+    #[uniffi::constructor]
+    pub fn start(
+        config: BindingConfig,
+        host: Arc<dyn BindingHost>,
+    ) -> Result<Arc<Self>, BindingError> {
+        Self::start_inner(config, host, None)
+    }
+
+    #[uniffi::constructor]
+    pub fn start_with_analytics(
+        config: BindingConfig,
+        host: Arc<dyn BindingHost>,
+        analytics: Arc<dyn BindingAnalyticsHost>,
+    ) -> Result<Arc<Self>, BindingError> {
+        Self::start_inner(config, host, Some(analytics))
     }
 
     pub fn recover_session(
@@ -1727,7 +1899,10 @@ fn count_to_u64(value: usize) -> Result<u64, BindingError> {
     u64::try_from(value).map_err(|_| BindingError::UnexpectedResult)
 }
 
-fn host_capabilities(host: Arc<dyn BindingHost>) -> Result<HostCapabilities, BindingError> {
+fn host_capabilities(
+    host: Arc<dyn BindingHost>,
+    analytics: Option<Arc<dyn BindingAnalyticsHost>>,
+) -> Result<HostCapabilities, BindingError> {
     let cache_directory = host_path(host.cache_directory())?;
     let directories = HostDirectories::new(
         host_path(host.private_data_directory())?,
@@ -1742,7 +1917,7 @@ fn host_capabilities(host: Arc<dyn BindingHost>) -> Result<HostCapabilities, Bin
     ] {
         std::fs::create_dir_all(directory).map_err(|_| BindingError::HostIo)?;
     }
-    Ok(HostCapabilities::new(
+    let capabilities = HostCapabilities::new(
         directories,
         Box::new(BindingSecureStorage {
             host: Arc::clone(&host),
@@ -1751,7 +1926,14 @@ fn host_capabilities(host: Arc<dyn BindingHost>) -> Result<HostCapabilities, Bin
             host: Arc::clone(&host),
         }),
         Box::new(BindingFiles { host }),
-    ))
+    );
+    let Some(analytics) = analytics else {
+        return Ok(capabilities);
+    };
+    let adapter = Arc::new(BindingAnalyticsAdapter::new(analytics));
+    let sink: Arc<dyn AnalyticsPort> = adapter.clone();
+    let identity: Arc<dyn AnalyticsIdentityPort> = adapter;
+    Ok(capabilities.with_analytics(sink, identity))
 }
 
 fn host_path(result: Result<String, HostBindingError>) -> Result<PathBuf, BindingError> {

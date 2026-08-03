@@ -6,6 +6,7 @@ pub mod error_codes;
 mod event;
 mod host;
 mod lifecycle;
+pub mod observability;
 mod operation;
 mod result;
 mod settings;

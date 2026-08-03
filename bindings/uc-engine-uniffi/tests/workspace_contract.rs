@@ -48,10 +48,13 @@ fn uniffi_binding_is_a_workspace_member_with_a_public_engine_boundary() {
         BTreeSet::from([
             "jni",
             "ndk-context",
+            "serde_json",
             "thiserror",
             "tokio",
+            "tracing",
             "uc-engine",
             "uniffi",
+            "uuid",
             "zeroize",
         ])
     );
@@ -112,4 +115,31 @@ fn uniffi_binding_owns_runnable_ios_and_android_packaging() {
     assert!(gradle.contains("net.java.dev.jna:jna:5.14.0@aar"));
     assert!(gradle.contains("namespace \"app.uniclipboard.engine\""));
     assert!(manifest.contains("android.permission.INTERNET"));
+}
+
+#[test]
+fn uniffi_binding_declares_mobile_analytics_host_contract() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let binding_root = workspace_root.join("bindings/uc-engine-uniffi/src");
+    let public_contract = fs::read_to_string(binding_root.join("lib.rs"))
+        .expect("binding public contract must be readable");
+    let runtime = fs::read_to_string(binding_root.join("runtime.rs"))
+        .expect("binding runtime must be readable");
+
+    for required in [
+        "pub trait BindingAnalyticsHost",
+        "pub struct BindingAnalyticsEvent",
+        "pub struct BindingAnalyticsIdentityChange",
+        "pub struct BindingAnalyticsIdentify",
+        "pub struct BindingAnalyticsGroupIdentify",
+    ] {
+        assert!(
+            public_contract.contains(required),
+            "mobile analytics contract missing {required}"
+        );
+    }
+    assert!(
+        runtime.contains("pub fn start_with_analytics"),
+        "mobile binding must offer an analytics-enabled constructor without removing the compatible constructor"
+    );
 }
