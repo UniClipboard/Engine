@@ -14,6 +14,10 @@ use uc_observability_contract::analytics::{
     IdentifyPayload, ReleaseOutcome,
 };
 use uuid::Uuid;
+#[cfg(feature = "dev-tools")]
+use wiremock::matchers::{method, path};
+#[cfg(feature = "dev-tools")]
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -31,6 +35,249 @@ async fn next_engine_event_matching(
     })
     .await
     .expect("timed out waiting for engine event")
+}
+
+#[cfg(feature = "dev-tools")]
+type EnginePairingTicketVault = Arc<Mutex<Option<String>>>;
+
+#[cfg(feature = "dev-tools")]
+struct StoreEnginePairingTicket {
+    vault: EnginePairingTicketVault,
+    code: &'static str,
+    expires_at_ms: i64,
+}
+
+#[cfg(feature = "dev-tools")]
+impl Respond for StoreEnginePairingTicket {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("pairing registration body must be JSON");
+        let ticket = body["sponsorTicket"]
+            .as_str()
+            .expect("pairing registration must contain a sponsor ticket")
+            .to_string();
+        *self.vault.lock().unwrap() = Some(ticket);
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "code": self.code,
+            "expiresAtMs": self.expires_at_ms,
+        }))
+    }
+}
+
+#[cfg(feature = "dev-tools")]
+struct ResolveEnginePairingTicket {
+    vault: EnginePairingTicketVault,
+    expires_at_ms: i64,
+}
+
+#[cfg(feature = "dev-tools")]
+impl Respond for ResolveEnginePairingTicket {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let ticket = self
+            .vault
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("pairing ticket must be registered before resolution");
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sponsorTicket": ticket,
+            "sponsorEndpointId": "ignored",
+            "expiresAtMs": self.expires_at_ms,
+        }))
+    }
+}
+
+#[cfg(feature = "dev-tools")]
+async fn mount_engine_rendezvous(server: &MockServer) {
+    const INVITATION_CODE: &str = "E2E0-A001";
+    const EXPIRES_AT_MS: i64 = 1_900_000_000_000;
+
+    let vault = Arc::new(Mutex::new(None));
+    Mock::given(method("POST"))
+        .and(path("/v1/pairings"))
+        .respond_with(StoreEnginePairingTicket {
+            vault: Arc::clone(&vault),
+            code: INVITATION_CODE,
+            expires_at_ms: EXPIRES_AT_MS,
+        })
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/pairings/resolve"))
+        .respond_with(ResolveEnginePairingTicket {
+            vault,
+            expires_at_ms: EXPIRES_AT_MS,
+        })
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/pairings/consume"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(server)
+        .await;
+}
+
+#[cfg(feature = "dev-tools")]
+fn empty_engine_host(root: &std::path::Path) -> HostCapabilities {
+    HostCapabilities::new(
+        HostDirectories::new(
+            root.join("private"),
+            root.join("cache"),
+            root.join("temporary"),
+            root.join("logs"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    )
+}
+
+#[cfg(feature = "dev-tools")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behavior() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let rendezvous = MockServer::start().await;
+    mount_engine_rendezvous(&rendezvous).await;
+    let sponsor_root = tempfile::tempdir().unwrap();
+    let joiner_root = tempfile::tempdir().unwrap();
+    let config = EngineConfig::new("1.2.3").with_rendezvous_base_url(rendezvous.uri());
+    let (sponsor, mut sponsor_events) =
+        Engine::start(config.clone(), empty_engine_host(sponsor_root.path()))
+            .await
+            .unwrap();
+    let (joiner, mut joiner_events) = Engine::start(config, empty_engine_host(joiner_root.path()))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    sponsor
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Sponsor".into()),
+            passphrase: crate::SecretString::new("correct horse battery staple"),
+            passphrase_confirmation: crate::SecretString::new("correct horse battery staple"),
+        }))
+        .await
+        .unwrap();
+    let invitation_code = match sponsor
+        .execute(crate::Operation::IssueInvitation)
+        .await
+        .unwrap()
+    {
+        crate::OperationResult::InvitationIssued {
+            invitation_code, ..
+        } => invitation_code,
+        other => panic!("expected invitation, got {other:?}"),
+    };
+    let joiner_device_id = match joiner
+        .execute(crate::Operation::JoinSpace(crate::JoinSpaceInput {
+            invitation_code,
+            device_name: Some("Joiner".into()),
+            passphrase: crate::SecretString::new("correct horse battery staple"),
+            preserve_unreadable_history: false,
+        }))
+        .await
+        .unwrap()
+    {
+        crate::OperationResult::SpaceJoined { self_device_id, .. } => self_device_id,
+        other => panic!("expected joined space, got {other:?}"),
+    };
+    assert!(matches!(
+        next_engine_event_matching(&mut sponsor_events, |event| matches!(
+            event,
+            EngineEvent::PairingCompleted(crate::PairingCompletion::Success { .. })
+        ))
+        .await,
+        EngineEvent::PairingCompleted(crate::PairingCompletion::Success { .. })
+    ));
+
+    let text = "engine inbound behavior baseline";
+    let first_send = sponsor
+        .execute(crate::Operation::SendText(crate::SendTextInput {
+            text: text.into(),
+            target_devices: vec![joiner_device_id.clone()],
+        }))
+        .await
+        .unwrap();
+    let first_entry_id = match first_send {
+        crate::OperationResult::EntrySent(report) => {
+            assert_eq!(report.total_accepted, 1);
+            assert_eq!(report.total_duplicate, 0);
+            assert_eq!(report.total_offline, 0);
+            assert_eq!(report.total_errored, 0);
+            report.entry_id
+        }
+        other => panic!("expected sent entry, got {other:?}"),
+    };
+    assert!(matches!(
+        next_engine_event_matching(&mut joiner_events, |event| matches!(
+            event,
+            EngineEvent::InboundNotice(notice)
+                if notice.text_preview.as_deref() == Some(text)
+        ))
+        .await,
+        EngineEvent::InboundNotice(_)
+    ));
+
+    let history = joiner
+        .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
+            cursor: None,
+            limit: 10,
+            query: None,
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        history,
+        crate::OperationResult::HistoryPage { ref entries, next_cursor: None }
+            if entries.len() == 1 && entries[0].preview.as_deref() == Some(text)
+    ));
+
+    let resend = sponsor
+        .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
+            entry_id: first_entry_id,
+            target_devices: vec![joiner_device_id],
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        resend,
+        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(
+            crate::ResendReportSummary {
+                accepted: 0,
+                duplicate: 1,
+                offline: 0,
+                errored: 0,
+                pending: 0,
+            },
+        ))
+    );
+    let history_after_resend = joiner
+        .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
+            cursor: None,
+            limit: 10,
+            query: None,
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        history_after_resend,
+        crate::OperationResult::HistoryPage { ref entries, next_cursor: None }
+            if entries.len() == 1 && entries[0].preview.as_deref() == Some(text)
+    ));
+
+    sponsor
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+    joiner
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
 }
 
 #[cfg(feature = "lan-compat")]
@@ -2701,6 +2948,199 @@ async fn engine_mobile_upload_owns_transfer_lifecycle_events() {
             .unwrap(),
         crate::OperationResult::MobileFileUploadAborted { existed: true }
     );
+
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
+#[cfg(feature = "lan-compat")]
+#[tokio::test]
+async fn engine_shutdown_removes_unfinished_mobile_upload_files() {
+    fn regular_file_count(root: &std::path::Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    regular_file_count(&path)
+                } else {
+                    usize::from(path.is_file())
+                }
+            })
+            .sum()
+    }
+
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let staging_root = private.join("file-cache/mobile_inbound");
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            private,
+            temp.path().join("cache"),
+            temp.path().join("temporary"),
+            temp.path().join("logs"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Mobile Upload Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap();
+
+    let upload = engine
+        .execute(crate::Operation::BeginMobileFileUpload(
+            crate::BeginMobileFileUploadInput {
+                data_name: "unfinished.bin".into(),
+                media_type: "application/octet-stream".into(),
+                source_device_id: "mobile-source".into(),
+                transfer_id: "mobile-transfer-unfinished".into(),
+                total_bytes: Some(4),
+            },
+        ))
+        .await
+        .unwrap();
+    let crate::OperationResult::MobileFileUploadStarted(upload) = upload else {
+        panic!("expected upload handle");
+    };
+    engine
+        .execute(crate::Operation::AppendMobileFileUpload(
+            crate::AppendMobileFileUploadInput {
+                handle: upload,
+                bytes: b"part".to_vec(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(regular_file_count(&staging_root), 1);
+
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+    assert_eq!(regular_file_count(&staging_root), 0);
+}
+
+#[cfg(feature = "lan-compat")]
+#[tokio::test]
+async fn engine_mobile_upload_progress_failure_cleans_up_and_invalidates_handle() {
+    use diesel::connection::SimpleConnection;
+    use diesel::Connection;
+
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let staging_root = private.join("file-cache/mobile_inbound");
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            private.clone(),
+            temp.path().join("cache"),
+            temp.path().join("temporary"),
+            temp.path().join("logs"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Mobile Upload Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap();
+
+    let upload = engine
+        .execute(crate::Operation::BeginMobileFileUpload(
+            crate::BeginMobileFileUploadInput {
+                data_name: "progress-failure.bin".into(),
+                media_type: "application/octet-stream".into(),
+                source_device_id: "mobile-source".into(),
+                transfer_id: "mobile-transfer-progress-failure".into(),
+                total_bytes: Some(4),
+            },
+        ))
+        .await
+        .unwrap();
+    let crate::OperationResult::MobileFileUploadStarted(upload) = upload else {
+        panic!("expected upload handle");
+    };
+
+    let database_path = private.join("uniclipboard.db");
+    let mut connection = diesel::sqlite::SqliteConnection::establish(
+        database_path.to_str().expect("database path must be UTF-8"),
+    )
+    .unwrap();
+    connection
+        .batch_execute(
+            "CREATE TRIGGER reject_mobile_upload_progress \
+             BEFORE INSERT ON file_transfer_events \
+             WHEN NEW.transfer_id = 'mobile-transfer-progress-failure' \
+               AND NEW.event_type = 'progress' \
+             BEGIN SELECT RAISE(FAIL, 'progress failure probe'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+    let error = engine
+        .execute(crate::Operation::AppendMobileFileUpload(
+            crate::AppendMobileFileUploadInput {
+                handle: upload.clone(),
+                bytes: b"part".to_vec(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), 1448);
+    assert_eq!(error.category(), crate::EngineErrorCategory::Internal);
+    assert!(error.is_retryable());
+    assert_eq!(
+        std::fs::read_dir(&staging_root)
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        0
+    );
+
+    let stale_error = engine
+        .execute(crate::Operation::AppendMobileFileUpload(
+            crate::AppendMobileFileUploadInput {
+                handle: upload,
+                bytes: b"again".to_vec(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(stale_error.code(), 1447);
+    assert_eq!(stale_error.category(), crate::EngineErrorCategory::NotFound);
 
     engine
         .shutdown(std::time::Duration::from_secs(15))

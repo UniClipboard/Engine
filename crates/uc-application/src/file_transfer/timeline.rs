@@ -181,3 +181,72 @@ pub(crate) async fn persist_and_publish(
         .map_err(|error| FileTransferApplicationError::Publish(error.to_string()))?;
     Ok(event)
 }
+
+#[cfg(test)]
+mod tests {
+    use uc_core::{FileTransferCancellationReason, FileTransferFailureReason};
+
+    use super::*;
+
+    fn started() -> FileTransferEvent {
+        FileTransferEvent::started("transfer-1", "peer-1", "file.bin", Some(4))
+    }
+
+    #[test]
+    fn every_terminal_state_rejects_further_progress() {
+        let histories = [
+            vec![
+                started(),
+                FileTransferEvent::completed("transfer-1", "peer-1"),
+            ],
+            vec![
+                started(),
+                FileTransferEvent::failed(
+                    "transfer-1",
+                    "peer-1",
+                    FileTransferFailureReason::StorageUnavailable,
+                    None,
+                ),
+            ],
+            vec![
+                started(),
+                FileTransferEvent::cancelled(
+                    "transfer-1",
+                    "peer-1",
+                    FileTransferCancellationReason::LocalUser,
+                ),
+            ],
+        ];
+
+        for history in histories {
+            let timeline = TransferTimeline::from_history("transfer-1", &history).unwrap();
+            assert_eq!(
+                timeline.ensure_active("transfer-1", "peer-1"),
+                Err(FileTransferApplicationError::TransferAlreadyFinished {
+                    transfer_id: "transfer-1".into(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_terminal_state_is_rejected() {
+        let history = vec![
+            started(),
+            FileTransferEvent::completed("transfer-1", "peer-1"),
+            FileTransferEvent::failed(
+                "transfer-1",
+                "peer-1",
+                FileTransferFailureReason::Unknown,
+                None,
+            ),
+        ];
+
+        assert_eq!(
+            TransferTimeline::from_history("transfer-1", &history).unwrap_err(),
+            FileTransferApplicationError::TransferAlreadyFinished {
+                transfer_id: "transfer-1".into(),
+            }
+        );
+    }
+}
