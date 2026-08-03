@@ -90,6 +90,15 @@ pub trait BlobMigrationRepoPort: Send + Sync {
         new_ciphertext: &[u8],
     ) -> Result<(), BlobMigrationRepoError>;
 
+    /// Keep the existing inline bytes unchanged while marking the payload as
+    /// permanently unavailable to normal readers. Idempotent for an already
+    /// unavailable row and a no-op when the row no longer exists.
+    async fn mark_unreadable_inline_data(
+        &self,
+        event_id: &EventId,
+        representation_id: &RepresentationId,
+    ) -> Result<(), BlobMigrationRepoError>;
+
     /// 清空备份集合。phase 4 cleanup 调用，启动期检测到孤立 `Prepared`
     /// 状态时也会调用以放弃迁移。幂等：空集合再清空不报错。
     async fn discard_all_records(&self) -> Result<(), BlobMigrationRepoError>;

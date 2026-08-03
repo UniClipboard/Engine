@@ -193,6 +193,34 @@ where
         .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))
     }
 
+    async fn mark_unreadable_inline_data(
+        &self,
+        event_id: &EventId,
+        representation_id: &RepresentationId,
+    ) -> Result<(), BlobMigrationRepoError> {
+        let event_id_s = event_id.as_ref().to_string();
+        let rep_id_s = representation_id.as_ref().to_string();
+        let span = debug_span!("infra.sqlite.mark_unreadable_inline_data");
+        span.in_scope(|| {
+            self.executor.run(move |conn| {
+                diesel::update(
+                    clipboard_snapshot_representation::table
+                        .filter(clipboard_snapshot_representation::event_id.eq(&event_id_s))
+                        .filter(clipboard_snapshot_representation::id.eq(&rep_id_s)),
+                )
+                .set((
+                    clipboard_snapshot_representation::payload_state.eq("Lost"),
+                    clipboard_snapshot_representation::last_error
+                        .eq("unreadable encrypted payload preserved during space switch"),
+                ))
+                .execute(conn)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                Ok(())
+            })
+        })
+        .map_err(|error| BlobMigrationRepoError::Storage(error.to_string()))
+    }
+
     async fn discard_all_records(&self) -> Result<(), BlobMigrationRepoError> {
         let span = debug_span!("infra.sqlite.discard_migration_backup");
         span.in_scope(|| {
@@ -382,5 +410,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes.as_deref(), Some(b"new-payload".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn mark_unreadable_preserves_ciphertext_and_isolates_payload() {
+        let (repo, executor, _dir) = make_repo();
+        seed_main_row(&executor, "evt-lost", "rep-lost", b"opaque-ciphertext");
+
+        repo.mark_unreadable_inline_data(
+            &EventId::from_string("evt-lost".into()),
+            &RepresentationId::from("rep-lost"),
+        )
+        .await
+        .unwrap();
+
+        let row = executor
+            .run(|conn| {
+                clipboard_snapshot_representation::table
+                    .filter(clipboard_snapshot_representation::event_id.eq("evt-lost"))
+                    .filter(clipboard_snapshot_representation::id.eq("rep-lost"))
+                    .select((
+                        clipboard_snapshot_representation::inline_data,
+                        clipboard_snapshot_representation::payload_state,
+                        clipboard_snapshot_representation::last_error,
+                    ))
+                    .first::<(Option<Vec<u8>>, String, Option<String>)>(conn)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            })
+            .unwrap();
+
+        assert_eq!(row.0.as_deref(), Some(b"opaque-ciphertext".as_slice()));
+        assert_eq!(row.1, "Lost");
+        assert!(row.2.is_some());
     }
 }

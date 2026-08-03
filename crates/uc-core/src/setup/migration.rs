@@ -64,7 +64,11 @@ pub enum MigrationPhase {
     ///
     /// 故障恢复：可以选择继续走阶段 2，也可以直接放弃（清空 backup 表 +
     /// 销毁 migration_key），旧空间数据完整。
-    Prepared { run_id: MigrationRunId },
+    Prepared {
+        run_id: MigrationRunId,
+        #[serde(default)]
+        preserved_unreadable_records: u64,
+    },
 
     /// 阶段 2 已完成：sponsor handshake 走完，session / 磁盘 keyslot /
     /// keyring KEK 三处都换成新空间的 master_key，`target_space_id` 由
@@ -87,6 +91,8 @@ pub enum MigrationPhase {
         /// （`#[serde(default)]`），等同于"按 Solo 回退"。
         #[serde(default)]
         sponsor_space_person_id: Option<Uuid>,
+        #[serde(default)]
+        preserved_unreadable_records: u64,
     },
 
     /// 阶段 3 已完成：主表所有 representation 都用新 master_key 重写。
@@ -101,13 +107,15 @@ pub enum MigrationPhase {
         /// 边界继续承载切换意图。语义与序列化兼容策略一致。
         #[serde(default)]
         sponsor_space_person_id: Option<Uuid>,
+        #[serde(default)]
+        preserved_unreadable_records: u64,
     },
 }
 
 impl MigrationPhase {
     pub fn run_id(&self) -> &MigrationRunId {
         match self {
-            Self::Prepared { run_id }
+            Self::Prepared { run_id, .. }
             | Self::HandshakeDone { run_id, .. }
             | Self::Swapped { run_id, .. } => run_id,
         }
@@ -144,6 +152,23 @@ impl MigrationPhase {
             } => *sponsor_space_person_id,
         }
     }
+
+    pub fn preserved_unreadable_records(&self) -> u64 {
+        match self {
+            Self::Prepared {
+                preserved_unreadable_records,
+                ..
+            }
+            | Self::HandshakeDone {
+                preserved_unreadable_records,
+                ..
+            }
+            | Self::Swapped {
+                preserved_unreadable_records,
+                ..
+            } => *preserved_unreadable_records,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +186,7 @@ mod tests {
     fn migration_phase_serde_round_trip_prepared() {
         let phase = MigrationPhase::Prepared {
             run_id: MigrationRunId::new("run-1"),
+            preserved_unreadable_records: 2,
         };
         let json = serde_json::to_string(&phase).unwrap();
         let parsed: MigrationPhase = serde_json::from_str(&json).unwrap();
@@ -175,6 +201,7 @@ mod tests {
             run_id: MigrationRunId::new("run-h"),
             target_space_id: SpaceId::from_str("space-h"),
             sponsor_space_person_id: Some(Uuid::from_u128(0x42)),
+            preserved_unreadable_records: 3,
         };
         let json = serde_json::to_string(&phase).unwrap();
         let parsed: MigrationPhase = serde_json::from_str(&json).unwrap();
@@ -185,6 +212,7 @@ mod tests {
     fn migration_phase_target_space_id_none_for_prepared() {
         let phase = MigrationPhase::Prepared {
             run_id: MigrationRunId::new("run-x"),
+            preserved_unreadable_records: 0,
         };
         assert_eq!(phase.target_space_id(), None);
     }
@@ -198,10 +226,12 @@ mod tests {
             run_id: run_id.clone(),
             target_space_id: space.clone(),
             sponsor_space_person_id: Some(person),
+            preserved_unreadable_records: 3,
         };
         assert_eq!(phase.run_id(), &run_id);
         assert_eq!(phase.target_space_id(), Some(&space));
         assert_eq!(phase.sponsor_space_person_id(), Some(person));
+        assert_eq!(phase.preserved_unreadable_records(), 3);
     }
 
     #[test]
@@ -217,9 +247,11 @@ mod tests {
         match parsed {
             MigrationPhase::HandshakeDone {
                 sponsor_space_person_id,
+                preserved_unreadable_records,
                 ..
             } => {
                 assert_eq!(sponsor_space_person_id, None);
+                assert_eq!(preserved_unreadable_records, 0);
             }
             other => panic!("expected HandshakeDone, got {other:?}"),
         }
@@ -236,9 +268,11 @@ mod tests {
         match parsed {
             MigrationPhase::Swapped {
                 sponsor_space_person_id,
+                preserved_unreadable_records,
                 ..
             } => {
                 assert_eq!(sponsor_space_person_id, None);
+                assert_eq!(preserved_unreadable_records, 0);
             }
             other => panic!("expected Swapped, got {other:?}"),
         }

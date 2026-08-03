@@ -340,6 +340,7 @@ async fn stable_join_routes_a_fresh_device_then_switches_an_existing_device() {
             invitation_code: "unused-for-invalid-input".to_owned(),
             device_name: Some("  ".to_owned()),
             passphrase: SecretString::new(PASSPHRASE),
+            preserve_unreadable_history: false,
         }))
         .await
         .expect_err("blank join device name must be rejected");
@@ -444,6 +445,7 @@ async fn join_through_with_result(
                 invitation_code: invitation.code,
                 device_name: Some(device_name.to_owned()),
                 passphrase: SecretString::new(PASSPHRASE),
+                preserve_unreadable_history: false,
             }))
             .await
         {

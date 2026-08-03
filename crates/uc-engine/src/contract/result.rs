@@ -367,6 +367,7 @@ pub enum OperationResult {
         self_device_id: String,
         self_identity_fingerprint: String,
         migrated_records: Option<u64>,
+        preserved_unreadable_records: Option<u64>,
     },
     SpaceUnlocked {
         space_id: String,

@@ -6,7 +6,7 @@ use tokio::sync::broadcast;
 use super::space_setup::{
     CancelInvitationError, IssuePairingInvitationError, IssuePairingInvitationResult,
     PairingInvitationAddressCandidate, PairingOutcome, SwitchSpaceError, SwitchSpaceInput,
-    SwitchSpaceResult,
+    SwitchSpaceResult, UnreadableHistoryPolicy,
 };
 use super::{
     GeneralSettingsPatch, RedeemPairingInvitationError, RedeemPairingInvitationInput,
@@ -17,6 +17,7 @@ pub struct JoinSpaceInput {
     pub invitation_code: String,
     pub device_name: Option<String>,
     pub passphrase: String,
+    pub preserve_unreadable_history: bool,
 }
 
 pub enum JoinSpaceResult {
@@ -53,11 +54,17 @@ impl SpaceTransitionCoordinator {
         &self,
         invitation_code: String,
         passphrase: String,
+        preserve_unreadable_history: bool,
     ) -> Result<SwitchSpaceResult, SwitchSpaceError> {
         self.setup
             .switch_space(SwitchSpaceInput {
                 code: invitation_code,
                 new_passphrase: passphrase,
+                unreadable_history_policy: if preserve_unreadable_history {
+                    UnreadableHistoryPolicy::PreserveAndContinue
+                } else {
+                    UnreadableHistoryPolicy::Reject
+                },
             })
             .await
     }
@@ -94,7 +101,11 @@ impl SpaceAdmissionCoordinator {
         if setup.has_completed {
             return self
                 .transition
-                .switch_space(input.invitation_code, input.passphrase)
+                .switch_space(
+                    input.invitation_code,
+                    input.passphrase,
+                    input.preserve_unreadable_history,
+                )
                 .await
                 .map(JoinSpaceResult::Switched)
                 .map_err(JoinSpaceError::Switch);

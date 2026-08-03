@@ -20,6 +20,7 @@ pub use commands::{
     IssuePairingInvitationResult, MigrationPhaseKind, MigrationProgress,
     PairingInvitationAddressCandidate, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
     SetupStateView, SwitchSpaceInput, SwitchSpaceResult, UnlockSpaceInput, UnlockSpaceResult,
+    UnreadableHistoryPolicy,
 };
 pub use deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps};
 pub use errors::{

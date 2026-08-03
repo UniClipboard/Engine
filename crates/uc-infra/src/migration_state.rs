@@ -99,6 +99,7 @@ mod tests {
         let repo = FileMigrationStateRepository::with_defaults(dir.path().to_path_buf());
         let phase = MigrationPhase::Prepared {
             run_id: MigrationRunId::new("mig-test"),
+            preserved_unreadable_records: 0,
         };
         repo.set_current(Some(phase.clone())).await.unwrap();
         assert_eq!(repo.get_current().await.unwrap(), Some(phase));
@@ -112,6 +113,7 @@ mod tests {
             run_id: MigrationRunId::new("mig-2"),
             target_space_id: SpaceId::from_str("space-2"),
             sponsor_space_person_id: None,
+            preserved_unreadable_records: 0,
         };
         repo.set_current(Some(phase.clone())).await.unwrap();
         repo.set_current(None).await.unwrap();
@@ -136,6 +138,7 @@ mod tests {
             run_id: MigrationRunId::new("mig-3"),
             target_space_id: SpaceId::from_str("space-3"),
             sponsor_space_person_id: None,
+            preserved_unreadable_records: 0,
         };
         repo.set_current(Some(phase.clone())).await.unwrap();
         assert_eq!(repo.get_current().await.unwrap(), Some(phase));

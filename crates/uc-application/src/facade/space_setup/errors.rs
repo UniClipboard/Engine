@@ -301,6 +301,8 @@ pub enum SwitchSpaceError {
     ServiceUnavailable,
     #[error("sponsor must upgrade before pairing")]
     SponsorUpgradeRequired,
+    #[error("unreadable local history requires explicit confirmation")]
+    UnreadableHistoryRequiresConfirmation,
     #[error("backup record decryption failed (corrupted ciphertext)")]
     InvalidCiphertext,
     #[error("storage failure: {0}")]

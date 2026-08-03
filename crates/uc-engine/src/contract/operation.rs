@@ -421,6 +421,7 @@ pub struct JoinSpaceInput {
     pub invitation_code: String,
     pub device_name: Option<String>,
     pub passphrase: SecretString,
+    pub preserve_unreadable_history: bool,
 }
 
 impl fmt::Debug for JoinSpaceInput {
@@ -430,6 +431,10 @@ impl fmt::Debug for JoinSpaceInput {
             .field("invitation_code", &"[REDACTED]")
             .field("device_name", &"[REDACTED]")
             .field("passphrase", &"[REDACTED]")
+            .field(
+                "preserve_unreadable_history",
+                &self.preserve_unreadable_history,
+            )
             .finish()
     }
 }

@@ -1639,6 +1639,7 @@ async fn engine_start_builds_a_resumable_real_session() {
             invitation_code,
             device_name: Some("  ".into()),
             passphrase: crate::SecretString::new("correct horse"),
+            preserve_unreadable_history: false,
         }))
         .await
         .unwrap_err();

@@ -216,6 +216,14 @@ pub struct RedeemPairingInvitationResult {
 pub struct SwitchSpaceInput {
     pub code: String,
     pub new_passphrase: String,
+    pub unreadable_history_policy: UnreadableHistoryPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnreadableHistoryPolicy {
+    #[default]
+    Reject,
+    PreserveAndContinue,
 }
 
 /// Internal command for [`crate::usecases::setup::switch_space::SwitchSpaceUseCase`].
@@ -223,6 +231,7 @@ pub struct SwitchSpaceInput {
 pub(crate) struct SwitchSpaceCommand {
     pub code: InvitationCode,
     pub new_passphrase: Passphrase,
+    pub unreadable_history_policy: UnreadableHistoryPolicy,
 }
 
 impl From<SwitchSpaceInput> for SwitchSpaceCommand {
@@ -230,6 +239,7 @@ impl From<SwitchSpaceInput> for SwitchSpaceCommand {
         Self {
             code: InvitationCode::new(input.code),
             new_passphrase: Passphrase::new(input.new_passphrase),
+            unreadable_history_policy: input.unreadable_history_policy,
         }
     }
 }
@@ -244,6 +254,8 @@ pub struct SwitchSpaceResult {
     pub self_identity_fingerprint: IdentityFingerprint,
     /// 实际被重加密回写的 representation 行数，用于 UI 显示"迁移了 N 条历史"。
     pub migrated_records: u64,
+    /// 原始密文被保留、但不再向正常读取路径暴露的 representation 行数。
+    pub preserved_unreadable_records: u64,
 }
 
 // ---------------------------------------------------------------------------

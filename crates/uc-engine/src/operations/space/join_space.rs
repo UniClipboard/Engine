@@ -21,6 +21,7 @@ pub async fn execute_join_space(
             invitation_code: input.invitation_code,
             device_name: input.device_name,
             passphrase: input.passphrase.expose().to_owned(),
+            preserve_unreadable_history: input.preserve_unreadable_history,
         })
         .await
         .map_err(map_join_space_error)?;
@@ -49,6 +50,7 @@ fn fresh_join_result(result: RedeemPairingInvitationResult) -> OperationResult {
         self_device_id: result.self_device_id.to_string(),
         self_identity_fingerprint: result.self_identity_fingerprint.as_display().to_string(),
         migrated_records: None,
+        preserved_unreadable_records: None,
     }
 }
 
@@ -60,6 +62,7 @@ fn switch_join_result(result: SwitchSpaceResult) -> OperationResult {
         self_device_id: result.self_device_id.to_string(),
         self_identity_fingerprint: result.self_identity_fingerprint.as_display().to_string(),
         migrated_records: Some(result.migrated_records),
+        preserved_unreadable_records: Some(result.preserved_unreadable_records),
     }
 }
 
@@ -180,6 +183,11 @@ fn map_switch_space_error(error: SwitchSpaceError) -> EngineError {
             EngineErrorCategory::Conflict,
             false,
         ),
+        SwitchSpaceError::UnreadableHistoryRequiresConfirmation => error_with(
+            JOIN_SPACE_UNREADABLE_HISTORY_REQUIRES_CONFIRMATION_CODE,
+            EngineErrorCategory::Conflict,
+            false,
+        ),
         SwitchSpaceError::InvalidCiphertext => error_with(
             JOIN_SPACE_INVALID_CIPHERTEXT_CODE,
             EngineErrorCategory::Internal,
@@ -244,11 +252,24 @@ mod tests {
         let pending = map_switch_space_error(SwitchSpaceError::PendingMigration(
             uc_core::setup::MigrationPhase::Prepared {
                 run_id: uc_core::setup::MigrationRunId::new("run-1"),
+                preserved_unreadable_records: 0,
             },
         ));
         let locked = map_switch_space_error(SwitchSpaceError::NotUnlocked);
 
         assert_ne!(not_setup.code(), pending.code());
         assert_ne!(pending.code(), locked.code());
+    }
+
+    #[test]
+    fn unreadable_history_confirmation_has_a_distinct_public_error() {
+        let error = map_switch_space_error(SwitchSpaceError::UnreadableHistoryRequiresConfirmation);
+
+        assert_eq!(
+            error.code(),
+            JOIN_SPACE_UNREADABLE_HISTORY_REQUIRES_CONFIRMATION_CODE
+        );
+        assert_eq!(error.category(), EngineErrorCategory::Conflict);
+        assert!(!error.is_retryable());
     }
 }

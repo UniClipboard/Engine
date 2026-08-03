@@ -722,6 +722,7 @@ fn pairing_methods_return_invitation_data_and_stable_join_errors() {
             invitation.invitation_code,
             Some("  ".to_owned()),
             "correct horse battery staple".to_owned(),
+            false,
         )
         .expect_err("blank device name must be rejected by the core");
     assert!(matches!(

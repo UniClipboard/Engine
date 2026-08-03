@@ -58,6 +58,7 @@ fn every_public_operation_has_a_stable_kind() {
                 invitation_code: "ABCD-EFGH".into(),
                 device_name: Some("mobile".into()),
                 passphrase: SecretString::new("secret"),
+                preserve_unreadable_history: false,
             }),
             OperationKind::JoinSpace,
         ),
@@ -1459,6 +1460,7 @@ fn setup_input_debug_output_redacts_user_and_pairing_data() {
         invitation_code: "NEVER-SHOW".into(),
         device_name: Some("Private Phone".into()),
         passphrase: SecretString::new("never-show-passphrase"),
+        preserve_unreadable_history: false,
     };
     let debug = format!("{input:?}");
 
@@ -1500,8 +1502,10 @@ fn join_space_contract_supports_saved_device_name_and_returns_both_identities() 
         invitation_code: "NEVER-SHOW".into(),
         device_name: None,
         passphrase: SecretString::new("never-show-passphrase"),
+        preserve_unreadable_history: true,
     };
     assert!(input.device_name.is_none());
+    assert!(input.preserve_unreadable_history);
 
     let result = OperationResult::SpaceJoined {
         sponsor_device_id: "sponsor-1".into(),
@@ -1510,6 +1514,7 @@ fn join_space_contract_supports_saved_device_name_and_returns_both_identities() 
         self_device_id: "device-1".into(),
         self_identity_fingerprint: "self-fingerprint".into(),
         migrated_records: Some(42),
+        preserved_unreadable_records: Some(3),
     };
     assert!(matches!(
         result,
@@ -1520,6 +1525,7 @@ fn join_space_contract_supports_saved_device_name_and_returns_both_identities() 
             ref self_device_id,
             ref self_identity_fingerprint,
             migrated_records: Some(42),
+            preserved_unreadable_records: Some(3),
         } if sponsor_device_id == "sponsor-1"
             && sponsor_identity_fingerprint == "sponsor-fingerprint"
             && space_id == "space-1"

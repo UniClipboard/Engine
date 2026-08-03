@@ -103,6 +103,11 @@ mockall::mock! {
             representation_id: &RepresentationId,
             new_ciphertext: &[u8],
         ) -> Result<(), BlobMigrationRepoError>;
+        async fn mark_unreadable_inline_data(
+            &self,
+            event_id: &EventId,
+            representation_id: &RepresentationId,
+        ) -> Result<(), BlobMigrationRepoError>;
         async fn discard_all_records(&self) -> Result<(), BlobMigrationRepoError>;
     }
 }
@@ -285,6 +290,13 @@ fn cmd_default() -> SwitchSpaceCommand {
     SwitchSpaceCommand {
         code: InvitationCode::new("CODE-1"),
         new_passphrase: Passphrase::new("hunter22hunter22"),
+        unreadable_history_policy: UnreadableHistoryPolicy::Reject,
+    }
+}
+fn cmd_preserving_unreadable_history() -> SwitchSpaceCommand {
+    SwitchSpaceCommand {
+        unreadable_history_policy: UnreadableHistoryPolicy::PreserveAndContinue,
+        ..cmd_default()
     }
 }
 
@@ -370,13 +382,16 @@ async fn pre_flight_rejects_when_pending_migration() {
     env.setup_status
         .expect_get_status()
         .return_once(|| Ok(already_setup()));
-    env.migration_state
-        .expect_get_current()
-        .return_once(|| Ok(Some(MigrationPhase::Prepared { run_id: run_id() })));
+    env.migration_state.expect_get_current().return_once(|| {
+        Ok(Some(MigrationPhase::Prepared {
+            run_id: run_id(),
+            preserved_unreadable_records: 0,
+        }))
+    });
 
     let err = env.build().execute(cmd_default()).await.unwrap_err();
     match err {
-        SwitchSpaceError::PendingMigration(MigrationPhase::Prepared { run_id: r }) => {
+        SwitchSpaceError::PendingMigration(MigrationPhase::Prepared { run_id: r, .. }) => {
             assert_eq!(r, run_id());
         }
         other => panic!("expected PendingMigration(Prepared), got {other:?}"),
@@ -491,10 +506,10 @@ async fn happy_path_executes_all_4_phases() {
     assert_eq!(relationship_reset.calls(), 1);
 }
 
-/// Phase 1 中途解密失败：清空 backup 表，**不**写 Prepared 状态——
-/// `migration_state.set_current` 不应该被调（连 Prepared 都没推进就失败了）。
+/// Phase 1 中途解密失败：默认要求用户确认，清空 backup 和 migration key，
+/// 且不写 Prepared 状态、不联系 sponsor。
 #[tokio::test]
-async fn phase1_decrypt_failure_aborts_and_cleans_backup() {
+async fn phase1_decrypt_failure_requires_confirmation_and_cleans_up() {
     let mut env = Env::new();
     env.setup_status
         .expect_get_status()
@@ -521,19 +536,130 @@ async fn phase1_decrypt_failure_aborts_and_cleans_backup() {
         .expect_decrypt()
         .return_once(|_, _, _| Err(BlobCipherError::InvalidCiphertext));
 
-    // Cleanup：discard_all_records 必须被调；migration_state 不应被推进。
+    // Cleanup：backup 和临时 key 都必须清理；migration_state 不应被推进。
     env.blob_migration_repo
         .expect_discard_all_records()
         .return_once(|| Ok(()));
     env.migration_state.expect_set_current().times(0);
-    // Phase 1 失败 cleanup 不调 discard_migration_key——key 已经在 keyring，
-    // 但本 cleanup 路径目前不知道 run_id (cleanup_after_phase1_failure 不
-    // 接受 run_id 参数)，留给启动期补偿处理（旧 run_id 会成为孤儿条目，
-    // 后续 prepare 时撞名才会暴露）。
-    env.key_migration.expect_discard_migration_key().times(0);
+    env.key_migration
+        .expect_discard_migration_key()
+        .with(predicate::eq(run_id()))
+        .return_once(|_| Ok(()));
+    env.handshake.expect_run().times(0);
 
     let err = env.build().execute(cmd_default()).await.unwrap_err();
-    assert!(matches!(err, SwitchSpaceError::InvalidCiphertext));
+    assert!(matches!(
+        err,
+        SwitchSpaceError::UnreadableHistoryRequiresConfirmation
+    ));
+}
+
+#[tokio::test]
+async fn confirmed_switch_preserves_unreadable_history_and_migrates_readable_rows() {
+    let mut env = Env::new();
+    env.setup_status
+        .expect_get_status()
+        .return_once(|| Ok(already_setup()));
+    env.migration_state
+        .expect_get_current()
+        .return_once(|| Ok(None));
+
+    env.key_migration
+        .expect_prepare_migration_key()
+        .return_once(|| Ok(run_id()));
+    env.blob_migration_repo
+        .expect_list_main_inline_representations()
+        .return_once(|| {
+            Ok(vec![
+                (
+                    EventId::from_string("readable-event".into()),
+                    RepresentationId::from("readable-rep"),
+                ),
+                (
+                    EventId::from_string("unreadable-event".into()),
+                    RepresentationId::from("unreadable-rep"),
+                ),
+            ])
+        });
+    env.blob_migration_repo
+        .expect_read_main_inline_data()
+        .times(2)
+        .returning(|event_id, _| Ok(Some(event_id.as_ref().as_bytes().to_vec())));
+    env.blob_cipher
+        .expect_decrypt()
+        .times(2)
+        .returning(|_, ciphertext, _| {
+            if ciphertext.as_bytes() == b"unreadable-event" {
+                Err(BlobCipherError::InvalidCiphertext)
+            } else {
+                Ok(uc_core::crypto::domain::Plaintext::new(b"plain".to_vec()))
+            }
+        });
+    env.key_migration
+        .expect_encrypt_with_migration_key()
+        .return_once(|_, _, _| Ok(Ciphertext::new(b"migration-ciphertext".to_vec())));
+    env.blob_migration_repo
+        .expect_upsert_record()
+        .return_once(|_| Ok(()));
+    env.blob_migration_repo
+        .expect_mark_unreadable_inline_data()
+        .withf(|event_id, representation_id| {
+            event_id.as_ref() == "unreadable-event"
+                && representation_id.as_ref() == "unreadable-rep"
+        })
+        .return_once(|_, _| Ok(()));
+
+    env.handshake
+        .expect_run()
+        .return_once(|_, _| Ok(outcome_default()));
+    env.member_repo.expect_get().return_once(|_| Ok(None));
+    env.member_repo.expect_save().return_once(|_| Ok(()));
+    env.trust_repo.expect_get().return_once(|_| Ok(None));
+    env.trust_repo.expect_save().return_once(|_| Ok(()));
+    env.peer_addr_repo.expect_upsert().times(0);
+
+    env.blob_migration_repo
+        .expect_count_records()
+        .return_once(|| Ok(1));
+    env.blob_migration_repo
+        .expect_list_records()
+        .return_once(|| {
+            Ok(vec![MigrationRecord {
+                event_id: EventId::from_string("readable-event".into()),
+                representation_id: RepresentationId::from("readable-rep"),
+                migration_ciphertext: b"migration-ciphertext".to_vec(),
+            }])
+        });
+    env.key_migration
+        .expect_decrypt_with_migration_key()
+        .return_once(|_, _, _| Ok(uc_core::crypto::domain::Plaintext::new(b"plain".to_vec())));
+    env.blob_cipher
+        .expect_encrypt()
+        .return_once(|_, _, _| Ok(Ciphertext::new(b"new-ciphertext".to_vec())));
+    env.blob_migration_repo
+        .expect_update_main_inline_data()
+        .return_once(|_, _, _| Ok(()));
+
+    env.setup_status.expect_set_status().return_once(|_| Ok(()));
+    env.blob_migration_repo
+        .expect_discard_all_records()
+        .return_once(|| Ok(()));
+    env.key_migration
+        .expect_discard_migration_key()
+        .return_once(|_| Ok(()));
+    env.migration_state
+        .expect_set_current()
+        .times(4)
+        .returning(|_| Ok(()));
+
+    let result = env
+        .build()
+        .execute(cmd_preserving_unreadable_history())
+        .await
+        .unwrap();
+
+    assert_eq!(result.migrated_records, 1);
+    assert_eq!(result.preserved_unreadable_records, 1);
 }
 
 /// Phase 2 handshake 失败：清空 backup + 销毁 migration_key + migration_state
@@ -596,9 +722,12 @@ async fn resume_none_is_noop() {
 #[tokio::test]
 async fn resume_prepared_aborts_and_cleans_up() {
     let mut env = Env::new();
-    env.migration_state
-        .expect_get_current()
-        .return_once(|| Ok(Some(MigrationPhase::Prepared { run_id: run_id() })));
+    env.migration_state.expect_get_current().return_once(|| {
+        Ok(Some(MigrationPhase::Prepared {
+            run_id: run_id(),
+            preserved_unreadable_records: 0,
+        }))
+    });
 
     env.blob_migration_repo
         .expect_discard_all_records()
@@ -624,6 +753,7 @@ async fn resume_handshake_done_replays_phase3_and_phase4() {
             run_id: run_id(),
             target_space_id: target_space(),
             sponsor_space_person_id: None,
+            preserved_unreadable_records: 0,
         }))
     });
 
@@ -684,6 +814,7 @@ async fn resume_swapped_replays_phase4_only() {
             run_id: run_id(),
             target_space_id: target_space(),
             sponsor_space_person_id: None,
+            preserved_unreadable_records: 0,
         }))
     });
 
@@ -867,6 +998,7 @@ async fn resume_handshake_done_with_persisted_person_invokes_adopt() {
             run_id: run_id(),
             target_space_id: target_space(),
             sponsor_space_person_id: Some(sponsor_person()),
+            preserved_unreadable_records: 7,
         }))
     });
 
@@ -882,8 +1014,12 @@ async fn resume_handshake_done_with_persisted_person_invokes_adopt() {
         .withf(|phase| match phase {
             Some(MigrationPhase::Swapped {
                 sponsor_space_person_id,
+                preserved_unreadable_records,
                 ..
-            }) => *sponsor_space_person_id == Some(sponsor_person()),
+            }) => {
+                *sponsor_space_person_id == Some(sponsor_person())
+                    && *preserved_unreadable_records == 7
+            }
             None => true,
             _ => false,
         })
@@ -917,6 +1053,7 @@ async fn resume_swapped_with_persisted_person_invokes_adopt() {
             run_id: run_id(),
             target_space_id: target_space(),
             sponsor_space_person_id: Some(sponsor_person()),
+            preserved_unreadable_records: 0,
         }))
     });
 
@@ -952,6 +1089,7 @@ async fn resume_swapped_with_none_person_falls_back_to_solo() {
             run_id: run_id(),
             target_space_id: target_space(),
             sponsor_space_person_id: None,
+            preserved_unreadable_records: 0,
         }))
     });
 

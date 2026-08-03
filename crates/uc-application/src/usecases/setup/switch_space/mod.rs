@@ -92,7 +92,7 @@ use uuid::Uuid;
 
 use crate::facade::space_setup::commands::SwitchSpaceCommand;
 use crate::facade::space_setup::{
-    RedeemPairingInvitationError, SwitchSpaceError, SwitchSpaceResult,
+    RedeemPairingInvitationError, SwitchSpaceError, SwitchSpaceResult, UnreadableHistoryPolicy,
 };
 use crate::membership::errors::MembershipApplicationError;
 use crate::membership::usecases::{AdmitMember, AdmitMemberUseCase};
@@ -104,6 +104,11 @@ use crate::trusted_peer::usecases::{TrustPeer, TrustPeerUseCase};
 
 pub(crate) type AdmitMemberUc = AdmitMemberUseCase<dyn MemberRepositoryPort>;
 pub(crate) type TrustPeerUc = TrustPeerUseCase<dyn TrustedPeerRepositoryPort>;
+
+struct Phase1Preparation {
+    run_id: MigrationRunId,
+    preserved_unreadable_records: u64,
+}
 
 // ---------------------------------------------------------------------------
 // HandshakeRunner —— 让 use case 不直接持有 `Arc<JoinerHandshakeCoordinator>`，
@@ -217,16 +222,17 @@ impl SwitchSpaceUseCase {
         }
 
         // ── Phase 1 — prepare backup ─────────────────────────────────────
-        let run_id = match self.phase_1_prepare().await {
-            Ok(id) => id,
+        let preparation = match self.phase_1_prepare(cmd.unreadable_history_policy).await {
+            Ok(preparation) => preparation,
             Err(err) => {
-                self.cleanup_after_phase1_failure().await;
                 return Err(err);
             }
         };
+        let run_id = preparation.run_id;
         self.migration_state
             .set_current(Some(MigrationPhase::Prepared {
                 run_id: run_id.clone(),
+                preserved_unreadable_records: preparation.preserved_unreadable_records,
             }))
             .await
             .map_err(map_migration_state_err)?;
@@ -250,6 +256,7 @@ impl SwitchSpaceUseCase {
                 run_id: run_id.clone(),
                 target_space_id: target_space_id.clone(),
                 sponsor_space_person_id: identity_target,
+                preserved_unreadable_records: preparation.preserved_unreadable_records,
             }))
             .await
             .map_err(map_migration_state_err)?;
@@ -271,6 +278,7 @@ impl SwitchSpaceUseCase {
                 run_id: run_id.clone(),
                 target_space_id: target_space_id.clone(),
                 sponsor_space_person_id: identity_target,
+                preserved_unreadable_records: preparation.preserved_unreadable_records,
             }))
             .await
             .map_err(map_migration_state_err)?;
@@ -296,6 +304,7 @@ impl SwitchSpaceUseCase {
             self_device_id: outcome.self_device_id,
             self_identity_fingerprint: outcome.self_identity_fingerprint,
             migrated_records,
+            preserved_unreadable_records: preparation.preserved_unreadable_records,
         })
     }
 
@@ -315,7 +324,7 @@ impl SwitchSpaceUseCase {
             Some(p) => p,
         };
         match phase {
-            MigrationPhase::Prepared { run_id } => {
+            MigrationPhase::Prepared { run_id, .. } => {
                 info!(
                     run_id = %run_id,
                     "found stranded Prepared migration; aborting and cleaning up"
@@ -327,6 +336,7 @@ impl SwitchSpaceUseCase {
                 run_id,
                 target_space_id,
                 sponsor_space_person_id,
+                preserved_unreadable_records,
             } => {
                 info!(
                     run_id = %run_id,
@@ -339,6 +349,7 @@ impl SwitchSpaceUseCase {
                         run_id: run_id.clone(),
                         target_space_id: target_space_id.clone(),
                         sponsor_space_person_id,
+                        preserved_unreadable_records,
                     }))
                     .await
                     .map_err(map_migration_state_err)?;
@@ -350,6 +361,7 @@ impl SwitchSpaceUseCase {
                 run_id,
                 target_space_id,
                 sponsor_space_person_id,
+                ..
             } => {
                 info!(
                     run_id = %run_id,
@@ -365,7 +377,10 @@ impl SwitchSpaceUseCase {
 
     // ── 私有 phase 实现 ──────────────────────────────────────────────────
 
-    async fn phase_1_prepare(&self) -> Result<MigrationRunId, SwitchSpaceError> {
+    async fn phase_1_prepare(
+        &self,
+        unreadable_history_policy: UnreadableHistoryPolicy,
+    ) -> Result<Phase1Preparation, SwitchSpaceError> {
         let active = active_space_placeholder();
         let run_id = self
             .key_migration
@@ -374,6 +389,27 @@ impl SwitchSpaceUseCase {
             .map_err(map_key_migration_err)?;
         debug!(run_id = %run_id, "migration key prepared");
 
+        let result = self
+            .backup_readable_records(&run_id, &active, unreadable_history_policy)
+            .await;
+        match result {
+            Ok(preserved_unreadable_records) => Ok(Phase1Preparation {
+                run_id,
+                preserved_unreadable_records,
+            }),
+            Err(error) => {
+                self.cleanup_after_phase1_failure(&run_id).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn backup_readable_records(
+        &self,
+        run_id: &MigrationRunId,
+        active: &ActiveSpace,
+        unreadable_history_policy: UnreadableHistoryPolicy,
+    ) -> Result<u64, SwitchSpaceError> {
         let reps = self
             .blob_migration_repo
             .list_main_inline_representations()
@@ -383,6 +419,8 @@ impl SwitchSpaceUseCase {
             count = reps.len(),
             "found inline representations to back up"
         );
+
+        let mut preserved_unreadable_records = 0_u64;
 
         for (event_id, rep_id) in reps {
             let bytes = match self
@@ -397,14 +435,30 @@ impl SwitchSpaceUseCase {
             };
             let aad_bytes = aad::for_inline(&event_id, &rep_id);
             let aad_obj = Aad::from(aad_bytes);
-            let plain = self
+            let plain = match self
                 .blob_cipher
                 .decrypt(&active, &Ciphertext::new(bytes), &aad_obj)
                 .await
-                .map_err(map_blob_cipher_err)?;
+            {
+                Ok(plain) => plain,
+                Err(BlobCipherError::InvalidCiphertext)
+                    if unreadable_history_policy == UnreadableHistoryPolicy::Reject =>
+                {
+                    return Err(SwitchSpaceError::UnreadableHistoryRequiresConfirmation);
+                }
+                Err(BlobCipherError::InvalidCiphertext) => {
+                    self.blob_migration_repo
+                        .mark_unreadable_inline_data(&event_id, &rep_id)
+                        .await
+                        .map_err(map_blob_repo_err)?;
+                    preserved_unreadable_records += 1;
+                    continue;
+                }
+                Err(error) => return Err(map_blob_cipher_err(error)),
+            };
             let mig_ct = self
                 .key_migration
-                .encrypt_with_migration_key(&run_id, &plain, &aad_obj)
+                .encrypt_with_migration_key(run_id, &plain, &aad_obj)
                 .await
                 .map_err(map_key_migration_err)?;
             self.blob_migration_repo
@@ -416,7 +470,7 @@ impl SwitchSpaceUseCase {
                 .await
                 .map_err(map_blob_repo_err)?;
         }
-        Ok(run_id)
+        Ok(preserved_unreadable_records)
     }
 
     async fn phase_2_handshake_and_persist(
@@ -554,9 +608,12 @@ impl SwitchSpaceUseCase {
 
     /// Phase 1 中途失败时的 best-effort 清理。phase 1 失败前 migration_state
     /// 还没被推进到 `Prepared`，所以这里不需要清 `migration_state`。
-    async fn cleanup_after_phase1_failure(&self) {
+    async fn cleanup_after_phase1_failure(&self, run_id: &MigrationRunId) {
         if let Err(err) = self.blob_migration_repo.discard_all_records().await {
             warn!(error = %err, "phase1-cleanup: discard_all_records failed");
+        }
+        if let Err(err) = self.key_migration.discard_migration_key(run_id).await {
+            warn!(error = %err, "phase1-cleanup: discard_migration_key failed");
         }
     }
 

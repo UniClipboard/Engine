@@ -88,6 +88,7 @@ pub struct SpaceJoined {
     pub self_device_id: String,
     pub self_identity_fingerprint: String,
     pub migrated_records: Option<u64>,
+    pub preserved_unreadable_records: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -262,6 +263,7 @@ enum WorkerCommand {
         invitation_code: Zeroizing<String>,
         device_name: Option<String>,
         passphrase: Zeroizing<String>,
+        preserve_unreadable_history: bool,
         response: mpsc::Sender<Result<SpaceJoined, BindingError>>,
     },
     SendText {
@@ -746,6 +748,7 @@ impl MobileEngine {
         invitation_code: String,
         device_name: Option<String>,
         passphrase: String,
+        preserve_unreadable_history: bool,
     ) -> Result<SpaceJoined, BindingError> {
         let commands = self.command_sender()?;
         let (response, result) = mpsc::channel();
@@ -754,6 +757,7 @@ impl MobileEngine {
                 invitation_code: Zeroizing::new(invitation_code),
                 device_name,
                 passphrase: Zeroizing::new(passphrase),
+                preserve_unreadable_history,
                 response,
             })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
@@ -1278,6 +1282,7 @@ async fn run_worker_loop(
                 mut invitation_code,
                 device_name,
                 passphrase,
+                preserve_unreadable_history,
                 response,
             } => {
                 let result = engine
@@ -1285,6 +1290,7 @@ async fn run_worker_loop(
                         invitation_code: std::mem::take(&mut *invitation_code),
                         device_name,
                         passphrase: SecretString::new(passphrase.as_str()),
+                        preserve_unreadable_history,
                     }))
                     .await
                     .map_err(BindingError::from)
@@ -1794,6 +1800,7 @@ fn map_space_joined(result: OperationResult) -> Result<SpaceJoined, BindingError
             self_device_id,
             self_identity_fingerprint,
             migrated_records,
+            preserved_unreadable_records,
         } => Ok(SpaceJoined {
             sponsor_device_id,
             sponsor_identity_fingerprint,
@@ -1801,6 +1808,7 @@ fn map_space_joined(result: OperationResult) -> Result<SpaceJoined, BindingError
             self_device_id,
             self_identity_fingerprint,
             migrated_records,
+            preserved_unreadable_records,
         }),
         _ => Err(BindingError::UnexpectedResult),
     }
@@ -2129,6 +2137,23 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn space_joined_mapping_preserves_history_counts() {
+        let joined = map_space_joined(OperationResult::SpaceJoined {
+            sponsor_device_id: "sponsor".into(),
+            sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
+            space_id: "space".into(),
+            self_device_id: "self".into(),
+            self_identity_fingerprint: "self-fingerprint".into(),
+            migrated_records: Some(4),
+            preserved_unreadable_records: Some(2),
+        })
+        .expect("space-joined result must map");
+
+        assert_eq!(joined.migrated_records, Some(4));
+        assert_eq!(joined.preserved_unreadable_records, Some(2));
+    }
 
     #[test]
     fn lifecycle_wait_keeps_recovery_polled_until_cancellation_settles() {

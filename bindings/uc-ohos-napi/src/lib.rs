@@ -107,6 +107,7 @@ pub struct OhSpaceJoined {
     pub self_device_id: String,
     pub self_identity_fingerprint: String,
     pub migrated_records: Option<String>,
+    pub preserved_unreadable_records: Option<String>,
 }
 
 #[napi(object)]

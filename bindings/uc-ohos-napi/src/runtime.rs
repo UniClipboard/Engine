@@ -179,6 +179,7 @@ impl OhEngine {
         invitation_code: String,
         device_name: Option<String>,
         passphrase: String,
+        preserve_unreadable_history: bool,
     ) -> napi::Result<OhSpaceJoined> {
         let invitation_code = Zeroizing::new(invitation_code);
         let passphrase = Zeroizing::new(passphrase);
@@ -188,6 +189,7 @@ impl OhEngine {
                 invitation_code: invitation_code.to_string(),
                 device_name,
                 passphrase: SecretString::new(passphrase.as_str()),
+                preserve_unreadable_history,
             }))
             .await
             .map_err(engine_error)?;
@@ -199,6 +201,7 @@ impl OhEngine {
                 self_device_id,
                 self_identity_fingerprint,
                 migrated_records,
+                preserved_unreadable_records,
             } => Ok(OhSpaceJoined {
                 sponsor_device_id,
                 sponsor_identity_fingerprint,
@@ -206,6 +209,8 @@ impl OhEngine {
                 self_device_id,
                 self_identity_fingerprint,
                 migrated_records: migrated_records.map(|count| count.to_string()),
+                preserved_unreadable_records: preserved_unreadable_records
+                    .map(|count| count.to_string()),
             }),
             _ => Err(unexpected_result()),
         }

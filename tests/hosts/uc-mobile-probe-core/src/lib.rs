@@ -49,6 +49,8 @@ enum ProbeCommand {
         invitation_code: String,
         device_name: String,
         passphrase: String,
+        #[serde(default)]
+        preserve_unreadable_history: bool,
     },
     IssueInvitation,
     ListDevices,
@@ -402,6 +404,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             invitation_code,
             device_name,
             passphrase,
+            preserve_unreadable_history,
         } => {
             execute_operation(
                 state,
@@ -409,6 +412,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                     invitation_code,
                     device_name: Some(device_name),
                     passphrase: SecretString::new(passphrase),
+                    preserve_unreadable_history,
                 }),
             )
             .await
@@ -1508,6 +1512,7 @@ mod tests {
             self_device_id: "device-1".into(),
             self_identity_fingerprint: "self-fingerprint".into(),
             migrated_records: None,
+            preserved_unreadable_records: None,
         });
 
         assert_eq!(

@@ -907,6 +907,7 @@ mod tests {
     };
 
     use crate::deps::SpaceAccessPorts;
+    use crate::facade::space_setup::UnreadableHistoryPolicy;
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
     use uc_core::setup::SetupStatus;
@@ -1626,6 +1627,13 @@ mod tests {
         ) -> Result<(), uc_core::ports::clipboard::BlobMigrationRepoError> {
             Ok(())
         }
+        async fn mark_unreadable_inline_data(
+            &self,
+            _event_id: &uc_core::ids::EventId,
+            _representation_id: &uc_core::ids::RepresentationId,
+        ) -> Result<(), uc_core::ports::clipboard::BlobMigrationRepoError> {
+            Ok(())
+        }
         async fn discard_all_records(
             &self,
         ) -> Result<(), uc_core::ports::clipboard::BlobMigrationRepoError> {
@@ -1901,6 +1909,7 @@ mod tests {
         let migration_state = Arc::new(FakeMigrationState::with_phase(
             uc_core::setup::MigrationPhase::Prepared {
                 run_id: uc_core::setup::MigrationRunId::new("test-pending-run"),
+                preserved_unreadable_records: 0,
             },
         ));
         let (facade, _inv, _peer) = make_facade_with_migration_state(
@@ -2290,6 +2299,7 @@ mod tests {
             .switch_space(SwitchSpaceInput {
                 code: "CODE-1".into(),
                 new_passphrase: "hunter22hunter22".into(),
+                unreadable_history_policy: UnreadableHistoryPolicy::Reject,
             })
             .await
             .unwrap_err();

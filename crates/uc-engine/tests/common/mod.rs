@@ -156,6 +156,13 @@ impl BlobMigrationRepoPort for NoopBlobMigrationRepo {
     ) -> Result<(), BlobMigrationRepoError> {
         Ok(())
     }
+    async fn mark_unreadable_inline_data(
+        &self,
+        _event_id: &EventId,
+        _representation_id: &RepresentationId,
+    ) -> Result<(), BlobMigrationRepoError> {
+        Ok(())
+    }
     async fn discard_all_records(&self) -> Result<(), BlobMigrationRepoError> {
         Ok(())
     }
