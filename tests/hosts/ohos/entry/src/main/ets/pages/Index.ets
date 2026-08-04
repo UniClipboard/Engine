@@ -58,7 +58,13 @@ struct Index {
     if (!this.ready) {
       return;
     }
-    this.applySnapshot(await engineRuntime.queryCurrentMemberRemoval());
+    try {
+      this.applySnapshot(await engineRuntime.queryCurrentMemberRemoval());
+    } catch (error) {
+      this.applySnapshot(engineRuntime.snapshot());
+      this.details = String(error);
+      hilog.error(DOMAIN, 'EngineProbe', 'Member removal query failed: %{public}s', JSON.stringify(error));
+    }
   }
 
   build() {
@@ -83,10 +89,10 @@ struct Index {
         .fontColor('#5B6570')
       if (this.ready) {
         Button('Member removal')
-          .onClick(() => this.queryCurrentMemberRemoval())
+          .onClick(() => { void this.queryCurrentMemberRemoval(); })
         Button(this.exporting ? 'Exporting' : 'Export sample')
           .enabled(!this.exporting)
-          .onClick(() => this.exportSample())
+          .onClick(() => { void this.exportSample(); })
       }
       if (this.details.length > 0) {
         Text(this.details)

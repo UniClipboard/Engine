@@ -636,29 +636,34 @@ impl RevocationStage {
         {
             return Err(KeyEpochError::RemovedMemberInOutbox);
         }
-        self.record
-            .advance_for_permanent_loss(permanently_lost_device_id, now_ms)?;
-        if next_space_state.space_id() != self.record.space_id()
-            || next_space_state.epoch() != self.record.next_epoch()
+        let mut next_record = self.record.clone();
+        next_record.advance_for_permanent_loss(permanently_lost_device_id, now_ms)?;
+        if next_space_state.space_id() != next_record.space_id()
+            || next_space_state.epoch() != next_record.next_epoch()
         {
             return Err(KeyEpochError::InvalidRevocationStage);
         }
-        self.outbox
-            .retain(|message| message.recipient() != permanently_lost_device_id);
-        outbox
-            .iter_mut()
-            .for_each(|message| message.assign_generation(self.record.next_epoch()));
-        self.outbox.extend(outbox);
-        self.generations.push(RevocationGeneration::new(
-            self.record.previous_epoch(),
+        let generation = RevocationGeneration::new(
+            next_record.previous_epoch(),
             next_space_state,
             group_state,
             key_catalog,
-        )?);
-        if self.all_recipients_confirmed() {
-            self.record
-                .transition_to(RevocationStatus::Complete, now_ms)?;
+        )?;
+        let mut next_outbox = self.outbox.clone();
+        next_outbox.retain(|message| message.recipient() != permanently_lost_device_id);
+        outbox
+            .iter_mut()
+            .for_each(|message| message.assign_generation(next_record.next_epoch()));
+        next_outbox.extend(outbox);
+        if next_outbox
+            .iter()
+            .all(RevocationOutboxMessage::is_confirmed)
+        {
+            next_record.transition_to(RevocationStatus::Complete, now_ms)?;
         }
+        self.record = next_record;
+        self.outbox = next_outbox;
+        self.generations.push(generation);
         Ok(())
     }
 }

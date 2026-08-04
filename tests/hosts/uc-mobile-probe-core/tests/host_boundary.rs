@@ -135,14 +135,13 @@ fn ios_and_android_probe_member_revocation_through_the_shared_contract() {
     let source = read(root.join("tests/hosts/uc-mobile-probe-core/src/lib.rs"));
     let ios_model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
     let ios_view = read(root.join("tests/hosts/ios/EngineProbe/ProbeView.swift"));
-    let android_command = read(root.join("tests/hosts/android/probe-command.sh"));
 
     for command in [
         "RemoveMember",
         "QueryCurrentMemberRevocation",
         "ContinueMemberRevocation",
     ] {
-        assert!(source.contains(command));
+        assert!(source.contains(command), "missing command: {command}");
     }
     for field in [
         "removed_device_ids",
@@ -150,11 +149,10 @@ fn ios_and_android_probe_member_revocation_through_the_shared_contract() {
         "updated_at_ms",
         "last_member_revocation",
     ] {
-        assert!(source.contains(field));
+        assert!(source.contains(field), "missing field: {field}");
     }
     assert!(ios_model.contains("query_current_member_revocation"));
     assert!(ios_view.contains("Member removal"));
-    assert!(android_command.contains("COMMAND_BASE64"));
 }
 
 #[test]

@@ -693,6 +693,10 @@ async fn permanent_loss_recovery_is_atomic_and_survives_restart() {
     repo.commit_revocation_recovery(&recovery, &material)
         .await
         .unwrap();
+    assert!(repo
+        .commit_revocation_recovery(&recovery, &material)
+        .await
+        .is_err());
     drop(repo);
 
     let reopened = reopen_repo(&pool);

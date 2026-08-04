@@ -359,7 +359,8 @@ final class ProbeModel {
             "completed_operations", "fatal_errors", "last_state", "has_next", "state",
             "pending_count", "waiting_for_peer_count", "waiting_for_update_count",
             "version_incompatible_count", "blocked_count", "rejected_count", "accepted",
-            "duplicate", "offline", "errored", "pending", "target_count",
+            "duplicate", "offline", "errored", "pending", "target_count", "outcome",
+            "pending_recipients",
         ]
         let evidence = result.filter { allowed.contains($0.key) }
         guard let data = try? JSONSerialization.data(

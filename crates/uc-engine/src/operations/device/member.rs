@@ -186,7 +186,7 @@ pub async fn execute_query_legacy_bootstrap(
     facade: &AppFacade,
     input: QueryLegacyBootstrapInput,
 ) -> Result<OperationResult, EngineError> {
-    validate_bootstrap_id(&input.bootstrap_id)?;
+    validate_opaque_id(&input.bootstrap_id)?;
     let result = facade
         .legacy_bootstrap(&input.bootstrap_id)
         .await
@@ -200,13 +200,7 @@ pub async fn execute_query_member_revocation(
     facade: &AppFacade,
     input: QueryMemberRevocationInput,
 ) -> Result<OperationResult, EngineError> {
-    if input.revocation_id.trim().is_empty() {
-        return Err(EngineError::new(
-            MEMBER_INVALID_INPUT_CODE,
-            EngineErrorCategory::InvalidInput,
-            false,
-        ));
-    }
+    validate_opaque_id(&input.revocation_id)?;
     let result = facade
         .member_revocation(&input.revocation_id)
         .await
@@ -232,7 +226,7 @@ pub async fn execute_continue_member_revocation(
     facade: &AppFacade,
     input: ContinueMemberRevocationInput,
 ) -> Result<OperationResult, EngineError> {
-    validate_bootstrap_id(&input.revocation_id)?;
+    validate_opaque_id(&input.revocation_id)?;
     if input.permanently_lost_device_ids.is_empty() {
         return Err(EngineError::new(
             MEMBER_INVALID_INPUT_CODE,
@@ -322,8 +316,8 @@ pub(crate) fn member_revocation_summary(result: MemberRevocationView) -> MemberR
     }
 }
 
-fn validate_bootstrap_id(bootstrap_id: &str) -> Result<(), EngineError> {
-    if bootstrap_id.is_empty() || bootstrap_id.len() > 128 || !bootstrap_id.is_ascii() {
+fn validate_opaque_id(opaque_id: &str) -> Result<(), EngineError> {
+    if opaque_id.is_empty() || opaque_id.len() > 128 || !opaque_id.is_ascii() {
         return Err(EngineError::new(
             MEMBER_INVALID_INPUT_CODE,
             EngineErrorCategory::InvalidInput,
@@ -453,7 +447,7 @@ fn map_roster_error(error: RosterError) -> EngineError {
             "member_removal_recovery_required",
         ),
         RosterError::InvalidPermanentLossSelection => (
-            MEMBER_INVALID_INPUT_CODE,
+            MEMBER_INVALID_PERMANENT_LOSS_SELECTION_CODE,
             EngineErrorCategory::InvalidInput,
             false,
             "invalid_permanent_loss_selection",
@@ -525,7 +519,10 @@ mod tests {
         );
         assert!(!recovery_required.is_retryable());
         let invalid_selection = map_roster_error(RosterError::InvalidPermanentLossSelection);
-        assert_eq!(invalid_selection.code(), MEMBER_INVALID_INPUT_CODE);
+        assert_eq!(
+            invalid_selection.code(),
+            MEMBER_INVALID_PERMANENT_LOSS_SELECTION_CODE
+        );
         assert_eq!(
             invalid_selection.category(),
             EngineErrorCategory::InvalidInput

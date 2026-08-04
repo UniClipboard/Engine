@@ -138,7 +138,7 @@ fn ohos_probe_exposes_the_complete_member_revocation_contract() {
         "continueMemberRevocation(",
         "nextEvent(timeoutMs: number): Promise<OhEngineEvent | null>",
     ] {
-        assert!(declarations.contains(method));
+        assert!(declarations.contains(method), "missing method: {method}");
     }
     for field in [
         "removedDeviceIds: string[]",
@@ -146,7 +146,7 @@ fn ohos_probe_exposes_the_complete_member_revocation_contract() {
         "updatedAtMs: number",
         "memberRevocation?: OhMemberRevocation",
     ] {
-        assert!(declarations.contains(field));
+        assert!(declarations.contains(field), "missing field: {field}");
     }
     assert!(runtime.contains("active.queryCurrentMemberRevocation()"));
     assert!(runtime
@@ -155,6 +155,8 @@ fn ohos_probe_exposes_the_complete_member_revocation_contract() {
     assert!(runtime.contains("updatedAtMs: revocation.updatedAtMs"));
     assert!(page.contains("snapshot.memberRemovalState"));
     assert!(page.contains("Button('Member removal')"));
+    assert!(page.contains("Member removal query failed"));
+    assert!(page.contains("void this.queryCurrentMemberRemoval();"));
 }
 
 #[test]

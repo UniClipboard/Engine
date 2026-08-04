@@ -1128,6 +1128,16 @@ impl DefaultSpaceAccessAdapter {
             )
             .with_pending_group_updates_from_excluding_many(&material, permanently_lost_device_ids);
         }
+        let validator = InMemorySession::new();
+        validator.set_master_key_for_space(
+            material.state().space_id().clone(),
+            self.session
+                .get_master_key()
+                .map_err(|error| KeyEpochError::Repository(error.to_string()))?,
+        );
+        validator
+            .install_space_material(&material)
+            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
         let record = repository
             .commit_revocation_recovery(&stage, &material)
             .await?;

@@ -333,6 +333,27 @@ fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generatio
     stage
         .acknowledge_recipient(&DeviceId::new("bob"), 104)
         .unwrap();
+    let before_invalid_recovery = stage.clone();
+    assert_eq!(
+        stage.append_recovery_generation(
+            &DeviceId::new("alice"),
+            first_state.clone(),
+            vec![5],
+            vec![6],
+            vec![RevocationOutboxMessage::new(DeviceId::new("bob"), vec![7])],
+            105,
+        ),
+        Err(KeyEpochError::InvalidRevocationStage)
+    );
+    assert_eq!(stage.record(), before_invalid_recovery.record());
+    assert_eq!(
+        stage.generation_count(),
+        before_invalid_recovery.generation_count()
+    );
+    assert_eq!(
+        stage.pending_recipient_device_ids(),
+        before_invalid_recovery.pending_recipient_device_ids()
+    );
     let mut second_state = first_state;
     second_state
         .rotate(ContentKeyId::from_string("current-3").unwrap())
@@ -345,7 +366,7 @@ fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generatio
             vec![5],
             vec![6],
             vec![],
-            105,
+            106,
         ),
         Err(KeyEpochError::PermanentLossRecipientNotPending)
     );
@@ -356,7 +377,7 @@ fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generatio
             vec![5],
             vec![6],
             vec![RevocationOutboxMessage::new(DeviceId::new("bob"), vec![7])],
-            106,
+            107,
         )
         .unwrap();
 
@@ -373,7 +394,7 @@ fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generatio
         vec![DeviceId::new("bob")]
     );
     stage
-        .acknowledge_recipient(&DeviceId::new("bob"), 107)
+        .acknowledge_recipient(&DeviceId::new("bob"), 108)
         .unwrap();
     assert!(stage.all_recipients_confirmed());
 }

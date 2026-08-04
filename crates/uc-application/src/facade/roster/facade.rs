@@ -226,7 +226,7 @@ impl MemberRosterFacade {
     }
 
     /// 读取某个成员的同步偏好。调用方传入字符串设备 ID,不接触 core 类型。
-    #[instrument(skip_all, fields(device_id = %device_id))]
+    #[instrument(skip_all)]
     pub async fn get_sync_preferences(
         &self,
         device_id: &str,
@@ -243,7 +243,7 @@ impl MemberRosterFacade {
     }
 
     /// 局部更新某个成员的同步偏好。合并规则收敛在 application 层。
-    #[instrument(skip_all, fields(device_id = %device_id))]
+    #[instrument(skip_all)]
     pub async fn update_sync_preferences(
         &self,
         device_id: &str,
@@ -430,19 +430,19 @@ impl MemberRosterFacade {
         if unique.len() != requested.len() {
             return Err(RosterError::InvalidPermanentLossSelection);
         }
-        if requested
-            .iter()
-            .all(|device_id| current.removed_device_ids().contains(device_id))
-        {
-            for device_id in &requested {
-                self.remove_member_records_idempotent(device_id).await?;
-            }
+        let (already_removed, outstanding): (Vec<_>, Vec<_>) = requested
+            .into_iter()
+            .partition(|device_id| current.removed_device_ids().contains(device_id));
+        for device_id in &already_removed {
+            self.remove_member_records_idempotent(device_id).await?;
+        }
+        if outstanding.is_empty() {
             return Ok(Self::revocation_view(current));
         }
-        if requested.iter().any(|device_id| {
-            current.removed_device_ids().contains(device_id)
-                || !current.pending_recipient_device_ids().contains(device_id)
-        }) {
+        if outstanding
+            .iter()
+            .any(|device_id| !current.pending_recipient_device_ids().contains(device_id))
+        {
             return Err(RosterError::InvalidPermanentLossSelection);
         }
         let group_revocation = self
@@ -452,7 +452,7 @@ impl MemberRosterFacade {
         let mut result = group_revocation
             .continue_group_revocation(
                 &revocation_id,
-                &requested,
+                &outstanding,
                 chrono::Utc::now().timestamp_millis(),
             )
             .await
@@ -463,7 +463,7 @@ impl MemberRosterFacade {
                 other => RosterError::GroupRevocation(other.to_string()),
             })?;
         self.publish_member_revocation(Self::revocation_view(result.clone()));
-        for device_id in &requested {
+        for device_id in &outstanding {
             self.remove_member_records_idempotent(device_id).await?;
         }
         match self.retry_group_delivery(result.clone()).await {
@@ -485,7 +485,7 @@ impl MemberRosterFacade {
             .map_err(|error| RosterError::GroupRevocation(error.to_string()))
     }
 
-    #[instrument(skip_all, fields(device_id = %device_id))]
+    #[instrument(skip_all)]
     pub async fn secure_remove_legacy_member(
         &self,
         device_id: &str,
@@ -662,33 +662,29 @@ impl MemberRosterFacade {
     }
 
     async fn remove_member_records(&self, device_id: &DeviceId) -> Result<(), RosterError> {
-        let removed = self
-            .member_repo
-            .remove(device_id)
-            .await
-            .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
-        if !removed {
-            return Err(RosterError::NotFound(device_id.as_str().to_string()));
-        }
-        self.peer_addr_repo
-            .remove(device_id)
-            .await
-            .map_err(|err| RosterError::PeerAddressRepository(err.to_string()))?;
-        self.trusted_peer_repo
-            .remove(device_id)
-            .await
-            .map_err(|err| RosterError::TrustedPeerRepository(err.to_string()))?;
-        Ok(())
+        self.remove_peer_records(device_id, true).await
     }
 
     async fn remove_member_records_idempotent(
         &self,
         device_id: &DeviceId,
     ) -> Result<(), RosterError> {
-        self.member_repo
+        self.remove_peer_records(device_id, false).await
+    }
+
+    async fn remove_peer_records(
+        &self,
+        device_id: &DeviceId,
+        missing_member_is_error: bool,
+    ) -> Result<(), RosterError> {
+        let removed = self
+            .member_repo
             .remove(device_id)
             .await
             .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
+        if missing_member_is_error && !removed {
+            return Err(RosterError::NotFound(device_id.as_str().to_string()));
+        }
         self.peer_addr_repo
             .remove(device_id)
             .await
@@ -892,10 +888,9 @@ mod tests {
             .next()
             .expect("production source must precede the test module");
 
-        assert!(!production.contains("recipient = %update.recipient()"));
-        assert!(!production.contains(
-            "#[instrument(skip_all, fields(device_id = %device_id))]\n    pub async fn revoke_member"
-        ));
+        assert!(!production.contains("device_id = %"));
+        assert!(!production.contains("recipient = %"));
+        assert!(!production.contains("%device_id"));
     }
 
     use async_trait::async_trait;
@@ -1715,6 +1710,62 @@ mod tests {
 
         let result = facade
             .continue_member_revocation("revocation-active", &["dev-waiting".to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(result.removed_device_ids, ["dev-removed", "dev-waiting"]);
+        assert_eq!(result.pending_recipient_device_ids, ["dev-retained"]);
+    }
+
+    #[tokio::test]
+    async fn permanent_loss_recovery_accepts_already_removed_and_pending_devices_together() {
+        let mut group = MockGroupRevocation::new();
+        group
+            .expect_current_group_revocation()
+            .times(1)
+            .returning(|| Ok(Some(active_revocation("dev-removed"))));
+        group
+            .expect_continue_group_revocation()
+            .times(1)
+            .withf(|revocation_id, lost, _| {
+                revocation_id.as_str() == "revocation-active"
+                    && lost == [DeviceId::new("dev-waiting")]
+            })
+            .returning(|revocation_id, _, _| {
+                Ok(uc_core::membership::GroupRevocationResult::Reliable {
+                    revocation_id: revocation_id.clone(),
+                    status: uc_core::membership::RevocationStatus::Distributing,
+                    removed_device_ids: vec![
+                        DeviceId::new("dev-removed"),
+                        DeviceId::new("dev-waiting"),
+                    ],
+                    pending_recipient_device_ids: vec![DeviceId::new("dev-retained")],
+                    updated_at_ms: 200,
+                })
+            });
+        let mut repo = MockMemberRepo::new();
+        repo.expect_remove().times(2).returning(|_| Ok(true));
+        let mut peer_addr = MockPeerAddrRepo::new();
+        peer_addr.expect_remove().times(2).returning(|_| Ok(()));
+        let mut trusted = MockTrustedPeerRepo::new();
+        trusted.expect_remove().times(2).returning(|_| Ok(true));
+        let facade = MemberRosterFacade::new_with_group_revocation(
+            MemberRosterDeps {
+                member_repo: Arc::new(repo),
+                peer_addr_repo: Arc::new(peer_addr),
+                trusted_peer_repo: Arc::new(trusted),
+                local_identity: Arc::new(MockLocalIdentity::new()),
+                presence: Arc::new(FakePresence::new(vec![])),
+                connection_channel: None,
+            },
+            Arc::new(group),
+        );
+
+        let result = facade
+            .continue_member_revocation(
+                "revocation-active",
+                &["dev-removed".to_owned(), "dev-waiting".to_owned()],
+            )
             .await
             .unwrap();
 
