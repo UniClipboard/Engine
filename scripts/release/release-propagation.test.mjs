@@ -24,8 +24,8 @@ test('notifies consumers only after release publication and interop verification
 
 test('uses a GitHub App installation token for both repository dispatches', () => {
   assert.match(workflow, /actions\/create-github-app-token@v3/)
-  assert.match(workflow, /ENGINE_RELEASE_APP_CLIENT_ID/)
-  assert.match(workflow, /ENGINE_RELEASE_APP_PRIVATE_KEY/)
+  assert.match(workflow, /client-id:\s*\$\{\{\s*secrets\.ENGINE_RELEASE_APP_CLIENT_ID\s*\}\}/)
+  assert.match(workflow, /private-key:\s*\$\{\{\s*secrets\.ENGINE_RELEASE_APP_PRIVATE_KEY\s*\}\}/)
   assert.match(workflow, /permission-contents:\s*write/)
   assert.match(workflow, /for repository in UniClipboard\/UniClipboard UniClipboard\/UniClip/)
   assert.match(workflow, /repos\/\$repository\/dispatches/)
