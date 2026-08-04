@@ -13,13 +13,14 @@ use uc_application::facade::{
 use uc_core::ports::ReachabilityState;
 
 use crate::{
-    ContentTypesPatch, ContentTypesSummary, DeviceSummary, EngineError, EngineErrorCategory,
-    LegacyBootstrapOutcome, LegacyBootstrapSummary, MemberProtectionStatusSummary,
-    MemberProtectionSummary, MemberRevocationOutcome, MemberRevocationSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MembershipConvergenceStateSummary,
-    MembershipConvergenceSummary, OperationResult, QueryLegacyBootstrapInput,
-    QueryMemberRevocationInput, QueryMemberSyncPreferencesInput, RemoveMemberInput,
-    SpaceProtectionModeSummary, SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
+    ContentTypesPatch, ContentTypesSummary, ContinueMemberRevocationInput, DeviceSummary,
+    EngineError, EngineErrorCategory, LegacyBootstrapOutcome, LegacyBootstrapSummary,
+    MemberProtectionStatusSummary, MemberProtectionSummary, MemberRevocationOutcome,
+    MemberRevocationSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
+    MembershipConvergenceStateSummary, MembershipConvergenceSummary, OperationResult,
+    QueryLegacyBootstrapInput, QueryMemberRevocationInput, QueryMemberSyncPreferencesInput,
+    RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
+    UpdateMemberSyncPreferencesInput,
 };
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
@@ -185,7 +186,7 @@ pub async fn execute_query_legacy_bootstrap(
     facade: &AppFacade,
     input: QueryLegacyBootstrapInput,
 ) -> Result<OperationResult, EngineError> {
-    validate_bootstrap_id(&input.bootstrap_id)?;
+    validate_opaque_id(&input.bootstrap_id)?;
     let result = facade
         .legacy_bootstrap(&input.bootstrap_id)
         .await
@@ -199,13 +200,7 @@ pub async fn execute_query_member_revocation(
     facade: &AppFacade,
     input: QueryMemberRevocationInput,
 ) -> Result<OperationResult, EngineError> {
-    if input.revocation_id.trim().is_empty() {
-        return Err(EngineError::new(
-            MEMBER_INVALID_INPUT_CODE,
-            EngineErrorCategory::InvalidInput,
-            false,
-        ));
-    }
+    validate_opaque_id(&input.revocation_id)?;
     let result = facade
         .member_revocation(&input.revocation_id)
         .await
@@ -213,6 +208,42 @@ pub async fn execute_query_member_revocation(
     Ok(OperationResult::MemberRevocationStatus(
         result.map(member_revocation_summary),
     ))
+}
+
+pub async fn execute_query_current_member_revocation(
+    facade: &AppFacade,
+) -> Result<OperationResult, EngineError> {
+    let result = facade
+        .current_member_revocation()
+        .await
+        .map_err(map_roster_error)?;
+    Ok(OperationResult::MemberRevocationStatus(
+        result.map(member_revocation_summary),
+    ))
+}
+
+pub async fn execute_continue_member_revocation(
+    facade: &AppFacade,
+    input: ContinueMemberRevocationInput,
+) -> Result<OperationResult, EngineError> {
+    validate_opaque_id(&input.revocation_id)?;
+    if input.permanently_lost_device_ids.is_empty() {
+        return Err(EngineError::new(
+            MEMBER_INVALID_INPUT_CODE,
+            EngineErrorCategory::InvalidInput,
+            false,
+        ));
+    }
+    for device_id in &input.permanently_lost_device_ids {
+        validate_device_id(device_id)?;
+    }
+    let result = facade
+        .continue_member_revocation(&input.revocation_id, &input.permanently_lost_device_ids)
+        .await
+        .map_err(map_roster_error)?;
+    Ok(OperationResult::MemberRevocationStatus(Some(
+        member_revocation_summary(result),
+    )))
 }
 
 fn member_revocation_result(result: MemberRevocationView) -> OperationResult {
@@ -267,7 +298,7 @@ fn legacy_bootstrap_summary(result: LegacyBootstrapView) -> LegacyBootstrapSumma
     }
 }
 
-fn member_revocation_summary(result: MemberRevocationView) -> MemberRevocationSummary {
+pub(crate) fn member_revocation_summary(result: MemberRevocationView) -> MemberRevocationSummary {
     let outcome = match result.state {
         MemberRevocationState::LocalOnly => MemberRevocationOutcome::LocalOnly,
         MemberRevocationState::Applied => MemberRevocationOutcome::Applied,
@@ -277,12 +308,16 @@ fn member_revocation_summary(result: MemberRevocationView) -> MemberRevocationSu
     MemberRevocationSummary {
         revocation_id: result.revocation_id,
         outcome,
-        pending_recipients: u64::try_from(result.pending_recipients).unwrap_or(u64::MAX),
+        pending_recipients: u64::try_from(result.pending_recipient_device_ids.len())
+            .unwrap_or(u64::MAX),
+        removed_device_ids: result.removed_device_ids,
+        pending_recipient_device_ids: result.pending_recipient_device_ids,
+        updated_at_ms: result.updated_at_ms,
     }
 }
 
-fn validate_bootstrap_id(bootstrap_id: &str) -> Result<(), EngineError> {
-    if bootstrap_id.is_empty() || bootstrap_id.len() > 128 || !bootstrap_id.is_ascii() {
+fn validate_opaque_id(opaque_id: &str) -> Result<(), EngineError> {
+    if opaque_id.is_empty() || opaque_id.len() > 128 || !opaque_id.is_ascii() {
         return Err(EngineError::new(
             MEMBER_INVALID_INPUT_CODE,
             EngineErrorCategory::InvalidInput,
@@ -399,6 +434,24 @@ fn map_roster_error(error: RosterError) -> EngineError {
             true,
             "group_revocation",
         ),
+        RosterError::MemberRemovalInProgress => (
+            MEMBER_REMOVAL_IN_PROGRESS_CODE,
+            EngineErrorCategory::Conflict,
+            true,
+            "member_removal_in_progress",
+        ),
+        RosterError::MemberRemovalRecoveryRequired => (
+            MEMBER_REMOVAL_RECOVERY_REQUIRED_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+            "member_removal_recovery_required",
+        ),
+        RosterError::InvalidPermanentLossSelection => (
+            MEMBER_INVALID_PERMANENT_LOSS_SELECTION_CODE,
+            EngineErrorCategory::InvalidInput,
+            false,
+            "invalid_permanent_loss_selection",
+        ),
         RosterError::LegacyBootstrapRequired => (
             MEMBER_LEGACY_BOOTSTRAP_REQUIRED_CODE,
             EngineErrorCategory::InvalidState,
@@ -449,11 +502,43 @@ mod tests {
     }
 
     #[test]
+    fn active_member_removal_conflicts_have_stable_public_errors() {
+        let in_progress = map_roster_error(RosterError::MemberRemovalInProgress);
+        let recovery_required = map_roster_error(RosterError::MemberRemovalRecoveryRequired);
+
+        assert_eq!(in_progress.code(), MEMBER_REMOVAL_IN_PROGRESS_CODE);
+        assert_eq!(in_progress.category(), EngineErrorCategory::Conflict);
+        assert!(in_progress.is_retryable());
+        assert_eq!(
+            recovery_required.code(),
+            MEMBER_REMOVAL_RECOVERY_REQUIRED_CODE
+        );
+        assert_eq!(
+            recovery_required.category(),
+            EngineErrorCategory::InvalidState
+        );
+        assert!(!recovery_required.is_retryable());
+        let invalid_selection = map_roster_error(RosterError::InvalidPermanentLossSelection);
+        assert_eq!(
+            invalid_selection.code(),
+            MEMBER_INVALID_PERMANENT_LOSS_SELECTION_CODE
+        );
+        assert_eq!(
+            invalid_selection.category(),
+            EngineErrorCategory::InvalidInput
+        );
+        assert!(!invalid_selection.is_retryable());
+    }
+
+    #[test]
     fn member_revocation_progress_is_preserved_in_the_stable_result() {
         let result = member_revocation_result(MemberRevocationView {
             revocation_id: Some("revocation-a".into()),
             state: MemberRevocationState::Applied,
             pending_recipients: 2,
+            removed_device_ids: vec!["dev-removed".into()],
+            pending_recipient_device_ids: vec!["dev-c".into(), "dev-d".into()],
+            updated_at_ms: 123,
         });
 
         assert_eq!(
@@ -462,6 +547,9 @@ mod tests {
                 revocation_id: Some("revocation-a".into()),
                 outcome: MemberRevocationOutcome::Applied,
                 pending_recipients: 2,
+                removed_device_ids: vec!["dev-removed".into()],
+                pending_recipient_device_ids: vec!["dev-c".into(), "dev-d".into()],
+                updated_at_ms: 123,
             })
         );
     }

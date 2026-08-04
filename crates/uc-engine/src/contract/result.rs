@@ -888,6 +888,9 @@ pub struct MemberRevocationSummary {
     pub revocation_id: Option<String>,
     pub outcome: MemberRevocationOutcome,
     pub pending_recipients: u64,
+    pub removed_device_ids: Vec<String>,
+    pub pending_recipient_device_ids: Vec<String>,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

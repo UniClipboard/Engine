@@ -328,6 +328,9 @@ pub enum BindingEvent {
         state: String,
         at_ms: i64,
     },
+    MemberRevocationChanged {
+        revocation: MemberRevocationResult,
+    },
     TransferProgress {
         transfer_id: String,
         entry_id: Option<String>,

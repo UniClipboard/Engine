@@ -729,6 +729,28 @@ impl AppFacade {
         self.member_roster.query_revocation(revocation_id).await
     }
 
+    pub async fn current_member_revocation(
+        &self,
+    ) -> Result<Option<crate::facade::MemberRevocationView>, RosterError> {
+        self.member_roster.current_member_revocation().await
+    }
+
+    pub async fn continue_member_revocation(
+        &self,
+        revocation_id: &str,
+        permanently_lost_device_ids: &[String],
+    ) -> Result<crate::facade::MemberRevocationView, RosterError> {
+        self.member_roster
+            .continue_member_revocation(revocation_id, permanently_lost_device_ids)
+            .await
+    }
+
+    pub fn subscribe_member_revocation_events(
+        &self,
+    ) -> broadcast::Receiver<crate::facade::MemberRevocationView> {
+        self.member_roster.subscribe_member_revocation_events()
+    }
+
     pub async fn diagnostics_status(
         &self,
     ) -> Result<crate::facade::DebugStatusView, crate::facade::DiagnosticsFacadeError> {

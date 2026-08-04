@@ -13,12 +13,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use uc_engine::{
-    CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent, ExportEntryInput,
-    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
-    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
-    HostSecureStorage, JoinSpaceInput, Operation, OperationResult, QueryHistoryInput,
-    ResendEntryInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    UnlockSpaceInput,
+    ContinueMemberRevocationInput, CreateSpaceInput, Engine, EngineConfig, EngineError,
+    EngineEvent, ExportEntryInput, HostCapabilities, HostCapabilityError,
+    HostCapabilityErrorCategory, HostClipboard, HostClipboardSnapshot, HostDirectories,
+    HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput, Operation,
+    OperationResult, QueryHistoryInput, RemoveMemberInput, ResendEntryInput, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput, UnlockSpaceInput,
 };
 
 #[cfg(target_os = "android")]
@@ -55,6 +55,14 @@ enum ProbeCommand {
     IssueInvitation,
     ListDevices,
     QueryMembershipConvergence,
+    RemoveMember {
+        device_id: String,
+    },
+    QueryCurrentMemberRevocation,
+    ContinueMemberRevocation {
+        revocation_id: String,
+        permanently_lost_device_ids: Vec<String>,
+    },
     SendText {
         text: String,
     },
@@ -147,6 +155,8 @@ struct EventSummary {
     lifecycle_failures: u64,
     fatal_errors: u64,
     last_state: Option<String>,
+    member_revocation_changes: u64,
+    last_member_revocation: Option<uc_engine::MemberRevocationSummary>,
 }
 
 #[derive(Clone)]
@@ -422,6 +432,29 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         ProbeCommand::QueryMembershipConvergence => {
             execute_operation(state, Operation::QueryMembershipConvergence).await
         }
+        ProbeCommand::RemoveMember { device_id } => {
+            execute_operation(
+                state,
+                Operation::RemoveMember(RemoveMemberInput { device_id }),
+            )
+            .await
+        }
+        ProbeCommand::QueryCurrentMemberRevocation => {
+            execute_operation(state, Operation::QueryCurrentMemberRevocation).await
+        }
+        ProbeCommand::ContinueMemberRevocation {
+            revocation_id,
+            permanently_lost_device_ids,
+        } => {
+            execute_operation(
+                state,
+                Operation::ContinueMemberRevocation(ContinueMemberRevocationInput {
+                    revocation_id,
+                    permanently_lost_device_ids,
+                }),
+            )
+            .await
+        }
         ProbeCommand::SendText { text } => {
             execute_operation(
                 state,
@@ -528,6 +561,8 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 "lifecycle_failures": events.lifecycle_failures,
                 "fatal_errors": events.fatal_errors,
                 "last_state": events.last_state,
+                "member_revocation_changes": events.member_revocation_changes,
+                "last_member_revocation": events.last_member_revocation,
             })
         }
         ProbeCommand::Shutdown => match state.engine.take() {
@@ -1033,6 +1068,9 @@ fn operation_response(result: OperationResult) -> Value {
             "revocation_id": summary.revocation_id,
             "outcome": summary.outcome,
             "pending_recipients": summary.pending_recipients,
+            "removed_device_ids": summary.removed_device_ids,
+            "pending_recipient_device_ids": summary.pending_recipient_device_ids,
+            "updated_at_ms": summary.updated_at_ms,
         }),
         OperationResult::MemberRevocationStatus(summary) => json!({
             "ok": true,
@@ -1360,6 +1398,10 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
         }
         EngineEvent::PeerPresenceChanged(_) => summary.refresh_requests += 1,
         EngineEvent::PairingCompleted(_) => {}
+        EngineEvent::MemberRevocationChanged(revocation) => {
+            summary.member_revocation_changes += 1;
+            summary.last_member_revocation = Some(revocation);
+        }
         EngineEvent::ActiveClipboardChanged(_) => summary.refresh_requests += 1,
         EngineEvent::MobileLanSettingsChanged(_) => summary.refresh_requests += 1,
         EngineEvent::RefreshRequired { .. } => summary.refresh_requests += 1,
@@ -1486,6 +1528,60 @@ mod tests {
         let response = execute_command(&mut state, command).await;
 
         assert_eq!(response, probe_error("not_started"));
+    }
+
+    #[tokio::test]
+    async fn member_revocation_commands_reach_the_engine_boundary() {
+        let commands = [
+            r#"{"command":"remove_member","device_id":"device-2"}"#,
+            r#"{"command":"query_current_member_revocation"}"#,
+            r#"{"command":"continue_member_revocation","revocation_id":"revocation-1","permanently_lost_device_ids":["device-3"]}"#,
+        ];
+
+        for source in commands {
+            let command: ProbeCommand =
+                serde_json::from_str(source).expect("member revocation command must deserialize");
+            let mut state = ProbeState {
+                engine: None,
+                files: ProbeFiles::default(),
+                events: Arc::new(Mutex::new(EventSummary::default())),
+            };
+
+            assert_eq!(
+                execute_command(&mut state, command).await,
+                probe_error("not_started")
+            );
+        }
+    }
+
+    #[test]
+    fn member_revocation_result_and_event_keep_the_same_complete_snapshot() {
+        let summary = uc_engine::MemberRevocationSummary {
+            revocation_id: Some("revocation-1".into()),
+            outcome: uc_engine::MemberRevocationOutcome::Applied,
+            pending_recipients: 1,
+            removed_device_ids: vec!["removed-1".into()],
+            pending_recipient_device_ids: vec!["waiting-1".into()],
+            updated_at_ms: 42,
+        };
+        let response = operation_response(OperationResult::MemberRemoved(summary.clone()));
+        let events = Arc::new(Mutex::new(EventSummary::default()));
+        record_event(
+            &events,
+            EngineEvent::MemberRevocationChanged(summary.clone()),
+        );
+        let events = lock_unpoisoned(&events);
+
+        assert_eq!(response["revocation_id"], "revocation-1");
+        assert_eq!(response["pending_recipients"], 1);
+        assert_eq!(response["removed_device_ids"], json!(["removed-1"]));
+        assert_eq!(
+            response["pending_recipient_device_ids"],
+            json!(["waiting-1"])
+        );
+        assert_eq!(response["updated_at_ms"], 42);
+        assert_eq!(events.member_revocation_changes, 1);
+        assert_eq!(events.last_member_revocation.as_ref(), Some(&summary));
     }
 
     #[test]

@@ -2,7 +2,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{EngineError, EngineState, LifecycleAction, OperationTerminal};
+use super::{
+    EngineError, EngineState, LifecycleAction, MemberRevocationSummary, OperationTerminal,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +37,7 @@ pub enum EngineEvent {
     PeerPresenceChanged(PeerPresenceChanged),
     /// A sponsor-side pairing handshake reached a terminal result.
     PairingCompleted(PairingCompletion),
+    MemberRevocationChanged(MemberRevocationSummary),
     ActiveClipboardChanged(ActiveClipboardChanged),
     MobileLanSettingsChanged(MobileLanSettingsChanged),
     RefreshRequired {
@@ -66,6 +69,7 @@ impl EngineEvent {
             Self::DeliveryStatusChanged(_) => "delivery_status_changed",
             Self::PeerPresenceChanged(_) => "peer_presence_changed",
             Self::PairingCompleted(_) => "pairing_completed",
+            Self::MemberRevocationChanged(_) => "member_revocation_changed",
             Self::ActiveClipboardChanged(_) => "active_clipboard_changed",
             Self::MobileLanSettingsChanged(_) => "mobile_lan_settings_changed",
             Self::RefreshRequired { .. } => "refresh_required",

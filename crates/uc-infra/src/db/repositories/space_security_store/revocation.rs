@@ -311,6 +311,94 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         Ok(Some(stage))
     }
 
+    async fn commit_revocation_recovery(
+        &self,
+        stage: &RevocationStage,
+        material: &SpaceKeyMaterial,
+    ) -> Result<RevocationRecord, KeyEpochError> {
+        let record = stage.record();
+        if !matches!(
+            record.status(),
+            RevocationStatus::Distributing | RevocationStatus::Complete
+        ) || material.state().space_id() != record.space_id()
+            || material.state().epoch() != record.next_epoch()
+            || stage.next_space_state() != material.state()
+            || stage.group_state() != material.group_state()
+            || stage.key_catalog() != material.key_catalog()
+        {
+            return Err(backend("invalid revocation recovery payload"));
+        }
+        let master_key = self.session.get_master_key().map_err(backend)?;
+        let encrypted_record = seal(
+            &master_key,
+            record,
+            &record_aad(
+                record.revocation_id().as_str(),
+                status_name(record.status()),
+            ),
+        )?;
+        let encrypted_stage = if record.status() == RevocationStatus::Complete {
+            None
+        } else {
+            Some(seal(
+                &master_key,
+                stage,
+                &stage_aad(record.revocation_id().as_str()),
+            )?)
+        };
+        let revocation_id = record.revocation_id().as_str().to_owned();
+        let previous_epoch = epoch_to_i64(record.previous_epoch().value())?;
+        let next_epoch = epoch_to_i64(record.next_epoch().value())?;
+        let status = status_name(record.status()).to_owned();
+        let updated_at_ms = record.updated_at_ms();
+        let record = record.clone();
+        let stage = stage.clone();
+        let material = material.clone();
+        self.executor
+            .run(move |conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let row = load_revocation_row(conn, &revocation_id)?
+                        .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
+                    let existing_record = decode_record(&master_key, &row)
+                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let existing_stage: RevocationStage = open(
+                        &master_key,
+                        row.encrypted_stage
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?,
+                        &stage_aad(&revocation_id),
+                    )
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    if existing_record.status() != RevocationStatus::Distributing
+                        || existing_stage.generation_count() >= stage.generation_count()
+                        || existing_record.next_epoch() >= record.next_epoch()
+                    {
+                        return Err(anyhow::anyhow!("revocation recovery is not append-only"));
+                    }
+                    save_space_material_on(conn, &master_key, &material)
+                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let affected = diesel::sql_query(
+                        "UPDATE member_revocation_log SET previous_epoch = ?, next_epoch = ?, \
+                         status = ?, encrypted_record = ?, encrypted_stage = ?, updated_at_ms = ? \
+                         WHERE revocation_id = ? AND status = 'distributing'",
+                    )
+                    .bind::<BigInt, _>(previous_epoch)
+                    .bind::<BigInt, _>(next_epoch)
+                    .bind::<Text, _>(&status)
+                    .bind::<Binary, _>(&encrypted_record)
+                    .bind::<Nullable<Binary>, _>(&encrypted_stage)
+                    .bind::<BigInt, _>(updated_at_ms)
+                    .bind::<Text, _>(&revocation_id)
+                    .execute(conn)?;
+                    if affected != 1 {
+                        return Err(anyhow::anyhow!("revocation recovery was not saved"));
+                    }
+                    Ok(record)
+                })
+            })
+            .map_err(backend)
+    }
+
     async fn activate_revocation(
         &self,
         revocation_id: &RevocationId,

@@ -1,16 +1,16 @@
 use uc_engine::{
-    ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
-    EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
-    EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
-    JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary, LocalDeviceSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MembershipConvergenceStateSummary,
-    MembershipConvergenceSummary, MigrationPhaseSummary, MigrationProgressSummary, Operation,
-    OperationKind, OperationResult, QueryHistoryInput, QueryLegacyBootstrapInput,
-    QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
-    ResendEntryInput, SearchEntriesInput, SearchPageSummary, SearchResultSummary, SecretString,
-    SendFilesInput, SendImageInput, SendTextInput, SetupInvitationSummary, SetupStateSummary,
-    SpaceProtectionModeSummary, SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
-    UpdateMemberSyncPreferencesInput,
+    ContentTypesPatch, ContentTypesSummary, ContinueMemberRevocationInput, CreateSpaceInput,
+    DeviceSummary, EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory,
+    EngineEvent, EngineState, EntrySummary, ExportEntryInput, HostFileHandle,
+    InvitationAvailability, JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary,
+    LocalDeviceSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
+    MembershipConvergenceStateSummary, MembershipConvergenceSummary, MigrationPhaseSummary,
+    MigrationProgressSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
+    QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
+    RemoveMemberInput, ResendEntryInput, SearchEntriesInput, SearchPageSummary,
+    SearchResultSummary, SecretString, SendFilesInput, SendImageInput, SendTextInput,
+    SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary, SpaceProtectionSummary,
+    StorageStatsSummary, UnlockSpaceInput, UpdateMemberSyncPreferencesInput,
 };
 
 #[test]
@@ -133,6 +133,17 @@ fn every_public_operation_has_a_stable_kind() {
                 device_id: "member-1".into(),
             }),
             OperationKind::SecureRemoveLegacyMember,
+        ),
+        (
+            Operation::QueryCurrentMemberRevocation,
+            OperationKind::QueryCurrentMemberRevocation,
+        ),
+        (
+            Operation::ContinueMemberRevocation(ContinueMemberRevocationInput {
+                revocation_id: "revocation-a".into(),
+                permanently_lost_device_ids: vec!["member-2".into()],
+            }),
+            OperationKind::ContinueMemberRevocation,
         ),
         (
             Operation::QueryLegacyBootstrap(QueryLegacyBootstrapInput {
@@ -1280,6 +1291,9 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
             revocation_id: Some("revocation-a".into()),
             outcome: uc_engine::MemberRevocationOutcome::Applied,
             pending_recipients: 1,
+            removed_device_ids: vec!["dev-removed".into()],
+            pending_recipient_device_ids: vec!["dev-waiting".into()],
+            updated_at_ms: 123,
         })
     )
     .contains("member_removed"));
@@ -1578,6 +1592,20 @@ fn lagged_consumers_receive_a_refresh_event() {
         reason: RefreshReason::ConsumerLagged,
     };
     assert_eq!(event.kind(), "refresh_required");
+}
+
+#[test]
+fn member_revocation_changes_expose_a_full_replacement_snapshot() {
+    let event = EngineEvent::MemberRevocationChanged(uc_engine::MemberRevocationSummary {
+        revocation_id: Some("revocation-a".into()),
+        outcome: uc_engine::MemberRevocationOutcome::Applied,
+        pending_recipients: 1,
+        removed_device_ids: vec!["dev-removed".into()],
+        pending_recipient_device_ids: vec!["dev-waiting".into()],
+        updated_at_ms: 123,
+    });
+
+    assert_eq!(event.kind(), "member_revocation_changed");
 }
 
 #[test]

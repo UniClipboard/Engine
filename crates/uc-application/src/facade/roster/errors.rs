@@ -46,6 +46,15 @@ pub enum RosterError {
     #[error("failed to revoke group member: {0}")]
     GroupRevocation(String),
 
+    #[error("another member removal is already in progress")]
+    MemberRemovalInProgress,
+
+    #[error("the active member removal requires security recovery")]
+    MemberRemovalRecoveryRequired,
+
+    #[error("permanently lost devices must be waiting in the active member removal")]
+    InvalidPermanentLossSelection,
+
     #[error("legacy space requires a secure bootstrap before member removal")]
     LegacyBootstrapRequired,
 

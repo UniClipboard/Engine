@@ -612,6 +612,124 @@ async fn distribution_progress_survives_restart_and_completes_after_all_confirma
 }
 
 #[tokio::test]
+async fn permanent_loss_recovery_is_atomic_and_survives_restart() {
+    let (repo, pool, _tempdir) = make_repo();
+    seed_current_space(&repo).await;
+    let mut record = RevocationRecord::prepare_with_recipients(
+        RevocationId::from_string("revocation-recovery").unwrap(),
+        SpaceId::from_str("space-sensitive"),
+        DeviceId::new("removed-device-sensitive"),
+        vec![
+            DeviceId::new("lost-device-sensitive"),
+            DeviceId::new("retained-device-sensitive"),
+        ],
+        GroupEpoch::new(1),
+        100,
+    )
+    .unwrap();
+    repo.begin_revocation(&record).await.unwrap();
+    record.transition_to(RevocationStatus::Staged, 110).unwrap();
+    let mut first_state = ready_state();
+    first_state
+        .rotate(ContentKeyId::from_string("content-key-next").unwrap())
+        .unwrap();
+    let stage = RevocationStage::new(
+        record,
+        first_state,
+        b"group-state-sensitive".to_vec(),
+        b"key-catalog-sensitive".to_vec(),
+        vec![
+            RevocationOutboxMessage::new(
+                DeviceId::new("lost-device-sensitive"),
+                b"lost-commit-sensitive".to_vec(),
+            ),
+            RevocationOutboxMessage::new(
+                DeviceId::new("retained-device-sensitive"),
+                b"retained-commit-sensitive".to_vec(),
+            ),
+        ],
+    )
+    .unwrap();
+    let revocation_id = stage.record().revocation_id().clone();
+    repo.stage_revocation(&stage).await.unwrap();
+    repo.activate_revocation(&revocation_id, 120).await.unwrap();
+    repo.start_distribution(&revocation_id, 130).await.unwrap();
+    repo.acknowledge_recipient(
+        &revocation_id,
+        &DeviceId::new("retained-device-sensitive"),
+        140,
+    )
+    .await
+    .unwrap();
+    let mut recovery = repo
+        .load_staged_revocation(&revocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut next_state = recovery.next_space_state().clone();
+    next_state
+        .rotate(ContentKeyId::from_string("content-key-recovery").unwrap())
+        .unwrap();
+    recovery
+        .append_recovery_generation(
+            &DeviceId::new("lost-device-sensitive"),
+            next_state.clone(),
+            b"recovery-group-state-sensitive".to_vec(),
+            b"recovery-key-catalog-sensitive".to_vec(),
+            vec![RevocationOutboxMessage::new(
+                DeviceId::new("retained-device-sensitive"),
+                b"recovery-commit-sensitive".to_vec(),
+            )],
+            150,
+        )
+        .unwrap();
+    let material = SpaceKeyMaterial::new(
+        next_state,
+        b"recovery-group-state-sensitive".to_vec(),
+        b"recovery-key-catalog-sensitive".to_vec(),
+        150,
+    );
+
+    repo.commit_revocation_recovery(&recovery, &material)
+        .await
+        .unwrap();
+    assert!(repo
+        .commit_revocation_recovery(&recovery, &material)
+        .await
+        .is_err());
+    drop(repo);
+
+    let reopened = reopen_repo(&pool);
+    let restored = reopened
+        .load_staged_revocation(&revocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.generation_count(), 2);
+    assert_eq!(
+        restored.removed_device_ids(),
+        vec![
+            DeviceId::new("removed-device-sensitive"),
+            DeviceId::new("lost-device-sensitive")
+        ]
+    );
+    assert_eq!(
+        restored.pending_recipient_device_ids(),
+        vec![DeviceId::new("retained-device-sensitive")]
+    );
+    assert_eq!(
+        reopened
+            .load_space_material(&SpaceId::from_str("space-sensitive"))
+            .await
+            .unwrap()
+            .unwrap()
+            .state()
+            .epoch(),
+        GroupEpoch::new(3)
+    );
+}
+
+#[tokio::test]
 async fn pending_legacy_upgrade_join_survives_restart_without_plaintext_storage() {
     let (repo, pool, _tempdir) = make_repo();
     let peer = DeviceId::new("peer-device-sensitive");

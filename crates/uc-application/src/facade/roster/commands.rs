@@ -29,6 +29,9 @@ pub struct MemberRevocationView {
     pub revocation_id: Option<String>,
     pub state: MemberRevocationState,
     pub pending_recipients: usize,
+    pub removed_device_ids: Vec<String>,
+    pub pending_recipient_device_ids: Vec<String>,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -84,6 +84,9 @@ pub struct OhMemberRevocation {
     pub revocation_id: Option<String>,
     pub outcome: String,
     pub pending_recipients: u32,
+    pub removed_device_ids: Vec<String>,
+    pub pending_recipient_device_ids: Vec<String>,
+    pub updated_at_ms: f64,
 }
 
 #[napi(object)]
@@ -132,6 +135,7 @@ pub struct OhEngineEvent {
     pub error_code: Option<u32>,
     pub error_category: Option<String>,
     pub retryable: Option<bool>,
+    pub member_revocation: Option<OhMemberRevocation>,
 }
 
 pub struct PreparedHost {
