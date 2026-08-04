@@ -14,6 +14,8 @@ test('notifies consumers only after release publication and interop verification
   assert.match(workflow, /if:\s*\$\{\{\s*needs\.assemble\.outputs\.published == 'true'\s*\}\}/)
   assert.match(workflow, /event_type:\s*["']engine_release_published["']/)
   assert.match(workflow, /test_pair_e2e\.sh/)
+  assert.match(workflow, /-p\s+uc-daemon\s+--bin\s+uniclipd/)
+  assert.match(workflow, /-p\s+uc-cli\s+--bin\s+uniclip/)
   assert.match(workflow, /ALICE_CLI:\s*.*old[\s\S]*BOB_CLI:\s*.*new/)
   assert.match(workflow, /ALICE_CLI:\s*.*new[\s\S]*BOB_CLI:\s*.*old/)
 })

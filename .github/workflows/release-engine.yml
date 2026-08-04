@@ -287,7 +287,8 @@ jobs:
           cargo build \
             --manifest-path old-desktop/Cargo.toml \
             --target-dir "$RUNNER_TEMP/old-target" \
-            -p uc-daemon -p uc-cli \
+            -p uc-daemon --bin uniclipd \
+            -p uc-cli --bin uniclip \
             --features uc-cli/dev-tools \
             --locked
 
@@ -301,7 +302,8 @@ jobs:
           cargo build \
             --manifest-path new-desktop/Cargo.toml \
             --target-dir "$RUNNER_TEMP/new-target" \
-            -p uc-daemon -p uc-cli \
+            -p uc-daemon --bin uniclipd \
+            -p uc-cli --bin uniclip \
             --features uc-cli/dev-tools \
             --locked
 
