@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Binary, Nullable, Text};
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     BootstrapError, BootstrapId, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
     LegacyBootstrapStage, LegacyBootstrapStatus,
@@ -369,12 +369,15 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
             .map_err(|error| BootstrapError::Repository(error.to_string()))
     }
 
-    async fn list_incomplete_legacy_bootstraps(
+    async fn list_incomplete_legacy_bootstraps_for_space(
         &self,
+        space_id: &SpaceId,
     ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
         let master_key = self
             .session
             .get_master_key()
+            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+        let lookup_token = space_lookup_token(&master_key, space_id)
             .map_err(|error| BootstrapError::Repository(error.to_string()))?;
         self.executor
             .run(move |conn| {
@@ -382,8 +385,10 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                     "SELECT bootstrap_id, space_lookup_token, previous_epoch, next_epoch, status, \
                      encrypted_record, encrypted_stage, created_at_ms, updated_at_ms \
                      FROM legacy_space_bootstrap_log \
-                     WHERE status NOT IN ('complete', 'recovery_required')",
+                     WHERE space_lookup_token = ? \
+                     AND status NOT IN ('complete', 'recovery_required')",
                 )
+                .bind::<Text, _>(lookup_token)
                 .load::<LegacyBootstrapRow>(conn)?;
                 rows.iter()
                     .map(|row| {
@@ -395,18 +400,26 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
             .map_err(|error| BootstrapError::Repository(error.to_string()))
     }
 
-    async fn list_legacy_bootstraps(&self) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
+    async fn list_legacy_bootstraps_for_space(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
         let master_key = self
             .session
             .get_master_key()
+            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+        let lookup_token = space_lookup_token(&master_key, space_id)
             .map_err(|error| BootstrapError::Repository(error.to_string()))?;
         self.executor
             .run(move |conn| {
                 let rows = diesel::sql_query(
                     "SELECT bootstrap_id, space_lookup_token, previous_epoch, next_epoch, status, \
                      encrypted_record, encrypted_stage, created_at_ms, updated_at_ms \
-                     FROM legacy_space_bootstrap_log ORDER BY updated_at_ms DESC",
+                     FROM legacy_space_bootstrap_log \
+                     WHERE space_lookup_token = ? \
+                     ORDER BY updated_at_ms DESC",
                 )
+                .bind::<Text, _>(lookup_token)
                 .load::<LegacyBootstrapRow>(conn)?;
                 rows.iter()
                     .map(|row| {

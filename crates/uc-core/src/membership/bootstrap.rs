@@ -345,11 +345,15 @@ pub trait LegacyBootstrapRepositoryPort: Send + Sync {
         bootstrap_id: &BootstrapId,
     ) -> Result<Option<LegacyBootstrapRecord>, BootstrapError>;
 
-    async fn list_incomplete_legacy_bootstraps(
+    async fn list_incomplete_legacy_bootstraps_for_space(
         &self,
+        space_id: &SpaceId,
     ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError>;
 
-    async fn list_legacy_bootstraps(&self) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError>;
+    async fn list_legacy_bootstraps_for_space(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError>;
 
     async fn acknowledge_legacy_readmission(
         &self,

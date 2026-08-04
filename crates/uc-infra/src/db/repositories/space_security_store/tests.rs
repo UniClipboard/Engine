@@ -537,7 +537,9 @@ async fn legacy_bootstrap_activation_is_atomic_and_waits_for_readmission() {
         stage.material().clone()
     );
     assert_eq!(
-        repo.list_incomplete_legacy_bootstraps().await.unwrap(),
+        repo.list_incomplete_legacy_bootstraps_for_space(&SpaceId::from_str("space-sensitive"))
+            .await
+            .unwrap(),
         vec![activated.clone()]
     );
 
@@ -551,7 +553,42 @@ async fn legacy_bootstrap_activation_is_atomic_and_waits_for_readmission() {
         .unwrap();
     assert_eq!(completed.status(), LegacyBootstrapStatus::Complete);
     assert!(repo
-        .list_incomplete_legacy_bootstraps()
+        .list_incomplete_legacy_bootstraps_for_space(&SpaceId::from_str("space-sensitive"))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn space_scoped_legacy_bootstrap_lists_do_not_decrypt_other_spaces() {
+    let (repo, pool, _tempdir) = make_repo();
+    let unrelated_space = SpaceId::from_str("old-space-sensitive");
+    repo.begin_legacy_bootstrap(
+        &LegacyBootstrapRecord::prepare(
+            BootstrapId::from_string("old-space-bootstrap-sensitive").unwrap(),
+            unrelated_space,
+            DeviceId::new("old-space-sponsor-sensitive"),
+            Vec::new(),
+            100,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    drop(repo);
+
+    let session = InMemorySession::new();
+    session.set_master_key(MasterKey::from_bytes(&[0x6b; 32]).unwrap());
+    let current_repo = DieselSpaceSecurityStore::new(DieselSqliteExecutor::new(pool), session);
+    let active_space = SpaceId::from_str("current-space-sensitive");
+
+    assert!(current_repo
+        .list_incomplete_legacy_bootstraps_for_space(&active_space)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(current_repo
+        .list_legacy_bootstraps_for_space(&active_space)
         .await
         .unwrap()
         .is_empty());

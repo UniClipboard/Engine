@@ -408,7 +408,10 @@ impl DefaultSpaceAccessAdapter {
         let Some(repository) = &self.legacy_bootstrap_repository else {
             return;
         };
-        let records = match repository.list_incomplete_legacy_bootstraps().await {
+        let records = match repository
+            .list_incomplete_legacy_bootstraps_for_space(space_id)
+            .await
+        {
             Ok(records) => records,
             Err(error) => {
                 warn!(error = %error, "legacy bootstrap readmission lookup failed after group admission");
@@ -416,8 +419,7 @@ impl DefaultSpaceAccessAdapter {
             }
         };
         for record in records {
-            if record.space_id() != space_id
-                || record.status() != LegacyBootstrapStatus::AwaitingReadmission
+            if record.status() != LegacyBootstrapStatus::AwaitingReadmission
                 || !record
                     .pending_readmission()
                     .iter()
@@ -2282,11 +2284,13 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
         let repository = self.legacy_bootstrap_repository.as_ref().ok_or_else(|| {
             BootstrapError::Repository("legacy bootstrap is not configured".into())
         })?;
-        let records = repository.list_incomplete_legacy_bootstraps().await?;
         let active_space_id = self
             .session
             .current_space_id()
             .map_err(|_| BootstrapError::CryptographicState)?;
+        let records = repository
+            .list_incomplete_legacy_bootstraps_for_space(&active_space_id)
+            .await?;
         let active_material = self
             .key_epoch_repository
             .as_ref()
@@ -2382,13 +2386,12 @@ impl SpaceProtectionStatusPort for DefaultSpaceAccessAdapter {
             .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?;
         let legacy_bootstrap = if let Some(repository) = &self.legacy_bootstrap_repository {
             repository
-                .list_legacy_bootstraps()
+                .list_legacy_bootstraps_for_space(&space_id)
                 .await
                 .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?
                 .into_iter()
                 .find(|record| {
-                    record.space_id() == &space_id
-                        && record.status() != LegacyBootstrapStatus::Complete
+                    record.status() != LegacyBootstrapStatus::Complete
                         && material.as_ref().is_none_or(|material| {
                             material.state().mode() != SpaceSecurityMode::Ready
                                 || material
@@ -2652,23 +2655,32 @@ mod admission_tests {
                 .cloned())
         }
 
-        async fn list_incomplete_legacy_bootstraps(
+        async fn list_incomplete_legacy_bootstraps_for_space(
             &self,
+            space_id: &SpaceId,
         ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
             Ok(self
                 .record
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|record| !record.status().is_terminal())
+                .filter(|record| record.space_id() == space_id && !record.status().is_terminal())
                 .cloned()
                 .collect())
         }
 
-        async fn list_legacy_bootstraps(
+        async fn list_legacy_bootstraps_for_space(
             &self,
+            space_id: &SpaceId,
         ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
-            Ok(self.record.lock().unwrap().iter().cloned().collect())
+            Ok(self
+                .record
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|record| record.space_id() == space_id)
+                .cloned()
+                .collect())
         }
 
         async fn acknowledge_legacy_readmission(
