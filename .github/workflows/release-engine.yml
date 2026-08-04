@@ -25,6 +25,11 @@ on:
         required: false
         type: boolean
         default: true
+      reverify_existing_release:
+        description: Re-run interoperability checks for an existing immutable Release
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -54,6 +59,7 @@ jobs:
           PUSH_TAG: ${{ github.ref_name }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_MATRIX: ${{ inputs.device_matrix_path }}
+          REVERIFY_EXISTING: ${{ inputs.reverify_existing_release }}
         run: |
           if [[ "$EVENT_NAME" == "push" ]]; then
             tag="$PUSH_TAG"
@@ -63,17 +69,25 @@ jobs:
             matrix="$INPUT_MATRIX"
           fi
           node scripts/release/verify-version.mjs "$tag" uc-engine
-          if [[ ! -f "$matrix" ]]; then
-            echo "Device matrix must be a tracked file in this commit: $matrix" >&2
+          if [[ "$REVERIFY_EXISTING" == "true" ]]; then
+            commit=$(git rev-list -n 1 "$tag")
+            if [[ -z "$commit" ]]; then
+              echo "Existing release tag did not resolve to a commit: $tag" >&2
+              exit 1
+            fi
+          else
+            commit=$(git rev-parse HEAD)
+          fi
+          if ! git cat-file -e "$commit:$matrix"; then
+            echo "Device matrix must be tracked by the release commit: $matrix" >&2
             exit 1
           fi
-          git ls-files --error-unmatch "$matrix" >/dev/null
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "device_matrix_path=$matrix" >> "$GITHUB_OUTPUT"
 
       - name: Refuse mutable or duplicate release names
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && !inputs.reverify_existing_release }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
@@ -196,16 +210,22 @@ jobs:
           retention-days: 14
 
       - id: publication
-        name: Create immutable GitHub Release
+        name: Create or verify immutable GitHub Release
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
           PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
+          REVERIFY_EXISTING: ${{ github.event_name == 'workflow_dispatch' && inputs.reverify_existing_release }}
           ASSET_DIR: ${{ runner.temp }}/engine-dist/release-assets
         shell: bash
         run: |
+          if [[ "$REVERIFY_EXISTING" == "true" ]]; then
+            gh release view "$TAG" >/dev/null
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           prerelease_flag=()
           if [[ "$PRERELEASE" == "true" ]]; then prerelease_flag+=(--prerelease); fi
           gh release create "$TAG" \

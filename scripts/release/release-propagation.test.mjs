@@ -16,6 +16,8 @@ test('notifies consumers only after release publication and interop verification
   assert.match(workflow, /test_pair_e2e\.sh/)
   assert.match(workflow, /-p\s+uc-daemon\s+--bin\s+uniclipd/)
   assert.match(workflow, /-p\s+uc-cli\s+--bin\s+uniclip/)
+  assert.match(workflow, /reverify_existing_release/)
+  assert.match(workflow, /commit=\$\(git rev-list -n 1 "\$tag"\)/)
   assert.match(workflow, /ALICE_CLI:\s*.*old[\s\S]*BOB_CLI:\s*.*new/)
   assert.match(workflow, /ALICE_CLI:\s*.*new[\s\S]*BOB_CLI:\s*.*old/)
 })
