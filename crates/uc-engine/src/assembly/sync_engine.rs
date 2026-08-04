@@ -708,9 +708,6 @@ pub async fn build_sync_engine_assembly(
             &deps.security.space_access_ports.space_protection,
         )),
     );
-    if let Err(error) = roster.resume_incomplete_revocations().await {
-        warn!(error = %error, "pending group updates could not resume during startup");
-    }
     if let Err(error) = roster.resume_legacy_bootstraps().await {
         warn!(error = %error, "legacy bootstrap recovery could not resume during startup");
     }

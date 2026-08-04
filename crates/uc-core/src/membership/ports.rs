@@ -409,6 +409,12 @@ pub trait RevocationRepositoryPort: Send + Sync {
         revocation_id: &RevocationId,
     ) -> Result<Option<RevocationStage>, KeyEpochError>;
 
+    async fn commit_revocation_recovery(
+        &self,
+        stage: &RevocationStage,
+        material: &SpaceKeyMaterial,
+    ) -> Result<RevocationRecord, KeyEpochError>;
+
     async fn activate_revocation(
         &self,
         revocation_id: &RevocationId,
@@ -456,6 +462,23 @@ pub trait GroupRevocationPort: Send + Sync {
         &self,
         revocation_id: &RevocationId,
     ) -> Result<Option<GroupRevocationResult>, KeyEpochError>;
+
+    async fn current_group_revocation(
+        &self,
+    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+        Ok(None)
+    }
+
+    async fn continue_group_revocation(
+        &self,
+        _revocation_id: &RevocationId,
+        _permanently_lost_device_ids: &[DeviceId],
+        _now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        Err(KeyEpochError::Repository(
+            "member revocation recovery unavailable".into(),
+        ))
+    }
 
     async fn resume_group_revocations(
         &self,

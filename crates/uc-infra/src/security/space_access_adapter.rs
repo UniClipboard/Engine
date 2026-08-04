@@ -11,6 +11,7 @@
 //! `EncryptionRepository` 一致——V1 加密协议 (Argon2id KDF +
 //! XChaCha20-Poly1305 wrap/unwrap) ironclad 保留。
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -983,13 +984,16 @@ impl DefaultSpaceAccessAdapter {
         let Some(stage) = repository.load_staged_revocation(revocation_id).await? else {
             return Ok(Vec::new());
         };
+        let mut recipients = HashSet::new();
         Ok(stage
             .outbox()
             .iter()
             .filter(|message| !message.is_confirmed())
+            .filter(|message| recipients.insert(message.recipient().clone()))
             .map(|message| {
-                PendingGroupUpdate::new(
+                PendingGroupUpdate::for_generation(
                     revocation_id.clone(),
+                    GroupEpoch::new(message.generation()),
                     message.recipient().clone(),
                     message.payload().to_vec(),
                 )
@@ -1011,6 +1015,126 @@ impl DefaultSpaceAccessAdapter {
         Self::group_revocation_result(repository.as_ref(), &record)
             .await
             .map(Some)
+    }
+
+    async fn current_group_revocation(
+        &self,
+    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+        let repository = self
+            .key_epoch_repository
+            .as_ref()
+            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+        let current = repository
+            .list_incomplete_revocations()
+            .await?
+            .into_iter()
+            .find(|record| record.space_id() == &space_id);
+        match current {
+            Some(record) => Self::group_revocation_result(repository.as_ref(), &record)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn continue_group_revocation(
+        &self,
+        revocation_id: &RevocationId,
+        permanently_lost_device_ids: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        let repository = self
+            .key_epoch_repository
+            .as_ref()
+            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let record = repository
+            .get_revocation(revocation_id)
+            .await?
+            .ok_or_else(|| KeyEpochError::Repository("revocation not found".into()))?;
+        if record.status() == RevocationStatus::Complete {
+            return Self::group_revocation_result(repository.as_ref(), &record).await;
+        }
+        let mut stage = repository
+            .load_staged_revocation(revocation_id)
+            .await?
+            .ok_or_else(|| KeyEpochError::Repository("revocation stage unavailable".into()))?;
+        let pending = stage.pending_recipient_device_ids();
+        let mut unique = HashSet::new();
+        if permanently_lost_device_ids.is_empty()
+            || permanently_lost_device_ids
+                .iter()
+                .any(|device_id| !unique.insert(device_id.clone()) || !pending.contains(device_id))
+        {
+            return Err(KeyEpochError::PermanentLossRecipientNotPending);
+        }
+        let mut material = repository
+            .load_space_material(record.space_id())
+            .await?
+            .ok_or_else(|| KeyEpochError::Repository("space key material unavailable".into()))?;
+        for lost_device_id in permanently_lost_device_ids {
+            let removal = MlsGroupEngine::remove_member(
+                &MlsClientState::from_bytes(material.group_state().to_vec()),
+                lost_device_id.as_str().as_bytes(),
+            )
+            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+            if GroupEpoch::new(removal.epoch) != material.state().epoch().next()? {
+                return Err(KeyEpochError::Repository(
+                    "MLS recovery epoch mismatch".into(),
+                ));
+            }
+            let next = self
+                .session
+                .rotate_space_material(
+                    &material,
+                    removal.sponsor_state.into_bytes(),
+                    GroupEpoch::new(removal.epoch),
+                    now_ms,
+                )
+                .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+            let encrypted_key_catalog = seal_group_catalog(&removal.wrapping_key, &next)
+                .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+            let update = serde_json::to_vec(&GroupEpochUpdate {
+                version: 1,
+                group_epoch: removal.epoch,
+                commit: removal.commit,
+                encrypted_key_catalog,
+            })
+            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+            let outbox = stage
+                .record()
+                .retained_recipients()
+                .iter()
+                .filter(|recipient| !permanently_lost_device_ids.contains(recipient))
+                .cloned()
+                .map(|recipient| RevocationOutboxMessage::new(recipient, update.clone()))
+                .collect();
+            stage.append_recovery_generation(
+                lost_device_id,
+                next.state().clone(),
+                next.group_state().to_vec(),
+                next.key_catalog().to_vec(),
+                outbox,
+                now_ms,
+            )?;
+            material = SpaceKeyMaterial::new(
+                next.state().clone(),
+                next.group_state().to_vec(),
+                next.key_catalog().to_vec(),
+                now_ms,
+            )
+            .with_pending_group_updates_from_excluding_many(&material, permanently_lost_device_ids);
+        }
+        let record = repository
+            .commit_revocation_recovery(&stage, &material)
+            .await?;
+        self.session
+            .install_space_material(&material)
+            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+        Self::group_revocation_result(repository.as_ref(), &record).await
     }
 
     async fn resume_group_revocations(
@@ -1079,24 +1203,22 @@ impl DefaultSpaceAccessAdapter {
         repository: &dyn RevocationRepositoryPort,
         record: &RevocationRecord,
     ) -> Result<GroupRevocationResult, KeyEpochError> {
-        let pending_recipients = if record.status() == RevocationStatus::Distributing {
-            repository
-                .load_staged_revocation(record.revocation_id())
-                .await?
-                .ok_or_else(|| {
-                    KeyEpochError::Repository("revocation distribution payload missing".into())
-                })?
-                .outbox()
-                .iter()
-                .filter(|message| !message.is_confirmed())
-                .count()
+        let staged = repository
+            .load_staged_revocation(record.revocation_id())
+            .await?;
+        let pending_recipient_device_ids = if record.status() == RevocationStatus::Complete {
+            Vec::new()
+        } else if let Some(stage) = staged {
+            stage.pending_recipient_device_ids()
         } else {
-            0
+            record.retained_recipients().to_vec()
         };
         Ok(GroupRevocationResult::Reliable {
             revocation_id: record.revocation_id().clone(),
             status: record.status(),
-            pending_recipients,
+            removed_device_ids: record.removed_device_ids(),
+            pending_recipient_device_ids,
+            updated_at_ms: record.updated_at_ms(),
         })
     }
 
@@ -1970,6 +2092,27 @@ impl GroupRevocationPort for DefaultSpaceAccessAdapter {
         DefaultSpaceAccessAdapter::query_group_revocation(self, revocation_id).await
     }
 
+    async fn current_group_revocation(
+        &self,
+    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+        DefaultSpaceAccessAdapter::current_group_revocation(self).await
+    }
+
+    async fn continue_group_revocation(
+        &self,
+        revocation_id: &RevocationId,
+        permanently_lost_device_ids: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        DefaultSpaceAccessAdapter::continue_group_revocation(
+            self,
+            revocation_id,
+            permanently_lost_device_ids,
+            now_ms,
+        )
+        .await
+    }
+
     async fn resume_group_revocations(
         &self,
         now_ms: i64,
@@ -2587,6 +2730,11 @@ mod admission_tests {
                 &self,
                 revocation_id: &RevocationId,
             ) -> Result<Option<RevocationStage>, KeyEpochError>;
+            async fn commit_revocation_recovery(
+                &self,
+                stage: &RevocationStage,
+                material: &SpaceKeyMaterial,
+            ) -> Result<RevocationRecord, KeyEpochError>;
             async fn activate_revocation(
                 &self,
                 revocation_id: &RevocationId,
@@ -2700,6 +2848,22 @@ mod admission_tests {
                     .as_ref()
                     .filter(|value| value.record().revocation_id() == revocation_id)
                     .cloned())
+            });
+
+        let recovery_material = material.clone();
+        let recovery_record = record.clone();
+        let recovery_stage = stage.clone();
+        mock.expect_commit_revocation_recovery()
+            .returning(move |value, next_material| {
+                *recovery_material.lock().unwrap() = Some(next_material.clone());
+                *recovery_record.lock().unwrap() = Some(value.record().clone());
+                *recovery_stage.lock().unwrap() =
+                    if value.record().status() == RevocationStatus::Complete {
+                        None
+                    } else {
+                        Some(value.clone())
+                    };
+                Ok(value.record().clone())
             });
 
         let activate_material = material.clone();
@@ -3438,6 +3602,59 @@ mod admission_tests {
     }
 
     #[tokio::test]
+    async fn current_revocation_snapshot_survives_repository_restart() {
+        let directory = tempdir().unwrap();
+        let database_url = directory.path().join("current-revocation-restart.sqlite");
+        let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("space-revocation-restart");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x41; 32]).unwrap(),
+        );
+        let repository = Arc::new(DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            session.as_ref().clone(),
+        ));
+        let record = RevocationRecord::prepare_with_recipients(
+            RevocationId::from_string("revocation-restart").unwrap(),
+            space_id,
+            DeviceId::new("dev-removed"),
+            vec![DeviceId::new("dev-c"), DeviceId::new("dev-d")],
+            GroupEpoch::new(1),
+            123,
+        )
+        .unwrap();
+        repository.begin_revocation(&record).await.unwrap();
+        drop(repository);
+
+        let reopened: Arc<dyn RevocationRepositoryPort> = Arc::new(DieselSpaceSecurityStore::new(
+            DieselSqliteExecutor::new(pool),
+            session.as_ref().clone(),
+        ));
+        let restarted = DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(DefaultCurrentProfile::new()),
+            session,
+            reopened,
+        );
+
+        let current = restarted.current_group_revocation().await.unwrap().unwrap();
+
+        assert_eq!(
+            current.revocation_id().map(RevocationId::as_str),
+            Some("revocation-restart")
+        );
+        assert_eq!(current.removed_device_ids(), [DeviceId::new("dev-removed")]);
+        assert_eq!(
+            current.pending_recipient_device_ids(),
+            [DeviceId::new("dev-c"), DeviceId::new("dev-d")]
+        );
+        assert_eq!(current.pending_recipients(), 2);
+        assert_eq!(current.updated_at_ms(), 123);
+    }
+
+    #[tokio::test]
     async fn current_member_signature_port_uses_persisted_current_group() {
         let (adapter, _session, _repository, _space_id, _directory) = sponsor_fixture();
         let payload = b"member-attestation-transcript";
@@ -3850,6 +4067,15 @@ mod admission_tests {
 
         assert_eq!(result.status(), Some(RevocationStatus::Distributing));
         assert_eq!(result.pending_recipients(), 1);
+        let current = sponsor.current_group_revocation().await.unwrap().unwrap();
+        assert_eq!(current.revocation_id(), result.revocation_id());
+        assert_eq!(current.removed_device_ids(), [DeviceId::new("charlie")]);
+        assert_eq!(
+            current.pending_recipient_device_ids(),
+            [DeviceId::new("bob")]
+        );
+        assert_eq!(current.pending_recipients(), 1);
+        assert_eq!(current.updated_at_ms(), 100);
         let after = sponsor_session
             .current_content_key(&space_id, ContentKeyPurpose::Content)
             .unwrap();
@@ -3862,6 +4088,93 @@ mod admission_tests {
             .unwrap();
         assert_eq!(stage.outbox().len(), 1);
         assert_eq!(stage.outbox()[0].recipient(), &DeviceId::new("bob"));
+    }
+
+    #[tokio::test]
+    async fn permanent_loss_recovery_advances_the_same_revocation_in_order() {
+        let (sponsor, sponsor_session, _repository, space_id, _sponsor_dir) = sponsor_fixture();
+        for (device, retained) in [
+            ("bob", Vec::new()),
+            ("charlie", vec![DeviceId::new("bob")]),
+            ("dave", vec![DeviceId::new("bob"), DeviceId::new("charlie")]),
+        ] {
+            let pending = sponsor
+                .prepare_group_join(&DeviceId::new(device))
+                .await
+                .unwrap();
+            sponsor
+                .admit_group_member(
+                    &space_id,
+                    &DeviceId::new("alice"),
+                    &DeviceId::new(device),
+                    &retained,
+                    &pending.key_package,
+                )
+                .await
+                .unwrap();
+        }
+        let removal = sponsor
+            .revoke_group_member(
+                &DeviceId::new("charlie"),
+                &[DeviceId::new("bob"), DeviceId::new("dave")],
+                100,
+            )
+            .await
+            .unwrap();
+        let revocation_id = removal.revocation_id().unwrap().clone();
+        let before_epoch = sponsor_session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap()
+            .epoch();
+
+        assert_eq!(
+            sponsor
+                .continue_group_revocation(&revocation_id, &[DeviceId::new("alice")], 120,)
+                .await,
+            Err(KeyEpochError::PermanentLossRecipientNotPending)
+        );
+        let recovered = sponsor
+            .continue_group_revocation(&revocation_id, &[DeviceId::new("bob")], 130)
+            .await
+            .unwrap();
+
+        assert_eq!(recovered.revocation_id(), Some(&revocation_id));
+        assert_eq!(
+            recovered.removed_device_ids(),
+            [DeviceId::new("charlie"), DeviceId::new("bob")]
+        );
+        assert_eq!(
+            recovered.pending_recipient_device_ids(),
+            [DeviceId::new("dave")]
+        );
+        assert_eq!(
+            sponsor_session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            before_epoch.next().unwrap()
+        );
+        let pending = sponsor.pending_group_updates(&revocation_id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].recipient(), &DeviceId::new("dave"));
+        let first_update_id = pending[0].update_id().to_owned();
+        let after_first_ack = sponsor
+            .acknowledge_group_update(&revocation_id, &DeviceId::new("dave"), 140)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_first_ack.status(),
+            Some(RevocationStatus::Distributing)
+        );
+        let next_pending = sponsor.pending_group_updates(&revocation_id).await.unwrap();
+        assert_eq!(next_pending.len(), 1);
+        assert_eq!(next_pending[0].recipient(), &DeviceId::new("dave"));
+        assert_ne!(next_pending[0].update_id(), first_update_id);
+        let complete = sponsor
+            .acknowledge_group_update(&revocation_id, &DeviceId::new("dave"), 150)
+            .await
+            .unwrap();
+        assert_eq!(complete.status(), Some(RevocationStatus::Complete));
     }
 
     #[tokio::test]

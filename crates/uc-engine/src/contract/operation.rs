@@ -73,6 +73,8 @@ pub enum OperationKind {
     RemoveMember,
     SecureRemoveLegacyMember,
     QueryMemberRevocation,
+    QueryCurrentMemberRevocation,
+    ContinueMemberRevocation,
     QueryLegacyBootstrap,
     QuerySpaceProtection,
     SearchEntries,
@@ -166,6 +168,8 @@ impl fmt::Display for OperationKind {
             Self::RemoveMember => "remove_member",
             Self::SecureRemoveLegacyMember => "secure_remove_legacy_member",
             Self::QueryMemberRevocation => "query_member_revocation",
+            Self::QueryCurrentMemberRevocation => "query_current_member_revocation",
+            Self::ContinueMemberRevocation => "continue_member_revocation",
             Self::QueryLegacyBootstrap => "query_legacy_bootstrap",
             Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
@@ -261,6 +265,8 @@ pub enum Operation {
     RemoveMember(RemoveMemberInput),
     SecureRemoveLegacyMember(RemoveMemberInput),
     QueryMemberRevocation(QueryMemberRevocationInput),
+    QueryCurrentMemberRevocation,
+    ContinueMemberRevocation(ContinueMemberRevocationInput),
     QueryLegacyBootstrap(QueryLegacyBootstrapInput),
     QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
@@ -354,6 +360,8 @@ impl Operation {
             Self::RemoveMember(_) => OperationKind::RemoveMember,
             Self::SecureRemoveLegacyMember(_) => OperationKind::SecureRemoveLegacyMember,
             Self::QueryMemberRevocation(_) => OperationKind::QueryMemberRevocation,
+            Self::QueryCurrentMemberRevocation => OperationKind::QueryCurrentMemberRevocation,
+            Self::ContinueMemberRevocation(_) => OperationKind::ContinueMemberRevocation,
             Self::QueryLegacyBootstrap(_) => OperationKind::QueryLegacyBootstrap,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
@@ -477,6 +485,12 @@ pub struct RemoveMemberInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryMemberRevocationInput {
     pub revocation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinueMemberRevocationInput {
+    pub revocation_id: String,
+    pub permanently_lost_device_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

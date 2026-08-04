@@ -13,6 +13,7 @@ struct Index {
   @State private ready: boolean = false;
   @State private exporting: boolean = false;
   @State private convergenceState: string = 'complete';
+  @State private memberRemovalState: string = 'none';
 
   aboutToAppear(): void {
     this.start().catch((error: Object) => this.fail(error));
@@ -29,6 +30,7 @@ struct Index {
     this.details = snapshot.details;
     this.ready = snapshot.ready;
     this.convergenceState = snapshot.convergenceState;
+    this.memberRemovalState = snapshot.memberRemovalState;
   }
 
   private fail(error: Object): void {
@@ -52,6 +54,13 @@ struct Index {
     }
   }
 
+  private async queryCurrentMemberRemoval(): Promise<void> {
+    if (!this.ready) {
+      return;
+    }
+    this.applySnapshot(await engineRuntime.queryCurrentMemberRemoval());
+  }
+
   build() {
     Column({ space: 16 }) {
       Text('UniClipboard')
@@ -69,7 +78,12 @@ struct Index {
       Text(this.convergenceState)
         .fontSize(14)
         .fontColor('#5B6570')
+      Text(this.memberRemovalState)
+        .fontSize(12)
+        .fontColor('#5B6570')
       if (this.ready) {
+        Button('Member removal')
+          .onClick(() => this.queryCurrentMemberRemoval())
         Button(this.exporting ? 'Exporting' : 'Export sample')
           .enabled(!this.exporting)
           .onClick(() => this.exportSample())

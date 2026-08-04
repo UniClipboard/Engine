@@ -5,12 +5,12 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
-    EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
-    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    QueryMemberRevocationInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
-    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
-    SendTextInput,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, ContinueMemberRevocationInput, CreateSpaceInput,
+    Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput,
+    HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation, OperationResult,
+    OperationTerminal, QueryMemberRevocationInput, RecoverSessionInput, RefreshReason,
+    RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput,
+    SendReportSummary, SendTextInput,
 };
 use zeroize::Zeroizing;
 
@@ -148,6 +148,45 @@ impl OhEngine {
             .map_err(engine_error)?;
         match result {
             OperationResult::MemberRevocationStatus(summary) => Ok(summary.map(member_revocation)),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_current_member_revocation(
+        &self,
+    ) -> napi::Result<Option<OhMemberRevocation>> {
+        let result = self
+            .engine
+            .execute(Operation::QueryCurrentMemberRevocation)
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::MemberRevocationStatus(summary) => Ok(summary.map(member_revocation)),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn continue_member_revocation(
+        &self,
+        revocation_id: String,
+        permanently_lost_device_ids: Vec<String>,
+    ) -> napi::Result<OhMemberRevocation> {
+        let result = self
+            .engine
+            .execute(Operation::ContinueMemberRevocation(
+                ContinueMemberRevocationInput {
+                    revocation_id,
+                    permanently_lost_device_ids,
+                },
+            ))
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::MemberRevocationStatus(Some(summary)) => {
+                Ok(member_revocation(summary))
+            }
             _ => Err(unexpected_result()),
         }
     }
@@ -413,6 +452,9 @@ fn member_revocation(summary: uc_engine::MemberRevocationSummary) -> OhMemberRev
         }
         .to_owned(),
         pending_recipients: u32::try_from(summary.pending_recipients).unwrap_or(u32::MAX),
+        removed_device_ids: summary.removed_device_ids,
+        pending_recipient_device_ids: summary.pending_recipient_device_ids,
+        updated_at_ms: summary.updated_at_ms as f64,
     }
 }
 
@@ -489,6 +531,7 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         error_code: None,
         error_category: None,
         retryable: None,
+        member_revocation: None,
     };
     match event {
         EngineEvent::StateChanged { state } => mapped.state = Some(engine_state(state).to_owned()),
@@ -513,6 +556,9 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
             map_event_error(error, &mut mapped);
         }
         EngineEvent::Fatal { error } => map_event_error(error, &mut mapped),
+        EngineEvent::MemberRevocationChanged(summary) => {
+            mapped.member_revocation = Some(member_revocation(summary));
+        }
         _ => {}
     }
     mapped
@@ -568,6 +614,29 @@ mod tests {
     };
 
     use super::{count, map_event, membership_convergence};
+
+    #[test]
+    fn member_revocation_event_keeps_the_complete_snapshot() {
+        let event = map_event(EngineEvent::MemberRevocationChanged(
+            uc_engine::MemberRevocationSummary {
+                revocation_id: Some("revocation-1".into()),
+                outcome: uc_engine::MemberRevocationOutcome::Applied,
+                pending_recipients: 1,
+                removed_device_ids: vec!["removed-1".into()],
+                pending_recipient_device_ids: vec!["waiting-1".into()],
+                updated_at_ms: 42,
+            },
+        ));
+
+        assert_eq!(event.kind, "member_revocation_changed");
+        let revocation = event.member_revocation.unwrap();
+        assert_eq!(revocation.revocation_id.as_deref(), Some("revocation-1"));
+        assert_eq!(revocation.outcome, "applied");
+        assert_eq!(revocation.pending_recipients, 1);
+        assert_eq!(revocation.removed_device_ids, ["removed-1"]);
+        assert_eq!(revocation.pending_recipient_device_ids, ["waiting-1"]);
+        assert_eq!(revocation.updated_at_ms, 42.0);
+    }
 
     #[test]
     fn refresh_event_keeps_only_the_stable_reason() {

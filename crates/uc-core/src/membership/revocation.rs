@@ -217,7 +217,9 @@ pub enum GroupRevocationResult {
     Reliable {
         revocation_id: RevocationId,
         status: RevocationStatus,
-        pending_recipients: usize,
+        removed_device_ids: Vec<DeviceId>,
+        pending_recipient_device_ids: Vec<DeviceId>,
+        updated_at_ms: i64,
     },
 }
 
@@ -240,8 +242,35 @@ impl GroupRevocationResult {
         match self {
             Self::LocalOnly => 0,
             Self::Reliable {
-                pending_recipients, ..
-            } => *pending_recipients,
+                pending_recipient_device_ids,
+                ..
+            } => pending_recipient_device_ids.len(),
+        }
+    }
+
+    pub fn removed_device_ids(&self) -> &[DeviceId] {
+        match self {
+            Self::LocalOnly => &[],
+            Self::Reliable {
+                removed_device_ids, ..
+            } => removed_device_ids,
+        }
+    }
+
+    pub fn pending_recipient_device_ids(&self) -> &[DeviceId] {
+        match self {
+            Self::LocalOnly => &[],
+            Self::Reliable {
+                pending_recipient_device_ids,
+                ..
+            } => pending_recipient_device_ids,
+        }
+    }
+
+    pub const fn updated_at_ms(&self) -> i64 {
+        match self {
+            Self::LocalOnly => 0,
+            Self::Reliable { updated_at_ms, .. } => *updated_at_ms,
         }
     }
 }
@@ -259,6 +288,8 @@ pub struct RevocationRecord {
     space_id: SpaceId,
     target_device_id: DeviceId,
     #[serde(default)]
+    permanently_lost_device_ids: Vec<DeviceId>,
+    #[serde(default)]
     retained_recipients: Vec<DeviceId>,
     previous_epoch: GroupEpoch,
     next_epoch: GroupEpoch,
@@ -273,6 +304,8 @@ struct RawRevocationRecord {
     space_id: SpaceId,
     target_device_id: DeviceId,
     #[serde(default)]
+    permanently_lost_device_ids: Vec<DeviceId>,
+    #[serde(default)]
     retained_recipients: Vec<DeviceId>,
     previous_epoch: GroupEpoch,
     next_epoch: GroupEpoch,
@@ -283,6 +316,8 @@ struct RawRevocationRecord {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationOutboxMessage {
+    #[serde(default)]
+    generation: u64,
     recipient: DeviceId,
     payload: Vec<u8>,
     #[serde(default)]
@@ -320,6 +355,25 @@ impl PendingGroupUpdate {
         }
     }
 
+    pub fn for_generation(
+        revocation_id: RevocationId,
+        generation: GroupEpoch,
+        recipient: DeviceId,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            update_id: format!(
+                "revocation:{}:{}:{}",
+                revocation_id.as_str(),
+                generation.value(),
+                recipient.as_str()
+            ),
+            revocation_id: Some(revocation_id),
+            recipient,
+            payload,
+        }
+    }
+
     pub fn update_id(&self) -> &str {
         &self.update_id
     }
@@ -352,6 +406,7 @@ impl fmt::Debug for PendingGroupUpdate {
 impl RevocationOutboxMessage {
     pub fn new(recipient: DeviceId, payload: Vec<u8>) -> Self {
         Self {
+            generation: 0,
             recipient,
             payload,
             confirmed_at_ms: None,
@@ -370,6 +425,14 @@ impl RevocationOutboxMessage {
         self.confirmed_at_ms.is_some()
     }
 
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn assign_generation(&mut self, generation: GroupEpoch) {
+        self.generation = generation.value();
+    }
+
     fn confirm(&mut self, now_ms: i64) {
         self.confirmed_at_ms.get_or_insert(now_ms);
     }
@@ -385,23 +448,60 @@ impl fmt::Debug for RevocationOutboxMessage {
     }
 }
 
+const REVOCATION_STAGE_VERSION: u8 = 2;
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "RawRevocationStage")]
-pub struct RevocationStage {
-    record: RevocationRecord,
+pub struct RevocationGeneration {
+    previous_epoch: GroupEpoch,
     next_space_state: SpaceKeyState,
     group_state: Vec<u8>,
     key_catalog: Vec<u8>,
+}
+
+impl RevocationGeneration {
+    fn new(
+        previous_epoch: GroupEpoch,
+        next_space_state: SpaceKeyState,
+        group_state: Vec<u8>,
+        key_catalog: Vec<u8>,
+    ) -> Result<Self, KeyEpochError> {
+        if previous_epoch.next()? != next_space_state.epoch() {
+            return Err(KeyEpochError::InvalidRevocationStage);
+        }
+        Ok(Self {
+            previous_epoch,
+            next_space_state,
+            group_state,
+            key_catalog,
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawRevocationStage")]
+pub struct RevocationStage {
+    version: u8,
+    record: RevocationRecord,
+    generations: Vec<RevocationGeneration>,
     outbox: Vec<RevocationOutboxMessage>,
 }
 
 #[derive(Deserialize)]
-struct RawRevocationStage {
-    record: RevocationRecord,
-    next_space_state: SpaceKeyState,
-    group_state: Vec<u8>,
-    key_catalog: Vec<u8>,
-    outbox: Vec<RevocationOutboxMessage>,
+#[serde(untagged)]
+enum RawRevocationStage {
+    Current {
+        version: u8,
+        record: RevocationRecord,
+        generations: Vec<RevocationGeneration>,
+        outbox: Vec<RevocationOutboxMessage>,
+    },
+    Legacy {
+        record: RevocationRecord,
+        next_space_state: SpaceKeyState,
+        group_state: Vec<u8>,
+        key_catalog: Vec<u8>,
+        outbox: Vec<RevocationOutboxMessage>,
+    },
 }
 
 impl RevocationStage {
@@ -410,7 +510,7 @@ impl RevocationStage {
         next_space_state: SpaceKeyState,
         group_state: Vec<u8>,
         key_catalog: Vec<u8>,
-        outbox: Vec<RevocationOutboxMessage>,
+        mut outbox: Vec<RevocationOutboxMessage>,
     ) -> Result<Self, KeyEpochError> {
         if record.status() != RevocationStatus::Staged
             || record.space_id() != next_space_state.space_id()
@@ -424,11 +524,19 @@ impl RevocationStage {
         {
             return Err(KeyEpochError::RemovedMemberInOutbox);
         }
-        Ok(Self {
-            record,
+        outbox
+            .iter_mut()
+            .for_each(|message| message.assign_generation(record.next_epoch()));
+        let generation = RevocationGeneration::new(
+            record.previous_epoch(),
             next_space_state,
             group_state,
             key_catalog,
+        )?;
+        Ok(Self {
+            version: REVOCATION_STAGE_VERSION,
+            record,
+            generations: vec![generation],
             outbox,
         })
     }
@@ -438,15 +546,15 @@ impl RevocationStage {
     }
 
     pub fn next_space_state(&self) -> &SpaceKeyState {
-        &self.next_space_state
+        &self.current_generation().next_space_state
     }
 
     pub fn group_state(&self) -> &[u8] {
-        &self.group_state
+        &self.current_generation().group_state
     }
 
     pub fn key_catalog(&self) -> &[u8] {
-        &self.key_catalog
+        &self.current_generation().key_catalog
     }
 
     pub fn outbox(&self) -> &[RevocationOutboxMessage] {
@@ -469,7 +577,7 @@ impl RevocationStage {
         let message = self
             .outbox
             .iter_mut()
-            .find(|message| message.recipient() == recipient)
+            .find(|message| message.recipient() == recipient && !message.is_confirmed())
             .ok_or(KeyEpochError::RevocationRecipientNotFound)?;
         message.confirm(now_ms);
         Ok(())
@@ -480,49 +588,153 @@ impl RevocationStage {
             .iter()
             .all(RevocationOutboxMessage::is_confirmed)
     }
+
+    pub fn generation_count(&self) -> usize {
+        self.generations.len()
+    }
+
+    fn current_generation(&self) -> &RevocationGeneration {
+        match self.generations.last() {
+            Some(generation) => generation,
+            None => unreachable!("revocation stage generation invariant"),
+        }
+    }
+
+    pub fn removed_device_ids(&self) -> Vec<DeviceId> {
+        self.record.removed_device_ids()
+    }
+
+    pub fn pending_recipient_device_ids(&self) -> Vec<DeviceId> {
+        let mut seen = HashSet::new();
+        self.outbox
+            .iter()
+            .filter(|message| !message.is_confirmed())
+            .map(|message| message.recipient().clone())
+            .filter(|recipient| seen.insert(recipient.clone()))
+            .collect()
+    }
+
+    pub fn append_recovery_generation(
+        &mut self,
+        permanently_lost_device_id: &DeviceId,
+        next_space_state: SpaceKeyState,
+        group_state: Vec<u8>,
+        key_catalog: Vec<u8>,
+        mut outbox: Vec<RevocationOutboxMessage>,
+        now_ms: i64,
+    ) -> Result<(), KeyEpochError> {
+        if self.record.status() != RevocationStatus::Distributing
+            || !self
+                .pending_recipient_device_ids()
+                .contains(permanently_lost_device_id)
+        {
+            return Err(KeyEpochError::PermanentLossRecipientNotPending);
+        }
+        if outbox
+            .iter()
+            .any(|message| message.recipient() == permanently_lost_device_id)
+        {
+            return Err(KeyEpochError::RemovedMemberInOutbox);
+        }
+        self.record
+            .advance_for_permanent_loss(permanently_lost_device_id, now_ms)?;
+        if next_space_state.space_id() != self.record.space_id()
+            || next_space_state.epoch() != self.record.next_epoch()
+        {
+            return Err(KeyEpochError::InvalidRevocationStage);
+        }
+        self.outbox
+            .retain(|message| message.recipient() != permanently_lost_device_id);
+        outbox
+            .iter_mut()
+            .for_each(|message| message.assign_generation(self.record.next_epoch()));
+        self.outbox.extend(outbox);
+        self.generations.push(RevocationGeneration::new(
+            self.record.previous_epoch(),
+            next_space_state,
+            group_state,
+            key_catalog,
+        )?);
+        if self.all_recipients_confirmed() {
+            self.record
+                .transition_to(RevocationStatus::Complete, now_ms)?;
+        }
+        Ok(())
+    }
 }
 
 impl TryFrom<RawRevocationStage> for RevocationStage {
     type Error = KeyEpochError;
 
     fn try_from(raw: RawRevocationStage) -> Result<Self, Self::Error> {
-        let target_status = raw.record.status();
-        let updated_at_ms = raw.record.updated_at_ms();
-        let mut record = RevocationRecord::prepare_with_recipients(
-            raw.record.revocation_id().clone(),
-            raw.record.space_id().clone(),
-            raw.record.target_device_id().clone(),
-            raw.record.retained_recipients().to_vec(),
-            raw.record.previous_epoch(),
-            raw.record.created_at_ms(),
-        )?;
-        record.transition_to(RevocationStatus::Staged, updated_at_ms)?;
-        let mut stage = Self::new(
-            record,
-            raw.next_space_state,
-            raw.group_state,
-            raw.key_catalog,
-            raw.outbox,
-        )?;
-        match target_status {
-            RevocationStatus::Staged => {}
-            RevocationStatus::Activated => {
-                stage.transition_to(RevocationStatus::Activated, updated_at_ms)?;
+        let mut stage = match raw {
+            RawRevocationStage::Current {
+                version,
+                record,
+                generations,
+                outbox,
+            } => Self {
+                version,
+                record,
+                generations,
+                outbox,
+            },
+            RawRevocationStage::Legacy {
+                record,
+                next_space_state,
+                group_state,
+                key_catalog,
+                mut outbox,
+            } => {
+                let generation = RevocationGeneration::new(
+                    record.previous_epoch(),
+                    next_space_state,
+                    group_state,
+                    key_catalog,
+                )?;
+                outbox
+                    .iter_mut()
+                    .for_each(|message| message.assign_generation(record.next_epoch()));
+                Self {
+                    version: REVOCATION_STAGE_VERSION,
+                    record,
+                    generations: vec![generation],
+                    outbox,
+                }
             }
-            RevocationStatus::Distributing => {
-                stage.transition_to(RevocationStatus::Activated, updated_at_ms)?;
-                stage.transition_to(RevocationStatus::Distributing, updated_at_ms)?;
-            }
-            RevocationStatus::Complete => {
-                stage.transition_to(RevocationStatus::Activated, updated_at_ms)?;
-                stage.transition_to(RevocationStatus::Distributing, updated_at_ms)?;
-                stage.transition_to(RevocationStatus::Complete, updated_at_ms)?;
-            }
-            RevocationStatus::RecoveryRequired => {
-                stage.transition_to(RevocationStatus::RecoveryRequired, updated_at_ms)?;
-            }
-            RevocationStatus::Prepared => return Err(KeyEpochError::InvalidRevocationStage),
+        };
+        if stage.version != REVOCATION_STAGE_VERSION || stage.generations.is_empty() {
+            return Err(KeyEpochError::InvalidRevocationStage);
         }
+        let mut expected_previous = stage.generations[0].previous_epoch;
+        for generation in &stage.generations {
+            if generation.previous_epoch != expected_previous
+                || generation.next_space_state.space_id() != stage.record.space_id()
+                || generation.next_space_state.epoch() != expected_previous.next()?
+            {
+                return Err(KeyEpochError::InvalidRevocationStage);
+            }
+            expected_previous = generation.next_space_state.epoch();
+        }
+        let Some(last) = stage.generations.last() else {
+            return Err(KeyEpochError::InvalidRevocationStage);
+        };
+        if last.previous_epoch != stage.record.previous_epoch()
+            || last.next_space_state.epoch() != stage.record.next_epoch()
+        {
+            return Err(KeyEpochError::InvalidRevocationStage);
+        }
+        let removed = stage.record.removed_device_ids();
+        if stage
+            .outbox
+            .iter()
+            .any(|message| removed.contains(message.recipient()))
+        {
+            return Err(KeyEpochError::RemovedMemberInOutbox);
+        }
+        stage
+            .outbox
+            .sort_by_key(RevocationOutboxMessage::generation);
         Ok(stage)
     }
 }
@@ -532,9 +744,10 @@ impl fmt::Debug for RevocationStage {
         f.debug_struct("RevocationStage")
             .field("revocation_id", self.record.revocation_id())
             .field("status", &self.record.status())
-            .field("epoch", &self.next_space_state.epoch())
-            .field("group_state_len", &self.group_state.len())
-            .field("key_catalog_len", &self.key_catalog.len())
+            .field("generation_count", &self.generations.len())
+            .field("epoch", &self.next_space_state().epoch())
+            .field("group_state_len", &self.group_state().len())
+            .field("key_catalog_len", &self.key_catalog().len())
             .field("outbox_count", &self.outbox.len())
             .finish()
     }
@@ -645,6 +858,26 @@ impl SpaceKeyMaterial {
         self
     }
 
+    pub fn with_pending_group_updates_from_excluding_many(
+        mut self,
+        previous: &Self,
+        excluded_recipients: &[DeviceId],
+    ) -> Self {
+        self.pending_group_updates = previous
+            .pending_group_updates
+            .iter()
+            .filter(|update| !excluded_recipients.contains(update.recipient()))
+            .cloned()
+            .collect();
+        self.pending_group_admission_replays = previous
+            .pending_group_admission_replays
+            .iter()
+            .filter(|admission| !excluded_recipients.contains(&admission.recipient))
+            .cloned()
+            .collect();
+        self
+    }
+
     pub fn cache_group_admission(
         &mut self,
         recipient: DeviceId,
@@ -741,6 +974,7 @@ impl RevocationRecord {
             revocation_id,
             space_id,
             target_device_id,
+            permanently_lost_device_ids: Vec::new(),
             retained_recipients,
             previous_epoch,
             next_epoch: previous_epoch.next()?,
@@ -800,6 +1034,36 @@ impl RevocationRecord {
         &self.retained_recipients
     }
 
+    pub fn permanently_lost_device_ids(&self) -> &[DeviceId] {
+        &self.permanently_lost_device_ids
+    }
+
+    pub fn removed_device_ids(&self) -> Vec<DeviceId> {
+        std::iter::once(self.target_device_id.clone())
+            .chain(self.permanently_lost_device_ids.iter().cloned())
+            .collect()
+    }
+
+    fn advance_for_permanent_loss(
+        &mut self,
+        device_id: &DeviceId,
+        now_ms: i64,
+    ) -> Result<(), KeyEpochError> {
+        if self.status != RevocationStatus::Distributing
+            || !self.retained_recipients.contains(device_id)
+            || self.permanently_lost_device_ids.contains(device_id)
+        {
+            return Err(KeyEpochError::PermanentLossRecipientNotPending);
+        }
+        self.retained_recipients
+            .retain(|recipient| recipient != device_id);
+        self.permanently_lost_device_ids.push(device_id.clone());
+        self.previous_epoch = self.next_epoch;
+        self.next_epoch = self.previous_epoch.next()?;
+        self.updated_at_ms = now_ms;
+        Ok(())
+    }
+
     pub const fn previous_epoch(&self) -> GroupEpoch {
         self.previous_epoch
     }
@@ -836,6 +1100,15 @@ impl TryFrom<RawRevocationRecord> for RevocationRecord {
             raw.previous_epoch,
             raw.created_at_ms,
         )?;
+        let mut seen = HashSet::new();
+        if raw.permanently_lost_device_ids.iter().any(|device_id| {
+            device_id == record.target_device_id()
+                || record.retained_recipients().contains(device_id)
+                || !seen.insert(device_id.clone())
+        }) {
+            return Err(KeyEpochError::InvalidRevocationRecord);
+        }
+        record.permanently_lost_device_ids = raw.permanently_lost_device_ids;
         match raw.status {
             RevocationStatus::Prepared => {
                 record.transition_to(RevocationStatus::Prepared, raw.updated_at_ms)?;
@@ -897,6 +1170,9 @@ pub enum KeyEpochError {
 
     #[error("revocation recipient not found")]
     RevocationRecipientNotFound,
+
+    #[error("permanently lost device is not waiting for revocation")]
+    PermanentLossRecipientNotPending,
 
     #[error("invalid revocation id")]
     InvalidRevocationId,

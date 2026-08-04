@@ -291,6 +291,94 @@ fn revocation_stage_tracks_each_recipient_once_and_rejects_unknown_ack() {
 }
 
 #[test]
+fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generation() {
+    let mut record = RevocationRecord::prepare_with_recipients(
+        RevocationId::from_string("permanent-loss-recovery").unwrap(),
+        SpaceId::from_str("space-1"),
+        DeviceId::new("removed-device"),
+        vec![DeviceId::new("alice"), DeviceId::new("bob")],
+        GroupEpoch::new(1),
+        100,
+    )
+    .unwrap();
+    record.transition_to(RevocationStatus::Staged, 101).unwrap();
+    let mut first_state = SpaceKeyState::legacy(SpaceId::from_str("space-1"));
+    first_state.mark_migrating().unwrap();
+    first_state
+        .mark_ready(
+            ContentKeyId::from_string("current-1").unwrap(),
+            ProtectionGroupId::generate(),
+        )
+        .unwrap();
+    first_state
+        .rotate(ContentKeyId::from_string("current-2").unwrap())
+        .unwrap();
+    let mut stage = RevocationStage::new(
+        record,
+        first_state.clone(),
+        vec![1],
+        vec![2],
+        vec![
+            RevocationOutboxMessage::new(DeviceId::new("alice"), vec![3]),
+            RevocationOutboxMessage::new(DeviceId::new("bob"), vec![4]),
+        ],
+    )
+    .unwrap();
+    stage
+        .transition_to(RevocationStatus::Activated, 102)
+        .unwrap();
+    stage
+        .transition_to(RevocationStatus::Distributing, 103)
+        .unwrap();
+    stage
+        .acknowledge_recipient(&DeviceId::new("bob"), 104)
+        .unwrap();
+    let mut second_state = first_state;
+    second_state
+        .rotate(ContentKeyId::from_string("current-3").unwrap())
+        .unwrap();
+
+    assert_eq!(
+        stage.append_recovery_generation(
+            &DeviceId::new("bob"),
+            second_state.clone(),
+            vec![5],
+            vec![6],
+            vec![],
+            105,
+        ),
+        Err(KeyEpochError::PermanentLossRecipientNotPending)
+    );
+    stage
+        .append_recovery_generation(
+            &DeviceId::new("alice"),
+            second_state,
+            vec![5],
+            vec![6],
+            vec![RevocationOutboxMessage::new(DeviceId::new("bob"), vec![7])],
+            106,
+        )
+        .unwrap();
+
+    assert_eq!(stage.generation_count(), 2);
+    assert_eq!(stage.record().previous_epoch(), GroupEpoch::new(2));
+    assert_eq!(stage.record().next_epoch(), GroupEpoch::new(3));
+    assert_eq!(stage.record().status(), RevocationStatus::Distributing);
+    assert_eq!(
+        stage.removed_device_ids(),
+        vec![DeviceId::new("removed-device"), DeviceId::new("alice")]
+    );
+    assert_eq!(
+        stage.pending_recipient_device_ids(),
+        vec![DeviceId::new("bob")]
+    );
+    stage
+        .acknowledge_recipient(&DeviceId::new("bob"), 107)
+        .unwrap();
+    assert!(stage.all_recipients_confirmed());
+}
+
+#[test]
 fn space_material_pending_updates_are_acknowledged_by_id() {
     let mut material = SpaceKeyMaterial::new(
         SpaceKeyState::legacy(SpaceId::from_str("space-1")),

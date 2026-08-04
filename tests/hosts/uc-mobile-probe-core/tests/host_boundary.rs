@@ -130,6 +130,34 @@ fn android_shell_only_forwards_commands_to_the_shared_probe() {
 }
 
 #[test]
+fn ios_and_android_probe_member_revocation_through_the_shared_contract() {
+    let root = workspace_root();
+    let source = read(root.join("tests/hosts/uc-mobile-probe-core/src/lib.rs"));
+    let ios_model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
+    let ios_view = read(root.join("tests/hosts/ios/EngineProbe/ProbeView.swift"));
+    let android_command = read(root.join("tests/hosts/android/probe-command.sh"));
+
+    for command in [
+        "RemoveMember",
+        "QueryCurrentMemberRevocation",
+        "ContinueMemberRevocation",
+    ] {
+        assert!(source.contains(command));
+    }
+    for field in [
+        "removed_device_ids",
+        "pending_recipient_device_ids",
+        "updated_at_ms",
+        "last_member_revocation",
+    ] {
+        assert!(source.contains(field));
+    }
+    assert!(ios_model.contains("query_current_member_revocation"));
+    assert!(ios_view.contains("Member removal"));
+    assert!(android_command.contains("COMMAND_BASE64"));
+}
+
+#[test]
 fn android_pairing_keeps_the_probe_alive_with_a_data_sync_service() {
     let root = workspace_root();
     let manifest = read(root.join("tests/hosts/android/app/src/main/AndroidManifest.xml"));

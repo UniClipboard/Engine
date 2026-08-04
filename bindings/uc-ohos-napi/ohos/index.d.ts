@@ -72,6 +72,28 @@ export interface OhMembershipConvergence {
   rejectedCount: number
 }
 
+export interface OhMemberRevocation {
+  revocationId?: string
+  outcome: 'local_only' | 'applied' | 'complete' | 'recovery_required'
+  pendingRecipients: number
+  removedDeviceIds: string[]
+  pendingRecipientDeviceIds: string[]
+  updatedAtMs: number
+}
+
+export interface OhEngineEvent {
+  kind: string
+  state?: string
+  refreshReason?: string
+  operationId?: string
+  terminal?: string
+  lifecycleAction?: string
+  errorCode?: number
+  errorCategory?: string
+  retryable?: boolean
+  memberRevocation?: OhMemberRevocation
+}
+
 export interface OhSpaceCreated {
   spaceId: string
   selfDeviceId: string
@@ -88,12 +110,20 @@ export interface OhEngine {
   recoverSession(allowSecureStorageUnlock: boolean): Promise<OhSessionRecovery>
   queryLocalDevice(): Promise<OhLocalDevice>
   queryMembershipConvergence(): Promise<OhMembershipConvergence>
+  removeMember(deviceId: string): Promise<OhMemberRevocation>
+  queryMemberRevocation(revocationId: string): Promise<OhMemberRevocation | null>
+  queryCurrentMemberRevocation(): Promise<OhMemberRevocation | null>
+  continueMemberRevocation(
+    revocationId: string,
+    permanentlyLostDeviceIds: string[]
+  ): Promise<OhMemberRevocation>
   queryActiveClipboard(): Promise<OhActiveClipboard | null>
   lifecycleState(): Promise<string>
   suspend(): Promise<void>
   resume(): Promise<void>
   sendText(text: string, targetDevices: string[]): Promise<OhSendReport>
   exportEntry(entryId: string, destinationHandle: string): Promise<void>
+  nextEvent(timeoutMs: number): Promise<OhEngineEvent | null>
   shutdown(deadlineMs: number): Promise<void>
 }
 

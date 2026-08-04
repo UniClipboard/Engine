@@ -33,6 +33,9 @@ struct ProbeView: View {
                     commandButton("Devices", systemImage: "iphone.and.arrow.forward") {
                         await model.listDevices()
                     }
+                    commandButton("Member removal", systemImage: "person.crop.circle.badge.minus") {
+                        await model.queryCurrentMemberRemoval()
+                    }
                 }
 
                 Section("Transfer") {

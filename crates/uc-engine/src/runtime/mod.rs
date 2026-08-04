@@ -13,9 +13,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use tracing::error;
+use tracing::{error, warn};
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
-use uc_application::facade::{AppFacade, HistoryMaintenanceRuntime, PairingOutcome};
+use uc_application::facade::{
+    AppFacade, HistoryMaintenanceRuntime, MemberRevocationView, PairingOutcome,
+};
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
@@ -103,6 +105,12 @@ fn engine_event_for_pairing_completion(outcome: PairingOutcome) -> crate::Engine
     crate::EngineEvent::PairingCompleted(completion)
 }
 
+fn engine_event_for_member_revocation(revocation: MemberRevocationView) -> crate::EngineEvent {
+    crate::EngineEvent::MemberRevocationChanged(
+        crate::operations::device::member::member_revocation_summary(revocation),
+    )
+}
+
 async fn spawn_pairing_completion_events(
     mut outcomes: tokio::sync::broadcast::Receiver<PairingOutcome>,
     tasks: &Arc<TaskRegistry>,
@@ -115,6 +123,31 @@ async fn spawn_pairing_completion_events(
                     _ = cancel.cancelled() => return,
                     outcome = outcomes.recv() => match outcome {
                         Ok(outcome) => events.send(engine_event_for_pairing_completion(outcome)),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            events.send(crate::EngineEvent::RefreshRequired {
+                                reason: crate::RefreshReason::ConsumerLagged,
+                            });
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        })
+        .await;
+}
+
+async fn spawn_member_revocation_events(
+    mut changes: tokio::sync::broadcast::Receiver<MemberRevocationView>,
+    tasks: &Arc<TaskRegistry>,
+    events: EventSender,
+) {
+    tasks
+        .spawn("member_revocation_events", move |cancel| async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    change = changes.recv() => match change {
+                        Ok(change) => events.send(engine_event_for_member_revocation(change)),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             events.send(crate::EngineEvent::RefreshRequired {
                                 reason: crate::RefreshReason::ConsumerLagged,
@@ -303,6 +336,15 @@ impl ProductionRuntime {
             .subscribe_pairing_completion()
             .map_err(|error| startup_error("pairing completion subscription", error))?;
         spawn_pairing_completion_events(pairing_outcomes, &tasks, events.clone()).await;
+        spawn_member_revocation_events(
+            facade.subscribe_member_revocation_events(),
+            &tasks,
+            events.clone(),
+        )
+        .await;
+        if let Err(error) = sync_engine.roster.resume_incomplete_revocations().await {
+            warn!(error = %error, "pending group updates could not resume during startup");
+        }
         let history_maintenance = facade.start_history_maintenance().await;
         spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
         let lifecycle = Arc::clone(file_transfer_lifecycle);
@@ -396,8 +438,8 @@ fn operation_error_with_code(
 #[cfg(test)]
 mod tests {
     use uc_application::facade::{
-        ClipboardOutboundOutcome, PairingOutcome, SearchFacadeError, SearchPageView,
-        SearchResultView, StorageFacadeError, StorageStatsView,
+        ClipboardOutboundOutcome, MemberRevocationState, MemberRevocationView, PairingOutcome,
+        SearchFacadeError, SearchPageView, SearchResultView, StorageFacadeError, StorageStatsView,
     };
     use uc_core::ids::DeviceId;
     use uc_core::security::IdentityFingerprint;
@@ -478,6 +520,41 @@ mod tests {
                 crate::PairingCompletion::Failure {
                     reason: "passphrase_mismatch".into(),
                 },
+            ))
+        );
+
+        tasks.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn member_revocation_changes_are_published_on_the_engine_event_stream() {
+        let (changes, change_stream) = tokio::sync::broadcast::channel(8);
+        let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
+        let tasks = Arc::new(TaskRegistry::new());
+
+        spawn_member_revocation_events(change_stream, &tasks, events).await;
+        changes
+            .send(MemberRevocationView {
+                revocation_id: Some("revocation-1".into()),
+                state: MemberRevocationState::Applied,
+                pending_recipients: 1,
+                removed_device_ids: vec!["removed-1".into()],
+                pending_recipient_device_ids: vec!["waiting-1".into()],
+                updated_at_ms: 42,
+            })
+            .unwrap();
+
+        assert_eq!(
+            event_stream.next().await,
+            Some(crate::EngineEvent::MemberRevocationChanged(
+                crate::MemberRevocationSummary {
+                    revocation_id: Some("revocation-1".into()),
+                    outcome: crate::MemberRevocationOutcome::Applied,
+                    pending_recipients: 1,
+                    removed_device_ids: vec!["removed-1".into()],
+                    pending_recipient_device_ids: vec!["waiting-1".into()],
+                    updated_at_ms: 42,
+                }
             ))
         );
 

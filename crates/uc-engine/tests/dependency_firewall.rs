@@ -412,7 +412,7 @@ fn engine_does_not_own_mobile_upload_state() {
 }
 
 #[test]
-fn engine_does_not_restore_search_or_membership_activity_steps() {
+fn engine_does_not_restore_unrelated_search_or_membership_activity_steps() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = read_rs_sources(&workspace_root.join("crates/uc-engine/src/runtime"));
 
@@ -421,7 +421,6 @@ fn engine_does_not_restore_search_or_membership_activity_steps() {
         "pause_background_activity",
         "resume_membership_gossip",
         "pause_membership_gossip",
-        "resume_incomplete_revocations",
         "resume_legacy_bootstraps",
     ] {
         assert!(

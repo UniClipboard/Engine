@@ -34,6 +34,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `IncomingEntry` | 收到一条具有完整摘要的新内容 |
 | `TransferProgress` | 文件传输进度发生变化 |
 | `PairingCompleted` | 本机作为邀请方时，一次已匹配的配对流程成功或失败 |
+| `MemberRevocationChanged` | 成员移除进度发生变化，携带完整当前状态 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |
 | `Fatal` | 核心遇到不可恢复错误 |
@@ -103,7 +104,10 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `ListDevices` | 返回设备编号、显示名和在线状态 |
 | `QueryMemberSyncPreferences` | 查询指定成员的发送、接收和内容类型偏好 |
 | `UpdateMemberSyncPreferences` | 局部更新指定成员的同步偏好，未提供字段保持不变 |
-| `RemoveMember` | 删除本机保存的成员及其信任和地址关联记录 |
+| `RemoveMember` | 发起可靠成员移除，或返回同一目标已有流程的当前状态 |
+| `QueryMemberRevocation` | 按流程编号查询成员移除状态，供兼容和诊断使用 |
+| `QueryCurrentMemberRevocation` | 无需旧流程编号，查询当前未完成的成员移除 |
+| `ContinueMemberRevocation` | 在用户明确确认等待设备永久丢失后继续向前恢复 |
 | `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引 |
 | `QuerySearchTags` | 查询当前索引中的标签和条目数量 |
 | `QuerySearchStatus` | 查询索引是否可用及最近重建时间 |
@@ -153,7 +157,22 @@ LAN 内容读写复用核心现有的加密历史、系统剪贴板写入、内�
 
 `QueryEncryptionState` 只返回初始化和会话可用状态。`LockEncryption` 成功后必须同时关闭接收入口，避免锁定后继续写入加密业务数据。`VerifySecureStorageAccess` 使用跨平台安全存储语义，宿主接口可按平台显示为 Keychain、Keystore 或对应系统名称。
 
-`QueryMemberSyncPreferences` 和 `UpdateMemberSyncPreferences` 只接受稳定设备编号。局部更新中未提供的开关和内容类型必须保持原值。`RemoveMember` 由核心统一删除成员、信任和地址关联记录；宿主不得自行编排这些持久化步骤。
+`QueryMemberSyncPreferences` 和 `UpdateMemberSyncPreferences` 只接受稳定设备编号。局部更新中未提供的开关和内容类型必须保持原值。
+
+成员移除由核心完整负责，宿主只使用三个主入口：发起移除、查询当前移除、确认永久丢失并继续。返回与 `MemberRevocationChanged` 事件使用同一份完整状态：
+
+- `revocation_id`：当前流程编号；仅本机兼容结果可以为空；
+- `outcome`：`local_only`、`applied`、`complete` 或 `recovery_required`；
+- `removed_device_ids`：此流程已经排除的设备；
+- `pending_recipient_device_ids`：仍需按顺序确认安全更新的保留设备；
+- `pending_recipients`：始终等于等待设备列表长度；
+- `updated_at_ms`：最近一次已保存状态变化的时间。
+
+`applied` 只表示本机已生效并仍在等待，不得显示为完成。同一目标重复移除返回原状态；另一目标在当前流程未结束时返回编号 `1394`、类别 `Conflict`、可重试的稳定错误。当前流程已进入 `recovery_required` 时返回编号 `1395`、类别 `InvalidState`、不可重试的稳定错误。宿主收到冲突后查询当前移除，不自行创建第二项任务。
+
+`ContinueMemberRevocation` 只接受当前等待设备且必须来自用户明确确认。空列表、本机、已确认设备、已移除设备、无关设备或重复设备返回输入错误。普通超时、网络失败、重启和宿主重试不得自动调用该入口。核心继续使用同一流程编号向前产生新安全状态，并保证每台保留设备按顺序收到缺失更新；宿主不安排重试、不拼接多次移除，也不恢复旧安全状态。
+
+成员移除进度由核心在首次本机生效、任一设备确认、永久丢失恢复产生新状态、全部完成和进入需要安全恢复时主动通知。事件消费者落后时按通用规则收到 `RefreshRequired`，随后调用 `QueryCurrentMemberRevocation` 读取真实状态。iOS、Android 和 HarmonyOS 绑定必须公开相同字段、结果、错误、入口和通知。
 
 搜索查询、标签、状态和重建都由核心执行。搜索结果可以正常返回预览、文件名、文件路径、链接和自定义标签，但这些用户内容不得出现在调试输出或日志中。加密会话锁定时，宿主不得读取搜索结果、标签或状态，也不得触发重建。
 
