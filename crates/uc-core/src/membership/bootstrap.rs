@@ -350,7 +350,11 @@ pub trait LegacyBootstrapRepositoryPort: Send + Sync {
         space_id: &SpaceId,
     ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError>;
 
-    async fn list_legacy_bootstraps_for_space(
+    /// Lists records for a space that have not reached `Complete`.
+    ///
+    /// `RecoveryRequired` records remain included because their state is
+    /// still part of the space's protection status.
+    async fn list_non_complete_legacy_bootstraps_for_space(
         &self,
         space_id: &SpaceId,
     ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError>;

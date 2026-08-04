@@ -560,6 +560,48 @@ async fn legacy_bootstrap_activation_is_atomic_and_waits_for_readmission() {
 }
 
 #[tokio::test]
+async fn completed_legacy_bootstrap_is_not_read_by_the_space_status_lookup() {
+    let (repo, pool, _tempdir) = make_repo();
+    let stage = staged_legacy_bootstrap();
+    let bootstrap_id = stage.record().bootstrap_id().clone();
+    let retained_member = DeviceId::new("retained-device-sensitive");
+    repo.begin_legacy_bootstrap(
+        &LegacyBootstrapRecord::prepare(
+            bootstrap_id.clone(),
+            SpaceId::from_str("space-sensitive"),
+            DeviceId::new("sponsor-sensitive"),
+            vec![retained_member.clone()],
+            100,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    repo.stage_legacy_bootstrap(&stage).await.unwrap();
+    repo.activate_legacy_bootstrap(&bootstrap_id, 120)
+        .await
+        .unwrap();
+    repo.acknowledge_legacy_readmission(&bootstrap_id, &retained_member, 130)
+        .await
+        .unwrap();
+
+    let mut conn = pool.get().unwrap();
+    diesel::sql_query(
+        "UPDATE legacy_space_bootstrap_log SET encrypted_record = ? WHERE bootstrap_id = ?",
+    )
+    .bind::<Binary, _>(b"unreadable-obsolete-bootstrap".to_vec())
+    .bind::<Text, _>(bootstrap_id.as_str())
+    .execute(&mut conn)
+    .unwrap();
+
+    assert!(repo
+        .list_non_complete_legacy_bootstraps_for_space(&SpaceId::from_str("space-sensitive"))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn space_scoped_legacy_bootstrap_lists_do_not_decrypt_other_spaces() {
     let (repo, pool, _tempdir) = make_repo();
     let unrelated_space = SpaceId::from_str("old-space-sensitive");
@@ -588,7 +630,7 @@ async fn space_scoped_legacy_bootstrap_lists_do_not_decrypt_other_spaces() {
         .unwrap()
         .is_empty());
     assert!(current_repo
-        .list_legacy_bootstraps_for_space(&active_space)
+        .list_non_complete_legacy_bootstraps_for_space(&active_space)
         .await
         .unwrap()
         .is_empty());

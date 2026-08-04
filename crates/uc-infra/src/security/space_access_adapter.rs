@@ -2386,21 +2386,20 @@ impl SpaceProtectionStatusPort for DefaultSpaceAccessAdapter {
             .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?;
         let legacy_bootstrap = if let Some(repository) = &self.legacy_bootstrap_repository {
             repository
-                .list_legacy_bootstraps_for_space(&space_id)
+                .list_non_complete_legacy_bootstraps_for_space(&space_id)
                 .await
                 .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?
                 .into_iter()
                 .find(|record| {
-                    record.status() != LegacyBootstrapStatus::Complete
-                        && material.as_ref().is_none_or(|material| {
-                            material.state().mode() != SpaceSecurityMode::Ready
-                                || material
-                                    .state()
-                                    .protection_group_id()
-                                    .is_none_or(|group_id| {
-                                        group_id.as_str() == record.bootstrap_id().as_str()
-                                    })
-                        })
+                    material.as_ref().is_none_or(|material| {
+                        material.state().mode() != SpaceSecurityMode::Ready
+                            || material
+                                .state()
+                                .protection_group_id()
+                                .is_none_or(|group_id| {
+                                    group_id.as_str() == record.bootstrap_id().as_str()
+                                })
+                    })
                 })
         } else {
             None
@@ -2669,7 +2668,7 @@ mod admission_tests {
                 .collect())
         }
 
-        async fn list_legacy_bootstraps_for_space(
+        async fn list_non_complete_legacy_bootstraps_for_space(
             &self,
             space_id: &SpaceId,
         ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
@@ -2678,7 +2677,10 @@ mod admission_tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|record| record.space_id() == space_id)
+                .filter(|record| {
+                    record.space_id() == space_id
+                        && record.status() != LegacyBootstrapStatus::Complete
+                })
                 .cloned()
                 .collect())
         }

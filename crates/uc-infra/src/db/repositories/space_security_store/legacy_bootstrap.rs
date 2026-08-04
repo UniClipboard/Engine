@@ -400,7 +400,7 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
             .map_err(|error| BootstrapError::Repository(error.to_string()))
     }
 
-    async fn list_legacy_bootstraps_for_space(
+    async fn list_non_complete_legacy_bootstraps_for_space(
         &self,
         space_id: &SpaceId,
     ) -> Result<Vec<LegacyBootstrapRecord>, BootstrapError> {
@@ -416,7 +416,7 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                     "SELECT bootstrap_id, space_lookup_token, previous_epoch, next_epoch, status, \
                      encrypted_record, encrypted_stage, created_at_ms, updated_at_ms \
                      FROM legacy_space_bootstrap_log \
-                     WHERE space_lookup_token = ? \
+                     WHERE space_lookup_token = ? AND status <> 'complete' \
                      ORDER BY updated_at_ms DESC",
                 )
                 .bind::<Text, _>(lookup_token)
