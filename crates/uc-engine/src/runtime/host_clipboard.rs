@@ -83,19 +83,16 @@ impl HostClipboardChangeRuntime {
         dispatch_mode: DispatchMode,
     ) -> Result<Option<SendReportSummary>, EngineError> {
         let lease = self.session_supervisor.acquire_operation().await?;
-        let cancellation = lease.cancellation();
-        let processing = self.process_change_while_leased(dispatch_mode);
-        tokio::select! {
-            _ = cancellation.cancelled() => Ok(None),
-            result = processing => result,
-        }
+        let result = self.process_change_while_leased(dispatch_mode).await;
+        drop(lease);
+        result
     }
 
     async fn process_change_while_leased(
         &self,
         dispatch_mode: DispatchMode,
     ) -> Result<Option<SendReportSummary>, EngineError> {
-        let (facade, capture, live_index, outbound, tasks) = {
+        let (facade, capture, live_index, outbound) = {
             let session_slot = self.session_supervisor.session();
             let session = session_slot.lock().await;
             let Some(session) = session.as_ref() else {
@@ -106,7 +103,6 @@ impl HostClipboardChangeRuntime {
                 Arc::clone(&session.clipboard.capture),
                 Arc::clone(&session.clipboard.live_index),
                 Arc::clone(&session.clipboard.sync),
-                Arc::clone(&session.tasks),
             )
         };
         let encryption = facade
@@ -193,27 +189,17 @@ impl HostClipboardChangeRuntime {
         match dispatch_mode {
             DispatchMode::AwaitReport => dispatch().await.map(Some),
             DispatchMode::Background => {
-                tasks
-                    .spawn("host_clipboard_outbound", move |cancel| async move {
-                        let outcome = tokio::select! {
-                            _ = cancel.cancelled() => return,
-                                    outcome = dispatch() => outcome,
-                        };
-                        match outcome {
-                            Ok(report) => tracing::info!(
-                                accepted = report.total_accepted,
-                                duplicate = report.total_duplicate,
-                                offline = report.total_offline,
-                                errored = report.total_errored,
-                                pending = report.total_pending,
-                                "host clipboard outbound sync completed"
-                            ),
-                            Err(error) => {
-                                warn!(error = %error, "host clipboard outbound sync failed")
-                            }
-                        }
-                    })
-                    .await;
+                match dispatch().await {
+                    Ok(report) => tracing::info!(
+                        accepted = report.total_accepted,
+                        duplicate = report.total_duplicate,
+                        offline = report.total_offline,
+                        errored = report.total_errored,
+                        pending = report.total_pending,
+                        "host clipboard outbound sync completed"
+                    ),
+                    Err(error) => warn!(error = %error, "host clipboard outbound sync failed"),
+                }
                 Ok(None)
             }
             DispatchMode::CaptureOnly => Ok(None),

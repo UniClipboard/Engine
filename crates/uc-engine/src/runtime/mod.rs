@@ -10,6 +10,7 @@ mod session_supervisor;
 
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,6 +74,7 @@ struct SessionFactory {
     events: EventSender,
     rendezvous_base_url: Option<String>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
+    recovery_generation: Arc<AtomicU64>,
 }
 
 struct ProductionSession {
@@ -195,10 +197,10 @@ fn network_recovery_summary(event: NetworkRecoveryEvent) -> crate::NetworkRecove
             retryable: false,
             next_retry_in_ms: None,
         },
-        NetworkRecoveryEvent::RetryScheduled => crate::NetworkRecoveryStatusSummary {
+        NetworkRecoveryEvent::RetryScheduled { delay } => crate::NetworkRecoveryStatusSummary {
             phase: crate::NetworkRecoveryPhaseSummary::RetryScheduled,
             retryable: true,
-            next_retry_in_ms: None,
+            next_retry_in_ms: Some(delay.as_millis().min(u128::from(u64::MAX)) as u64),
         },
         NetworkRecoveryEvent::Succeeded => crate::NetworkRecoveryStatusSummary {
             phase: crate::NetworkRecoveryPhaseSummary::Idle,
@@ -241,24 +243,24 @@ async fn spawn_network_recovery_observation_task(
         uc_infra::network::iroh::NetworkRecoveryObservation,
     >,
     recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
+    generation: Arc<AtomicU64>,
     tasks: &Arc<TaskRegistry>,
 ) {
     tasks
         .spawn("network_recovery_observations", move |cancel| async move {
-            let mut generation = 0u64;
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     observation = observations.recv() => match observation {
                         Ok(uc_infra::network::iroh::NetworkRecoveryObservation::LocalRelayRecovered) => {
-                            generation = generation.wrapping_add(1);
-                            recovery.observe_local_network_recovered(generation).await;
+                            let current_generation = generation.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                            recovery.observe_local_network_recovered(current_generation).await;
                         }
                         Ok(uc_infra::network::iroh::NetworkRecoveryObservation::PreviouslyOnlinePeerPathExhausted) => {
-                            recovery.observe_previously_online_peer_path_exhausted(generation).await;
+                            recovery.observe_previously_online_peer_path_exhausted(generation.load(Ordering::Relaxed)).await;
                         }
                         Ok(uc_infra::network::iroh::NetworkRecoveryObservation::FreshPeerDialSucceeded) => {
-                            recovery.observe_fresh_peer_dial_succeeded(generation).await;
+                            recovery.observe_fresh_peer_dial_succeeded(generation.load(Ordering::Relaxed)).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -319,6 +321,7 @@ impl ProductionRuntime {
             events: events.clone(),
             rendezvous_base_url: rendezvous_base_url.clone(),
             network_recovery: Arc::clone(&network_recovery),
+            recovery_generation: Arc::new(AtomicU64::new(0)),
         });
         session_supervisor.configure_factory(Arc::clone(&session_factory));
         session_supervisor.resume().await?;
@@ -450,6 +453,7 @@ impl ProductionRuntime {
         spawn_network_recovery_observation_task(
             sync_engine.subscribe_network_recovery_observations(),
             Arc::clone(&factory.network_recovery),
+            Arc::clone(&factory.recovery_generation),
             &tasks,
         )
         .await;
@@ -497,55 +501,45 @@ impl ProductionRuntime {
         })
     }
 
-    async fn current_facade(&self) -> Result<Arc<AppFacade>, EngineError> {
+    async fn current_session_field<T>(
+        &self,
+        project: impl FnOnce(&ProductionSession) -> Arc<T>,
+    ) -> Result<Arc<T>, EngineError> {
         let session = self.session_supervisor.session();
         let result = session
             .lock()
             .await
             .as_ref()
-            .map(|session| Arc::clone(&session.facade))
+            .map(project)
             .ok_or_else(operation_unavailable_error);
         result
+    }
+
+    async fn current_facade(&self) -> Result<Arc<AppFacade>, EngineError> {
+        self.current_session_field(|session| Arc::clone(&session.facade))
+            .await
     }
 
     async fn current_active_clipboard(
         &self,
     ) -> Result<Arc<uc_application::facade::ActiveClipboardFacade>, EngineError> {
-        let session = self.session_supervisor.session();
-        let result = session
-            .lock()
+        self.current_session_field(|session| Arc::clone(&session.sync_engine.active_clipboard))
             .await
-            .as_ref()
-            .map(|session| Arc::clone(&session.sync_engine.active_clipboard))
-            .ok_or_else(operation_unavailable_error);
-        result
     }
 
     async fn current_clipboard_sync_runtime(
         &self,
     ) -> Result<Arc<uc_application::facade::ClipboardSyncRuntime>, EngineError> {
-        let session = self.session_supervisor.session();
-        let result = session
-            .lock()
+        self.current_session_field(|session| Arc::clone(&session.clipboard.sync))
             .await
-            .as_ref()
-            .map(|session| Arc::clone(&session.clipboard.sync))
-            .ok_or_else(operation_unavailable_error);
-        result
     }
 
     #[cfg(feature = "lan-compat")]
     async fn current_mobile_sync(
         &self,
     ) -> Result<Arc<uc_application::facade::MobileSyncFacade>, EngineError> {
-        let session = self.session_supervisor.session();
-        let result = session
-            .lock()
+        self.current_session_field(|session| Arc::clone(&session.mobile_sync))
             .await
-            .as_ref()
-            .map(|session| Arc::clone(&session.mobile_sync))
-            .ok_or_else(operation_unavailable_error);
-        result
     }
 }
 
@@ -616,11 +610,13 @@ mod tests {
     #[test]
     fn network_recovery_events_expose_only_stable_status() {
         assert_eq!(
-            network_recovery_summary(NetworkRecoveryEvent::RetryScheduled),
+            network_recovery_summary(NetworkRecoveryEvent::RetryScheduled {
+                delay: Duration::from_millis(500)
+            }),
             crate::NetworkRecoveryStatusSummary {
                 phase: crate::NetworkRecoveryPhaseSummary::RetryScheduled,
                 retryable: true,
-                next_retry_in_ms: None,
+                next_retry_in_ms: Some(500),
             }
         );
         assert_eq!(

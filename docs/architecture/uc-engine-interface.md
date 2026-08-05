@@ -83,7 +83,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `ClearStorageCache` | 清理核心缓存并返回实际释放的字节数 |
 | `QueryLocalDevice` | 返回本机设备编号和按设置解析后的显示名 |
 | `RecoverNetwork` | 请求当前网络会话恢复；与自动恢复共享同一轮结果，不重复启动 |
-| `QueryNetworkRecoveryStatus` | 查询恢复是否进行中、是否等待重试及最近失败是否可重试 |
+| `QueryNetworkRecoveryStatus` | 查询恢复阶段、最近失败是否可重试及下次重试剩余毫秒数；没有等待中的重试时 `next_retry_in_ms` 为空 |
 | `ListMobileDevices` | 列出用户显式启用的 LAN 兼容通道所登记的移动设备 |
 | `RevokeMobileDevice` | 撤销一台 LAN 兼容设备的访问凭据 |
 | `AuthenticateMobileRequest` | 校验一次 LAN 兼容请求并返回脱敏凭据凭证 |

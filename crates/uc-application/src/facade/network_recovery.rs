@@ -34,7 +34,7 @@ pub struct NetworkRecoveryStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkRecoveryEvent {
     Started,
-    RetryScheduled,
+    RetryScheduled { delay: Duration },
     Succeeded,
     Failed { retryable: bool },
 }
@@ -282,7 +282,9 @@ async fn run_recovery_cycle(
                     }
                 }
             }
-            let _ = inner.events.send(NetworkRecoveryEvent::RetryScheduled);
+            let _ = inner
+                .events
+                .send(NetworkRecoveryEvent::RetryScheduled { delay });
             if let Some(automatic_cancel) = &automatic_cancel {
                 tokio::select! {
                     _ = inner.cancel.cancelled() => return Err(NetworkRecoveryRequestError::Stopped),
@@ -299,7 +301,7 @@ async fn run_recovery_cycle(
             }
         }
 
-        {
+        let resumed_from_retry = {
             let mut state = inner.state.lock().await;
             if state.phase == NetworkRecoveryPhase::Stopped {
                 return Err(NetworkRecoveryRequestError::Stopped);
@@ -311,6 +313,7 @@ async fn run_recovery_cycle(
                 drop(state);
                 return cancel_automatic_cycle(&inner).await;
             }
+            let resumed_from_retry = state.phase == NetworkRecoveryPhase::RetryScheduled;
             state.phase = NetworkRecoveryPhase::Recovering;
             state.next_retry_at = None;
             if let (Some(generation), Some(cycle)) =
@@ -320,6 +323,10 @@ async fn run_recovery_cycle(
                     cycle.rebuilding = true;
                 }
             }
+            resumed_from_retry
+        };
+        if resumed_from_retry {
+            let _ = inner.events.send(NetworkRecoveryEvent::Started);
         }
         let result = tokio::select! {
             _ = inner.cancel.cancelled() => Err(NetworkRecoveryRequestError::Stopped),
@@ -367,7 +374,22 @@ async fn finish_cycle(
 async fn cancel_automatic_cycle(
     inner: &NetworkRecoveryInner,
 ) -> Result<(), NetworkRecoveryRequestError> {
-    finish_cycle(inner, NetworkRecoveryPhase::Idle, None).await;
+    let transitioned_to_idle = {
+        let mut state = inner.state.lock().await;
+        let transitioned_to_idle = if state.phase == NetworkRecoveryPhase::Stopped {
+            false
+        } else {
+            state.phase = NetworkRecoveryPhase::Idle;
+            state.next_retry_at = None;
+            true
+        };
+        state.automatic_cycle = None;
+        state.in_flight = None;
+        transitioned_to_idle
+    };
+    if transitioned_to_idle {
+        let _ = inner.events.send(NetworkRecoveryEvent::Succeeded);
+    }
     Ok(())
 }
 
@@ -546,6 +568,7 @@ mod tests {
             Ok(()),
         ]));
         let recovery = NetworkRecoveryFacade::new(rebuilder.clone());
+        let mut events = recovery.subscribe();
 
         recovery.observe_local_network_recovered(6).await;
         recovery
@@ -556,8 +579,19 @@ mod tests {
             recovery.status().await.phase,
             NetworkRecoveryPhase::RetryScheduled
         );
+        assert_eq!(events.recv().await, Ok(NetworkRecoveryEvent::Started));
+        assert_eq!(
+            events.recv().await,
+            Ok(NetworkRecoveryEvent::RetryScheduled {
+                delay: Duration::from_secs(1)
+            })
+        );
 
         recovery.observe_fresh_peer_dial_succeeded(6).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(10), events.recv()).await,
+            Ok(Ok(NetworkRecoveryEvent::Succeeded))
+        );
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
 

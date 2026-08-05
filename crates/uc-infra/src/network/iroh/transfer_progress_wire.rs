@@ -33,17 +33,16 @@
 //!   - `0x06` Cancelled(Replaced)
 //!   - `0x07` Cancelled(Timeout)
 //!   - `0x08` Cancelled(Unknown)
+//!   - `0x09` Cancelled(ConnectivityRecovery)
 //!
 //! 取消子原因占用独立 status 字节,而不是单独引入 reason 字段,以保持
-//! 帧定长。老 sender 收到 `0x04..0x08` 会返回 `UnknownStatus` 拒绝单帧,
-//! 但 accept loop 会接受下一帧,不影响连续 progress。
+//! 帧定长。此变更配套提升 ALPN 版本，旧版不会协商到新帧。
 //!
 //! ## 为什么用裸字节而不是 postcard
 //!
 //! 帧固定 34 字节,比 postcard 头本身还要短。`u128`/`u64` 的大端编码
 //! 是最便宜也最容易在 receiver 重建的形式;serde_with 提供 `As<Bytes>`
-//! 也行,但会把简单代码间接化。这层不做版本协商(ALPN 已经表达版
-//! 本),将来要扩字段就跳 ALPN 到 `/1`。
+//! 也行,但会把简单代码间接化。这层的版本协商由 ALPN 表达。
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -164,6 +163,9 @@ fn decode(buf: &[u8; FRAME_LEN]) -> Result<ProgressFrame, ProgressWireError> {
         0x08 => OutboundProgressStatus::Cancelled {
             reason: FileTransferCancellationReason::Unknown,
         },
+        0x09 => OutboundProgressStatus::Cancelled {
+            reason: FileTransferCancellationReason::ConnectivityRecovery,
+        },
         other => return Err(ProgressWireError::UnknownStatus(other)),
     };
     Ok(ProgressFrame {
@@ -257,8 +259,8 @@ mod tests {
         task.await.unwrap();
     }
 
-    /// 五个 cancel 子原因都走独立 status byte。这里一次性覆盖
-    /// 0x04..0x08,避免 wire 字节与 [`FileTransferCancellationReason`]
+    /// Six cancel reasons each use a distinct status byte. This locks
+    /// 0x04..0x09 to [`FileTransferCancellationReason`]
     /// 的对齐发生漂移。
     #[tokio::test]
     async fn frame_round_trip_cancelled_all_reasons() {
@@ -268,6 +270,7 @@ mod tests {
             FileTransferCancellationReason::Replaced,
             FileTransferCancellationReason::Timeout,
             FileTransferCancellationReason::Unknown,
+            FileTransferCancellationReason::ConnectivityRecovery,
         ];
         for reason in reasons {
             let frame = ProgressFrame {
@@ -298,6 +301,7 @@ mod tests {
             (FileTransferCancellationReason::Replaced, 0x06),
             (FileTransferCancellationReason::Timeout, 0x07),
             (FileTransferCancellationReason::Unknown, 0x08),
+            (FileTransferCancellationReason::ConnectivityRecovery, 0x09),
         ];
         for &(reason, expected) in cases {
             let frame = ProgressFrame {

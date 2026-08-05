@@ -114,13 +114,7 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::NetworkRecoveryStatus(status) => Ok(OhNetworkRecoveryStatus {
-                phase: match status.phase {
-                    uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
-                    uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
-                    uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
-                    uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
-                }
-                .to_string(),
+                phase: recovery_phase(status.phase).to_string(),
                 retryable: status.retryable,
                 next_retry_in_ms: status.next_retry_in_ms.map(|value| value as f64),
             }),
@@ -598,21 +592,22 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
             mapped.member_revocation = Some(member_revocation(summary));
         }
         EngineEvent::NetworkRecoveryChanged(status) => {
-            mapped.network_recovery_phase = Some(
-                match status.phase {
-                    uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
-                    uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
-                    uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
-                    uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
-                }
-                .to_owned(),
-            );
+            mapped.network_recovery_phase = Some(recovery_phase(status.phase).to_owned());
             mapped.retryable = Some(status.retryable);
             mapped.next_retry_in_ms = status.next_retry_in_ms.map(|value| value as f64);
         }
         _ => {}
     }
     mapped
+}
+
+fn recovery_phase(phase: uc_engine::NetworkRecoveryPhaseSummary) -> &'static str {
+    match phase {
+        uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
+        uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
+        uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
+        uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
+    }
 }
 
 fn engine_state(state: EngineState) -> &'static str {
@@ -717,6 +712,7 @@ mod tests {
             Some("retry_scheduled")
         );
         assert_eq!(event.retryable, Some(true));
+        assert_eq!(event.next_retry_in_ms, Some(500.0));
     }
 
     #[test]

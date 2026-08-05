@@ -35,7 +35,7 @@
 - 发送侧活动传输在网络恢复时补唯一终态仍未完成；当前会话关闭会直接停止发送进度翻译任务，因此不能把该项目标记为完成。
 - 已把发送进度翻译任务收口为可等待关闭的运行期：它跟踪未终止发送，网络恢复关闭时先按最后进度发出 `connectivity_recovery` 的唯一取消终态，再等待任务退出；已结束传输会被移出活动表而不会重复终态。`cargo test -p uc-engine outbound_progress_tests --locked` 的两项检查通过。
 - 完整自动化验证通过：应用层恢复规则 7 项、文件接收 8 项、基础设施恢复 10 项和 Presence 15 项、Engine 恢复/操作门/发送终态及公开契约、UniFFI 完整测试和公开契约、HarmonyOS N-API 完整测试均通过；`cargo metadata`、全工作区 `cargo check`、格式、仓库架构检查和差异检查均通过。
-- 已实际生成 iOS XCFramework 与 Android AAR。两份生成接口均包含恢复动作、状态查询和状态通知，压缩包与 AAR 的校验值均与清单一致。HarmonyOS 宿主冒烟跳过：当前没有已打包的 N-API 模块。Windows 双机 20 轮网络切换验收跳过：当前没有两台 Windows 设备。iPhone 物理机处于离线状态；Android 已连接设备只确认环境存在，未把它当作本次跨设备恢复验收。
+- 已实际生成 iOS XCFramework 与 Android AAR。两份生成接口均包含恢复动作、状态查询和状态通知，压缩包与 AAR 的校验值均与清单一致。HarmonyOS 宿主冒烟跳过：当前没有已打包的 N-API 模块。Windows 双机 20 轮网络切换验收跳过：当前没有两台 Windows 设备。iPhone 物理机检查跳过：设备处于离线状态。Android 真机恢复检查跳过：已连接设备只确认环境存在，未进行本次跨设备恢复验收。
 
 ### 计划制定：确认边界与现状
 

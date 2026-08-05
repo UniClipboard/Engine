@@ -1733,13 +1733,7 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
         }
         uc_engine::EngineEvent::NetworkRecoveryChanged(status) => {
             BindingEvent::NetworkRecoveryChanged {
-                phase: match status.phase {
-                    uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
-                    uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
-                    uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
-                    uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
-                }
-                .to_owned(),
+                phase: recovery_phase(status.phase).to_owned(),
                 retryable: status.retryable,
                 next_retry_in_ms: status.next_retry_in_ms,
             }
@@ -2050,17 +2044,20 @@ fn map_network_recovery_status(
 ) -> Result<NetworkRecoveryStatus, BindingError> {
     match result {
         OperationResult::NetworkRecoveryStatus(status) => Ok(NetworkRecoveryStatus {
-            phase: match status.phase {
-                uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
-                uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
-                uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
-                uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
-            }
-            .to_string(),
+            phase: recovery_phase(status.phase).to_string(),
             retryable: status.retryable,
             next_retry_in_ms: status.next_retry_in_ms,
         }),
         _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn recovery_phase(phase: uc_engine::NetworkRecoveryPhaseSummary) -> &'static str {
+    match phase {
+        uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
+        uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
+        uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
+        uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
     }
 }
 

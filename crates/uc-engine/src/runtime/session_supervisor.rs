@@ -133,9 +133,13 @@ impl uc_application::facade::RebuildNetworkSessionPort for SessionSupervisor {
     async fn rebuild_network_session(
         &self,
     ) -> Result<(), uc_application::facade::RebuildNetworkSessionError> {
-        self.rebuild_session()
-            .await
-            .map_err(|_| uc_application::facade::RebuildNetworkSessionError::Retryable)
+        self.rebuild_session().await.map_err(|error| {
+            if error.is_retryable() {
+                uc_application::facade::RebuildNetworkSessionError::Retryable
+            } else {
+                uc_application::facade::RebuildNetworkSessionError::Permanent
+            }
+        })
     }
 }
 
@@ -200,6 +204,8 @@ impl SessionOperationGate {
     async fn wait_for_drain(&self) {
         loop {
             let notified = self.inner.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let active = self
                 .inner
                 .state

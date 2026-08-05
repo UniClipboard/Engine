@@ -678,7 +678,7 @@ fn operation_response(result: OperationResult) -> Value {
         OperationResult::NetworkRecoveryStatus(status) => json!({
             "ok": true,
             "kind": "network_recovery_status",
-            "phase": format!("{:?}", status.phase),
+            "phase": network_recovery_phase(status.phase),
             "retryable": status.retryable,
             "next_retry_in_ms": status.next_retry_in_ms,
         }),
@@ -1357,6 +1357,15 @@ fn operation_response(result: OperationResult) -> Value {
                 "outcome": "no_eligible_targets",
             }),
         },
+    }
+}
+
+fn network_recovery_phase(phase: uc_engine::NetworkRecoveryPhaseSummary) -> &'static str {
+    match phase {
+        uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
+        uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
+        uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
+        uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
     }
 }
 

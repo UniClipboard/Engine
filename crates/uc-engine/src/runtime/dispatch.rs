@@ -85,8 +85,13 @@ impl EngineRuntime for ProductionRuntime {
                     .request_recovery()
                     .await
                     .map(|()| OperationResult::NetworkRecovered)
-                    .map_err(|_| {
-                        EngineError::new(1105, crate::EngineErrorCategory::Unavailable, true)
+                    .map_err(|error| match error {
+                        uc_application::facade::NetworkRecoveryRequestError::Stopped => {
+                            super::operation_unavailable_error()
+                        }
+                        uc_application::facade::NetworkRecoveryRequestError::Rebuild(_) => {
+                            EngineError::new(1105, crate::EngineErrorCategory::Unavailable, true)
+                        }
                     });
             }
             Operation::QueryNetworkRecoveryStatus => {

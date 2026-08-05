@@ -92,7 +92,12 @@ pub enum NetworkRecoveryObservation {
 
 pub struct NetworkRecoveryObservationSource {
     sender: broadcast::Sender<NetworkRecoveryObservation>,
-    local_relay_recovered_at: Mutex<Option<Instant>>,
+    state: Mutex<NetworkRecoveryObservationState>,
+}
+
+struct NetworkRecoveryObservationState {
+    local_relay_recovered_at: Option<Instant>,
+    pending_local_relay_recovered: bool,
 }
 
 impl NetworkRecoveryObservationSource {
@@ -100,28 +105,48 @@ impl NetworkRecoveryObservationSource {
         let (sender, _) = broadcast::channel(32);
         Self {
             sender,
-            local_relay_recovered_at: Mutex::new(None),
+            state: Mutex::new(NetworkRecoveryObservationState {
+                local_relay_recovered_at: None,
+                pending_local_relay_recovered: false,
+            }),
         }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<NetworkRecoveryObservation> {
-        self.sender.subscribe()
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let receiver = self.sender.subscribe();
+        if state.pending_local_relay_recovered {
+            state.pending_local_relay_recovered = false;
+            let _ = self
+                .sender
+                .send(NetworkRecoveryObservation::LocalRelayRecovered);
+        }
+        receiver
     }
 
     pub(crate) fn publish(&self, observation: NetworkRecoveryObservation) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if observation == NetworkRecoveryObservation::LocalRelayRecovered {
-            if let Ok(mut recovered_at) = self.local_relay_recovered_at.lock() {
-                *recovered_at = Some(Instant::now());
+            state.local_relay_recovered_at = Some(Instant::now());
+            if self.sender.receiver_count() == 0 {
+                state.pending_local_relay_recovered = true;
+                return;
             }
         }
         let _ = self.sender.send(observation);
     }
 
     pub(crate) fn local_relay_recovered_recently(&self) -> bool {
-        self.local_relay_recovered_at
+        self.state
             .lock()
-            .ok()
-            .and_then(|recovered_at| *recovered_at)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .local_relay_recovered_at
             .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
     }
 }
@@ -544,10 +569,10 @@ mod tests {
     #[test]
     fn relay_recovery_observation_opens_a_short_window() {
         let source = NetworkRecoveryObservationSource::new();
-        let mut observations = source.subscribe();
         assert!(!source.local_relay_recovered_recently());
 
         source.publish(NetworkRecoveryObservation::LocalRelayRecovered);
+        let mut observations = source.subscribe();
 
         assert!(source.local_relay_recovered_recently());
         assert_eq!(

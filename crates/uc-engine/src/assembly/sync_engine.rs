@@ -316,22 +316,6 @@ mod group_update_retry_tests {
 ///
 /// transfer_id 字段直接复用帧里的 sender 端 entry_id —— sender 本地
 /// entry_id == transfer_id 是发送侧的协议约定(同接收侧约定对称)。
-/// `Cancelled` 反向帧的子原因 → wire reason 标签。
-///
-/// 必须与 `uc-application/src/facade/host_event/publisher.rs` 里 receiver
-/// 侧的 `cancellation_reason_label` 保持一致 —— 前端 i18n key
-/// (`clipboard.transfer.cancelReason.<label>`) 在两端共用同一张表。
-fn cancellation_reason_label(reason: FileTransferCancellationReason) -> &'static str {
-    match reason {
-        FileTransferCancellationReason::LocalUser => "local_user",
-        FileTransferCancellationReason::RemotePeer => "remote_peer",
-        FileTransferCancellationReason::Replaced => "replaced",
-        FileTransferCancellationReason::Timeout => "timeout",
-        FileTransferCancellationReason::ConnectivityRecovery => "connectivity_recovery",
-        FileTransferCancellationReason::Unknown => "unknown",
-    }
-}
-
 struct OutboundProgressRuntime {
     commands: mpsc::UnboundedSender<OutboundProgressCommand>,
     task: JoinHandle<()>,
@@ -350,18 +334,89 @@ struct ActiveOutboundProgress {
     total_bytes: Option<u64>,
 }
 
+fn forward_outbound_progress(
+    bus: &HostEventBus,
+    last_progress_emit: &mut HashMap<String, Instant>,
+    active: &mut HashMap<String, ActiveOutboundProgress>,
+    event: InboundProgressEvent,
+) {
+    let terminal = match &event.status {
+        OutboundProgressStatus::InProgress => None,
+        OutboundProgressStatus::Completed => Some(("completed", None)),
+        OutboundProgressStatus::Failed => {
+            Some(("failed", Some("receiver fetch failed".to_string())))
+        }
+        OutboundProgressStatus::Cancelled { reason } => {
+            Some(("cancelled", Some(reason.as_str().to_string())))
+        }
+    };
+
+    // Terminal frames bypass throttling so the host receives the final bytes and state.
+    let should_emit_progress = if terminal.is_some() {
+        true
+    } else {
+        let now = Instant::now();
+        match last_progress_emit.get(&event.transfer_id) {
+            Some(previous) if now.duration_since(*previous) < TRANSLATOR_PROGRESS_MIN_INTERVAL => {
+                false
+            }
+            _ => {
+                last_progress_emit.insert(event.transfer_id.clone(), now);
+                true
+            }
+        }
+    };
+
+    if should_emit_progress {
+        bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::Progress {
+            transfer_id: event.transfer_id.clone(),
+            entry_id: Some(event.transfer_id.clone()),
+            attempt_id: None,
+            peer_id: event.from_device.as_str().to_string(),
+            direction: FileTransferDirection::Sending,
+            bytes_transferred: event.bytes_transferred,
+            total_bytes: event.total_bytes,
+        }));
+    }
+
+    if let Some((status, reason)) = terminal {
+        // Terminal frames remove active tracking before shutdown can cancel it again.
+        last_progress_emit.remove(&event.transfer_id);
+        active.remove(&event.transfer_id);
+        bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::StatusChanged {
+            transfer_id: event.transfer_id.clone(),
+            entry_id: event.transfer_id,
+            attempt_id: None,
+            status: status.to_string(),
+            reason,
+        }));
+    } else {
+        active.insert(
+            event.transfer_id,
+            ActiveOutboundProgress {
+                peer_id: event.from_device.as_str().to_owned(),
+                bytes_transferred: event.bytes_transferred,
+                total_bytes: event.total_bytes,
+            },
+        );
+    }
+}
+
 impl OutboundProgressRuntime {
     fn spawn(mut rx: broadcast::Receiver<InboundProgressEvent>, bus: Arc<HostEventBus>) -> Self {
         let (commands, mut command_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
-            // 每个 transfer_id 记录上次 emit progress 的时刻,用于 5/sec 节流。
-            // 终态帧到达时移除对应 entry,防止长时间运行后无限增长。
+            // Track each transfer's last host progress event for the 5/sec limit.
+            // Terminal frames remove their entries so long-running sessions do not grow unbounded.
             let mut last_progress_emit: HashMap<String, Instant> = HashMap::new();
             let mut active = HashMap::<String, ActiveOutboundProgress>::new();
             loop {
                 tokio::select! {
                     command = command_rx.recv() => match command {
                         Some(OutboundProgressCommand::Shutdown { reason, done }) => {
+                            while let Ok(event) = rx.try_recv() {
+                                forward_outbound_progress(&bus, &mut last_progress_emit, &mut active, event);
+                            }
                             for (transfer_id, progress) in active.drain() {
                                 bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::Progress {
                                     entry_id: Some(transfer_id.clone()),
@@ -377,7 +432,7 @@ impl OutboundProgressRuntime {
                                     transfer_id,
                                     attempt_id: None,
                                     status: "cancelled".to_owned(),
-                                    reason: Some(cancellation_reason_label(reason).to_owned()),
+                                    reason: Some(reason.as_str().to_owned()),
                                 }));
                             }
                             let _ = done.send(());
@@ -386,68 +441,7 @@ impl OutboundProgressRuntime {
                         None => return,
                     },
                     received = rx.recv() => match received {
-                    Ok(event) => {
-                        let terminal = match &event.status {
-                            OutboundProgressStatus::InProgress => None,
-                            OutboundProgressStatus::Completed => Some(("completed", None)),
-                            OutboundProgressStatus::Failed => {
-                                Some(("failed", Some("receiver fetch failed".to_string())))
-                            }
-                            OutboundProgressStatus::Cancelled { reason } => Some((
-                                "cancelled",
-                                Some(cancellation_reason_label(*reason).to_string()),
-                            )),
-                        };
-
-                        // Progress 帧节流:终态帧总是放行(让前端立刻看到最终 bytes
-                        // 和状态),InProgress 帧按 transfer_id 走 5/sec 上限。
-                        let should_emit_progress = if terminal.is_some() {
-                            true
-                        } else {
-                            let now = Instant::now();
-                            match last_progress_emit.get(&event.transfer_id) {
-                                Some(prev)
-                                    if now.duration_since(*prev) < TRANSLATOR_PROGRESS_MIN_INTERVAL =>
-                                {
-                                    false
-                                }
-                                _ => {
-                                    last_progress_emit.insert(event.transfer_id.clone(), now);
-                                    true
-                                }
-                            }
-                        };
-
-                        if should_emit_progress {
-                            bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::Progress {
-                                transfer_id: event.transfer_id.clone(),
-                                entry_id: Some(event.transfer_id.clone()),
-                                attempt_id: None,
-                                peer_id: event.from_device.as_str().to_string(),
-                                direction: FileTransferDirection::Sending,
-                                bytes_transferred: event.bytes_transferred,
-                                total_bytes: event.total_bytes,
-                            }));
-                        }
-
-                        if let Some((status, reason)) = terminal {
-                            last_progress_emit.remove(&event.transfer_id);
-                            active.remove(&event.transfer_id);
-                            bus.emit_or_warn(HostEvent::Transfer(TransferHostEvent::StatusChanged {
-                                transfer_id: event.transfer_id.clone(),
-                                entry_id: event.transfer_id,
-                                attempt_id: None,
-                                status: status.to_string(),
-                                reason,
-                            }));
-                        } else {
-                            active.insert(event.transfer_id, ActiveOutboundProgress {
-                                peer_id: event.from_device.as_str().to_owned(),
-                                bytes_transferred: event.bytes_transferred,
-                                total_bytes: event.total_bytes,
-                            });
-                        }
-                    }
+                    Ok(event) => forward_outbound_progress(&bus, &mut last_progress_emit, &mut active, event),
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         debug!(
                             skipped = n,
@@ -517,6 +511,15 @@ mod outbound_progress_tests {
                 status: OutboundProgressStatus::InProgress,
             })
             .unwrap_or_else(|error| panic!("send progress: {error}"));
+        events
+            .send(InboundProgressEvent {
+                from_device: DeviceId::new("peer-a"),
+                transfer_id: "transfer-a".to_owned(),
+                bytes_transferred: 12,
+                total_bytes: Some(20),
+                status: OutboundProgressStatus::InProgress,
+            })
+            .unwrap_or_else(|error| panic!("send progress: {error}"));
         tokio::task::yield_now().await;
 
         runtime
@@ -554,7 +557,6 @@ mod outbound_progress_tests {
                 status: OutboundProgressStatus::Completed,
             })
             .unwrap_or_else(|error| panic!("send terminal: {error}"));
-        tokio::task::yield_now().await;
         runtime
             .shutdown(FileTransferCancellationReason::ConnectivityRecovery)
             .await;

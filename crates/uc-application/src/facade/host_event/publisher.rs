@@ -20,8 +20,7 @@ fn recover_poisoned<T>(poisoned: PoisonError<T>, context: &'static str) -> T {
     poisoned.into_inner()
 }
 use uc_core::file_transfer::{
-    FileTransferCancellationReason, FileTransferEvent, FileTransferEventPublisherPort,
-    FileTransferFailureReason,
+    FileTransferEvent, FileTransferEventPublisherPort, FileTransferFailureReason,
 };
 use uc_core::ports::{FindAttemptIdForTransferPort, FindEntryIdForTransferPort};
 
@@ -146,7 +145,7 @@ impl FileTransferEventPublisherPort for FileTransferHostEventPublisher {
                 reason,
                 ..
             } => {
-                let reason_label = Some(cancellation_reason_label(reason).to_string());
+                let reason_label = Some(reason.as_str().to_string());
                 self.publish_status_change(&transfer_id, "cancelled", reason_label, "Cancelled")
                     .await;
             }
@@ -199,16 +198,5 @@ fn format_failure_reason(reason: FileTransferFailureReason, detail: Option<&str>
     match detail.map(str::trim).filter(|s| !s.is_empty()) {
         Some(detail) => format!("{label}: {detail}"),
         None => label.to_string(),
-    }
-}
-
-fn cancellation_reason_label(reason: FileTransferCancellationReason) -> &'static str {
-    match reason {
-        FileTransferCancellationReason::LocalUser => "local_user",
-        FileTransferCancellationReason::RemotePeer => "remote_peer",
-        FileTransferCancellationReason::Replaced => "replaced",
-        FileTransferCancellationReason::Timeout => "timeout",
-        FileTransferCancellationReason::ConnectivityRecovery => "connectivity_recovery",
-        FileTransferCancellationReason::Unknown => "unknown",
     }
 }

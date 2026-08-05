@@ -587,8 +587,9 @@ impl IrohPresenceAdapter {
                 .as_ref()
                 .is_some_and(|observations| observations.local_relay_recovered_recently());
         let dial = if recovery_confirmation {
+            let deadline = Instant::now() + RECOVERY_CONFIRMATION_BUDGET;
             let first = match tokio::time::timeout(
-                RECOVERY_CONFIRMATION_BUDGET,
+                deadline.saturating_duration_since(Instant::now()),
                 connect_with_staggered_retry(
                     Arc::clone(&self.endpoint),
                     endpoint_addr.clone(),
@@ -608,7 +609,7 @@ impl IrohPresenceAdapter {
                         recovery.recover_after_confirmed_path_failure().await;
                     }
                     match tokio::time::timeout(
-                        RECOVERY_CONFIRMATION_BUDGET,
+                        deadline.saturating_duration_since(Instant::now()),
                         connect_with_staggered_retry(
                             Arc::clone(&self.endpoint),
                             endpoint_addr,
