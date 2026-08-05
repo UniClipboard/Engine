@@ -28,6 +28,10 @@ pub enum EntryDeliveryStatus {
     /// 当前离线,下次上线时可重试送达。与 `Failed` 的区别:
     /// `Unreachable` 是预期的临时状态,`Failed` 是需要关注的异常。
     Unreachable,
+    /// A newer local clipboard entry replaced this unreachable delivery for
+    /// the same peer. It is terminal for automatic delivery: keeping the
+    /// older content would make a reconnected peer regress to stale content.
+    Superseded,
     /// 投递失败,`reason` 给出失败类别。
     Failed { reason: DeliveryFailureReason },
 }

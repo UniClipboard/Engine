@@ -323,6 +323,118 @@ async fn offline_members_learn_about_each_other_and_keep_syncing_after_restart()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn offline_clipboard_delivery_reaches_the_receiver_after_it_restarts() {
+    let rendezvous = mount_rendezvous().await;
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let device_b = DeviceHarness::new(rendezvous.uri());
+
+    let engine_a = device_a.start().await;
+    let engine_b = device_b.start().await;
+    let (space_id, a_id) = create_space(&engine_a, "Device A").await;
+    let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
+    wait_for_members(&engine_a, &[&b_id]).await;
+    wait_for_members(&engine_b, &[&a_id]).await;
+
+    engine_b
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("take B offline before sending");
+
+    let text = "offline recovery must reach B exactly";
+    let sent = engine_a
+        .execute(Operation::SendText(SendTextInput {
+            text: text.to_owned(),
+            target_devices: vec![b_id.clone()],
+        }))
+        .await
+        .expect("record an offline send attempt");
+    let OperationResult::EntrySent(report) = sent else {
+        panic!("unexpected offline send result: {sent:?}");
+    };
+    assert_eq!(report.total_accepted, 0);
+    assert_eq!(report.total_offline, 1);
+
+    engine_a
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("restart A with its saved offline delivery record");
+    let engine_a = device_a.start().await;
+    recover(&engine_a).await;
+
+    let engine_b = device_b.start().await;
+    recover(&engine_b).await;
+    wait_until(WAIT_TIMEOUT, || async {
+        receiver_has_exact_text(&engine_b, text).await
+    })
+    .await;
+
+    engine_a
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down A after offline delivery recovery");
+    engine_b
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down B after offline delivery recovery");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn offline_clipboard_delivery_only_sends_the_latest_content_when_the_receiver_returns() {
+    let rendezvous = mount_rendezvous().await;
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let device_b = DeviceHarness::new(rendezvous.uri());
+
+    let engine_a = device_a.start().await;
+    let engine_b = device_b.start().await;
+    let (space_id, a_id) = create_space(&engine_a, "Device A").await;
+    let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
+    wait_for_members(&engine_a, &[&b_id]).await;
+    wait_for_members(&engine_b, &[&a_id]).await;
+
+    engine_b
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("take B offline before sending");
+
+    let stale_text = "offline stale content must not reach B";
+    let latest_text = "offline latest content must reach B";
+    for text in [stale_text, latest_text] {
+        let sent = engine_a
+            .execute(Operation::SendText(SendTextInput {
+                text: text.to_owned(),
+                target_devices: vec![b_id.clone()],
+            }))
+            .await
+            .expect("record an offline send attempt");
+        let OperationResult::EntrySent(report) = sent else {
+            panic!("unexpected offline send result: {sent:?}");
+        };
+        assert_eq!(report.total_accepted, 0);
+        assert_eq!(report.total_offline, 1);
+    }
+
+    let engine_b = device_b.start().await;
+    recover(&engine_b).await;
+    wait_until(WAIT_TIMEOUT, || async {
+        receiver_has_exact_text(&engine_b, latest_text).await
+    })
+    .await;
+    assert!(
+        !receiver_has_exact_text(&engine_b, stale_text).await,
+        "B must not receive content replaced while it was offline"
+    );
+
+    engine_a
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down A after latest-only offline delivery recovery");
+    engine_b
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down B after latest-only offline delivery recovery");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn stable_join_routes_a_fresh_device_then_switches_an_existing_device() {
     let rendezvous = mount_rendezvous().await;
     let first_sponsor = DeviceHarness::new(rendezvous.uri());

@@ -1045,6 +1045,7 @@ fn entry_delivery_contract_preserves_full_view_without_debugging_user_content() 
         uc_engine::EntryDeliveryStatusSummary::Delivered,
         uc_engine::EntryDeliveryStatusSummary::Duplicate,
         uc_engine::EntryDeliveryStatusSummary::Unreachable,
+        uc_engine::EntryDeliveryStatusSummary::Superseded,
         uc_engine::EntryDeliveryStatusSummary::Failed {
             reason: uc_engine::DeliveryFailureReasonSummary::LocalPolicy,
         },
@@ -1061,7 +1062,7 @@ fn entry_delivery_contract_preserves_full_view_without_debugging_user_content() 
             reason: uc_engine::DeliveryFailureReasonSummary::Internal,
         },
     ];
-    assert_eq!(statuses.len(), 9);
+    assert_eq!(statuses.len(), 10);
 }
 
 #[test]

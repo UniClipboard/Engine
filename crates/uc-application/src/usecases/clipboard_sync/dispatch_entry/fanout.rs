@@ -7,14 +7,13 @@
 //! elapses stop waiting and return whatever is still in flight so the
 //! caller can drive it to completion off the hot path.
 //!
-//! ## Contract red line — VISION locked decision #59 (clipboard transience)
+//! ## Contract boundary
 //!
 //! This is a *deadline + observe* mechanism, NOT a queue / retry /
 //! redelivery mechanism. Tasks run exactly once; the deadline only bounds
 //! how long the FOREGROUND waits for them. Tasks still in flight at the
 //! deadline are handed back so the caller can *finish and record* them —
-//! never replayed. Do not grow retry / backoff / persistence into this
-//! type: automatic redelivery is an absolute project禁区.
+//! never replayed by this type.
 
 use std::time::{Duration, Instant};
 

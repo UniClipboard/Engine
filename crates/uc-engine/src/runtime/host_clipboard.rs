@@ -91,7 +91,7 @@ impl HostClipboardChangeRuntime {
                 Arc::clone(&session.facade),
                 Arc::clone(&session.clipboard.capture),
                 Arc::clone(&session.clipboard.live_index),
-                Arc::clone(&session.clipboard.outbound),
+                Arc::clone(&session.clipboard.sync),
                 Arc::clone(&session.tasks),
             )
         };
@@ -167,7 +167,7 @@ impl HostClipboardChangeRuntime {
         let entry_id = captured.entry_id;
         let dispatch = move || async move {
             outbound
-                .dispatch_capture(ClipboardOutboundInput {
+                .dispatch_local_capture(ClipboardOutboundInput {
                     entry_id: entry_id.clone(),
                     snapshot: dispatch_snapshot,
                     origin,

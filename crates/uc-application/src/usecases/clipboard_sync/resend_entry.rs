@@ -2,54 +2,12 @@
 //!
 //!补齐 desktop 缺失的"重发"能力:用户在 entry detail view 上看到对某 peer
 //! 是 `Unreachable`(或 `Failed`),主动点重发。本用例**不引入新表、不新增 Port、
-//! 不自动触发**,候选集合由 [`EntryDeliveryRepositoryPort::list_by_entry`]
-//! 与 [`TrustedPeerRepositoryPort::list`] 在本调用内派生(差集),与 ADR
-//! §3.3 铁律 6 一致。
+//! 不自行监听自动触发**；用户手动重发的候选集合由
+//! [`EntryDeliveryRepositoryPort::list_by_entry`] 与
+//! [`TrustedPeerRepositoryPort::list`] 在本调用内派生(差集)。它只决定用户
+//! 允许重发的目标；既有本机内容的还原、组装和实际投递由私有的
+//! `ExistingLocalEntryDelivery` 统一完成。
 //!
-//! ## 与 `DispatchClipboardEntryUseCase` 的关系
-//!
-//! 本用例**不复用** `ClipboardOutboundDispatcher::dispatch_capture` 入口
-//! (`dispatch_capture` 的语义是"刚捕获了新内容,广播给所有 peer"):
-//!
-//! - 输入语义不同:resend 的输入是已存 `EntryId`,不是新 snapshot;
-//! - origin 不同:用 [`ClipboardChangeOrigin::Resend`](uc_core::ClipboardChangeOrigin::Resend),
-//!   避免污染 capture 漏斗 telemetry;
-//! - 目标语义不同:resend 走 `DispatchClipboardEntryInput.target_filter`
-//!   收紧 fan-out 到差集 / 显式 peer 子集,而 capture 走全 fan-out。
-//!
-//! 但下游(plan → publish → encode → dispatch)100% 复用既有路径:
-//!
-//! - [`reconstruct_snapshot_from_entry`] —— commit B2 抽出的共享 helper;
-//! - [`assemble_outbound_payload`] —— resolve file set → plan → publish →
-//!   directory manifest → identity stamp 的共享出站组装链,与
-//!   active-clipboard pull serve 同源(issue #1327);其内部的 planner
-//!   bypass 语义见下文 `max_file_size` 契约;
-//! - [`encode_snapshot_with_blob_refs_to_v3_bytes`] —— payload codec;
-//! - [`DispatchEntryRunner`] —— commit A 的 `target_filter` 字段 + 本 commit
-//!   抽出的内部 trait,让 fan-out / delivery 落盘 / host event emit 全部复用。
-//!
-//! ## "本机已不持有 plaintext / blob" 的定义
-//!
-//! `reconstruct_snapshot_from_entry` 已经把所有"无法物化"的情况收敛成
-//! [`BuildSnapshotError::PasteRepUnavailable`] / `PasteRepBlobFetchFailed` /
-//! `NoRestorableRepresentations`,本用例
-//! 全部映射成 [`ResendEntryError::EntryNotResendable`] + [`NotResendableReason::PayloadLost`]。
-//! 文件分支额外做了 on-disk 存在性校验(reconstruct 内 `path.exists()` →
-//! `PayloadResolveError::Lost`),所以"本机文件被 GC 但 payload_state 还没翻
-//! 成 Lost"的边界情况也走得通。
-//!
-//! ## `max_file_size` 与 Resend 的契约
-//!
-//! Resend 路径**不**受 `settings.file_sync.max_file_size` 限制 —— 该 setting
-//! 是 LocalCapture 自动出站的带宽护栏(用户没主动表态时不想偷偷送大文件),
-//! 而 resend 是用户显式动作,理应越过此护栏自行承担后果。bypass 在 planner
-//! 内实现(origin-aware,[`assemble_outbound_payload`] 以 `Resend` origin
-//! 规划),`file_sync_enabled` 不在 bypass 范围内 —— "关闭文件同步"是更强
-//! 的用户意图,resend 仍尊重。
-//!
-//! 这条契约让 [`NotResendableReason::PayloadLost`] 的语义严格收窄到"本机
-//! 不持有 plaintext / blob",不再混入"持有但超用户上限"的歧义,前端
-//! i18n 文案可以放心表达"this entry no longer exists locally"。
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -58,7 +16,6 @@ use thiserror::Error;
 use tracing::info;
 
 use uc_core::blob::ports::BlobReaderPort;
-use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::clipboard::EntryDeliveryStatus;
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::clipboard::{
@@ -71,20 +28,11 @@ use uc_core::ports::{
 };
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
-use crate::facade::clipboard_outbound::{
-    assemble_outbound_payload, ClipboardOutboundError, OutboundBlobPublishGateway, OutboundPayload,
-    OutboundPayloadError,
-};
-use crate::usecases::clipboard_sync::dispatch_entry::{
-    DispatchClipboardEntryInput, DispatchEntryRunner, DispatchSyncError,
-};
-use crate::usecases::clipboard_sync::payload_codec::{
-    encode_snapshot_with_blob_refs_and_file_set_to_v3_bytes,
-    encode_snapshot_with_blob_refs_to_v3_bytes,
-};
-use crate::usecases::clipboard_sync::snapshot_from_entry::{
-    reconstruct_snapshot_from_entry, BuildSnapshotError,
-};
+use crate::facade::clipboard_outbound::OutboundBlobPublishGateway;
+use crate::usecases::clipboard_sync::dispatch_entry::DispatchEntryRunner;
+
+use super::existing_local_entry_delivery::ExistingLocalEntryDelivery;
+pub(crate) use super::existing_local_entry_delivery::ExistingLocalEntryDeliveryRunner;
 
 /// 用户主动 resend 的命令。
 #[derive(Debug, Clone)]
@@ -193,20 +141,9 @@ impl ResendEntryRunner for ResendEntryUseCase {
 }
 
 pub(crate) struct ResendEntryUseCase {
-    entry_repo: Arc<dyn GetClipboardEntryPort>,
-    event_repo: Arc<dyn ClipboardEventRepositoryPort>,
-    selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-    representation_repo: Arc<dyn GetRepresentationPort>,
-    rep_processing_repo: Arc<dyn UpdateRepresentationProcessingResultPort>,
-    payload_resolver: Arc<dyn ClipboardPayloadResolverPort>,
-    blob_store: Arc<dyn BlobReaderPort>,
     entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
-    device_identity: Arc<dyn DeviceIdentityPort>,
-    settings: Arc<dyn SettingsPort>,
-    entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
-    blob_publisher: Arc<dyn OutboundBlobPublishGateway>,
-    dispatch_runner: Arc<dyn DispatchEntryRunner>,
+    delivery: Arc<dyn ExistingLocalEntryDeliveryRunner>,
 }
 
 /// Bundled dependencies for [`ResendEntryUseCase`].
@@ -234,8 +171,15 @@ pub(crate) struct ResendEntryDeps {
 }
 
 impl ResendEntryUseCase {
+    #[cfg(test)]
     pub(crate) fn new(deps: ResendEntryDeps) -> Self {
-        Self {
+        Self::build(deps).0
+    }
+
+    pub(crate) fn build(
+        deps: ResendEntryDeps,
+    ) -> (Self, Arc<dyn ExistingLocalEntryDeliveryRunner>) {
+        let delivery = Arc::new(ExistingLocalEntryDelivery {
             entry_repo: deps.entry_repo,
             event_repo: deps.event_repo,
             selection_repo: deps.selection_repo,
@@ -243,29 +187,22 @@ impl ResendEntryUseCase {
             rep_processing_repo: deps.rep_processing_repo,
             payload_resolver: deps.payload_resolver,
             blob_store: deps.blob_store,
-            entry_delivery_repo: deps.entry_delivery_repo,
-            trusted_peer_repo: deps.trusted_peer_repo,
             device_identity: deps.device_identity,
             settings: deps.settings,
             entry_file_set_repo: deps.entry_file_set_repo,
             blob_publisher: deps.blob_publisher,
             dispatch_runner: deps.dispatch_runner,
-        }
+        }) as Arc<dyn ExistingLocalEntryDeliveryRunner>;
+        let resend = Self {
+            entry_delivery_repo: deps.entry_delivery_repo,
+            trusted_peer_repo: deps.trusted_peer_repo,
+            delivery: Arc::clone(&delivery),
+        };
+        (resend, delivery)
     }
 
-    /// 执行一次 resend。流程对照 ADR-005 §2.5.4:
-    ///
-    /// 1. `entry_repo.get_entry` — 不存在则 `EntryNotFound`。
-    /// 2. `event_repo.get_source_device` — 非本机则 `RemoteOrigin`。
-    /// 3. `reconstruct_snapshot_from_entry` — 任一必要 rep 不可解则 `PayloadLost`。
-    /// 4. 派生目标集合(filter 校验 / 差集派生)。
-    /// 5. `assemble_outbound_payload` — resolve file set → plan(Resend) →
-    ///    publish;文件集不可复现 / publish 失败映射到对应 error。
-    /// 6. V3 envelope 编码。
-    /// 7. `dispatch_runner.execute` with `target_filter = Some(targets)`。
-    ///
-    /// fan-out 后的 `EntryDeliveryRecord` 写盘 + host event emit 由
-    /// `DispatchClipboardEntryUseCase` 内部完成,本用例只回收聚合计数。
+    /// Chooses the user-authorized targets, then delegates all existing-entry
+    /// delivery work to the shared private module.
     pub(crate) async fn execute(
         &self,
         cmd: ResendEntryCommand,
@@ -276,54 +213,6 @@ impl ResendEntryUseCase {
             "resend.execute start"
         );
 
-        // 1. Load entry.
-        let entry = self
-            .entry_repo
-            .get_entry(&cmd.entry_id)
-            .await
-            .map_err(|err| ResendEntryError::Storage(format!("get_entry: {err}")))?
-            .ok_or_else(|| ResendEntryError::EntryNotFound(cmd.entry_id.clone()))?;
-
-        // 2. Origin check. `get_source_device == None` 说明 event 已不存在
-        //    (FK 错位),保守按"非本机"处理,而不是当成本机 — entry 真的有
-        //    local 来源的话 source_device 必然有值。
-        let source_device = match self
-            .event_repo
-            .get_source_device(&entry.event_id)
-            .await
-            .map_err(|err| ResendEntryError::Storage(format!("get_source_device: {err}")))?
-        {
-            Some(dev) => dev,
-            None => {
-                return Err(ResendEntryError::EntryNotResendable {
-                    entry_id: cmd.entry_id.clone(),
-                    reason: NotResendableReason::RemoteOrigin,
-                });
-            }
-        };
-        let local_device = self.device_identity.current_device_id();
-        if source_device != local_device {
-            return Err(ResendEntryError::EntryNotResendable {
-                entry_id: cmd.entry_id.clone(),
-                reason: NotResendableReason::RemoteOrigin,
-            });
-        }
-
-        // 3. Reconstruct snapshot. 借用 commit B2 的共享 helper,文件分支自带
-        //    on-disk 存在性校验,所以"本机已不持有"在此处一并被吸收。
-        let snapshot = reconstruct_snapshot_from_entry(
-            self.entry_repo.as_ref(),
-            self.selection_repo.as_ref(),
-            self.representation_repo.as_ref(),
-            self.rep_processing_repo.as_ref(),
-            self.payload_resolver.as_ref(),
-            self.blob_store.as_ref(),
-            &cmd.entry_id,
-        )
-        .await
-        .map_err(|err| map_build_snapshot_error(err, &cmd.entry_id))?;
-
-        // 4. Derive target set.
         let trusted: Vec<DeviceId> = self
             .trusted_peer_repo
             .list()
@@ -374,140 +263,7 @@ impl ResendEntryUseCase {
             }
         };
 
-        // 5. Assemble the payload via the shared outbound chain (file-set
-        //    resolution from the persisted manifest, all-or-nothing member
-        //    checks, blob publish, directory manifest + identity stamp; shared
-        //    with the pull-serve path — issue #1327). `Unavailable` covers
-        //    every "this machine cannot reproduce the set" case (excluded
-        //    manifest lines, a member unreadable now, planner exclusions) →
-        //    `PayloadLost`.
-        let payload = assemble_outbound_payload(
-            self.entry_file_set_repo.as_ref(),
-            self.blob_publisher.as_ref(),
-            Arc::clone(&self.settings),
-            &cmd.entry_id,
-            snapshot,
-        )
-        .await;
-        let OutboundPayload {
-            snapshot,
-            blob_refs,
-            file_set_manifest,
-        } = match payload {
-            Ok(parts) => parts,
-            Err(OutboundPayloadError::Unavailable) => {
-                return Err(ResendEntryError::EntryNotResendable {
-                    entry_id: cmd.entry_id.clone(),
-                    reason: NotResendableReason::PayloadLost,
-                });
-            }
-            Err(OutboundPayloadError::Publish(err)) => {
-                return Err(map_outbound_publish_error(err));
-            }
-            Err(OutboundPayloadError::Internal(msg)) => {
-                return Err(ResendEntryError::Dispatch(msg));
-            }
-        };
-
-        // 6. Encode V3 envelope.
-        let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
-        let (plaintext, snapshot_hash, wire_version) = match file_set_manifest {
-            Some(manifest) => {
-                let (plaintext, snapshot_hash) =
-                    encode_snapshot_with_blob_refs_and_file_set_to_v3_bytes(
-                        &snapshot, &blob_refs, &manifest,
-                    )
-                    .map_err(|e| ResendEntryError::Dispatch(format!("payload encode: {e}")))?;
-                (
-                    plaintext,
-                    snapshot_hash,
-                    uc_core::ports::ClipboardHeader::DIRECTORY_VERSION,
-                )
-            }
-            None => {
-                let (plaintext, snapshot_hash) =
-                    encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &blob_refs)
-                        .map_err(|e| ResendEntryError::Dispatch(format!("payload encode: {e}")))?;
-                (
-                    plaintext,
-                    snapshot_hash,
-                    uc_core::ports::ClipboardHeader::CURRENT_VERSION,
-                )
-            }
-        };
-
-        // 7. Dispatch. fan-out 的 delivery 落盘 + host event emit 在
-        //    `DispatchClipboardEntryUseCase::execute` 内串行完成,本用例只
-        //    回收聚合计数。`target_filter = Some(targets)` 让 dispatch
-        //    跳过差集外的 peer(commit A 行为),且仍受 `is_send_allowed`
-        //    保护(用户在 settings 关掉的对端不会被发送)。
-        let outcome = self
-            .dispatch_runner
-            .execute(DispatchClipboardEntryInput {
-                plaintext,
-                snapshot_hash,
-                payload_version: 3,
-                wire_version,
-                categories,
-                entry_id: Some(cmd.entry_id.clone()),
-                target_filter: Some(targets),
-            })
-            .await
-            .map_err(map_dispatch_sync_error)?;
-
-        info!(
-            entry_id = %cmd.entry_id,
-            accepted = outcome.total_accepted,
-            duplicate = outcome.total_duplicate,
-            offline = outcome.total_offline,
-            errored = outcome.total_errored,
-            pending = outcome.total_pending,
-            "resend.execute completed"
-        );
-
-        Ok(ResendReport {
-            accepted: outcome.total_accepted,
-            duplicate: outcome.total_duplicate,
-            offline: outcome.total_offline,
-            errored: outcome.total_errored,
-            pending: outcome.total_pending,
-        })
-    }
-}
-
-fn map_build_snapshot_error(err: BuildSnapshotError, entry_id: &EntryId) -> ResendEntryError {
-    match err {
-        BuildSnapshotError::EntryNotFound { entry_id } => ResendEntryError::EntryNotFound(entry_id),
-        BuildSnapshotError::SelectionNotFound { .. }
-        | BuildSnapshotError::PasteRepNotFound { .. }
-        | BuildSnapshotError::PasteRepUnavailable(_)
-        | BuildSnapshotError::PasteRepBlobFetchFailed { .. }
-        | BuildSnapshotError::NoRestorableRepresentations { .. } => {
-            // `BuildSnapshotError::EntryNotFound` 自带 entry_id;其余 PayloadLost
-            // 类变体没有 —— reconstruct helper 拿到的是同一 entry_id,这里直接
-            // 用上游传入的副本回填,避免上游每个 variant 都改成带 id。
-            ResendEntryError::EntryNotResendable {
-                entry_id: entry_id.clone(),
-                reason: NotResendableReason::PayloadLost,
-            }
-        }
-        BuildSnapshotError::Repository(inner) => ResendEntryError::Storage(inner.to_string()),
-    }
-}
-
-fn map_outbound_publish_error(err: ClipboardOutboundError) -> ResendEntryError {
-    ResendEntryError::Dispatch(err.to_string())
-}
-
-fn map_dispatch_sync_error(err: DispatchSyncError) -> ResendEntryError {
-    match err {
-        DispatchSyncError::LockedSpace => {
-            ResendEntryError::Dispatch("encryption session locked".to_string())
-        }
-        DispatchSyncError::CipherFailure(msg) => {
-            ResendEntryError::Dispatch(format!("cipher: {msg}"))
-        }
-        DispatchSyncError::Repository(msg) => ResendEntryError::Storage(msg),
+        self.delivery.deliver(cmd.entry_id, targets).await
     }
 }
 
@@ -557,9 +313,32 @@ mod tests {
     use crate::facade::{
         BlobTransferError, PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult,
     };
-    use crate::usecases::clipboard_sync::dispatch_entry::{DispatchOutcome, DispatchPerTarget};
+    use crate::usecases::clipboard_sync::dispatch_entry::{
+        DispatchClipboardEntryInput, DispatchOutcome, DispatchPerTarget, DispatchSyncError,
+    };
 
-    // ── fakes: ports needed by reconstruct_snapshot_from_entry + this use case ──
+    #[test]
+    fn manual_resend_does_not_own_automatic_recovery_policy() {
+        let recovery_rule_name = concat!("is_", "recovery_eligible");
+        let occurrences = include_str!("resend_entry.rs")
+            .matches(recovery_rule_name)
+            .count();
+        assert!(
+            occurrences == 0,
+            "automatic recovery eligibility belongs to ClipboardSyncRuntime"
+        );
+    }
+
+    #[test]
+    fn manual_resend_does_not_reconstruct_or_send_existing_content() {
+        let reconstruction_name = concat!("reconstruct_", "snapshot_from_entry");
+        assert!(
+            !include_str!("resend_entry.rs").contains(reconstruction_name),
+            "manual resend should only choose targets"
+        );
+    }
+
+    // ── fakes: ports needed by target selection and existing-entry delivery ──
 
     struct FakeEntryRepo {
         entry: Option<ClipboardEntry>,
@@ -705,6 +484,7 @@ mod tests {
     struct StubDeliveryRepo {
         records: Vec<EntryDeliveryRecord>,
     }
+
     #[async_trait]
     impl EntryDeliveryRepositoryPort for StubDeliveryRepo {
         async fn record_attempt(
@@ -932,6 +712,7 @@ mod tests {
             total_offline: 0,
             total_errored: 0,
             total_pending: 0,
+            pending_targets: Vec::new(),
             at_ms: chrono::Utc::now().timestamp_millis(),
         }
     }
@@ -1028,7 +809,9 @@ mod tests {
             entry_delivery_repo: Arc::new(StubDeliveryRepo {
                 records: Vec::new(),
             }),
-            trusted_peer_repo: Arc::new(StubTrustedPeerRepo { peers: Vec::new() }),
+            trusted_peer_repo: Arc::new(StubTrustedPeerRepo {
+                peers: vec![trusted(&local, "peer-b", 1)],
+            }),
             device_identity: Arc::new(StubDeviceIdentity(local)),
             settings: Arc::new(StubSettings),
             entry_file_set_repo: Arc::new(StubFileSetRepo { file_set: None }),
@@ -1039,7 +822,7 @@ mod tests {
         let err = uc
             .execute(ResendEntryCommand {
                 entry_id,
-                target_filter: None,
+                target_filter: Some(vec![DeviceId::new("peer-b")]),
             })
             .await
             .expect_err("expected RemoteOrigin");
@@ -1082,7 +865,9 @@ mod tests {
             entry_delivery_repo: Arc::new(StubDeliveryRepo {
                 records: Vec::new(),
             }),
-            trusted_peer_repo: Arc::new(StubTrustedPeerRepo { peers: Vec::new() }),
+            trusted_peer_repo: Arc::new(StubTrustedPeerRepo {
+                peers: vec![trusted(&local, "peer-b", 1)],
+            }),
             device_identity: Arc::new(StubDeviceIdentity(local)),
             settings: Arc::new(StubSettings),
             entry_file_set_repo: Arc::new(StubFileSetRepo { file_set: None }),
@@ -1093,7 +878,7 @@ mod tests {
         let err = uc
             .execute(ResendEntryCommand {
                 entry_id,
-                target_filter: None,
+                target_filter: Some(vec![DeviceId::new("peer-b")]),
             })
             .await
             .expect_err("expected PayloadLost");

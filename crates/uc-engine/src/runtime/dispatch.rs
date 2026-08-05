@@ -395,7 +395,8 @@ impl EngineRuntime for ProductionRuntime {
             Operation::SendImage(input) => self.execute_send_image(input).await,
             Operation::SendFiles(input) => self.execute_send_files(input, &cancellation).await,
             Operation::ResendEntry(input) => {
-                execute_resend_entry(self.current_facade().await?.as_ref(), input).await
+                execute_resend_entry(self.current_clipboard_sync_runtime().await?.as_ref(), input)
+                    .await
             }
             Operation::ExportEntry(input) => self.execute_export_entry(input).await,
         }
