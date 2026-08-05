@@ -57,6 +57,7 @@ pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
 pub use legacy_upgrade_adapter::{
     IrohLegacyUpgradeAdapter, IrohLegacyUpgradeHandler, LEGACY_UPGRADE_ALPN,
 };
+pub use net_recovery::NetworkRecoveryObservation;
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     GroupUpdateHandlers, IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError,

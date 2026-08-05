@@ -57,6 +57,12 @@ export interface OhSessionRecovery {
   resumed: boolean
 }
 
+export interface OhNetworkRecoveryStatus {
+  phase: 'idle' | 'recovering' | 'retry_scheduled' | 'failed'
+  retryable: boolean
+  nextRetryInMs?: number
+}
+
 export interface OhLocalDevice {
   deviceId: string
   displayName: string
@@ -92,6 +98,8 @@ export interface OhEngineEvent {
   errorCategory?: string
   retryable?: boolean
   memberRevocation?: OhMemberRevocation
+  networkRecoveryPhase?: 'idle' | 'recovering' | 'retry_scheduled' | 'failed'
+  nextRetryInMs?: number
 }
 
 export interface OhSpaceCreated {
@@ -108,6 +116,8 @@ export interface OhActiveClipboard {
 export interface OhEngine {
   createSpace(deviceName: string | null, passphrase: string): Promise<OhSpaceCreated>
   recoverSession(allowSecureStorageUnlock: boolean): Promise<OhSessionRecovery>
+  recoverNetwork(): Promise<void>
+  queryNetworkRecoveryStatus(): Promise<OhNetworkRecoveryStatus>
   queryLocalDevice(): Promise<OhLocalDevice>
   queryMembershipConvergence(): Promise<OhMembershipConvergence>
   removeMember(deviceId: string): Promise<OhMemberRevocation>

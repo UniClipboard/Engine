@@ -142,24 +142,25 @@ impl FileTransferFacade {
     pub async fn close(&self) -> Result<(), FileTransferApplicationError> {
         let _creation = self.sessions.lock_creation().await;
         let sessions = self.sessions.close_and_snapshot().await;
-        Self::cancel_sessions(sessions).await
+        Self::cancel_sessions(sessions, uc_core::FileTransferCancellationReason::Unknown).await
     }
 
-    pub async fn cancel_active_sessions(&self) -> Result<(), FileTransferApplicationError> {
+    pub async fn cancel_active_sessions(
+        &self,
+        reason: uc_core::FileTransferCancellationReason,
+    ) -> Result<(), FileTransferApplicationError> {
         let _creation = self.sessions.lock_creation().await;
         let sessions = self.sessions.snapshot().await;
-        Self::cancel_sessions(sessions).await
+        Self::cancel_sessions(sessions, reason).await
     }
 
     async fn cancel_sessions(
         sessions: Vec<Arc<FileTransferSession>>,
+        reason: uc_core::FileTransferCancellationReason,
     ) -> Result<(), FileTransferApplicationError> {
         let mut first_error = None;
         for session in sessions {
-            match session
-                .cancel(uc_core::FileTransferCancellationReason::Unknown)
-                .await
-            {
+            match session.cancel(reason).await {
                 Ok(_) | Err(FileTransferApplicationError::TransferAlreadyFinished { .. }) => {}
                 Err(error) if first_error.is_none() => first_error = Some(error),
                 Err(_) => {}

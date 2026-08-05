@@ -35,6 +35,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `TransferProgress` | 文件传输进度发生变化 |
 | `PairingCompleted` | 本机作为邀请方时，一次已匹配的配对流程成功或失败 |
 | `MemberRevocationChanged` | 成员移除进度发生变化，携带完整当前状态 |
+| `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |
 | `Fatal` | 核心遇到不可恢复错误 |
@@ -81,6 +82,8 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `QueryStorageStats` | 查询数据库、密钥库、缓存和日志占用大小，不返回本机目录 |
 | `ClearStorageCache` | 清理核心缓存并返回实际释放的字节数 |
 | `QueryLocalDevice` | 返回本机设备编号和按设置解析后的显示名 |
+| `RecoverNetwork` | 请求当前网络会话恢复；与自动恢复共享同一轮结果，不重复启动 |
+| `QueryNetworkRecoveryStatus` | 查询恢复阶段、最近失败是否可重试及下次重试剩余毫秒数；没有等待中的重试时 `next_retry_in_ms` 为空 |
 | `ListMobileDevices` | 列出用户显式启用的 LAN 兼容通道所登记的移动设备 |
 | `RevokeMobileDevice` | 撤销一台 LAN 兼容设备的访问凭据 |
 | `AuthenticateMobileRequest` | 校验一次 LAN 兼容请求并返回脱敏凭据凭证 |
@@ -142,6 +145,8 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 `CancelInvitation` 在没有待取消邀请时返回冲突错误。`ResetSpace` 只清除当前空间设置，不向宿主暴露底层存储步骤。`FactoryResetSpace` 则先清除密钥材料，再清除空间设置和待处理邀请；密钥清除失败时不得提前清除设置，成功后必须关闭接收入口。`QuerySetupState` 不返回内部服务状态；`QueryMigrationProgress` 只返回准备、握手完成、切换完成三个稳定阶段，不公开内部运行编号或目标空间。
 
 `QueryStorageStats` 和 `ClearStorageCache` 由核心执行。宿主只能看到分类后的字节数和实际释放量，不能取得数据库、密钥库、缓存或日志的本机路径。
+
+`RecoverNetwork` 不改变 `RefreshPeerConnections` 的轻量探测语义。恢复状态事件可能因消费者积压而由 `RefreshRequired` 代替，宿主随后调用 `QueryNetworkRecoveryStatus` 获取当前事实；状态和错误不包含设备名、地址或底层网络文本。
 
 `QueryLocalDevice` 的显示名由核心统一读取并规范化；设置缺失、读取失败或名称为空时使用稳定默认名称。调试输出不得包含显示名。
 

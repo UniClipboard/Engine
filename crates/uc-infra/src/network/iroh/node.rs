@@ -77,6 +77,7 @@ use super::membership_attestation_adapter::{
     IrohMembershipIdentityAdapter, MEMBERSHIP_ATTESTATION_ALPN,
 };
 use super::net_recovery::DemandRecoveryCoordinator;
+use super::net_recovery::NetworkRecoveryObservationSource;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
 use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
@@ -174,12 +175,18 @@ pub struct IrohNode {
     ///
     /// [`shutdown`]: IrohNode::shutdown
     net_recovery: Option<tokio::task::JoinHandle<()>>,
+    network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
     /// Keeps the process-wide single-node reservation until shutdown is
     /// complete. Dropping a partially-built or live node releases it too.
     _run_lease: NodeRunLease,
 }
 
 impl IrohNode {
+    pub fn subscribe_network_recovery_observations(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<super::net_recovery::NetworkRecoveryObservation> {
+        self.network_recovery_observations.subscribe()
+    }
     #[cfg(any(test, feature = "test-util"))]
     pub async fn accepts_protocol_for_test(&self, alpn: &[u8]) -> bool {
         let client = match Endpoint::builder(presets::N0)
@@ -616,6 +623,7 @@ impl Drop for NodeRunLease {
 pub struct IrohNodeBuilder {
     endpoint: Arc<Endpoint>,
     demand_recovery: Arc<DemandRecoveryCoordinator>,
+    network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
     /// Held in `Option` so `install_*` methods can `take()` + reassign the
     /// builder (iroh's `RouterBuilder::accept` consumes `self`).
     router_builder: Option<RouterBuilder>,
@@ -746,6 +754,7 @@ impl IrohNodeBuilder {
             (*endpoint).clone(),
             !config.disable_relays,
         ));
+        let network_recovery_observations = Arc::new(NetworkRecoveryObservationSource::new());
         let router_builder = Router::builder((*endpoint).clone());
         debug!(
             endpoint_id = %endpoint.id().fmt_short(),
@@ -759,6 +768,7 @@ impl IrohNodeBuilder {
         Ok(Self {
             endpoint,
             demand_recovery,
+            network_recovery_observations,
             router_builder: Some(router_builder),
             config,
             run_lease,
@@ -857,6 +867,7 @@ impl IrohNodeBuilder {
             fingerprint_factory,
             clock,
             Arc::clone(&self.demand_recovery),
+            Arc::clone(&self.network_recovery_observations),
         );
         let handler = adapter.handler();
 
@@ -1317,13 +1328,18 @@ impl IrohNodeBuilder {
         // design, so an empty relay-status set is expected, not a wedge. The
         // handle is retained (not detached) so `shutdown` can stop it
         // deterministically and keep a panic visible.
-        let net_recovery = (!self.config.disable_relays)
-            .then(|| super::net_recovery::spawn_net_recovery((*self.endpoint).clone()));
+        let net_recovery = (!self.config.disable_relays).then(|| {
+            super::net_recovery::spawn_net_recovery(
+                (*self.endpoint).clone(),
+                Arc::clone(&self.network_recovery_observations),
+            )
+        });
 
         IrohNode {
             endpoint: self.endpoint,
             router,
             net_recovery,
+            network_recovery_observations: self.network_recovery_observations,
             _run_lease: self.run_lease,
         }
     }

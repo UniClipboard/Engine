@@ -47,7 +47,7 @@ use super::transfer_progress_wire::{
 /// ALPN identifier for the reverse-direction transfer progress protocol.
 /// Disjoint from the forward clipboard / presence / blobs ALPNs so the
 /// shared Router multiplexes correctly.
-pub const TRANSFER_PROGRESS_ALPN: &[u8] = b"uniclipboard/transfer-progress/0";
+pub const TRANSFER_PROGRESS_ALPN: &[u8] = b"uniclipboard/transfer-progress/1";
 
 /// Capacity of the inbound progress broadcast. Sized for typical fan-in:
 /// even a 10-peer space rarely produces more than a few in-flight transfers

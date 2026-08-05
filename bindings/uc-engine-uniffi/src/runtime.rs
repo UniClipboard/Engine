@@ -173,6 +173,13 @@ pub struct PeerConnectionRefresh {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NetworkRecoveryStatus {
+    pub phase: String,
+    pub retryable: bool,
+    pub next_retry_in_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SpaceInvitation {
     pub invitation_code: String,
     pub expires_at_ms: i64,
@@ -283,6 +290,12 @@ enum WorkerCommand {
     },
     RefreshPeerConnections {
         response: mpsc::Sender<Result<PeerConnectionRefresh, BindingError>>,
+    },
+    RecoverNetwork {
+        response: mpsc::Sender<Result<(), BindingError>>,
+    },
+    QueryNetworkRecoveryStatus {
+        response: mpsc::Sender<Result<NetworkRecoveryStatus, BindingError>>,
     },
     QuerySpaceState {
         response: mpsc::Sender<Result<SpaceState, BindingError>>,
@@ -725,6 +738,14 @@ impl MobileEngine {
         result
             .recv()
             .map_err(|_| BindingError::RuntimeUnavailable)?
+    }
+
+    pub fn recover_network(&self) -> Result<(), BindingError> {
+        self.request(|response| WorkerCommand::RecoverNetwork { response })
+    }
+
+    pub fn query_network_recovery_status(&self) -> Result<NetworkRecoveryStatus, BindingError> {
+        self.request(|response| WorkerCommand::QueryNetworkRecoveryStatus { response })
     }
 
     pub fn query_space_state(&self) -> Result<SpaceState, BindingError> {
@@ -1264,6 +1285,22 @@ async fn run_worker_loop(
                     .and_then(map_peer_connection_refresh);
                 let _ = response.send(result);
             }
+            WorkerCommand::RecoverNetwork { response } => {
+                let result = engine
+                    .execute(Operation::RecoverNetwork)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_network_recovered);
+                let _ = response.send(result);
+            }
+            WorkerCommand::QueryNetworkRecoveryStatus { response } => {
+                let result = engine
+                    .execute(Operation::QueryNetworkRecoveryStatus)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_network_recovery_status);
+                let _ = response.send(result);
+            }
             WorkerCommand::QuerySpaceState { response } => {
                 let result = engine
                     .execute(Operation::QuerySetupState)
@@ -1694,6 +1731,13 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
                 activated_by: event.activated_by,
             }
         }
+        uc_engine::EngineEvent::NetworkRecoveryChanged(status) => {
+            BindingEvent::NetworkRecoveryChanged {
+                phase: recovery_phase(status.phase).to_owned(),
+                retryable: status.retryable,
+                next_retry_in_ms: status.next_retry_in_ms,
+            }
+        }
         other => BindingEvent::Changed {
             kind: other.kind().to_owned(),
         },
@@ -1985,6 +2029,35 @@ fn map_peer_connection_refresh(
             errors: u64::from(report.errors),
         }),
         _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_network_recovered(result: OperationResult) -> Result<(), BindingError> {
+    match result {
+        OperationResult::NetworkRecovered => Ok(()),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_network_recovery_status(
+    result: OperationResult,
+) -> Result<NetworkRecoveryStatus, BindingError> {
+    match result {
+        OperationResult::NetworkRecoveryStatus(status) => Ok(NetworkRecoveryStatus {
+            phase: recovery_phase(status.phase).to_string(),
+            retryable: status.retryable,
+            next_retry_in_ms: status.next_retry_in_ms,
+        }),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn recovery_phase(phase: uc_engine::NetworkRecoveryPhaseSummary) -> &'static str {
+    match phase {
+        uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
+        uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
+        uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
+        uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
     }
 }
 
@@ -2651,6 +2724,24 @@ mod tests {
                 device_id: "device-2".to_owned(),
                 state: "online".to_owned(),
                 at_ms: 42,
+            }
+        );
+    }
+
+    #[test]
+    fn network_recovery_event_keeps_the_stable_status() {
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::NetworkRecoveryChanged(
+                uc_engine::NetworkRecoveryStatusSummary {
+                    phase: uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled,
+                    retryable: true,
+                    next_retry_in_ms: Some(500),
+                },
+            )),
+            BindingEvent::NetworkRecoveryChanged {
+                phase: "retry_scheduled".to_owned(),
+                retryable: true,
+                next_retry_in_ms: Some(500),
             }
         );
     }

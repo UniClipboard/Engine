@@ -220,6 +220,7 @@ pub struct RuntimeAppFacadeAssembly {
     pub blob_transfer_port: Arc<dyn uc_core::ports::blob::BlobTransferPort>,
     pub clipboard_restore: ClipboardRestoreAssembly,
     pub search: Arc<SearchFacade>,
+    pub network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
 }
 
 /// 从已注入的 application deps 构造统一业务入口。
@@ -351,5 +352,6 @@ pub fn build_app_facade_from_deps(
             app_version_state: deps.app_version_state.clone(),
             setup_status: deps.setup_status.clone(),
         })),
+        network_recovery: runtime.network_recovery,
     }))
 }

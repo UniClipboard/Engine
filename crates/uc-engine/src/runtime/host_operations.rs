@@ -216,7 +216,8 @@ impl ProductionRuntime {
         target_devices: Vec<String>,
     ) -> Result<OperationResult, EngineError> {
         let (capture, live_index, sync) = {
-            let session = self.session.lock().await;
+            let session_slot = self.session_supervisor.session();
+            let session = session_slot.lock().await;
             let session = session.as_ref().ok_or_else(operation_unavailable_error)?;
             (
                 Arc::clone(&session.clipboard.capture),

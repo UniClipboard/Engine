@@ -22,6 +22,22 @@ pub enum OperationTerminal {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkRecoveryPhaseSummary {
+    Idle,
+    Recovering,
+    RetryScheduled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkRecoveryStatusSummary {
+    pub phase: NetworkRecoveryPhaseSummary,
+    pub retryable: bool,
+    pub next_retry_in_ms: Option<u64>,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntrySummary {
     pub entry_id: String,
@@ -393,6 +409,8 @@ pub enum OperationResult {
     LocalDevice(LocalDeviceSummary),
     PeerConnections(Vec<PeerConnectionSummary>),
     PeerConnectionsRefreshed(PeerConnectionRefreshSummary),
+    NetworkRecovered,
+    NetworkRecoveryStatus(NetworkRecoveryStatusSummary),
     Settings(Box<SettingsSummary>),
     SettingsUpdated(SettingsUpdateOutcome),
     RelaySaved(SaveRelayOutcome),
@@ -519,6 +537,10 @@ impl fmt::Debug for OperationResult {
             Self::PeerConnectionsRefreshed(report) => debug
                 .field("kind", &"peer_connections_refreshed")
                 .field("report", report),
+            Self::NetworkRecovered => debug.field("kind", &"network_recovered"),
+            Self::NetworkRecoveryStatus(status) => debug
+                .field("kind", &"network_recovery_status")
+                .field("status", status),
             Self::Settings(_) => debug.field("kind", &"settings"),
             Self::SettingsUpdated(outcome) => debug
                 .field("kind", &"settings_updated")

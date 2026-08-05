@@ -3,7 +3,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EngineError, EngineState, LifecycleAction, MemberRevocationSummary, OperationTerminal,
+    EngineError, EngineState, LifecycleAction, MemberRevocationSummary,
+    NetworkRecoveryStatusSummary, OperationTerminal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +41,7 @@ pub enum EngineEvent {
     MemberRevocationChanged(MemberRevocationSummary),
     ActiveClipboardChanged(ActiveClipboardChanged),
     MobileLanSettingsChanged(MobileLanSettingsChanged),
+    NetworkRecoveryChanged(NetworkRecoveryStatusSummary),
     RefreshRequired {
         reason: RefreshReason,
     },
@@ -72,6 +74,7 @@ impl EngineEvent {
             Self::MemberRevocationChanged(_) => "member_revocation_changed",
             Self::ActiveClipboardChanged(_) => "active_clipboard_changed",
             Self::MobileLanSettingsChanged(_) => "mobile_lan_settings_changed",
+            Self::NetworkRecoveryChanged(_) => "network_recovery_changed",
             Self::RefreshRequired { .. } => "refresh_required",
             Self::OperationFinished { .. } => "operation_finished",
             Self::LifecycleFailed { .. } => "lifecycle_failed",

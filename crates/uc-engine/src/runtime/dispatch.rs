@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+#[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
 use super::ProductionRuntime;
 use crate::engine::EngineRuntime;
@@ -78,327 +79,394 @@ impl EngineRuntime for ProductionRuntime {
         cancellation: CancellationToken,
     ) -> Result<OperationResult, EngineError> {
         match operation {
-            Operation::CreateSpace(input) => {
-                execute_create_space(self.current_facade().await?.as_ref(), input).await
+            Operation::RecoverNetwork => {
+                return self
+                    .network_recovery
+                    .request_recovery()
+                    .await
+                    .map(|()| OperationResult::NetworkRecovered)
+                    .map_err(|error| match error {
+                        uc_application::facade::NetworkRecoveryRequestError::Stopped => {
+                            super::operation_unavailable_error()
+                        }
+                        uc_application::facade::NetworkRecoveryRequestError::Rebuild(_) => {
+                            EngineError::new(1105, crate::EngineErrorCategory::Unavailable, true)
+                        }
+                    });
             }
-            Operation::UnlockSpace(input) => {
-                let session = self.session.lock().await;
-                let session = session
-                    .as_ref()
-                    .ok_or_else(super::operation_unavailable_error)?;
-                execute_unlock_space(session.facade.as_ref(), input).await
-            }
-            Operation::RecoverSession(input) => {
-                let session = self.session.lock().await;
-                let session = session
-                    .as_ref()
-                    .ok_or_else(super::operation_unavailable_error)?;
-                execute_recover_session(session.facade.as_ref(), input).await
-            }
-            Operation::JoinSpace(input) => {
-                execute_join_space(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::IssueInvitation => {
-                execute_issue_invitation(self.current_facade().await?.as_ref()).await
-            }
-            Operation::CancelInvitation => {
-                execute_cancel_invitation(self.current_facade().await?.as_ref()).await
-            }
-            Operation::ResetSpace => {
-                execute_reset_space(self.current_facade().await?.as_ref()).await
-            }
-            Operation::FactoryResetSpace => {
-                execute_factory_reset_space(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QuerySetupState => {
-                execute_query_setup_state(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QueryMigrationProgress => {
-                execute_query_migration_progress(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QueryStorageStats => {
-                execute_query_storage_stats(self.current_facade().await?.as_ref()).await
-            }
-            Operation::ClearStorageCache => {
-                execute_clear_storage_cache(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QueryLocalDevice => {
-                execute_query_local_device(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QueryPeerConnections => {
-                execute_query_peer_connections(self.current_facade().await?.as_ref()).await
-            }
-            Operation::RefreshPeerConnections => {
-                execute_refresh_peer_connections(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QuerySettings => {
-                execute_query_settings(self.current_facade().await?.as_ref()).await
-            }
-            Operation::UpdateSettings(patch) => {
-                execute_update_settings(self.current_facade().await?.as_ref(), *patch).await
-            }
-            Operation::SaveRelay(input) => {
-                execute_save_relay(self.current_facade().await?.as_ref(), *input).await
-            }
-            Operation::ProbeRelay(input) => {
-                execute_probe_relay(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::QueryRelayCredential(input) => {
-                execute_query_relay_credential(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::QueryUpgradeStatus => {
-                execute_query_upgrade_status(
-                    self.current_facade().await?.as_ref(),
-                    &self.app_version,
-                )
-                .await
-            }
-            Operation::AcknowledgeUpgrade => {
-                execute_acknowledge_upgrade(
-                    self.current_facade().await?.as_ref(),
-                    &self.app_version,
-                )
-                .await
-            }
-            Operation::QueryDiagnostics => {
-                execute_query_diagnostics(self.current_facade().await?.as_ref()).await
-            }
-            Operation::UpdateDebugMode(input) => {
-                execute_update_debug_mode(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::ExportDiagnosticLogs(input) => {
-                execute_export_diagnostic_logs(
-                    self.current_facade().await?.as_ref(),
-                    self.files.as_ref(),
-                    &self.temporary_dir,
-                    input,
-                )
-                .await
-            }
-            Operation::ExportConfig(input) => {
-                execute_export_config(
-                    self.current_facade().await?.as_ref(),
-                    self.files.as_ref(),
-                    &self.temporary_dir,
-                    input,
-                )
-                .await
-            }
-            Operation::PreviewConfigImport(input) => {
-                execute_preview_config_import(
-                    self.current_facade().await?.as_ref(),
-                    self.files.as_ref(),
-                    &self.temporary_dir,
-                    input,
-                )
-                .await
-            }
-            Operation::StageConfigImport(input) => {
-                execute_stage_config_import(
-                    self.current_facade().await?.as_ref(),
-                    self.files.as_ref(),
-                    &self.temporary_dir,
-                    input,
-                )
-                .await
-            }
-            #[cfg(not(feature = "lan-compat"))]
-            Operation::ListMobileDevices
-            | Operation::RevokeMobileDevice(_)
-            | Operation::AuthenticateMobileRequest(_)
-            | Operation::RevalidateMobileCredential(_)
-            | Operation::ListMobileLanInterfaces
-            | Operation::QueryMobileSyncSettings
-            | Operation::UpdateMobileSyncSettings(_)
-            | Operation::UpdateMobileLanEndpoint(_)
-            | Operation::RegisterMobileDevice(_)
-            | Operation::UpdateMobileDevice(_)
-            | Operation::CheckMobileContentAvailable(_)
-            | Operation::QueryLatestMobileSyncDocument
-            | Operation::ApplyMobileSyncDocument(_)
-            | Operation::ReadMobileSyncFile(_)
-            | Operation::BeginMobileFileUpload(_)
-            | Operation::AppendMobileFileUpload(_)
-            | Operation::FinishMobileFileUpload(_)
-            | Operation::AbortMobileFileUpload(_) => Err(super::operation_unavailable_error()),
-            #[cfg(feature = "lan-compat")]
-            operation @ (Operation::ListMobileDevices
-            | Operation::RevokeMobileDevice(_)
-            | Operation::AuthenticateMobileRequest(_)
-            | Operation::RevalidateMobileCredential(_)
-            | Operation::ListMobileLanInterfaces
-            | Operation::QueryMobileSyncSettings
-            | Operation::UpdateMobileSyncSettings(_)
-            | Operation::UpdateMobileLanEndpoint(_)
-            | Operation::RegisterMobileDevice(_)
-            | Operation::UpdateMobileDevice(_)
-            | Operation::CheckMobileContentAvailable(_)
-            | Operation::QueryLatestMobileSyncDocument
-            | Operation::ApplyMobileSyncDocument(_)
-            | Operation::ReadMobileSyncFile(_)
-            | Operation::BeginMobileFileUpload(_)
-            | Operation::AppendMobileFileUpload(_)
-            | Operation::FinishMobileFileUpload(_)
-            | Operation::AbortMobileFileUpload(_)) => {
-                self.execute_lan_compatibility_operation(operation).await
-            }
-            Operation::QueryReceiveReadiness => {
-                let status = self.file_transfer_lifecycle.receive_readiness_status();
-                Ok(OperationResult::ReceiveReadiness(
-                    crate::ReceiveReadinessSummary {
-                        ready: status.ready,
-                        degraded: status.degraded_reason.is_some(),
+            Operation::QueryNetworkRecoveryStatus => {
+                let status = self.network_recovery.status().await;
+                return Ok(OperationResult::NetworkRecoveryStatus(
+                    crate::NetworkRecoveryStatusSummary {
+                        phase: match status.phase {
+                            uc_application::facade::NetworkRecoveryPhase::Idle => {
+                                crate::NetworkRecoveryPhaseSummary::Idle
+                            }
+                            uc_application::facade::NetworkRecoveryPhase::Recovering => {
+                                crate::NetworkRecoveryPhaseSummary::Recovering
+                            }
+                            uc_application::facade::NetworkRecoveryPhase::RetryScheduled => {
+                                crate::NetworkRecoveryPhaseSummary::RetryScheduled
+                            }
+                            uc_application::facade::NetworkRecoveryPhase::Failed => {
+                                crate::NetworkRecoveryPhaseSummary::Failed
+                            }
+                            uc_application::facade::NetworkRecoveryPhase::Stopped => {
+                                crate::NetworkRecoveryPhaseSummary::Failed
+                            }
+                        },
+                        retryable: status.retryable,
+                        next_retry_in_ms: status
+                            .next_retry_in
+                            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64),
                     },
-                ))
+                ));
             }
-            Operation::QueryEncryptionState => {
-                execute_query_encryption_state(self.current_facade().await?.as_ref()).await
-            }
-            Operation::LockEncryption => {
-                let session = self.session.lock().await;
-                let session = session
-                    .as_ref()
-                    .ok_or_else(super::operation_unavailable_error)?;
-                execute_lock_encryption(session.facade.as_ref()).await
-            }
-            Operation::VerifySecureStorageAccess => {
-                execute_verify_secure_storage_access(self.current_facade().await?.as_ref()).await
-            }
-            Operation::ListDevices => {
-                execute_list_devices(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QueryMembershipConvergence => {
-                execute_query_membership_convergence(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QueryMemberSyncPreferences(input) => {
-                execute_query_member_sync_preferences(self.current_facade().await?.as_ref(), input)
+            _ => {}
+        }
+        let session_lease = self.session_supervisor.acquire_operation().await?;
+        let operation = async {
+            match operation {
+                Operation::CreateSpace(input) => {
+                    execute_create_space(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::UnlockSpace(input) => {
+                    execute_unlock_space(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::RecoverSession(input) => {
+                    execute_recover_session(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::JoinSpace(input) => {
+                    execute_join_space(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::IssueInvitation => {
+                    execute_issue_invitation(self.current_facade().await?.as_ref()).await
+                }
+                Operation::CancelInvitation => {
+                    execute_cancel_invitation(self.current_facade().await?.as_ref()).await
+                }
+                Operation::ResetSpace => {
+                    execute_reset_space(self.current_facade().await?.as_ref()).await
+                }
+                Operation::FactoryResetSpace => {
+                    execute_factory_reset_space(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QuerySetupState => {
+                    execute_query_setup_state(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryMigrationProgress => {
+                    execute_query_migration_progress(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryStorageStats => {
+                    execute_query_storage_stats(self.current_facade().await?.as_ref()).await
+                }
+                Operation::ClearStorageCache => {
+                    execute_clear_storage_cache(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryLocalDevice => {
+                    execute_query_local_device(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryPeerConnections => {
+                    execute_query_peer_connections(self.current_facade().await?.as_ref()).await
+                }
+                Operation::RefreshPeerConnections => {
+                    execute_refresh_peer_connections(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QuerySettings => {
+                    execute_query_settings(self.current_facade().await?.as_ref()).await
+                }
+                Operation::UpdateSettings(patch) => {
+                    execute_update_settings(self.current_facade().await?.as_ref(), *patch).await
+                }
+                Operation::SaveRelay(input) => {
+                    execute_save_relay(self.current_facade().await?.as_ref(), *input).await
+                }
+                Operation::ProbeRelay(input) => {
+                    execute_probe_relay(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::QueryRelayCredential(input) => {
+                    execute_query_relay_credential(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::QueryUpgradeStatus => {
+                    execute_query_upgrade_status(
+                        self.current_facade().await?.as_ref(),
+                        &self.app_version,
+                    )
                     .await
-            }
-            Operation::UpdateMemberSyncPreferences(input) => {
-                execute_update_member_sync_preferences(self.current_facade().await?.as_ref(), input)
+                }
+                Operation::AcknowledgeUpgrade => {
+                    execute_acknowledge_upgrade(
+                        self.current_facade().await?.as_ref(),
+                        &self.app_version,
+                    )
                     .await
-            }
-            Operation::RemoveMember(input) => {
-                execute_remove_member(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::SecureRemoveLegacyMember(input) => {
-                execute_secure_remove_legacy_member(self.current_facade().await?.as_ref(), input)
+                }
+                Operation::QueryDiagnostics => {
+                    execute_query_diagnostics(self.current_facade().await?.as_ref()).await
+                }
+                Operation::UpdateDebugMode(input) => {
+                    execute_update_debug_mode(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::ExportDiagnosticLogs(input) => {
+                    execute_export_diagnostic_logs(
+                        self.current_facade().await?.as_ref(),
+                        self.files.as_ref(),
+                        &self.temporary_dir,
+                        input,
+                    )
                     .await
-            }
-            Operation::QueryMemberRevocation(input) => {
-                execute_query_member_revocation(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::QueryCurrentMemberRevocation => {
-                execute_query_current_member_revocation(self.current_facade().await?.as_ref()).await
-            }
-            Operation::ContinueMemberRevocation(input) => {
-                execute_continue_member_revocation(self.current_facade().await?.as_ref(), input)
+                }
+                Operation::ExportConfig(input) => {
+                    execute_export_config(
+                        self.current_facade().await?.as_ref(),
+                        self.files.as_ref(),
+                        &self.temporary_dir,
+                        input,
+                    )
                     .await
-            }
-            Operation::QueryLegacyBootstrap(input) => {
-                execute_query_legacy_bootstrap(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::QuerySpaceProtection => {
-                execute_query_space_protection(self.current_facade().await?.as_ref()).await
-            }
-            Operation::SearchEntries(input) => {
-                execute_search_entries(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::QuerySearchTags => {
-                execute_query_search_tags(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QuerySearchStatus => {
-                execute_query_search_status(self.current_facade().await?.as_ref()).await
-            }
-            Operation::RebuildSearchIndex => {
-                execute_rebuild_search_index(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QueryHistory(input) => {
-                let search_input = history_search_input(input)?;
-                let offset = search_input.offset;
-                let limit = search_input.limit;
-                let page = self
-                    .current_facade()
-                    .await?
-                    .search_query(search_input)
+                }
+                Operation::PreviewConfigImport(input) => {
+                    execute_preview_config_import(
+                        self.current_facade().await?.as_ref(),
+                        self.files.as_ref(),
+                        &self.temporary_dir,
+                        input,
+                    )
                     .await
-                    .map_err(map_query_history_error)?;
-                history_page_result(page, offset, limit)
-            }
-            Operation::ListHistoryEntries(input) => {
-                execute_list_history_entries(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::GetHistoryEntry(input) => {
-                execute_get_history_entry(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::DeleteHistoryEntry(input) => {
-                execute_delete_history_entry(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::SetHistoryEntryFavorite(input) => {
-                execute_set_history_entry_favorite(self.current_facade().await?.as_ref(), input)
+                }
+                Operation::StageConfigImport(input) => {
+                    execute_stage_config_import(
+                        self.current_facade().await?.as_ref(),
+                        self.files.as_ref(),
+                        &self.temporary_dir,
+                        input,
+                    )
                     .await
-            }
-            Operation::QueryHistoryStats => {
-                execute_query_history_stats(self.current_facade().await?.as_ref()).await
-            }
-            Operation::GetHistoryEntryResource(input) => {
-                execute_get_history_entry_resource(self.current_facade().await?.as_ref(), input)
+                }
+                #[cfg(not(feature = "lan-compat"))]
+                Operation::ListMobileDevices
+                | Operation::RevokeMobileDevice(_)
+                | Operation::AuthenticateMobileRequest(_)
+                | Operation::RevalidateMobileCredential(_)
+                | Operation::ListMobileLanInterfaces
+                | Operation::QueryMobileSyncSettings
+                | Operation::UpdateMobileSyncSettings(_)
+                | Operation::UpdateMobileLanEndpoint(_)
+                | Operation::RegisterMobileDevice(_)
+                | Operation::UpdateMobileDevice(_)
+                | Operation::CheckMobileContentAvailable(_)
+                | Operation::QueryLatestMobileSyncDocument
+                | Operation::ApplyMobileSyncDocument(_)
+                | Operation::ReadMobileSyncFile(_)
+                | Operation::BeginMobileFileUpload(_)
+                | Operation::AppendMobileFileUpload(_)
+                | Operation::FinishMobileFileUpload(_)
+                | Operation::AbortMobileFileUpload(_) => Err(super::operation_unavailable_error()),
+                #[cfg(feature = "lan-compat")]
+                operation @ (Operation::ListMobileDevices
+                | Operation::RevokeMobileDevice(_)
+                | Operation::AuthenticateMobileRequest(_)
+                | Operation::RevalidateMobileCredential(_)
+                | Operation::ListMobileLanInterfaces
+                | Operation::QueryMobileSyncSettings
+                | Operation::UpdateMobileSyncSettings(_)
+                | Operation::UpdateMobileLanEndpoint(_)
+                | Operation::RegisterMobileDevice(_)
+                | Operation::UpdateMobileDevice(_)
+                | Operation::CheckMobileContentAvailable(_)
+                | Operation::QueryLatestMobileSyncDocument
+                | Operation::ApplyMobileSyncDocument(_)
+                | Operation::ReadMobileSyncFile(_)
+                | Operation::BeginMobileFileUpload(_)
+                | Operation::AppendMobileFileUpload(_)
+                | Operation::FinishMobileFileUpload(_)
+                | Operation::AbortMobileFileUpload(_)) => {
+                    self.execute_lan_compatibility_operation(operation).await
+                }
+                Operation::QueryReceiveReadiness => {
+                    let status = self.file_transfer_lifecycle.receive_readiness_status();
+                    Ok(OperationResult::ReceiveReadiness(
+                        crate::ReceiveReadinessSummary {
+                            ready: status.ready,
+                            degraded: status.degraded_reason.is_some(),
+                        },
+                    ))
+                }
+                Operation::QueryEncryptionState => {
+                    execute_query_encryption_state(self.current_facade().await?.as_ref()).await
+                }
+                Operation::LockEncryption => {
+                    execute_lock_encryption(self.current_facade().await?.as_ref()).await
+                }
+                Operation::VerifySecureStorageAccess => {
+                    execute_verify_secure_storage_access(self.current_facade().await?.as_ref())
+                        .await
+                }
+                Operation::ListDevices => {
+                    execute_list_devices(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryMembershipConvergence => {
+                    execute_query_membership_convergence(self.current_facade().await?.as_ref())
+                        .await
+                }
+                Operation::QueryMemberSyncPreferences(input) => {
+                    execute_query_member_sync_preferences(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
                     .await
-            }
-            Operation::ReadBlob(input) => {
-                execute_read_blob(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::ReadThumbnail(input) => {
-                execute_read_thumbnail(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::ReadEntryFile(input) => {
-                execute_read_entry_file(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::QueryEntryDelivery(input) => {
-                execute_query_entry_delivery(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::ClearHistory => {
-                execute_clear_history(self.current_facade().await?.as_ref()).await
-            }
-            Operation::QueryEntryReceiveProgress(input) => {
-                execute_query_entry_receive_progress(self.current_facade().await?.as_ref(), input)
+                }
+                Operation::UpdateMemberSyncPreferences(input) => {
+                    execute_update_member_sync_preferences(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
                     .await
-            }
-            Operation::ListEntryReceiveProgress => {
-                execute_list_entry_receive_progress(self.current_facade().await?.as_ref()).await
-            }
-            Operation::CancelEntryReceive(input) => {
-                execute_cancel_entry_receive(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::CancelInboundTransfer(input) => {
-                execute_cancel_inbound_transfer(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::CaptureCurrentClipboard => {
-                execute_capture_current_clipboard(self.current_facade().await?.as_ref()).await
-            }
-            Operation::ObserveClipboardChange(input) => {
-                Ok(OperationResult::ClipboardChangeObserved {
-                    report: self
-                        .clipboard_change_runtime
-                        .observe_change(input.dispatch)
-                        .await?,
-                })
-            }
-            Operation::QueryActiveClipboard => {
-                execute_query_active_clipboard(self.current_active_clipboard().await?.as_ref())
+                }
+                Operation::RemoveMember(input) => {
+                    execute_remove_member(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::SecureRemoveLegacyMember(input) => {
+                    execute_secure_remove_legacy_member(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
                     .await
-            }
-            Operation::RestoreClipboard(input) => {
-                execute_restore_clipboard(self.current_facade().await?.as_ref(), input).await
-            }
-            Operation::SendText(input) => self.execute_send_text(input).await,
-            Operation::SendImage(input) => self.execute_send_image(input).await,
-            Operation::SendFiles(input) => self.execute_send_files(input, &cancellation).await,
-            Operation::ResendEntry(input) => {
-                execute_resend_entry(self.current_clipboard_sync_runtime().await?.as_ref(), input)
+                }
+                Operation::QueryMemberRevocation(input) => {
+                    execute_query_member_revocation(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::QueryCurrentMemberRevocation => {
+                    execute_query_current_member_revocation(self.current_facade().await?.as_ref())
+                        .await
+                }
+                Operation::ContinueMemberRevocation(input) => {
+                    execute_continue_member_revocation(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::QueryLegacyBootstrap(input) => {
+                    execute_query_legacy_bootstrap(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::QuerySpaceProtection => {
+                    execute_query_space_protection(self.current_facade().await?.as_ref()).await
+                }
+                Operation::SearchEntries(input) => {
+                    execute_search_entries(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::QuerySearchTags => {
+                    execute_query_search_tags(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QuerySearchStatus => {
+                    execute_query_search_status(self.current_facade().await?.as_ref()).await
+                }
+                Operation::RebuildSearchIndex => {
+                    execute_rebuild_search_index(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryHistory(input) => {
+                    let search_input = history_search_input(input)?;
+                    let offset = search_input.offset;
+                    let limit = search_input.limit;
+                    let page = self
+                        .current_facade()
+                        .await?
+                        .search_query(search_input)
+                        .await
+                        .map_err(map_query_history_error)?;
+                    history_page_result(page, offset, limit)
+                }
+                Operation::ListHistoryEntries(input) => {
+                    execute_list_history_entries(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::GetHistoryEntry(input) => {
+                    execute_get_history_entry(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::DeleteHistoryEntry(input) => {
+                    execute_delete_history_entry(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::SetHistoryEntryFavorite(input) => {
+                    execute_set_history_entry_favorite(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::QueryHistoryStats => {
+                    execute_query_history_stats(self.current_facade().await?.as_ref()).await
+                }
+                Operation::GetHistoryEntryResource(input) => {
+                    execute_get_history_entry_resource(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::ReadBlob(input) => {
+                    execute_read_blob(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::ReadThumbnail(input) => {
+                    execute_read_thumbnail(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::ReadEntryFile(input) => {
+                    execute_read_entry_file(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::QueryEntryDelivery(input) => {
+                    execute_query_entry_delivery(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::ClearHistory => {
+                    execute_clear_history(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryEntryReceiveProgress(input) => {
+                    execute_query_entry_receive_progress(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
                     .await
+                }
+                Operation::ListEntryReceiveProgress => {
+                    execute_list_entry_receive_progress(self.current_facade().await?.as_ref()).await
+                }
+                Operation::CancelEntryReceive(input) => {
+                    execute_cancel_entry_receive(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::CancelInboundTransfer(input) => {
+                    execute_cancel_inbound_transfer(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::CaptureCurrentClipboard => {
+                    execute_capture_current_clipboard(self.current_facade().await?.as_ref()).await
+                }
+                Operation::ObserveClipboardChange(input) => {
+                    Ok(OperationResult::ClipboardChangeObserved {
+                        report: self
+                            .clipboard_change_runtime
+                            .observe_change(input.dispatch)
+                            .await?,
+                    })
+                }
+                Operation::QueryActiveClipboard => {
+                    execute_query_active_clipboard(self.current_active_clipboard().await?.as_ref())
+                        .await
+                }
+                Operation::RestoreClipboard(input) => {
+                    execute_restore_clipboard(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::RecoverNetwork | Operation::QueryNetworkRecoveryStatus => {
+                    Err(super::operation_unavailable_error())
+                }
+                Operation::SendText(input) => self.execute_send_text(input).await,
+                Operation::SendImage(input) => self.execute_send_image(input).await,
+                Operation::SendFiles(input) => self.execute_send_files(input, &cancellation).await,
+                Operation::ResendEntry(input) => {
+                    execute_resend_entry(
+                        self.current_clipboard_sync_runtime().await?.as_ref(),
+                        input,
+                    )
+                    .await
+                }
+                Operation::ExportEntry(input) => self.execute_export_entry(input).await,
             }
-            Operation::ExportEntry(input) => self.execute_export_entry(input).await,
+        };
+        let session_cancellation = session_lease.cancellation();
+        tokio::select! {
+            _ = session_cancellation.cancelled() => Err(super::operation_unavailable_error()),
+            result = operation => result,
         }
     }
 
@@ -519,54 +587,17 @@ impl EngineRuntime for ProductionRuntime {
     }
 
     async fn suspend(&self) -> Result<(), EngineError> {
-        let session = self.session.lock().await.take();
-        if let Some(session) = session {
-            #[cfg(feature = "lan-compat")]
-            if session
-                .mobile_sync
-                .shutdown_mobile_file_uploads()
-                .await
-                .is_err()
-            {
-                tracing::warn!("mobile file upload shutdown finished with an error");
-            }
-            if let Err(error) = session.history_maintenance.shutdown().await {
-                tracing::warn!(error = %error, "history maintenance stopped with an error");
-            }
-            session.tasks.shutdown(Duration::from_millis(500)).await;
-            if let Err(error) = session.search_runtime.shutdown().await {
-                tracing::error!(error = %error, "search runtime stopped with error");
-            }
-            session.clipboard.shutdown().await;
-            session.sync_engine.shutdown().await;
-            self.session_factory
-                .wired
-                .shared
-                .file_transfer_facade
-                .cancel_active_sessions()
-                .await
-                .map_err(|error| {
-                    operation_error_with_code(1104, "cancel active file transfers", error)
-                })?;
-        }
-        Ok(())
+        self.session_supervisor.suspend().await
     }
 
     async fn resume(&self) -> Result<(), EngineError> {
-        let session = Self::build_session(&self.session_factory).await?;
-        *self.session.lock().await = Some(session);
-        Ok(())
+        self.session_supervisor.resume().await
     }
 
     async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
+        self.network_recovery.shutdown().await;
         self.suspend().await?;
-        self.session_factory
-            .wired
-            .shared
-            .file_transfer_facade
-            .close()
-            .await
-            .map_err(|error| operation_error_with_code(1104, "close file transfers", error))?;
+        self.session_supervisor.close_file_transfers().await?;
         self.task_registry.shutdown(deadline).await;
         if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {
             if error.kind() != std::io::ErrorKind::NotFound {

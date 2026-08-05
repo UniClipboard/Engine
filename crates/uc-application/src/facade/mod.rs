@@ -28,6 +28,7 @@ mod membership_connectivity;
 pub mod membership_gossip;
 #[cfg(feature = "lan-compat")]
 pub mod mobile_sync;
+pub mod network_recovery;
 pub mod resource;
 pub mod roster;
 pub mod search;
@@ -146,6 +147,10 @@ pub use mobile_sync::{
     ShortcutInstallMethod, ShortcutInstallMethodOption, SyncClipboardItemType, SyncClipboardMeta,
     UpdateMobileSyncSettingsError, UpdateMobileSyncSettingsInput, UpdateMobileSyncSettingsOutput,
     SYNC_CLIPBOARD_EX_INSTALL_URL,
+};
+pub use network_recovery::{
+    NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
+    NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,
 };
 pub use resource::{
     BinaryResourceView, FileResourceView, ResourceFacade, ResourceFacadeDeps, ResourceFacadeError,

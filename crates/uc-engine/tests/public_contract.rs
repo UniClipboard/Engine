@@ -393,6 +393,24 @@ fn peer_connection_contract_preserves_status_without_debugging_identity_or_addre
 }
 
 #[test]
+fn network_recovery_contract_exposes_one_action_and_one_status_query() {
+    assert_eq!(
+        Operation::RecoverNetwork.kind(),
+        OperationKind::RecoverNetwork
+    );
+    assert_eq!(
+        Operation::QueryNetworkRecoveryStatus.kind(),
+        OperationKind::QueryNetworkRecoveryStatus
+    );
+    let status = OperationResult::NetworkRecoveryStatus(uc_engine::NetworkRecoveryStatusSummary {
+        phase: uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled,
+        retryable: true,
+        next_retry_in_ms: Some(1_000),
+    });
+    assert!(format!("{status:?}").contains("network_recovery_status"));
+}
+
+#[test]
 fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user_values() {
     assert_eq!(
         Operation::QuerySettings.kind(),

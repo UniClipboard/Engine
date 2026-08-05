@@ -674,6 +674,14 @@ fn operation_response(result: OperationResult) -> Value {
             "offline": report.offline,
             "errors": report.errors,
         }),
+        OperationResult::NetworkRecovered => json!({"ok": true, "kind": "network_recovered"}),
+        OperationResult::NetworkRecoveryStatus(status) => json!({
+            "ok": true,
+            "kind": "network_recovery_status",
+            "phase": network_recovery_phase(status.phase),
+            "retryable": status.retryable,
+            "next_retry_in_ms": status.next_retry_in_ms,
+        }),
         OperationResult::Settings(settings) => json!({
             "ok": true,
             "kind": "settings",
@@ -1352,6 +1360,15 @@ fn operation_response(result: OperationResult) -> Value {
     }
 }
 
+fn network_recovery_phase(phase: uc_engine::NetworkRecoveryPhaseSummary) -> &'static str {
+    match phase {
+        uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
+        uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
+        uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
+        uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
+    }
+}
+
 fn mobile_sync_item_type(item_type: uc_engine::MobileSyncItemType) -> &'static str {
     match item_type {
         uc_engine::MobileSyncItemType::Text => "text",
@@ -1405,6 +1422,7 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
         }
         EngineEvent::ActiveClipboardChanged(_) => summary.refresh_requests += 1,
         EngineEvent::MobileLanSettingsChanged(_) => summary.refresh_requests += 1,
+        EngineEvent::NetworkRecoveryChanged(_) => summary.refresh_requests += 1,
         EngineEvent::RefreshRequired { .. } => summary.refresh_requests += 1,
         EngineEvent::OperationFinished { .. } => summary.completed_operations += 1,
         EngineEvent::LifecycleFailed { .. } => summary.lifecycle_failures += 1,
