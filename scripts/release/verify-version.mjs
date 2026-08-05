@@ -32,7 +32,7 @@ if (tag !== expected) throw new Error(`tag ${tag} does not match ${packageName} 
 
 if (packageName === 'uc-engine') {
   const harmonyPackage = readFileSync('tests/hosts/ohos/engine/oh-package.json5', 'utf8')
-  const match = harmonyPackage.match(/^\s*version:\s*['"]([^'"]+)['"],?\s*$/m)
+  const match = harmonyPackage.match(/^\s*(?:"version"|version)\s*:\s*['"]([^'"]+)['"],?\s*$/m)
   if (!match) throw new Error('HarmonyOS package version is missing')
   if (match[1] !== packageMetadata.version) {
     throw new Error(
