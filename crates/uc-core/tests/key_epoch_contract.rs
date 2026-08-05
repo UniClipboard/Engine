@@ -400,6 +400,63 @@ fn permanent_loss_recovery_only_excludes_waiting_devices_and_appends_a_generatio
 }
 
 #[test]
+fn absent_permanent_loss_recipient_finishes_the_old_revocation_without_another_generation() {
+    let mut record = RevocationRecord::prepare_with_recipients(
+        RevocationId::from_string("absent-permanent-loss-recipient").unwrap(),
+        SpaceId::from_str("space-1"),
+        DeviceId::new("removed-device"),
+        vec![DeviceId::new("already-absent-device")],
+        GroupEpoch::new(1),
+        100,
+    )
+    .unwrap();
+    record.transition_to(RevocationStatus::Staged, 101).unwrap();
+    let mut state = SpaceKeyState::legacy(SpaceId::from_str("space-1"));
+    state.mark_migrating().unwrap();
+    state
+        .mark_ready(
+            ContentKeyId::from_string("current-1").unwrap(),
+            ProtectionGroupId::generate(),
+        )
+        .unwrap();
+    state
+        .rotate(ContentKeyId::from_string("current-2").unwrap())
+        .unwrap();
+    let mut stage = RevocationStage::new(
+        record,
+        state,
+        vec![1],
+        vec![2],
+        vec![RevocationOutboxMessage::new(
+            DeviceId::new("already-absent-device"),
+            vec![3],
+        )],
+    )
+    .unwrap();
+    stage
+        .transition_to(RevocationStatus::Activated, 102)
+        .unwrap();
+    stage
+        .transition_to(RevocationStatus::Distributing, 103)
+        .unwrap();
+
+    stage
+        .finish_absent_recipients(&[DeviceId::new("already-absent-device")], 104)
+        .unwrap();
+
+    assert_eq!(stage.generation_count(), 1);
+    assert_eq!(stage.record().status(), RevocationStatus::Complete);
+    assert_eq!(
+        stage.removed_device_ids(),
+        vec![
+            DeviceId::new("removed-device"),
+            DeviceId::new("already-absent-device")
+        ]
+    );
+    assert!(stage.pending_recipient_device_ids().is_empty());
+}
+
+#[test]
 fn space_material_pending_updates_are_acknowledged_by_id() {
     let mut material = SpaceKeyMaterial::new(
         SpaceKeyState::legacy(SpaceId::from_str("space-1")),

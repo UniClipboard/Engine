@@ -1077,7 +1077,28 @@ impl DefaultSpaceAccessAdapter {
             .load_space_material(record.space_id())
             .await?
             .ok_or_else(|| KeyEpochError::Repository("space key material unavailable".into()))?;
+        let mut already_absent = Vec::new();
+        let mut still_in_group = Vec::new();
         for lost_device_id in permanently_lost_device_ids {
+            match MlsGroupEngine::contains_active_member(
+                &MlsClientState::from_bytes(material.group_state().to_vec()),
+                lost_device_id.as_str().as_bytes(),
+            ) {
+                Ok(true) => still_in_group.push(lost_device_id.clone()),
+                Ok(false) => already_absent.push(lost_device_id.clone()),
+                Err(_) => {
+                    stage.transition_to(RevocationStatus::RecoveryRequired, now_ms)?;
+                    let record = repository
+                        .commit_revocation_recovery(&stage, &material)
+                        .await?;
+                    return Self::group_revocation_result(repository.as_ref(), &record).await;
+                }
+            }
+        }
+        if !already_absent.is_empty() {
+            stage.finish_absent_recipients(&already_absent, now_ms)?;
+        }
+        for lost_device_id in still_in_group {
             let removal = MlsGroupEngine::remove_member(
                 &MlsClientState::from_bytes(material.group_state().to_vec()),
                 lost_device_id.as_str().as_bytes(),
@@ -1115,7 +1136,7 @@ impl DefaultSpaceAccessAdapter {
                 .map(|recipient| RevocationOutboxMessage::new(recipient, update.clone()))
                 .collect();
             stage.append_recovery_generation(
-                lost_device_id,
+                &lost_device_id,
                 next.state().clone(),
                 next.group_state().to_vec(),
                 next.key_catalog().to_vec(),
@@ -1130,22 +1151,26 @@ impl DefaultSpaceAccessAdapter {
             )
             .with_pending_group_updates_from_excluding_many(&material, permanently_lost_device_ids);
         }
-        let validator = InMemorySession::new();
-        validator.set_master_key_for_space(
-            material.state().space_id().clone(),
-            self.session
-                .get_master_key()
-                .map_err(|error| KeyEpochError::Repository(error.to_string()))?,
-        );
-        validator
-            .install_space_material(&material)
-            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+        if stage.record().status() != RevocationStatus::Complete {
+            let validator = InMemorySession::new();
+            validator.set_master_key_for_space(
+                material.state().space_id().clone(),
+                self.session
+                    .get_master_key()
+                    .map_err(|error| KeyEpochError::Repository(error.to_string()))?,
+            );
+            validator
+                .install_space_material(&material)
+                .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+        }
         let record = repository
             .commit_revocation_recovery(&stage, &material)
             .await?;
-        self.session
-            .install_space_material(&material)
-            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+        if record.status() != RevocationStatus::RecoveryRequired {
+            self.session
+                .install_space_material(&material)
+                .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+        }
         Self::group_revocation_result(repository.as_ref(), &record).await
     }
 
@@ -1218,7 +1243,10 @@ impl DefaultSpaceAccessAdapter {
         let staged = repository
             .load_staged_revocation(record.revocation_id())
             .await?;
-        let pending_recipient_device_ids = if record.status() == RevocationStatus::Complete {
+        let pending_recipient_device_ids = if matches!(
+            record.status(),
+            RevocationStatus::Complete | RevocationStatus::RecoveryRequired
+        ) {
             Vec::new()
         } else if let Some(stage) = staged {
             stage.pending_recipient_device_ids()
@@ -4199,6 +4227,90 @@ mod admission_tests {
             .await
             .unwrap();
         assert_eq!(complete.status(), Some(RevocationStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn permanent_loss_recovery_requires_group_rebuild_when_current_group_is_unreadable() {
+        let directory = tempdir().unwrap();
+        let space_id = SpaceId::from("corrupt-recovery-space");
+        let mut record = RevocationRecord::prepare_with_recipients(
+            RevocationId::from_string("corrupt-recovery-revocation").unwrap(),
+            space_id.clone(),
+            DeviceId::new("removed-device"),
+            vec![DeviceId::new("lost-device")],
+            GroupEpoch::new(1),
+            100,
+        )
+        .unwrap();
+        record.transition_to(RevocationStatus::Staged, 101).unwrap();
+        let mut state = SpaceKeyState::legacy(space_id.clone());
+        state.mark_migrating().unwrap();
+        state
+            .mark_ready(
+                ContentKeyId::from_string("current-1").unwrap(),
+                ProtectionGroupId::generate(),
+            )
+            .unwrap();
+        state
+            .rotate(ContentKeyId::from_string("current-2").unwrap())
+            .unwrap();
+        let mut stage = RevocationStage::new(
+            record,
+            state.clone(),
+            b"corrupt-group-state".to_vec(),
+            b"key-catalog".to_vec(),
+            vec![RevocationOutboxMessage::new(
+                DeviceId::new("lost-device"),
+                vec![1],
+            )],
+        )
+        .unwrap();
+        stage
+            .transition_to(RevocationStatus::Activated, 102)
+            .unwrap();
+        stage
+            .transition_to(RevocationStatus::Distributing, 103)
+            .unwrap();
+        let active_record = stage.record().clone();
+        let material = SpaceKeyMaterial::new(
+            state,
+            b"corrupt-group-state".to_vec(),
+            b"key-catalog".to_vec(),
+            103,
+        );
+        let revocation_id = active_record.revocation_id().clone();
+
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_get_revocation()
+            .times(1)
+            .returning(move |_| Ok(Some(active_record.clone())));
+        repository
+            .expect_load_staged_revocation()
+            .times(2)
+            .returning(move |_| Ok(Some(stage.clone())));
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .returning(move |_| Ok(Some(material.clone())));
+        repository
+            .expect_commit_revocation_recovery()
+            .times(1)
+            .withf(|stage, _| stage.record().status() == RevocationStatus::RecoveryRequired)
+            .returning(|stage, _| Ok(stage.record().clone()));
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            Arc::new(InMemorySession::new()),
+            Arc::new(repository),
+        );
+
+        let result = adapter
+            .continue_group_revocation(&revocation_id, &[DeviceId::new("lost-device")], 104)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status(), Some(RevocationStatus::RecoveryRequired));
+        assert!(result.pending_recipient_device_ids().is_empty());
     }
 
     #[tokio::test]

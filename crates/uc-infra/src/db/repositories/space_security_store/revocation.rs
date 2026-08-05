@@ -320,12 +320,15 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let record = stage.record();
         if !matches!(
             record.status(),
-            RevocationStatus::Distributing | RevocationStatus::Complete
-        ) || material.state().space_id() != record.space_id()
-            || material.state().epoch() != record.next_epoch()
-            || stage.next_space_state() != material.state()
-            || stage.group_state() != material.group_state()
-            || stage.key_catalog() != material.key_catalog()
+            RevocationStatus::Distributing
+                | RevocationStatus::Complete
+                | RevocationStatus::RecoveryRequired
+        ) || (record.status() != RevocationStatus::RecoveryRequired
+            && (material.state().space_id() != record.space_id()
+                || material.state().epoch() != record.next_epoch()
+                || stage.next_space_state() != material.state()
+                || stage.group_state() != material.group_state()
+                || stage.key_catalog() != material.key_catalog()))
         {
             return Err(backend("invalid revocation recovery payload"));
         }
@@ -370,9 +373,17 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                         &stage_aad(&revocation_id),
                     )
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let appends_generation = existing_stage.generation_count()
+                        < stage.generation_count()
+                        && existing_record.next_epoch() < record.next_epoch();
+                    let finishes_without_generation = matches!(
+                        record.status(),
+                        RevocationStatus::Complete | RevocationStatus::RecoveryRequired
+                    ) && existing_stage.generation_count()
+                        == stage.generation_count()
+                        && existing_record.next_epoch() == record.next_epoch();
                     if existing_record.status() != RevocationStatus::Distributing
-                        || existing_stage.generation_count() >= stage.generation_count()
-                        || existing_record.next_epoch() >= record.next_epoch()
+                        || !(appends_generation || finishes_without_generation)
                     {
                         return Err(anyhow::anyhow!("revocation recovery is not append-only"));
                     }

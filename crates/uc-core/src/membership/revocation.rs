@@ -614,6 +614,35 @@ impl RevocationStage {
             .collect()
     }
 
+    pub fn finish_absent_recipients(
+        &mut self,
+        permanently_lost_device_ids: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<(), KeyEpochError> {
+        if self.record.status() != RevocationStatus::Distributing {
+            return Err(KeyEpochError::PermanentLossRecipientNotPending);
+        }
+        let pending = self.pending_recipient_device_ids();
+        let mut unique = HashSet::new();
+        if permanently_lost_device_ids.is_empty()
+            || permanently_lost_device_ids
+                .iter()
+                .any(|device_id| !unique.insert(device_id.clone()) || !pending.contains(device_id))
+        {
+            return Err(KeyEpochError::PermanentLossRecipientNotPending);
+        }
+        for device_id in permanently_lost_device_ids {
+            self.record.finish_absent_recipient(device_id, now_ms)?;
+            self.outbox
+                .retain(|message| message.recipient() != device_id);
+        }
+        if self.all_recipients_confirmed() {
+            self.record
+                .transition_to(RevocationStatus::Complete, now_ms)?;
+        }
+        Ok(())
+    }
+
     pub fn append_recovery_generation(
         &mut self,
         permanently_lost_device_id: &DeviceId,
@@ -1065,6 +1094,24 @@ impl RevocationRecord {
         self.permanently_lost_device_ids.push(device_id.clone());
         self.previous_epoch = self.next_epoch;
         self.next_epoch = self.previous_epoch.next()?;
+        self.updated_at_ms = now_ms;
+        Ok(())
+    }
+
+    fn finish_absent_recipient(
+        &mut self,
+        device_id: &DeviceId,
+        now_ms: i64,
+    ) -> Result<(), KeyEpochError> {
+        if self.status != RevocationStatus::Distributing
+            || !self.retained_recipients.contains(device_id)
+            || self.permanently_lost_device_ids.contains(device_id)
+        {
+            return Err(KeyEpochError::PermanentLossRecipientNotPending);
+        }
+        self.retained_recipients
+            .retain(|recipient| recipient != device_id);
+        self.permanently_lost_device_ids.push(device_id.clone());
         self.updated_at_ms = now_ms;
         Ok(())
     }
