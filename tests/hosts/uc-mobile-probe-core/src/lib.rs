@@ -1303,6 +1303,7 @@ fn operation_response(result: OperationResult) -> Value {
                     uc_engine::EntryDeliveryStatusSummary::Delivered => "delivered",
                     uc_engine::EntryDeliveryStatusSummary::Duplicate => "duplicate",
                     uc_engine::EntryDeliveryStatusSummary::Unreachable => "unreachable",
+                    uc_engine::EntryDeliveryStatusSummary::Superseded => "superseded",
                     uc_engine::EntryDeliveryStatusSummary::Failed { .. } => "failed",
                 })
                 .collect::<Vec<_>>();

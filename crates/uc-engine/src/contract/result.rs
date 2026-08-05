@@ -221,6 +221,7 @@ pub enum EntryDeliveryStatusSummary {
     Delivered,
     Duplicate,
     Unreachable,
+    Superseded,
     Failed {
         reason: DeliveryFailureReasonSummary,
     },

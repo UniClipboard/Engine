@@ -7,6 +7,7 @@
 pub(crate) mod active_state;
 pub(crate) mod apply_inbound;
 pub(crate) mod dispatch_entry;
+mod existing_local_entry_delivery;
 pub(crate) mod get_entry_delivery_view;
 /// `pub` (not `pub(crate)`) because `decode_v3_bytes_to_snapshot` needs
 /// a fully-public path for the CLI `watch` re-export at lib.rs root.

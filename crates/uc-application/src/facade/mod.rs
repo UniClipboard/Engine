@@ -16,6 +16,7 @@ pub mod clipboard_inbound;
 pub mod clipboard_live_index;
 pub mod clipboard_outbound;
 pub mod clipboard_restore;
+pub mod clipboard_sync_runtime;
 pub mod config_migration;
 pub mod device;
 pub mod diagnostics;
@@ -98,6 +99,7 @@ pub use clipboard_outbound::{
 pub use clipboard_restore::{
     ClipboardRestoreError, ClipboardRestoreFacade, ClipboardRestoreFacadeDeps,
 };
+pub use clipboard_sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
 pub use config_migration::{ConfigMigrationDeps, ConfigMigrationFacade};
 pub use device::{DeviceFacade, DeviceFacadeError, LocalDeviceInfoView};
 pub use diagnostics::{

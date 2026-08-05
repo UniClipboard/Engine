@@ -68,6 +68,8 @@ pub enum EntryDeliveryStatusView {
     /// Peer was unreachable (offline / dial failure). Not a fault — the peer
     /// is simply not available right now.
     Unreachable,
+    /// A newer local clipboard entry replaced this older offline delivery.
+    Superseded,
     Failed {
         reason: DeliveryFailureReason,
     },
@@ -286,6 +288,7 @@ fn map_status(status: &DomainDeliveryStatus) -> EntryDeliveryStatusView {
         DomainDeliveryStatus::Delivered => EntryDeliveryStatusView::Delivered,
         DomainDeliveryStatus::Duplicate => EntryDeliveryStatusView::Duplicate,
         DomainDeliveryStatus::Unreachable => EntryDeliveryStatusView::Unreachable,
+        DomainDeliveryStatus::Superseded => EntryDeliveryStatusView::Superseded,
         DomainDeliveryStatus::Failed { reason } => EntryDeliveryStatusView::Failed {
             reason: reason.clone(),
         },

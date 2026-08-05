@@ -4,7 +4,7 @@ use crate::error_codes::*;
 
 use tracing::error;
 use uc_application::facade::{
-    AppFacade, NotResendableReason, ResendEntryCommand, ResendEntryError, ResendReport,
+    ClipboardSyncRuntime, NotResendableReason, ResendEntryCommand, ResendEntryError, ResendReport,
 };
 
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub async fn execute_resend_entry(
-    facade: &AppFacade,
+    runtime: &ClipboardSyncRuntime,
     input: ResendEntryInput,
 ) -> Result<OperationResult, EngineError> {
     let target_filter = (!input.target_devices.is_empty()).then(|| {
@@ -23,7 +23,7 @@ pub async fn execute_resend_entry(
             .map(uc_core::ids::DeviceId::new)
             .collect()
     });
-    let result = facade
+    let result = runtime
         .resend_entry(ResendEntryCommand {
             entry_id: uc_core::ids::EntryId::from(input.entry_id.as_str()),
             target_filter,

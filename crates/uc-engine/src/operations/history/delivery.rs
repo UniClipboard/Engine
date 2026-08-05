@@ -65,6 +65,7 @@ fn delivery_status(status: EntryDeliveryStatusView) -> EntryDeliveryStatusSummar
         EntryDeliveryStatusView::Delivered => EntryDeliveryStatusSummary::Delivered,
         EntryDeliveryStatusView::Duplicate => EntryDeliveryStatusSummary::Duplicate,
         EntryDeliveryStatusView::Unreachable => EntryDeliveryStatusSummary::Unreachable,
+        EntryDeliveryStatusView::Superseded => EntryDeliveryStatusSummary::Superseded,
         EntryDeliveryStatusView::Failed { reason } => EntryDeliveryStatusSummary::Failed {
             reason: delivery_failure_reason(reason),
         },
