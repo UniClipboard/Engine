@@ -134,6 +134,14 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
         &self,
         settlement: &InboundReceiveSettlement,
     ) -> Result<(), InboundReceiveCommitError> {
+        let allow_cancelled_replay = matches!(
+            settlement,
+            InboundReceiveSettlement::NoEntry {
+                terminal: PartialReceiveTerminal::Cancelled,
+                artifacts: NoEntryReceiveArtifacts::None,
+                ..
+            }
+        );
         let (record, entry_id, attempt_id, file_set, expected, target, artifacts, now_ms) =
             match settlement {
                 InboundReceiveSettlement::Complete {
@@ -256,7 +264,20 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                     ))
                     .execute(conn)?;
                     if attempt_updated != 1 {
-                        return Err(CommitInvariantError::AttemptStateMismatch.into());
+                        let already_cancelled = allow_cancelled_replay
+                            && entry_receive_attempt::table
+                                .filter(entry_receive_attempt::entry_id.eq(&entry_id))
+                                .filter(entry_receive_attempt::current_attempt_id.eq(&attempt_id))
+                                .filter(
+                                    entry_receive_attempt::attempt_state
+                                        .eq(AttemptState::Cancelled.to_string()),
+                                )
+                                .count()
+                                .get_result::<i64>(conn)?
+                                == 1;
+                        if !already_cancelled {
+                            return Err(CommitInvariantError::AttemptStateMismatch.into());
+                        }
                     }
 
                     settle_artifacts(conn, &entry_id, &attempt_id, artifacts, now_ms)?;
