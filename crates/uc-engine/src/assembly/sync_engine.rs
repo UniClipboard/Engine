@@ -119,6 +119,9 @@ pub struct SyncEngineAssembly {
     /// 与 `roster` 同样共享 `peer_addr_repo` / `presence`,所以 F1 hook
     /// 喂好的 presence 缓存,`dispatch_entry` 能直接读到。
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
+    /// Shared peer reachability source for clipboard recovery and roster
+    /// consumers. All subscribers observe the same online transitions.
+    pub(crate) presence: Arc<dyn PresencePort>,
     /// Slice 3 Phase 2:大 payload 发布 / 拉取门面。CLI 与后续 daemon/UI
     /// 都从这里走完整的 hash 去重、加解密和 blob 传输编排。
     pub blob: Arc<BlobTransferFacade>,
@@ -909,6 +912,7 @@ pub async fn build_sync_engine_assembly(
         facade,
         roster,
         clipboard_sync,
+        presence,
         blob,
         outbound_progress_reporter,
         blob_transfer,

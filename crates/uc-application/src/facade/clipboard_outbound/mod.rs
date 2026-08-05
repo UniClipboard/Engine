@@ -34,7 +34,7 @@ use crate::usecases::clipboard_sync::apply_inbound::{
     compute_file_set_component, InboundFileSetManifest, InboundFileSetMember,
 };
 use crate::usecases::clipboard_sync::resend_entry::{
-    ResendEntryDeps, ResendEntryRunner, ResendEntryUseCase,
+    ExistingLocalEntryDeliveryRunner, ResendEntryDeps, ResendEntryRunner, ResendEntryUseCase,
 };
 use crate::usecases::clipboard_sync::V3BlobRef;
 
@@ -486,6 +486,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
 pub struct ClipboardOutboundFacade {
     dispatcher: Arc<dyn ClipboardOutboundPort>,
     resend_runner: Arc<dyn ResendEntryRunner>,
+    existing_entry_delivery: Arc<dyn ExistingLocalEntryDeliveryRunner>,
 }
 
 impl ClipboardOutboundFacade {
@@ -501,7 +502,7 @@ impl ClipboardOutboundFacade {
             Arc::new(ClipboardOutboundDispatcher::from_deps(&deps));
         let dispatch_runner = deps.clipboard_sync.dispatch_runner();
         let blob_publisher: Arc<dyn OutboundBlobPublishGateway> = deps.blob_transfer.clone();
-        let resend_uc = ResendEntryUseCase::new(ResendEntryDeps {
+        let (resend_uc, existing_entry_delivery) = ResendEntryUseCase::build(ResendEntryDeps {
             entry_repo: deps.entry_repo,
             event_repo: deps.event_repo,
             selection_repo: deps.selection_repo,
@@ -520,6 +521,7 @@ impl ClipboardOutboundFacade {
         Self {
             dispatcher,
             resend_runner: Arc::new(resend_uc) as Arc<dyn ResendEntryRunner>,
+            existing_entry_delivery,
         }
     }
 
@@ -531,10 +533,12 @@ impl ClipboardOutboundFacade {
     pub(crate) fn from_parts(
         dispatcher: Arc<dyn ClipboardOutboundPort>,
         resend_runner: Arc<dyn ResendEntryRunner>,
+        existing_entry_delivery: Arc<dyn ExistingLocalEntryDeliveryRunner>,
     ) -> Self {
         Self {
             dispatcher,
             resend_runner,
+            existing_entry_delivery,
         }
     }
 
@@ -563,6 +567,16 @@ impl ClipboardOutboundFacade {
         cmd: ResendEntryCommand,
     ) -> Result<ResendReport, ResendEntryError> {
         self.resend_runner.execute(cmd).await
+    }
+
+    pub(crate) async fn deliver_existing_local_entry(
+        &self,
+        entry_id: EntryId,
+        targets: Vec<DeviceId>,
+    ) -> Result<ResendReport, ResendEntryError> {
+        self.existing_entry_delivery
+            .deliver(entry_id, targets)
+            .await
     }
 }
 
@@ -1088,6 +1102,19 @@ mod tests {
         }
     }
 
+    struct UnusedExistingEntryDelivery;
+
+    #[async_trait]
+    impl ExistingLocalEntryDeliveryRunner for UnusedExistingEntryDelivery {
+        async fn deliver(
+            &self,
+            _entry_id: EntryId,
+            _targets: Vec<DeviceId>,
+        ) -> Result<ResendReport, ResendEntryError> {
+            panic!("existing-entry delivery should not run in this facade test");
+        }
+    }
+
     /// Records the last `ResendEntryCommand` and returns a canned report.
     /// Used by [`resend_entry_forwards_command_to_runner`] to prove the
     /// facade thin-method threads command + result without mutation.
@@ -1391,6 +1418,7 @@ mod tests {
         let facade = ClipboardOutboundFacade::from_parts(
             Arc::new(FakeOutbound),
             Arc::new(UnusedResendRunner),
+            Arc::new(UnusedExistingEntryDelivery),
         );
         let outcome = facade
             .dispatch_capture_to_targets(
@@ -1447,6 +1475,7 @@ mod tests {
         let facade = ClipboardOutboundFacade::from_parts(
             Arc::new(FakeOutbound),
             Arc::clone(&runner) as Arc<dyn ResendEntryRunner>,
+            Arc::new(UnusedExistingEntryDelivery),
         );
 
         let cmd = ResendEntryCommand {

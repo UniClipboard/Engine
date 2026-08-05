@@ -114,9 +114,7 @@ impl PerPeerDispatcher {
         // and enforces a TTL re-dial, so by the time `known_offline` is true
         // we have first-hand evidence the peer is unreachable. Telemetry
         // fires `sync_deferred` (not `sync_failed`) to preserve
-        // attempted+deferred parity. Background recovery is unchanged — the
-        // next clipboard event retries and an inbound presence connection
-        // flips the peer back to Online.
+        // attempted+deferred parity.
         if known_offline {
             self.analytics
                 .capture(Event::SyncDeferred(SyncDeferredProps {

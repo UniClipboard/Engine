@@ -5,7 +5,8 @@ use uc_application::facade::{
     ClipboardCaptureFacade, ClipboardInboundEvent, ClipboardInboundEventAction,
     ClipboardInboundEventPort, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
     ClipboardLiveIndexDeps, ClipboardLiveIndexFacade, ClipboardLiveIndexPort, ClipboardLiveIndexer,
-    ClipboardOutboundDeps, ClipboardOutboundFacade, InboundClipboardApplyPort,
+    ClipboardOutboundDeps, ClipboardOutboundFacade, ClipboardSyncRuntime, ClipboardSyncRuntimeDeps,
+    InboundClipboardApplyPort,
 };
 use uc_application::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
@@ -25,7 +26,7 @@ pub(crate) struct ClipboardRuntime {
     pub capture: Arc<ClipboardCaptureFacade>,
     pub live_index: Arc<ClipboardLiveIndexFacade>,
     pub outbound: Arc<ClipboardOutboundFacade>,
-    inbound_runtime: ClipboardInboundRuntime,
+    pub sync: Arc<ClipboardSyncRuntime>,
     #[cfg(feature = "lan-compat")]
     pub apply_inbound: Arc<ApplyInboundClipboardUseCase>,
 }
@@ -154,6 +155,18 @@ pub(crate) fn build_clipboard_runtime(
         apply: apply_inbound.clone() as Arc<dyn InboundClipboardApplyPort>,
         events: Arc::new(EngineClipboardInboundEvents { events }),
     });
+    let sync = Arc::new(ClipboardSyncRuntime::start(ClipboardSyncRuntimeDeps {
+        outbound: Arc::clone(&outbound),
+        settings: deps.settings.clone(),
+        inbound: inbound_runtime,
+        presence: Arc::clone(&sync_engine.presence),
+        known_peers: wired.sync_engine.peer_addr_repo.clone(),
+        entries: deps.clipboard.entry_ports.list.clone(),
+        events: wired.shared.clipboard_event_reader_repo.clone(),
+        deliveries: wired.shared.entry_delivery_repo.clone(),
+        device_identity: deps.device.device_identity.clone(),
+        clock: deps.system.clock.clone(),
+    }));
 
     ClipboardRuntime {
         capture: Arc::new(ClipboardCaptureFacade::new(
@@ -162,7 +175,7 @@ pub(crate) fn build_clipboard_runtime(
         )),
         live_index: Arc::new(ClipboardLiveIndexFacade::new(search_live_indexer)),
         outbound,
-        inbound_runtime,
+        sync,
         #[cfg(feature = "lan-compat")]
         apply_inbound,
     }
@@ -170,9 +183,7 @@ pub(crate) fn build_clipboard_runtime(
 
 impl ClipboardRuntime {
     pub(crate) async fn shutdown(self) {
-        if let Err(error) = self.inbound_runtime.shutdown().await {
-            tracing::error!(error = %error, "clipboard inbound runtime stopped with error");
-        }
+        self.sync.shutdown().await;
     }
 }
 

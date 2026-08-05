@@ -213,9 +213,8 @@ impl DeliveryRecorder {
 /// batched, so an early-settling peer's badge isn't held hostage by a
 /// staggered-retry long-tail), and log a per-bucket summary when drained.
 ///
-/// Best-effort RECORD-ONLY (VISION locked decision #59): a peer that
-/// finally settles Offline / Errored after the deadline is recorded as
-/// such, never replayed — automatic redelivery is an absolute禁区.
+/// Best-effort RECORD-ONLY: a peer that finally settles Offline / Errored
+/// after the deadline is recorded as such. This continuation never retries.
 pub(crate) fn spawn_deferred_drain(
     mut set: JoinSet<PeerDispatchResult>,
     entry_id: Option<EntryId>,

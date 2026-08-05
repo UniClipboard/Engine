@@ -39,7 +39,7 @@
 //! probes populate `last_state`, so a peer that always dials us first
 //! (accept-only) stays `Unknown` until the dispatch adapter actually
 //! reaches it. Dropping `Unknown` peers in the preflight would silently
-//! exclude that recovery path.
+//! exclude a valid direct-delivery attempt.
 //!
 //! ## Concurrency
 //!
