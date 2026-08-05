@@ -14,9 +14,9 @@ use uc_core::ports::{
     BeginReceiveAttemptPort, BeginReceiveFailurePort, ClaimReceiveCommitPort,
     CommitInboundReceivePort, CompletedReceiveArtifacts, GetEntryAttemptPort,
     InboundReceiveCommitError, InboundReceiveRecord, InboundReceiveSettlement,
-    NoEntryReceiveArtifacts, PartialReceiveTerminal, ReceiveArtifact, ReceiveArtifactOwnership,
-    ReceiveArtifactPhase, ReceiveArtifactRecord, ReceiveArtifactResolution,
-    RecordReceiveArtifactsPort, RequestReceiveCancellationPort,
+    NoEntryReceiveArtifacts, PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveArtifact,
+    ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
+    ReceiveArtifactResolution, RecordReceiveArtifactsPort, RequestReceiveCancellationPort,
 };
 use uc_core::SnapshotHash;
 use uc_infra::db::executor::DieselSqliteExecutor;
@@ -246,6 +246,67 @@ async fn no_entry_cancel_settles_attempt_and_artifacts_without_history() {
                     .first::<String>(conn)?,
                 "rolled_back"
             );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_settlement_is_idempotent_after_partial_receive_finishes_first() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("cancelled-settlement.sqlite");
+    let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+    let subkey: Arc<dyn DeriveSpaceSubkeyPort> = Arc::new(FixedSubkey);
+    let profile: Arc<dyn CurrentProfilePort> = Arc::new(FixedProfile);
+    let attempts =
+        DieselEntryReceiveAttemptRepository::new(DieselSqliteExecutor::new(pool.clone()));
+    let commit = DieselInboundReceiveCommitRepository::new(
+        DieselSqliteExecutor::new(pool.clone()),
+        subkey,
+        profile,
+    );
+    let reader = DieselSqliteExecutor::new(pool);
+
+    attempts
+        .begin_first_receive("entry", "a1", 1)
+        .await
+        .unwrap();
+    attempts
+        .request_receive_cancellation("entry", "a1", 2)
+        .await
+        .unwrap();
+    commit
+        .commit_inbound_receive(&InboundReceiveSettlement::Partial {
+            record: record("entry"),
+            attempt_id: "a1".to_owned(),
+            terminal: PartialReceiveTerminal::Cancelled,
+            file_set: None,
+            artifacts: PartialReceiveArtifacts::None,
+            now_ms: 3,
+        })
+        .await
+        .unwrap();
+
+    let cancellation = commit
+        .commit_inbound_receive(&InboundReceiveSettlement::NoEntry {
+            entry_id: EntryId::from("entry"),
+            attempt_id: "a1".to_owned(),
+            terminal: PartialReceiveTerminal::Cancelled,
+            artifacts: NoEntryReceiveArtifacts::None,
+            now_ms: 4,
+        })
+        .await;
+
+    assert!(cancellation.is_ok());
+    reader
+        .run(|conn| {
+            assert_eq!(
+                entry_receive_attempt::table
+                    .select(entry_receive_attempt::attempt_state)
+                    .first::<String>(conn)?,
+                "cancelled"
+            );
+            assert_eq!(clipboard_entry::table.count().get_result::<i64>(conn)?, 1);
             Ok(())
         })
         .unwrap();
