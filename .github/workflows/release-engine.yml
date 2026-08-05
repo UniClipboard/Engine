@@ -31,9 +31,6 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-
 concurrency:
   group: release-engine
   cancel-in-progress: false
@@ -42,12 +39,14 @@ jobs:
   prepare:
     name: Validate release request
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       commit: ${{ steps.release.outputs.commit }}
       device_matrix_path: ${{ steps.release.outputs.device_matrix_path }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
 
@@ -105,8 +104,10 @@ jobs:
     name: Build iOS and Android
     needs: prepare
     runs-on: macos-14
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
@@ -120,11 +121,6 @@ jobs:
             aarch64-linux-android x86_64-linux-android
           cargo install cargo-ndk --locked
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-          shared-key: engine-release-macos
-
       - name: Build iOS assets
         env:
           UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
@@ -137,7 +133,7 @@ jobs:
           UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/engine-dist
         run: bindings/uc-engine-uniffi/scripts/build-android-aar.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ios-android-assets
           path: ${{ runner.temp }}/engine-dist/
@@ -148,8 +144,10 @@ jobs:
     name: Build HarmonyOS
     needs: prepare
     runs-on: [self-hosted, macOS, ARM64, deveco]
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
@@ -167,7 +165,7 @@ jobs:
           UC_OHOS_TARGET_DIR: ${{ runner.temp }}/uc-ohos-target
         run: tests/hosts/ohos/build-emulator.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: harmonyos-assets
           path: ${{ runner.temp }}/engine-dist/
@@ -178,17 +176,19 @@ jobs:
     name: Verify and publish one release bundle
     needs: [prepare, ios-android, harmonyos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       tag: ${{ needs.prepare.outputs.tag }}
       commit: ${{ needs.prepare.outputs.commit }}
       published: ${{ steps.publication.outputs.published }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: '*-assets'
           path: ${{ runner.temp }}/engine-dist
@@ -202,7 +202,7 @@ jobs:
 
       - name: Upload verified dry-run bundle
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ needs.prepare.outputs.tag }}-verified
           path: ${{ runner.temp }}/engine-dist/release-assets/
@@ -241,6 +241,8 @@ jobs:
     needs: assemble
     if: ${{ needs.assemble.outputs.published == 'true' }}
     runs-on: macos-14
+    permissions:
+      contents: read
     outputs:
       tag: ${{ needs.assemble.outputs.tag }}
       commit: ${{ needs.assemble.outputs.commit }}
@@ -249,18 +251,20 @@ jobs:
       CURRENT_TAG: ${{ needs.assemble.outputs.tag }}
       CURRENT_COMMIT: ${{ needs.assemble.outputs.commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.assemble.outputs.commit }}
+          fetch-depth: 0
           path: engine
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: UniClipboard/UniClipboard
           ref: main
+          fetch-depth: 0
           path: desktop
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
 
       - id: previous
         name: Resolve the previous Engine release
@@ -289,9 +293,35 @@ jobs:
           echo "tag=$previous_tag" >> "$GITHUB_OUTPUT"
           echo "commit=$previous_commit" >> "$GITHUB_OUTPUT"
 
+      - id: compatible-desktop
+        name: Resolve previous-compatible desktop consumer
+        env:
+          PREVIOUS_COMMIT: ${{ steps.previous.outputs.commit }}
+        shell: bash
+        run: |
+          desktop_commit=""
+          while read -r candidate; do
+            pinned=$(git -C desktop show "$candidate:Cargo.toml" 2>/dev/null \
+              | grep -m1 '^[[:space:]]*uc-engine[[:space:]]*=' \
+              | sed -E 's/.*rev[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/')
+            if [[ "$pinned" =~ ^[0-9a-f]{40}$ ]] \
+              && git -C engine merge-base --is-ancestor "$pinned" "$PREVIOUS_COMMIT"; then
+              desktop_commit="$candidate"
+              break
+            fi
+          done < <(git -C desktop rev-list --first-parent HEAD)
+          if [[ -z "$desktop_commit" ]]; then
+            echo "No desktop consumer is compatible with previous Engine commit $PREVIOUS_COMMIT" >&2
+            exit 1
+          fi
+          echo "commit=$desktop_commit" >> "$GITHUB_OUTPUT"
+
       - name: Create isolated desktop consumers
+        env:
+          PREVIOUS_DESKTOP_COMMIT: ${{ steps.compatible-desktop.outputs.commit }}
         run: |
           git clone --local desktop old-desktop
+          git -C old-desktop checkout --detach "$PREVIOUS_DESKTOP_COMMIT"
           git clone --local desktop new-desktop
 
       - name: Build the previous Engine consumer
@@ -345,11 +375,13 @@ jobs:
     name: Notify desktop and mobile consumers
     needs: version-interop
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
-          client-id: ${{ secrets.ENGINE_RELEASE_APP_CLIENT_ID }}
+          app-id: ${{ vars.ENGINE_RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.ENGINE_RELEASE_APP_PRIVATE_KEY }}
           owner: UniClipboard
           repositories: |-

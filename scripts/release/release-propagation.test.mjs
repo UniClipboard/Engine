@@ -20,11 +20,16 @@ test('notifies consumers only after release publication and interop verification
   assert.match(workflow, /commit=\$\(git rev-list -n 1 "\$tag"\)/)
   assert.match(workflow, /ALICE_CLI:\s*.*old[\s\S]*BOB_CLI:\s*.*new/)
   assert.match(workflow, /ALICE_CLI:\s*.*new[\s\S]*BOB_CLI:\s*.*old/)
+  assert.match(workflow, /Resolve previous-compatible desktop consumer/)
+  assert.match(workflow, /git -C engine merge-base --is-ancestor/)
+  assert.match(workflow, /git -C old-desktop checkout --detach/)
+  assert.match(workflow, /fetch-depth:\s*0/)
+  assert.doesNotMatch(workflow, /uses:\s*\S+@(?![0-9a-f]{40})/)
 })
 
 test('uses a GitHub App installation token for both repository dispatches', () => {
-  assert.match(workflow, /actions\/create-github-app-token@v3/)
-  assert.match(workflow, /client-id:\s*\$\{\{\s*secrets\.ENGINE_RELEASE_APP_CLIENT_ID\s*\}\}/)
+  assert.match(workflow, /actions\/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1/)
+  assert.match(workflow, /app-id:\s*\$\{\{\s*vars\.ENGINE_RELEASE_APP_CLIENT_ID\s*\}\}/)
   assert.match(workflow, /private-key:\s*\$\{\{\s*secrets\.ENGINE_RELEASE_APP_PRIVATE_KEY\s*\}\}/)
   assert.match(workflow, /permission-contents:\s*write/)
   assert.match(workflow, /for repository in UniClipboard\/UniClipboard UniClipboard\/UniClip/)
