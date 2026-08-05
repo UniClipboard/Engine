@@ -26,6 +26,7 @@ pub(super) fn build_space_access_ports(
     SpaceAccessPorts,
     Arc<dyn uc_core::membership::LegacyProtectionPort>,
     Arc<dyn uc_core::membership::CurrentMemberSignaturePort>,
+    Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
 ) {
     let security_repository = Arc::new(DieselSpaceSecurityStore::new(
         db_executor.clone(),
@@ -34,6 +35,8 @@ pub(super) fn build_space_access_ports(
     let key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> =
         security_repository.clone();
     let legacy_bootstrap_repository: Arc<dyn uc_core::membership::LegacyBootstrapRepositoryPort> =
+        security_repository.clone();
+    let space_security_reset: Arc<dyn uc_core::membership::SpaceSecurityStateResetPort> =
         security_repository.clone();
     let space_access_adapter = Arc::new(
         uc_infra::security::DefaultSpaceAccessAdapter::new_with_security_repositories(
@@ -55,6 +58,7 @@ pub(super) fn build_space_access_ports(
         SpaceAccessPorts::from_adapter(space_access_adapter),
         legacy_protection,
         current_member_signatures,
+        space_security_reset,
     )
 }
 pub(super) fn build_peer_admission_port(

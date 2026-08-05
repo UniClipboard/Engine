@@ -77,6 +77,7 @@ use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Passphrase};
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
     MemberRepositoryPort, MemberSyncPreferences, RelationshipStateResetPort,
+    SpaceSecurityStateResetPort,
 };
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::ports::clipboard::{BlobMigrationRepoError, BlobMigrationRepoPort, MigrationRecord};
@@ -158,6 +159,7 @@ pub(crate) struct SwitchSpaceUseCase {
     trust_peer: Arc<TrustPeerUc>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     relationship_reset: Arc<dyn RelationshipStateResetPort>,
+    space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,
     clock: Arc<dyn ClockPort>,
     /// Switches the local analytics identity to the target Space's
     /// person once commit phase has succeeded. `None` on the target
@@ -179,6 +181,7 @@ impl SwitchSpaceUseCase {
         trust_peer: Arc<TrustPeerUc>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         relationship_reset: Arc<dyn RelationshipStateResetPort>,
+        space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,
         clock: Arc<dyn ClockPort>,
         analytics: Arc<dyn AnalyticsFacade>,
     ) -> Self {
@@ -193,6 +196,7 @@ impl SwitchSpaceUseCase {
             trust_peer,
             peer_addr_repo,
             relationship_reset,
+            space_security_reset,
             clock,
             analytics,
         }
@@ -485,6 +489,10 @@ impl SwitchSpaceUseCase {
             .map_err(map_redeem_err)?;
         self.relationship_reset
             .clear_all_relationships()
+            .await
+            .map_err(|error| SwitchSpaceError::Storage(error.to_string()))?;
+        self.space_security_reset
+            .clear_space_security_state_except(&outcome.space_id)
             .await
             .map_err(|error| SwitchSpaceError::Storage(error.to_string()))?;
         let now = self.now_utc()?;

@@ -250,7 +250,7 @@ pub fn wire_dependencies_from_inputs(
 
     // Space access — single session/key access entry. See
     // `build_space_access_ports` for the §8.3 single-adapter-reuse rationale.
-    let (space_access_ports, legacy_protection, current_member_signatures) =
+    let (space_access_ports, legacy_protection, current_member_signatures, space_security_reset) =
         build_space_access_ports(
             &infra.key_material,
             &platform.current_profile,
@@ -625,6 +625,7 @@ pub fn wire_dependencies_from_inputs(
             peer_admission,
             peer_addr_repo: Arc::clone(&peer_addr_repo),
             relationship_reset,
+            space_security_reset,
             membership_candidate_repo,
             verified_peer_promotion,
             membership_announcement_repo,

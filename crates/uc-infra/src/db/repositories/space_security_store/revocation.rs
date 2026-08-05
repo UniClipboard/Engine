@@ -5,6 +5,7 @@ use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     BeginRevocationOutcome, KeyEpochError, RevocationId, RevocationRecord,
     RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial,
+    SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
 };
 
 use crate::db::ports::DbExecutor;
@@ -621,5 +622,42 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                 })
             })
             .map_err(backend)
+    }
+}
+
+#[async_trait]
+impl<E: DbExecutor> SpaceSecurityStateResetPort for DieselSpaceSecurityStore<E> {
+    async fn clear_space_security_state_except(
+        &self,
+        active_space_id: &SpaceId,
+    ) -> Result<(), SpaceSecurityStateResetError> {
+        let master_key = self
+            .session
+            .get_master_key()
+            .map_err(|error| SpaceSecurityStateResetError::Repository(error.to_string()))?;
+        let active_space_lookup_token = space_lookup_token(&master_key, active_space_id)
+            .map_err(|error| SpaceSecurityStateResetError::Repository(error.to_string()))?;
+        self.executor
+            .run(move |conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    diesel::sql_query(
+                        "DELETE FROM member_revocation_log WHERE space_lookup_token <> ?",
+                    )
+                    .bind::<Text, _>(&active_space_lookup_token)
+                    .execute(conn)?;
+                    diesel::sql_query(
+                        "DELETE FROM legacy_space_bootstrap_log WHERE space_lookup_token <> ?",
+                    )
+                    .bind::<Text, _>(&active_space_lookup_token)
+                    .execute(conn)?;
+                    diesel::sql_query(
+                        "DELETE FROM space_key_epoch_state WHERE space_lookup_token <> ?",
+                    )
+                    .bind::<Text, _>(&active_space_lookup_token)
+                    .execute(conn)?;
+                    Ok(())
+                })
+            })
+            .map_err(|error| SpaceSecurityStateResetError::Repository(error.to_string()))
     }
 }

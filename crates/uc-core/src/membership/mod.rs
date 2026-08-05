@@ -36,7 +36,8 @@ pub use ports::{
     MembershipGossipTransportError, MembershipGossipTransportPort, MembershipOutboxRepositoryError,
     MembershipOutboxRepositoryPort, MembershipSecurityState, MembershipSecurityUpdateError,
     MembershipSecurityUpdatePort, RelationshipStateResetError, RelationshipStateResetPort,
-    RevocationRepositoryPort, VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
+    RevocationRepositoryPort, SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
+    VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
 };
 pub use preferences::MemberSyncPreferences;
 pub use protection::{

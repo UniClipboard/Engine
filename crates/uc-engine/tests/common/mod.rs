@@ -18,9 +18,10 @@ use uc_application::facade::{
     PairingMembershipGossipPort, SpaceMembershipGossipError, SponsorSeedBatchContext,
 };
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
-use uc_core::ids::{EventId, RepresentationId};
+use uc_core::ids::{EventId, RepresentationId, SpaceId};
 use uc_core::membership::{
-    RelationshipStateResetError, RelationshipStateResetPort, SponsorCandidateSeed,
+    RelationshipStateResetError, RelationshipStateResetPort, SpaceSecurityStateResetError,
+    SpaceSecurityStateResetPort, SponsorCandidateSeed,
 };
 use uc_core::ports::clipboard::{BlobMigrationRepoError, BlobMigrationRepoPort, MigrationRecord};
 use uc_core::ports::security::{
@@ -78,6 +79,22 @@ impl RelationshipStateResetPort for NoopRelationshipStateReset {
 
 pub fn relationship_state_reset_noop() -> Arc<dyn RelationshipStateResetPort> {
     Arc::new(NoopRelationshipStateReset)
+}
+
+pub struct NoopSpaceSecurityStateReset;
+
+#[async_trait]
+impl SpaceSecurityStateResetPort for NoopSpaceSecurityStateReset {
+    async fn clear_space_security_state_except(
+        &self,
+        _active_space_id: &SpaceId,
+    ) -> Result<(), SpaceSecurityStateResetError> {
+        Ok(())
+    }
+}
+
+pub fn space_security_state_reset_noop() -> Arc<dyn SpaceSecurityStateResetPort> {
+    Arc::new(NoopSpaceSecurityStateReset)
 }
 
 pub struct NoopMigrationState;

@@ -338,6 +338,20 @@ pub trait RelationshipStateResetPort: Send + Sync {
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum SpaceSecurityStateResetError {
+    #[error("space security state reset failed: {0}")]
+    Repository(String),
+}
+
+#[async_trait]
+pub trait SpaceSecurityStateResetPort: Send + Sync {
+    async fn clear_space_security_state_except(
+        &self,
+        active_space_id: &SpaceId,
+    ) -> Result<(), SpaceSecurityStateResetError>;
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum CurrentMemberSignatureError {
     #[error("current member signing state is unavailable")]
     Unavailable,

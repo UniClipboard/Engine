@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use uc_core::membership::{MemberRepositoryPort, RelationshipStateResetPort};
+use uc_core::membership::{
+    MemberRepositoryPort, RelationshipStateResetPort, SpaceSecurityStateResetPort,
+};
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
 use uc_core::ports::pairing_invitation::{
@@ -47,6 +49,7 @@ pub struct SpaceAdmissionDeps {
 
 pub struct SpaceTransitionDeps {
     pub relationship_reset: Arc<dyn RelationshipStateResetPort>,
+    pub space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,
     pub migration_state: Arc<dyn MigrationStatePort>,
     pub key_migration: Arc<dyn KeyMigrationPort>,
     pub blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,

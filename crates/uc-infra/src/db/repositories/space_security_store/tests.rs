@@ -1,5 +1,5 @@
 use diesel::prelude::*;
-use diesel::sql_types::{Binary, Nullable, Text};
+use diesel::sql_types::{BigInt, Binary, Nullable, Text};
 use tempfile::{tempdir, TempDir};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
@@ -8,6 +8,7 @@ use uc_core::membership::{
     LegacyUpgradeDescriptor, LegacyUpgradeId, LegacyUpgradeRequest, PendingGroupUpdate,
     RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
     RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
+    SpaceSecurityStateResetPort,
 };
 use uc_core::space_access::PreparedGroupJoin;
 
@@ -50,9 +51,13 @@ fn ready_state() -> SpaceKeyState {
 }
 
 fn prepared(id: &str) -> RevocationRecord {
+    prepared_for_space(id, "space-sensitive")
+}
+
+fn prepared_for_space(id: &str, space_id: &str) -> RevocationRecord {
     RevocationRecord::prepare(
         RevocationId::from_string(id).unwrap(),
-        SpaceId::from_str("space-sensitive"),
+        SpaceId::from_str(space_id),
         DeviceId::new("removed-device-sensitive"),
         GroupEpoch::new(1),
         100,
@@ -222,6 +227,12 @@ struct RawLegacyUpgradeCiphertext {
     peer_lookup_token: String,
     #[diesel(sql_type = Binary)]
     encrypted_payload: Vec<u8>,
+}
+
+#[derive(QueryableByName)]
+struct RowCount {
+    #[diesel(sql_type = BigInt)]
+    count: i64,
 }
 
 #[tokio::test]
@@ -407,6 +418,125 @@ async fn incomplete_revocations_are_discovered_after_restart() {
     assert_eq!(
         reopened.list_incomplete_revocations().await.unwrap(),
         vec![stage.record().clone()]
+    );
+}
+
+#[tokio::test]
+async fn clearing_space_security_state_preserves_current_space_and_removes_old_space_records() {
+    let (repo, pool, _tempdir) = make_repo();
+    seed_current_space(&repo).await;
+    repo.begin_revocation(&prepared("revocation-to-clear"))
+        .await
+        .unwrap();
+    repo.save_space_material(&SpaceKeyMaterial::new(
+        SpaceKeyState::legacy(SpaceId::from_str("other-space-sensitive")),
+        b"old-other-group-state-sensitive".to_vec(),
+        b"old-other-key-catalog-sensitive".to_vec(),
+        90,
+    ))
+    .await
+    .unwrap();
+    repo.begin_revocation(&prepared_for_space(
+        "other-space-revocation-to-clear",
+        "other-space-sensitive",
+    ))
+    .await
+    .unwrap();
+    repo.begin_legacy_bootstrap(
+        &LegacyBootstrapRecord::prepare(
+            BootstrapId::from_string("bootstrap-to-clear").unwrap(),
+            SpaceId::from_str("legacy-other-space-sensitive"),
+            DeviceId::new("sponsor-sensitive"),
+            vec![DeviceId::new("retained-device-sensitive")],
+            100,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    repo.clear_space_security_state_except(&SpaceId::from_str("space-sensitive"))
+        .await
+        .unwrap();
+
+    let mut conn = pool.get().unwrap();
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM member_revocation_log")
+            .get_result::<RowCount>(&mut conn)
+            .unwrap()
+            .count,
+        1
+    );
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM space_key_epoch_state")
+            .get_result::<RowCount>(&mut conn)
+            .unwrap()
+            .count,
+        1
+    );
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM legacy_space_bootstrap_log")
+            .get_result::<RowCount>(&mut conn)
+            .unwrap()
+            .count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn clearing_space_security_state_preserves_current_legacy_bootstrap() {
+    let (repo, pool, _tempdir) = make_repo();
+    repo.begin_legacy_bootstrap(
+        &LegacyBootstrapRecord::prepare(
+            BootstrapId::from_string("bootstrap-to-preserve").unwrap(),
+            SpaceId::from_str("space-sensitive"),
+            DeviceId::new("sponsor-sensitive"),
+            vec![DeviceId::new("retained-device-sensitive")],
+            100,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    repo.save_space_material(&SpaceKeyMaterial::new(
+        SpaceKeyState::legacy(SpaceId::from_str("other-space-sensitive")),
+        b"old-other-group-state-sensitive".to_vec(),
+        b"old-other-key-catalog-sensitive".to_vec(),
+        90,
+    ))
+    .await
+    .unwrap();
+    repo.begin_revocation(&prepared_for_space(
+        "other-space-revocation-to-clear",
+        "other-space-sensitive",
+    ))
+    .await
+    .unwrap();
+
+    repo.clear_space_security_state_except(&SpaceId::from_str("space-sensitive"))
+        .await
+        .unwrap();
+
+    let mut conn = pool.get().unwrap();
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM member_revocation_log")
+            .get_result::<RowCount>(&mut conn)
+            .unwrap()
+            .count,
+        0
+    );
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM space_key_epoch_state")
+            .get_result::<RowCount>(&mut conn)
+            .unwrap()
+            .count,
+        0
+    );
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM legacy_space_bootstrap_log")
+            .get_result::<RowCount>(&mut conn)
+            .unwrap()
+            .count,
+        1
     );
 }
 

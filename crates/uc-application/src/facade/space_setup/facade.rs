@@ -189,6 +189,7 @@ impl SpaceFacade {
         } = admission;
         let SpaceTransitionDeps {
             relationship_reset,
+            space_security_reset,
             migration_state,
             key_migration,
             blob_migration_repo,
@@ -340,6 +341,7 @@ impl SpaceFacade {
             Arc::clone(&trust_peer_uc),
             Arc::clone(&peer_addr_repo),
             relationship_reset,
+            space_security_reset,
             Arc::clone(&clock),
             Arc::clone(&analytics),
         ));
@@ -884,6 +886,7 @@ mod tests {
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
         MembershipError, RelationshipStateResetError, RelationshipStateResetPort, SpaceMember,
+        SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
     };
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::PairingSessionMessage;
@@ -1229,6 +1232,18 @@ mod tests {
     #[async_trait]
     impl RelationshipStateResetPort for NoopRelationshipStateReset {
         async fn clear_all_relationships(&self) -> Result<(), RelationshipStateResetError> {
+            Ok(())
+        }
+    }
+
+    struct NoopSpaceSecurityStateReset;
+
+    #[async_trait]
+    impl SpaceSecurityStateResetPort for NoopSpaceSecurityStateReset {
+        async fn clear_space_security_state_except(
+            &self,
+            _active_space_id: &SpaceId,
+        ) -> Result<(), SpaceSecurityStateResetError> {
             Ok(())
         }
     }
@@ -1783,6 +1798,7 @@ mod tests {
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::new(NoopRelationshipStateReset),
+                space_security_reset: Arc::new(NoopSpaceSecurityStateReset),
                 migration_state,
                 key_migration: Arc::new(FakeKeyMigration),
                 blob_migration_repo: Arc::new(FakeBlobMigrationRepo),

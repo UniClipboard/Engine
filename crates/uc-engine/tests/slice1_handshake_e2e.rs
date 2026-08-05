@@ -423,6 +423,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
         },
         transition: SpaceTransitionDeps {
             relationship_reset: common::relationship_state_reset_noop(),
+            space_security_reset: common::space_security_state_reset_noop(),
             migration_state,
             key_migration,
             blob_migration_repo,

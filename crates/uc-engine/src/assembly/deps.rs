@@ -74,6 +74,8 @@ pub struct SyncEngineDeps {
     pub peer_addr_repo: Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
     /// Whole-table reset used when switching away from the active space.
     pub relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort>,
+    /// Removes persisted security state from the prior space after a successful switch.
+    pub space_security_reset: Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
     /// Encrypted, active-space-scoped candidate address book.
     pub membership_candidate_repo: Arc<dyn uc_core::membership::MembershipCandidateRepositoryPort>,
     /// Atomic persistence boundary for a fully verified peer relationship.

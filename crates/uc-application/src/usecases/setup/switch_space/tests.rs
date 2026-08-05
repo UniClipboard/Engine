@@ -17,6 +17,7 @@ use uc_core::ports::pairing::DiscoveryChannel;
 use uc_core::ids::{DeviceId, EventId, RepresentationId};
 use uc_core::membership::{
     MembershipError, RelationshipStateResetError, RelationshipStateResetPort, SpaceMember,
+    SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
 };
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::ports::PeerAddressError;
@@ -216,6 +217,37 @@ impl RelationshipStateResetPort for RecordingRelationshipStateReset {
     }
 }
 
+#[derive(Default)]
+struct RecordingSpaceSecurityStateReset {
+    calls: AtomicUsize,
+    active_space_ids: Mutex<Vec<SpaceId>>,
+}
+
+impl RecordingSpaceSecurityStateReset {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn active_space_ids(&self) -> Vec<SpaceId> {
+        self.active_space_ids.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl SpaceSecurityStateResetPort for RecordingSpaceSecurityStateReset {
+    async fn clear_space_security_state_except(
+        &self,
+        active_space_id: &SpaceId,
+    ) -> Result<(), SpaceSecurityStateResetError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.active_space_ids
+            .lock()
+            .unwrap()
+            .push(active_space_id.clone());
+        Ok(())
+    }
+}
+
 /// Records analytics-facade invocations so tests can assert *which*
 /// identity transition fired and how often. Other methods are inert.
 #[derive(Default)]
@@ -312,6 +344,7 @@ struct Env {
     trust_repo: MockTrustRepo,
     peer_addr_repo: MockPeerAddrRepo,
     relationship_reset: Arc<RecordingRelationshipStateReset>,
+    space_security_reset: Arc<RecordingSpaceSecurityStateReset>,
 }
 
 impl Env {
@@ -327,6 +360,7 @@ impl Env {
             trust_repo: MockTrustRepo::new(),
             peer_addr_repo: MockPeerAddrRepo::new(),
             relationship_reset: Arc::new(RecordingRelationshipStateReset::default()),
+            space_security_reset: Arc::new(RecordingSpaceSecurityStateReset::default()),
         }
     }
 
@@ -352,6 +386,7 @@ impl Env {
             trust,
             Arc::new(self.peer_addr_repo) as Arc<dyn PeerAddressRepositoryPort>,
             self.relationship_reset,
+            self.space_security_reset,
             Arc::new(FixedClock(0)),
             analytics,
         )
@@ -404,6 +439,7 @@ async fn pre_flight_rejects_when_pending_migration() {
 async fn happy_path_executes_all_4_phases() {
     let mut env = Env::new();
     let relationship_reset = Arc::clone(&env.relationship_reset);
+    let space_security_reset = Arc::clone(&env.space_security_reset);
 
     // Pre-flight
     env.setup_status
@@ -504,6 +540,11 @@ async fn happy_path_executes_all_4_phases() {
     assert_eq!(result.self_device_id.as_str(), "local-device");
     assert_eq!(result.migrated_records, 1);
     assert_eq!(relationship_reset.calls(), 1);
+    assert_eq!(space_security_reset.calls(), 1);
+    assert_eq!(
+        space_security_reset.active_space_ids(),
+        vec![target_space()]
+    );
 }
 
 /// Phase 1 中途解密失败：默认要求用户确认，清空 backup 和 migration key，

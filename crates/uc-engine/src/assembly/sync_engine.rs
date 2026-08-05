@@ -674,6 +674,7 @@ pub async fn build_sync_engine_assembly(
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::clone(&space_setup.relationship_reset),
+                space_security_reset: Arc::clone(&space_setup.space_security_reset),
                 migration_state: Arc::clone(&space_setup.migration_state),
                 key_migration: Arc::clone(&space_setup.key_migration),
                 blob_migration_repo: Arc::clone(&space_setup.blob_migration_repo),
