@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 use uc_engine::observability::{
-    AdoptOutcome, AnalyticsIdentityError, AnalyticsIdentityPort, AnalyticsPort, Event,
-    GroupIdentifyPayload, IdentifyPayload, ReleaseOutcome,
+    AdoptOutcome, AnalyticsEventContext, AnalyticsIdentityError, AnalyticsIdentityPort,
+    AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
 use uc_engine::{
     ClipboardRestoreMode, ClipboardRestoreOutcome, ContinueMemberRevocationInput, CreateSpaceInput,
@@ -23,11 +23,12 @@ use uc_engine::{
 use zeroize::Zeroizing;
 
 use crate::{
-    BindingAnalyticsHost, BindingClipboardOrigin, BindingClipboardRepresentation,
-    BindingClipboardRestoreMode, BindingClipboardRestoreOutcome, BindingClipboardSnapshot,
-    BindingConfig, BindingEngineState, BindingError, BindingEvent, BindingFailure,
-    BindingFileMetadata, BindingHost, BindingLifecycleAction, BindingOperationTerminal,
-    BindingRefreshReason, BindingTransferDirection, HostBindingError,
+    BindingAnalyticsContext, BindingAnalyticsDeviceType, BindingAnalyticsHost, BindingAnalyticsOs,
+    BindingClipboardOrigin, BindingClipboardRepresentation, BindingClipboardRestoreMode,
+    BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
+    BindingError, BindingEvent, BindingFailure, BindingFileMetadata, BindingHost,
+    BindingLifecycleAction, BindingOperationTerminal, BindingRefreshReason,
+    BindingTransferDirection, HostBindingError,
 };
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
@@ -408,11 +409,12 @@ struct EventQueue {
 
 struct BindingAnalyticsAdapter {
     host: Arc<dyn BindingAnalyticsHost>,
+    context: AnalyticsEventContext,
 }
 
 impl BindingAnalyticsAdapter {
-    fn new(host: Arc<dyn BindingAnalyticsHost>) -> Self {
-        Self { host }
+    fn new(host: Arc<dyn BindingAnalyticsHost>, context: AnalyticsEventContext) -> Self {
+        Self { host, context }
     }
 
     fn map_identity_error(error: crate::BindingAnalyticsHostError) -> AnalyticsIdentityError {
@@ -473,9 +475,11 @@ impl BindingAnalyticsAdapter {
 
 impl AnalyticsPort for BindingAnalyticsAdapter {
     fn capture(&self, event: Event) {
+        let mut properties = event.properties();
+        properties.extend(self.context.properties());
         let event = crate::BindingAnalyticsEvent {
             name: event.name().to_owned(),
-            properties_json: serde_json::Value::Object(event.properties()).to_string(),
+            properties_json: serde_json::Value::Object(properties).to_string(),
         };
         if let Err(error) = self.host.capture(event) {
             Self::warn_callback("capture", &error);
@@ -620,7 +624,7 @@ impl MobileEngine {
     fn start_inner(
         config: BindingConfig,
         host: Arc<dyn BindingHost>,
-        analytics: Option<Arc<dyn BindingAnalyticsHost>>,
+        analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
     ) -> Result<Arc<Self>, BindingError> {
         #[cfg(target_vendor = "apple")]
         crate::apple::install_apple_tracing();
@@ -679,8 +683,9 @@ impl MobileEngine {
         config: BindingConfig,
         host: Arc<dyn BindingHost>,
         analytics: Arc<dyn BindingAnalyticsHost>,
+        context: BindingAnalyticsContext,
     ) -> Result<Arc<Self>, BindingError> {
-        Self::start_inner(config, host, Some(analytics))
+        Self::start_inner(config, host, Some((analytics, context)))
     }
 
     pub fn recover_session(
@@ -2049,7 +2054,7 @@ fn count_to_u64(value: usize) -> Result<u64, BindingError> {
 
 fn host_capabilities(
     host: Arc<dyn BindingHost>,
-    analytics: Option<Arc<dyn BindingAnalyticsHost>>,
+    analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
 ) -> Result<HostCapabilities, BindingError> {
     let cache_directory = host_path(host.cache_directory())?;
     let directories = HostDirectories::new(
@@ -2075,13 +2080,36 @@ fn host_capabilities(
         }),
         Box::new(BindingFiles { host }),
     );
-    let Some(analytics) = analytics else {
+    let Some((analytics, context)) = analytics else {
         return Ok(capabilities);
     };
-    let adapter = Arc::new(BindingAnalyticsAdapter::new(analytics));
+    let adapter = Arc::new(BindingAnalyticsAdapter::new(
+        analytics,
+        analytics_event_context(context),
+    ));
     let sink: Arc<dyn AnalyticsPort> = adapter.clone();
     let identity: Arc<dyn AnalyticsIdentityPort> = adapter;
     Ok(capabilities.with_analytics(sink, identity))
+}
+
+fn analytics_event_context(context: BindingAnalyticsContext) -> AnalyticsEventContext {
+    AnalyticsEventContext {
+        os: match context.os {
+            BindingAnalyticsOs::Macos => Os::Macos,
+            BindingAnalyticsOs::Windows => Os::Windows,
+            BindingAnalyticsOs::Linux => Os::Linux,
+            BindingAnalyticsOs::Ios => Os::Ios,
+            BindingAnalyticsOs::Android => Os::Android,
+            BindingAnalyticsOs::Other => Os::Other,
+        },
+        os_version: context.os_version,
+        device_type: match context.device_type {
+            BindingAnalyticsDeviceType::Mobile => DeviceType::Mobile,
+            BindingAnalyticsDeviceType::Desktop => DeviceType::Desktop,
+        },
+        arch: context.arch,
+        app_channel: context.app_channel,
+    }
 }
 
 fn host_path(result: Result<String, HostBindingError>) -> Result<PathBuf, BindingError> {

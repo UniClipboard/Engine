@@ -6,7 +6,7 @@ pub mod facade;
 pub mod identity;
 pub mod port;
 
-pub use context::Os;
+pub use context::{AnalyticsEventContext, DeviceType, Os};
 pub use events::{
     CaptureOrigin, DialogOpenSource, Direction, DismissSource, Event, FailureReason, InstallKind,
     InvitationCodeSource, LatencyBucket, MobileAuthFailureKind, NameLengthBucket,

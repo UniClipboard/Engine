@@ -52,6 +52,9 @@ fn uniffi_binding_is_a_workspace_member_with_a_public_engine_boundary() {
             "thiserror",
             "tokio",
             "tracing",
+            "tracing-android",
+            "tracing-oslog",
+            "tracing-subscriber",
             "uc-engine",
             "uniffi",
             "uuid",
@@ -128,6 +131,9 @@ fn uniffi_binding_declares_mobile_analytics_host_contract() {
 
     for required in [
         "pub trait BindingAnalyticsHost",
+        "pub struct BindingAnalyticsContext",
+        "pub enum BindingAnalyticsOs",
+        "pub enum BindingAnalyticsDeviceType",
         "pub struct BindingAnalyticsEvent",
         "pub struct BindingAnalyticsIdentityChange",
         "pub struct BindingAnalyticsIdentify",

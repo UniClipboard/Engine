@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use uc_engine::{EngineError, EngineErrorCategory};
 
 use uc_engine_uniffi::{
-    core_version, BindingAnalyticsEvent, BindingAnalyticsGroupIdentify, BindingAnalyticsHost,
-    BindingAnalyticsHostError, BindingAnalyticsIdentify, BindingAnalyticsIdentityChange,
+    core_version, BindingAnalyticsContext, BindingAnalyticsDeviceType, BindingAnalyticsEvent,
+    BindingAnalyticsGroupIdentify, BindingAnalyticsHost, BindingAnalyticsHostError,
+    BindingAnalyticsIdentify, BindingAnalyticsIdentityChange, BindingAnalyticsOs,
     BindingClipboardRepresentation, BindingClipboardRestoreMode, BindingClipboardRestoreOutcome,
     BindingClipboardSnapshot, BindingConfig, BindingEngineState, BindingError,
     BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost, BindingOperationTerminal,
@@ -350,6 +351,13 @@ fn mobile_host_can_create_a_space_with_analytics_and_shutdown_through_the_bindin
         },
         host.clone(),
         analytics.clone(),
+        BindingAnalyticsContext {
+            os: BindingAnalyticsOs::Ios,
+            os_version: "18.0".to_owned(),
+            device_type: BindingAnalyticsDeviceType::Mobile,
+            arch: "arm64".to_owned(),
+            app_channel: "development".to_owned(),
+        },
     )
     .expect("analytics-enabled binding engine must start");
 
@@ -382,6 +390,14 @@ fn mobile_host_can_create_a_space_with_analytics_and_shutdown_through_the_bindin
     assert!(!device_name_event
         .properties_json
         .contains("mobile-contract-host"));
+    let properties: serde_json::Value = serde_json::from_str(&device_name_event.properties_json)
+        .expect("analytics event properties must be valid JSON");
+    assert_eq!(properties["$os"], "ios");
+    assert_eq!(properties["os"], "ios");
+    assert_eq!(properties["os_version"], "18.0");
+    assert_eq!(properties["$device_type"], "mobile");
+    assert_eq!(properties["arch"], "arm64");
+    assert_eq!(properties["app_channel"], "development");
     assert_eq!(lock(&analytics.identifies).len(), 1);
     assert_eq!(lock(&analytics.group_identifies).len(), 1);
     assert!(lock(&analytics.space_person_id).is_some());
@@ -534,8 +550,7 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
         .expect("missing entry must remain a structured business outcome");
     assert!(matches!(
         resend,
-        uc_engine_uniffi::ResendEntryOutcome::EntryNotFound { ref entry_id }
-            if entry_id == "missing-entry"
+        uc_engine_uniffi::ResendEntryOutcome::NoEligibleTargets
     ));
 
     let remove = engine.remove_member("missing-device".to_owned());

@@ -114,6 +114,32 @@ pub struct BindingAnalyticsEvent {
     pub properties_json: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingAnalyticsOs {
+    Macos,
+    Windows,
+    Linux,
+    Ios,
+    Android,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingAnalyticsDeviceType {
+    Mobile,
+    Desktop,
+}
+
+/// Platform attributes that the host supplies once for all analytics events.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BindingAnalyticsContext {
+    pub os: BindingAnalyticsOs,
+    pub os_version: String,
+    pub device_type: BindingAnalyticsDeviceType,
+    pub arch: String,
+    pub app_channel: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BindingAnalyticsIdentityChange {
     pub previous_distinct_id: String,
