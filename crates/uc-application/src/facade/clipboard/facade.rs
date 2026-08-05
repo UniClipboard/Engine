@@ -235,7 +235,6 @@ impl ClipboardSyncFacade {
         self.cancel_entry_receive_uc = Some(Arc::new(CancelEntryReceiveUseCase::new(
             get_attempt,
             request_cancel,
-            progress,
             commit_inbound,
             get_publish,
             staging_cleanup,

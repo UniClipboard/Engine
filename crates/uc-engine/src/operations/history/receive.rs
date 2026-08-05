@@ -89,9 +89,6 @@ fn entry_receive_cancellation(
     outcome: AppEntryReceiveCancellationOutcome,
 ) -> EntryReceiveCancellationOutcome {
     match outcome {
-        AppEntryReceiveCancellationOutcome::CancellationRequested => {
-            EntryReceiveCancellationOutcome::CancellationRequested
-        }
         AppEntryReceiveCancellationOutcome::Cancelled => EntryReceiveCancellationOutcome::Cancelled,
         AppEntryReceiveCancellationOutcome::NotReceiving => {
             EntryReceiveCancellationOutcome::NotReceiving

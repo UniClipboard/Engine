@@ -5,8 +5,8 @@ use uc_core::ids::EntryId;
 use uc_core::ports::{
     CancelDirectoryAttemptTransfersPort, CleanupDirectoryStagingPort, ClockPort,
     CommitInboundReceivePort, GetDirectoryPublishRecordPort, GetEntryAttemptPort,
-    GetEntryReceiveProgressPort, InboundReceiveSettlement, NoEntryReceiveArtifacts,
-    PartialReceiveTerminal, RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
+    InboundReceiveSettlement, NoEntryReceiveArtifacts, PartialReceiveTerminal,
+    RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
 };
 
 use tracing::instrument;
@@ -30,7 +30,6 @@ impl AttemptTransferCancellation for BlobTransferFacade {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelEntryReceiveOutcome {
-    CancellationRequested,
     Cancelled,
     NotReceiving,
     TooLate,
@@ -55,7 +54,6 @@ pub enum CancelEntryReceiveError {
 pub(super) struct CancelEntryReceiveUseCase {
     get_attempt: Arc<dyn GetEntryAttemptPort>,
     request_cancel: Arc<dyn RequestReceiveCancellationPort>,
-    progress: Arc<dyn GetEntryReceiveProgressPort>,
     commit_inbound: Arc<dyn CommitInboundReceivePort>,
     get_publish: Arc<dyn GetDirectoryPublishRecordPort>,
     staging_cleanup: Arc<dyn CleanupDirectoryStagingPort>,
@@ -69,7 +67,6 @@ impl CancelEntryReceiveUseCase {
     pub(super) fn new(
         get_attempt: Arc<dyn GetEntryAttemptPort>,
         request_cancel: Arc<dyn RequestReceiveCancellationPort>,
-        progress: Arc<dyn GetEntryReceiveProgressPort>,
         commit_inbound: Arc<dyn CommitInboundReceivePort>,
         get_publish: Arc<dyn GetDirectoryPublishRecordPort>,
         staging_cleanup: Arc<dyn CleanupDirectoryStagingPort>,
@@ -81,7 +78,6 @@ impl CancelEntryReceiveUseCase {
         Self {
             get_attempt,
             request_cancel,
-            progress,
             commit_inbound,
             get_publish,
             staging_cleanup,
@@ -173,7 +169,6 @@ impl CancelEntryReceiveUseCase {
             .get_publish_record(entry_id.as_ref(), expected_attempt_id)
             .await
             .map_err(|error| CancelEntryReceiveError::PublishLog(error.to_string()))?;
-        let directory_receive = record.is_some();
         if let Some(record) = record {
             let staged_roots = record
                 .root_map
@@ -191,34 +186,24 @@ impl CancelEntryReceiveUseCase {
                 transfer_errors.join("; "),
             ));
         }
-        let zero_item_receive = self
-            .progress
-            .get_entry_receive_progress(entry_id.as_ref())
+        self.commit_inbound
+            .commit_inbound_receive(&InboundReceiveSettlement::NoEntry {
+                entry_id: entry_id.clone(),
+                attempt_id: expected_attempt_id.to_owned(),
+                terminal: PartialReceiveTerminal::Cancelled,
+                artifacts: NoEntryReceiveArtifacts::None,
+                now_ms: self.clock.now_ms(),
+            })
             .await
-            .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?
-            .is_none_or(|progress| progress.items_total == 0);
-        if directory_receive || zero_item_receive {
-            self.commit_inbound
-                .commit_inbound_receive(&InboundReceiveSettlement::NoEntry {
-                    entry_id: entry_id.clone(),
-                    attempt_id: expected_attempt_id.to_owned(),
-                    terminal: PartialReceiveTerminal::Cancelled,
-                    artifacts: NoEntryReceiveArtifacts::None,
-                    now_ms: self.clock.now_ms(),
-                })
-                .await
-                .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?;
-            self.host_event_bus.emit_or_warn(HostEvent::Clipboard(
-                ClipboardHostEvent::ReceiveAttemptStateChanged {
-                    entry_id: entry_id.as_ref().to_owned(),
-                    attempt_id: expected_attempt_id.to_owned(),
-                    state: "cancelled".to_owned(),
-                },
-            ));
-            Ok(CancelEntryReceiveOutcome::Cancelled)
-        } else {
-            Ok(CancelEntryReceiveOutcome::CancellationRequested)
-        }
+            .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?;
+        self.host_event_bus.emit_or_warn(HostEvent::Clipboard(
+            ClipboardHostEvent::ReceiveAttemptStateChanged {
+                entry_id: entry_id.as_ref().to_owned(),
+                attempt_id: expected_attempt_id.to_owned(),
+                state: "cancelled".to_owned(),
+            },
+        ));
+        Ok(CancelEntryReceiveOutcome::Cancelled)
     }
 }
 
@@ -230,8 +215,7 @@ mod tests {
     use async_trait::async_trait;
     use uc_core::ports::{
         AttemptError, AttemptState, DirectoryPublishRecord, DirectoryStagingCleanupError,
-        EntryReceiveAttempt, EntryReceiveProgress, FileTransferProjectionError,
-        InboundReceiveCommitError, PublishLogError, PublishPhase,
+        EntryReceiveAttempt, InboundReceiveCommitError, PublishLogError, PublishPhase,
     };
 
     use super::*;
@@ -267,18 +251,6 @@ mod tests {
         ) -> Result<RequestReceiveCancellationOutcome, AttemptError> {
             self.cancel_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.cancel_outcome)
-        }
-    }
-
-    struct ProgressMock;
-
-    #[async_trait]
-    impl GetEntryReceiveProgressPort for ProgressMock {
-        async fn get_entry_receive_progress(
-            &self,
-            _entry_id: &str,
-        ) -> Result<Option<EntryReceiveProgress>, FileTransferProjectionError> {
-            Ok(None)
         }
     }
 
@@ -322,6 +294,19 @@ mod tests {
                 partial_visible_roots: None,
                 landed: false,
             }))
+        }
+    }
+
+    struct NoPublishMock;
+
+    #[async_trait]
+    impl GetDirectoryPublishRecordPort for NoPublishMock {
+        async fn get_publish_record(
+            &self,
+            _entry_id: &str,
+            _attempt_id: &str,
+        ) -> Result<Option<DirectoryPublishRecord>, PublishLogError> {
+            Ok(None)
         }
     }
 
@@ -397,7 +382,6 @@ mod tests {
         CancelEntryReceiveUseCase::new(
             attempts.clone(),
             attempts,
-            Arc::new(ProgressMock),
             Arc::new(CommitMock::default()),
             Arc::new(PublishMock),
             cleaner,
@@ -458,6 +442,38 @@ mod tests {
         assert_eq!(transfers.calls.load(Ordering::SeqCst), 1);
         assert_eq!(projection.calls.load(Ordering::SeqCst), 1);
         assert_eq!(cleaner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn active_file_receive_is_terminally_cancelled() {
+        let attempts = Arc::new(AttemptMock {
+            state: AttemptState::Receiving,
+            cancel_outcome: RequestReceiveCancellationOutcome::Requested,
+            cancel_calls: AtomicUsize::new(0),
+        });
+        let commits = Arc::new(CommitMock::default());
+        let cleaner = Arc::new(CleanerMock::default());
+        let transfers = Arc::new(TransferMock::default());
+        let projection = Arc::new(ProjectionMock::default());
+        let use_case = CancelEntryReceiveUseCase::new(
+            attempts.clone(),
+            attempts,
+            commits.clone(),
+            Arc::new(NoPublishMock),
+            cleaner.clone(),
+            projection.clone(),
+            transfers.clone(),
+            Arc::new(ClockMock),
+            Arc::new(HostEventBus::new()),
+        );
+
+        let result = use_case.execute(&EntryId::new(), "attempt-1").await;
+
+        assert!(matches!(result, Ok(CancelEntryReceiveOutcome::Cancelled)));
+        assert_eq!(commits.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(transfers.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(projection.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cleaner.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

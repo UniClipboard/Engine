@@ -940,14 +940,13 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
     );
 
     let receive_outcomes = [
-        uc_engine::EntryReceiveCancellationOutcome::CancellationRequested,
         uc_engine::EntryReceiveCancellationOutcome::Cancelled,
         uc_engine::EntryReceiveCancellationOutcome::NotReceiving,
         uc_engine::EntryReceiveCancellationOutcome::TooLate,
         uc_engine::EntryReceiveCancellationOutcome::AlreadyTerminal,
         uc_engine::EntryReceiveCancellationOutcome::Superseded,
     ];
-    assert_eq!(receive_outcomes.len(), 6);
+    assert_eq!(receive_outcomes.len(), 5);
     let transfer_outcomes = [
         uc_engine::InboundTransferCancellationOutcome::Cancelled,
         uc_engine::InboundTransferCancellationOutcome::NotInflight,
