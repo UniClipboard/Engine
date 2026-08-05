@@ -83,6 +83,7 @@ impl ProgressFrame {
                 FileTransferCancellationReason::Replaced => 0x06,
                 FileTransferCancellationReason::Timeout => 0x07,
                 FileTransferCancellationReason::Unknown => 0x08,
+                FileTransferCancellationReason::ConnectivityRecovery => 0x09,
             },
         }
     }

@@ -48,10 +48,11 @@
 //! healthy relay" signal is expected and this watchdog is not started.
 
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iroh::{Endpoint, Watcher as _};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -79,6 +80,52 @@ const DEMAND_RECOVERY_COOLDOWN: Duration = Duration::from_secs(5);
 /// remains available as a later fallback.
 const DEMAND_RECOVERY_ACTION_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Desensitized facts produced by the network layer for the Engine recovery
+/// coordinator. This type deliberately carries neither peer identity nor
+/// transport errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkRecoveryObservation {
+    LocalRelayRecovered,
+    PreviouslyOnlinePeerPathExhausted,
+    FreshPeerDialSucceeded,
+}
+
+pub struct NetworkRecoveryObservationSource {
+    sender: broadcast::Sender<NetworkRecoveryObservation>,
+    local_relay_recovered_at: Mutex<Option<Instant>>,
+}
+
+impl NetworkRecoveryObservationSource {
+    pub fn new() -> Self {
+        let (sender, _) = broadcast::channel(32);
+        Self {
+            sender,
+            local_relay_recovered_at: Mutex::new(None),
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<NetworkRecoveryObservation> {
+        self.sender.subscribe()
+    }
+
+    pub(crate) fn publish(&self, observation: NetworkRecoveryObservation) {
+        if observation == NetworkRecoveryObservation::LocalRelayRecovered {
+            if let Ok(mut recovered_at) = self.local_relay_recovered_at.lock() {
+                *recovered_at = Some(Instant::now());
+            }
+        }
+        let _ = self.sender.send(observation);
+    }
+
+    pub(crate) fn local_relay_recovered_recently(&self) -> bool {
+        self.local_relay_recovered_at
+            .lock()
+            .ok()
+            .and_then(|recovered_at| *recovered_at)
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+    }
+}
+
 /// Small synchronous state machine used to claim a demand-driven recovery.
 /// The enclosing mutex makes the claim atomic across concurrent peer dials;
 /// the potentially-async recovery action runs after the lock is released.
@@ -101,6 +148,20 @@ impl DemandRecoveryGate {
         }
         if relay_is_healthy {
             self.last_claimed_at = None;
+            return false;
+        }
+        if self
+            .last_claimed_at
+            .is_some_and(|last| now.saturating_duration_since(last) < self.cooldown)
+        {
+            return false;
+        }
+        self.last_claimed_at = Some(now);
+        true
+    }
+
+    fn claim_for_confirmed_path_failure(&mut self, relays_enabled: bool, now: Instant) -> bool {
+        if !relays_enabled {
             return false;
         }
         if self
@@ -164,6 +225,27 @@ impl DemandRecoveryCoordinator {
                 "demand-driven endpoint recovery exceeded its action budget"
             );
         }
+    }
+
+    pub(crate) async fn recover_after_confirmed_path_failure(&self) {
+        let claimed = match self.gate.lock() {
+            Ok(mut gate) => {
+                gate.claim_for_confirmed_path_failure(self.relays_enabled, Instant::now())
+            }
+            Err(err) => {
+                warn!(target: "iroh.net_recovery", error = %err, "demand recovery gate lock poisoned");
+                false
+            }
+        };
+        if !claimed {
+            return;
+        }
+        reset_resolver(&self.endpoint);
+        let _ = await_bounded(
+            DEMAND_RECOVERY_ACTION_TIMEOUT,
+            self.endpoint.network_change(),
+        )
+        .await;
     }
 }
 
@@ -303,22 +385,30 @@ fn relay_healthy(statuses: &[iroh::endpoint::RelayStatus]) -> bool {
 ///
 /// Call only when relays are enabled — see the module docs.
 #[must_use]
-pub(crate) fn spawn_net_recovery(endpoint: Endpoint) -> JoinHandle<()> {
+pub(crate) fn spawn_net_recovery(
+    endpoint: Endpoint,
+    observations: Arc<NetworkRecoveryObservationSource>,
+) -> JoinHandle<()> {
     let closed = endpoint.closed();
     tokio::spawn(async move {
         // `run_until` yields `Some(())` on normal return, `None` if the
         // endpoint closed first; either way there is nothing to propagate.
         let _ = closed
-            .run_until(run(endpoint, RecoveryPolicy::default()))
+            .run_until(run(endpoint, RecoveryPolicy::default(), observations))
             .await;
     })
 }
 
 /// Driver loop: observe relay health, act, then wait for the next status
 /// change or the re-check timer, whichever comes first.
-async fn run(endpoint: Endpoint, policy: RecoveryPolicy) {
+async fn run(
+    endpoint: Endpoint,
+    policy: RecoveryPolicy,
+    observations: Arc<NetworkRecoveryObservationSource>,
+) {
     let mut watcher = endpoint.home_relay_status();
     let mut state = RecoveryState::new(policy);
+    let mut was_unhealthy = !relay_healthy(&watcher.get());
     info!(
         target: "iroh.net_recovery",
         grace_ms = policy.grace.as_millis() as u64,
@@ -333,6 +423,10 @@ async fn run(endpoint: Endpoint, policy: RecoveryPolicy) {
 
     loop {
         let healthy = relay_healthy(&watcher.get());
+        if healthy && was_unhealthy {
+            observations.publish(NetworkRecoveryObservation::LocalRelayRecovered);
+        }
+        was_unhealthy = !healthy;
         let wait = match state.observe(healthy, Instant::now()) {
             Action::Idle => None,
             Action::Wait(d) => Some(d),
@@ -445,6 +539,30 @@ mod tests {
             initial_backoff: Duration::from_secs(30),
             max_backoff: Duration::from_secs(300),
         }
+    }
+
+    #[test]
+    fn relay_recovery_observation_opens_a_short_window() {
+        let source = NetworkRecoveryObservationSource::new();
+        let mut observations = source.subscribe();
+        assert!(!source.local_relay_recovered_recently());
+
+        source.publish(NetworkRecoveryObservation::LocalRelayRecovered);
+
+        assert!(source.local_relay_recovered_recently());
+        assert_eq!(
+            observations.try_recv(),
+            Ok(NetworkRecoveryObservation::LocalRelayRecovered)
+        );
+    }
+
+    #[test]
+    fn confirmed_path_failure_claim_is_disabled_for_lan_only() {
+        let now = Instant::now();
+        let mut gate = DemandRecoveryGate::new(Duration::from_secs(5));
+        assert!(!gate.claim_for_confirmed_path_failure(false, now));
+        assert!(gate.claim_for_confirmed_path_failure(true, now));
+        assert!(!gate.claim_for_confirmed_path_failure(true, now + Duration::from_secs(4)));
     }
 
     const fn secs(n: u64) -> Duration {

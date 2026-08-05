@@ -31,6 +31,9 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 
 use crate::facade::config_migration::ConfigMigrationFacade;
+use crate::facade::network_recovery::{
+    NetworkRecoveryFacade, NetworkRecoveryRequestError, NetworkRecoveryStatus,
+};
 use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
 use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
 use crate::facade::space_admission::SpaceAdmissionCoordinator;
@@ -93,6 +96,7 @@ pub struct AppFacade {
     storage: Arc<StorageFacade>,
     config_migration: Arc<ConfigMigrationFacade>,
     upgrade: Arc<UpgradeFacade>,
+    network_recovery: Arc<NetworkRecoveryFacade>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +143,7 @@ impl AppFacade {
             storage: parts.storage,
             config_migration: parts.config_migration,
             upgrade: parts.upgrade,
+            network_recovery: parts.network_recovery,
         }
     }
 
@@ -337,6 +342,14 @@ impl AppFacade {
         &self,
     ) -> Result<EnsureReachableAllReport, EnsureReachableAllError> {
         self.space.refresh_presence().await
+    }
+
+    pub async fn recover_network(&self) -> Result<(), NetworkRecoveryRequestError> {
+        self.network_recovery.request_recovery().await
+    }
+
+    pub async fn network_recovery_status(&self) -> NetworkRecoveryStatus {
+        self.network_recovery.status().await
     }
 
     /// 列出已配对 peer 的 `DeviceId`(本机已过滤)。供 desktop keepalive
@@ -928,4 +941,5 @@ pub struct AppFacadeParts {
     pub storage: Arc<StorageFacade>,
     pub config_migration: Arc<ConfigMigrationFacade>,
     pub upgrade: Arc<UpgradeFacade>,
+    pub network_recovery: Arc<NetworkRecoveryFacade>,
 }

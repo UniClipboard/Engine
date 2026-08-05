@@ -381,6 +381,11 @@ pub enum BindingEvent {
         activated_at_ms: i64,
         activated_by: String,
     },
+    NetworkRecoveryChanged {
+        phase: String,
+        retryable: bool,
+        next_retry_in_ms: Option<u64>,
+    },
     Changed {
         kind: String,
     },

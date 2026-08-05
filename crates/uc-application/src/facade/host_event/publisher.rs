@@ -208,6 +208,7 @@ fn cancellation_reason_label(reason: FileTransferCancellationReason) -> &'static
         FileTransferCancellationReason::RemotePeer => "remote_peer",
         FileTransferCancellationReason::Replaced => "replaced",
         FileTransferCancellationReason::Timeout => "timeout",
+        FileTransferCancellationReason::ConnectivityRecovery => "connectivity_recovery",
         FileTransferCancellationReason::Unknown => "unknown",
     }
 }

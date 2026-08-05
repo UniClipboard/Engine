@@ -56,6 +56,7 @@ pub enum FileTransferCancellationReason {
     /// Carries no peer attribution — both ends are notified by the same
     /// event flow regardless of which side stalled.
     Timeout,
+    ConnectivityRecovery,
     Unknown,
 }
 
@@ -66,6 +67,7 @@ impl FileTransferCancellationReason {
             Self::RemotePeer => "remote_peer",
             Self::Replaced => "replaced",
             Self::Timeout => "timeout",
+            Self::ConnectivityRecovery => "connectivity_recovery",
             Self::Unknown => "unknown",
         }
     }

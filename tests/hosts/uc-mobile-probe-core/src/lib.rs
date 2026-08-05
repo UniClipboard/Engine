@@ -674,6 +674,14 @@ fn operation_response(result: OperationResult) -> Value {
             "offline": report.offline,
             "errors": report.errors,
         }),
+        OperationResult::NetworkRecovered => json!({"ok": true, "kind": "network_recovered"}),
+        OperationResult::NetworkRecoveryStatus(status) => json!({
+            "ok": true,
+            "kind": "network_recovery_status",
+            "phase": format!("{:?}", status.phase),
+            "retryable": status.retryable,
+            "next_retry_in_ms": status.next_retry_in_ms,
+        }),
         OperationResult::Settings(settings) => json!({
             "ok": true,
             "kind": "settings",
@@ -1405,6 +1413,7 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
         }
         EngineEvent::ActiveClipboardChanged(_) => summary.refresh_requests += 1,
         EngineEvent::MobileLanSettingsChanged(_) => summary.refresh_requests += 1,
+        EngineEvent::NetworkRecoveryChanged(_) => summary.refresh_requests += 1,
         EngineEvent::RefreshRequired { .. } => summary.refresh_requests += 1,
         EngineEvent::OperationFinished { .. } => summary.completed_operations += 1,
         EngineEvent::LifecycleFailed { .. } => summary.lifecycle_failures += 1,

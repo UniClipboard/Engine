@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
 use tracing::{error, warn};
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
@@ -11,7 +10,8 @@ use uc_core::ports::{SelfWriteLedgerPort, SystemClipboardPort};
 use uc_core::{ClipboardChangeOrigin, TaskRegistry};
 
 use super::host_operations::send_report_summary;
-use super::{operation_error_with_code, ProductionSession};
+use super::operation_error_with_code;
+use super::session_supervisor::SessionSupervisor;
 use crate::{EngineError, HostClipboardChange, HostClipboardChangeStream, SendReportSummary};
 
 const OBSERVE_CLIPBOARD_FAILED_CODE: u32 = 1254;
@@ -25,7 +25,7 @@ enum DispatchMode {
 
 #[derive(Clone)]
 pub(super) struct HostClipboardChangeRuntime {
-    pub(super) session: Arc<Mutex<Option<ProductionSession>>>,
+    pub(super) session_supervisor: Arc<SessionSupervisor>,
     pub(super) system_clipboard: Arc<dyn SystemClipboardPort>,
     pub(super) change_origin: Arc<dyn SelfWriteLedgerPort>,
     pub(super) active_register: LocalActiveRegisterAdvancer,
@@ -82,8 +82,22 @@ impl HostClipboardChangeRuntime {
         &self,
         dispatch_mode: DispatchMode,
     ) -> Result<Option<SendReportSummary>, EngineError> {
+        let lease = self.session_supervisor.acquire_operation().await?;
+        let cancellation = lease.cancellation();
+        let processing = self.process_change_while_leased(dispatch_mode);
+        tokio::select! {
+            _ = cancellation.cancelled() => Ok(None),
+            result = processing => result,
+        }
+    }
+
+    async fn process_change_while_leased(
+        &self,
+        dispatch_mode: DispatchMode,
+    ) -> Result<Option<SendReportSummary>, EngineError> {
         let (facade, capture, live_index, outbound, tasks) = {
-            let session = self.session.lock().await;
+            let session_slot = self.session_supervisor.session();
+            let session = session_slot.lock().await;
             let Some(session) = session.as_ref() else {
                 return Ok(None);
             };

@@ -63,6 +63,13 @@ pub struct OhSessionRecovery {
 }
 
 #[napi(object)]
+pub struct OhNetworkRecoveryStatus {
+    pub phase: String,
+    pub retryable: bool,
+    pub next_retry_in_ms: Option<f64>,
+}
+
+#[napi(object)]
 pub struct OhLocalDevice {
     pub device_id: String,
     pub display_name: String,
@@ -136,6 +143,8 @@ pub struct OhEngineEvent {
     pub error_category: Option<String>,
     pub retryable: Option<bool>,
     pub member_revocation: Option<OhMemberRevocation>,
+    pub network_recovery_phase: Option<String>,
+    pub next_retry_in_ms: Option<f64>,
 }
 
 pub struct PreparedHost {

@@ -654,7 +654,10 @@ mod tests {
             .sync_engine_assembly
             .membership_attestation_is_reachable_for_test()
             .await;
-        lifecycle.sync_engine_assembly.shutdown().await;
+        lifecycle
+            .sync_engine_assembly
+            .shutdown(uc_core::FileTransferCancellationReason::Unknown)
+            .await;
 
         assert!(
             reachable,

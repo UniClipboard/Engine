@@ -6,6 +6,7 @@ mod host_operations;
 mod lan_compatibility;
 #[cfg(feature = "lan-compat")]
 mod mobile_upload;
+mod session_supervisor;
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -16,7 +17,8 @@ use tokio::sync::Mutex;
 use tracing::{error, warn};
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
-    AppFacade, HistoryMaintenanceRuntime, MemberRevocationView, PairingOutcome,
+    AppFacade, HistoryMaintenanceRuntime, MemberRevocationView, NetworkRecoveryEvent,
+    PairingOutcome,
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
@@ -42,13 +44,14 @@ use crate::engine::event_stream::EventSender;
 use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
+use session_supervisor::SessionSupervisor;
 const START_FAILED_CODE: u32 = 1101;
 const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
 pub(crate) struct ProductionRuntime {
     app_version: String,
-    session_factory: SessionFactory,
-    session: Arc<Mutex<Option<ProductionSession>>>,
+    session_supervisor: Arc<SessionSupervisor>,
+    network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     task_registry: Arc<TaskRegistry>,
     file_transfer_lifecycle: Arc<FileTransferLifecycle>,
     #[cfg(feature = "lan-compat")]
@@ -69,6 +72,7 @@ struct SessionFactory {
     file_transfer_lifecycle: Arc<FileTransferLifecycle>,
     events: EventSender,
     rendezvous_base_url: Option<String>,
+    network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
 }
 
 struct ProductionSession {
@@ -80,6 +84,29 @@ struct ProductionSession {
     clipboard: ClipboardRuntime,
     sync_engine: SyncEngineAssembly,
     tasks: Arc<TaskRegistry>,
+}
+
+impl ProductionSession {
+    async fn shutdown(self, transfer_reason: uc_core::FileTransferCancellationReason) {
+        #[cfg(feature = "lan-compat")]
+        if self
+            .mobile_sync
+            .shutdown_mobile_file_uploads()
+            .await
+            .is_err()
+        {
+            warn!("mobile file upload shutdown finished with an error");
+        }
+        if let Err(error) = self.history_maintenance.shutdown().await {
+            warn!(error = %error, "history maintenance stopped with an error");
+        }
+        self.tasks.shutdown(Duration::from_millis(500)).await;
+        if let Err(error) = self.search_runtime.shutdown().await {
+            error!(error = %error, "search runtime stopped with error");
+        }
+        self.clipboard.shutdown().await;
+        self.sync_engine.shutdown(transfer_reason).await;
+    }
 }
 
 fn engine_event_for_active_clipboard(
@@ -161,6 +188,87 @@ async fn spawn_member_revocation_events(
         .await;
 }
 
+fn network_recovery_summary(event: NetworkRecoveryEvent) -> crate::NetworkRecoveryStatusSummary {
+    match event {
+        NetworkRecoveryEvent::Started => crate::NetworkRecoveryStatusSummary {
+            phase: crate::NetworkRecoveryPhaseSummary::Recovering,
+            retryable: false,
+            next_retry_in_ms: None,
+        },
+        NetworkRecoveryEvent::RetryScheduled => crate::NetworkRecoveryStatusSummary {
+            phase: crate::NetworkRecoveryPhaseSummary::RetryScheduled,
+            retryable: true,
+            next_retry_in_ms: None,
+        },
+        NetworkRecoveryEvent::Succeeded => crate::NetworkRecoveryStatusSummary {
+            phase: crate::NetworkRecoveryPhaseSummary::Idle,
+            retryable: false,
+            next_retry_in_ms: None,
+        },
+        NetworkRecoveryEvent::Failed { retryable } => crate::NetworkRecoveryStatusSummary {
+            phase: crate::NetworkRecoveryPhaseSummary::Failed,
+            retryable,
+            next_retry_in_ms: None,
+        },
+    }
+}
+
+async fn spawn_network_recovery_events(
+    mut changes: tokio::sync::broadcast::Receiver<NetworkRecoveryEvent>,
+    tasks: &Arc<TaskRegistry>,
+    events: EventSender,
+) {
+    tasks
+        .spawn("network_recovery_events", move |cancel| async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    change = changes.recv() => match change {
+                        Ok(change) => events.send(crate::EngineEvent::NetworkRecoveryChanged(network_recovery_summary(change))),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => events.send(crate::EngineEvent::RefreshRequired {
+                            reason: crate::RefreshReason::ConsumerLagged,
+                        }),
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        })
+        .await;
+}
+
+async fn spawn_network_recovery_observation_task(
+    mut observations: tokio::sync::broadcast::Receiver<
+        uc_infra::network::iroh::NetworkRecoveryObservation,
+    >,
+    recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
+    tasks: &Arc<TaskRegistry>,
+) {
+    tasks
+        .spawn("network_recovery_observations", move |cancel| async move {
+            let mut generation = 0u64;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    observation = observations.recv() => match observation {
+                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::LocalRelayRecovered) => {
+                            generation = generation.wrapping_add(1);
+                            recovery.observe_local_network_recovered(generation).await;
+                        }
+                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::PreviouslyOnlinePeerPathExhausted) => {
+                            recovery.observe_previously_online_peer_path_exhausted(generation).await;
+                        }
+                        Ok(uc_infra::network::iroh::NetworkRecoveryObservation::FreshPeerDialSucceeded) => {
+                            recovery.observe_fresh_peer_dial_succeeded(generation).await;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        })
+        .await;
+}
+
 #[cfg(feature = "lan-compat")]
 fn engine_event_for_mobile_settings_update(
     settings: &crate::MobileSyncSettingsUpdateSummary,
@@ -193,20 +301,34 @@ impl ProductionRuntime {
             .map_err(|error| startup_error("dependency wiring", error))?;
 
         let file_transfer_lifecycle = Arc::clone(&background.file_transfer_lifecycle);
-        let session = Self::build_session(&SessionFactory {
+        let session = Arc::new(Mutex::new(None));
+        let session_supervisor = Arc::new(SessionSupervisor::new(
+            Arc::clone(&session),
+            Arc::clone(&wired.shared.file_transfer_facade),
+        ));
+        let recovery_port: Arc<dyn uc_application::facade::RebuildNetworkSessionPort> =
+            Arc::clone(&session_supervisor)
+                as Arc<dyn uc_application::facade::RebuildNetworkSessionPort>;
+        let network_recovery = Arc::new(uc_application::facade::NetworkRecoveryFacade::new(
+            recovery_port,
+        ));
+        let session_factory = Arc::new(SessionFactory {
             wired: wired.clone(),
             paths: paths.clone(),
             file_transfer_lifecycle: Arc::clone(&file_transfer_lifecycle),
             events: events.clone(),
             rendezvous_base_url: rendezvous_base_url.clone(),
-        })
-        .await?;
+            network_recovery: Arc::clone(&network_recovery),
+        });
+        session_supervisor.configure_factory(Arc::clone(&session_factory));
+        session_supervisor.resume().await?;
         let task_registry = Arc::new(TaskRegistry::new());
+        spawn_network_recovery_events(network_recovery.subscribe(), &task_registry, events.clone())
+            .await;
         let blob_ports = BlobProcessingPorts::from_app_deps(&wired.deps);
         spawn_blob_processing_tasks(background, blob_ports, &task_registry).await;
-        let session = Arc::new(Mutex::new(Some(session)));
         let clipboard_change_runtime = HostClipboardChangeRuntime {
-            session: Arc::clone(&session),
+            session_supervisor: Arc::clone(&session_supervisor),
             system_clipboard: Arc::clone(&wired.deps.clipboard.system_clipboard),
             change_origin: Arc::clone(&wired.deps.clipboard.clipboard_change_origin),
             active_register: LocalActiveRegisterAdvancer::new(
@@ -232,18 +354,10 @@ impl ProductionRuntime {
         ));
         let clock = Arc::clone(&wired.deps.system.clock);
         let file_cache_dir = paths.file_cache_dir.clone();
-        let session_factory = SessionFactory {
-            wired,
-            paths,
-            file_transfer_lifecycle: Arc::clone(&file_transfer_lifecycle),
-            events: events.clone(),
-            rendezvous_base_url,
-        };
-
         Ok(Self {
             app_version,
-            session_factory,
-            session,
+            session_supervisor,
+            network_recovery,
             task_registry,
             file_transfer_lifecycle,
             #[cfg(feature = "lan-compat")]
@@ -330,8 +444,15 @@ impl ProductionRuntime {
                 },
                 search: search_runtime.facade(),
                 clipboard_outbound: Arc::clone(&clipboard.outbound),
+                network_recovery: Arc::clone(&factory.network_recovery),
             },
         );
+        spawn_network_recovery_observation_task(
+            sync_engine.subscribe_network_recovery_observations(),
+            Arc::clone(&factory.network_recovery),
+            &tasks,
+        )
+        .await;
         let pairing_outcomes = facade
             .subscribe_pairing_completion()
             .map_err(|error| startup_error("pairing completion subscription", error))?;
@@ -377,46 +498,54 @@ impl ProductionRuntime {
     }
 
     async fn current_facade(&self) -> Result<Arc<AppFacade>, EngineError> {
-        self.session
+        let session = self.session_supervisor.session();
+        let result = session
             .lock()
             .await
             .as_ref()
             .map(|session| Arc::clone(&session.facade))
-            .ok_or_else(operation_unavailable_error)
+            .ok_or_else(operation_unavailable_error);
+        result
     }
 
     async fn current_active_clipboard(
         &self,
     ) -> Result<Arc<uc_application::facade::ActiveClipboardFacade>, EngineError> {
-        self.session
+        let session = self.session_supervisor.session();
+        let result = session
             .lock()
             .await
             .as_ref()
             .map(|session| Arc::clone(&session.sync_engine.active_clipboard))
-            .ok_or_else(operation_unavailable_error)
+            .ok_or_else(operation_unavailable_error);
+        result
     }
 
     async fn current_clipboard_sync_runtime(
         &self,
     ) -> Result<Arc<uc_application::facade::ClipboardSyncRuntime>, EngineError> {
-        self.session
+        let session = self.session_supervisor.session();
+        let result = session
             .lock()
             .await
             .as_ref()
             .map(|session| Arc::clone(&session.clipboard.sync))
-            .ok_or_else(operation_unavailable_error)
+            .ok_or_else(operation_unavailable_error);
+        result
     }
 
     #[cfg(feature = "lan-compat")]
     async fn current_mobile_sync(
         &self,
     ) -> Result<Arc<uc_application::facade::MobileSyncFacade>, EngineError> {
-        self.session
+        let session = self.session_supervisor.session();
+        let result = session
             .lock()
             .await
             .as_ref()
             .map(|session| Arc::clone(&session.mobile_sync))
-            .ok_or_else(operation_unavailable_error)
+            .ok_or_else(operation_unavailable_error);
+        result
     }
 }
 
@@ -481,6 +610,26 @@ mod tests {
                 activated_at_ms: 42,
                 activated_by: "device-1".into(),
             })
+        );
+    }
+
+    #[test]
+    fn network_recovery_events_expose_only_stable_status() {
+        assert_eq!(
+            network_recovery_summary(NetworkRecoveryEvent::RetryScheduled),
+            crate::NetworkRecoveryStatusSummary {
+                phase: crate::NetworkRecoveryPhaseSummary::RetryScheduled,
+                retryable: true,
+                next_retry_in_ms: None,
+            }
+        );
+        assert_eq!(
+            network_recovery_summary(NetworkRecoveryEvent::Failed { retryable: false }),
+            crate::NetworkRecoveryStatusSummary {
+                phase: crate::NetworkRecoveryPhaseSummary::Failed,
+                retryable: false,
+                next_retry_in_ms: None,
+            }
         );
     }
 

@@ -16,8 +16,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhLocalDevice, OhMemberRevocation, OhMembershipConvergence, OhSendReport, OhSessionRecovery,
-    OhSpaceCreated, OhSpaceJoined,
+    OhLocalDevice, OhMemberRevocation, OhMembershipConvergence, OhNetworkRecoveryStatus,
+    OhSendReport, OhSessionRecovery, OhSpaceCreated, OhSpaceJoined,
 };
 
 #[napi]
@@ -88,6 +88,42 @@ impl OhEngine {
             OperationResult::SessionRecovered { unlocked, resumed } => {
                 Ok(OhSessionRecovery { unlocked, resumed })
             }
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn recover_network(&self) -> napi::Result<()> {
+        match self
+            .engine
+            .execute(Operation::RecoverNetwork)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::NetworkRecovered => Ok(()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_network_recovery_status(&self) -> napi::Result<OhNetworkRecoveryStatus> {
+        match self
+            .engine
+            .execute(Operation::QueryNetworkRecoveryStatus)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::NetworkRecoveryStatus(status) => Ok(OhNetworkRecoveryStatus {
+                phase: match status.phase {
+                    uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
+                    uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
+                    uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
+                    uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
+                }
+                .to_string(),
+                retryable: status.retryable,
+                next_retry_in_ms: status.next_retry_in_ms.map(|value| value as f64),
+            }),
             _ => Err(unexpected_result()),
         }
     }
@@ -532,6 +568,8 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         error_category: None,
         retryable: None,
         member_revocation: None,
+        network_recovery_phase: None,
+        next_retry_in_ms: None,
     };
     match event {
         EngineEvent::StateChanged { state } => mapped.state = Some(engine_state(state).to_owned()),
@@ -558,6 +596,19 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         EngineEvent::Fatal { error } => map_event_error(error, &mut mapped),
         EngineEvent::MemberRevocationChanged(summary) => {
             mapped.member_revocation = Some(member_revocation(summary));
+        }
+        EngineEvent::NetworkRecoveryChanged(status) => {
+            mapped.network_recovery_phase = Some(
+                match status.phase {
+                    uc_engine::NetworkRecoveryPhaseSummary::Idle => "idle",
+                    uc_engine::NetworkRecoveryPhaseSummary::Recovering => "recovering",
+                    uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled => "retry_scheduled",
+                    uc_engine::NetworkRecoveryPhaseSummary::Failed => "failed",
+                }
+                .to_owned(),
+            );
+            mapped.retryable = Some(status.retryable);
+            mapped.next_retry_in_ms = status.next_retry_in_ms.map(|value| value as f64);
         }
         _ => {}
     }
@@ -648,6 +699,24 @@ mod tests {
         assert_eq!(event.refresh_reason.as_deref(), Some("consumer_lagged"));
         assert_eq!(event.operation_id, None);
         assert_eq!(event.error_code, None);
+    }
+
+    #[test]
+    fn network_recovery_event_keeps_the_stable_status() {
+        let event = map_event(EngineEvent::NetworkRecoveryChanged(
+            uc_engine::NetworkRecoveryStatusSummary {
+                phase: uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled,
+                retryable: true,
+                next_retry_in_ms: Some(500),
+            },
+        ));
+
+        assert_eq!(event.kind, "network_recovery_changed");
+        assert_eq!(
+            event.network_recovery_phase.as_deref(),
+            Some("retry_scheduled")
+        );
+        assert_eq!(event.retryable, Some(true));
     }
 
     #[test]

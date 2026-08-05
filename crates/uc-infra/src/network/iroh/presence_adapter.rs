@@ -73,7 +73,9 @@ use uc_core::ports::{
 use uc_core::security::IdentityFingerprint;
 
 use super::connect::connect_with_staggered_retry;
-use super::net_recovery::DemandRecoveryCoordinator;
+use super::net_recovery::{
+    DemandRecoveryCoordinator, NetworkRecoveryObservation, NetworkRecoveryObservationSource,
+};
 
 /// ALPN identifier for the Slice 2 presence protocol. The accept-side
 /// handler performs no application-level handshake — its sole job is to
@@ -86,6 +88,7 @@ pub const PRESENCE_ALPN: &[u8] = b"uniclipboard/presence/0";
 /// members flipping state on an unlock); lagging subscribers recover via
 /// [`PresencePort::current_state`] per the broadcast contract.
 const EVENT_CHANNEL_CAPACITY: usize = 64;
+const RECOVERY_CONFIRMATION_BUDGET: Duration = Duration::from_secs(2);
 
 /// Maximum age of a tracked-connection entry before [`IrohPresenceAdapter::
 /// ensure_reachable`] refuses the fast-path and forces a fresh dial.
@@ -340,6 +343,7 @@ fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool 
 pub struct IrohPresenceAdapter {
     endpoint: Arc<Endpoint>,
     demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
+    network_recovery_observations: Option<Arc<NetworkRecoveryObservationSource>>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     clock: Arc<dyn ClockPort>,
     /// Live iroh connections keyed by `DeviceId`. `DeviceId` is `Copy +
@@ -420,6 +424,7 @@ impl IrohPresenceAdapter {
             fingerprint_factory,
             clock,
             None,
+            None,
         )
     }
 
@@ -431,6 +436,7 @@ impl IrohPresenceAdapter {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
         demand_recovery: Arc<DemandRecoveryCoordinator>,
+        network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
     ) -> Self {
         Self::build(
             endpoint,
@@ -440,6 +446,7 @@ impl IrohPresenceAdapter {
             fingerprint_factory,
             clock,
             Some(demand_recovery),
+            Some(network_recovery_observations),
         )
     }
 
@@ -451,6 +458,7 @@ impl IrohPresenceAdapter {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
         demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
+        network_recovery_observations: Option<Arc<NetworkRecoveryObservationSource>>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let last_state = Arc::new(Mutex::new(HashMap::new()));
@@ -470,6 +478,7 @@ impl IrohPresenceAdapter {
         Self {
             endpoint,
             demand_recovery,
+            network_recovery_observations,
             peer_addr_repo,
             clock,
             peers: Arc::new(Mutex::new(HashMap::new())),
@@ -561,20 +570,70 @@ impl IrohPresenceAdapter {
             postcard::from_bytes(&record.addr_blob).map_err(|err| {
                 PresenceError::Internal(format!("postcard decode EndpointAddr: {err}"))
             })?;
+        let was_online = self
+            .last_state
+            .lock()
+            .await
+            .get(device)
+            .is_some_and(|state| *state == ReachabilityState::Online);
 
         if let Some(recovery) = &self.demand_recovery {
             recovery.recover_for_demand().await;
         }
 
-        // Dial.
-        match connect_with_staggered_retry(
-            Arc::clone(&self.endpoint),
-            endpoint_addr,
-            PRESENCE_ALPN,
-            "presence",
-        )
-        .await
-        {
+        let recovery_confirmation = was_online
+            && self
+                .network_recovery_observations
+                .as_ref()
+                .is_some_and(|observations| observations.local_relay_recovered_recently());
+        let dial = if recovery_confirmation {
+            let first = match tokio::time::timeout(
+                RECOVERY_CONFIRMATION_BUDGET,
+                connect_with_staggered_retry(
+                    Arc::clone(&self.endpoint),
+                    endpoint_addr.clone(),
+                    PRESENCE_ALPN,
+                    "network_recovery_confirmation",
+                ),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err("network recovery confirmation timed out".to_string()),
+            };
+            match first {
+                Ok(connection) => Ok(connection),
+                Err(_) => {
+                    if let Some(recovery) = &self.demand_recovery {
+                        recovery.recover_after_confirmed_path_failure().await;
+                    }
+                    match tokio::time::timeout(
+                        RECOVERY_CONFIRMATION_BUDGET,
+                        connect_with_staggered_retry(
+                            Arc::clone(&self.endpoint),
+                            endpoint_addr,
+                            PRESENCE_ALPN,
+                            "network_recovery_confirmation",
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err("network recovery confirmation timed out".to_string()),
+                    }
+                }
+            }
+        } else {
+            connect_with_staggered_retry(
+                Arc::clone(&self.endpoint),
+                endpoint_addr,
+                PRESENCE_ALPN,
+                "presence",
+            )
+            .await
+        };
+
+        match dial {
             Ok(connection) => {
                 let now = self.now();
                 let device_id_for_watchdog = *device;
@@ -628,6 +687,10 @@ impl IrohPresenceAdapter {
                                 stamps.remove(device);
                             }
                             self.broadcast(*device, ReachabilityState::Online, now);
+                            if let Some(observations) = &self.network_recovery_observations {
+                                observations
+                                    .publish(NetworkRecoveryObservation::FreshPeerDialSucceeded);
+                            }
                             return Ok(ReachabilityState::Online);
                         }
                     }
@@ -653,6 +716,9 @@ impl IrohPresenceAdapter {
                 }
                 info!("dial_and_track: dial succeeded, peer marked Online");
                 self.broadcast(*device, ReachabilityState::Online, now);
+                if let Some(observations) = &self.network_recovery_observations {
+                    observations.publish(NetworkRecoveryObservation::FreshPeerDialSucceeded);
+                }
                 Ok(ReachabilityState::Online)
             }
             Err(err) => {
@@ -671,6 +737,12 @@ impl IrohPresenceAdapter {
                     .await
                     .insert(*device, Instant::now());
                 self.broadcast(*device, ReachabilityState::Offline, now);
+                if was_online {
+                    if let Some(observations) = &self.network_recovery_observations {
+                        observations
+                            .publish(NetworkRecoveryObservation::PreviouslyOnlinePeerPathExhausted);
+                    }
+                }
                 Ok(ReachabilityState::Offline)
             }
         }
