@@ -6,6 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use tracing::warn;
 use uc_engine::observability::{
     AdoptOutcome, AnalyticsIdentityError, AnalyticsIdentityPort, AnalyticsPort, Event,
     GroupIdentifyPayload, IdentifyPayload, ReleaseOutcome,
@@ -30,6 +31,66 @@ use crate::{
 };
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
+
+fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
+    match error {
+        BindingError::Engine {
+            code,
+            category,
+            retryable,
+        } => warn!(
+            operation,
+            error_kind = "engine",
+            error_code = *code,
+            error_category = ?category,
+            retryable = *retryable,
+            "mobile query failed"
+        ),
+        BindingError::HostUnavailable => {
+            warn!(
+                operation,
+                error_kind = "host_unavailable",
+                "mobile query failed"
+            )
+        }
+        BindingError::HostPermissionDenied => {
+            warn!(
+                operation,
+                error_kind = "host_permission_denied",
+                "mobile query failed"
+            )
+        }
+        BindingError::HostInvalidHandle => {
+            warn!(
+                operation,
+                error_kind = "host_invalid_handle",
+                "mobile query failed"
+            )
+        }
+        BindingError::HostIo => warn!(operation, error_kind = "host_io", "mobile query failed"),
+        BindingError::RuntimeUnavailable => {
+            warn!(
+                operation,
+                error_kind = "runtime_unavailable",
+                "mobile query failed"
+            )
+        }
+        BindingError::AlreadyStopped => {
+            warn!(
+                operation,
+                error_kind = "already_stopped",
+                "mobile query failed"
+            )
+        }
+        BindingError::UnexpectedResult => {
+            warn!(
+                operation,
+                error_kind = "unexpected_result",
+                "mobile query failed"
+            )
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SpaceCreated {
@@ -561,6 +622,8 @@ impl MobileEngine {
         host: Arc<dyn BindingHost>,
         analytics: Option<Arc<dyn BindingAnalyticsHost>>,
     ) -> Result<Arc<Self>, BindingError> {
+        #[cfg(target_vendor = "apple")]
+        crate::apple::install_apple_tracing();
         let capabilities = host_capabilities(Arc::clone(&host), analytics)?;
         let config = EngineConfig::new(config.app_version).with_profile_id(config.profile_id);
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
@@ -1202,6 +1265,9 @@ async fn run_worker_loop(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_space_state);
+                if let Err(error) = &result {
+                    log_mobile_query_failure("query_space_state", error);
+                }
                 let _ = response.send(result);
             }
             WorkerCommand::ListDevices { response } => {
@@ -1210,6 +1276,9 @@ async fn run_worker_loop(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_devices);
+                if let Err(error) = &result {
+                    log_mobile_query_failure("list_devices", error);
+                }
                 let _ = response.send(result);
             }
             WorkerCommand::QueryMembershipConvergence { response } => {
@@ -1255,6 +1324,9 @@ async fn run_worker_loop(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_member_revocation_status);
+                if let Err(error) = &result {
+                    log_mobile_query_failure("query_current_member_revocation", error);
+                }
                 let _ = response.send(result);
             }
             WorkerCommand::QueryCurrentMemberRevocation { response } => {

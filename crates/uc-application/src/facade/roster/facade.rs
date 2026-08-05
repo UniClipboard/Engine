@@ -17,11 +17,11 @@
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
-use tracing::{instrument, warn};
+use tracing::{error, instrument, warn};
 
 use uc_core::membership::{
     BootstrapId, GroupBootstrapPort, GroupBootstrapResult, GroupRevocationPort,
-    GroupRevocationResult, GroupUpdateDispatchPort, LegacyBootstrapStatus,
+    GroupRevocationResult, GroupUpdateDispatchPort, KeyEpochError, LegacyBootstrapStatus,
     MemberProtectionStatus as CoreMemberProtectionStatus, MemberRepositoryPort, RevocationStatus,
     SpaceMember, SpaceProtectionMode as CoreSpaceProtectionMode, SpaceProtectionSnapshot,
     SpaceProtectionStatusPort,
@@ -482,7 +482,34 @@ impl MemberRosterFacade {
         group_revocation
             .current_group_revocation()
             .await
-            .map_err(|error| RosterError::GroupRevocation(error.to_string()))
+            .map_err(|failure| {
+                error!(
+                    operation = "query_current_member_revocation",
+                    failure_kind = Self::group_revocation_failure_kind(&failure),
+                    "current member revocation query failed"
+                );
+                RosterError::GroupRevocation(failure.to_string())
+            })
+    }
+
+    fn group_revocation_failure_kind(error: &KeyEpochError) -> &'static str {
+        match error {
+            KeyEpochError::Repository(_) => "repository",
+            KeyEpochError::DecryptionFailed => "decryption",
+            KeyEpochError::PersistedStateIntegrityFailed
+            | KeyEpochError::InvalidRevocationStage
+            | KeyEpochError::InvalidRevocationRecord => "integrity",
+            KeyEpochError::SpaceNotReady
+            | KeyEpochError::InvalidSpaceSecurityTransition { .. }
+            | KeyEpochError::InvalidRevocationTransition { .. } => "state_transition",
+            KeyEpochError::EpochOverflow
+            | KeyEpochError::InvalidContentKeyId
+            | KeyEpochError::ContentKeyReuse
+            | KeyEpochError::RemovedMemberInOutbox
+            | KeyEpochError::RevocationRecipientNotFound
+            | KeyEpochError::PermanentLossRecipientNotPending
+            | KeyEpochError::InvalidRevocationId => "validation",
+        }
     }
 
     #[instrument(skip_all)]
@@ -891,6 +918,37 @@ mod tests {
         assert!(!production.contains("device_id = %"));
         assert!(!production.contains("recipient = %"));
         assert!(!production.contains("%device_id"));
+    }
+
+    #[test]
+    fn current_member_revocation_failure_kinds_are_safe_and_specific() {
+        assert_eq!(
+            MemberRosterFacade::group_revocation_failure_kind(
+                &uc_core::membership::KeyEpochError::Repository("private failure".into(),),
+            ),
+            "repository"
+        );
+        assert_eq!(
+            MemberRosterFacade::group_revocation_failure_kind(
+                &uc_core::membership::KeyEpochError::DecryptionFailed,
+            ),
+            "decryption"
+        );
+        assert_eq!(
+            MemberRosterFacade::group_revocation_failure_kind(
+                &uc_core::membership::KeyEpochError::PersistedStateIntegrityFailed,
+            ),
+            "integrity"
+        );
+        assert_eq!(
+            MemberRosterFacade::group_revocation_failure_kind(
+                &uc_core::membership::KeyEpochError::InvalidRevocationTransition {
+                    from: RevocationStatus::Prepared,
+                    to: RevocationStatus::Complete,
+                },
+            ),
+            "state_transition"
+        );
     }
 
     use async_trait::async_trait;

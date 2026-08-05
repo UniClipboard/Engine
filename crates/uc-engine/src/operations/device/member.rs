@@ -2,7 +2,7 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
+use tracing::{error, info};
 use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, LegacyBootstrapState,
     LegacyBootstrapView, MemberProtectionStatusView, MemberRevocationState, MemberRevocationView,
@@ -25,7 +25,14 @@ use crate::{
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     let encryption = facade.encryption_state().await.map_err(|_| {
-        error!(error_kind = "encryption_state", "device list query failed");
+        error!(
+            operation = "list_devices",
+            source = "encryption_state",
+            error_code = MEMBER_REPOSITORY_FAILED_CODE,
+            error_category = "internal",
+            retryable = false,
+            "device list query failed"
+        );
         EngineError::new(
             MEMBER_REPOSITORY_FAILED_CODE,
             EngineErrorCategory::Internal,
@@ -33,23 +40,34 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
         )
     })?;
     if !encryption.initialized {
+        info!(
+            operation = "list_devices",
+            encryption_initialized = false,
+            device_count = 0,
+            "device list query completed"
+        );
         return Ok(OperationResult::Devices(Vec::new()));
     }
     let entries = facade
         .list_roster_entries()
         .await
         .map_err(map_roster_error)?;
-    Ok(OperationResult::Devices(
-        entries
-            .into_iter()
-            .map(|entry| DeviceSummary {
-                device_id: entry.device_id.as_str().to_string(),
-                display_name: entry.device_name,
-                is_local: entry.is_local,
-                online: entry.is_local || entry.state == ReachabilityState::Online,
-            })
-            .collect(),
-    ))
+    let devices = entries
+        .into_iter()
+        .map(|entry| DeviceSummary {
+            device_id: entry.device_id.as_str().to_string(),
+            display_name: entry.device_name,
+            is_local: entry.is_local,
+            online: entry.is_local || entry.state == ReachabilityState::Online,
+        })
+        .collect::<Vec<_>>();
+    info!(
+        operation = "list_devices",
+        encryption_initialized = true,
+        device_count = devices.len(),
+        "device list query completed"
+    );
+    Ok(OperationResult::Devices(devices))
 }
 
 pub async fn execute_query_membership_convergence(
@@ -217,9 +235,13 @@ pub async fn execute_query_current_member_revocation(
         .current_member_revocation()
         .await
         .map_err(map_roster_error)?;
-    Ok(OperationResult::MemberRevocationStatus(
-        result.map(member_revocation_summary),
-    ))
+    let result = result.map(member_revocation_summary);
+    info!(
+        operation = "query_current_member_revocation",
+        has_member_revocation = result.is_some(),
+        "current member revocation query completed"
+    );
+    Ok(OperationResult::MemberRevocationStatus(result))
 }
 
 pub async fn execute_continue_member_revocation(
@@ -384,7 +406,6 @@ fn member_preferences_result(preferences: MemberSyncPreferencesView) -> Operatio
 }
 
 fn map_roster_error(error: RosterError) -> EngineError {
-    let error_message = error.to_string();
     let (code, category, retryable, variant) = match error {
         RosterError::NotFound(_) => (
             MEMBER_NOT_FOUND_CODE,
@@ -477,9 +498,14 @@ fn map_roster_error(error: RosterError) -> EngineError {
             "local_member_unavailable",
         ),
     };
-    if category == EngineErrorCategory::Internal {
-        error!(variant, error = %error_message, "member operation failed");
-    }
+    error!(
+        operation = "member_roster",
+        variant,
+        error_code = code,
+        error_category = %category,
+        retryable,
+        "member roster operation failed"
+    );
     EngineError::new(code, category, retryable)
 }
 

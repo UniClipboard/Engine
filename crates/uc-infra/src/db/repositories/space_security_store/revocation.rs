@@ -90,7 +90,7 @@ fn decode_record(
         || record.created_at_ms() != row.created_at_ms
         || record.updated_at_ms() != row.updated_at_ms
     {
-        return Err(backend("revocation row integrity mismatch"));
+        return Err(KeyEpochError::PersistedStateIntegrityFailed);
     }
     Ok(record)
 }

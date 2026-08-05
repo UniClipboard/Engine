@@ -1170,6 +1170,12 @@ pub enum KeyEpochError {
     #[error("invalid persisted revocation record")]
     InvalidRevocationRecord,
 
+    #[error("persisted security state could not be decrypted")]
+    DecryptionFailed,
+
+    #[error("persisted security state failed integrity validation")]
+    PersistedStateIntegrityFailed,
+
     #[error("removed member cannot receive the staged revocation")]
     RemovedMemberInOutbox,
 
