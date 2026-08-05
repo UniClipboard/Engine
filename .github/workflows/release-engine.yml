@@ -293,35 +293,9 @@ jobs:
           echo "tag=$previous_tag" >> "$GITHUB_OUTPUT"
           echo "commit=$previous_commit" >> "$GITHUB_OUTPUT"
 
-      - id: compatible-desktop
-        name: Resolve previous-compatible desktop consumer
-        env:
-          PREVIOUS_COMMIT: ${{ steps.previous.outputs.commit }}
-        shell: bash
-        run: |
-          desktop_commit=""
-          while read -r candidate; do
-            pinned=$(git -C desktop show "$candidate:Cargo.toml" 2>/dev/null \
-              | grep -m1 '^[[:space:]]*uc-engine[[:space:]]*=' \
-              | sed -E 's/.*rev[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/')
-            if [[ "$pinned" =~ ^[0-9a-f]{40}$ ]] \
-              && git -C engine merge-base --is-ancestor "$pinned" "$PREVIOUS_COMMIT"; then
-              desktop_commit="$candidate"
-              break
-            fi
-          done < <(git -C desktop rev-list --first-parent HEAD)
-          if [[ -z "$desktop_commit" ]]; then
-            echo "No desktop consumer is compatible with previous Engine commit $PREVIOUS_COMMIT" >&2
-            exit 1
-          fi
-          echo "commit=$desktop_commit" >> "$GITHUB_OUTPUT"
-
       - name: Create isolated desktop consumers
-        env:
-          PREVIOUS_DESKTOP_COMMIT: ${{ steps.compatible-desktop.outputs.commit }}
         run: |
           git clone --local desktop old-desktop
-          git -C old-desktop checkout --detach "$PREVIOUS_DESKTOP_COMMIT"
           git clone --local desktop new-desktop
 
       - name: Build the previous Engine consumer
