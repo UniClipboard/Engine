@@ -37,6 +37,7 @@ mod status_codec {
     pub const DELIVERED: &str = "delivered";
     pub const DUPLICATE: &str = "duplicate";
     pub const UNREACHABLE: &str = "unreachable";
+    pub const SUPERSEDED: &str = "superseded";
     // Legacy alias: rows written before the Unreachable promotion decode as
     // Unreachable for seamless migration without a schema rewrite.
     const LEGACY_FAILED_OFFLINE: &str = "failed_offline";
@@ -51,6 +52,7 @@ mod status_codec {
             EntryDeliveryStatus::Delivered => DELIVERED,
             EntryDeliveryStatus::Duplicate => DUPLICATE,
             EntryDeliveryStatus::Unreachable => UNREACHABLE,
+            EntryDeliveryStatus::Superseded => SUPERSEDED,
             EntryDeliveryStatus::Failed { reason } => match reason {
                 DeliveryFailureReason::LocalPolicy => FAILED_LOCAL_POLICY,
                 DeliveryFailureReason::PeerRejected => FAILED_PEER_REJECTED,
@@ -66,6 +68,7 @@ mod status_codec {
             DELIVERED => Ok(EntryDeliveryStatus::Delivered),
             DUPLICATE => Ok(EntryDeliveryStatus::Duplicate),
             UNREACHABLE | LEGACY_FAILED_OFFLINE => Ok(EntryDeliveryStatus::Unreachable),
+            SUPERSEDED => Ok(EntryDeliveryStatus::Superseded),
             FAILED_LOCAL_POLICY => Ok(EntryDeliveryStatus::Failed {
                 reason: DeliveryFailureReason::LocalPolicy,
             }),
@@ -254,6 +257,16 @@ mod tests {
         assert_eq!(encoded, "unreachable");
         let decoded = status_codec::decode(encoded).unwrap();
         assert!(matches!(decoded, EntryDeliveryStatus::Unreachable));
+    }
+
+    #[test]
+    fn superseded_delivery_round_trips() {
+        let encoded = status_codec::encode(&EntryDeliveryStatus::Superseded);
+        assert_eq!(encoded, "superseded");
+        assert_eq!(
+            status_codec::decode(encoded).unwrap(),
+            EntryDeliveryStatus::Superseded
+        );
     }
 
     #[test]

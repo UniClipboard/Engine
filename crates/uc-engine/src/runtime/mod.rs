@@ -701,6 +701,7 @@ mod tests {
                 offline: 3,
                 errored: 4,
                 pending: 5,
+                pending_targets: Vec::new(),
                 at_ms: 123,
                 blob_ref_count: 6,
             },

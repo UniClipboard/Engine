@@ -712,6 +712,7 @@ mod tests {
             total_offline: 0,
             total_errored: 0,
             total_pending: 0,
+            pending_targets: Vec::new(),
             at_ms: chrono::Utc::now().timestamp_millis(),
         }
     }

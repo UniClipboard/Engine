@@ -106,6 +106,8 @@ pub enum ClipboardOutboundOutcome {
         /// hit). Their delivery records are being written by a background
         /// continuation; counted here only for observability.
         pending: usize,
+        /// Devices whose result is still settling in the background.
+        pending_targets: Vec<DeviceId>,
         at_ms: i64,
         blob_ref_count: usize,
     },
@@ -477,6 +479,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             offline: dispatch_result.total_offline,
             errored: dispatch_result.total_errored,
             pending: dispatch_result.total_pending,
+            pending_targets: dispatch_result.pending_targets,
             at_ms: dispatch_result.at_ms,
             blob_ref_count,
         })
@@ -1077,6 +1080,7 @@ mod tests {
                 offline: 0,
                 errored: 0,
                 pending: 0,
+                pending_targets: Vec::new(),
                 at_ms: 1,
                 blob_ref_count: 0,
             })
@@ -1449,6 +1453,7 @@ mod tests {
                 offline: 0,
                 errored: 0,
                 pending: 0,
+                pending_targets: Vec::new(),
                 at_ms: 1,
                 blob_ref_count: 0,
             }

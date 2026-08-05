@@ -52,6 +52,7 @@
 //! genuinely need them (broadcast `subscribe + emit`; see
 //! `ingest_inbound.rs::tests` and Phase 1 `roster/facade.rs::FakePresence`).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -249,6 +250,8 @@ pub(crate) struct DispatchOutcome {
     pub total_offline: usize,
     pub total_errored: usize,
     pub total_pending: usize,
+    /// Targets whose result is still settling after the foreground deadline.
+    pub pending_targets: Vec<DeviceId>,
     pub at_ms: i64,
 }
 
@@ -414,6 +417,7 @@ impl DispatchClipboardEntryUseCase {
                 total_offline: 0,
                 total_errored: 0,
                 total_pending: 0,
+                pending_targets: Vec::new(),
                 at_ms: self.clock.now_ms(),
             });
         }
@@ -501,6 +505,13 @@ impl DispatchClipboardEntryUseCase {
         //    badge isn't held hostage by a staggered-retry long tail. This
         //    is best-effort RECORD-ONLY, never a resend (VISION #59).
         let total_pending = leftover.len();
+        let settled_targets: HashSet<DeviceId> =
+            per_target.iter().map(|target| target.device_id).collect();
+        let pending_targets = candidates
+            .iter()
+            .filter(|target| !settled_targets.contains(target))
+            .copied()
+            .collect();
         if total_pending > 0 {
             spawn_deferred_drain(
                 leftover,
@@ -519,6 +530,7 @@ impl DispatchClipboardEntryUseCase {
             total_offline,
             total_errored,
             total_pending,
+            pending_targets,
             at_ms: self.clock.now_ms(),
         })
     }

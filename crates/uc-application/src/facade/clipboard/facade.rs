@@ -122,6 +122,7 @@ pub struct DispatchEntryOutcome {
     pub total_offline: usize,
     pub total_errored: usize,
     pub total_pending: usize,
+    pub pending_targets: Vec<DeviceId>,
     pub at_ms: i64,
 }
 
@@ -501,6 +502,7 @@ fn lift_outcome(internal: DispatchOutcome) -> DispatchEntryOutcome {
         total_offline: internal.total_offline,
         total_errored: internal.total_errored,
         total_pending: internal.total_pending,
+        pending_targets: internal.pending_targets,
         at_ms: internal.at_ms,
     }
 }

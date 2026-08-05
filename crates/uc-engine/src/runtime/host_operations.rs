@@ -215,13 +215,13 @@ impl ProductionRuntime {
         snapshot: SystemClipboardSnapshot,
         target_devices: Vec<String>,
     ) -> Result<OperationResult, EngineError> {
-        let (capture, live_index, outbound) = {
+        let (capture, live_index, sync) = {
             let session = self.session.lock().await;
             let session = session.as_ref().ok_or_else(operation_unavailable_error)?;
             (
                 Arc::clone(&session.clipboard.capture),
                 Arc::clone(&session.clipboard.live_index),
-                Arc::clone(&session.clipboard.outbound),
+                Arc::clone(&session.clipboard.sync),
             )
         };
         let captured = capture
@@ -248,8 +248,8 @@ impl ProductionRuntime {
                 .map(DeviceId::new)
                 .collect::<Vec<_>>()
         });
-        let outcome = outbound
-            .dispatch_capture_to_targets(
+        let outcome = sync
+            .dispatch_local_capture_to_targets(
                 ClipboardOutboundInput {
                     entry_id: captured.entry_id.clone(),
                     snapshot,
