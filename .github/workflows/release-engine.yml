@@ -100,8 +100,8 @@ jobs:
             exit 1
           fi
 
-  ios-android:
-    name: Build iOS and Android
+  ios:
+    name: Build iOS
     needs: prepare
     runs-on: macos-14
     permissions:
@@ -112,20 +112,55 @@ jobs:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
-      - name: Install targets and Android build helper
+      - name: Install iOS targets
         shell: bash
         run: |
           toolchain=$(rustup show active-toolchain | awk '{print $1}')
           rustup target add --toolchain "$toolchain" \
-            aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios \
-            aarch64-linux-android x86_64-linux-android
-          cargo install cargo-ndk --locked
+            aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: engine-release-ios
 
       - name: Build iOS assets
         env:
           UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
           UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/engine-dist
         run: bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-assets
+          path: ${{ runner.temp }}/engine-dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    name: Build Android
+    needs: prepare
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Install Android targets and build helper
+        shell: bash
+        run: |
+          toolchain=$(rustup show active-toolchain | awk '{print $1}')
+          rustup target add --toolchain "$toolchain" \
+            aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: engine-release-android
 
       - name: Build Android assets
         env:
@@ -135,7 +170,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ios-android-assets
+          name: android-assets
           path: ${{ runner.temp }}/engine-dist/
           if-no-files-found: error
           retention-days: 7
@@ -174,7 +209,7 @@ jobs:
 
   assemble:
     name: Verify and publish one release bundle
-    needs: [prepare, ios-android, harmonyos]
+    needs: [prepare, ios, android, harmonyos]
     runs-on: ubuntu-latest
     permissions:
       contents: write

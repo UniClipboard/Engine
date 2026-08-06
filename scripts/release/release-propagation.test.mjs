@@ -36,3 +36,14 @@ test('uses a GitHub App installation token for both repository dispatches', () =
   assert.match(workflow, /repos\/\$repository\/dispatches/)
   assert.doesNotMatch(workflow, /PERSONAL_ACCESS_TOKEN|PAT/)
 })
+
+test('builds mobile release assets in parallel with target-specific caches', () => {
+  assert.match(workflow, /\n  ios:\n[\s\S]*?needs:\s*prepare/)
+  assert.match(workflow, /\n  android:\n[\s\S]*?needs:\s*prepare/)
+  assert.match(workflow, /shared-key:\s*engine-release-ios/)
+  assert.match(workflow, /shared-key:\s*engine-release-android/)
+  assert.match(workflow, /name:\s*ios-assets/)
+  assert.match(workflow, /name:\s*android-assets/)
+  assert.match(workflow, /assemble:[\s\S]*?needs:\s*\[prepare, ios, android, harmonyos\]/)
+  assert.doesNotMatch(workflow, /ios-android:/)
+})
