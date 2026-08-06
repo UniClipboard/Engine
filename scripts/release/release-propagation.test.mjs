@@ -29,12 +29,12 @@ test('notifies consumers only after release publication and interop verification
 
 test('uses a GitHub App installation token for both repository dispatches', () => {
   assert.match(workflow, /actions\/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1/)
-  assert.match(workflow, /app-id:\s*\$\{\{\s*vars\.ENGINE_RELEASE_APP_CLIENT_ID\s*\}\}/)
+  assert.match(workflow, /client-id:\s*\$\{\{\s*secrets\.ENGINE_RELEASE_APP_CLIENT_ID\s*\}\}/)
   assert.match(workflow, /private-key:\s*\$\{\{\s*secrets\.ENGINE_RELEASE_APP_PRIVATE_KEY\s*\}\}/)
   assert.match(workflow, /permission-contents:\s*write/)
   assert.match(workflow, /for repository in UniClipboard\/UniClipboard UniClipboard\/UniClip/)
   assert.match(workflow, /repos\/\$repository\/dispatches/)
-  assert.doesNotMatch(workflow, /PERSONAL_ACCESS_TOKEN|PAT/)
+  assert.doesNotMatch(workflow, /app-id:|vars\.ENGINE_RELEASE_APP_CLIENT_ID|PERSONAL_ACCESS_TOKEN|PAT/)
 })
 
 test('builds mobile release assets in parallel with target-specific caches', () => {
