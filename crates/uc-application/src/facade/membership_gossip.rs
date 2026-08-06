@@ -5,17 +5,17 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use tokio::sync::{broadcast, mpsc, oneshot, Notify};
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
-    validate_sponsor_candidate_seed_batch, CandidateFailure, CandidateMergeError,
-    CandidateMergeOutcome, CandidateStatus, CurrentMemberSignaturePort,
-    CurrentMembershipAnnouncementPort, CurrentMembershipIdentityError, DeviceAnnouncement,
-    MemberRepositoryPort, MemberSyncPreferences, MembershipAnnouncementRepositoryError,
-    MembershipAnnouncementRepositoryPort, MembershipAttestationEndpointError,
-    MembershipAttestationEndpointPort, MembershipAttestationError, MembershipAttestationPort,
-    MembershipCandidateRepositoryError, MembershipCandidateRepositoryPort, MembershipEvent,
-    MembershipEventBatch, MembershipGossipEndpointError, MembershipGossipEndpointPort,
+    CandidateFailure, CandidateMergeError, CandidateMergeOutcome, CandidateStatus,
+    CurrentMemberSignaturePort, CurrentMembershipAnnouncementPort, CurrentMembershipIdentityError,
+    DeviceAnnouncement, MemberRepositoryPort, MemberSyncPreferences,
+    MembershipAnnouncementRepositoryError, MembershipAnnouncementRepositoryPort,
+    MembershipAttestationEndpointError, MembershipAttestationEndpointPort,
+    MembershipAttestationError, MembershipAttestationPort, MembershipCandidateRepositoryError,
+    MembershipCandidateRepositoryPort, MembershipEvent, MembershipEventBatch,
+    MembershipGossipBoundsError, MembershipGossipEndpointError, MembershipGossipEndpointPort,
     MembershipGossipMessage, MembershipGossipTransportPort, MembershipOutboxRepositoryError,
     MembershipOutboxRepositoryPort, MembershipSecurityUpdateError, MembershipSecurityUpdatePort,
     PendingGroupUpdate, PendingMembershipBatch, RelayedSecurityUpdate, SpaceMember,
@@ -139,6 +139,8 @@ pub enum SpaceMembershipGossipError {
     AnnouncementStorage(#[from] MembershipAnnouncementRepositoryError),
     #[error("membership outbox storage failed: {0}")]
     Outbox(#[from] MembershipOutboxRepositoryError),
+    #[error("membership delivery batch is invalid: {0}")]
+    DeliveryBatch(#[from] MembershipGossipBoundsError),
     #[error("membership security update failed: {0}")]
     SecurityUpdate(#[from] MembershipSecurityUpdateError),
     #[error("membership candidate was not found")]
@@ -160,12 +162,116 @@ pub trait PairingMembershipGossipPort: Send + Sync {
     async fn prepare_sponsor_membership(
         &self,
         context: SponsorSeedBatchContext,
-    ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError>;
-
-    async fn accept_sponsor_seed_batch(
-        &self,
-        seeds: Vec<SponsorCandidateSeed>,
     ) -> Result<(), SpaceMembershipGossipError>;
+
+    fn notify_pending_delivery(&self);
+}
+
+#[derive(Default)]
+struct SponsorSeedDeliveryMetrics {
+    seed_count: usize,
+    device_metadata_bytes: usize,
+    address_bytes: usize,
+    security_update_count: usize,
+    security_update_bytes: usize,
+    largest_seed_bytes: usize,
+    largest_security_update_bytes: usize,
+}
+
+impl SponsorSeedDeliveryMetrics {
+    fn from_seeds(seeds: &[SponsorCandidateSeed]) -> Self {
+        let mut metrics = Self {
+            seed_count: seeds.len(),
+            ..Self::default()
+        };
+        for seed in seeds {
+            let device_metadata_bytes = seed
+                .space_id
+                .as_ref()
+                .len()
+                .saturating_add(seed.device_id.as_str().len())
+                .saturating_add(seed.device_name_hint.len())
+                .saturating_add(seed.identity_fingerprint_hint.as_display().len())
+                .saturating_add(seed.source_device_id.as_str().len())
+                .saturating_add(64);
+            let security_update_bytes = seed
+                .security_updates
+                .iter()
+                .map(|update| update.payload.len())
+                .sum::<usize>();
+            metrics.device_metadata_bytes = metrics
+                .device_metadata_bytes
+                .saturating_add(device_metadata_bytes);
+            metrics.address_bytes = metrics
+                .address_bytes
+                .saturating_add(seed.transport_address_blob.len());
+            metrics.security_update_count = metrics
+                .security_update_count
+                .saturating_add(seed.security_updates.len());
+            metrics.security_update_bytes = metrics
+                .security_update_bytes
+                .saturating_add(security_update_bytes);
+            metrics.largest_seed_bytes = metrics.largest_seed_bytes.max(
+                device_metadata_bytes
+                    .saturating_add(seed.transport_address_blob.len())
+                    .saturating_add(
+                        seed.security_updates
+                            .iter()
+                            .map(|update| update.payload.len().saturating_add(64))
+                            .sum::<usize>(),
+                    ),
+            );
+            metrics.largest_security_update_bytes = metrics.largest_security_update_bytes.max(
+                seed.security_updates
+                    .iter()
+                    .map(|update| update.payload.len())
+                    .max()
+                    .unwrap_or(0),
+            );
+        }
+        metrics
+    }
+}
+
+fn split_sponsor_seed_events(
+    space_id: &SpaceId,
+    seeds: &[SponsorCandidateSeed],
+) -> Result<Vec<Vec<MembershipEvent>>, SpaceMembershipGossipError> {
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+
+    for seed in seeds.iter().cloned() {
+        current.push(MembershipEvent::SponsorSeed(seed));
+        let candidate = MembershipEventBatch {
+            space_id: space_id.clone(),
+            batch_id: [0; 32],
+            events: current.clone(),
+        };
+        match candidate.validate_transfer_bounds() {
+            Ok(()) => {}
+            Err(MembershipGossipBoundsError::MessageTooLarge) if current.len() > 1 => {
+                let event = current.pop().ok_or_else(|| {
+                    SpaceMembershipGossipError::Relationship(
+                        "membership delivery batch unexpectedly empty".into(),
+                    )
+                })?;
+                batches.push(std::mem::take(&mut current));
+                current.push(event);
+                MembershipEventBatch {
+                    space_id: space_id.clone(),
+                    batch_id: [0; 32],
+                    events: current.clone(),
+                }
+                .validate_transfer_bounds()?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    Ok(batches)
 }
 
 impl SpaceMembershipGossip {
@@ -320,17 +426,6 @@ impl SpaceMembershipGossip {
         Ok(announcement)
     }
 
-    pub(crate) async fn accept_sponsor_seed_batch(
-        &self,
-        seeds: Vec<SponsorCandidateSeed>,
-    ) -> Result<(), SpaceMembershipGossipError> {
-        validate_sponsor_candidate_seed_batch(&seeds)?;
-        for seed in seeds {
-            self.accept_sponsor_seed(seed).await?;
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     async fn build_sponsor_seed_batch(
         &self,
@@ -412,19 +507,83 @@ impl SpaceMembershipGossip {
                 expires_at_ms,
             });
         }
-        validate_sponsor_candidate_seed_batch(&seeds)?;
         Ok(seeds)
     }
 
     pub(crate) async fn prepare_sponsor_membership(
         &self,
         context: SponsorSeedBatchContext,
-    ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError> {
+    ) -> Result<(), SpaceMembershipGossipError> {
         let seeds = self.build_sponsor_seed_batch_inner(&context).await?;
         let now_ms = self.deps.clock.now_ms();
         let expires_at_ms = now_ms.saturating_add(DIRECT_ATTESTATION_TTL_MS);
-        let mut persisted_outbox_count = 0usize;
-        let mut failed_outbox_count = 0usize;
+
+        let joiner_seeds = seeds
+            .iter()
+            .filter(|seed| seed.device_id != context.sponsor_device_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let metrics = SponsorSeedDeliveryMetrics::from_seeds(&joiner_seeds);
+        let batch_limit_bytes = MembershipEventBatch::max_transfer_bytes();
+        let mut joiner_batches = Vec::new();
+        for events in split_sponsor_seed_events(&context.space_id, &joiner_seeds)? {
+            let batch_id_input = serde_json::to_vec(&(context.joiner_device_id.as_str(), &events))
+                .map_err(|error| SpaceMembershipGossipError::Relationship(error.to_string()))?;
+            let batch_id = self
+                .deps
+                .hash
+                .hash_bytes(&batch_id_input)
+                .map_err(|error| SpaceMembershipGossipError::Relationship(error.to_string()))?
+                .bytes;
+            let pending = PendingMembershipBatch::new(
+                context.joiner_device_id.clone(),
+                MembershipEventBatch {
+                    space_id: context.space_id.clone(),
+                    batch_id,
+                    events,
+                },
+                now_ms,
+            )?;
+            joiner_batches.push(pending);
+        }
+        let joiner_batch_count = joiner_batches.len();
+        let joiner_total_batch_bytes = joiner_batches
+            .iter()
+            .map(|pending| pending.batch().estimated_transfer_bytes())
+            .sum::<usize>();
+        let joiner_max_batch_bytes = joiner_batches
+            .iter()
+            .map(|pending| pending.batch().estimated_transfer_bytes())
+            .max()
+            .unwrap_or(0);
+        for (batch_index, pending) in joiner_batches.iter().enumerate() {
+            if let Err(error) = self.deps.outbox_repo.save(pending).await {
+                warn!(
+                    recipient_device_id = %context.joiner_device_id.as_str(),
+                    batch_index,
+                    batch_count = joiner_batch_count,
+                    batch_event_count = pending.batch().events.len(),
+                    batch_bytes = pending.batch().estimated_transfer_bytes(),
+                    batch_limit_bytes,
+                    error_kind = "membership_outbox_persist_failed",
+                    retryable = false,
+                    "membership delivery could not be queued for joiner"
+                );
+                return Err(error.into());
+            }
+            info!(
+                recipient_device_id = %context.joiner_device_id.as_str(),
+                batch_index,
+                batch_count = joiner_batch_count,
+                batch_event_count = pending.batch().events.len(),
+                batch_bytes = pending.batch().estimated_transfer_bytes(),
+                batch_limit_bytes,
+                "membership delivery batch queued for joiner"
+            );
+        }
+
+        let mut persisted_existing_member_batches = 0usize;
+        let mut failed_existing_member_batches = 0usize;
         for recipient in seeds
             .iter()
             .filter(|seed| seed.device_id != context.sponsor_device_id)
@@ -461,28 +620,46 @@ impl SpaceMembershipGossip {
             .map_err(|error| SpaceMembershipGossipError::Relationship(error.to_string()))?;
             match self.deps.outbox_repo.save(&pending).await {
                 Ok(()) => {
-                    persisted_outbox_count = persisted_outbox_count.saturating_add(1);
+                    persisted_existing_member_batches =
+                        persisted_existing_member_batches.saturating_add(1);
                 }
                 Err(_) => {
-                    // The joiner receives the same existing-member seeds in Confirm and
-                    // can therefore drive convergence even when this redundant sponsor
-                    // delivery path is temporarily unavailable. Failing the pairing here
-                    // would be worse: the group admission is already durable.
-                    failed_outbox_count = failed_outbox_count.saturating_add(1);
+                    failed_existing_member_batches =
+                        failed_existing_member_batches.saturating_add(1);
                 }
             }
         }
-        if persisted_outbox_count > 0 {
-            self.wake.notify_one();
-        }
-        if failed_outbox_count > 0 {
+        if failed_existing_member_batches > 0 {
             warn!(
-                failed_outbox_count,
-                retry_via_joiner = true,
+                failed_existing_member_batches,
+                recovery_via_membership_gossip = true,
+                error_kind = "membership_outbox_persist_failed",
+                retryable = false,
                 "membership sponsor delivery could not be persisted"
             );
         }
-        Ok(seeds)
+        info!(
+            recipient_device_id = %context.joiner_device_id.as_str(),
+            existing_member_count = metrics.seed_count,
+            delivery_batch_count = joiner_batch_count,
+            delivery_total_batch_bytes = joiner_total_batch_bytes,
+            delivery_max_batch_bytes = joiner_max_batch_bytes,
+            delivery_batch_limit_bytes = batch_limit_bytes,
+            device_metadata_bytes = metrics.device_metadata_bytes,
+            address_bytes = metrics.address_bytes,
+            security_update_count = metrics.security_update_count,
+            security_update_bytes = metrics.security_update_bytes,
+            largest_seed_bytes = metrics.largest_seed_bytes,
+            largest_security_update_bytes = metrics.largest_security_update_bytes,
+            persisted_existing_member_batches,
+            failed_existing_member_batches,
+            "membership delivery queued for joiner after pairing confirmation"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn notify_pending_delivery(&self) {
+        self.wake.notify_one();
     }
 
     pub async fn load_pending(
@@ -772,6 +949,18 @@ impl SpaceMembershipGossip {
             .into_iter()
             .filter(|item| item.next_attempt_at_ms() <= now_ms)
         {
+            let batch_event_count = item.batch().events.len();
+            let batch_bytes = item.batch().estimated_transfer_bytes();
+            let batch_limit_bytes = MembershipEventBatch::max_transfer_bytes();
+            let delivery_attempt = item.attempt_count().saturating_add(1);
+            info!(
+                recipient_device_id = %item.recipient_device_id().as_str(),
+                batch_event_count,
+                batch_bytes,
+                batch_limit_bytes,
+                delivery_attempt,
+                "membership delivery attempt started"
+            );
             let response = self
                 .deps
                 .transport
@@ -787,7 +976,7 @@ impl SpaceMembershipGossip {
                         && ack.batch_id == item.batch().batch_id
             );
             if acknowledged {
-                if self
+                let removed = self
                     .deps
                     .outbox_repo
                     .remove(
@@ -795,12 +984,35 @@ impl SpaceMembershipGossip {
                         item.recipient_device_id(),
                         &item.batch().batch_id,
                     )
-                    .await?
-                {
+                    .await?;
+                if removed {
                     delivered = delivered.saturating_add(1);
                 }
+                info!(
+                    recipient_device_id = %item.recipient_device_id().as_str(),
+                    batch_event_count,
+                    batch_bytes,
+                    batch_limit_bytes,
+                    delivery_attempt,
+                    outbox_removed = removed,
+                    "membership delivery acknowledged by recipient"
+                );
             } else {
                 let next_attempt_at_ms = next_membership_retry_at(&item, now_ms);
+                let error_kind = match &response {
+                    Ok(MembershipGossipMessage::Ack(_)) => "membership_ack_mismatch",
+                    Ok(_) => "unexpected_membership_response",
+                    Err(
+                        uc_core::membership::MembershipGossipTransportError::VersionIncompatible,
+                    ) => "version_incompatible",
+                    Err(uc_core::membership::MembershipGossipTransportError::Offline) => "offline",
+                    Err(uc_core::membership::MembershipGossipTransportError::Transport) => {
+                        "transport"
+                    }
+                    Err(uc_core::membership::MembershipGossipTransportError::Rejected) => {
+                        "rejected"
+                    }
+                };
                 if matches!(
                     response,
                     Err(uc_core::membership::MembershipGossipTransportError::VersionIncompatible)
@@ -814,6 +1026,18 @@ impl SpaceMembershipGossip {
                     item.mark_retry(next_attempt_at_ms, now_ms);
                 }
                 self.deps.outbox_repo.save(&item).await?;
+                warn!(
+                    recipient_device_id = %item.recipient_device_id().as_str(),
+                    batch_event_count,
+                    batch_bytes,
+                    batch_limit_bytes,
+                    delivery_attempt,
+                    retry_count = item.attempt_count(),
+                    next_attempt_at_ms,
+                    error_kind,
+                    retryable = true,
+                    "membership delivery deferred for retry"
+                );
             }
         }
         Ok(delivered)
@@ -1351,15 +1575,12 @@ impl PairingMembershipGossipPort for SpaceMembershipGossip {
     async fn prepare_sponsor_membership(
         &self,
         context: SponsorSeedBatchContext,
-    ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError> {
+    ) -> Result<(), SpaceMembershipGossipError> {
         SpaceMembershipGossip::prepare_sponsor_membership(self, context).await
     }
 
-    async fn accept_sponsor_seed_batch(
-        &self,
-        seeds: Vec<SponsorCandidateSeed>,
-    ) -> Result<(), SpaceMembershipGossipError> {
-        SpaceMembershipGossip::accept_sponsor_seed_batch(self, seeds).await
+    fn notify_pending_delivery(&self) {
+        SpaceMembershipGossip::notify_pending_delivery(self);
     }
 }
 
@@ -2838,7 +3059,7 @@ mod tests {
             hash: Arc::new(FixedHasher),
         });
 
-        let seeds = gossip
+        gossip
             .prepare_sponsor_membership(SponsorSeedBatchContext {
                 space_id: SpaceId::from("space-a"),
                 sponsor_device_id: DeviceId::new("device-b"),
@@ -2856,16 +3077,34 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(seeds.len(), 2);
         let pending = outbox
             .list_pending(&SpaceId::from("space-a"))
             .await
             .unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].recipient_device_id(), &DeviceId::new("device-a"));
-        assert_eq!(pending[0].batch().batch_id, [9; 32]);
-        assert_eq!(pending[0].batch().events.len(), 1);
-        let MembershipEvent::SponsorSeed(joiner) = &pending[0].batch().events[0] else {
+        assert_eq!(pending.len(), 2);
+
+        let joiner_delivery = pending
+            .iter()
+            .find(|item| item.recipient_device_id() == &DeviceId::new("device-c"))
+            .expect("joiner membership delivery");
+        assert_eq!(joiner_delivery.batch().events.len(), 1);
+        let MembershipEvent::SponsorSeed(existing_member) = &joiner_delivery.batch().events[0]
+        else {
+            panic!("expected existing-member seed event");
+        };
+        assert_eq!(existing_member.device_id, DeviceId::new("device-a"));
+        assert_eq!(existing_member.source_device_id, DeviceId::new("device-b"));
+        assert_eq!(existing_member.security_updates.len(), 1);
+        assert_eq!(existing_member.security_updates[0].previous_epoch, 6);
+        assert_eq!(existing_member.security_updates[0].next_epoch, 7);
+
+        let existing_member_delivery = pending
+            .iter()
+            .find(|item| item.recipient_device_id() == &DeviceId::new("device-a"))
+            .expect("existing-member membership delivery");
+        assert_eq!(existing_member_delivery.batch().events.len(), 1);
+        let MembershipEvent::SponsorSeed(joiner) = &existing_member_delivery.batch().events[0]
+        else {
             panic!("expected sponsor seed event");
         };
         assert_eq!(joiner.device_id, DeviceId::new("device-c"));
@@ -2876,7 +3115,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sponsor_outbox_failure_still_returns_joiner_recovery_seeds() {
+    async fn sponsor_preparation_splits_oversized_existing_member_delivery_for_joiner() {
+        let candidates = Arc::new(InMemoryCandidateRepository::default());
+        let outbox = Arc::new(InMemoryMembershipOutbox::default());
+        let members = Arc::new(InMemoryMemberRepository::default());
+        let addresses = Arc::new(InMemoryPeerAddressRepository::default());
+        let member = |device_id: &str, name: &str, fingerprint_raw: &str| SpaceMember {
+            device_id: DeviceId::new(device_id),
+            device_name: name.to_owned(),
+            identity_fingerprint: fingerprint(fingerprint_raw),
+            joined_at: chrono::DateTime::from_timestamp_millis(500).unwrap(),
+            sync_preferences: uc_core::MemberSyncPreferences::default(),
+        };
+        for current in [
+            member("device-a", "Device A", "AAAAAAAAAAAAAAAA"),
+            member("device-b", "Device B", "BBBBBBBBBBBBBBBB"),
+            member("device-d", "Device D", "DDDDDDDDDDDDDDDD"),
+            member("device-c", "Device C", "CCCCCCCCCCCCCCCC"),
+        ] {
+            members.save(&current).await.unwrap();
+        }
+        for device_id in ["device-a", "device-d"] {
+            addresses
+                .upsert(&PeerAddressRecord {
+                    device_id: DeviceId::new(device_id),
+                    addr_blob: format!("address-{device_id}").into_bytes(),
+                    observed_at: chrono::DateTime::from_timestamp_millis(700).unwrap(),
+                })
+                .await
+                .unwrap();
+        }
+        let gossip = SpaceMembershipGossip::new(SpaceMembershipGossipDeps {
+            candidate_repo: candidates,
+            announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+            outbox_repo: outbox.clone(),
+            security_updates: membership_security(6),
+            transport: membership_transport(),
+            clock: Arc::new(FixedClock(1_000)),
+            device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
+            announcement_material: Arc::new(FixedAnnouncementMaterial),
+            member_signatures: Arc::new(AcceptingMemberSignatures),
+            fingerprint_factory: Arc::new(FixedFingerprintFactory),
+            attestation: Arc::new(FixedAttestation(Ok(verified_peer()))),
+            verified_peer_promotion: Arc::new(NoopVerifiedPeerPromotion),
+            member_repo: members,
+            trusted_peer_repo: Arc::new(InMemoryTrustedPeerRepository::default()),
+            peer_address_repo: addresses,
+            hash: Arc::new(Blake3Hasher),
+        });
+
+        gossip
+            .prepare_sponsor_membership(SponsorSeedBatchContext {
+                space_id: SpaceId::from("space-a"),
+                sponsor_device_id: DeviceId::new("device-b"),
+                sponsor_transport_address_blob: b"address-b".to_vec(),
+                joiner_device_id: DeviceId::new("device-c"),
+                joiner_device_name: "Device C".to_owned(),
+                joiner_identity_fingerprint: fingerprint("CCCCCCCCCCCCCCCC"),
+                joiner_transport_address_blob: b"address-c".to_vec(),
+                group_epoch: 7,
+                existing_member_updates: vec![
+                    uc_core::membership::PendingGroupUpdate::persistent(
+                        DeviceId::new("device-a"),
+                        vec![1; 140 * 1024],
+                    ),
+                    uc_core::membership::PendingGroupUpdate::persistent(
+                        DeviceId::new("device-d"),
+                        vec![2; 140 * 1024],
+                    ),
+                ],
+            })
+            .await
+            .unwrap();
+
+        let joiner_batches = outbox
+            .list_pending(&SpaceId::from("space-a"))
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|pending| pending.recipient_device_id() == &DeviceId::new("device-c"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(joiner_batches.len(), 2);
+        assert!(joiner_batches
+            .iter()
+            .all(|pending| pending.batch().validate_transfer_bounds().is_ok()));
+        assert_eq!(
+            joiner_batches
+                .iter()
+                .flat_map(|pending| pending.batch().events.iter())
+                .filter_map(|event| match event {
+                    MembershipEvent::SponsorSeed(seed) => Some(seed.device_id.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["device-a", "device-d"]
+        );
+    }
+
+    #[tokio::test]
+    async fn sponsor_preparation_fails_when_joiner_delivery_cannot_be_queued() {
         let members = Arc::new(InMemoryMemberRepository::default());
         let addresses = Arc::new(InMemoryPeerAddressRepository::default());
         let member = |device_id: &str, name: &str, fingerprint_raw: &str| SpaceMember {
@@ -2920,7 +3258,7 @@ mod tests {
             hash: Arc::new(FixedHasher),
         });
 
-        let seeds = gossip
+        let error = gossip
             .prepare_sponsor_membership(SponsorSeedBatchContext {
                 space_id: SpaceId::from("space-a"),
                 sponsor_device_id: DeviceId::new("device-b"),
@@ -2936,16 +3274,12 @@ mod tests {
                 )],
             })
             .await
-            .unwrap();
+            .expect_err("joiner delivery must be durable before confirmation");
 
-        assert_eq!(
-            seeds
-                .iter()
-                .map(|seed| seed.device_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["device-a", "device-b"]
-        );
-        assert_eq!(seeds[0].security_updates.len(), 1);
+        assert!(matches!(
+            error,
+            SpaceMembershipGossipError::Outbox(MembershipOutboxRepositoryError::Repository(_))
+        ));
     }
 
     #[tokio::test]
@@ -3227,34 +3561,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status(), CandidateStatus::Pending);
-    }
-
-    #[tokio::test]
-    async fn sponsor_seed_batch_saves_every_candidate() {
-        let repo = Arc::new(InMemoryCandidateRepository::default());
-        let gossip = gossip(repo.clone(), 1_000);
-        let first = seed(100);
-        let mut second = seed(200);
-        second.device_id = DeviceId::new("device-d");
-        second.device_name_hint = "Device D".to_owned();
-        second.identity_fingerprint_hint = fingerprint("CANDIDATEFP00002");
-
-        gossip
-            .accept_sponsor_seed_batch(vec![first, second])
-            .await
-            .unwrap();
-
-        assert_eq!(repo.save_count(), 2);
-        assert!(repo
-            .get(&SpaceId::from("space-a"), &DeviceId::new("device-c"))
-            .await
-            .unwrap()
-            .is_some());
-        assert!(repo
-            .get(&SpaceId::from("space-a"), &DeviceId::new("device-d"))
-            .await
-            .unwrap()
-            .is_some());
     }
 
     #[tokio::test]

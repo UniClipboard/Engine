@@ -54,7 +54,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::task::JoinSet;
@@ -221,6 +221,9 @@ pub(crate) struct DispatchClipboardEntryInput {
     ///
     /// `Some(vec![])` 是合法的"无目标"语义,与差集派生空集等价,不报错。
     pub target_filter: Option<Vec<DeviceId>>,
+    /// Monotonic time at which the source clipboard change was observed.
+    /// Manual resends have no new source observation and leave this empty.
+    pub source_started_at: Option<Instant>,
 }
 
 /// One target's dispatch result. `Ok` + `DispatchAck` when the peer
@@ -430,6 +433,7 @@ impl DispatchClipboardEntryUseCase {
         //    can join the outbound dispatch with the inbound ingest.
         let payload_type = payload_type_from_categories(&input.categories);
         let payload_size_bucket = PayloadSizeBucket::from_bytes(input.plaintext.len() as u64);
+        let source_started_at = input.source_started_at;
         let header = Arc::new(header);
         let mut set: JoinSet<PeerDispatchResult> = JoinSet::new();
         for device_id in &candidates {
@@ -454,6 +458,7 @@ impl DispatchClipboardEntryUseCase {
                             payload,
                             payload_type,
                             payload_size_bucket,
+                            source_started_at,
                         )
                         .await
                 }
@@ -570,10 +575,10 @@ mod tests {
     use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryStatus};
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
     use uc_core::ports::{
-        ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, FirstSyncStateError,
-        LocalIdentityError, LocalIdentityPort, PeerAddressError, PeerAddressRecord,
-        PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort, ReachabilityState,
-        SettingsPort,
+        ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, DispatchTiming,
+        FirstSyncStateError, LocalIdentityError, LocalIdentityPort, PeerAddressError,
+        PeerAddressRecord, PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort,
+        ReachabilityState, SettingsPort,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -641,6 +646,7 @@ mod tests {
     fn dispatch_report(outcome: Result<DispatchAck, ClipboardDispatchError>) -> DispatchReport {
         DispatchReport {
             transport: ConnectionChannel::Direct,
+            timing: DispatchTiming::default(),
             outcome,
         }
     }
@@ -1032,6 +1038,7 @@ mod tests {
             // 默认无 filter:历史 verdict 都是"对 peer_addr_repo 全 fan-out"
             // 语义。专门验证 ADR-005 §2.5 resend 路径的 verdict 自行构造 Some。
             target_filter: None,
+            source_started_at: None,
         }
     }
 
@@ -1563,6 +1570,7 @@ mod tests {
             categories,
             entry_id: None,
             target_filter: None,
+            source_started_at: None,
         };
 
         let outcome = uc.execute(text_input).await.expect("dispatch ok");
@@ -1895,6 +1903,7 @@ mod tests {
             categories,
             entry_id: None,
             target_filter: None,
+            source_started_at: None,
         };
 
         uc.execute(file_input).await.expect("dispatch ok");

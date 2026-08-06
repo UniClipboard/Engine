@@ -2,6 +2,7 @@
 
 pub mod analytics;
 pub mod flow;
+pub mod otlp;
 pub mod stages;
 pub mod task_supervision;
 

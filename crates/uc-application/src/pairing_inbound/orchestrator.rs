@@ -73,9 +73,9 @@ pub(crate) struct PairingInboundOrchestrator {
     handshake: Arc<SponsorHandshakeCoordinator>,
     admit_member: Arc<AdmitMemberUc>,
     trust_peer: Arc<TrustPeerUc>,
-    /// Slice 2 Phase 1 · T5：配对成功后 best-effort 把 joiner 的传输地址
-    /// 写入仓库，供后续 `ensure_reachable_all` 直接拨号，避免每次都要走
-    /// rendezvous。写失败不 fail 配对（presence 下轮兜底）。
+    /// Best-effort cache of the verified joiner's transport address. It is
+    /// persisted before confirmation can activate asynchronous membership
+    /// delivery; a later presence pass remains the fallback after a failure.
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     local_device_id: uc_core::DeviceId,
     /// Broadcast channel: fires exactly one [`PairingOutcome`] per matched
@@ -465,6 +465,9 @@ impl PairingInboundOrchestrator {
             return;
         }
 
+        // Persist the address before confirmation can activate asynchronous delivery.
+        self.persist_peer_address(&facts, now).await;
+
         if let Err(err) = self.handshake.confirm(session).await {
             warn!(
                 session = %session,
@@ -485,11 +488,6 @@ impl PairingInboundOrchestrator {
                 joiner_device_id = %facts.device_id.as_str(),
                 "pairing handshake completed"
             );
-            // Slice 2 Phase 1 · T5：best-effort 把 joiner 的传输地址 blob
-            // 写入 `peer_addr_repo`。空 blob（旧 joiner / adapter 未附带）
-            // 跳过 upsert；写失败只 warn 不 fail 配对——presence 下一轮
-            // `ensure_reachable_all` 会再拉兜底。
-            self.persist_peer_address(&facts, now).await;
             // Slice 8b' · fire `pairing_succeeded` before the broadcast so
             // a slow/dead subscriber can't drop the analytics signal.
             // duration_ms is "actual handshake time" measured from the
@@ -518,7 +516,7 @@ impl PairingInboundOrchestrator {
         }
     }
 
-    /// Best-effort 写 joiner 传输地址；blob 为空或写失败都只 warn。
+    /// Best-effort persistence of the verified joiner's transport address.
     async fn persist_peer_address(&self, facts: &JoinerFacts, observed_at: chrono::DateTime<Utc>) {
         if facts.transport_address_blob.is_empty() {
             debug!(
@@ -536,13 +534,13 @@ impl PairingInboundOrchestrator {
             warn!(
                 device_id = %facts.device_id.as_str(),
                 error = %err,
-                "peer_addr_repo.upsert failed after pairing; presence will recover lazily"
+                "peer address persistence failed before pairing confirmation; presence will recover lazily"
             );
         } else {
             debug!(
                 device_id = %facts.device_id.as_str(),
                 blob_len = facts.transport_address_blob.len(),
-                "peer_addr_repo.upsert landed for new joiner"
+                "peer address persisted for new joiner before pairing confirmation"
             );
         }
     }
@@ -605,6 +603,7 @@ mod tests {
     //! the persistence-before-confirm ordering guarantee.
     use super::*;
 
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
@@ -612,7 +611,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
-    use uc_core::membership::{MembershipError, SpaceMember, SponsorCandidateSeed};
+    use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::pairing::invitation::{InvitationCode, PairingInvitation};
     use uc_core::pairing::session_message::{
         JoinerChallengeResponse, PairingReject, PairingSecurityCapability,
@@ -673,22 +672,18 @@ mod tests {
         async fn prepare_sponsor_membership(
             &self,
             _context: SponsorSeedBatchContext,
-        ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError> {
-            Ok(Vec::new())
-        }
-
-        async fn accept_sponsor_seed_batch(
-            &self,
-            _seeds: Vec<SponsorCandidateSeed>,
         ) -> Result<(), SpaceMembershipGossipError> {
             Ok(())
         }
+
+        fn notify_pending_delivery(&self) {}
     }
 
     #[derive(Default)]
     struct RecordingSessionPort {
         sent: StdMutex<Vec<(PairingSessionId, PairingSessionMessage)>>,
         closed: StdMutex<Vec<(PairingSessionId, Option<String>)>>,
+        confirm_requires_persisted_address: StdMutex<Option<Arc<AtomicBool>>>,
     }
     impl RecordingSessionPort {
         fn sent(&self) -> Vec<(PairingSessionId, PairingSessionMessage)> {
@@ -696,6 +691,10 @@ mod tests {
         }
         fn closed(&self) -> Vec<(PairingSessionId, Option<String>)> {
             self.closed.lock().unwrap().clone()
+        }
+
+        fn require_persisted_address_before_confirm(&self, persisted_address: Arc<AtomicBool>) {
+            *self.confirm_requires_persisted_address.lock().unwrap() = Some(persisted_address);
         }
     }
     #[async_trait]
@@ -708,6 +707,19 @@ mod tests {
             session: &PairingSessionId,
             message: PairingSessionMessage,
         ) -> Result<(), SessionError> {
+            if matches!(&message, PairingSessionMessage::Confirm(_)) {
+                if let Some(persisted_address) = self
+                    .confirm_requires_persisted_address
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                {
+                    assert!(
+                        persisted_address.load(Ordering::SeqCst),
+                        "joiner address must be persisted before Confirm triggers delivery"
+                    );
+                }
+            }
             self.sent.lock().unwrap().push((session.clone(), message));
             Ok(())
         }
@@ -1404,6 +1416,41 @@ mod tests {
         })
         .await;
         // 当 orch 持有的最后一个 Arc drop 时，mockall 的析构会校验期望。
+    }
+
+    #[tokio::test]
+    async fn verified_path_persists_joiner_address_before_confirm() {
+        let persisted_address = Arc::new(AtomicBool::new(false));
+        let persisted_address_for_upsert = Arc::clone(&persisted_address);
+        let mut mock = MockPeerAddrRepo::new();
+        mock.expect_upsert().times(1).returning(move |_| {
+            persisted_address_for_upsert.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let mut b = Bundle::happy();
+        b.session_port
+            .require_persisted_address_before_confirm(persisted_address);
+        b.peer_addr_repo = Arc::new(mock);
+        b.holder.insert(pending("OK")).await;
+        let (orch, _outcomes) = b.build(drained_events());
+
+        let session = PairingSessionId::new("s-confirm-address-order");
+        orch.handle_event(PairingSessionEvent::Incoming {
+            session: session.clone(),
+            message: PairingSessionMessage::Request(joiner_request_with_blob(
+                "OK",
+                vec![0xde, 0xad, 0xbe, 0xef],
+            )),
+        })
+        .await;
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session,
+            message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
+                encrypted_challenge: vec![0x11],
+            }),
+        })
+        .await;
     }
 
     #[tokio::test]

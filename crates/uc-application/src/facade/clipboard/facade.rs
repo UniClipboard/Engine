@@ -3,6 +3,7 @@
 //! `ClipboardInboundRuntime`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
 use tracing::instrument;
@@ -164,6 +165,11 @@ struct DispatchVersions {
     wire: u8,
 }
 
+pub(crate) struct ClipboardSyncDispatch<'a> {
+    facade: &'a ClipboardSyncFacade,
+    source_started_at: Option<Instant>,
+}
+
 impl ClipboardSyncFacade {
     /// Reclaim the areas where interrupted directory receives were being
     /// assembled, and report how many were removed.
@@ -215,6 +221,16 @@ impl ClipboardSyncFacade {
             receive_progress: None,
             list_receive_attempts: None,
             host_event_bus: deps.host_event_bus.clone(),
+        }
+    }
+
+    pub(crate) fn dispatch_context(
+        &self,
+        source_started_at: Option<Instant>,
+    ) -> ClipboardSyncDispatch<'_> {
+        ClipboardSyncDispatch {
+            facade: self,
+            source_started_at,
         }
     }
 
@@ -334,6 +350,7 @@ impl ClipboardSyncFacade {
                 // raw-bytes 路径不与某条 entry 绑定,跳过 delivery 落盘。
                 entry_id: None,
                 target_filter: input.target_filter,
+                source_started_at: None,
             })
             .await?;
         Ok(lift_outcome(internal))
@@ -351,6 +368,7 @@ impl ClipboardSyncFacade {
         categories: ClipboardContentCategorySet,
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
+        source_started_at: Option<Instant>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
         let internal = self
             .dispatch_uc
@@ -362,6 +380,7 @@ impl ClipboardSyncFacade {
                 categories,
                 entry_id,
                 target_filter,
+                source_started_at,
             })
             .await?;
         Ok(lift_outcome(internal))
@@ -386,22 +405,9 @@ impl ClipboardSyncFacade {
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
-        let _ = origin; // span metadata only (see doc above)
-        let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
-        let (plaintext, snapshot_hash) = encode_snapshot_to_v3_bytes(&snapshot)
-            .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
-        self.dispatch_internal(
-            plaintext,
-            snapshot_hash,
-            DispatchVersions {
-                payload: 3,
-                wire: ClipboardHeader::CURRENT_VERSION,
-            },
-            categories,
-            entry_id,
-            target_filter,
-        )
-        .await
+        self.dispatch_context(None)
+            .dispatch_snapshot(snapshot, origin, entry_id, target_filter)
+            .await
     }
 
     /// 编码并发送带 Slice 3 blob 引用的剪贴板快照。
@@ -417,23 +423,9 @@ impl ClipboardSyncFacade {
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
-        let _ = origin;
-        let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
-        let (plaintext, snapshot_hash) =
-            encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &blob_refs)
-                .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
-        self.dispatch_internal(
-            plaintext,
-            snapshot_hash,
-            DispatchVersions {
-                payload: 3,
-                wire: ClipboardHeader::CURRENT_VERSION,
-            },
-            categories,
-            entry_id,
-            target_filter,
-        )
-        .await
+        self.dispatch_context(None)
+            .dispatch_snapshot_with_blob_refs(snapshot, blob_refs, origin, entry_id, target_filter)
+            .await
     }
 
     /// 编码并发送带目录成员清单的剪贴板快照。
@@ -442,6 +434,96 @@ impl ClipboardSyncFacade {
     /// `manifest` 让接收端能原子重建目录树,因此走 `DIRECTORY_VERSION` wire。
     #[instrument(skip_all, fields(rep_count = snapshot.representations.len(), blob_ref_count = blob_refs.len(), member_count = manifest.members.len(), origin = ?origin))]
     pub async fn dispatch_snapshot_with_blob_refs_and_file_set(
+        &self,
+        snapshot: SystemClipboardSnapshot,
+        blob_refs: Vec<V3BlobRef>,
+        manifest: crate::usecases::clipboard_sync::apply_inbound::InboundFileSetManifest,
+        origin: ClipboardChangeOrigin,
+        entry_id: Option<EntryId>,
+        target_filter: Option<Vec<DeviceId>>,
+    ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
+        self.dispatch_context(None)
+            .dispatch_snapshot_with_blob_refs_and_file_set(
+                snapshot,
+                blob_refs,
+                manifest,
+                origin,
+                entry_id,
+                target_filter,
+            )
+            .await
+    }
+
+    /// Crate-internal accessor — hand the inner dispatch use case to
+    /// callers that need to feed `DispatchClipboardEntryInput` directly
+    /// (currently only [`ResendEntryUseCase`] via
+    /// [`ClipboardOutboundFacade`]). The blanket impl
+    /// `DispatchEntryRunner for DispatchClipboardEntryUseCase` provides
+    /// the trait-object handle without exposing the concrete use case
+    /// across the crate boundary.
+    pub(crate) fn dispatch_runner(&self) -> Arc<dyn DispatchEntryRunner> {
+        Arc::clone(&self.dispatch_uc) as Arc<dyn DispatchEntryRunner>
+    }
+}
+
+impl ClipboardSyncDispatch<'_> {
+    pub(crate) async fn dispatch_snapshot(
+        &self,
+        snapshot: SystemClipboardSnapshot,
+        origin: ClipboardChangeOrigin,
+        entry_id: Option<EntryId>,
+        target_filter: Option<Vec<DeviceId>>,
+    ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
+        let _ = origin; // span metadata only (see facade documentation)
+        let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
+        let (plaintext, snapshot_hash) = encode_snapshot_to_v3_bytes(&snapshot)
+            .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
+        self.facade
+            .dispatch_internal(
+                plaintext,
+                snapshot_hash,
+                DispatchVersions {
+                    payload: 3,
+                    wire: ClipboardHeader::CURRENT_VERSION,
+                },
+                categories,
+                entry_id,
+                target_filter,
+                self.source_started_at,
+            )
+            .await
+    }
+
+    pub(crate) async fn dispatch_snapshot_with_blob_refs(
+        &self,
+        snapshot: SystemClipboardSnapshot,
+        blob_refs: Vec<V3BlobRef>,
+        origin: ClipboardChangeOrigin,
+        entry_id: Option<EntryId>,
+        target_filter: Option<Vec<DeviceId>>,
+    ) -> Result<DispatchEntryOutcome, ClipboardSyncError> {
+        let _ = origin;
+        let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
+        let (plaintext, snapshot_hash) =
+            encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &blob_refs)
+                .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
+        self.facade
+            .dispatch_internal(
+                plaintext,
+                snapshot_hash,
+                DispatchVersions {
+                    payload: 3,
+                    wire: ClipboardHeader::CURRENT_VERSION,
+                },
+                categories,
+                entry_id,
+                target_filter,
+                self.source_started_at,
+            )
+            .await
+    }
+
+    pub(crate) async fn dispatch_snapshot_with_blob_refs_and_file_set(
         &self,
         snapshot: SystemClipboardSnapshot,
         blob_refs: Vec<V3BlobRef>,
@@ -459,29 +541,20 @@ impl ClipboardSyncFacade {
                 &manifest,
             )
             .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
-        self.dispatch_internal(
-            plaintext,
-            snapshot_hash,
-            DispatchVersions {
-                payload: 3,
-                wire: ClipboardHeader::DIRECTORY_VERSION,
-            },
-            categories,
-            entry_id,
-            target_filter,
-        )
-        .await
-    }
-
-    /// Crate-internal accessor — hand the inner dispatch use case to
-    /// callers that need to feed `DispatchClipboardEntryInput` directly
-    /// (currently only [`ResendEntryUseCase`] via
-    /// [`ClipboardOutboundFacade`]). The blanket impl
-    /// `DispatchEntryRunner for DispatchClipboardEntryUseCase` provides
-    /// the trait-object handle without exposing the concrete use case
-    /// across the crate boundary.
-    pub(crate) fn dispatch_runner(&self) -> Arc<dyn DispatchEntryRunner> {
-        Arc::clone(&self.dispatch_uc) as Arc<dyn DispatchEntryRunner>
+        self.facade
+            .dispatch_internal(
+                plaintext,
+                snapshot_hash,
+                DispatchVersions {
+                    payload: 3,
+                    wire: ClipboardHeader::DIRECTORY_VERSION,
+                },
+                categories,
+                entry_id,
+                target_filter,
+                self.source_started_at,
+            )
+            .await
     }
 }
 
@@ -616,6 +689,7 @@ mod tests {
     fn dispatch_report(outcome: Result<DispatchAck, ClipboardDispatchError>) -> DispatchReport {
         DispatchReport {
             transport: ConnectionChannel::Direct,
+            timing: uc_core::ports::DispatchTiming::default(),
             outcome,
         }
     }

@@ -350,7 +350,6 @@ impl SpaceFacade {
             admit_member_uc,
             trust_peer_uc,
             setup_status,
-            membership_gossip,
             peer_addr_repo,
             clock,
             analytics,
@@ -1690,19 +1689,11 @@ mod tests {
         async fn prepare_sponsor_membership(
             &self,
             _context: crate::facade::SponsorSeedBatchContext,
-        ) -> Result<
-            Vec<uc_core::membership::SponsorCandidateSeed>,
-            crate::facade::SpaceMembershipGossipError,
-        > {
-            Ok(Vec::new())
-        }
-
-        async fn accept_sponsor_seed_batch(
-            &self,
-            _seeds: Vec<uc_core::membership::SponsorCandidateSeed>,
         ) -> Result<(), crate::facade::SpaceMembershipGossipError> {
             Ok(())
         }
+
+        fn notify_pending_delivery(&self) {}
     }
 
     fn default_fingerprint() -> IdentityFingerprint {

@@ -927,8 +927,12 @@ impl IrohNodeBuilder {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         presence: Arc<dyn PresencePort>,
     ) -> ClipboardHandlers {
-        let receiver =
-            IrohClipboardReceiverAdapter::new(member_repo, peer_admission, fingerprint_factory);
+        let receiver = IrohClipboardReceiverAdapter::new(
+            Arc::clone(&self.endpoint),
+            member_repo,
+            peer_admission,
+            fingerprint_factory,
+        );
         let handler = receiver.handler();
 
         let builder = self

@@ -29,6 +29,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -39,7 +40,7 @@ use tracing::{debug, instrument, warn};
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, ConnectionChannel, DispatchAck,
-    DispatchReport, PeerAddressRepositoryPort, PresencePort, SyncPayload,
+    DispatchReport, DispatchTiming, PeerAddressRepositoryPort, PresencePort, SyncPayload,
 };
 
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
@@ -219,24 +220,32 @@ impl IrohClipboardDispatchAdapter {
         connection: &Connection,
         header: &ClipboardHeader,
         payload: &SyncPayload,
+        timing: &mut DispatchTiming,
     ) -> Result<DispatchAck, ClipboardDispatchError> {
-        let (mut send, mut recv) = connection
-            .open_bi()
-            .await
-            .map_err(|err| ClipboardDispatchError::Io(format!("open_bi: {err}")))?;
+        let stream_started_at = Instant::now();
+        let stream = connection.open_bi().await;
+        timing.stream_open_ms = Some(duration_ms(stream_started_at.elapsed()));
+        let (mut send, mut recv) =
+            stream.map_err(|err| ClipboardDispatchError::Io(format!("open_bi: {err}")))?;
 
         // Write the frame + close the send half so the peer's read_exact on
         // the payload length / body reaches a terminal state.
-        clipboard_wire::write_frame(&mut send, header, &payload.ciphertext)
-            .await
-            .map_err(map_encode_err)?;
-        send.finish()
-            .map_err(|err| ClipboardDispatchError::Io(format!("send.finish: {err}")))?;
+        let frame_write_started_at = Instant::now();
+        let frame_write =
+            match clipboard_wire::write_frame(&mut send, header, &payload.ciphertext).await {
+                Ok(()) => send
+                    .finish()
+                    .map_err(|err| ClipboardDispatchError::Io(format!("send.finish: {err}"))),
+                Err(error) => Err(map_encode_err(error)),
+            };
+        timing.frame_write_ms = Some(duration_ms(frame_write_started_at.elapsed()));
+        frame_write?;
 
         let mut ack_buf = [0u8; 1];
-        recv.read_exact(&mut ack_buf)
-            .await
-            .map_err(|err| ClipboardDispatchError::Io(format!("ack read: {err}")))?;
+        let receiver_apply_wait_started_at = Instant::now();
+        let ack_read = recv.read_exact(&mut ack_buf).await;
+        timing.receiver_apply_wait_ms = Some(duration_ms(receiver_apply_wait_started_at.elapsed()));
+        ack_read.map_err(|err| ClipboardDispatchError::Io(format!("ack read: {err}")))?;
 
         // Any unknown code is adapter-level rejection rather than an ignored
         // success.
@@ -262,6 +271,8 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         header: &ClipboardHeader,
         payload: SyncPayload,
     ) -> DispatchReport {
+        let mut timing = DispatchTiming::default();
+
         // 1. Early-reject oversized payloads at the adapter boundary so
         //    the caller gets a clean error without us opening a stream
         //    just to tear it back down. This is a *local* policy check —
@@ -272,6 +283,7 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         if payload.ciphertext.len() > clipboard_wire::MAX_PAYLOAD_SIZE as usize {
             return DispatchReport {
                 transport: ConnectionChannel::Unknown,
+                timing,
                 outcome: Err(ClipboardDispatchError::LocalPolicyExceeded(format!(
                     "ciphertext {} bytes exceeds wire MAX_PAYLOAD_SIZE {}",
                     payload.ciphertext.len(),
@@ -282,11 +294,15 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
 
         // 2. Resolve address; missing / bad record = offline. No dial, so
         //    no path established → transport Unknown.
-        let addr = match self.resolve_addr(target).await {
+        let address_resolution_started_at = Instant::now();
+        let addr = self.resolve_addr(target).await;
+        timing.address_resolution_ms = duration_ms(address_resolution_started_at.elapsed());
+        let addr = match addr {
             Some(a) => a,
             None => {
                 return DispatchReport {
                     transport: ConnectionChannel::Unknown,
+                    timing,
                     outcome: Err(ClipboardDispatchError::Offline),
                 }
             }
@@ -302,7 +318,10 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         //    already fed the verdict to PresencePort so this branch only
         //    has to surface the public error. No path established →
         //    transport Unknown.
-        let connection = match self.dial_single_flight(target, addr).await {
+        let connection_started_at = Instant::now();
+        let connection = self.dial_single_flight(target, addr).await;
+        timing.connection_ms = Some(duration_ms(connection_started_at.elapsed()));
+        let connection = match connection {
             Ok(connection) => connection,
             Err(err) => {
                 debug!(
@@ -311,6 +330,7 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
                 );
                 return DispatchReport {
                     transport: ConnectionChannel::Unknown,
+                    timing,
                     outcome: Err(ClipboardDispatchError::Offline),
                 };
             }
@@ -323,12 +343,15 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
             drop(connection);
             return DispatchReport {
                 transport,
+                timing,
                 outcome: Err(ClipboardDispatchError::PeerIncompatible),
             };
         }
 
         // 4. Write the frame + read the ack on a fresh bi-stream.
-        let outcome = self.send_and_ack(&connection, header, &payload).await;
+        let outcome = self
+            .send_and_ack(&connection, header, &payload, &mut timing)
+            .await;
 
         // 5. Probe the path that actually served this attempt while the
         //    connection is still alive. Sampling right after the send/ack
@@ -345,8 +368,16 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         //    cache connections.
         drop(connection);
 
-        DispatchReport { transport, outcome }
+        DispatchReport {
+            transport,
+            timing,
+            outcome,
+        }
     }
+}
+
+fn duration_ms(duration: Duration) -> u32 {
+    duration.as_millis().min(u32::MAX as u128) as u32
 }
 
 /// Map wire-encoding failures into the public error type without leaking
@@ -574,6 +605,37 @@ mod tests {
             .outcome
             .expect("dispatch succeeds");
         assert_eq!(ack, DispatchAck::Accepted);
+
+        peer_router.shutdown().await.expect("router shutdown");
+    }
+
+    #[tokio::test]
+    async fn dispatch_records_timing_for_accepted_delivery() {
+        let (peer_endpoint, peer_router) = spawn_ack_endpoint(AckCode::Accepted.as_byte()).await;
+        let peer_addr = peer_endpoint.addr();
+
+        let sender_endpoint = bind_endpoint().await;
+        wait_for_direct_addrs(&sender_endpoint).await;
+        let repo = Arc::new(MemRepo::default());
+        let target = DeviceId::new("timed-target");
+        seed_addr(&repo, &target, &peer_addr).await;
+
+        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
+        let report = adapter
+            .dispatch(
+                &target,
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"timed delivery"),
+                },
+            )
+            .await;
+
+        assert!(matches!(report.outcome, Ok(DispatchAck::Accepted)));
+        assert!(report.timing.connection_ms.is_some());
+        assert!(report.timing.stream_open_ms.is_some());
+        assert!(report.timing.frame_write_ms.is_some());
+        assert!(report.timing.receiver_apply_wait_ms.is_some());
 
         peer_router.shutdown().await.expect("router shutdown");
     }

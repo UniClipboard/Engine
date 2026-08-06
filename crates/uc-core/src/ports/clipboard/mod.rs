@@ -61,7 +61,7 @@ pub use self_write_ledger::{SelfWriteAttribution, SelfWriteLedgerPort, SelfWrite
 pub use spool_queue::{SpoolQueuePort, SpoolRequest};
 pub use sync_dispatch::{
     ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, DispatchAck, DispatchReport,
-    SyncPayload,
+    DispatchTiming, SyncPayload,
 };
 pub use sync_receiver::{
     ClipboardReceiverPort, InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt,

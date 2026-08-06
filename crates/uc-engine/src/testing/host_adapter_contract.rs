@@ -2354,9 +2354,7 @@ async fn engine_start_builds_a_resumable_real_session() {
             },))
             .await
             .unwrap(),
-        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::EntryNotFound {
-            entry_id: "missing-entry".into(),
-        },)
+        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::NoEligibleTargets,)
     );
 
     let local_member = engine

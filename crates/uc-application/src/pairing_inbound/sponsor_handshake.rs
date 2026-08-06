@@ -471,8 +471,7 @@ impl SponsorHandshakeCoordinator {
             )
             .await
             .map_err(|error| format!("admit_group_member: {error}"))?;
-        let membership_seeds = self
-            .membership_gossip
+        self.membership_gossip
             .prepare_sponsor_membership(SponsorSeedBatchContext {
                 space_id: ctx.space_id.clone(),
                 sponsor_device_id: sender_device_id,
@@ -504,16 +503,17 @@ impl SponsorHandshakeCoordinator {
             welcome: admission.welcome,
             encrypted_key_catalog: admission.encrypted_key_catalog,
             group_epoch: admission.group_epoch,
-            membership_seeds,
         });
         self.pairing_session
             .send(session, confirm)
             .await
             .map_err(|e| format!("send Confirm: {e}"))?;
+        self.membership_gossip.notify_pending_delivery();
         info!(
             session = %session,
             transport_address_blob_len,
-            "Confirm sent to joiner"
+            membership_delivery_triggered = true,
+            "Confirm sent to joiner; pending membership delivery activated"
         );
         self.pairing_session
             .close(session, Some("handshake confirmed".into()))
@@ -589,9 +589,7 @@ mod tests {
     use async_trait::async_trait;
 
     use uc_core::ids::DeviceId;
-    use uc_core::membership::{
-        MemberRepositoryPort, MembershipError, SpaceMember, SponsorCandidateSeed,
-    };
+    use uc_core::membership::{MemberRepositoryPort, MembershipError, SpaceMember};
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::ports::pairing::{DialError, DialOutcome, SessionError};
     use uc_core::ports::space::{GroupAdmissionPort, PrepareAdmissionOfferPort, SpaceAccessError};
@@ -727,11 +725,8 @@ mod tests {
             async fn prepare_sponsor_membership(
                 &self,
                 context: SponsorSeedBatchContext,
-            ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError>;
-            async fn accept_sponsor_seed_batch(
-                &self,
-                seeds: Vec<SponsorCandidateSeed>,
             ) -> Result<(), SpaceMembershipGossipError>;
+            fn notify_pending_delivery(&self);
         }
     }
 
@@ -761,7 +756,11 @@ mod tests {
         gossip
             .expect_prepare_sponsor_membership()
             .times(0..=1)
-            .returning(|_| Ok(Vec::new()));
+            .returning(|_| Ok(()));
+        gossip
+            .expect_notify_pending_delivery()
+            .times(0..=1)
+            .returning(|| ());
         Arc::new(gossip)
     }
 
@@ -1195,19 +1194,11 @@ mod tests {
                     && context.existing_member_updates[0].recipient()
                         == &DeviceId::new("bob-device")
             })
-            .returning(|context| {
-                Ok(vec![SponsorCandidateSeed {
-                    space_id: context.space_id,
-                    device_id: DeviceId::new("bob-device"),
-                    device_name_hint: "Bob".into(),
-                    identity_fingerprint_hint: sponsor_fp(),
-                    transport_address_blob: b"bob-address".to_vec(),
-                    address_observed_at_ms: 1,
-                    source_device_id: context.sponsor_device_id,
-                    security_updates: Vec::new(),
-                    expires_at_ms: i64::MAX,
-                }])
-            });
+            .returning(|_| Ok(()));
+        membership_gossip
+            .expect_notify_pending_delivery()
+            .times(1)
+            .returning(|| ());
         let member = |device_id: &str| SpaceMember {
             device_id: DeviceId::new(device_id),
             device_name: device_id.to_string(),
@@ -1243,8 +1234,7 @@ mod tests {
         let PairingSessionMessage::Confirm(confirm) = &sent[1].1 else {
             panic!("expected Confirm");
         };
-        assert_eq!(confirm.membership_seeds.len(), 1);
-        assert_eq!(confirm.membership_seeds[0].device_id.as_str(), "bob-device");
+        assert_eq!(confirm.group_epoch, 2);
     }
 
     #[tokio::test]

@@ -91,6 +91,9 @@ pub struct ClipboardOutboundInput {
     pub entry_id: String,
     pub snapshot: SystemClipboardSnapshot,
     pub origin: ClipboardChangeOrigin,
+    /// Monotonic time at which the source clipboard change was observed.
+    /// `None` means this dispatch did not originate from a new local copy.
+    pub source_started_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +236,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
         let entry_id_str = input.entry_id.clone();
         let snapshot_rep_count = input.snapshot.representations.len();
         let dispatch_start = Instant::now();
+        let source_started_at = input.source_started_at;
 
         let entry_id = EntryId::from(input.entry_id.as_str());
         let display_metadata = file_display_metadata(&input.snapshot);
@@ -421,10 +425,11 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
         }
 
         let dispatch_phase_start = Instant::now();
+        let dispatch = self.clipboard_sync.dispatch_context(source_started_at);
         // LocalCapture 路径:把 entry_id 透传给 dispatch,fan-out 完成后落盘
         // 每个对端的投递结果(供视图层追踪"这条 entry 同步到了哪些设备")。
         let dispatch_result = if let Some(manifest) = file_set_manifest {
-            self.clipboard_sync
+            dispatch
                 .dispatch_snapshot_with_blob_refs_and_file_set(
                     clipboard_intent.snapshot,
                     blob_refs,
@@ -435,7 +440,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 )
                 .await
         } else if blob_refs.is_empty() {
-            self.clipboard_sync
+            dispatch
                 .dispatch_snapshot(
                     clipboard_intent.snapshot,
                     input.origin,
@@ -444,7 +449,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 )
                 .await
         } else {
-            self.clipboard_sync
+            dispatch
                 .dispatch_snapshot_with_blob_refs(
                     clipboard_intent.snapshot,
                     blob_refs,
@@ -1437,6 +1442,7 @@ mod tests {
                         file_set_v1_component: None,
                     },
                     origin: ClipboardChangeOrigin::LocalCapture,
+                    source_started_at: None,
                 },
                 Some(vec![DeviceId::new("peer-a"), DeviceId::new("peer-b")]),
             )

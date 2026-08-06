@@ -19,18 +19,22 @@
 //! - `mark_*` errors are warn-only and never abort the dial.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::warn;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
-    ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, DispatchReport,
+    ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, DispatchReport, DispatchTiming,
     FirstSyncStatePort, PresencePort, ReachabilityState, SyncPayload,
 };
 use uc_observability_contract::analytics::{
     AnalyticsPort, Direction, Event, PayloadSizeBucket, PayloadType, SyncDeferReason,
     SyncDeferredProps, SyncEventProps, TransportType,
 };
+use uc_observability_contract::otlp::{
+    log_clipboard_sync_stage, ClipboardSyncStage as OtlpClipboardSyncStage, ClipboardSyncTiming,
+};
+use uc_observability_contract::FlowId;
 
 use super::{
     dispatch_failure_stage, map_dispatch_error_to_failure_reason, transport_type_from_channel,
@@ -101,6 +105,7 @@ impl PerPeerDispatcher {
         payload: SyncPayload,
         payload_type: PayloadType,
         payload_size_bucket: PayloadSizeBucket,
+        source_started_at: Option<Instant>,
     ) -> PeerDispatchResult {
         // Preflight presence, then fire attempted (ordering: attempted must
         // precede the dial / deferral so funnel parity holds).
@@ -128,11 +133,20 @@ impl PerPeerDispatcher {
         }
 
         let started_at = Instant::now();
-        let DispatchReport { transport, outcome } = self
+        let source_to_dispatch_ms = source_started_at.map(|source_started_at| {
+            duration_ms(started_at.saturating_duration_since(source_started_at))
+        });
+        let DispatchReport {
+            transport,
+            timing,
+            outcome,
+        } = self
             .clipboard_dispatch
             .dispatch(&device_id, &header, payload)
             .await;
-        let duration_ms = started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        let dispatch_to_remote_commit_ms = duration_ms(started_at.elapsed());
+        let copy_to_remote_commit_ms =
+            source_started_at.map(|source_started_at| duration_ms(source_started_at.elapsed()));
         // Translate the path the adapter actually used (probed post-settle)
         // into the analytics bucket. `Unknown` when no active path resolved —
         // e.g. a dial failure or a mid-handshake snapshot.
@@ -145,7 +159,7 @@ impl PerPeerDispatcher {
                 payload_size_bucket,
                 transport_type,
                 peer_os: None,
-                sync_latency_ms: Some(duration_ms),
+                sync_latency_ms: Some(dispatch_to_remote_commit_ms),
                 failure_reason: None,
                 failure_stage: None,
             }),
@@ -163,6 +177,21 @@ impl PerPeerDispatcher {
         let is_ok = outcome.is_ok();
         self.analytics.capture(event);
 
+        if is_ok {
+            let (flow_id, flow_synthetic) = timing_flow_id(&header);
+            self.capture_completed_stages(
+                &flow_id,
+                flow_synthetic,
+                payload_type,
+                payload_size_bucket,
+                transport_type,
+                source_to_dispatch_ms,
+                copy_to_remote_commit_ms,
+                dispatch_to_remote_commit_ms,
+                timing,
+            );
+        }
+
         // First-success funnel: fires the generic clipboard event and (if
         // File) the file-specific event. Both flags dedup independently.
         if is_ok {
@@ -171,7 +200,7 @@ impl PerPeerDispatcher {
                     direction: Direction::Outbound,
                     peer_os: None,
                     transport_type,
-                    duration_ms,
+                    duration_ms: dispatch_to_remote_commit_ms,
                 }),
                 Ok(false) => {}
                 Err(err) => warn!(
@@ -197,18 +226,129 @@ impl PerPeerDispatcher {
 
         (device_id, outcome)
     }
+
+    fn capture_completed_stages(
+        &self,
+        flow_id: &FlowId,
+        flow_synthetic: bool,
+        payload_type: PayloadType,
+        payload_size_bucket: PayloadSizeBucket,
+        transport_type: TransportType,
+        source_to_dispatch_ms: Option<u32>,
+        copy_to_remote_commit_ms: Option<u32>,
+        dispatch_to_remote_commit_ms: u32,
+        timing: DispatchTiming,
+    ) {
+        let log = |stage, duration_ms| {
+            log_clipboard_sync_stage(ClipboardSyncTiming {
+                flow_id,
+                flow_synthetic,
+                direction: Direction::Outbound,
+                payload_type,
+                payload_size_bucket,
+                transport_type,
+                stage,
+                duration_ms,
+            });
+        };
+
+        if let Some(duration_ms) = source_to_dispatch_ms {
+            log(OtlpClipboardSyncStage::SourceToDispatch, duration_ms);
+        }
+        log(
+            OtlpClipboardSyncStage::AddressResolution,
+            timing.address_resolution_ms,
+        );
+        if let Some(duration_ms) = timing.connection_ms {
+            log(OtlpClipboardSyncStage::Connection, duration_ms);
+        }
+        if let Some(duration_ms) = timing.stream_open_ms {
+            log(OtlpClipboardSyncStage::StreamOpen, duration_ms);
+        }
+        if let Some(duration_ms) = timing.frame_write_ms {
+            log(OtlpClipboardSyncStage::FrameWrite, duration_ms);
+        }
+        if let Some(duration_ms) = timing.receiver_apply_wait_ms {
+            log(OtlpClipboardSyncStage::ReceiverApplyWait, duration_ms);
+        }
+        log(
+            OtlpClipboardSyncStage::DispatchToRemoteCommit,
+            dispatch_to_remote_commit_ms,
+        );
+        if let Some(duration_ms) = copy_to_remote_commit_ms {
+            log(OtlpClipboardSyncStage::CopyToRemoteCommit, duration_ms);
+        }
+    }
+}
+
+fn timing_flow_id(header: &ClipboardHeader) -> (FlowId, bool) {
+    match header.flow_id.as_deref().map(FlowId::parse_str) {
+        Some(Ok(flow_id)) => (flow_id, false),
+        Some(Err(_)) | None => (FlowId::generate(), true),
+    }
+}
+
+fn duration_ms(duration: Duration) -> u32 {
+    duration.as_millis().min(u32::MAX as u128) as u32
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
     use super::super::test_support::*;
     use super::*;
 
-    use uc_core::ports::{ConnectionChannel, DispatchAck};
+    use tracing_subscriber::fmt::MakeWriter;
+    use uc_core::ports::{ConnectionChannel, DispatchAck, DispatchTiming};
     use uc_observability_contract::analytics::{FailureReason, SyncFailureStage};
+    use uc_observability_contract::FlowId;
+
+    #[derive(Clone, Default)]
+    struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct Writer(CapturedWriter);
+
+    impl Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                 .0
+                .lock()
+                .expect("captured log writer lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturedWriter {
+        type Writer = Writer;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            Writer(self.clone())
+        }
+    }
+
+    impl CapturedWriter {
+        fn output(&self) -> String {
+            String::from_utf8(self.0.lock().expect("captured log writer lock").clone())
+                .expect("UTF-8 log output")
+        }
+    }
 
     fn header() -> Arc<ClipboardHeader> {
         Arc::new(test_header())
+    }
+
+    fn header_with_flow() -> (Arc<ClipboardHeader>, FlowId) {
+        let flow_id = FlowId::generate();
+        let mut header = test_header();
+        header.flow_id = Some(flow_id.to_string());
+        (Arc::new(header), flow_id)
     }
 
     fn bucket() -> PayloadSizeBucket {
@@ -222,7 +362,17 @@ mod tests {
         transport: ConnectionChannel,
         outcome: Result<DispatchAck, ClipboardDispatchError>,
     ) -> DispatchReport {
-        DispatchReport { transport, outcome }
+        DispatchReport {
+            transport,
+            outcome,
+            timing: DispatchTiming {
+                address_resolution_ms: 11,
+                connection_ms: Some(22),
+                stream_open_ms: Some(33),
+                frame_write_ms: Some(44),
+                receiver_apply_wait_ms: Some(55),
+            },
+        }
     }
 
     /// Online (Unknown) peer + accepting dispatch: `sync_attempted` fires
@@ -251,6 +401,7 @@ mod tests {
                 sync_payload(),
                 PayloadType::Text,
                 bucket(),
+                None,
             )
             .await;
 
@@ -277,6 +428,97 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn dispatch_one_writes_relay_stage_timings_to_the_otlp_log() {
+        let mut dispatch = MockDispatch::new();
+        dispatch
+            .expect_dispatch()
+            .times(1)
+            .returning(|_, _, _| report(ConnectionChannel::Relay, Ok(DispatchAck::Accepted)));
+
+        let dispatcher = PerPeerDispatcher::new(
+            Arc::new(dispatch),
+            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(CapturingAnalyticsSink::default()),
+            Arc::new(AllMarkedFirstSyncState),
+        );
+        let (header, flow_id) = header_with_flow();
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(writer.clone())
+            .finish();
+        let tracing_dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&tracing_dispatch);
+
+        let (_, outcome) = dispatcher
+            .dispatch_one(
+                dev("peer-relay"),
+                header,
+                sync_payload(),
+                PayloadType::Text,
+                bucket(),
+                Some(std::time::Instant::now()),
+            )
+            .await;
+
+        assert!(matches!(outcome, Ok(DispatchAck::Accepted)));
+
+        let output = writer.output();
+        assert!(output.contains(&format!("flow_id={flow_id}")));
+        assert!(output.contains("sync_transport=\"relay\""));
+        assert!(output.contains("sync_stage=\"address_resolution\""));
+        assert!(output.contains("sync_stage=\"receiver_apply_wait\""));
+        assert!(output.contains("sync_stage=\"copy_to_remote_commit\""));
+    }
+
+    #[tokio::test]
+    async fn dispatch_one_writes_direct_stage_timings_to_the_otlp_log() {
+        let mut dispatch = MockDispatch::new();
+        dispatch
+            .expect_dispatch()
+            .times(1)
+            .returning(|_, _, _| report(ConnectionChannel::Direct, Ok(DispatchAck::Accepted)));
+
+        let dispatcher = PerPeerDispatcher::new(
+            Arc::new(dispatch),
+            Arc::new(StaticPresence(ReachabilityState::Unknown)),
+            Arc::new(CapturingAnalyticsSink::default()),
+            Arc::new(AllMarkedFirstSyncState),
+        );
+        let (header, flow_id) = header_with_flow();
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(writer.clone())
+            .finish();
+        let tracing_dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&tracing_dispatch);
+
+        let (_, outcome) = dispatcher
+            .dispatch_one(
+                dev("peer-direct"),
+                header,
+                sync_payload(),
+                PayloadType::Text,
+                bucket(),
+                None,
+            )
+            .await;
+
+        assert!(matches!(outcome, Ok(DispatchAck::Accepted)));
+
+        let output = writer.output();
+        assert!(output.contains(&format!("flow_id={flow_id}")));
+        assert!(output.contains("sync_transport=\"p2p_direct\""));
+        assert!(output.contains("sync_stage=\"address_resolution\""));
+        assert!(output.contains("sync_stage=\"dispatch_to_remote_commit\""));
+        assert!(!output.contains("peer-direct"));
+        assert!(!output.contains("ciphertext"));
+    }
+
     /// Presence `Offline` short-circuits: the dispatch port is NEVER touched,
     /// `sync_attempted` still fires (funnel parity), and the deferral is
     /// reported via `sync_deferred(PeerKnownOffline)` + `Err(Offline)`.
@@ -300,6 +542,7 @@ mod tests {
                 sync_payload(),
                 PayloadType::Text,
                 bucket(),
+                None,
             )
             .await;
 
@@ -345,6 +588,7 @@ mod tests {
                 sync_payload(),
                 PayloadType::Text,
                 bucket(),
+                None,
             )
             .await;
 
@@ -394,6 +638,7 @@ mod tests {
                 sync_payload(),
                 PayloadType::File,
                 bucket(),
+                None,
             )
             .await;
 
@@ -457,6 +702,7 @@ mod tests {
                     sync_payload(),
                     PayloadType::Text,
                     bucket(),
+                    None,
                 )
                 .await;
 

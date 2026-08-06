@@ -309,7 +309,6 @@ fn outcome_default() -> JoinerHandshakeOutcome {
         // Phase 098 默认 None：switch_space tests 关注迁移流程而非 person
         // 切换；PR 8 才接 switch_space 的 identify。
         sponsor_space_person_id: None,
-        membership_seeds: Vec::new(),
     }
 }
 fn already_setup() -> SetupStatus {

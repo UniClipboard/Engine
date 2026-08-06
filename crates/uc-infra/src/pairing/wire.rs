@@ -26,10 +26,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use uc_core::ids::{DeviceId, SpaceId};
-use uc_core::membership::{
-    validate_sponsor_candidate_seed_batch, CandidateMergeError, RelayedSecurityUpdate,
-    SponsorCandidateSeed,
-};
 use uc_core::pairing::{
     InvitationCode, JoinerChallengeResponse, JoinerRequest, PairingReject, PairingRejectReason,
     PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer, SponsorConfirm,
@@ -47,11 +43,12 @@ use uc_core::security::IdentityFingerprint;
 ///   字段是 `Option`：sponsor 端 telemetry 身份未确立时编为 `None`，joiner 端
 ///   见 `None` 退回 Solo（schema doc §3.4 / task_plan §开放问题 2 决策 A）。
 ///
-/// - v4 → v5：在 `SponsorConfirm` 上新增候选通讯录种子。
+/// - v5 → v6：移除 `SponsorConfirm` 上的候选通讯录种子。已有设备资料改走
+///   可确认、可重试的成员收敛通道，避免最终确认承担无界资料。
 ///
 /// postcard 非 schema-兼容，每次新增字段都升版本号；旧 peer 发来的低版本帧会走
 /// [`WireDecodeError::UnsupportedVersion`] 分支显式拒连，让排障信号明确。
-const WIRE_VERSION: u8 = 5;
+const WIRE_VERSION: u8 = 6;
 
 // ============================================================================
 // Wire types (infra-local)
@@ -132,28 +129,6 @@ struct WireSponsorConfirm {
     welcome: Vec<u8>,
     encrypted_key_catalog: Vec<u8>,
     group_epoch: u64,
-    membership_seeds: Vec<WireSponsorCandidateSeed>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct WireSponsorCandidateSeed {
-    space_id: String,
-    device_id: String,
-    device_name_hint: String,
-    identity_fingerprint_hint: String,
-    transport_address_blob: Vec<u8>,
-    address_observed_at_ms: i64,
-    source_device_id: String,
-    security_updates: Vec<WireRelayedSecurityUpdate>,
-    expires_at_ms: i64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct WireRelayedSecurityUpdate {
-    previous_epoch: u64,
-    next_epoch: u64,
-    payload: Vec<u8>,
-    digest: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -178,8 +153,6 @@ enum WireRejectReason {
 pub enum WireEncodeError {
     #[error("postcard encode failed: {0}")]
     Postcard(#[from] postcard::Error),
-    #[error("invalid membership seeds: {0}")]
-    InvalidMembershipSeeds(#[from] CandidateMergeError),
 }
 
 #[derive(Debug, Error)]
@@ -201,9 +174,6 @@ pub enum WireDecodeError {
 
     #[error("unsupported pairing security capability {0}")]
     UnsupportedSecurityCapability(u8),
-
-    #[error("invalid membership seeds: {0}")]
-    InvalidMembershipSeeds(CandidateMergeError),
 }
 
 impl From<postcard::Error> for WireDecodeError {
@@ -218,9 +188,6 @@ impl From<postcard::Error> for WireDecodeError {
 
 /// Serialize a [`PairingSessionMessage`] for transport.
 pub fn encode(message: &PairingSessionMessage) -> Result<Vec<u8>, WireEncodeError> {
-    if let PairingSessionMessage::Confirm(confirm) = message {
-        validate_sponsor_candidate_seed_batch(&confirm.membership_seeds)?;
-    }
     let envelope = WireEnvelope {
         v: WIRE_VERSION,
         body: to_wire(message),
@@ -282,7 +249,6 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
             welcome: c.welcome.clone(),
             encrypted_key_catalog: c.encrypted_key_catalog.clone(),
             group_epoch: c.group_epoch,
-            membership_seeds: c.membership_seeds.iter().map(seed_to_wire).collect(),
         }),
         PairingSessionMessage::Reject(r) => WireBody::Reject(WirePairingReject {
             reason: match &r.reason {
@@ -324,34 +290,24 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
                 encrypted_challenge: c.encrypted_challenge,
             },
         )),
-        WireBody::Confirm(c) => {
-            let membership_seeds = c
-                .membership_seeds
-                .into_iter()
-                .map(seed_from_wire)
-                .collect::<Result<Vec<_>, _>>()?;
-            validate_sponsor_candidate_seed_batch(&membership_seeds)
-                .map_err(WireDecodeError::InvalidMembershipSeeds)?;
-            Ok(PairingSessionMessage::Confirm(SponsorConfirm {
-                space_id: SpaceId::from_string(c.space_id),
-                sender_device_id: DeviceId::new(c.sender_device_id),
-                sender_device_name: c.sender_device_name,
-                sender_identity_fingerprint: parse_fingerprint(&c.sender_identity_fingerprint)?,
-                transport_address_blob: c.transport_address_blob,
-                sponsor_space_person_id: c
-                    .sponsor_space_person_id
-                    .map(|s| {
-                        uuid::Uuid::parse_str(&s).map_err(|e| {
-                            WireDecodeError::InvalidSpacePersonId(format!("{e} (got `{s}`)"))
-                        })
+        WireBody::Confirm(c) => Ok(PairingSessionMessage::Confirm(SponsorConfirm {
+            space_id: SpaceId::from_string(c.space_id),
+            sender_device_id: DeviceId::new(c.sender_device_id),
+            sender_device_name: c.sender_device_name,
+            sender_identity_fingerprint: parse_fingerprint(&c.sender_identity_fingerprint)?,
+            transport_address_blob: c.transport_address_blob,
+            sponsor_space_person_id: c
+                .sponsor_space_person_id
+                .map(|s| {
+                    uuid::Uuid::parse_str(&s).map_err(|e| {
+                        WireDecodeError::InvalidSpacePersonId(format!("{e} (got `{s}`)"))
                     })
-                    .transpose()?,
-                welcome: c.welcome,
-                encrypted_key_catalog: c.encrypted_key_catalog,
-                group_epoch: c.group_epoch,
-                membership_seeds,
-            }))
-        }
+                })
+                .transpose()?,
+            welcome: c.welcome,
+            encrypted_key_catalog: c.encrypted_key_catalog,
+            group_epoch: c.group_epoch,
+        })),
         WireBody::Reject(r) => Ok(PairingSessionMessage::Reject(PairingReject {
             reason: match r.reason {
                 WireRejectReason::InvitationMismatch => PairingRejectReason::InvitationMismatch,
@@ -362,52 +318,6 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
             },
         })),
     }
-}
-
-fn seed_to_wire(seed: &SponsorCandidateSeed) -> WireSponsorCandidateSeed {
-    WireSponsorCandidateSeed {
-        space_id: seed.space_id.inner().clone(),
-        device_id: seed.device_id.as_str().to_string(),
-        device_name_hint: seed.device_name_hint.clone(),
-        identity_fingerprint_hint: seed.identity_fingerprint_hint.as_display().to_string(),
-        transport_address_blob: seed.transport_address_blob.clone(),
-        address_observed_at_ms: seed.address_observed_at_ms,
-        source_device_id: seed.source_device_id.as_str().to_string(),
-        security_updates: seed
-            .security_updates
-            .iter()
-            .map(|update| WireRelayedSecurityUpdate {
-                previous_epoch: update.previous_epoch,
-                next_epoch: update.next_epoch,
-                payload: update.payload.clone(),
-                digest: update.digest,
-            })
-            .collect(),
-        expires_at_ms: seed.expires_at_ms,
-    }
-}
-
-fn seed_from_wire(seed: WireSponsorCandidateSeed) -> Result<SponsorCandidateSeed, WireDecodeError> {
-    Ok(SponsorCandidateSeed {
-        space_id: SpaceId::from_string(seed.space_id),
-        device_id: DeviceId::new(seed.device_id),
-        device_name_hint: seed.device_name_hint,
-        identity_fingerprint_hint: parse_fingerprint(&seed.identity_fingerprint_hint)?,
-        transport_address_blob: seed.transport_address_blob,
-        address_observed_at_ms: seed.address_observed_at_ms,
-        source_device_id: DeviceId::new(seed.source_device_id),
-        security_updates: seed
-            .security_updates
-            .into_iter()
-            .map(|update| RelayedSecurityUpdate {
-                previous_epoch: update.previous_epoch,
-                next_epoch: update.next_epoch,
-                payload: update.payload,
-                digest: update.digest,
-            })
-            .collect(),
-        expires_at_ms: seed.expires_at_ms,
-    })
 }
 
 fn parse_fingerprint(s: &str) -> Result<IdentityFingerprint, WireDecodeError> {
@@ -422,7 +332,6 @@ fn parse_fingerprint(s: &str) -> Result<IdentityFingerprint, WireDecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uc_core::membership::{RelayedSecurityUpdate, SponsorCandidateSeed};
 
     fn sample_fingerprint() -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string("ABCDEFGHIJKLMNOP").unwrap()
@@ -431,69 +340,6 @@ mod tests {
     fn round_trip(msg: PairingSessionMessage) -> PairingSessionMessage {
         let bytes = encode(&msg).expect("encode");
         decode(&bytes).expect("decode")
-    }
-
-    fn sample_seed() -> SponsorCandidateSeed {
-        SponsorCandidateSeed {
-            space_id: SpaceId::from_str("space-99"),
-            device_id: DeviceId::new("device-a"),
-            device_name_hint: "Device A".to_owned(),
-            identity_fingerprint_hint: sample_fingerprint(),
-            transport_address_blob: vec![0x31, 0x32],
-            address_observed_at_ms: 1_700_000_000_000,
-            source_device_id: DeviceId::new("dev-sponsor"),
-            security_updates: vec![RelayedSecurityUpdate {
-                previous_epoch: 6,
-                next_epoch: 7,
-                payload: vec![0x41, 0x42],
-                digest: [0x51; 32],
-            }],
-            expires_at_ms: 1_700_604_800_000,
-        }
-    }
-
-    fn confirm_with_seeds(membership_seeds: Vec<SponsorCandidateSeed>) -> PairingSessionMessage {
-        PairingSessionMessage::Confirm(SponsorConfirm {
-            space_id: SpaceId::from_str("space-99"),
-            sender_device_id: DeviceId::new("dev-sponsor"),
-            sender_device_name: "Sponsor".to_owned(),
-            sender_identity_fingerprint: sample_fingerprint(),
-            transport_address_blob: vec![0xaa],
-            sponsor_space_person_id: None,
-            welcome: vec![1],
-            encrypted_key_catalog: vec![2],
-            group_epoch: 7,
-            membership_seeds,
-        })
-    }
-
-    #[test]
-    fn confirm_rejects_too_many_membership_seeds() {
-        assert!(encode(&confirm_with_seeds(vec![sample_seed(); 65])).is_err());
-    }
-
-    #[test]
-    fn confirm_rejects_oversized_membership_address() {
-        let mut seed = sample_seed();
-        seed.transport_address_blob = vec![0; 16 * 1024 + 1];
-
-        assert!(encode(&confirm_with_seeds(vec![seed])).is_err());
-    }
-
-    #[test]
-    fn confirm_rejects_too_many_relayed_updates() {
-        let mut seed = sample_seed();
-        seed.security_updates = vec![seed.security_updates[0].clone(); 65];
-
-        assert!(encode(&confirm_with_seeds(vec![seed])).is_err());
-    }
-
-    #[test]
-    fn confirm_rejects_oversized_relayed_update() {
-        let mut seed = sample_seed();
-        seed.security_updates[0].payload = vec![0; 256 * 1024 + 1];
-
-        assert!(encode(&confirm_with_seeds(vec![seed])).is_err());
     }
 
     #[test]
@@ -576,22 +422,6 @@ mod tests {
             welcome: vec![1, 2, 3],
             encrypted_key_catalog: vec![4, 5, 6],
             group_epoch: 7,
-            membership_seeds: vec![SponsorCandidateSeed {
-                space_id: SpaceId::from_str("space-99"),
-                device_id: DeviceId::new("device-a"),
-                device_name_hint: "Device A".to_owned(),
-                identity_fingerprint_hint: sample_fingerprint(),
-                transport_address_blob: vec![0x31, 0x32],
-                address_observed_at_ms: 1_700_000_000_000,
-                source_device_id: DeviceId::new("dev-sponsor"),
-                security_updates: vec![RelayedSecurityUpdate {
-                    previous_epoch: 6,
-                    next_epoch: 7,
-                    payload: vec![0x41, 0x42],
-                    digest: [0x51; 32],
-                }],
-                expires_at_ms: 1_700_604_800_000,
-            }],
         });
         let decoded = round_trip(original);
         match decoded {
@@ -605,9 +435,6 @@ mod tests {
                 assert_eq!(c.welcome, vec![1, 2, 3]);
                 assert_eq!(c.encrypted_key_catalog, vec![4, 5, 6]);
                 assert_eq!(c.group_epoch, 7);
-                assert_eq!(c.membership_seeds.len(), 1);
-                assert_eq!(c.membership_seeds[0].device_id, DeviceId::new("device-a"));
-                assert_eq!(c.membership_seeds[0].security_updates.len(), 1);
             }
             other => panic!("expected Confirm, got {other:?}"),
         }
@@ -628,7 +455,6 @@ mod tests {
             welcome: vec![1],
             encrypted_key_catalog: vec![2],
             group_epoch: 2,
-            membership_seeds: Vec::new(),
         });
         let decoded = round_trip(original);
         match decoded {

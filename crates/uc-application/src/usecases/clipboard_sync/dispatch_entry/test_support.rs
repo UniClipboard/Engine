@@ -248,6 +248,7 @@ pub(crate) fn dispatch_input() -> DispatchClipboardEntryInput {
         categories: ClipboardContentCategorySet::empty(),
         entry_id: None,
         target_filter: None,
+        source_started_at: None,
     }
 }
 

@@ -34,11 +34,12 @@
 //! retry logic.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
+use iroh::Endpoint;
 use tokio::sync::broadcast;
 use tracing::{debug, instrument, warn};
 
@@ -51,6 +52,7 @@ use uc_core::ports::{
 use uc_core::security::IdentityFingerprint;
 
 use super::clipboard_wire::{self, AckCode};
+use super::conn_path::{path_for, OnMissing};
 
 /// Capacity of the `InboundClipboard` broadcast channel. Matches the
 /// presence adapter (`PRESENCE_EVENT_CHANNEL_CAPACITY`) so both streams
@@ -69,6 +71,7 @@ pub struct IrohClipboardReceiverAdapter {
 }
 
 struct HandlerState {
+    endpoint: Arc<Endpoint>,
     member_repo: Arc<dyn MemberRepositoryPort>,
     peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
@@ -77,12 +80,14 @@ struct HandlerState {
 
 impl IrohClipboardReceiverAdapter {
     pub fn new(
+        endpoint: Arc<Endpoint>,
         member_repo: Arc<dyn MemberRepositoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(INBOUND_CHANNEL_CAPACITY);
         let handler_state = Arc::new(HandlerState {
+            endpoint,
             member_repo,
             peer_admission,
             fingerprint_factory,
@@ -194,10 +199,15 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         //    `Accepted` because the sender side did its job; application
         //    consumer responsibility is to subscribe before F1 completes.
         let (receipt, result) = InboundClipboardReceipt::pending();
+        let transport = path_for(&self.state.endpoint, remote, OnMissing::Unknown)
+            .await
+            .channel;
         let inbound = InboundClipboard {
             peer_device_id,
             header: frame.header,
             ciphertext: frame.ciphertext,
+            transport,
+            received_at: Instant::now(),
             receipt,
         };
         if self.state.event_tx.send(inbound).is_err() {
@@ -493,6 +503,7 @@ mod tests {
         wait_for_direct_addrs(&receiver_endpoint).await;
 
         let adapter = IrohClipboardReceiverAdapter::new(
+            Arc::clone(&receiver_endpoint),
             member_repo,
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),

@@ -21,7 +21,7 @@ use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
 use uc_core::ids::{EventId, RepresentationId, SpaceId};
 use uc_core::membership::{
     RelationshipStateResetError, RelationshipStateResetPort, SpaceSecurityStateResetError,
-    SpaceSecurityStateResetPort, SponsorCandidateSeed,
+    SpaceSecurityStateResetPort,
 };
 use uc_core::ports::clipboard::{BlobMigrationRepoError, BlobMigrationRepoPort, MigrationRecord};
 use uc_core::ports::security::{
@@ -52,16 +52,11 @@ impl PairingMembershipGossipPort for NoopPairingMembershipGossip {
     async fn prepare_sponsor_membership(
         &self,
         _context: SponsorSeedBatchContext,
-    ) -> Result<Vec<SponsorCandidateSeed>, SpaceMembershipGossipError> {
-        Ok(Vec::new())
-    }
-
-    async fn accept_sponsor_seed_batch(
-        &self,
-        _seeds: Vec<SponsorCandidateSeed>,
     ) -> Result<(), SpaceMembershipGossipError> {
         Ok(())
     }
+
+    fn notify_pending_delivery(&self) {}
 }
 
 pub fn membership_gossip_noop() -> Arc<dyn PairingMembershipGossipPort> {

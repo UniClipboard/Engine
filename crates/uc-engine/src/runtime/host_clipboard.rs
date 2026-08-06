@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use tracing::{error, warn};
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
@@ -49,7 +50,10 @@ pub(super) async fn spawn_host_clipboard_change_task(
                     }
                     change = changes.next() => match change {
                         Ok(HostClipboardChange::Changed) => {
-                            if let Err(error) = runtime.process_change(DispatchMode::Background).await {
+                            if let Err(error) = runtime
+                                .process_change(DispatchMode::Background, Some(Instant::now()))
+                                .await
+                            {
                                 warn!(error = %error, "host clipboard change processing failed");
                             }
                         }
@@ -70,20 +74,26 @@ impl HostClipboardChangeRuntime {
         &self,
         dispatch: bool,
     ) -> Result<Option<SendReportSummary>, EngineError> {
-        self.process_change(if dispatch {
-            DispatchMode::AwaitReport
-        } else {
-            DispatchMode::CaptureOnly
-        })
+        self.process_change(
+            if dispatch {
+                DispatchMode::AwaitReport
+            } else {
+                DispatchMode::CaptureOnly
+            },
+            None,
+        )
         .await
     }
 
     async fn process_change(
         &self,
         dispatch_mode: DispatchMode,
+        source_started_at: Option<Instant>,
     ) -> Result<Option<SendReportSummary>, EngineError> {
         let lease = self.session_supervisor.acquire_operation().await?;
-        let result = self.process_change_while_leased(dispatch_mode).await;
+        let result = self
+            .process_change_while_leased(dispatch_mode, source_started_at)
+            .await;
         drop(lease);
         result
     }
@@ -91,6 +101,7 @@ impl HostClipboardChangeRuntime {
     async fn process_change_while_leased(
         &self,
         dispatch_mode: DispatchMode,
+        source_started_at: Option<Instant>,
     ) -> Result<Option<SendReportSummary>, EngineError> {
         let (facade, capture, live_index, outbound) = {
             let session_slot = self.session_supervisor.session();
@@ -181,6 +192,7 @@ impl HostClipboardChangeRuntime {
                     entry_id: entry_id.clone(),
                     snapshot: dispatch_snapshot,
                     origin,
+                    source_started_at,
                 })
                 .await
                 .map_err(|error| observe_error("clipboard dispatch", error))

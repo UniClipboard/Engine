@@ -148,6 +148,7 @@ impl ExistingLocalEntryDeliveryRunner for ExistingLocalEntryDelivery {
                 categories,
                 entry_id: Some(entry_id.clone()),
                 target_filter: Some(targets),
+                source_started_at: None,
             })
             .await
             .map_err(map_dispatch_sync_error)?;

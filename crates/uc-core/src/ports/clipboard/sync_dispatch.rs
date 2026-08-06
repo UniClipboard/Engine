@@ -72,10 +72,11 @@ pub struct SyncPayload {
     pub ciphertext: Bytes,
 }
 
-/// Outcome of a single dispatch. Adapter-layer ack semantics only —
-/// `Accepted` means the bytes reached the peer and its adapter accepted
-/// them for ingest; it does **not** promise the application-level ingest
-/// succeeded.
+/// Outcome of a single dispatch.
+///
+/// `Accepted` means the peer completed its inbound processing and durably
+/// accepted the content. `DuplicateIgnored` means the peer already held the
+/// same content, so no second durable write was needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchAck {
     Accepted,
@@ -112,8 +113,23 @@ pub enum ClipboardDispatchError {
     Internal(String),
 }
 
+/// Measured phases of one dispatch attempt.
+///
+/// Durations are local monotonic measurements in milliseconds. A missing
+/// value means the attempt did not reach that phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DispatchTiming {
+    pub address_resolution_ms: u32,
+    pub connection_ms: Option<u32>,
+    pub stream_open_ms: Option<u32>,
+    pub frame_write_ms: Option<u32>,
+    /// Time spent after the frame was written until the peer confirmed that
+    /// its inbound processing reached a terminal result.
+    pub receiver_apply_wait_ms: Option<u32>,
+}
+
 /// Outcome of a single dispatch attempt paired with the connection path
-/// actually used to reach the peer.
+/// actually used to reach the peer and its measured stages.
 ///
 /// `transport` is observed when the dispatch settles, so it reflects the
 /// path that carried — or attempted to carry — this frame. It is
@@ -125,6 +141,7 @@ pub enum ClipboardDispatchError {
 #[derive(Debug)]
 pub struct DispatchReport {
     pub transport: ConnectionChannel,
+    pub timing: DispatchTiming,
     pub outcome: Result<DispatchAck, ClipboardDispatchError>,
 }
 

@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, oneshot};
 
 use super::sync_dispatch::ClipboardHeader;
 use crate::ids::DeviceId;
+use crate::ports::ConnectionChannel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundClipboardDisposition {
@@ -83,6 +84,10 @@ pub struct InboundClipboard {
     pub peer_device_id: DeviceId,
     pub header: ClipboardHeader,
     pub ciphertext: Bytes,
+    /// Connection path observed when the receiver accepted this delivery.
+    pub transport: ConnectionChannel,
+    /// Local monotonic time at which the delivery became ready for processing.
+    pub received_at: std::time::Instant,
     pub receipt: InboundClipboardReceipt,
 }
 

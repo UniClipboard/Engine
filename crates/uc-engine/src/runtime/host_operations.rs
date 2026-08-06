@@ -255,6 +255,7 @@ impl ProductionRuntime {
                     entry_id: captured.entry_id.clone(),
                     snapshot,
                     origin: ClipboardChangeOrigin::LocalCapture,
+                    source_started_at: None,
                 },
                 target_filter,
             )

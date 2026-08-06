@@ -582,8 +582,7 @@ async fn read_next_frame(
         | WireDecodeError::UnsupportedVersion { .. }
         | WireDecodeError::UnsupportedSecurityCapability(_)
         | WireDecodeError::InvalidFingerprint(_)
-        | WireDecodeError::InvalidSpacePersonId(_)
-        | WireDecodeError::InvalidMembershipSeeds(_) => {
+        | WireDecodeError::InvalidSpacePersonId(_) => {
             SessionError::Internal(format!("wire decode: {err}"))
         }
     })

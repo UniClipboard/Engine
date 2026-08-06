@@ -16,12 +16,11 @@ pub use bootstrap::{
 };
 pub use error::MembershipError;
 pub use gossip::{
-    validate_sponsor_candidate_seed_batch, CandidateFailure, CandidateMergeError,
-    CandidateMergeOutcome, CandidateSource, CandidateStatus, DeviceAnnouncement, MembershipAck,
-    MembershipAnnouncementVersion, MembershipDigest, MembershipEvent, MembershipEventBatch,
-    MembershipGossipBoundsError, MembershipGossipMessage, MembershipRequestMissing,
-    PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate, SponsorCandidateSeed,
-    VerifiedMembershipPeer,
+    CandidateFailure, CandidateMergeError, CandidateMergeOutcome, CandidateSource, CandidateStatus,
+    DeviceAnnouncement, MembershipAck, MembershipAnnouncementVersion, MembershipDigest,
+    MembershipEvent, MembershipEventBatch, MembershipGossipBoundsError, MembershipGossipMessage,
+    MembershipRequestMissing, PendingMembershipBatch, RelayedSecurityUpdate,
+    SpaceMembershipCandidate, SponsorCandidateSeed, VerifiedMembershipPeer,
 };
 pub use member::SpaceMember;
 pub use ports::{

@@ -10,7 +10,6 @@ const MAX_ANNOUNCEMENT_SIGNATURE_BYTES: usize = 4 * 1024;
 const MAX_SECURITY_UPDATES: usize = 64;
 const MAX_GOSSIP_MESSAGE_BYTES: usize = 256 * 1024;
 const MAX_SECURITY_UPDATE_BYTES: usize = MAX_GOSSIP_MESSAGE_BYTES - 16 * 1024;
-const MAX_SPONSOR_CANDIDATE_SEEDS: usize = 64;
 const MAX_GOSSIP_DEVICES: usize = 64;
 const MAX_GOSSIP_EVENTS: usize = 64;
 
@@ -71,23 +70,6 @@ impl SponsorCandidateSeed {
         validate_address(&self.transport_address_blob)?;
         validate_security_updates(&self.security_updates)
     }
-}
-
-pub fn validate_sponsor_candidate_seed_batch(
-    seeds: &[SponsorCandidateSeed],
-) -> Result<(), CandidateMergeError> {
-    if seeds.len() > MAX_SPONSOR_CANDIDATE_SEEDS {
-        return Err(CandidateMergeError::TooManySponsorSeeds);
-    }
-    let mut total = 64usize;
-    for seed in seeds {
-        seed.validate_transfer_bounds()?;
-        total = total.saturating_add(estimated_seed_transfer_bytes(seed));
-        if total > MAX_GOSSIP_MESSAGE_BYTES {
-            return Err(CandidateMergeError::SponsorSeedBatchTooLarge);
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,17 +198,32 @@ pub struct MembershipEventBatch {
 }
 
 impl MembershipEventBatch {
+    pub const fn max_transfer_bytes() -> usize {
+        MAX_GOSSIP_MESSAGE_BYTES
+    }
+
+    pub fn estimated_transfer_bytes(&self) -> usize {
+        self.space_id
+            .as_ref()
+            .len()
+            .saturating_add(64)
+            .saturating_add(
+                self.events
+                    .iter()
+                    .map(MembershipEvent::estimated_transfer_bytes)
+                    .sum::<usize>(),
+            )
+    }
+
     pub fn validate_transfer_bounds(&self) -> Result<(), MembershipGossipBoundsError> {
         if self.events.len() > MAX_GOSSIP_EVENTS {
             return Err(MembershipGossipBoundsError::TooManyEvents);
         }
-        let mut total = self.space_id.as_ref().len().saturating_add(64);
         for event in &self.events {
             event.validate_transfer_bounds()?;
-            total = total.saturating_add(event.estimated_transfer_bytes());
-            if total > MAX_GOSSIP_MESSAGE_BYTES {
-                return Err(MembershipGossipBoundsError::MessageTooLarge);
-            }
+        }
+        if self.estimated_transfer_bytes() > Self::max_transfer_bytes() {
+            return Err(MembershipGossipBoundsError::MessageTooLarge);
         }
         Ok(())
     }
@@ -377,10 +374,6 @@ pub enum CandidateMergeError {
     InvalidExpiry,
     #[error("candidate contains too many security updates")]
     TooManySecurityUpdates,
-    #[error("candidate batch contains too many sponsor seeds")]
-    TooManySponsorSeeds,
-    #[error("candidate sponsor seed batch is too large")]
-    SponsorSeedBatchTooLarge,
     #[error("candidate security update is invalid")]
     InvalidSecurityUpdate,
 }
@@ -974,17 +967,6 @@ mod tests {
             seed.validate_transfer_bounds(),
             Err(CandidateMergeError::InvalidSecurityUpdate)
         ));
-    }
-
-    #[test]
-    fn sponsor_seed_batch_rejects_total_payload_over_message_limit() {
-        let mut first = seed(100);
-        first.security_updates[0].payload = vec![1; 140 * 1024];
-        let mut second = seed(200);
-        second.device_id = DeviceId::new("device-b");
-        second.security_updates[0].payload = vec![2; 140 * 1024];
-
-        assert!(super::validate_sponsor_candidate_seed_batch(&[first, second]).is_err());
     }
 
     #[test]
