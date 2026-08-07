@@ -62,8 +62,9 @@ use crate::facade::{
     SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
     SettingsFacadeError, SpaceFacade, StorageFacade,
 };
-use crate::facade::{
-    MembershipConvergenceFacadeError, MembershipConvergenceStatus, SpaceApplicationHandle,
+use crate::facade::{MembershipConvergenceFacadeError, SpaceApplicationHandle};
+use crate::membership::{
+    MembershipConvergenceStatus, SharedDeviceRefreshStarted, SharedDeviceRefreshStatus,
 };
 use crate::usecases::clipboard_sync::V3BlobRef;
 use uc_core::ids::DeviceId;
@@ -305,6 +306,30 @@ impl AppFacade {
             .membership_convergence()
             .await
             .map_err(MembershipConvergenceFacadeError::from)
+    }
+
+    pub async fn start_shared_device_refresh(
+        &self,
+    ) -> Result<SharedDeviceRefreshStarted, MembershipConvergenceFacadeError> {
+        self.space_application
+            .start_shared_device_refresh()
+            .await
+            .map_err(MembershipConvergenceFacadeError::from)
+    }
+
+    pub async fn shared_device_refresh_status(
+        &self,
+        request_id: &str,
+    ) -> Option<SharedDeviceRefreshStatus> {
+        self.space_application
+            .shared_device_refresh_status(request_id)
+            .await
+    }
+
+    pub fn subscribe_shared_device_refresh(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<SharedDeviceRefreshStatus> {
+        self.space_application.subscribe_shared_device_refresh()
     }
 
     pub async fn join_space(

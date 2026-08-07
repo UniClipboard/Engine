@@ -459,6 +459,8 @@ pub enum OperationResult {
     },
     Devices(Vec<DeviceSummary>),
     MembershipConvergence(MembershipConvergenceSummary),
+    SharedDeviceRefreshStarted(SharedDeviceRefreshStartedSummary),
+    SharedDeviceRefresh(Option<SharedDeviceRefreshSummary>),
     MemberSyncPreferences(MemberSyncPreferencesSummary),
     MemberRemoved(MemberRevocationSummary),
     MemberRevocationStatus(Option<MemberRevocationSummary>),
@@ -646,6 +648,12 @@ impl fmt::Debug for OperationResult {
                 .field("device_count", &devices.len()),
             Self::MembershipConvergence(summary) => debug
                 .field("kind", &"membership_convergence")
+                .field("summary", summary),
+            Self::SharedDeviceRefreshStarted(summary) => debug
+                .field("kind", &"shared_device_refresh_started")
+                .field("summary", summary),
+            Self::SharedDeviceRefresh(summary) => debug
+                .field("kind", &"shared_device_refresh")
                 .field("summary", summary),
             Self::MemberSyncPreferences(preferences) => debug
                 .field("kind", &"member_sync_preferences")
@@ -894,6 +902,92 @@ pub struct MembershipConvergenceSummary {
     pub version_incompatible_count: u64,
     pub blocked_count: u64,
     pub rejected_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedDeviceRefreshStartedSummary {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedDeviceRefreshPhaseSummary {
+    Started,
+    Discovering,
+    Connecting,
+    RoundCompleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedDeviceRefreshDeviceStateSummary {
+    Discovered,
+    Connecting,
+    Connected,
+    AlreadyPresent,
+    WaitingForPeer,
+    WaitingForUpdate,
+    VersionIncompatible,
+    Rejected,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedDeviceRefreshDeviceSummary {
+    pub device_id: String,
+    pub display_name: String,
+    pub state: SharedDeviceRefreshDeviceStateSummary,
+}
+
+impl fmt::Debug for SharedDeviceRefreshDeviceSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedDeviceRefreshDeviceSummary")
+            .field("has_device_id", &!self.device_id.is_empty())
+            .field("has_display_name", &!self.display_name.is_empty())
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedDeviceRefreshSummary {
+    pub request_id: String,
+    pub phase: SharedDeviceRefreshPhaseSummary,
+    pub devices: Vec<SharedDeviceRefreshDeviceSummary>,
+    pub total_count: u64,
+    pub discovered_count: u64,
+    pub connecting_count: u64,
+    pub connected_count: u64,
+    pub already_present_count: u64,
+    pub waiting_for_peer_count: u64,
+    pub waiting_for_update_count: u64,
+    pub version_incompatible_count: u64,
+    pub rejected_count: u64,
+    pub unavailable_source_count: u64,
+}
+
+impl fmt::Debug for SharedDeviceRefreshSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedDeviceRefreshSummary")
+            .field("request_id", &self.request_id)
+            .field("phase", &self.phase)
+            .field("device_count", &self.devices.len())
+            .field("total_count", &self.total_count)
+            .field("discovered_count", &self.discovered_count)
+            .field("connecting_count", &self.connecting_count)
+            .field("connected_count", &self.connected_count)
+            .field("already_present_count", &self.already_present_count)
+            .field("waiting_for_peer_count", &self.waiting_for_peer_count)
+            .field("waiting_for_update_count", &self.waiting_for_update_count)
+            .field(
+                "version_incompatible_count",
+                &self.version_incompatible_count,
+            )
+            .field("rejected_count", &self.rejected_count)
+            .field("unavailable_source_count", &self.unavailable_source_count)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

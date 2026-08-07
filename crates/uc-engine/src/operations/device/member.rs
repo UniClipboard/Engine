@@ -7,8 +7,12 @@ use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, LegacyBootstrapState,
     LegacyBootstrapView, MemberProtectionStatusView, MemberRevocationState, MemberRevocationView,
     MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    MembershipConvergenceFacadeError, MembershipConvergenceState, RosterError,
-    SpaceMembershipGossipError, SpaceProtectionModeView, SpaceProtectionView,
+    MembershipConvergenceFacadeError, RosterError, SpaceProtectionModeView, SpaceProtectionView,
+};
+use uc_application::membership::{
+    MembershipConvergenceError, MembershipConvergenceState,
+    SharedDeviceRefreshDeviceState as AppSharedDeviceRefreshDeviceState,
+    SharedDeviceRefreshPhase as AppSharedDeviceRefreshPhase, SharedDeviceRefreshStatus,
 };
 use uc_core::ports::ReachabilityState;
 
@@ -19,8 +23,10 @@ use crate::{
     MemberRevocationSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
     MembershipConvergenceStateSummary, MembershipConvergenceSummary, OperationResult,
     QueryLegacyBootstrapInput, QueryMemberRevocationInput, QueryMemberSyncPreferencesInput,
-    RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
-    UpdateMemberSyncPreferencesInput,
+    QuerySharedDeviceRefreshInput, RemoveMemberInput, SharedDeviceRefreshDeviceStateSummary,
+    SharedDeviceRefreshDeviceSummary, SharedDeviceRefreshPhaseSummary,
+    SharedDeviceRefreshStartedSummary, SharedDeviceRefreshSummary, SpaceProtectionModeSummary,
+    SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
 };
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
@@ -106,13 +112,108 @@ pub async fn execute_query_membership_convergence(
     ))
 }
 
+pub async fn execute_refresh_shared_devices(
+    facade: &AppFacade,
+) -> Result<OperationResult, EngineError> {
+    let started = facade
+        .start_shared_device_refresh()
+        .await
+        .map_err(|error| match error {
+            MembershipConvergenceFacadeError::Unavailable => {
+                EngineError::new(1103, EngineErrorCategory::Unavailable, false)
+            }
+            MembershipConvergenceFacadeError::Query(error) => {
+                map_membership_convergence_error(error)
+            }
+        })?;
+    Ok(OperationResult::SharedDeviceRefreshStarted(
+        SharedDeviceRefreshStartedSummary {
+            request_id: started.request_id,
+        },
+    ))
+}
+
+pub async fn execute_query_shared_device_refresh(
+    facade: &AppFacade,
+    input: QuerySharedDeviceRefreshInput,
+) -> Result<OperationResult, EngineError> {
+    Ok(OperationResult::SharedDeviceRefresh(
+        facade
+            .shared_device_refresh_status(&input.request_id)
+            .await
+            .map(shared_device_refresh_summary),
+    ))
+}
+
+pub(crate) fn shared_device_refresh_summary(
+    status: SharedDeviceRefreshStatus,
+) -> SharedDeviceRefreshSummary {
+    SharedDeviceRefreshSummary {
+        request_id: status.request_id,
+        phase: match status.phase {
+            AppSharedDeviceRefreshPhase::Started => SharedDeviceRefreshPhaseSummary::Started,
+            AppSharedDeviceRefreshPhase::Discovering => {
+                SharedDeviceRefreshPhaseSummary::Discovering
+            }
+            AppSharedDeviceRefreshPhase::Connecting => SharedDeviceRefreshPhaseSummary::Connecting,
+            AppSharedDeviceRefreshPhase::RoundCompleted => {
+                SharedDeviceRefreshPhaseSummary::RoundCompleted
+            }
+        },
+        devices: status
+            .devices
+            .into_iter()
+            .map(|device| SharedDeviceRefreshDeviceSummary {
+                device_id: device.device_id.as_str().to_owned(),
+                display_name: device.device_name,
+                state: match device.state {
+                    AppSharedDeviceRefreshDeviceState::Discovered => {
+                        SharedDeviceRefreshDeviceStateSummary::Discovered
+                    }
+                    AppSharedDeviceRefreshDeviceState::Connecting => {
+                        SharedDeviceRefreshDeviceStateSummary::Connecting
+                    }
+                    AppSharedDeviceRefreshDeviceState::Connected => {
+                        SharedDeviceRefreshDeviceStateSummary::Connected
+                    }
+                    AppSharedDeviceRefreshDeviceState::AlreadyPresent => {
+                        SharedDeviceRefreshDeviceStateSummary::AlreadyPresent
+                    }
+                    AppSharedDeviceRefreshDeviceState::WaitingForPeer => {
+                        SharedDeviceRefreshDeviceStateSummary::WaitingForPeer
+                    }
+                    AppSharedDeviceRefreshDeviceState::WaitingForUpdate => {
+                        SharedDeviceRefreshDeviceStateSummary::WaitingForUpdate
+                    }
+                    AppSharedDeviceRefreshDeviceState::VersionIncompatible => {
+                        SharedDeviceRefreshDeviceStateSummary::VersionIncompatible
+                    }
+                    AppSharedDeviceRefreshDeviceState::Rejected => {
+                        SharedDeviceRefreshDeviceStateSummary::Rejected
+                    }
+                },
+            })
+            .collect(),
+        total_count: usize_to_u64(status.total_count),
+        discovered_count: usize_to_u64(status.discovered_count),
+        connecting_count: usize_to_u64(status.connecting_count),
+        connected_count: usize_to_u64(status.connected_count),
+        already_present_count: usize_to_u64(status.already_present_count),
+        waiting_for_peer_count: usize_to_u64(status.waiting_for_peer_count),
+        waiting_for_update_count: usize_to_u64(status.waiting_for_update_count),
+        version_incompatible_count: usize_to_u64(status.version_incompatible_count),
+        rejected_count: usize_to_u64(status.rejected_count),
+        unavailable_source_count: usize_to_u64(status.unavailable_source_count),
+    }
+}
+
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-fn map_membership_convergence_error(error: SpaceMembershipGossipError) -> EngineError {
+fn map_membership_convergence_error(error: MembershipConvergenceError) -> EngineError {
     let (code, category, retryable, variant) = match error {
-        SpaceMembershipGossipError::CurrentIdentity(
+        MembershipConvergenceError::CurrentIdentity(
             uc_core::membership::CurrentMembershipIdentityError::Unavailable,
         ) => (
             QUERY_MEMBERSHIP_CONVERGENCE_UNAVAILABLE_CODE,
@@ -120,7 +221,7 @@ fn map_membership_convergence_error(error: SpaceMembershipGossipError) -> Engine
             true,
             "current_identity_unavailable",
         ),
-        SpaceMembershipGossipError::CurrentIdentity(
+        MembershipConvergenceError::CurrentIdentity(
             uc_core::membership::CurrentMembershipIdentityError::LoadFailed,
         ) => (
             QUERY_MEMBERSHIP_CONVERGENCE_FAILED_CODE,

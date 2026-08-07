@@ -78,6 +78,40 @@ export interface OhMembershipConvergence {
   rejectedCount: number
 }
 
+export interface OhSharedDeviceRefreshStarted {
+  requestId: string
+}
+
+export interface OhSharedDeviceRefreshDevice {
+  deviceId: string
+  displayName: string
+  state:
+    | 'discovered'
+    | 'connecting'
+    | 'connected'
+    | 'already_present'
+    | 'waiting_for_peer'
+    | 'waiting_for_update'
+    | 'version_incompatible'
+    | 'rejected'
+}
+
+export interface OhSharedDeviceRefresh {
+  requestId: string
+  phase: 'started' | 'discovering' | 'connecting' | 'round_completed'
+  devices: OhSharedDeviceRefreshDevice[]
+  totalCount: number
+  discoveredCount: number
+  connectingCount: number
+  connectedCount: number
+  alreadyPresentCount: number
+  waitingForPeerCount: number
+  waitingForUpdateCount: number
+  versionIncompatibleCount: number
+  rejectedCount: number
+  unavailableSourceCount: number
+}
+
 export interface OhMemberRevocation {
   revocationId?: string
   outcome: 'local_only' | 'applied' | 'complete' | 'recovery_required'
@@ -98,6 +132,7 @@ export interface OhEngineEvent {
   errorCategory?: string
   retryable?: boolean
   memberRevocation?: OhMemberRevocation
+  sharedDeviceRefresh?: OhSharedDeviceRefresh
   networkRecoveryPhase?: 'idle' | 'recovering' | 'retry_scheduled' | 'failed'
   nextRetryInMs?: number
 }
@@ -120,6 +155,8 @@ export interface OhEngine {
   queryNetworkRecoveryStatus(): Promise<OhNetworkRecoveryStatus>
   queryLocalDevice(): Promise<OhLocalDevice>
   queryMembershipConvergence(): Promise<OhMembershipConvergence>
+  refreshSharedDevices(): Promise<OhSharedDeviceRefreshStarted>
+  querySharedDeviceRefresh(requestId: string): Promise<OhSharedDeviceRefresh | null>
   removeMember(deviceId: string): Promise<OhMemberRevocation>
   queryMemberRevocation(revocationId: string): Promise<OhMemberRevocation | null>
   queryCurrentMemberRevocation(): Promise<OhMemberRevocation | null>

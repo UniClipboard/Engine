@@ -70,6 +70,8 @@ pub enum OperationKind {
     VerifySecureStorageAccess,
     ListDevices,
     QueryMembershipConvergence,
+    RefreshSharedDevices,
+    QuerySharedDeviceRefresh,
     QueryMemberSyncPreferences,
     UpdateMemberSyncPreferences,
     RemoveMember,
@@ -167,6 +169,8 @@ impl fmt::Display for OperationKind {
             Self::VerifySecureStorageAccess => "verify_secure_storage_access",
             Self::ListDevices => "list_devices",
             Self::QueryMembershipConvergence => "query_membership_convergence",
+            Self::RefreshSharedDevices => "refresh_shared_devices",
+            Self::QuerySharedDeviceRefresh => "query_shared_device_refresh",
             Self::QueryMemberSyncPreferences => "query_member_sync_preferences",
             Self::UpdateMemberSyncPreferences => "update_member_sync_preferences",
             Self::RemoveMember => "remove_member",
@@ -207,6 +211,30 @@ impl fmt::Display for OperationKind {
             Self::ResendEntry => "resend_entry",
         };
         formatter.write_str(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Operation, OperationKind, QuerySharedDeviceRefreshInput};
+
+    #[test]
+    fn shared_device_refresh_operations_have_stable_kinds() {
+        assert_eq!(
+            Operation::RefreshSharedDevices.kind(),
+            OperationKind::RefreshSharedDevices
+        );
+        assert_eq!(
+            Operation::RefreshSharedDevices.kind().to_string(),
+            "refresh_shared_devices"
+        );
+        assert_eq!(
+            Operation::QuerySharedDeviceRefresh(QuerySharedDeviceRefreshInput {
+                request_id: "request-1".to_owned(),
+            })
+            .kind(),
+            OperationKind::QuerySharedDeviceRefresh
+        );
     }
 }
 
@@ -266,6 +294,8 @@ pub enum Operation {
     VerifySecureStorageAccess,
     ListDevices,
     QueryMembershipConvergence,
+    RefreshSharedDevices,
+    QuerySharedDeviceRefresh(QuerySharedDeviceRefreshInput),
     QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput),
     UpdateMemberSyncPreferences(UpdateMemberSyncPreferencesInput),
     RemoveMember(RemoveMemberInput),
@@ -363,6 +393,8 @@ impl Operation {
             Self::VerifySecureStorageAccess => OperationKind::VerifySecureStorageAccess,
             Self::ListDevices => OperationKind::ListDevices,
             Self::QueryMembershipConvergence => OperationKind::QueryMembershipConvergence,
+            Self::RefreshSharedDevices => OperationKind::RefreshSharedDevices,
+            Self::QuerySharedDeviceRefresh(_) => OperationKind::QuerySharedDeviceRefresh,
             Self::QueryMemberSyncPreferences(_) => OperationKind::QueryMemberSyncPreferences,
             Self::UpdateMemberSyncPreferences(_) => OperationKind::UpdateMemberSyncPreferences,
             Self::RemoveMember(_) => OperationKind::RemoveMember,
@@ -664,6 +696,11 @@ pub struct QueryHistoryInput {
     pub cursor: Option<String>,
     pub limit: u32,
     pub query: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuerySharedDeviceRefreshInput {
+    pub request_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

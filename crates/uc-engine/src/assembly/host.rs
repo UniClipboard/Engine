@@ -647,6 +647,7 @@ mod tests {
             &wiring.wired.sync_engine,
             &wiring.wired.shared,
             None,
+            None,
         )
         .await
         .unwrap();

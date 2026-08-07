@@ -20,7 +20,7 @@ use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard_write::MobileConsumableBackfill;
 use crate::deps::SpaceAccessPorts;
-use crate::facade::PairingMembershipGossipPort;
+use crate::membership::PairingMembershipConvergencePort;
 
 pub struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
@@ -34,7 +34,7 @@ pub struct SpaceAdmissionDeps {
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub settings: Arc<dyn SettingsPort>,
     pub clock: Arc<dyn ClockPort>,
-    pub membership_gossip: Arc<dyn PairingMembershipGossipPort>,
+    pub membership_gossip: Arc<dyn PairingMembershipConvergencePort>,
     pub pairing_invitation: Arc<dyn PairingInvitationPort>,
     pub pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
     pub pairing_invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,

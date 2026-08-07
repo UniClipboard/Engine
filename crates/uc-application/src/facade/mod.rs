@@ -25,7 +25,6 @@ pub mod file_transfer;
 pub mod host_event;
 pub mod legacy_upgrade;
 mod membership_connectivity;
-pub mod membership_gossip;
 #[cfg(feature = "lan-compat")]
 pub mod mobile_sync;
 pub mod network_recovery;
@@ -124,12 +123,6 @@ pub use legacy_upgrade::{
 };
 pub use membership_connectivity::{
     start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
-};
-pub use membership_gossip::{
-    build_space_membership_gossip, MembershipConvergenceState, MembershipConvergenceStatus,
-    MembershipGossipPassOutcome, MembershipGossipRuntimeError, PairingMembershipGossipPort,
-    SpaceMembershipGossip, SpaceMembershipGossipActivity, SpaceMembershipGossipDeps,
-    SpaceMembershipGossipError, SpaceMembershipGossipRuntime, SponsorSeedBatchContext,
 };
 #[cfg(feature = "lan-compat")]
 pub use mobile_sync::{

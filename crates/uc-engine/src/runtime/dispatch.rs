@@ -12,7 +12,8 @@ use crate::operations::device::member::{
     execute_continue_member_revocation, execute_list_devices,
     execute_query_current_member_revocation, execute_query_legacy_bootstrap,
     execute_query_member_revocation, execute_query_member_sync_preferences,
-    execute_query_membership_convergence, execute_query_space_protection, execute_remove_member,
+    execute_query_membership_convergence, execute_query_shared_device_refresh,
+    execute_query_space_protection, execute_refresh_shared_devices, execute_remove_member,
     execute_secure_remove_legacy_member, execute_update_member_sync_preferences,
 };
 use crate::operations::device::peer_connections::{
@@ -309,6 +310,16 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::QueryMembershipConvergence => {
                     execute_query_membership_convergence(self.current_facade().await?.as_ref())
                         .await
+                }
+                Operation::RefreshSharedDevices => {
+                    execute_refresh_shared_devices(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QuerySharedDeviceRefresh(input) => {
+                    execute_query_shared_device_refresh(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
+                    .await
                 }
                 Operation::QueryMemberSyncPreferences(input) => {
                     execute_query_member_sync_preferences(

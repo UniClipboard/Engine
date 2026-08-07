@@ -10,7 +10,9 @@ pub use runtime::{
     ActiveClipboard, Device, EntryNotResendableReason, InvitationAvailability, InvitationIssued,
     LocalDevice, MemberRevocationOutcome, MemberRevocationResult, MembershipConvergence,
     MembershipConvergenceState, MobileEngine, PeerConnectionRefresh, ResendEntryOutcome,
-    SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceJoined, SpaceState,
+    SendReport, SessionRecovery, SharedDeviceRefresh, SharedDeviceRefreshDevice,
+    SharedDeviceRefreshDeviceState, SharedDeviceRefreshPhase, SharedDeviceRefreshStarted,
+    SpaceCreated, SpaceInvitation, SpaceJoined, SpaceState,
 };
 
 uniffi::setup_scaffolding!();
@@ -358,6 +360,9 @@ pub enum BindingEvent {
     },
     MemberRevocationChanged {
         revocation: MemberRevocationResult,
+    },
+    SharedDeviceRefreshChanged {
+        refresh: SharedDeviceRefresh,
     },
     TransferProgress {
         transfer_id: String,

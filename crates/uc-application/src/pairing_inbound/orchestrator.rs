@@ -634,8 +634,8 @@ mod tests {
         AnalyticsPort, DefaultAnalyticsFacade, NoopAnalyticsIdentity,
     };
 
-    use crate::facade::{
-        PairingMembershipGossipPort, SpaceMembershipGossipError, SponsorSeedBatchContext,
+    use crate::membership::{
+        MembershipConvergenceError, PairingMembershipConvergencePort, SponsorSeedBatchContext,
     };
 
     // ── fakes ────────────────────────────────────────────────────────────
@@ -668,11 +668,11 @@ mod tests {
     struct NoopPairingMembershipGossip;
 
     #[async_trait]
-    impl PairingMembershipGossipPort for NoopPairingMembershipGossip {
+    impl PairingMembershipConvergencePort for NoopPairingMembershipGossip {
         async fn prepare_sponsor_membership(
             &self,
             _context: SponsorSeedBatchContext,
-        ) -> Result<(), SpaceMembershipGossipError> {
+        ) -> Result<(), MembershipConvergenceError> {
             Ok(())
         }
 

@@ -45,16 +45,15 @@ const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
 use uc_application::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::{
-    build_active_clipboard_pull_serve_port, build_space_membership_gossip,
-    start_membership_connectivity, ActiveClipboardDeps, ActiveClipboardFacade,
-    ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, AutomaticLegacyUpgradeRuntime,
-    BlobTransferDeps, BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort,
-    ClipboardLiveIndexer, ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent,
-    HostEventBus, InboundClipboardApplyPort, MemberRosterDeps, MemberRosterFacade,
-    MembershipConnectivityDeps, SpaceAdmissionDeps, SpaceApplicationRuntime, SpaceFacade,
-    SpaceFacadeDeps, SpaceMembershipGossipDeps, SpaceSessionDeps, SpaceTransitionDeps,
-    TransferHostEvent,
+    build_active_clipboard_pull_serve_port, start_membership_connectivity, ActiveClipboardDeps,
+    ActiveClipboardFacade, ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps,
+    AutomaticLegacyUpgradeRuntime, BlobTransferDeps, BlobTransferFacade, ClipboardLiveIndexDeps,
+    ClipboardLiveIndexPort, ClipboardLiveIndexer, ClipboardSnapshotDeps, ClipboardSyncDeps,
+    ClipboardSyncFacade, HostEvent, HostEventBus, InboundClipboardApplyPort, MemberRosterDeps,
+    MemberRosterFacade, MembershipConnectivityDeps, SpaceAdmissionDeps, SpaceApplicationRuntime,
+    SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, TransferHostEvent,
 };
+use uc_application::membership::{build_membership_convergence, MembershipConvergenceDeps};
 use uc_application::proof::HmacProofAdapter;
 use uc_application::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
@@ -631,7 +630,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
     );
-    let membership_gossip = build_space_membership_gossip(SpaceMembershipGossipDeps {
+    let membership_gossip = build_membership_convergence(MembershipConvergenceDeps {
         candidate_repo: Arc::clone(&space_setup.membership_candidate_repo),
         announcement_repo: Arc::clone(&space_setup.membership_announcement_repo),
         outbox_repo: Arc::clone(&space_setup.membership_outbox_repo),

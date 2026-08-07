@@ -9,16 +9,11 @@ use crate::facade::space_setup::{
     FactoryResetError, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
     SpaceFacade, TryResumeSessionError, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
+use crate::membership::MembershipConvergenceActivityPort;
 use crate::receive_reconciliation::EnsureReceiveReadyPort;
 use uc_core::ids::SpaceId;
 use uc_core::ports::setup::SetupStatusPort;
 use uc_core::ports::space::{LockSpacePort, ResumeSpaceSessionPort};
-
-#[async_trait]
-pub(crate) trait MembershipActivityPort: Send + Sync {
-    async fn pause(&self) -> Result<(), String>;
-    async fn resume(&self) -> Result<(), String>;
-}
 
 #[async_trait]
 pub(crate) trait SearchSessionActivityPort: Send + Sync {
@@ -80,14 +75,14 @@ pub struct RecoverSpaceSessionResult {
 }
 
 pub(crate) struct SpaceActivityCoordinator {
-    membership: Arc<dyn MembershipActivityPort>,
+    membership: Arc<dyn MembershipConvergenceActivityPort>,
     receive: Arc<dyn EnsureReceiveReadyPort>,
     search: Arc<dyn SearchSessionActivityPort>,
 }
 
 impl SpaceActivityCoordinator {
     pub(crate) fn new(
-        membership: Arc<dyn MembershipActivityPort>,
+        membership: Arc<dyn MembershipConvergenceActivityPort>,
         receive: Arc<dyn EnsureReceiveReadyPort>,
         search: Arc<dyn SearchSessionActivityPort>,
     ) -> Self {
@@ -152,7 +147,7 @@ pub(crate) struct SpaceSessionCoordinator {
 }
 
 pub struct SpaceSessionActivityDeps {
-    pub membership: crate::facade::SpaceMembershipGossipActivity,
+    pub membership: crate::membership::MembershipConvergenceActivity,
     pub receive: Arc<dyn EnsureReceiveReadyPort>,
 }
 
@@ -381,14 +376,14 @@ mod tests {
     };
 
     use super::{
-        MembershipActivityPort, SearchSessionActivityPort, SpaceActivityCoordinator,
-        SpaceSessionAccessError, SpaceSessionAccessPort, SpaceSessionCoordinator,
-        SpaceSessionError,
+        SearchSessionActivityPort, SpaceActivityCoordinator, SpaceSessionAccessError,
+        SpaceSessionAccessPort, SpaceSessionCoordinator, SpaceSessionError,
     };
     use crate::facade::{
         FactoryResetError, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
         UnlockSpaceInput, UnlockSpaceResult,
     };
+    use crate::membership::MembershipConvergenceActivityPort;
     use uc_core::ids::SpaceId;
 
     #[derive(Clone)]
@@ -413,7 +408,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl MembershipActivityPort for RecordingMembershipActivity {
+    impl MembershipConvergenceActivityPort for RecordingMembershipActivity {
         async fn pause(&self) -> Result<(), String> {
             self.calls.push("membership.pause");
             Ok(())

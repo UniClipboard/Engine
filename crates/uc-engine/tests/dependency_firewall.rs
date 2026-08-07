@@ -168,10 +168,26 @@ fn engine_does_not_own_membership_gossip_or_its_runtime() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let engine_source = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
 
-    for forbidden in ["SpaceMembershipGossipRuntime", "SpaceMembershipGossip,"] {
+    for forbidden in [
+        "MembershipConvergenceRuntime",
+        "MembershipConvergenceActivity",
+    ] {
         assert!(
             !engine_source.contains(forbidden),
             "application runtime must own {forbidden} instead of uc-engine"
+        );
+    }
+}
+
+#[test]
+fn facade_directory_does_not_contain_membership_implementation() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let facade = workspace_root.join("crates/uc-application/src/facade");
+
+    for forbidden in ["membership_gossip.rs", "membership_gossip"] {
+        assert!(
+            !facade.join(forbidden).exists(),
+            "membership implementation must live under uc-application/src/membership, not facade/{forbidden}"
         );
     }
 }

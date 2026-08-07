@@ -58,8 +58,8 @@ use uc_core::security::IdentityFingerprint;
 use uc_core::space_access::domain::{ProofDerivedKey, SpaceAccessProofArtifact};
 use uc_observability_contract::analytics::AnalyticsFacade;
 
-use crate::facade::{PairingMembershipGossipPort, SponsorSeedBatchContext};
 use crate::group_update_delivery::GroupUpdateDeliveryPort;
+use crate::membership::{PairingMembershipConvergencePort, SponsorSeedBatchContext};
 
 /// Facts about the verified joiner, handed to the orchestrator so it can
 /// drive admit + trust use cases without re-parsing the `JoinerRequest`.
@@ -107,7 +107,7 @@ pub(crate) struct SponsorHandshakeCoordinator {
     group_admission: Arc<dyn GroupAdmissionPort>,
     group_update_delivery: Option<Arc<dyn GroupUpdateDeliveryPort>>,
     member_repo: Arc<dyn MemberRepositoryPort>,
-    membership_gossip: Arc<dyn PairingMembershipGossipPort>,
+    membership_gossip: Arc<dyn PairingMembershipConvergencePort>,
     proof_port: Arc<dyn ProofPort>,
     local_identity: Arc<dyn LocalIdentityPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
@@ -140,7 +140,7 @@ impl SponsorHandshakeCoordinator {
         group_admission: Arc<dyn GroupAdmissionPort>,
         group_update_delivery: Option<Arc<dyn GroupUpdateDeliveryPort>>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        membership_gossip: Arc<dyn PairingMembershipGossipPort>,
+        membership_gossip: Arc<dyn PairingMembershipConvergencePort>,
         proof_port: Arc<dyn ProofPort>,
         local_identity: Arc<dyn LocalIdentityPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
@@ -599,8 +599,8 @@ mod tests {
         GroupAdmission, PreparedAdmissionOffer, PreparedGroupJoin, ProofDerivedKey,
     };
 
-    use crate::facade::{
-        PairingMembershipGossipPort, SpaceMembershipGossipError, SponsorSeedBatchContext,
+    use crate::membership::{
+        MembershipConvergenceError, PairingMembershipConvergencePort, SponsorSeedBatchContext,
     };
 
     // ── fakes ────────────────────────────────────────────────────────────
@@ -721,11 +721,11 @@ mod tests {
         PairingMembershipGossip {}
 
         #[async_trait]
-        impl PairingMembershipGossipPort for PairingMembershipGossip {
+        impl PairingMembershipConvergencePort for PairingMembershipGossip {
             async fn prepare_sponsor_membership(
                 &self,
                 context: SponsorSeedBatchContext,
-            ) -> Result<(), SpaceMembershipGossipError>;
+            ) -> Result<(), MembershipConvergenceError>;
             fn notify_pending_delivery(&self);
         }
     }

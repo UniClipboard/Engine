@@ -1685,11 +1685,11 @@ mod tests {
     struct NoopPairingMembershipGossip;
 
     #[async_trait]
-    impl crate::facade::PairingMembershipGossipPort for NoopPairingMembershipGossip {
+    impl crate::membership::PairingMembershipConvergencePort for NoopPairingMembershipGossip {
         async fn prepare_sponsor_membership(
             &self,
-            _context: crate::facade::SponsorSeedBatchContext,
-        ) -> Result<(), crate::facade::SpaceMembershipGossipError> {
+            _context: crate::membership::SponsorSeedBatchContext,
+        ) -> Result<(), crate::membership::MembershipConvergenceError> {
             Ok(())
         }
 

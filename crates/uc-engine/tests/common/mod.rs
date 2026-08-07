@@ -14,8 +14,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use uc_application::clipboard_write::MobileConsumableBackfill;
-use uc_application::facade::{
-    PairingMembershipGossipPort, SpaceMembershipGossipError, SponsorSeedBatchContext,
+use uc_application::membership::{
+    MembershipConvergenceError, PairingMembershipConvergencePort, SponsorSeedBatchContext,
 };
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
 use uc_core::ids::{EventId, RepresentationId, SpaceId};
@@ -48,18 +48,18 @@ pub fn mobile_consumable_backfill_noop() -> Arc<dyn MobileConsumableBackfill> {
 pub struct NoopPairingMembershipGossip;
 
 #[async_trait]
-impl PairingMembershipGossipPort for NoopPairingMembershipGossip {
+impl PairingMembershipConvergencePort for NoopPairingMembershipGossip {
     async fn prepare_sponsor_membership(
         &self,
         _context: SponsorSeedBatchContext,
-    ) -> Result<(), SpaceMembershipGossipError> {
+    ) -> Result<(), MembershipConvergenceError> {
         Ok(())
     }
 
     fn notify_pending_delivery(&self) {}
 }
 
-pub fn membership_gossip_noop() -> Arc<dyn PairingMembershipGossipPort> {
+pub fn membership_gossip_noop() -> Arc<dyn PairingMembershipConvergencePort> {
     Arc::new(NoopPairingMembershipGossip)
 }
 

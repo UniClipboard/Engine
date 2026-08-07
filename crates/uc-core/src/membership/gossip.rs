@@ -153,6 +153,18 @@ impl MembershipRequestMissing {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipSharedDevicePageRequest {
+    pub space_id: SpaceId,
+    pub after_device_id: Option<DeviceId>,
+}
+
+impl MembershipSharedDevicePageRequest {
+    pub fn validate_transfer_bounds(&self) -> Result<(), MembershipGossipBoundsError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MembershipEvent {
     SponsorSeed(SponsorCandidateSeed),
     Announcement(DeviceAnnouncement),
@@ -230,6 +242,44 @@ impl MembershipEventBatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipSharedDevicePage {
+    pub space_id: SpaceId,
+    pub seeds: Vec<SponsorCandidateSeed>,
+    pub next_after_device_id: Option<DeviceId>,
+}
+
+impl MembershipSharedDevicePage {
+    pub fn validate_transfer_bounds(&self) -> Result<(), MembershipGossipBoundsError> {
+        if self.seeds.len() > MAX_GOSSIP_DEVICES {
+            return Err(MembershipGossipBoundsError::TooManyDevices);
+        }
+        if self
+            .seeds
+            .windows(2)
+            .any(|pair| pair[0].device_id.as_str() >= pair[1].device_id.as_str())
+        {
+            return Err(MembershipGossipBoundsError::InvalidPageOrder);
+        }
+        if let Some(next_after_device_id) = &self.next_after_device_id {
+            if self.seeds.last().map(|seed| &seed.device_id) != Some(next_after_device_id) {
+                return Err(MembershipGossipBoundsError::InvalidPageCursor);
+            }
+        }
+        MembershipEventBatch {
+            space_id: self.space_id.clone(),
+            batch_id: [0; 32],
+            events: self
+                .seeds
+                .iter()
+                .cloned()
+                .map(MembershipEvent::SponsorSeed)
+                .collect(),
+        }
+        .validate_transfer_bounds()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MembershipAck {
     pub space_id: SpaceId,
     pub batch_id: [u8; 32],
@@ -239,6 +289,8 @@ pub struct MembershipAck {
 pub enum MembershipGossipMessage {
     Digest(MembershipDigest),
     RequestMissing(MembershipRequestMissing),
+    RequestSharedDevicePage(MembershipSharedDevicePageRequest),
+    SharedDevicePage(MembershipSharedDevicePage),
     EventBatch(MembershipEventBatch),
     Ack(MembershipAck),
 }
@@ -248,6 +300,8 @@ impl MembershipGossipMessage {
         match self {
             Self::Digest(digest) => digest.validate_transfer_bounds(),
             Self::RequestMissing(request) => request.validate_transfer_bounds(),
+            Self::RequestSharedDevicePage(request) => request.validate_transfer_bounds(),
+            Self::SharedDevicePage(page) => page.validate_transfer_bounds(),
             Self::EventBatch(batch) => batch.validate_transfer_bounds(),
             Self::Ack(_) => Ok(()),
         }
@@ -260,6 +314,10 @@ pub enum MembershipGossipBoundsError {
     TooManyDevices,
     #[error("membership gossip contains too many events")]
     TooManyEvents,
+    #[error("membership shared device page is not in stable order")]
+    InvalidPageOrder,
+    #[error("membership shared device page cursor is invalid")]
+    InvalidPageCursor,
     #[error("membership gossip message is too large")]
     MessageTooLarge,
     #[error("membership gossip event is invalid: {0}")]
@@ -869,9 +927,10 @@ mod tests {
     use super::{
         CandidateFailure, CandidateMergeError, CandidateMergeOutcome, CandidateSource,
         CandidateStatus, DeviceAnnouncement, MembershipAnnouncementVersion, MembershipDigest,
-        MembershipEvent, MembershipEventBatch, MembershipRequestMissing, PendingMembershipBatch,
-        RelayedSecurityUpdate, SpaceMembershipCandidate, SponsorCandidateSeed,
-        MAX_GOSSIP_MESSAGE_BYTES,
+        MembershipEvent, MembershipEventBatch, MembershipGossipBoundsError,
+        MembershipGossipMessage, MembershipRequestMissing, MembershipSharedDevicePage,
+        MembershipSharedDevicePageRequest, PendingMembershipBatch, RelayedSecurityUpdate,
+        SpaceMembershipCandidate, SponsorCandidateSeed, MAX_GOSSIP_MESSAGE_BYTES,
     };
 
     fn fingerprint(raw: &str) -> IdentityFingerprint {
@@ -937,6 +996,61 @@ mod tests {
             security_updates_after_epoch: Some(4),
         };
         assert!(request.validate_transfer_bounds().is_err());
+    }
+
+    #[test]
+    fn shared_device_page_requires_stable_order_and_matching_cursor() {
+        let mut first = seed(100);
+        first.device_id = DeviceId::new("device-a");
+        let mut second = seed(100);
+        second.device_id = DeviceId::new("device-c");
+
+        let request = MembershipSharedDevicePageRequest {
+            space_id: SpaceId::from("space-a"),
+            after_device_id: Some(DeviceId::new("device-0")),
+        };
+        assert!(MembershipGossipMessage::RequestSharedDevicePage(request)
+            .validate_transfer_bounds()
+            .is_ok());
+
+        let page = MembershipSharedDevicePage {
+            space_id: SpaceId::from("space-a"),
+            seeds: vec![first.clone(), second.clone()],
+            next_after_device_id: Some(second.device_id.clone()),
+        };
+        assert!(MembershipGossipMessage::SharedDevicePage(page.clone())
+            .validate_transfer_bounds()
+            .is_ok());
+
+        let unordered = MembershipSharedDevicePage {
+            seeds: vec![second, first],
+            ..page
+        };
+        assert!(matches!(
+            unordered.validate_transfer_bounds(),
+            Err(MembershipGossipBoundsError::InvalidPageOrder)
+        ));
+    }
+
+    #[test]
+    fn shared_device_page_reuses_the_single_message_device_limit() {
+        let seeds = (0..65)
+            .map(|index| {
+                let mut seed = seed(100);
+                seed.device_id = DeviceId::new(format!("device-{index:03}"));
+                seed
+            })
+            .collect();
+        let page = MembershipSharedDevicePage {
+            space_id: SpaceId::from("space-a"),
+            seeds,
+            next_after_device_id: None,
+        };
+
+        assert!(matches!(
+            page.validate_transfer_bounds(),
+            Err(MembershipGossipBoundsError::TooManyDevices)
+        ));
     }
 
     #[test]

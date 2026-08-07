@@ -17,8 +17,9 @@ use uc_engine::{
     HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot,
     HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
     JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult,
-    QueryMemberRevocationInput, RecoverSessionInput, RemoveMemberInput, ResendEntryInput,
-    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
+    QueryMemberRevocationInput, QuerySharedDeviceRefreshInput, RecoverSessionInput,
+    RemoveMemberInput, ResendEntryInput, RestoreClipboardInput, SecretString, SendFilesInput,
+    SendImageInput, SendTextInput,
 };
 use zeroize::Zeroizing;
 
@@ -221,6 +222,55 @@ pub struct MembershipConvergence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SharedDeviceRefreshPhase {
+    Started,
+    Discovering,
+    Connecting,
+    RoundCompleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SharedDeviceRefreshDeviceState {
+    Discovered,
+    Connecting,
+    Connected,
+    AlreadyPresent,
+    WaitingForPeer,
+    WaitingForUpdate,
+    VersionIncompatible,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SharedDeviceRefreshDevice {
+    pub device_id: String,
+    pub display_name: String,
+    pub state: SharedDeviceRefreshDeviceState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SharedDeviceRefreshStarted {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SharedDeviceRefresh {
+    pub request_id: String,
+    pub phase: SharedDeviceRefreshPhase,
+    pub devices: Vec<SharedDeviceRefreshDevice>,
+    pub total_count: u64,
+    pub discovered_count: u64,
+    pub connecting_count: u64,
+    pub connected_count: u64,
+    pub already_present_count: u64,
+    pub waiting_for_peer_count: u64,
+    pub waiting_for_update_count: u64,
+    pub version_incompatible_count: u64,
+    pub rejected_count: u64,
+    pub unavailable_source_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum MemberRevocationOutcome {
     LocalOnly,
     Applied,
@@ -305,6 +355,13 @@ enum WorkerCommand {
     },
     QueryMembershipConvergence {
         response: mpsc::Sender<Result<MembershipConvergence, BindingError>>,
+    },
+    RefreshSharedDevices {
+        response: mpsc::Sender<Result<SharedDeviceRefreshStarted, BindingError>>,
+    },
+    QuerySharedDeviceRefresh {
+        request_id: String,
+        response: mpsc::Sender<Result<Option<SharedDeviceRefresh>, BindingError>>,
     },
     RemoveMember {
         device_id: String,
@@ -758,6 +815,20 @@ impl MobileEngine {
 
     pub fn query_membership_convergence(&self) -> Result<MembershipConvergence, BindingError> {
         self.request(|response| WorkerCommand::QueryMembershipConvergence { response })
+    }
+
+    pub fn refresh_shared_devices(&self) -> Result<SharedDeviceRefreshStarted, BindingError> {
+        self.request(|response| WorkerCommand::RefreshSharedDevices { response })
+    }
+
+    pub fn query_shared_device_refresh(
+        &self,
+        request_id: String,
+    ) -> Result<Option<SharedDeviceRefresh>, BindingError> {
+        self.request(|response| WorkerCommand::QuerySharedDeviceRefresh {
+            request_id,
+            response,
+        })
     }
 
     pub fn remove_member(&self, device_id: String) -> Result<MemberRevocationResult, BindingError> {
@@ -1331,6 +1402,27 @@ async fn run_worker_loop(
                     .and_then(map_membership_convergence);
                 let _ = response.send(result);
             }
+            WorkerCommand::RefreshSharedDevices { response } => {
+                let result = engine
+                    .execute(Operation::RefreshSharedDevices)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_shared_device_refresh_started);
+                let _ = response.send(result);
+            }
+            WorkerCommand::QuerySharedDeviceRefresh {
+                request_id,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::QuerySharedDeviceRefresh(
+                        QuerySharedDeviceRefreshInput { request_id },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_shared_device_refresh);
+                let _ = response.send(result);
+            }
             WorkerCommand::RemoveMember {
                 device_id,
                 response,
@@ -1700,6 +1792,11 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
                 revocation: map_member_revocation_summary(summary),
             }
         }
+        uc_engine::EngineEvent::SharedDeviceRefreshChanged(summary) => {
+            BindingEvent::SharedDeviceRefreshChanged {
+                refresh: shared_device_refresh(summary),
+            }
+        }
         uc_engine::EngineEvent::TransferProgress(event) => BindingEvent::TransferProgress {
             transfer_id: event.transfer_id,
             entry_id: event.entry_id,
@@ -1827,6 +1924,90 @@ fn map_membership_convergence(
             rejected_count: summary.rejected_count,
         }),
         _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_shared_device_refresh_started(
+    result: OperationResult,
+) -> Result<SharedDeviceRefreshStarted, BindingError> {
+    match result {
+        OperationResult::SharedDeviceRefreshStarted(summary) => Ok(SharedDeviceRefreshStarted {
+            request_id: summary.request_id,
+        }),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_shared_device_refresh(
+    result: OperationResult,
+) -> Result<Option<SharedDeviceRefresh>, BindingError> {
+    match result {
+        OperationResult::SharedDeviceRefresh(summary) => Ok(summary.map(shared_device_refresh)),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn shared_device_refresh(summary: uc_engine::SharedDeviceRefreshSummary) -> SharedDeviceRefresh {
+    SharedDeviceRefresh {
+        request_id: summary.request_id,
+        phase: match summary.phase {
+            uc_engine::SharedDeviceRefreshPhaseSummary::Started => {
+                SharedDeviceRefreshPhase::Started
+            }
+            uc_engine::SharedDeviceRefreshPhaseSummary::Discovering => {
+                SharedDeviceRefreshPhase::Discovering
+            }
+            uc_engine::SharedDeviceRefreshPhaseSummary::Connecting => {
+                SharedDeviceRefreshPhase::Connecting
+            }
+            uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted => {
+                SharedDeviceRefreshPhase::RoundCompleted
+            }
+        },
+        devices: summary
+            .devices
+            .into_iter()
+            .map(|device| SharedDeviceRefreshDevice {
+                device_id: device.device_id,
+                display_name: device.display_name,
+                state: match device.state {
+                    uc_engine::SharedDeviceRefreshDeviceStateSummary::Discovered => {
+                        SharedDeviceRefreshDeviceState::Discovered
+                    }
+                    uc_engine::SharedDeviceRefreshDeviceStateSummary::Connecting => {
+                        SharedDeviceRefreshDeviceState::Connecting
+                    }
+                    uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected => {
+                        SharedDeviceRefreshDeviceState::Connected
+                    }
+                    uc_engine::SharedDeviceRefreshDeviceStateSummary::AlreadyPresent => {
+                        SharedDeviceRefreshDeviceState::AlreadyPresent
+                    }
+                    uc_engine::SharedDeviceRefreshDeviceStateSummary::WaitingForPeer => {
+                        SharedDeviceRefreshDeviceState::WaitingForPeer
+                    }
+                    uc_engine::SharedDeviceRefreshDeviceStateSummary::WaitingForUpdate => {
+                        SharedDeviceRefreshDeviceState::WaitingForUpdate
+                    }
+                    uc_engine::SharedDeviceRefreshDeviceStateSummary::VersionIncompatible => {
+                        SharedDeviceRefreshDeviceState::VersionIncompatible
+                    }
+                    uc_engine::SharedDeviceRefreshDeviceStateSummary::Rejected => {
+                        SharedDeviceRefreshDeviceState::Rejected
+                    }
+                },
+            })
+            .collect(),
+        total_count: summary.total_count,
+        discovered_count: summary.discovered_count,
+        connecting_count: summary.connecting_count,
+        connected_count: summary.connected_count,
+        already_present_count: summary.already_present_count,
+        waiting_for_peer_count: summary.waiting_for_peer_count,
+        waiting_for_update_count: summary.waiting_for_update_count,
+        version_incompatible_count: summary.version_incompatible_count,
+        rejected_count: summary.rejected_count,
+        unavailable_source_count: summary.unavailable_source_count,
     }
 }
 
@@ -2410,6 +2591,58 @@ mod tests {
                     removed_device_ids: vec!["removed-1".into()],
                     pending_recipient_device_ids: vec!["waiting-1".into()],
                     updated_at_ms: 42,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn shared_device_refresh_methods_and_event_keep_the_complete_snapshot() {
+        let _refresh: fn(&MobileEngine) -> Result<SharedDeviceRefreshStarted, BindingError> =
+            MobileEngine::refresh_shared_devices;
+        let _query: fn(&MobileEngine, String) -> Result<Option<SharedDeviceRefresh>, BindingError> =
+            MobileEngine::query_shared_device_refresh;
+        let summary = uc_engine::SharedDeviceRefreshSummary {
+            request_id: "refresh-1".into(),
+            phase: uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted,
+            devices: vec![uc_engine::SharedDeviceRefreshDeviceSummary {
+                device_id: "device-c".into(),
+                display_name: "Device C".into(),
+                state: uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected,
+            }],
+            total_count: 1,
+            discovered_count: 0,
+            connecting_count: 0,
+            connected_count: 1,
+            already_present_count: 0,
+            waiting_for_peer_count: 0,
+            waiting_for_update_count: 0,
+            version_incompatible_count: 0,
+            rejected_count: 0,
+            unavailable_source_count: 2,
+        };
+
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::SharedDeviceRefreshChanged(summary)),
+            BindingEvent::SharedDeviceRefreshChanged {
+                refresh: SharedDeviceRefresh {
+                    request_id: "refresh-1".into(),
+                    phase: SharedDeviceRefreshPhase::RoundCompleted,
+                    devices: vec![SharedDeviceRefreshDevice {
+                        device_id: "device-c".into(),
+                        display_name: "Device C".into(),
+                        state: SharedDeviceRefreshDeviceState::Connected,
+                    }],
+                    total_count: 1,
+                    discovered_count: 0,
+                    connecting_count: 0,
+                    connected_count: 1,
+                    already_present_count: 0,
+                    waiting_for_peer_count: 0,
+                    waiting_for_update_count: 0,
+                    version_incompatible_count: 0,
+                    rejected_count: 0,
+                    unavailable_source_count: 2,
                 },
             }
         );

@@ -765,6 +765,8 @@ impl IrohMembershipAttestationHandler {
         let message_space_id = match &request.message {
             MembershipGossipMessage::Digest(message) => &message.space_id,
             MembershipGossipMessage::RequestMissing(message) => &message.space_id,
+            MembershipGossipMessage::RequestSharedDevicePage(message) => &message.space_id,
+            MembershipGossipMessage::SharedDevicePage(message) => &message.space_id,
             MembershipGossipMessage::EventBatch(message) => &message.space_id,
             MembershipGossipMessage::Ack(message) => &message.space_id,
         };
@@ -1012,8 +1014,9 @@ mod tests {
         MembershipAttestationError, MembershipAttestationPort, MembershipError,
         MembershipEventBatch, MembershipGossipEndpointError, MembershipGossipEndpointPort,
         MembershipGossipMessage, MembershipGossipTransportError, MembershipGossipTransportPort,
-        PeerAdmissionError, PeerAdmissionPort, RelayedSecurityUpdate, SpaceMember,
-        SpaceMembershipCandidate, SponsorCandidateSeed, VerifiedMembershipPeer,
+        MembershipSharedDevicePage, MembershipSharedDevicePageRequest, PeerAdmissionError,
+        PeerAdmissionPort, RelayedSecurityUpdate, SpaceMember, SpaceMembershipCandidate,
+        SponsorCandidateSeed, VerifiedMembershipPeer,
     };
     use uc_core::ports::security::IdentityFingerprintFactoryPort;
     use uc_core::ports::{
@@ -1366,6 +1369,13 @@ mod tests {
                     MembershipGossipMessage::Ack(uc_core::membership::MembershipAck {
                         space_id: batch.space_id.clone(),
                         batch_id: batch.batch_id,
+                    })
+                }
+                MembershipGossipMessage::RequestSharedDevicePage(request) => {
+                    MembershipGossipMessage::SharedDevicePage(MembershipSharedDevicePage {
+                        space_id: request.space_id.clone(),
+                        seeds: Vec::new(),
+                        next_after_device_id: None,
                     })
                 }
                 _ => return Err(MembershipGossipEndpointError::Rejected),
@@ -1794,7 +1804,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn known_member_event_batch_round_trips_over_membership_channel() {
+    async fn known_member_event_batch_and_shared_device_page_round_trip_over_membership_channel() {
         let a_seed = [0x41; 32];
         let b_seed = [0x42; 32];
         let a_endpoint = endpoint(a_seed).await;
@@ -1876,10 +1886,39 @@ mod tests {
                 batch_id: batch.batch_id,
             })
         );
-        let received = received.0.lock().unwrap();
-        assert_eq!(received.len(), 1);
-        assert_eq!(received[0].0, b_identity.device_id);
-        drop(received);
+        let received_events = received.0.lock().unwrap();
+        assert_eq!(received_events.len(), 1);
+        assert_eq!(received_events[0].0, b_identity.device_id);
+        drop(received_events);
+
+        let shared_device_page = b_transport
+            .exchange(
+                &a_identity.device_id,
+                MembershipGossipMessage::RequestSharedDevicePage(
+                    MembershipSharedDevicePageRequest {
+                        space_id: SpaceId::from("space-a"),
+                        after_device_id: None,
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            shared_device_page,
+            MembershipGossipMessage::SharedDevicePage(MembershipSharedDevicePage {
+                space_id: SpaceId::from("space-a"),
+                seeds: Vec::new(),
+                next_after_device_id: None,
+            })
+        );
+        let received_events = received.0.lock().unwrap();
+        assert_eq!(received_events.len(), 2);
+        assert!(matches!(
+            received_events[1].1,
+            MembershipGossipMessage::RequestSharedDevicePage(_)
+        ));
+        drop(received_events);
         a_router.shutdown().await.ok();
         b_endpoint.close().await;
     }

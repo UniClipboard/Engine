@@ -19,8 +19,9 @@ pub use gossip::{
     CandidateFailure, CandidateMergeError, CandidateMergeOutcome, CandidateSource, CandidateStatus,
     DeviceAnnouncement, MembershipAck, MembershipAnnouncementVersion, MembershipDigest,
     MembershipEvent, MembershipEventBatch, MembershipGossipBoundsError, MembershipGossipMessage,
-    MembershipRequestMissing, PendingMembershipBatch, RelayedSecurityUpdate,
-    SpaceMembershipCandidate, SponsorCandidateSeed, VerifiedMembershipPeer,
+    MembershipRequestMissing, MembershipSharedDevicePage, MembershipSharedDevicePageRequest,
+    PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate, SponsorCandidateSeed,
+    VerifiedMembershipPeer,
 };
 pub use member::SpaceMember;
 pub use ports::{

@@ -21,6 +21,7 @@ use uc_application::facade::{
     AppFacade, HistoryMaintenanceRuntime, MemberRevocationView, NetworkRecoveryEvent,
     PairingOutcome,
 };
+use uc_application::membership::SharedDeviceRefreshStatus;
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
@@ -140,6 +141,12 @@ fn engine_event_for_member_revocation(revocation: MemberRevocationView) -> crate
     )
 }
 
+fn engine_event_for_shared_device_refresh(status: SharedDeviceRefreshStatus) -> crate::EngineEvent {
+    crate::EngineEvent::SharedDeviceRefreshChanged(
+        crate::operations::device::member::shared_device_refresh_summary(status),
+    )
+}
+
 async fn spawn_pairing_completion_events(
     mut outcomes: tokio::sync::broadcast::Receiver<PairingOutcome>,
     tasks: &Arc<TaskRegistry>,
@@ -177,6 +184,31 @@ async fn spawn_member_revocation_events(
                     _ = cancel.cancelled() => return,
                     change = changes.recv() => match change {
                         Ok(change) => events.send(engine_event_for_member_revocation(change)),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            events.send(crate::EngineEvent::RefreshRequired {
+                                reason: crate::RefreshReason::ConsumerLagged,
+                            });
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        })
+        .await;
+}
+
+async fn spawn_shared_device_refresh_events(
+    mut changes: tokio::sync::broadcast::Receiver<SharedDeviceRefreshStatus>,
+    tasks: &Arc<TaskRegistry>,
+    events: EventSender,
+) {
+    tasks
+        .spawn("shared_device_refresh_events", move |cancel| async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    change = changes.recv() => match change {
+                        Ok(change) => events.send(engine_event_for_shared_device_refresh(change)),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             events.send(crate::EngineEvent::RefreshRequired {
                                 reason: crate::RefreshReason::ConsumerLagged,
@@ -467,6 +499,12 @@ impl ProductionRuntime {
             events.clone(),
         )
         .await;
+        spawn_shared_device_refresh_events(
+            facade.subscribe_shared_device_refresh(),
+            &tasks,
+            events.clone(),
+        )
+        .await;
         if let Err(error) = sync_engine.roster.resume_incomplete_revocations().await {
             warn!(error = %error, "pending group updates could not resume during startup");
         }
@@ -575,6 +613,10 @@ mod tests {
         ClipboardOutboundOutcome, MemberRevocationState, MemberRevocationView, PairingOutcome,
         SearchFacadeError, SearchPageView, SearchResultView, StorageFacadeError, StorageStatsView,
     };
+    use uc_application::membership::{
+        SharedDeviceRefreshDevice, SharedDeviceRefreshDeviceState, SharedDeviceRefreshPhase,
+        SharedDeviceRefreshStatus,
+    };
     use uc_core::ids::DeviceId;
     use uc_core::security::IdentityFingerprint;
 
@@ -627,6 +669,103 @@ mod tests {
                 next_retry_in_ms: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn shared_device_refresh_changes_are_published_on_the_engine_event_stream() {
+        let (changes, change_stream) = tokio::sync::broadcast::channel(8);
+        let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
+        let tasks = Arc::new(TaskRegistry::new());
+
+        spawn_shared_device_refresh_events(change_stream, &tasks, events).await;
+        changes
+            .send(SharedDeviceRefreshStatus {
+                request_id: "request-1".into(),
+                phase: SharedDeviceRefreshPhase::Connecting,
+                devices: vec![SharedDeviceRefreshDevice {
+                    device_id: DeviceId::new("device-c"),
+                    device_name: "Device C".into(),
+                    state: SharedDeviceRefreshDeviceState::Connecting,
+                }],
+                total_count: 1,
+                discovered_count: 0,
+                connecting_count: 1,
+                connected_count: 0,
+                already_present_count: 0,
+                waiting_for_peer_count: 0,
+                waiting_for_update_count: 0,
+                version_incompatible_count: 0,
+                rejected_count: 0,
+                unavailable_source_count: 0,
+            })
+            .unwrap();
+
+        assert_eq!(
+            event_stream.next().await,
+            Some(crate::EngineEvent::SharedDeviceRefreshChanged(
+                crate::SharedDeviceRefreshSummary {
+                    request_id: "request-1".into(),
+                    phase: crate::SharedDeviceRefreshPhaseSummary::Connecting,
+                    devices: vec![crate::SharedDeviceRefreshDeviceSummary {
+                        device_id: "device-c".into(),
+                        display_name: "Device C".into(),
+                        state: crate::SharedDeviceRefreshDeviceStateSummary::Connecting,
+                    }],
+                    total_count: 1,
+                    discovered_count: 0,
+                    connecting_count: 1,
+                    connected_count: 0,
+                    already_present_count: 0,
+                    waiting_for_peer_count: 0,
+                    waiting_for_update_count: 0,
+                    version_incompatible_count: 0,
+                    rejected_count: 0,
+                    unavailable_source_count: 0,
+                }
+            ))
+        );
+
+        tasks.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn shared_device_refresh_lag_requests_a_snapshot_refresh() {
+        let (changes, change_stream) = tokio::sync::broadcast::channel(1);
+        let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
+        let tasks = Arc::new(TaskRegistry::new());
+
+        spawn_shared_device_refresh_events(change_stream, &tasks, events).await;
+        for phase in [
+            SharedDeviceRefreshPhase::Started,
+            SharedDeviceRefreshPhase::Discovering,
+        ] {
+            changes
+                .send(SharedDeviceRefreshStatus {
+                    request_id: "request-1".into(),
+                    phase,
+                    devices: Vec::new(),
+                    total_count: 0,
+                    discovered_count: 0,
+                    connecting_count: 0,
+                    connected_count: 0,
+                    already_present_count: 0,
+                    waiting_for_peer_count: 0,
+                    waiting_for_update_count: 0,
+                    version_incompatible_count: 0,
+                    rejected_count: 0,
+                    unavailable_source_count: 0,
+                })
+                .unwrap();
+        }
+
+        assert_eq!(
+            event_stream.next().await,
+            Some(crate::EngineEvent::RefreshRequired {
+                reason: crate::RefreshReason::ConsumerLagged,
+            })
+        );
+
+        tasks.shutdown(Duration::from_secs(1)).await;
     }
 
     #[tokio::test]

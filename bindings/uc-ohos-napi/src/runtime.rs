@@ -8,16 +8,17 @@ use uc_engine::{
     ClipboardRestoreMode, ClipboardRestoreOutcome, ContinueMemberRevocationInput, CreateSpaceInput,
     Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput,
     HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation, OperationResult,
-    OperationTerminal, QueryMemberRevocationInput, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput,
-    SendReportSummary, SendTextInput,
+    OperationTerminal, QueryMemberRevocationInput, QuerySharedDeviceRefreshInput,
+    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
+    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
     OhLocalDevice, OhMemberRevocation, OhMembershipConvergence, OhNetworkRecoveryStatus,
-    OhSendReport, OhSessionRecovery, OhSpaceCreated, OhSpaceJoined,
+    OhSendReport, OhSessionRecovery, OhSharedDeviceRefresh, OhSharedDeviceRefreshDevice,
+    OhSharedDeviceRefreshStarted, OhSpaceCreated, OhSpaceJoined,
 };
 
 #[napi]
@@ -147,6 +148,43 @@ impl OhEngine {
             .map_err(engine_error)?;
         match result {
             OperationResult::MembershipConvergence(summary) => membership_convergence(summary),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn refresh_shared_devices(&self) -> napi::Result<OhSharedDeviceRefreshStarted> {
+        let result = self
+            .engine
+            .execute(Operation::RefreshSharedDevices)
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::SharedDeviceRefreshStarted(summary) => {
+                Ok(OhSharedDeviceRefreshStarted {
+                    request_id: summary.request_id,
+                })
+            }
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_shared_device_refresh(
+        &self,
+        request_id: String,
+    ) -> napi::Result<Option<OhSharedDeviceRefresh>> {
+        let result = self
+            .engine
+            .execute(Operation::QuerySharedDeviceRefresh(
+                QuerySharedDeviceRefreshInput { request_id },
+            ))
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::SharedDeviceRefresh(summary) => {
+                summary.map(shared_device_refresh).transpose()
+            }
             _ => Err(unexpected_result()),
         }
     }
@@ -545,6 +583,64 @@ fn membership_convergence(
     })
 }
 
+fn shared_device_refresh(
+    summary: uc_engine::SharedDeviceRefreshSummary,
+) -> napi::Result<OhSharedDeviceRefresh> {
+    Ok(OhSharedDeviceRefresh {
+        request_id: summary.request_id,
+        phase: match summary.phase {
+            uc_engine::SharedDeviceRefreshPhaseSummary::Started => "started",
+            uc_engine::SharedDeviceRefreshPhaseSummary::Discovering => "discovering",
+            uc_engine::SharedDeviceRefreshPhaseSummary::Connecting => "connecting",
+            uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted => "round_completed",
+        }
+        .to_owned(),
+        devices: summary
+            .devices
+            .into_iter()
+            .map(|device| {
+                Ok(OhSharedDeviceRefreshDevice {
+                    device_id: device.device_id,
+                    display_name: device.display_name,
+                    state: match device.state {
+                        uc_engine::SharedDeviceRefreshDeviceStateSummary::Discovered => {
+                            "discovered"
+                        }
+                        uc_engine::SharedDeviceRefreshDeviceStateSummary::Connecting => {
+                            "connecting"
+                        }
+                        uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected => "connected",
+                        uc_engine::SharedDeviceRefreshDeviceStateSummary::AlreadyPresent => {
+                            "already_present"
+                        }
+                        uc_engine::SharedDeviceRefreshDeviceStateSummary::WaitingForPeer => {
+                            "waiting_for_peer"
+                        }
+                        uc_engine::SharedDeviceRefreshDeviceStateSummary::WaitingForUpdate => {
+                            "waiting_for_update"
+                        }
+                        uc_engine::SharedDeviceRefreshDeviceStateSummary::VersionIncompatible => {
+                            "version_incompatible"
+                        }
+                        uc_engine::SharedDeviceRefreshDeviceStateSummary::Rejected => "rejected",
+                    }
+                    .to_owned(),
+                })
+            })
+            .collect::<napi::Result<Vec<_>>>()?,
+        total_count: count_u64(summary.total_count)?,
+        discovered_count: count_u64(summary.discovered_count)?,
+        connecting_count: count_u64(summary.connecting_count)?,
+        connected_count: count_u64(summary.connected_count)?,
+        already_present_count: count_u64(summary.already_present_count)?,
+        waiting_for_peer_count: count_u64(summary.waiting_for_peer_count)?,
+        waiting_for_update_count: count_u64(summary.waiting_for_update_count)?,
+        version_incompatible_count: count_u64(summary.version_incompatible_count)?,
+        rejected_count: count_u64(summary.rejected_count)?,
+        unavailable_source_count: count_u64(summary.unavailable_source_count)?,
+    })
+}
+
 fn count_u64(value: u64) -> napi::Result<u32> {
     u32::try_from(value).map_err(|_| unexpected_result())
 }
@@ -562,6 +658,7 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         error_category: None,
         retryable: None,
         member_revocation: None,
+        shared_device_refresh: None,
         network_recovery_phase: None,
         next_retry_in_ms: None,
     };
@@ -590,6 +687,9 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         EngineEvent::Fatal { error } => map_event_error(error, &mut mapped),
         EngineEvent::MemberRevocationChanged(summary) => {
             mapped.member_revocation = Some(member_revocation(summary));
+        }
+        EngineEvent::SharedDeviceRefreshChanged(summary) => {
+            mapped.shared_device_refresh = shared_device_refresh(summary).ok();
         }
         EngineEvent::NetworkRecoveryChanged(status) => {
             mapped.network_recovery_phase = Some(recovery_phase(status.phase).to_owned());
@@ -682,6 +782,47 @@ mod tests {
         assert_eq!(revocation.removed_device_ids, ["removed-1"]);
         assert_eq!(revocation.pending_recipient_device_ids, ["waiting-1"]);
         assert_eq!(revocation.updated_at_ms, 42.0);
+    }
+
+    #[test]
+    fn shared_device_refresh_event_keeps_the_complete_snapshot() {
+        let event = map_event(EngineEvent::SharedDeviceRefreshChanged(
+            uc_engine::SharedDeviceRefreshSummary {
+                request_id: "refresh-1".into(),
+                phase: uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted,
+                devices: vec![uc_engine::SharedDeviceRefreshDeviceSummary {
+                    device_id: "device-c".into(),
+                    display_name: "Device C".into(),
+                    state: uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected,
+                }],
+                total_count: 1,
+                discovered_count: 0,
+                connecting_count: 0,
+                connected_count: 1,
+                already_present_count: 0,
+                waiting_for_peer_count: 0,
+                waiting_for_update_count: 0,
+                version_incompatible_count: 0,
+                rejected_count: 0,
+                unavailable_source_count: 2,
+            },
+        ));
+
+        assert_eq!(event.kind, "shared_device_refresh_changed");
+        let refresh = event.shared_device_refresh.unwrap();
+        assert_eq!(refresh.request_id, "refresh-1");
+        assert_eq!(refresh.phase, "round_completed");
+        assert_eq!(
+            refresh
+                .devices
+                .into_iter()
+                .map(|device| (device.device_id, device.display_name, device.state))
+                .collect::<Vec<_>>(),
+            vec![("device-c".into(), "Device C".into(), "connected".into(),)]
+        );
+        assert_eq!(refresh.total_count, 1);
+        assert_eq!(refresh.connected_count, 1);
+        assert_eq!(refresh.unavailable_source_count, 2);
     }
 
     #[test]
