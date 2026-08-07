@@ -3,7 +3,7 @@
 - **状态**：Accepted（已接受）
 - **日期**：2026-05-20
 - **修订**：2026-07-19（四平台统一完整 P2P 节点）
-- **相关文档**：`docs/architecture/ports.md`、`docs/agent/architecture-rules.md`、`docs/architecture/module-boundaries.md`、`docs/architecture/bootstrap.md`、[`adr-007-headless-server-node-deployment.md`](./adr-007-headless-server-node-deployment.md)（无头 server 节点部署——本 ADR host 模型的一个运行模式）
+- **相关文档**：[`Port 定义`](../specs/ports.md)、[`uc-engine 跨平台核心接口`](../specs/uc-engine-interface.md)、[`架构总览`](../architecture/architecture-bible.md)
 
 ## 1. 背景
 
@@ -224,7 +224,7 @@ pub struct ResendEntryCommand {
 - **桌面端立即受益**：§2.6 的 cancel-safe 改造令 desktop daemon 重启行为更可预测，dev profile 切换 / WSL hot-reload / Sentry 崩溃恢复都更稳
 - mobile / desktop / cli / web 调用 use case 的路径完全一致，新增能力只需写一次
 - platform adapter 拆分让 mobile 上的 attack surface 与编译产物显著缩小
-- ADR-005 一旦落地，后续 `docs/architecture/ports.md` §13 "添加方法前先问的问题"的执行范围有了清晰锚点
+- ADR-005 一旦落地，后续 `docs/specs/ports.md` §13 "添加方法前先问的问题"的执行范围有了清晰锚点
 
 ### 3.2 反向 / 成本
 
@@ -409,8 +409,6 @@ pub struct ResendEntryCommand {
 1. **iOS share extension 拓扑**：v1 选 (A) extension 内 in-process 跑完整 engine，还是 (B) extension 只把用户操作安全交给主 app，由主 app 启动完整 engine？不得引入第三套精简协议实现。
 2. **UniFFI 的 async 标注 vs callback bridge**：哪种风格更适合 `Engine::start` 这种长 init 操作？
 3. **CLI 的 in-process 路径是否仍保留**？还是统一改走 `uc-daemon-client`（即便在同机上也跨进程）？这影响 `Engine` 是否要支持"无 daemon 模式"。
-   - **部分解答（[ADR-007](./adr-007-headless-server-node-deployment.md) §2.2）**：本期保留单二进制自启（`uniclip start` detached-spawn `uniclip daemon`），RunMode 解析下沉 `uc-desktop`（Scope A）；拆独立 `uniclipd` 二进制（Scope B）暂缓，须单独 ADR。完整的"是否统一走 daemon-client"仍待定。
-   - **后续立项（[ADR-008](./adr-008-uniclipd-split-gui-as-client.md)）**：Scope B 正式立项——拆独立 `uniclipd` 二进制、GUI 删除 `GuiInProcess` 永久转 client、轻量模式（GUI 退出后 daemon detach 留守）。即对本 OQ "统一走 daemon-client（即便同机也跨进程）" 给出肯定回答（GUI 侧；CLI 的一次性业务命令仍保留 in-process `uc-bootstrap` 路径）。
 4. **移动端 share intent 如何进入统一操作入口**？它必须转换为与桌面相同的捕获/发送用例并产生一致的投递记录，不得调用旧 `mobile_sync` facade 或新建旁路协议。
 
 ## 8. 决策记录

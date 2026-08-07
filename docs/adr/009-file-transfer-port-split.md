@@ -2,7 +2,7 @@
 
 - **状态**：Accepted（已采纳）
 - **日期**：2026-06-18
-- **相关文档**：[`ports.md`](./ports.md)、[`module-boundaries.md`](./module-boundaries.md)、`crates/uc-core/AGENTS.md`（§5.4 Port 文档纪律、§2.3 新需求=新小端口）
+- **相关文档**：[`Port 定义`](../specs/ports.md)、`crates/uc-core/AGENTS.md`（§5.4 Port 文档纪律、§2.3 新需求=新小端口）
 
 ## 1. 背景
 

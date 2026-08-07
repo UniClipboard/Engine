@@ -1,0 +1,32 @@
+# 文档索引
+
+本文档库按信息用途组织，避免把需求、稳定行为和重大取舍混在同一份文件中。
+
+- [架构总览](architecture/architecture-bible.md)：当前系统边界、职责和维护规则。
+- [需求](prd/)：要解决的问题、范围和验收标准。
+- [技术说明](specs/)：稳定行为、接口和运行约束。
+- [决策记录](adr/)：重要技术取舍及其后果。
+
+## 需求
+
+- [PRD-001：本地加密历史搜索](prd/001-local-encrypted-search.md)
+
+## 技术说明
+
+- [本地加密搜索](specs/001-local-encrypted-search.md)
+- [Engine 仓库检查](specs/engine-repository-checks.md)
+- [Port 定义](specs/ports.md)
+- [uc-engine 跨平台核心接口](specs/uc-engine-interface.md)
+
+## 决策记录
+
+- [ADR-002：剪贴板详情资源协议](adr/002-clipboard-resource-protocol.md)
+- [ADR-003：缩略图资源协议](adr/003-thumbnail-resource-protocol.md)
+- [ADR-004：剪贴板恢复单一表示](adr/004-restore-single-representation.md)
+- [ADR-005：抽取 uc-engine](adr/005-uc-engine-extraction.md)
+- [ADR-009：文件传输 Port 拆分](adr/009-file-transfer-port-split.md)
+- [ADR-010：目录同步文件集清单](adr/010-directory-sync-as-file-set-manifest.md)
+- [ADR-011：可靠成员撤销](adr/011-reliable-member-revocation.md)
+- [ADR-012：主动刷新共享设备](adr/012-automatic-shared-device-refresh.md)
+- [ADR-013：本地加密索引](adr/013-local-encrypted-search-index.md)
+- [ADR-014：应用层使用动态 Port](adr/014-dynamic-ports-in-use-cases.md)

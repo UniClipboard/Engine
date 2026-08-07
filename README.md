@@ -243,7 +243,7 @@ engine.shutdown(Duration::from_secs(2)).await?;
 event_task.await?;
 ```
 
-宿主适配器分别实现 `HostSecureStorage`、`HostClipboard` 和 `HostFileAccess`。所有业务动作都通过 `Engine::execute(Operation)` 发起，结果只使用 crate 根导出的稳定类型。完整操作和事件说明见 [uc-engine 跨平台核心接口](docs/architecture/uc-engine-interface.md)。
+宿主适配器分别实现 `HostSecureStorage`、`HostClipboard` 和 `HostFileAccess`。所有业务动作都通过 `Engine::execute(Operation)` 发起，结果只使用 crate 根导出的稳定类型。完整操作和事件说明见 [uc-engine 跨平台核心接口](docs/specs/uc-engine-interface.md)。
 
 ## iOS 集成
 
@@ -543,9 +543,10 @@ node scripts/release/verify-release-bundle.mjs <release-assets-directory>
 ## 进一步阅读
 
 - [UniClipboard 架构圣经](docs/architecture/architecture-bible.md)
+- [文档索引](docs/README.md)
 - [项目愿景](VISION.md)
-- [架构原则](docs/architecture/principles.md)
-- [uc-engine 跨平台核心接口](docs/architecture/uc-engine-interface.md)
+- [Port 定义](docs/specs/ports.md)
+- [uc-engine 跨平台核心接口](docs/specs/uc-engine-interface.md)
 - [密文持久化规则](docs/security/encrypted-persistence.md)
 - [发布完整性](docs/security/release-integrity.md)
 - [迁移历史映射](docs/migration/source-history-map.md)

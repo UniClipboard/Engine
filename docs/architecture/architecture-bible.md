@@ -636,6 +636,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 | 日期 | 修改范围 | 架构结论 |
 | --- | --- | --- |
+| 2026-08-07 | 架构文档归档 | 需求、技术说明和重大决策分别归入 `docs/prd/`、`docs/specs/` 和 `docs/adr/`；本文继续是当前架构的唯一总入口，过时的架构教程不再保留。 |
 | 2026-08-06 | 配对确认成员资料迁移 | 配对最终确认只承载准入所需的有界数据；已有成员资料在确认前分批持久化、确认成功后交接，并以确认和重试收敛。成员交接日志只保留脱敏统计和失败类别。 |
 | 2026-08-06 | 剪贴板同步详细延迟日志 | 发送与接收阶段统一由 `uc-observability-contract` 输出结构化本地日志；每个阶段名称与实际测量范围一致，发送完成以接收端实际保存或重复确认回执为准，直连或中继取本次传输的实际路径。Engine 不接入外部发送器，宿主负责日志保留或采集；产品分析不接收逐阶段数据。 |
 | 2026-08-06 | Engine 发布通知凭据 | GitHub App 的客户端编号和私钥均从发布流程可读取的受保护配置取得，并使用当前字段名；发布后的双向互通确认仍是通知下游的前置条件。仅修正交付流程，无架构变化。 |
@@ -694,8 +695,9 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `AGENTS.md`：仓库不可破坏规则和交付要求。
 - `CONTEXT.md`：统一领域词表。
 - `VISION.md`：长期目标和边界。
-- `docs/architecture/uc-engine-interface.md`：稳定操作、结果、事件和宿主能力。
-- `docs/architecture/ports.md`：内部能力接口和边界。
+- `docs/README.md`：需求、技术说明和决策记录索引。
+- `docs/specs/uc-engine-interface.md`：稳定操作、结果、事件和宿主能力。
+- `docs/specs/ports.md`：内部能力接口和边界。
 - `docs/security/encrypted-persistence.md`：密文持久化规则。
 - `docs/security/release-integrity.md`：发布来源和校验规则。
-- `docs/architecture/adr-011-reliable-member-revocation.md`：可靠成员移除和密钥世代。
+- `docs/adr/011-reliable-member-revocation.md`：可靠成员移除和密钥世代。
