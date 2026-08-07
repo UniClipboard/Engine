@@ -34,10 +34,10 @@ use uc_core::membership::{
     GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
     LegacyBootstrapProgress, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
     LegacyBootstrapStage, LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus,
-    PendingGroupUpdate, ProtectionGroupAdmission, ProtectionGroupId, RevocationId,
-    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
-    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError, SpaceProtectionMode,
-    SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
+    PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId,
+    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
+    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError,
+    SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
@@ -757,10 +757,10 @@ impl DefaultSpaceAccessAdapter {
             current.state().epoch(),
             now_ms,
         )?;
-        let mut record = match repository.begin_revocation(&prepared).await? {
-            BeginRevocationOutcome::Begun(record) | BeginRevocationOutcome::Existing(record) => {
-                record
-            }
+        let (mut record, rebuilding_prepared) = match repository.begin_revocation(&prepared).await?
+        {
+            BeginRevocationOutcome::Begun(record) => (record, false),
+            BeginRevocationOutcome::Existing(record) => (record, true),
         };
 
         let mut stalled_iterations = 0;
@@ -774,10 +774,54 @@ impl DefaultSpaceAccessAdapter {
                         .ok_or_else(|| {
                             KeyEpochError::Repository("space key material unavailable".into())
                         })?;
-                    if base.state().epoch() != record.previous_epoch() {
+                    if base.state().epoch() < record.previous_epoch() {
+                        if rebuilding_prepared {
+                            record = repository
+                                .resolve_prepared_revocation(
+                                    record.revocation_id(),
+                                    PreparedRevocationResolution::RecoveryRequired(Some(base)),
+                                    now_ms,
+                                )
+                                .await?;
+                            return Self::group_revocation_result(repository.as_ref(), &record)
+                                .await;
+                        }
                         return Err(KeyEpochError::Repository(
                             "prepared revocation epoch mismatch".into(),
                         ));
+                    }
+                    if rebuilding_prepared && base.state().epoch() > record.previous_epoch() {
+                        record.rebase_prepared(base.state().epoch(), now_ms)?;
+                    }
+                    let target_is_active = match MlsGroupEngine::contains_active_member(
+                        &MlsClientState::from_bytes(base.group_state().to_vec()),
+                        target.as_str().as_bytes(),
+                    ) {
+                        Ok(active) => active,
+                        Err(_) if rebuilding_prepared => {
+                            record = repository
+                                .resolve_prepared_revocation(
+                                    record.revocation_id(),
+                                    PreparedRevocationResolution::RecoveryRequired(Some(base)),
+                                    now_ms,
+                                )
+                                .await?;
+                            return Self::group_revocation_result(repository.as_ref(), &record)
+                                .await;
+                        }
+                        Err(error) => {
+                            return Err(KeyEpochError::Repository(error.to_string()));
+                        }
+                    };
+                    if !target_is_active {
+                        record = repository
+                            .resolve_prepared_revocation(
+                                record.revocation_id(),
+                                PreparedRevocationResolution::TargetAbsent(base),
+                                now_ms,
+                            )
+                            .await?;
+                        return Self::group_revocation_result(repository.as_ref(), &record).await;
                     }
                     let removal = MlsGroupEngine::remove_member(
                         &MlsClientState::from_bytes(base.group_state().to_vec()),
@@ -832,7 +876,41 @@ impl DefaultSpaceAccessAdapter {
                     validator
                         .install_space_material(&next)
                         .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
-                    repository.stage_revocation(&stage).await?;
+                    if rebuilding_prepared {
+                        record = repository
+                            .resolve_prepared_revocation(
+                                record.revocation_id(),
+                                PreparedRevocationResolution::TargetPresent {
+                                    current_material: base.clone(),
+                                    stage,
+                                },
+                                now_ms,
+                            )
+                            .await?;
+                    } else if let Err(error) = repository.stage_revocation(&stage).await {
+                        return Err(error);
+                    }
+                    if rebuilding_prepared {
+                        let persisted = repository
+                            .get_revocation(record.revocation_id())
+                            .await?
+                            .ok_or_else(|| {
+                                KeyEpochError::Repository(
+                                    "revocation state disappeared after staging".into(),
+                                )
+                            })?;
+                        if persisted.status() == RevocationStatus::Prepared {
+                            record = repository
+                                .resolve_prepared_revocation(
+                                    record.revocation_id(),
+                                    PreparedRevocationResolution::RecoveryRequired(Some(base)),
+                                    now_ms,
+                                )
+                                .await?;
+                            return Self::group_revocation_result(repository.as_ref(), &record)
+                                .await;
+                        }
+                    }
                 }
                 RevocationStatus::Staged => {
                     record = repository
@@ -1184,7 +1262,27 @@ impl DefaultSpaceAccessAdapter {
             .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
         let records = repository.list_incomplete_revocations().await?;
         let mut results = Vec::with_capacity(records.len());
-        for record in records {
+        for mut record in records {
+            if record.status() == RevocationStatus::RecoveryRequired {
+                results.push(Self::group_revocation_result(repository.as_ref(), &record).await?);
+                continue;
+            }
+            if record.status() == RevocationStatus::Prepared
+                && !matches!(
+                    repository.load_space_material(record.space_id()).await,
+                    Ok(Some(_))
+                )
+            {
+                record = repository
+                    .resolve_prepared_revocation(
+                        record.revocation_id(),
+                        PreparedRevocationResolution::RecoveryRequired(None),
+                        now_ms,
+                    )
+                    .await?;
+                results.push(Self::group_revocation_result(repository.as_ref(), &record).await?);
+                continue;
+            }
             results.push(
                 self.revoke_group_member(
                     record.target_device_id(),
@@ -2573,8 +2671,9 @@ mod admission_tests {
         GroupBootstrapPort, GroupBootstrapResult, KeyEpochError, LegacyBootstrapRecord,
         LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
         LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult,
-        LegacyRequestInspection, LegacyUpgradeDescriptor, LegacyUpgradeRequest, RevocationId,
-        RevocationRecord, RevocationStage, RevocationStatus,
+        LegacyRequestInspection, LegacyUpgradeDescriptor, LegacyUpgradeRequest,
+        PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
+        RevocationStatus,
     };
     use uc_core::pairing::InvitationCode;
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
@@ -2782,6 +2881,12 @@ mod admission_tests {
                 &self,
                 revocation_id: &RevocationId,
             ) -> Result<Option<RevocationStage>, KeyEpochError>;
+            async fn resolve_prepared_revocation(
+                &self,
+                revocation_id: &RevocationId,
+                resolution: PreparedRevocationResolution,
+                now_ms: i64,
+            ) -> Result<RevocationRecord, KeyEpochError>;
             async fn commit_revocation_recovery(
                 &self,
                 stage: &RevocationStage,
@@ -2870,7 +2975,7 @@ mod admission_tests {
                     .lock()
                     .unwrap()
                     .iter()
-                    .filter(|value| !value.status().is_terminal())
+                    .filter(|value| value.status() != RevocationStatus::Complete)
                     .cloned()
                     .collect())
             });
@@ -2901,6 +3006,50 @@ mod admission_tests {
                     .filter(|value| value.record().revocation_id() == revocation_id)
                     .cloned())
             });
+
+        let resolution_material = material.clone();
+        let resolution_record = record.clone();
+        let resolution_stage = stage.clone();
+        let resolved_stage_calls = stage_calls.clone();
+        mock.expect_resolve_prepared_revocation().returning(
+            move |revocation_id, resolution, now_ms| {
+                let mut current = resolution_record.lock().unwrap();
+                let record = current
+                    .as_mut()
+                    .filter(|record| record.revocation_id() == revocation_id)
+                    .ok_or_else(|| KeyEpochError::Repository("revocation not found".into()))?;
+                match resolution {
+                    PreparedRevocationResolution::TargetAbsent(verified) => {
+                        if resolution_material.lock().unwrap().as_ref() != Some(&verified) {
+                            return Err(KeyEpochError::Repository(
+                                "prepared verification state changed".into(),
+                            ));
+                        }
+                        record.transition_to(RevocationStatus::Complete, now_ms)?;
+                    }
+                    PreparedRevocationResolution::TargetPresent {
+                        current_material,
+                        stage,
+                    } => {
+                        if resolution_material.lock().unwrap().as_ref() != Some(&current_material) {
+                            return Err(KeyEpochError::Repository(
+                                "prepared verification state changed".into(),
+                            ));
+                        }
+                        resolved_stage_calls.fetch_add(1, Ordering::AcqRel);
+                        if !persist_stage {
+                            return Ok(record.clone());
+                        }
+                        *record = stage.record().clone();
+                        *resolution_stage.lock().unwrap() = Some(stage);
+                    }
+                    PreparedRevocationResolution::RecoveryRequired(_) => {
+                        record.transition_to(RevocationStatus::RecoveryRequired, now_ms)?;
+                    }
+                }
+                Ok(record.clone())
+            },
+        );
 
         let recovery_material = material.clone();
         let recovery_record = record.clone();
@@ -3651,6 +3800,277 @@ mod admission_tests {
         let (adapter, session, repository, space_id, directory, _) =
             sponsor_fixture_with_stage_persistence(true);
         (adapter, session, repository, space_id, directory)
+    }
+
+    #[tokio::test]
+    async fn restart_finishes_prepared_revocation_when_target_is_already_absent() {
+        let (sponsor, _session, repository, space_id, _directory) = sponsor_fixture();
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-absent-target-restart").unwrap(),
+            space_id,
+            DeviceId::new("already-absent-device"),
+            material.state().epoch(),
+            100,
+        )
+        .unwrap();
+        repository.begin_revocation(&prepared).await.unwrap();
+
+        let recovered = sponsor.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status(), Some(RevocationStatus::Complete));
+        assert_eq!(
+            repository
+                .load_space_material(prepared.space_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state()
+                .epoch(),
+            material.state().epoch()
+        );
+        assert!(sponsor
+            .resume_group_revocations(201)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_rebuilds_prepared_revocation_from_a_later_current_epoch() {
+        let (sponsor, _session, repository, space_id, _directory) = sponsor_fixture();
+        let target = DeviceId::new("target-device");
+        let retained = DeviceId::new("retained-device");
+        let target_join = sponsor.prepare_group_join(&target).await.unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &target,
+                &[],
+                &target_join.key_package,
+            )
+            .await
+            .unwrap();
+        let prepared_material = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = RevocationRecord::prepare_with_recipients(
+            RevocationId::from_string("prepared-later-current-epoch").unwrap(),
+            space_id.clone(),
+            target.clone(),
+            vec![retained.clone()],
+            prepared_material.state().epoch(),
+            100,
+        )
+        .unwrap();
+        repository.begin_revocation(&prepared).await.unwrap();
+        let retained_join = sponsor.prepare_group_join(&retained).await.unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &retained,
+                &[],
+                &retained_join.key_package,
+            )
+            .await
+            .unwrap();
+        let current_epoch = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state()
+            .epoch();
+
+        let recovered = sponsor.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(recovered[0].status(), Some(RevocationStatus::Distributing));
+        let activated_epoch = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state()
+            .epoch();
+        assert_eq!(activated_epoch, current_epoch.next().unwrap());
+        let repeated = sponsor.resume_group_revocations(201).await.unwrap();
+        assert_eq!(repeated[0].status(), Some(RevocationStatus::Distributing));
+        assert_eq!(
+            repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state()
+                .epoch(),
+            activated_epoch
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_prepared_rebuild_persists_recovery_required_without_retrying() {
+        let (sponsor, _session, repository, space_id, _directory, stage_calls) =
+            sponsor_fixture_with_stage_persistence(false);
+        let joining = sponsor
+            .prepare_group_join(&DeviceId::new("target-device"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("target-device"),
+                &[],
+                &joining.key_package,
+            )
+            .await
+            .unwrap();
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-rebuild-failure").unwrap(),
+            space_id,
+            DeviceId::new("target-device"),
+            material.state().epoch(),
+            100,
+        )
+        .unwrap();
+        repository.begin_revocation(&prepared).await.unwrap();
+
+        let recovered = sponsor.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(
+            recovered[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
+        assert_eq!(stage_calls.load(Ordering::Acquire), 1);
+        let repeated = sponsor.resume_group_revocations(201).await.unwrap();
+        assert_eq!(
+            repeated[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
+        assert_eq!(stage_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn unreadable_group_marks_prepared_revocation_recovery_required() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("prepared-unreadable-group");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x35; 32]).unwrap(),
+        );
+        let mut state = SpaceKeyState::legacy(space_id.clone());
+        state.mark_migrating().unwrap();
+        state
+            .mark_ready(ContentKeyId::generate(), ProtectionGroupId::generate())
+            .unwrap();
+        let material = SpaceKeyMaterial::new(
+            state,
+            b"unreadable-group-state".to_vec(),
+            b"key-catalog".to_vec(),
+            100,
+        );
+        let (repository, _) = memory_revocation_repository(Some(material.clone()));
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-unreadable-group").unwrap(),
+            space_id,
+            DeviceId::new("target-device"),
+            material.state().epoch(),
+            100,
+        )
+        .unwrap();
+        repository.begin_revocation(&prepared).await.unwrap();
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            repository,
+        );
+
+        let recovered = adapter.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(
+            recovered[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
+        assert_eq!(
+            adapter.resume_group_revocations(201).await.unwrap()[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_material_marks_prepared_revocation_recovery_required() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("prepared-unavailable-material");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x36; 32]).unwrap(),
+        );
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-unavailable-material").unwrap(),
+            space_id,
+            DeviceId::new("target-device"),
+            GroupEpoch::new(1),
+            100,
+        )
+        .unwrap();
+        let listed = prepared.clone();
+        let mut resolved = prepared.clone();
+        resolved
+            .transition_to(RevocationStatus::RecoveryRequired, 200)
+            .unwrap();
+        let returned = resolved.clone();
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_list_incomplete_revocations()
+            .times(1)
+            .return_once(|| Ok(vec![listed]));
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .return_once(|_| Err(KeyEpochError::DecryptionFailed));
+        repository
+            .expect_resolve_prepared_revocation()
+            .times(1)
+            .withf(|_, resolution, _| {
+                matches!(
+                    resolution,
+                    PreparedRevocationResolution::RecoveryRequired(None)
+                )
+            })
+            .return_once(move |_, _, _| Ok(returned));
+        repository
+            .expect_load_staged_revocation()
+            .times(1)
+            .return_once(|_| Ok(None));
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            Arc::new(repository),
+        );
+
+        let recovered = adapter.resume_group_revocations(200).await.unwrap();
+
+        assert_eq!(
+            recovered[0].status(),
+            Some(RevocationStatus::RecoveryRequired)
+        );
     }
 
     #[tokio::test]

@@ -167,13 +167,13 @@ LAN 内容读写复用核心现有的加密历史、系统剪贴板写入、内�
 成员移除由核心完整负责，宿主只使用三个主入口：发起移除、查询当前移除、确认永久丢失并继续。返回与 `MemberRevocationChanged` 事件使用同一份完整状态：
 
 - `revocation_id`：当前流程编号；仅本机兼容结果可以为空；
-- `outcome`：`local_only`、`applied`、`complete` 或 `recovery_required`；
+- `outcome`：`local_only`、`recovering`、`applied`、`complete` 或 `recovery_required`；
 - `removed_device_ids`：此流程已经排除的设备；
 - `pending_recipient_device_ids`：仍需按顺序确认安全更新的保留设备；
 - `pending_recipients`：始终等于等待设备列表长度；
 - `updated_at_ms`：最近一次已保存状态变化的时间。
 
-`applied` 只表示本机已生效并仍在等待，不得显示为完成。同一目标重复移除返回原状态；另一目标在当前流程未结束时返回编号 `1394`、类别 `Conflict` 的稳定冲突。该冲突不是宿主自动重试的信号：宿主查询当前移除并等待核心协调，自动重试不得调用 `ContinueMemberRevocation`。当前流程已进入 `recovery_required` 时返回编号 `1395`、类别 `InvalidState`、不可重试的稳定错误。宿主收到冲突后查询当前移除，不自行创建第二项任务。
+`recovering` 表示已记录但尚未形成安全更新的移除正在由核心统一收束，不是普通等待状态；`QueryCurrentMemberRevocation` 会先完成这项收束再返回状态。`applied` 只表示本机已生效并仍在等待，不得显示为完成。同一目标重复移除返回原状态；另一目标在当前流程未结束时返回编号 `1394`、类别 `Conflict` 的稳定冲突。该冲突不是宿主自动重试的信号：宿主查询当前移除并等待核心协调，自动重试不得调用 `ContinueMemberRevocation`。当前流程已进入 `recovery_required` 时返回编号 `1395`、类别 `InvalidState`、不可重试的稳定错误。宿主收到冲突后查询当前移除，不自行创建第二项任务。
 
 `ContinueMemberRevocation` 只接受当前等待设备且必须来自用户明确确认。空列表、本机、已确认设备、已移除设备、无关设备或重复设备返回输入错误。普通超时、网络失败、重启和宿主重试不得自动调用该入口。核心继续使用同一流程编号向前产生新安全状态，并保证每台保留设备按顺序收到缺失更新；宿主不安排重试、不拼接多次移除，也不恢复旧安全状态。
 

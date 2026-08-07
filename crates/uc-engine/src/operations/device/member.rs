@@ -424,6 +424,7 @@ fn legacy_bootstrap_summary(result: LegacyBootstrapView) -> LegacyBootstrapSumma
 pub(crate) fn member_revocation_summary(result: MemberRevocationView) -> MemberRevocationSummary {
     let outcome = match result.state {
         MemberRevocationState::LocalOnly => MemberRevocationOutcome::LocalOnly,
+        MemberRevocationState::Recovering => MemberRevocationOutcome::Recovering,
         MemberRevocationState::Applied => MemberRevocationOutcome::Applied,
         MemberRevocationState::Complete => MemberRevocationOutcome::Complete,
         MemberRevocationState::RecoveryRequired => MemberRevocationOutcome::RecoveryRequired,
@@ -679,5 +680,19 @@ mod tests {
                 updated_at_ms: 123,
             })
         );
+    }
+
+    #[test]
+    fn recovering_member_revocation_is_exposed_in_the_stable_result() {
+        let summary = member_revocation_summary(MemberRevocationView {
+            revocation_id: Some("revocation-prepared".into()),
+            state: MemberRevocationState::Recovering,
+            pending_recipients: 0,
+            removed_device_ids: vec!["dev-removed".into()],
+            pending_recipient_device_ids: Vec::new(),
+            updated_at_ms: 123,
+        });
+
+        assert_eq!(summary.outcome, MemberRevocationOutcome::Recovering);
     }
 }

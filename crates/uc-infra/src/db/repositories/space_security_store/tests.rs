@@ -6,8 +6,8 @@ use uc_core::membership::{
     BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, LegacyBootstrapRecord,
     LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
     LegacyUpgradeDescriptor, LegacyUpgradeId, LegacyUpgradeRequest, PendingGroupUpdate,
-    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
-    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
+    PreparedRevocationResolution, RevocationId, RevocationOutboxMessage, RevocationRecord,
+    RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
     SpaceSecurityStateResetPort,
 };
 use uc_core::space_access::PreparedGroupJoin;
@@ -418,6 +418,154 @@ async fn incomplete_revocations_are_discovered_after_restart() {
     assert_eq!(
         reopened.list_incomplete_revocations().await.unwrap(),
         vec![stage.record().clone()]
+    );
+}
+
+#[tokio::test]
+async fn verified_absent_target_finishes_prepared_revocation_after_restart() {
+    let (repo, pool, _tempdir) = make_repo();
+    let material = seed_current_space(&repo).await;
+    let prepared = RevocationRecord::prepare_with_recipients(
+        RevocationId::from_string("prepared-absent-after-restart").unwrap(),
+        SpaceId::from_str("space-sensitive"),
+        DeviceId::new("already-absent-device-sensitive"),
+        vec![DeviceId::new("retained-device-sensitive")],
+        material.state().epoch(),
+        100,
+    )
+    .unwrap();
+    repo.begin_revocation(&prepared).await.unwrap();
+    drop(repo);
+
+    let reopened = reopen_repo(&pool);
+    let resolved = reopened
+        .resolve_prepared_revocation(
+            prepared.revocation_id(),
+            PreparedRevocationResolution::TargetAbsent(material.clone()),
+            110,
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.status(), RevocationStatus::Complete);
+
+    assert_eq!(
+        reopened
+            .get_revocation(prepared.revocation_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .status(),
+        RevocationStatus::Complete
+    );
+    assert_eq!(
+        reopened
+            .load_space_material(prepared.space_id())
+            .await
+            .unwrap()
+            .unwrap(),
+        material
+    );
+    assert!(reopened
+        .load_staged_revocation(prepared.revocation_id())
+        .await
+        .unwrap()
+        .is_none());
+
+    let mut conn = pool.get().unwrap();
+    let row = diesel::sql_query(
+        "SELECT encrypted_record, encrypted_stage FROM member_revocation_log LIMIT 1",
+    )
+    .get_result::<RawCiphertexts>(&mut conn)
+    .unwrap();
+    assert!(row.encrypted_stage.is_none());
+    for plaintext in [
+        "space-sensitive",
+        "already-absent-device-sensitive",
+        "retained-device-sensitive",
+    ] {
+        assert!(!row
+            .encrypted_record
+            .windows(plaintext.len())
+            .any(|window| window == plaintext.as_bytes()));
+    }
+}
+
+#[tokio::test]
+async fn verified_present_target_restages_prepared_revocation_from_current_epoch() {
+    let (repo, pool, _tempdir) = make_repo();
+    let material = seed_current_space(&repo).await;
+    let prepared = RevocationRecord::prepare(
+        RevocationId::from_string("prepared-present-after-restart").unwrap(),
+        SpaceId::from_str("space-sensitive"),
+        DeviceId::new("present-device-sensitive"),
+        material.state().epoch(),
+        100,
+    )
+    .unwrap();
+    repo.begin_revocation(&prepared).await.unwrap();
+    let mut advanced_state = material.state().clone();
+    advanced_state
+        .rotate(ContentKeyId::from_string("content-key-advanced").unwrap())
+        .unwrap();
+    let advanced = SpaceKeyMaterial::new(
+        advanced_state.clone(),
+        b"advanced-group-state-sensitive".to_vec(),
+        b"advanced-key-catalog-sensitive".to_vec(),
+        150,
+    );
+    repo.save_space_material(&advanced).await.unwrap();
+    drop(repo);
+
+    let reopened = reopen_repo(&pool);
+    let mut rebuilt = prepared.clone();
+    rebuilt
+        .rebase_prepared(advanced.state().epoch(), 200)
+        .unwrap();
+    rebuilt
+        .transition_to(RevocationStatus::Staged, 200)
+        .unwrap();
+    let mut next_state = advanced.state().clone();
+    next_state
+        .rotate(ContentKeyId::from_string("content-key-rebuilt").unwrap())
+        .unwrap();
+    let stage = RevocationStage::new(
+        rebuilt,
+        next_state,
+        b"rebuilt-group-state-sensitive".to_vec(),
+        b"rebuilt-key-catalog-sensitive".to_vec(),
+        Vec::new(),
+    )
+    .unwrap();
+
+    let resolved = reopened
+        .resolve_prepared_revocation(
+            prepared.revocation_id(),
+            PreparedRevocationResolution::TargetPresent {
+                current_material: advanced.clone(),
+                stage: stage.clone(),
+            },
+            200,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resolved, stage.record().clone());
+    assert_eq!(resolved.status(), RevocationStatus::Staged);
+    assert_eq!(resolved.previous_epoch(), advanced.state().epoch());
+    assert_eq!(
+        reopened
+            .load_space_material(prepared.space_id())
+            .await
+            .unwrap()
+            .unwrap(),
+        advanced
+    );
+    assert_eq!(
+        reopened
+            .load_staged_revocation(prepared.revocation_id())
+            .await
+            .unwrap(),
+        Some(stage)
     );
 }
 

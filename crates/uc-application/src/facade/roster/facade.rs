@@ -298,17 +298,19 @@ impl MemberRosterFacade {
         device_id: &str,
     ) -> Result<MemberRevocationView, RosterError> {
         let device_id = DeviceId::new(device_id);
-        if let Some(current) = self.current_group_revocation().await? {
+        if let Some(current) = self.recover_member_revocations(false).await?.pop() {
             if current.removed_device_ids().contains(&device_id) {
                 return Ok(Self::revocation_view(current));
             }
-            return Err(
-                if current.status() == Some(RevocationStatus::RecoveryRequired) {
-                    RosterError::MemberRemovalRecoveryRequired
-                } else {
-                    RosterError::MemberRemovalInProgress
-                },
-            );
+            if current.status() != Some(RevocationStatus::Complete) {
+                return Err(
+                    if current.status() == Some(RevocationStatus::RecoveryRequired) {
+                        RosterError::MemberRemovalRecoveryRequired
+                    } else {
+                        RosterError::MemberRemovalInProgress
+                    },
+                );
+            }
         }
         let local_fingerprint = self.validate_remote_member(&device_id).await?;
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -402,9 +404,9 @@ impl MemberRosterFacade {
     pub async fn current_member_revocation(
         &self,
     ) -> Result<Option<MemberRevocationView>, RosterError> {
-        self.current_group_revocation()
+        self.recover_member_revocations(false)
             .await
-            .map(|current| current.map(Self::revocation_view))
+            .map(|mut recovered| recovered.pop().map(Self::revocation_view))
     }
 
     pub async fn continue_member_revocation(
@@ -415,8 +417,9 @@ impl MemberRosterFacade {
         let revocation_id = uc_core::membership::RevocationId::from_string(revocation_id)
             .map_err(|_| RosterError::InvalidPermanentLossSelection)?;
         let current = self
-            .current_group_revocation()
+            .recover_member_revocations(false)
             .await?
+            .pop()
             .ok_or_else(|| RosterError::NotFound(revocation_id.as_str().to_owned()))?;
         if current.revocation_id() != Some(&revocation_id) || permanently_lost_device_ids.is_empty()
         {
@@ -490,6 +493,41 @@ impl MemberRosterFacade {
                 );
                 RosterError::GroupRevocation(failure.to_string())
             })
+    }
+
+    async fn recover_member_revocations(
+        &self,
+        resume_all: bool,
+    ) -> Result<Vec<GroupRevocationResult>, RosterError> {
+        let current = self.current_group_revocation().await?;
+        let needs_recovery = resume_all
+            || matches!(
+                current.as_ref().and_then(GroupRevocationResult::status),
+                Some(
+                    RevocationStatus::Prepared
+                        | RevocationStatus::Staged
+                        | RevocationStatus::Activated
+                )
+            );
+        if !needs_recovery {
+            return Ok(current.into_iter().collect());
+        }
+        let Some(group_revocation) = &self.group_revocation else {
+            return Ok(Vec::new());
+        };
+        let recovered = group_revocation
+            .resume_group_revocations(chrono::Utc::now().timestamp_millis())
+            .await
+            .map_err(|error| RosterError::GroupRevocation(error.to_string()))?;
+        for revocation in &recovered {
+            self.publish_member_revocation(Self::revocation_view(revocation.clone()));
+            if revocation.status() != Some(RevocationStatus::RecoveryRequired) {
+                for device_id in revocation.removed_device_ids() {
+                    self.remove_member_records_idempotent(device_id).await?;
+                }
+            }
+        }
+        Ok(recovered)
     }
 
     fn group_revocation_failure_kind(error: &KeyEpochError) -> &'static str {
@@ -621,16 +659,9 @@ impl MemberRosterFacade {
         &self,
     ) -> Result<Vec<MemberRevocationView>, RosterError> {
         self.retry_pending_space_group_updates().await?;
-        let Some(group_revocation) = &self.group_revocation else {
-            return Ok(Vec::new());
-        };
-        let pending = group_revocation
-            .resume_group_revocations(chrono::Utc::now().timestamp_millis())
-            .await
-            .map_err(|error| RosterError::GroupRevocation(error.to_string()))?;
+        let pending = self.recover_member_revocations(true).await?;
         let mut results = Vec::with_capacity(pending.len());
         for revocation in pending {
-            self.publish_member_revocation(Self::revocation_view(revocation.clone()));
             results.push(Self::revocation_view(
                 self.retry_group_delivery(revocation).await?,
             ));
@@ -864,8 +895,8 @@ impl MemberRosterFacade {
                     RevocationStatus::RecoveryRequired => MemberRevocationState::RecoveryRequired,
                     RevocationStatus::Prepared
                     | RevocationStatus::Staged
-                    | RevocationStatus::Activated
-                    | RevocationStatus::Distributing => MemberRevocationState::Applied,
+                    | RevocationStatus::Activated => MemberRevocationState::Recovering,
+                    RevocationStatus::Distributing => MemberRevocationState::Applied,
                 },
                 pending_recipients: pending_recipient_device_ids.len(),
                 removed_device_ids: removed_device_ids
@@ -1627,6 +1658,127 @@ mod tests {
             pending_recipient_device_ids: vec![DeviceId::new("dev-waiting")],
             updated_at_ms: 123,
         }
+    }
+
+    #[test]
+    fn prepared_revocation_is_presented_as_recovering_not_waiting() {
+        let view = MemberRosterFacade::revocation_view(
+            uc_core::membership::GroupRevocationResult::Reliable {
+                revocation_id: uc_core::membership::RevocationId::from_string(
+                    "revocation-prepared",
+                )
+                .unwrap(),
+                status: uc_core::membership::RevocationStatus::Prepared,
+                removed_device_ids: vec![DeviceId::new("removed-device")],
+                pending_recipient_device_ids: Vec::new(),
+                updated_at_ms: 123,
+            },
+        );
+
+        assert_eq!(view.state, MemberRevocationState::Recovering);
+        assert!(view.pending_recipient_device_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn current_prepared_revocation_runs_the_shared_recovery_entry() {
+        let prepared = uc_core::membership::GroupRevocationResult::Reliable {
+            revocation_id: uc_core::membership::RevocationId::from_string("revocation-prepared")
+                .unwrap(),
+            status: uc_core::membership::RevocationStatus::Prepared,
+            removed_device_ids: vec![DeviceId::new("removed-device")],
+            pending_recipient_device_ids: Vec::new(),
+            updated_at_ms: 100,
+        };
+        let recovered = uc_core::membership::GroupRevocationResult::Reliable {
+            revocation_id: uc_core::membership::RevocationId::from_string("revocation-prepared")
+                .unwrap(),
+            status: uc_core::membership::RevocationStatus::RecoveryRequired,
+            removed_device_ids: vec![DeviceId::new("removed-device")],
+            pending_recipient_device_ids: Vec::new(),
+            updated_at_ms: 200,
+        };
+        let mut group = MockGroupRevocation::new();
+        group
+            .expect_current_group_revocation()
+            .times(1)
+            .return_once(move || Ok(Some(prepared)));
+        group
+            .expect_resume_group_revocations()
+            .times(1)
+            .return_once(move |_| Ok(vec![recovered]));
+        let mut repo = MockMemberRepo::new();
+        repo.expect_remove().times(0);
+        let facade = MemberRosterFacade::new_with_group_revocation(
+            MemberRosterDeps {
+                member_repo: Arc::new(repo),
+                peer_addr_repo: Arc::new(MockPeerAddrRepo::new()),
+                trusted_peer_repo: Arc::new(MockTrustedPeerRepo::new()),
+                local_identity: Arc::new(MockLocalIdentity::new()),
+                presence: Arc::new(FakePresence::new(vec![])),
+                connection_channel: None,
+            },
+            Arc::new(group),
+        );
+
+        let current = facade.current_member_revocation().await.unwrap().unwrap();
+
+        assert_eq!(current.state, MemberRevocationState::RecoveryRequired);
+        assert_eq!(current.updated_at_ms, 200);
+    }
+
+    #[tokio::test]
+    async fn repeated_removal_of_a_prepared_target_runs_the_shared_recovery_entry() {
+        let prepared = uc_core::membership::GroupRevocationResult::Reliable {
+            revocation_id: uc_core::membership::RevocationId::from_string("revocation-prepared")
+                .unwrap(),
+            status: uc_core::membership::RevocationStatus::Prepared,
+            removed_device_ids: vec![DeviceId::new("removed-device")],
+            pending_recipient_device_ids: Vec::new(),
+            updated_at_ms: 100,
+        };
+        let recovered = uc_core::membership::GroupRevocationResult::Reliable {
+            revocation_id: uc_core::membership::RevocationId::from_string("revocation-prepared")
+                .unwrap(),
+            status: uc_core::membership::RevocationStatus::Complete,
+            removed_device_ids: vec![DeviceId::new("removed-device")],
+            pending_recipient_device_ids: Vec::new(),
+            updated_at_ms: 200,
+        };
+        let mut group = MockGroupRevocation::new();
+        group
+            .expect_current_group_revocation()
+            .times(1)
+            .return_once(move || Ok(Some(prepared)));
+        group
+            .expect_resume_group_revocations()
+            .times(1)
+            .return_once(move |_| Ok(vec![recovered]));
+        group.expect_revoke_group_member().times(0);
+        let mut repo = MockMemberRepo::new();
+        repo.expect_remove()
+            .times(1)
+            .withf(|device_id| device_id == &DeviceId::new("removed-device"))
+            .returning(|_| Ok(true));
+        let mut peer_addr = MockPeerAddrRepo::new();
+        peer_addr.expect_remove().times(1).returning(|_| Ok(()));
+        let mut trusted = MockTrustedPeerRepo::new();
+        trusted.expect_remove().times(1).returning(|_| Ok(true));
+        let facade = MemberRosterFacade::new_with_group_revocation(
+            MemberRosterDeps {
+                member_repo: Arc::new(repo),
+                peer_addr_repo: Arc::new(peer_addr),
+                trusted_peer_repo: Arc::new(trusted),
+                local_identity: Arc::new(MockLocalIdentity::new()),
+                presence: Arc::new(FakePresence::new(vec![])),
+                connection_channel: None,
+            },
+            Arc::new(group),
+        );
+
+        let result = facade.revoke_member("removed-device").await.unwrap();
+
+        assert_eq!(result.state, MemberRevocationState::Complete);
+        assert_eq!(result.updated_at_ms, 200);
     }
 
     #[tokio::test]

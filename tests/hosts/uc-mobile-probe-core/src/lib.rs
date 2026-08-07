@@ -157,6 +157,7 @@ struct EventSummary {
     last_state: Option<String>,
     member_revocation_changes: u64,
     last_member_revocation: Option<uc_engine::MemberRevocationSummary>,
+    shared_device_refresh_changes: u64,
 }
 
 #[derive(Clone)]
@@ -563,6 +564,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 "last_state": events.last_state,
                 "member_revocation_changes": events.member_revocation_changes,
                 "last_member_revocation": events.last_member_revocation,
+                "shared_device_refresh_changes": events.shared_device_refresh_changes,
             })
         }
         ProbeCommand::Shutdown => match state.engine.take() {
@@ -1062,6 +1064,32 @@ fn operation_response(result: OperationResult) -> Value {
             "blocked_count": summary.blocked_count,
             "rejected_count": summary.rejected_count,
         }),
+        OperationResult::SharedDeviceRefreshStarted(_) => json!({
+            "ok": true,
+            "kind": "shared_device_refresh_started",
+        }),
+        OperationResult::SharedDeviceRefresh(summary) => match summary {
+            Some(summary) => json!({
+                "ok": true,
+                "kind": "shared_device_refresh",
+                "phase": shared_device_refresh_phase(summary.phase),
+                "total_count": summary.total_count,
+                "discovered_count": summary.discovered_count,
+                "connecting_count": summary.connecting_count,
+                "connected_count": summary.connected_count,
+                "already_present_count": summary.already_present_count,
+                "waiting_for_peer_count": summary.waiting_for_peer_count,
+                "waiting_for_update_count": summary.waiting_for_update_count,
+                "version_incompatible_count": summary.version_incompatible_count,
+                "rejected_count": summary.rejected_count,
+                "unavailable_source_count": summary.unavailable_source_count,
+            }),
+            None => json!({
+                "ok": true,
+                "kind": "shared_device_refresh",
+                "has_refresh": false,
+            }),
+        },
         OperationResult::MemberSyncPreferences(preferences) => json!({
             "ok": true,
             "kind": "member_sync_preferences",
@@ -1369,6 +1397,15 @@ fn network_recovery_phase(phase: uc_engine::NetworkRecoveryPhaseSummary) -> &'st
     }
 }
 
+fn shared_device_refresh_phase(phase: uc_engine::SharedDeviceRefreshPhaseSummary) -> &'static str {
+    match phase {
+        uc_engine::SharedDeviceRefreshPhaseSummary::Started => "started",
+        uc_engine::SharedDeviceRefreshPhaseSummary::Discovering => "discovering",
+        uc_engine::SharedDeviceRefreshPhaseSummary::Connecting => "connecting",
+        uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted => "round_completed",
+    }
+}
+
 fn mobile_sync_item_type(item_type: uc_engine::MobileSyncItemType) -> &'static str {
     match item_type {
         uc_engine::MobileSyncItemType::Text => "text",
@@ -1420,6 +1457,7 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
             summary.member_revocation_changes += 1;
             summary.last_member_revocation = Some(revocation);
         }
+        EngineEvent::SharedDeviceRefreshChanged(_) => summary.shared_device_refresh_changes += 1,
         EngineEvent::ActiveClipboardChanged(_) => summary.refresh_requests += 1,
         EngineEvent::MobileLanSettingsChanged(_) => summary.refresh_requests += 1,
         EngineEvent::NetworkRecoveryChanged(_) => summary.refresh_requests += 1,
@@ -1601,6 +1639,40 @@ mod tests {
         assert_eq!(response["updated_at_ms"], 42);
         assert_eq!(events.member_revocation_changes, 1);
         assert_eq!(events.last_member_revocation.as_ref(), Some(&summary));
+    }
+
+    #[test]
+    fn shared_device_refresh_results_and_events_keep_only_aggregate_state() {
+        let summary = uc_engine::SharedDeviceRefreshSummary {
+            request_id: "request-1".into(),
+            phase: uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted,
+            devices: vec![uc_engine::SharedDeviceRefreshDeviceSummary {
+                device_id: "private-device-id".into(),
+                display_name: "private device name".into(),
+                state: uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected,
+            }],
+            total_count: 1,
+            discovered_count: 0,
+            connecting_count: 0,
+            connected_count: 1,
+            already_present_count: 0,
+            waiting_for_peer_count: 0,
+            waiting_for_update_count: 0,
+            version_incompatible_count: 0,
+            rejected_count: 0,
+            unavailable_source_count: 0,
+        };
+        let response =
+            operation_response(OperationResult::SharedDeviceRefresh(Some(summary.clone())));
+        let events = Arc::new(Mutex::new(EventSummary::default()));
+        record_event(&events, EngineEvent::SharedDeviceRefreshChanged(summary));
+
+        assert_eq!(response["kind"], "shared_device_refresh");
+        assert_eq!(response["phase"], "round_completed");
+        assert_eq!(response["connected_count"], 1);
+        assert!(!response.to_string().contains("private-device-id"));
+        assert!(!response.to_string().contains("private device name"));
+        assert_eq!(lock_unpoisoned(&events).shared_device_refresh_changes, 1);
     }
 
     #[test]

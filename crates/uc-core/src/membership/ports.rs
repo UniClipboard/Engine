@@ -7,8 +7,9 @@ use super::gossip::PendingMembershipBatch;
 use super::gossip::{DeviceAnnouncement, SpaceMembershipCandidate, VerifiedMembershipPeer};
 use super::member::SpaceMember;
 use super::revocation::{
-    GroupEpoch, GroupRevocationResult, KeyEpochError, PendingGroupUpdate, RevocationId,
-    RevocationRecord, RevocationStage, SpaceKeyMaterial,
+    GroupEpoch, GroupRevocationResult, KeyEpochError, PendingGroupUpdate,
+    PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
+    SpaceKeyMaterial,
 };
 use crate::ids::SpaceId;
 use crate::ports::PeerAddressRecord;
@@ -422,6 +423,13 @@ pub trait RevocationRepositoryPort: Send + Sync {
         &self,
         revocation_id: &RevocationId,
     ) -> Result<Option<RevocationStage>, KeyEpochError>;
+
+    async fn resolve_prepared_revocation(
+        &self,
+        revocation_id: &RevocationId,
+        resolution: PreparedRevocationResolution,
+        now_ms: i64,
+    ) -> Result<RevocationRecord, KeyEpochError>;
 
     async fn commit_revocation_recovery(
         &self,
