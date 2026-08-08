@@ -137,6 +137,7 @@ impl RemovalCoordinator {
         target: &DeviceId,
         now_ms: i64,
     ) -> Result<MemberRemovalSummary, RemovalCoordinatorError> {
+        let _guard = self.state_lock.lock().await;
         let mut state = self.load_state().await?;
         let view = self.deps.recovery.current_view().await?;
         let own_member = self
@@ -230,12 +231,16 @@ impl RemovalCoordinator {
     }
 
     /// 普通成员通道上的意图/恢复资料交换入口。
+    ///
+    /// 与后台推进串行执行:入站消息的读-改-写必须在 `state_lock` 内完成,
+    /// 否则保存的意图可能被并发的 reconcile 旧快照覆盖。
     pub async fn ingest_exchange(
         &self,
         source_device_id: &DeviceId,
         message: RemovalExchangeMessage,
         now_ms: i64,
     ) -> Result<RemovalExchangeMessage, RemovalCoordinatorError> {
+        let _guard = self.state_lock.lock().await;
         let admission_state = self.load_any_state().await?;
         let source_instance = self
             .current_member_instance(source_device_id)
@@ -437,11 +442,13 @@ impl RemovalCoordinator {
     /// 受限迟交入口:接收已被移除发起者的历史意图。
     ///
     /// 只返回有界接收结果;不返回成员列表、摘要、代次、密钥或内容。
+    /// 与后台推进串行执行:迟交验收的读-改-写必须在 `state_lock` 内完成。
     pub async fn handle_late_submission(
         &self,
         submission: RemovalLateSubmission,
         now_ms: i64,
     ) -> Result<RemovalLateAcceptance, RemovalLateSubmissionError> {
+        let _guard = self.state_lock.lock().await;
         let RemovalLateSubmission::Intent(intent) = submission;
         let state = self
             .load_any_state()
