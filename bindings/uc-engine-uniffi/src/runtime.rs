@@ -16,10 +16,11 @@ use uc_engine::{
     Engine, EngineConfig, ExportEntryInput, HostCapabilities, HostCapabilityError,
     HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot,
     HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
-    JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult,
+    JoinSpaceInput, NetworkSettingsPatch, ObserveClipboardChangeInput, Operation, OperationResult,
     QueryMemberRevocationInput, QuerySharedDeviceRefreshInput, RecoverSessionInput,
-    RemoveMemberInput, ResendEntryInput, RestoreClipboardInput, SecretString, SendFilesInput,
-    SendImageInput, SendTextInput,
+    RelayCredentialEdit, RemoveMemberInput, ResendEntryInput, RestoreClipboardInput,
+    SaveRelayInput, SaveRelayOutcome, SecretString, SendFilesInput, SendImageInput, SendTextInput,
+    SettingsPatch,
 };
 use zeroize::Zeroizing;
 
@@ -27,8 +28,8 @@ use crate::{
     BindingAnalyticsContext, BindingAnalyticsDeviceType, BindingAnalyticsHost, BindingAnalyticsOs,
     BindingClipboardOrigin, BindingClipboardRepresentation, BindingClipboardRestoreMode,
     BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
-    BindingError, BindingEvent, BindingFailure, BindingFileMetadata, BindingHost,
-    BindingLifecycleAction, BindingOperationTerminal, BindingRefreshReason,
+    BindingError, BindingErrorCategory, BindingEvent, BindingFailure, BindingFileMetadata,
+    BindingHost, BindingLifecycleAction, BindingOperationTerminal, BindingRefreshReason,
     BindingTransferDirection, HostBindingError,
 };
 
@@ -331,6 +332,11 @@ pub enum ResendEntryOutcome {
     NoEligibleTargets,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RelaySaveResult {
+    pub configured: bool,
+}
+
 enum WorkerCommand {
     RecoverSession {
         allow_secure_storage_unlock: bool,
@@ -341,6 +347,12 @@ enum WorkerCommand {
     },
     RefreshPeerConnections {
         response: mpsc::Sender<Result<PeerConnectionRefresh, BindingError>>,
+    },
+    SaveCustomRelay {
+        url: Zeroizing<String>,
+        access_token: Zeroizing<String>,
+        previous_url: Option<String>,
+        response: mpsc::Sender<Result<RelaySaveResult, BindingError>>,
     },
     RecoverNetwork {
         response: mpsc::Sender<Result<(), BindingError>>,
@@ -796,6 +808,20 @@ impl MobileEngine {
         result
             .recv()
             .map_err(|_| BindingError::RuntimeUnavailable)?
+    }
+
+    pub fn save_custom_relay(
+        &self,
+        url: String,
+        access_token: String,
+        previous_url: Option<String>,
+    ) -> Result<RelaySaveResult, BindingError> {
+        self.request(|response| WorkerCommand::SaveCustomRelay {
+            url: Zeroizing::new(url),
+            access_token: Zeroizing::new(access_token),
+            previous_url,
+            response,
+        })
     }
 
     pub fn recover_network(&self) -> Result<(), BindingError> {
@@ -1357,6 +1383,50 @@ async fn run_worker_loop(
                     .and_then(map_peer_connection_refresh);
                 let _ = response.send(result);
             }
+            WorkerCommand::SaveCustomRelay {
+                mut url,
+                access_token,
+                previous_url,
+                response,
+            } => {
+                let url = std::mem::take(&mut *url);
+                let result =
+                    if url.is_empty() && previous_url.as_deref().unwrap_or_default().is_empty() {
+                        Ok(RelaySaveResult { configured: false })
+                    } else {
+                        let credential = if url.is_empty() {
+                            RelayCredentialEdit::Delete {
+                                url: previous_url.unwrap_or_default(),
+                            }
+                        } else if access_token.is_empty() {
+                            RelayCredentialEdit::Keep { url: url.clone() }
+                        } else {
+                            RelayCredentialEdit::Set {
+                                url: url.clone(),
+                                access_token: SecretString::new(access_token.as_str()),
+                            }
+                        };
+                        engine
+                            .execute(Operation::SaveRelay(Box::new(SaveRelayInput {
+                                settings: SettingsPatch {
+                                    network: Some(NetworkSettingsPatch {
+                                        custom_relay_urls: Some(if url.is_empty() {
+                                            Vec::new()
+                                        } else {
+                                            vec![url]
+                                        }),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                credential,
+                            })))
+                            .await
+                            .map_err(BindingError::from)
+                            .and_then(map_relay_save_result)
+                    };
+                let _ = response.send(result);
+            }
             WorkerCommand::RecoverNetwork { response } => {
                 let result = engine
                     .execute(Operation::RecoverNetwork)
@@ -1707,6 +1777,27 @@ fn receive_lifecycle_result<T>(
         .map_err(|_| BindingError::RuntimeUnavailable)
 }
 
+macro_rules! map_enum {
+    ($name:ident, $($from_path:ident)::+ => $($to_path:ident)::+, $($variant:ident),+ $(,)?) => {
+        fn $name(value: $($from_path)::+) -> $($to_path)::+ {
+            type FromEnum = $($from_path)::+;
+            type ToEnum = $($to_path)::+;
+            match value {
+                $(FromEnum::$variant => ToEnum::$variant,)+
+            }
+        }
+    };
+}
+
+macro_rules! unpack_operation {
+    ($result:expr, $variant:pat => $construct:expr) => {
+        match $result {
+            $variant => Ok($construct),
+            _ => Err(BindingError::UnexpectedResult),
+        }
+    };
+}
+
 fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
     match event {
         uc_engine::EngineEvent::StateChanged { state } => BindingEvent::StateChanged {
@@ -1736,20 +1827,12 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
         }
         uc_engine::EngineEvent::LifecycleFailed { action, error } => {
             BindingEvent::LifecycleFailed {
-                action: match action {
-                    uc_engine::LifecycleAction::Suspend => BindingLifecycleAction::Suspend,
-                    uc_engine::LifecycleAction::Resume => BindingLifecycleAction::Resume,
-                },
+                action: map_lifecycle_action(action),
                 failure: BindingFailure::from(error),
             }
         }
         uc_engine::EngineEvent::RefreshRequired { reason } => BindingEvent::RefreshRequired {
-            reason: match reason {
-                uc_engine::RefreshReason::ConsumerLagged => BindingRefreshReason::ConsumerLagged,
-                uc_engine::RefreshReason::StateInvalidated => {
-                    BindingRefreshReason::StateInvalidated
-                }
-            },
+            reason: map_refresh_reason(reason),
         },
         uc_engine::EngineEvent::Fatal { error } => BindingEvent::Fatal {
             failure: BindingFailure::from(error),
@@ -1758,10 +1841,7 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
             entry_id: event.entry_id,
             attempt_id: event.attempt_id,
             preview: event.preview,
-            origin: match event.origin {
-                uc_engine::ClipboardOriginSummary::Local => BindingClipboardOrigin::Local,
-                uc_engine::ClipboardOriginSummary::Remote => BindingClipboardOrigin::Remote,
-            },
+            origin: map_clipboard_origin(event.origin),
         },
         uc_engine::EngineEvent::IncomingPending(event) => BindingEvent::IncomingPending {
             entry_id: event.entry_id,
@@ -1795,7 +1875,7 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
         }
         uc_engine::EngineEvent::SharedDeviceRefreshChanged(summary) => {
             BindingEvent::SharedDeviceRefreshChanged {
-                refresh: shared_device_refresh(summary),
+                refresh: map_shared_device_refresh_summary(summary),
             }
         }
         uc_engine::EngineEvent::TransferProgress(event) => BindingEvent::TransferProgress {
@@ -1803,12 +1883,7 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
             entry_id: event.entry_id,
             attempt_id: event.attempt_id,
             peer_id: event.peer_id,
-            direction: match event.direction {
-                uc_engine::TransferDirectionSummary::Sending => BindingTransferDirection::Sending,
-                uc_engine::TransferDirectionSummary::Receiving => {
-                    BindingTransferDirection::Receiving
-                }
-            },
+            direction: map_transfer_direction(event.direction),
             completed_bytes: event.completed_bytes,
             total_bytes: event.total_bytes,
         },
@@ -1842,161 +1917,136 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
     }
 }
 
-fn map_engine_state(state: uc_engine::EngineState) -> BindingEngineState {
-    match state {
-        uc_engine::EngineState::Running => BindingEngineState::Running,
-        uc_engine::EngineState::Quiescing => BindingEngineState::Quiescing,
-        uc_engine::EngineState::Quiesced => BindingEngineState::Quiesced,
-        uc_engine::EngineState::Suspended => BindingEngineState::Suspended,
-        uc_engine::EngineState::ShuttingDown => BindingEngineState::ShuttingDown,
-        uc_engine::EngineState::Stopped => BindingEngineState::Stopped,
-    }
-}
+map_enum!(map_engine_state, uc_engine::EngineState => BindingEngineState,
+    Running, Quiescing, Quiesced, Suspended, ShuttingDown, Stopped,
+);
+
+map_enum!(map_invitation_availability, uc_engine::InvitationAvailability => InvitationAvailability,
+    CrossNetwork, SameLocalNetwork,
+);
+
+map_enum!(map_membership_convergence_state, uc_engine::MembershipConvergenceStateSummary => MembershipConvergenceState,
+    Complete, Converging, WaitingForUpgrade, Blocked,
+);
+
+map_enum!(map_shared_device_refresh_phase, uc_engine::SharedDeviceRefreshPhaseSummary => SharedDeviceRefreshPhase,
+    Started, Discovering, Connecting, RoundCompleted,
+);
+
+map_enum!(map_shared_device_refresh_device_state, uc_engine::SharedDeviceRefreshDeviceStateSummary => SharedDeviceRefreshDeviceState,
+    Discovered, Connecting, Connected, AlreadyPresent, WaitingForPeer, WaitingForUpdate, VersionIncompatible, Rejected,
+);
+
+map_enum!(map_member_revocation_outcome, uc_engine::MemberRevocationOutcome => MemberRevocationOutcome,
+    LocalOnly, Recovering, Applied, Complete, RecoveryRequired,
+);
+
+map_enum!(map_legacy_bootstrap_outcome, uc_engine::LegacyBootstrapOutcome => LegacyMemberRemovalOutcome,
+    AwaitingReadmission, Complete, RecoveryRequired,
+);
+
+map_enum!(map_clipboard_origin, uc_engine::ClipboardOriginSummary => BindingClipboardOrigin,
+    Local, Remote,
+);
+
+map_enum!(map_lifecycle_action, uc_engine::LifecycleAction => BindingLifecycleAction,
+    Suspend, Resume,
+);
+
+map_enum!(map_refresh_reason, uc_engine::RefreshReason => BindingRefreshReason,
+    ConsumerLagged, StateInvalidated,
+);
+
+map_enum!(map_transfer_direction, uc_engine::TransferDirectionSummary => BindingTransferDirection,
+    Sending, Receiving,
+);
+
+map_enum!(map_entry_not_resendable_reason, uc_engine::EntryNotResendableReason => EntryNotResendableReason,
+    RemoteOrigin, PayloadLost,
+);
+
+map_enum!(map_restore_mode, BindingClipboardRestoreMode => ClipboardRestoreMode,
+    Standard, PlainText, FilePaths,
+);
 
 fn map_space_created(result: OperationResult) -> Result<SpaceCreated, BindingError> {
-    match result {
-        OperationResult::SpaceCreated {
-            space_id,
-            self_device_id,
-            identity_fingerprint,
-        } => Ok(SpaceCreated {
-            space_id,
-            self_device_id,
-            identity_fingerprint,
-        }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::SpaceCreated {
+        space_id,
+        self_device_id,
+        identity_fingerprint,
+    } => SpaceCreated {
+        space_id,
+        self_device_id,
+        identity_fingerprint,
+    })
 }
 
 fn map_space_state(result: OperationResult) -> Result<SpaceState, BindingError> {
-    match result {
-        OperationResult::SetupState(state) => Ok(SpaceState {
-            has_completed: state.has_completed,
-            space_id: state.space_id,
-            current_invitation: state.current_invitation.map(|invitation| SpaceInvitation {
-                invitation_code: invitation.invitation_code,
-                expires_at_ms: invitation.expires_at_ms,
-            }),
-            device_name: state.device_name,
+    unpack_operation!(result, OperationResult::SetupState(state) => SpaceState {
+        has_completed: state.has_completed,
+        space_id: state.space_id,
+        current_invitation: state.current_invitation.map(|invitation| SpaceInvitation {
+            invitation_code: invitation.invitation_code,
+            expires_at_ms: invitation.expires_at_ms,
         }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+        device_name: state.device_name,
+    })
 }
 
 fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
-    match result {
-        OperationResult::Devices(devices) => Ok(devices
-            .into_iter()
-            .map(|device| Device {
-                device_id: device.device_id,
-                display_name: device.display_name,
-                is_local: device.is_local,
-                online: device.online,
-            })
-            .collect()),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::Devices(devices) => devices
+        .into_iter()
+        .map(|device| Device {
+            device_id: device.device_id,
+            display_name: device.display_name,
+            is_local: device.is_local,
+            online: device.online,
+        })
+        .collect())
 }
 
 fn map_membership_convergence(
     result: OperationResult,
 ) -> Result<MembershipConvergence, BindingError> {
-    match result {
-        OperationResult::MembershipConvergence(summary) => Ok(MembershipConvergence {
-            state: match summary.state {
-                uc_engine::MembershipConvergenceStateSummary::Complete => {
-                    MembershipConvergenceState::Complete
-                }
-                uc_engine::MembershipConvergenceStateSummary::Converging => {
-                    MembershipConvergenceState::Converging
-                }
-                uc_engine::MembershipConvergenceStateSummary::WaitingForUpgrade => {
-                    MembershipConvergenceState::WaitingForUpgrade
-                }
-                uc_engine::MembershipConvergenceStateSummary::Blocked => {
-                    MembershipConvergenceState::Blocked
-                }
-            },
-            pending_count: summary.pending_count,
-            waiting_for_peer_count: summary.waiting_for_peer_count,
-            waiting_for_update_count: summary.waiting_for_update_count,
-            version_incompatible_count: summary.version_incompatible_count,
-            blocked_count: summary.blocked_count,
-            rejected_count: summary.rejected_count,
-        }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::MembershipConvergence(summary) => MembershipConvergence {
+        state: map_membership_convergence_state(summary.state),
+        pending_count: summary.pending_count,
+        waiting_for_peer_count: summary.waiting_for_peer_count,
+        waiting_for_update_count: summary.waiting_for_update_count,
+        version_incompatible_count: summary.version_incompatible_count,
+        blocked_count: summary.blocked_count,
+        rejected_count: summary.rejected_count,
+    })
 }
 
 fn map_shared_device_refresh_started(
     result: OperationResult,
 ) -> Result<SharedDeviceRefreshStarted, BindingError> {
-    match result {
-        OperationResult::SharedDeviceRefreshStarted(summary) => Ok(SharedDeviceRefreshStarted {
-            request_id: summary.request_id,
-        }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::SharedDeviceRefreshStarted(summary) => SharedDeviceRefreshStarted {
+        request_id: summary.request_id,
+    })
 }
 
 fn map_shared_device_refresh(
     result: OperationResult,
 ) -> Result<Option<SharedDeviceRefresh>, BindingError> {
-    match result {
-        OperationResult::SharedDeviceRefresh(summary) => Ok(summary.map(shared_device_refresh)),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::SharedDeviceRefresh(summary) => summary
+        .map(map_shared_device_refresh_summary))
 }
 
-fn shared_device_refresh(summary: uc_engine::SharedDeviceRefreshSummary) -> SharedDeviceRefresh {
+fn map_shared_device_refresh_summary(
+    summary: uc_engine::SharedDeviceRefreshSummary,
+) -> SharedDeviceRefresh {
     SharedDeviceRefresh {
         request_id: summary.request_id,
-        phase: match summary.phase {
-            uc_engine::SharedDeviceRefreshPhaseSummary::Started => {
-                SharedDeviceRefreshPhase::Started
-            }
-            uc_engine::SharedDeviceRefreshPhaseSummary::Discovering => {
-                SharedDeviceRefreshPhase::Discovering
-            }
-            uc_engine::SharedDeviceRefreshPhaseSummary::Connecting => {
-                SharedDeviceRefreshPhase::Connecting
-            }
-            uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted => {
-                SharedDeviceRefreshPhase::RoundCompleted
-            }
-        },
+        phase: map_shared_device_refresh_phase(summary.phase),
         devices: summary
             .devices
             .into_iter()
             .map(|device| SharedDeviceRefreshDevice {
                 device_id: device.device_id,
                 display_name: device.display_name,
-                state: match device.state {
-                    uc_engine::SharedDeviceRefreshDeviceStateSummary::Discovered => {
-                        SharedDeviceRefreshDeviceState::Discovered
-                    }
-                    uc_engine::SharedDeviceRefreshDeviceStateSummary::Connecting => {
-                        SharedDeviceRefreshDeviceState::Connecting
-                    }
-                    uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected => {
-                        SharedDeviceRefreshDeviceState::Connected
-                    }
-                    uc_engine::SharedDeviceRefreshDeviceStateSummary::AlreadyPresent => {
-                        SharedDeviceRefreshDeviceState::AlreadyPresent
-                    }
-                    uc_engine::SharedDeviceRefreshDeviceStateSummary::WaitingForPeer => {
-                        SharedDeviceRefreshDeviceState::WaitingForPeer
-                    }
-                    uc_engine::SharedDeviceRefreshDeviceStateSummary::WaitingForUpdate => {
-                        SharedDeviceRefreshDeviceState::WaitingForUpdate
-                    }
-                    uc_engine::SharedDeviceRefreshDeviceStateSummary::VersionIncompatible => {
-                        SharedDeviceRefreshDeviceState::VersionIncompatible
-                    }
-                    uc_engine::SharedDeviceRefreshDeviceStateSummary::Rejected => {
-                        SharedDeviceRefreshDeviceState::Rejected
-                    }
-                },
+                state: map_shared_device_refresh_device_state(device.state),
             })
             .collect(),
         total_count: summary.total_count,
@@ -2013,42 +2063,24 @@ fn shared_device_refresh(summary: uc_engine::SharedDeviceRefreshSummary) -> Shar
 }
 
 fn map_member_removed(result: OperationResult) -> Result<MemberRevocationResult, BindingError> {
-    match result {
-        OperationResult::MemberRemoved(summary) => Ok(map_member_revocation_summary(summary)),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::MemberRemoved(summary) => map_member_revocation_summary(summary))
 }
 
 fn map_legacy_member_removal(
     result: OperationResult,
 ) -> Result<LegacyMemberRemovalResult, BindingError> {
-    match result {
-        OperationResult::LegacyMemberRemoval(summary) => Ok(LegacyMemberRemovalResult {
-            bootstrap_id: summary.bootstrap_id,
-            outcome: match summary.outcome {
-                uc_engine::LegacyBootstrapOutcome::AwaitingReadmission => {
-                    LegacyMemberRemovalOutcome::AwaitingReadmission
-                }
-                uc_engine::LegacyBootstrapOutcome::Complete => LegacyMemberRemovalOutcome::Complete,
-                uc_engine::LegacyBootstrapOutcome::RecoveryRequired => {
-                    LegacyMemberRemovalOutcome::RecoveryRequired
-                }
-            },
-            pending_readmission: summary.pending_readmission,
-        }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::LegacyMemberRemoval(summary) => LegacyMemberRemovalResult {
+        bootstrap_id: summary.bootstrap_id,
+        outcome: map_legacy_bootstrap_outcome(summary.outcome),
+        pending_readmission: summary.pending_readmission,
+    })
 }
 
 fn map_member_revocation_status(
     result: OperationResult,
 ) -> Result<Option<MemberRevocationResult>, BindingError> {
-    match result {
-        OperationResult::MemberRevocationStatus(summary) => {
-            Ok(summary.map(map_member_revocation_summary))
-        }
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::MemberRevocationStatus(summary) => summary
+        .map(map_member_revocation_summary))
 }
 
 fn map_required_member_revocation_status(
@@ -2062,15 +2094,7 @@ fn map_member_revocation_summary(
 ) -> MemberRevocationResult {
     MemberRevocationResult {
         revocation_id: summary.revocation_id,
-        outcome: match summary.outcome {
-            uc_engine::MemberRevocationOutcome::LocalOnly => MemberRevocationOutcome::LocalOnly,
-            uc_engine::MemberRevocationOutcome::Recovering => MemberRevocationOutcome::Recovering,
-            uc_engine::MemberRevocationOutcome::Applied => MemberRevocationOutcome::Applied,
-            uc_engine::MemberRevocationOutcome::Complete => MemberRevocationOutcome::Complete,
-            uc_engine::MemberRevocationOutcome::RecoveryRequired => {
-                MemberRevocationOutcome::RecoveryRequired
-            }
-        },
+        outcome: map_member_revocation_outcome(summary.outcome),
         pending_recipients: summary.pending_recipients,
         removed_device_ids: summary.removed_device_ids,
         pending_recipient_device_ids: summary.pending_recipient_device_ids,
@@ -2079,160 +2103,133 @@ fn map_member_revocation_summary(
 }
 
 fn map_resend_outcome(result: OperationResult) -> Result<ResendEntryOutcome, BindingError> {
-    match result {
-        OperationResult::EntryResent(outcome) => match outcome {
-            uc_engine::ResendEntryOutcome::Completed(report) => Ok(ResendEntryOutcome::Completed {
-                accepted: count_to_u64(report.accepted)?,
-                duplicate: count_to_u64(report.duplicate)?,
-                offline: count_to_u64(report.offline)?,
-                errored: count_to_u64(report.errored)?,
-                pending: count_to_u64(report.pending)?,
-            }),
-            uc_engine::ResendEntryOutcome::EntryNotFound { entry_id } => {
-                Ok(ResendEntryOutcome::EntryNotFound { entry_id })
-            }
-            uc_engine::ResendEntryOutcome::EntryNotResendable { entry_id, reason } => {
-                Ok(ResendEntryOutcome::EntryNotResendable {
-                    entry_id,
-                    reason: match reason {
-                        uc_engine::EntryNotResendableReason::RemoteOrigin => {
-                            EntryNotResendableReason::RemoteOrigin
-                        }
-                        uc_engine::EntryNotResendableReason::PayloadLost => {
-                            EntryNotResendableReason::PayloadLost
-                        }
-                    },
-                })
-            }
-            uc_engine::ResendEntryOutcome::TargetNotTrusted { device_id } => {
-                Ok(ResendEntryOutcome::TargetNotTrusted { device_id })
-            }
-            uc_engine::ResendEntryOutcome::NoEligibleTargets => {
-                Ok(ResendEntryOutcome::NoEligibleTargets)
-            }
+    unpack_operation!(result, OperationResult::EntryResent(outcome) => match outcome {
+        uc_engine::ResendEntryOutcome::Completed(report) => ResendEntryOutcome::Completed {
+            accepted: count_to_u64(report.accepted)?,
+            duplicate: count_to_u64(report.duplicate)?,
+            offline: count_to_u64(report.offline)?,
+            errored: count_to_u64(report.errored)?,
+            pending: count_to_u64(report.pending)?,
         },
-        _ => Err(BindingError::UnexpectedResult),
-    }
+        uc_engine::ResendEntryOutcome::EntryNotFound { entry_id } => {
+            ResendEntryOutcome::EntryNotFound { entry_id }
+        }
+        uc_engine::ResendEntryOutcome::EntryNotResendable { entry_id, reason } => {
+            ResendEntryOutcome::EntryNotResendable {
+                entry_id,
+                reason: map_entry_not_resendable_reason(reason),
+            }
+        }
+        uc_engine::ResendEntryOutcome::TargetNotTrusted { device_id } => {
+            ResendEntryOutcome::TargetNotTrusted { device_id }
+        }
+        uc_engine::ResendEntryOutcome::NoEligibleTargets => ResendEntryOutcome::NoEligibleTargets,
+    })
 }
 
 fn map_space_left(result: OperationResult) -> Result<(), BindingError> {
-    match result {
-        OperationResult::SpaceFactoryReset => Ok(()),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::SpaceFactoryReset => ())
 }
 
 fn map_session_recovery(result: OperationResult) -> Result<SessionRecovery, BindingError> {
-    match result {
-        OperationResult::SessionRecovered { unlocked, resumed } => {
-            Ok(SessionRecovery { unlocked, resumed })
-        }
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::SessionRecovered { unlocked, resumed } => SessionRecovery {
+        unlocked,
+        resumed,
+    })
 }
 
 fn map_local_device(result: OperationResult) -> Result<LocalDevice, BindingError> {
-    match result {
-        OperationResult::LocalDevice(device) => Ok(LocalDevice {
-            device_id: device.device_id,
-            display_name: device.display_name,
-        }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::LocalDevice(device) => LocalDevice {
+        device_id: device.device_id,
+        display_name: device.display_name,
+    })
 }
 
 fn map_invitation_issued(result: OperationResult) -> Result<InvitationIssued, BindingError> {
-    match result {
-        OperationResult::InvitationIssued {
-            invitation_code,
-            expires_at_ms,
-            availability,
-        } => Ok(InvitationIssued {
-            invitation_code,
-            expires_at_ms,
-            availability: match availability {
-                uc_engine::InvitationAvailability::CrossNetwork => {
-                    InvitationAvailability::CrossNetwork
-                }
-                uc_engine::InvitationAvailability::SameLocalNetwork => {
-                    InvitationAvailability::SameLocalNetwork
-                }
-            },
-        }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::InvitationIssued {
+        invitation_code,
+        expires_at_ms,
+        availability,
+    } => InvitationIssued {
+        invitation_code,
+        expires_at_ms,
+        availability: map_invitation_availability(availability),
+    })
 }
 
 fn map_space_joined(result: OperationResult) -> Result<SpaceJoined, BindingError> {
-    match result {
-        OperationResult::SpaceJoined {
-            sponsor_device_id,
-            sponsor_identity_fingerprint,
-            space_id,
-            self_device_id,
-            self_identity_fingerprint,
-            migrated_records,
-            preserved_unreadable_records,
-        } => Ok(SpaceJoined {
-            sponsor_device_id,
-            sponsor_identity_fingerprint,
-            space_id,
-            self_device_id,
-            self_identity_fingerprint,
-            migrated_records,
-            preserved_unreadable_records,
-        }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::SpaceJoined {
+        sponsor_device_id,
+        sponsor_identity_fingerprint,
+        space_id,
+        self_device_id,
+        self_identity_fingerprint,
+        migrated_records,
+        preserved_unreadable_records,
+    } => SpaceJoined {
+        sponsor_device_id,
+        sponsor_identity_fingerprint,
+        space_id,
+        self_device_id,
+        self_identity_fingerprint,
+        migrated_records,
+        preserved_unreadable_records,
+    })
 }
 
 fn map_send_report(result: OperationResult) -> Result<SendReport, BindingError> {
-    match result {
-        OperationResult::EntrySent(report) => Ok(SendReport {
-            entry_id: report.entry_id,
-            at_ms: report.at_ms,
-            total_accepted: count_to_u64(report.total_accepted)?,
-            total_duplicate: count_to_u64(report.total_duplicate)?,
-            total_offline: count_to_u64(report.total_offline)?,
-            total_errored: count_to_u64(report.total_errored)?,
-            total_pending: count_to_u64(report.total_pending)?,
-        }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::EntrySent(report) => SendReport {
+        entry_id: report.entry_id,
+        at_ms: report.at_ms,
+        total_accepted: count_to_u64(report.total_accepted)?,
+        total_duplicate: count_to_u64(report.total_duplicate)?,
+        total_offline: count_to_u64(report.total_offline)?,
+        total_errored: count_to_u64(report.total_errored)?,
+        total_pending: count_to_u64(report.total_pending)?,
+    })
 }
 
 fn map_peer_connection_refresh(
     result: OperationResult,
 ) -> Result<PeerConnectionRefresh, BindingError> {
+    unpack_operation!(result, OperationResult::PeerConnectionsRefreshed(report) => PeerConnectionRefresh {
+        total: u64::from(report.total),
+        online: u64::from(report.online),
+        offline: u64::from(report.offline),
+        errors: u64::from(report.errors),
+    })
+}
+
+fn map_relay_save_result(result: OperationResult) -> Result<RelaySaveResult, BindingError> {
     match result {
-        OperationResult::PeerConnectionsRefreshed(report) => Ok(PeerConnectionRefresh {
-            total: u64::from(report.total),
-            online: u64::from(report.online),
-            offline: u64::from(report.offline),
-            errors: u64::from(report.errors),
-        }),
+        OperationResult::RelaySaved(SaveRelayOutcome::Saved { settings, .. }) => {
+            Ok(RelaySaveResult {
+                configured: !settings.network.custom_relay_urls.is_empty(),
+            })
+        }
+        OperationResult::RelaySaved(SaveRelayOutcome::Rejected { .. }) => {
+            Err(BindingError::Engine {
+                code: 0,
+                category: BindingErrorCategory::InvalidInput,
+                retryable: false,
+            })
+        }
         _ => Err(BindingError::UnexpectedResult),
     }
 }
 
 fn map_network_recovered(result: OperationResult) -> Result<(), BindingError> {
-    match result {
-        OperationResult::NetworkRecovered => Ok(()),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::NetworkRecovered => ())
 }
 
 fn map_network_recovery_status(
     result: OperationResult,
 ) -> Result<NetworkRecoveryStatus, BindingError> {
-    match result {
-        OperationResult::NetworkRecoveryStatus(status) => Ok(NetworkRecoveryStatus {
-            phase: recovery_phase(status.phase).to_string(),
-            retryable: status.retryable,
-            next_retry_in_ms: status.next_retry_in_ms,
-        }),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::NetworkRecoveryStatus(status) => NetworkRecoveryStatus {
+        phase: recovery_phase(status.phase).to_string(),
+        retryable: status.retryable,
+        next_retry_in_ms: status.next_retry_in_ms,
+    })
 }
 
 fn recovery_phase(phase: uc_engine::NetworkRecoveryPhaseSummary) -> &'static str {
@@ -2256,18 +2253,7 @@ fn map_clipboard_change_observed(
 }
 
 fn map_clipboard_captured(result: OperationResult) -> Result<Option<String>, BindingError> {
-    match result {
-        OperationResult::ClipboardCaptured { entry_id } => Ok(entry_id),
-        _ => Err(BindingError::UnexpectedResult),
-    }
-}
-
-fn map_restore_mode(mode: BindingClipboardRestoreMode) -> ClipboardRestoreMode {
-    match mode {
-        BindingClipboardRestoreMode::Standard => ClipboardRestoreMode::Standard,
-        BindingClipboardRestoreMode::PlainText => ClipboardRestoreMode::PlainText,
-        BindingClipboardRestoreMode::FilePaths => ClipboardRestoreMode::FilePaths,
-    }
+    unpack_operation!(result, OperationResult::ClipboardCaptured { entry_id } => entry_id)
 }
 
 fn map_clipboard_restored(
@@ -2288,20 +2274,14 @@ fn map_clipboard_restored(
 }
 
 fn map_active_clipboard(result: OperationResult) -> Result<Option<ActiveClipboard>, BindingError> {
-    match result {
-        OperationResult::ActiveClipboard(active) => Ok(active.map(|active| ActiveClipboard {
-            entry_id: active.entry_id,
-            activated_by: active.activated_by,
-        })),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::ActiveClipboard(active) => active.map(|active| ActiveClipboard {
+        entry_id: active.entry_id,
+        activated_by: active.activated_by,
+    }))
 }
 
 fn map_entry_exported(result: OperationResult) -> Result<(), BindingError> {
-    match result {
-        OperationResult::EntryExported => Ok(()),
-        _ => Err(BindingError::UnexpectedResult),
-    }
+    unpack_operation!(result, OperationResult::EntryExported => ())
 }
 
 fn count_to_u64(value: usize) -> Result<u64, BindingError> {
