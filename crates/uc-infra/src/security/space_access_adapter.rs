@@ -1260,28 +1260,44 @@ impl DefaultSpaceAccessAdapter {
             .key_epoch_repository
             .as_ref()
             .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
-        let records = repository.list_incomplete_revocations().await?;
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+        let records = repository
+            .list_incomplete_revocations()
+            .await?
+            .into_iter()
+            .filter(|record| record.space_id() == &space_id)
+            .collect::<Vec<_>>();
         let mut results = Vec::with_capacity(records.len());
         for mut record in records {
             if record.status() == RevocationStatus::RecoveryRequired {
                 results.push(Self::group_revocation_result(repository.as_ref(), &record).await?);
                 continue;
             }
-            if record.status() == RevocationStatus::Prepared
-                && !matches!(
-                    repository.load_space_material(record.space_id()).await,
-                    Ok(Some(_))
-                )
-            {
-                record = repository
-                    .resolve_prepared_revocation(
-                        record.revocation_id(),
-                        PreparedRevocationResolution::RecoveryRequired(None),
-                        now_ms,
-                    )
-                    .await?;
-                results.push(Self::group_revocation_result(repository.as_ref(), &record).await?);
-                continue;
+            if record.status() == RevocationStatus::Prepared {
+                match repository.load_space_material(record.space_id()).await {
+                    Ok(Some(_)) => {}
+                    Ok(None)
+                    | Err(
+                        KeyEpochError::DecryptionFailed
+                        | KeyEpochError::PersistedStateIntegrityFailed,
+                    ) => {
+                        record = repository
+                            .resolve_prepared_revocation(
+                                record.revocation_id(),
+                                PreparedRevocationResolution::RecoveryRequired(None),
+                                now_ms,
+                            )
+                            .await?;
+                        results.push(
+                            Self::group_revocation_result(repository.as_ref(), &record).await?,
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             results.push(
                 self.revoke_group_member(
@@ -4071,6 +4087,83 @@ mod admission_tests {
             recovered[0].status(),
             Some(RevocationStatus::RecoveryRequired)
         );
+    }
+
+    #[tokio::test]
+    async fn resume_group_revocations_ignores_incomplete_records_from_another_space() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(
+            SpaceId::from("active-space"),
+            MasterKey::from_bytes(&[0x37; 32]).unwrap(),
+        );
+        let other_space_record = RevocationRecord::prepare(
+            RevocationId::from_string("other-space-prepared").unwrap(),
+            SpaceId::from("other-space"),
+            DeviceId::new("target-device"),
+            GroupEpoch::new(1),
+            100,
+        )
+        .unwrap();
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_list_incomplete_revocations()
+            .times(1)
+            .return_once(move || Ok(vec![other_space_record]));
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            Arc::new(repository),
+        );
+
+        assert!(adapter
+            .resume_group_revocations(200)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn transient_material_load_error_keeps_prepared_revocation_retryable() {
+        let directory = tempdir().unwrap();
+        let session = Arc::new(InMemorySession::new());
+        let space_id = SpaceId::from("prepared-transient-material-error");
+        session.set_master_key_for_space(
+            space_id.clone(),
+            MasterKey::from_bytes(&[0x38; 32]).unwrap(),
+        );
+        let prepared = RevocationRecord::prepare(
+            RevocationId::from_string("prepared-transient-material-error").unwrap(),
+            space_id,
+            DeviceId::new("target-device"),
+            GroupEpoch::new(1),
+            100,
+        )
+        .unwrap();
+        let mut repository = MockRevocationRepository::new();
+        repository
+            .expect_list_incomplete_revocations()
+            .times(1)
+            .return_once(move || Ok(vec![prepared]));
+        repository
+            .expect_load_space_material()
+            .times(1)
+            .return_once(|_| {
+                Err(KeyEpochError::Repository(
+                    "temporary storage failure".into(),
+                ))
+            });
+        repository.expect_resolve_prepared_revocation().never();
+        let adapter = adapter(
+            local_key_material(&directory, memory_secure_storage()),
+            session,
+            Arc::new(repository),
+        );
+
+        assert!(matches!(
+            adapter.resume_group_revocations(200).await,
+            Err(KeyEpochError::Repository(message)) if message == "temporary storage failure"
+        ));
     }
 
     #[tokio::test]

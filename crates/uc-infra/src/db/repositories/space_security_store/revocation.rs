@@ -421,7 +421,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                     .bind::<Text, _>(status_name(status))
                     .bind::<Binary, _>(encrypted_record)
                     .bind::<Nullable<Binary>, _>(encrypted_stage)
-                    .bind::<BigInt, _>(now_ms)
+                    .bind::<BigInt, _>(record.updated_at_ms())
                     .bind::<Text, _>(&revocation_id)
                     .execute(conn)?;
                     if affected != 1 {

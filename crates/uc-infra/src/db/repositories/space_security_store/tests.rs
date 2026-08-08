@@ -519,10 +519,10 @@ async fn verified_present_target_restages_prepared_revocation_from_current_epoch
     let reopened = reopen_repo(&pool);
     let mut rebuilt = prepared.clone();
     rebuilt
-        .rebase_prepared(advanced.state().epoch(), 200)
+        .rebase_prepared(advanced.state().epoch(), 199)
         .unwrap();
     rebuilt
-        .transition_to(RevocationStatus::Staged, 200)
+        .transition_to(RevocationStatus::Staged, 199)
         .unwrap();
     let mut next_state = advanced.state().clone();
     next_state
@@ -552,6 +552,13 @@ async fn verified_present_target_restages_prepared_revocation_from_current_epoch
     assert_eq!(resolved, stage.record().clone());
     assert_eq!(resolved.status(), RevocationStatus::Staged);
     assert_eq!(resolved.previous_epoch(), advanced.state().epoch());
+    assert_eq!(
+        reopened
+            .get_revocation(prepared.revocation_id())
+            .await
+            .unwrap(),
+        Some(stage.record().clone())
+    );
     assert_eq!(
         reopened
             .load_space_material(prepared.space_id())
