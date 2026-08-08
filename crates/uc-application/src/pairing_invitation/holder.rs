@@ -181,6 +181,7 @@ mod tests {
             issued,
             expires,
             DeviceId::new("device-1"),
+            0,
         );
         invitation
     }

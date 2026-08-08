@@ -103,6 +103,7 @@ use uc_core::clipboard::{
     ClipboardContentCategory, ClipboardContentCategorySet, EntryDeliveryRecord,
 };
 use uc_core::ids::{DeviceId, EntryId};
+use uc_core::membership::RemovalTargetGatePort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClockPort, ConnectionChannel,
@@ -322,11 +323,23 @@ pub(crate) struct DispatchClipboardEntryUseCase {
     recorder: Arc<DeliveryRecorder>,
 }
 
+#[cfg(test)]
+pub(crate) struct AllowAllRemovalTargets;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl RemovalTargetGatePort for AllowAllRemovalTargets {
+    async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+        false
+    }
+}
+
 impl DispatchClipboardEntryUseCase {
     /// The 13-port positional signature is intentionally preserved so
     /// bootstrap and tests keep wiring unchanged; the ports are reassembled
     /// into the five concern-scoped collaborators here.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn new(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
@@ -342,12 +355,51 @@ impl DispatchClipboardEntryUseCase {
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
     ) -> Self {
+        Self::new_with_removal_gate(
+            peer_addr_repo,
+            member_repo,
+            presence,
+            transfer_cipher,
+            clipboard_dispatch,
+            device_identity,
+            local_identity,
+            settings,
+            clock,
+            analytics,
+            first_sync_state,
+            entry_delivery_repo,
+            host_event_bus,
+            Arc::new(AllowAllRemovalTargets),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_removal_gate(
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        presence: Arc<dyn PresencePort>,
+        transfer_cipher: Arc<dyn TransferCipherPort>,
+        clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
+        device_identity: Arc<dyn DeviceIdentityPort>,
+        local_identity: Arc<dyn LocalIdentityPort>,
+        settings: Arc<dyn SettingsPort>,
+        clock: Arc<dyn ClockPort>,
+        analytics: Arc<dyn AnalyticsPort>,
+        first_sync_state: Arc<dyn FirstSyncStatePort>,
+        entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
+        host_event_bus: SharedHostEventEmitter,
+        removal_gate: Arc<dyn RemovalTargetGatePort>,
+    ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {
             cipher: transfer_cipher,
             device_identity,
             clock,
-            selector: TargetSelector::new(peer_addr_repo, member_repo),
+            selector: TargetSelector::new_with_removal_gate(
+                peer_addr_repo,
+                member_repo,
+                removal_gate,
+            ),
             header_factory: OutboundHeaderFactory::new(settings, local_identity, header_clock),
             dispatcher: Arc::new(PerPeerDispatcher::new(
                 clipboard_dispatch,

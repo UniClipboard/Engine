@@ -130,28 +130,26 @@ fn android_shell_only_forwards_commands_to_the_shared_probe() {
 }
 
 #[test]
-fn ios_and_android_probe_member_revocation_through_the_shared_contract() {
+fn ios_and_android_probe_member_removal_through_the_shared_contract() {
     let root = workspace_root();
     let source = read(root.join("tests/hosts/uc-mobile-probe-core/src/lib.rs"));
     let ios_model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
     let ios_view = read(root.join("tests/hosts/ios/EngineProbe/ProbeView.swift"));
 
-    for command in [
-        "RemoveMember",
-        "QueryCurrentMemberRevocation",
-        "ContinueMemberRevocation",
-    ] {
+    for command in ["RemoveMember", "QueryMemberRemoval"] {
         assert!(source.contains(command), "missing command: {command}");
     }
     for field in [
-        "removed_device_ids",
-        "pending_recipient_device_ids",
+        "phase",
+        "intent_count",
+        "effective_member_count",
+        "convergence_digest",
         "updated_at_ms",
-        "last_member_revocation",
+        "last_member_removal",
     ] {
         assert!(source.contains(field), "missing field: {field}");
     }
-    assert!(ios_model.contains("query_current_member_revocation"));
+    assert!(ios_model.contains("query_member_removal"));
     assert!(ios_view.contains("Member removal"));
 }
 

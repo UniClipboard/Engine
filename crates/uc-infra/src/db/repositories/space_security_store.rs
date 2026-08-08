@@ -29,3 +29,5 @@ fn backend(error: impl std::fmt::Display) -> KeyEpochError {
 fn epoch_to_i64(epoch: u64) -> Result<i64, KeyEpochError> {
     i64::try_from(epoch).map_err(|_| backend("group epoch exceeds SQLite range"))
 }
+
+pub(crate) use encrypted_payload::space_lookup_token;

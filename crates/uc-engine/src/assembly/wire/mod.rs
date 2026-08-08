@@ -59,10 +59,11 @@ use uc_infra::db::repositories::{
     DieselClipboardEventRepository, DieselClipboardRepresentationRepository,
     DieselClipboardSelectionRepository, DieselEntryAvailabilityRepository,
     DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
-    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository,
-    DieselSpaceSecurityStore, DieselThumbnailRepository, DieselTrustedPeerRepository,
-    EncryptedMembershipAnnouncementRepository, EncryptedMembershipCandidateRepository,
-    EncryptedMembershipOutboxRepository, EncryptedRelationshipStore,
+    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselRemovalIntentStore,
+    DieselSpaceMemberRepository, DieselSpaceSecurityStore, DieselThumbnailRepository,
+    DieselTrustedPeerRepository, EncryptedMembershipAnnouncementRepository,
+    EncryptedMembershipCandidateRepository, EncryptedMembershipOutboxRepository,
+    EncryptedRelationshipStore,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
@@ -258,6 +259,19 @@ pub fn wire_dependencies_from_inputs(
             &infra.db_executor,
         );
     let membership_session = Arc::clone(&platform.session);
+    let removal_store = Arc::new(DieselRemovalIntentStore::new(
+        Arc::clone(&infra.db_executor),
+        platform.session.as_ref().clone(),
+    ));
+    let removal_intent_repository: Arc<dyn uc_core::membership::RemovalIntentRepositoryPort> =
+        removal_store.clone();
+    let removal_pending_join: Arc<dyn uc_core::membership::RemovalPendingJoinStorePort> =
+        removal_store;
+    let removal_key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> =
+        Arc::new(DieselSpaceSecurityStore::new(
+            Arc::clone(&infra.db_executor),
+            platform.session.as_ref().clone(),
+        ));
     let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
 
     let relationship_store = Arc::new(EncryptedRelationshipStore::new(
@@ -632,6 +646,9 @@ pub fn wire_dependencies_from_inputs(
             membership_outbox_repo,
             current_member_signatures,
             membership_session,
+            removal_intent_repository,
+            removal_pending_join,
+            removal_key_epoch_repository,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             blob_migration_repo: Arc::clone(&infra.blob_migration_repo),
             migration_state: Arc::clone(&infra.migration_state),

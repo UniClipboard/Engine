@@ -8,7 +8,7 @@ mod runtime;
 
 pub use runtime::{
     ActiveClipboard, Device, EntryNotResendableReason, InvitationAvailability, InvitationIssued,
-    LocalDevice, MemberRevocationOutcome, MemberRevocationResult, MembershipConvergence,
+    LocalDevice, MemberRemoval, MemberRemovalPhase, MembershipConvergence,
     MembershipConvergenceState, MobileEngine, PeerConnectionRefresh, RelaySaveResult,
     ResendEntryOutcome, SendReport, SessionRecovery, SharedDeviceRefresh,
     SharedDeviceRefreshDevice, SharedDeviceRefreshDeviceState, SharedDeviceRefreshPhase,
@@ -358,8 +358,8 @@ pub enum BindingEvent {
         state: String,
         at_ms: i64,
     },
-    MemberRevocationChanged {
-        revocation: MemberRevocationResult,
+    MemberRemovalChanged {
+        removal: MemberRemoval,
     },
     SharedDeviceRefreshChanged {
         refresh: SharedDeviceRefresh,

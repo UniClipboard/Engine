@@ -46,6 +46,7 @@ pub async fn build_daemon_lifecycle(
     space_setup: &SyncEngineDeps,
     shared: &SharedRuntimeDeps,
     rendezvous_base_url: Option<String>,
+    relay_fallback_override: Option<bool>,
 ) -> anyhow::Result<DaemonLifecycle> {
     // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
     // member_repo 已不再持有的孤儿条目清掉,恢复设计意图的不变量
@@ -95,7 +96,8 @@ pub async fn build_daemon_lifecycle(
         .load()
         .await
         .map_err(|err| anyhow::anyhow!("settings load failed at startup: {err}"))?;
-    let allow_relay_fallback = settings.network.allow_relay_fallback;
+    let allow_relay_fallback =
+        relay_fallback_override.unwrap_or(settings.network.allow_relay_fallback);
     let allow_overlay_network_addrs = settings.network.allow_overlay_network_addrs;
     let custom_relay_urls = settings.network.custom_relay_urls.clone();
     let congestion_controller = settings.network.congestion_controller;

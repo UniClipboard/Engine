@@ -18,8 +18,7 @@ use tokio::sync::Mutex;
 use tracing::{error, warn};
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
-    AppFacade, HistoryMaintenanceRuntime, MemberRevocationView, NetworkRecoveryEvent,
-    PairingOutcome,
+    AppFacade, HistoryMaintenanceRuntime, MemberRemovalView, NetworkRecoveryEvent, PairingOutcome,
 };
 use uc_application::membership::SharedDeviceRefreshStatus;
 use uc_core::ports::ClockPort;
@@ -74,6 +73,7 @@ struct SessionFactory {
     file_transfer_lifecycle: Arc<FileTransferLifecycle>,
     events: EventSender,
     rendezvous_base_url: Option<String>,
+    relay_fallback_override: Option<bool>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     recovery_generation: Arc<AtomicU64>,
 }
@@ -135,9 +135,9 @@ fn engine_event_for_pairing_completion(outcome: PairingOutcome) -> crate::Engine
     crate::EngineEvent::PairingCompleted(completion)
 }
 
-fn engine_event_for_member_revocation(revocation: MemberRevocationView) -> crate::EngineEvent {
-    crate::EngineEvent::MemberRevocationChanged(
-        crate::operations::device::member::member_revocation_summary(revocation),
+fn engine_event_for_member_removal(removal: MemberRemovalView) -> crate::EngineEvent {
+    crate::EngineEvent::MemberRemovalChanged(
+        crate::operations::device::member::member_removal_summary(removal),
     )
 }
 
@@ -172,18 +172,18 @@ async fn spawn_pairing_completion_events(
         .await;
 }
 
-async fn spawn_member_revocation_events(
-    mut changes: tokio::sync::broadcast::Receiver<MemberRevocationView>,
+async fn spawn_member_removal_events(
+    mut changes: tokio::sync::broadcast::Receiver<MemberRemovalView>,
     tasks: &Arc<TaskRegistry>,
     events: EventSender,
 ) {
     tasks
-        .spawn("member_revocation_events", move |cancel| async move {
+        .spawn("member_removal_events", move |cancel| async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     change = changes.recv() => match change {
-                        Ok(change) => events.send(engine_event_for_member_revocation(change)),
+                        Ok(change) => events.send(engine_event_for_member_removal(change)),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             events.send(crate::EngineEvent::RefreshRequired {
                                 reason: crate::RefreshReason::ConsumerLagged,
@@ -322,6 +322,7 @@ impl ProductionRuntime {
     ) -> Result<Self, EngineError> {
         let app_version = config.app_version().to_string();
         let rendezvous_base_url = config.rendezvous_base_url_override();
+        let relay_fallback_override = config.test_relay_fallback_override();
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
         let HostWiring {
             wired,
@@ -352,6 +353,7 @@ impl ProductionRuntime {
             file_transfer_lifecycle: Arc::clone(&file_transfer_lifecycle),
             events: events.clone(),
             rendezvous_base_url: rendezvous_base_url.clone(),
+            relay_fallback_override,
             network_recovery: Arc::clone(&network_recovery),
             recovery_generation: Arc::new(AtomicU64::new(0)),
         });
@@ -418,6 +420,7 @@ impl ProductionRuntime {
             &wired.sync_engine,
             &wired.shared,
             factory.rendezvous_base_url.clone(),
+            factory.relay_fallback_override,
         )
         .await
         .map_err(|error| startup_error("p2p session", error))?;
@@ -493,8 +496,8 @@ impl ProductionRuntime {
             .subscribe_pairing_completion()
             .map_err(|error| startup_error("pairing completion subscription", error))?;
         spawn_pairing_completion_events(pairing_outcomes, &tasks, events.clone()).await;
-        spawn_member_revocation_events(
-            facade.subscribe_member_revocation_events(),
+        spawn_member_removal_events(
+            facade.subscribe_member_removal_events(),
             &tasks,
             events.clone(),
         )
@@ -505,9 +508,6 @@ impl ProductionRuntime {
             events.clone(),
         )
         .await;
-        if let Err(error) = sync_engine.roster.resume_incomplete_revocations().await {
-            warn!(error = %error, "pending group updates could not resume during startup");
-        }
         let history_maintenance = facade.start_history_maintenance().await;
         spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
         let lifecycle = Arc::clone(file_transfer_lifecycle);
@@ -610,7 +610,7 @@ fn operation_error_with_code(
 #[cfg(test)]
 mod tests {
     use uc_application::facade::{
-        ClipboardOutboundOutcome, MemberRevocationState, MemberRevocationView, PairingOutcome,
+        ClipboardOutboundOutcome, MemberRemovalPhaseView, MemberRemovalView, PairingOutcome,
         SearchFacadeError, SearchPageView, SearchResultView, StorageFacadeError, StorageStatsView,
     };
     use uc_application::membership::{
@@ -822,32 +822,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn member_revocation_changes_are_published_on_the_engine_event_stream() {
+    async fn member_removal_changes_are_published_on_the_engine_event_stream() {
         let (changes, change_stream) = tokio::sync::broadcast::channel(8);
         let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
         let tasks = Arc::new(TaskRegistry::new());
 
-        spawn_member_revocation_events(change_stream, &tasks, events).await;
+        spawn_member_removal_events(change_stream, &tasks, events).await;
         changes
-            .send(MemberRevocationView {
-                revocation_id: Some("revocation-1".into()),
-                state: MemberRevocationState::Applied,
-                pending_recipients: 1,
-                removed_device_ids: vec!["removed-1".into()],
-                pending_recipient_device_ids: vec!["waiting-1".into()],
+            .send(MemberRemovalView {
+                phase: MemberRemovalPhaseView::Applied,
+                intent_count: 1,
+                effective_member_count: 2,
+                convergence_digest: None,
                 updated_at_ms: 42,
             })
             .unwrap();
 
         assert_eq!(
             event_stream.next().await,
-            Some(crate::EngineEvent::MemberRevocationChanged(
-                crate::MemberRevocationSummary {
-                    revocation_id: Some("revocation-1".into()),
-                    outcome: crate::MemberRevocationOutcome::Applied,
-                    pending_recipients: 1,
-                    removed_device_ids: vec!["removed-1".into()],
-                    pending_recipient_device_ids: vec!["waiting-1".into()],
+            Some(crate::EngineEvent::MemberRemovalChanged(
+                crate::MemberRemovalSummary {
+                    phase: crate::MemberRemovalPhase::Applied,
+                    intent_count: 1,
+                    effective_member_count: 2,
+                    convergence_digest: None,
                     updated_at_ms: 42,
                 }
             ))

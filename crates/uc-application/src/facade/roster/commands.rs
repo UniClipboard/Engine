@@ -17,25 +17,6 @@ use uc_core::ports::{ConnectionChannel, ReachabilityState};
 use uc_core::settings::model::ContentTypes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemberRevocationState {
-    LocalOnly,
-    Recovering,
-    Applied,
-    Complete,
-    RecoveryRequired,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemberRevocationView {
-    pub revocation_id: Option<String>,
-    pub state: MemberRevocationState,
-    pub pending_recipients: usize,
-    pub removed_device_ids: Vec<String>,
-    pub pending_recipient_device_ids: Vec<String>,
-    pub updated_at_ms: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LegacyBootstrapState {
     AwaitingReadmission,
     Complete,
@@ -224,5 +205,46 @@ fn apply_content_types_patch(target: &mut ContentTypes, patch: ContentTypesPatch
     }
     if let Some(v) = patch.rich_text {
         target.rich_text = v;
+    }
+}
+
+/// 成员移除对外阶段(规格 015)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberRemovalPhaseView {
+    Applied,
+    Converging,
+    Complete,
+    RecoveryRequired,
+}
+
+/// 成员移除对外状态:一次查询恢复完整当前事实。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRemovalView {
+    pub phase: MemberRemovalPhaseView,
+    pub intent_count: usize,
+    pub effective_member_count: usize,
+    pub convergence_digest: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+impl MemberRemovalView {
+    pub fn from_summary(summary: uc_core::membership::MemberRemovalSummary) -> Self {
+        let phase = match summary.phase {
+            uc_core::membership::RemovalPhase::Applied => MemberRemovalPhaseView::Applied,
+            uc_core::membership::RemovalPhase::Converging => MemberRemovalPhaseView::Converging,
+            uc_core::membership::RemovalPhase::Complete => MemberRemovalPhaseView::Complete,
+            uc_core::membership::RemovalPhase::RecoveryRequired => {
+                MemberRemovalPhaseView::RecoveryRequired
+            }
+        };
+        Self {
+            phase,
+            intent_count: summary.intent_count,
+            effective_member_count: summary.effective_member_count,
+            convergence_digest: summary
+                .convergence_digest
+                .map(|digest| digest.iter().map(|byte| format!("{byte:02x}")).collect()),
+            updated_at_ms: summary.updated_at_ms,
+        }
     }
 }

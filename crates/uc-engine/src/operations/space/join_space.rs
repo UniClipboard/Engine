@@ -105,6 +105,11 @@ fn map_fresh_join_error(error: RedeemPairingInvitationError) -> EngineError {
             EngineErrorCategory::Conflict,
             false,
         ),
+        RedeemPairingInvitationError::SponsorAdmissionUnavailable => error_with(
+            JOIN_SPACE_SPONSOR_ADMISSION_UNAVAILABLE_CODE,
+            EngineErrorCategory::Conflict,
+            true,
+        ),
         RedeemPairingInvitationError::SponsorDeclined => error_with(
             JOIN_SPACE_SPONSOR_DECLINED_CODE,
             EngineErrorCategory::Conflict,
@@ -161,6 +166,11 @@ fn map_switch_space_error(error: SwitchSpaceError) -> EngineError {
             JOIN_SPACE_SPONSOR_REJECTED_CODE,
             EngineErrorCategory::Conflict,
             false,
+        ),
+        SwitchSpaceError::SponsorAdmissionUnavailable => error_with(
+            JOIN_SPACE_SPONSOR_ADMISSION_UNAVAILABLE_CODE,
+            EngineErrorCategory::Conflict,
+            true,
         ),
         SwitchSpaceError::Timeout => deadline_error(JOIN_SPACE_TIMEOUT_CODE),
         SwitchSpaceError::ConnectionLost => unavailable_error(JOIN_SPACE_CONNECTION_LOST_CODE),
