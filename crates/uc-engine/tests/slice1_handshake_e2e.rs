@@ -30,7 +30,10 @@ use uc_application::facade::space_setup::{
 };
 use uc_application::proof::HmacProofAdapter;
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, MembershipError, PeerAdmissionPort, SpaceMember};
+use uc_core::membership::{
+    MemberRepositoryPort, MembershipError, PeerAdmissionPort, RemovalAdmissionDecision,
+    RemovalAdmissionGatePort, SpaceMember,
+};
 use uc_core::ports::pairing::PairingSessionPort;
 use uc_core::ports::space::ProofPort;
 use uc_core::ports::{
@@ -53,6 +56,19 @@ use uc_infra::security::{
 };
 
 // ─── in-memory fakes ────────────────────────────────────────────────────────
+
+struct AllowRemovalAdmission;
+
+#[async_trait]
+impl RemovalAdmissionGatePort for AllowRemovalAdmission {
+    async fn admission_decision(&self, _invitation_generation: u64) -> RemovalAdmissionDecision {
+        RemovalAdmissionDecision::Allowed
+    }
+
+    async fn invitation_generation(&self) -> Result<u64, RemovalAdmissionDecision> {
+        Ok(0)
+    }
+}
 
 #[derive(Default)]
 struct InMemorySecureStorage {
@@ -420,6 +436,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
                 as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
             presence,
             analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
+            removal_admission: Arc::new(AllowRemovalAdmission),
         },
         transition: SpaceTransitionDeps {
             relationship_reset: common::relationship_state_reset_noop(),

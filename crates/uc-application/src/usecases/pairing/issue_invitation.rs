@@ -25,6 +25,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tracing::{debug, info, instrument, warn};
 
+use uc_core::membership::{RemovalAdmissionDecision, RemovalAdmissionGatePort};
 use uc_core::pairing::invitation::PairingInvitation;
 use uc_core::ports::pairing_invitation::{
     CodeOrigin, InvitationError, IssuedInvitation, PairingInvitationAddressCandidate,
@@ -55,6 +56,7 @@ pub(crate) struct IssuePairingInvitationUseCase {
     /// "early dial failure" (NetworkNotStarted / ServiceUnavailable) leaves
     /// a started signal so PostHog can compute the "tried to invite" cohort.
     analytics: Arc<dyn AnalyticsFacade>,
+    removal_admission: Arc<dyn RemovalAdmissionGatePort>,
 }
 
 impl IssuePairingInvitationUseCase {
@@ -66,6 +68,7 @@ impl IssuePairingInvitationUseCase {
         clock: Arc<dyn ClockPort>,
         holder: Arc<InMemoryPairingInvitationHolder>,
         analytics: Arc<dyn AnalyticsFacade>,
+        removal_admission: Arc<dyn RemovalAdmissionGatePort>,
     ) -> Self {
         Self {
             pairing_invitation,
@@ -75,6 +78,7 @@ impl IssuePairingInvitationUseCase {
             clock,
             holder,
             analytics,
+            removal_admission,
         }
     }
 
@@ -83,6 +87,7 @@ impl IssuePairingInvitationUseCase {
         &self,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
         self.capture_pairing_started();
+        let admission_generation = self.current_admission_generation().await?;
 
         // 1. Ask the rendezvous adapter for a code.
         let issued: IssuedInvitation = self
@@ -90,7 +95,8 @@ impl IssuePairingInvitationUseCase {
             .issue_invitation()
             .await
             .map_err(map_invitation_err)?;
-        self.finish_issued_invitation(issued).await
+        self.finish_issued_invitation(issued, admission_generation)
+            .await
     }
 
     #[instrument(skip_all, fields(selected_ip = %selected_ip))]
@@ -99,13 +105,15 @@ impl IssuePairingInvitationUseCase {
         selected_ip: IpAddr,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
         self.capture_pairing_started();
+        let admission_generation = self.current_admission_generation().await?;
 
         let issued: IssuedInvitation = self
             .pairing_invitation_by_address
             .issue_invitation_for_address(selected_ip)
             .await
             .map_err(map_invitation_err)?;
-        self.finish_issued_invitation(issued).await
+        self.finish_issued_invitation(issued, admission_generation)
+            .await
     }
 
     #[instrument(skip_all, fields(count = tracing::field::Empty))]
@@ -130,6 +138,7 @@ impl IssuePairingInvitationUseCase {
     async fn finish_issued_invitation(
         &self,
         issued: IssuedInvitation,
+        admission_generation: u64,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
         debug!(code = %issued.code.as_str(), expires_at = %issued.expires_at, "invitation issued by rendezvous");
 
@@ -161,8 +170,13 @@ impl IssuePairingInvitationUseCase {
 
         let issued_at = self.now_utc()?;
         let device_id = self.device_identity.current_device_id();
-        let (invitation, _issued_event) =
-            PairingInvitation::issue(issued.code.clone(), issued_at, issued.expires_at, device_id);
+        let (invitation, _issued_event) = PairingInvitation::issue(
+            issued.code.clone(),
+            issued_at,
+            issued.expires_at,
+            device_id,
+            admission_generation,
+        );
 
         self.holder.insert(invitation).await;
         info!(code = %issued.code.as_str(), "pairing invitation parked in holder");
@@ -180,6 +194,32 @@ impl IssuePairingInvitationUseCase {
             warn!(ms, "clock returned a timestamp outside chrono's range");
             IssuePairingInvitationError::Internal("clock returned invalid timestamp".into())
         })
+    }
+
+    async fn current_admission_generation(&self) -> Result<u64, IssuePairingInvitationError> {
+        self.removal_admission
+            .invitation_generation()
+            .await
+            .map_err(map_removal_admission_decision)
+    }
+}
+
+fn map_removal_admission_decision(
+    decision: RemovalAdmissionDecision,
+) -> IssuePairingInvitationError {
+    match decision {
+        RemovalAdmissionDecision::Allowed => IssuePairingInvitationError::Internal(
+            "removal admission gate returned an incomplete allow result".into(),
+        ),
+        RemovalAdmissionDecision::AwaitingConvergence => {
+            IssuePairingInvitationError::MemberRemovalInProgress
+        }
+        RemovalAdmissionDecision::RecoveryRequired => {
+            IssuePairingInvitationError::MemberRemovalRecoveryRequired
+        }
+        RemovalAdmissionDecision::SupersededInvitation | RemovalAdmissionDecision::Unavailable => {
+            IssuePairingInvitationError::MemberRemovalUnavailable
+        }
     }
 }
 
@@ -204,7 +244,27 @@ mod tests {
     use chrono::Duration;
 
     use uc_core::ids::DeviceId;
+    use uc_core::membership::{RemovalAdmissionDecision, RemovalAdmissionGatePort};
     use uc_core::pairing::invitation::{InvitationCode, InvitationState};
+
+    struct FixedRemovalAdmissionGate(RemovalAdmissionDecision);
+
+    #[async_trait]
+    impl RemovalAdmissionGatePort for FixedRemovalAdmissionGate {
+        async fn admission_decision(
+            &self,
+            _invitation_generation: u64,
+        ) -> RemovalAdmissionDecision {
+            self.0
+        }
+
+        async fn invitation_generation(&self) -> Result<u64, RemovalAdmissionDecision> {
+            match self.0 {
+                RemovalAdmissionDecision::Allowed => Ok(0),
+                decision => Err(decision),
+            }
+        }
+    }
 
     /// Test fake `AnalyticsPort` that records every captured `Event` for
     /// later inspection. Mirrors the joiner-side `CapturingAnalyticsSink`.
@@ -430,6 +490,7 @@ mod tests {
             clock,
             holder.clone(),
             analytics_facade,
+            Arc::new(FixedRemovalAdmissionGate(RemovalAdmissionDecision::Allowed)),
         );
         Harness {
             uc,
@@ -471,6 +532,36 @@ mod tests {
 
         // Funnel anchor + issuance outcome: a directory-issued code.
         assert_started_then_issued(&h.analytics, InvitationCodeSource::DirectoryIssued, false);
+    }
+
+    #[tokio::test]
+    async fn pending_removal_prevents_issuing_an_invitation() {
+        let port = Arc::new(FakeInvitationPort::with_ok("ABCD-1234", expires_at()));
+        let device_identity: Arc<dyn DeviceIdentityPort> =
+            Arc::new(FixedDeviceIdentity(DeviceId::new("sponsor-1")));
+        let clock: Arc<dyn ClockPort> = Arc::new(FixedClock(issued_at_ms()));
+        let holder = Arc::new(InMemoryPairingInvitationHolder::new());
+        let analytics = Arc::new(CapturingAnalyticsSink::default());
+        let uc = IssuePairingInvitationUseCase::new(
+            port.clone() as Arc<dyn PairingInvitationPort>,
+            port.clone() as Arc<dyn PairingInvitationAddressQueryPort>,
+            port.clone() as Arc<dyn PairingInvitationByAddressPort>,
+            device_identity,
+            clock,
+            holder.clone(),
+            wrap_facade(analytics.clone()),
+            Arc::new(FixedRemovalAdmissionGate(
+                RemovalAdmissionDecision::AwaitingConvergence,
+            )),
+        );
+
+        assert!(matches!(
+            uc.execute().await,
+            Err(IssuePairingInvitationError::MemberRemovalInProgress)
+        ));
+        assert_eq!(port.calls(), 0);
+        assert_eq!(holder.len().await, 0);
+        assert_pairing_started(&analytics);
     }
 
     #[tokio::test]

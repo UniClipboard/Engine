@@ -621,6 +621,15 @@ mod tests {
             Err(CurrentMemberSignatureError::Unavailable)
         );
         assert!(!wiring.wired.sync_engine.membership_session.is_ready());
+        assert_eq!(
+            wiring
+                .wired
+                .sync_engine
+                .removal_intent_repository
+                .current_space_lineage()
+                .await,
+            Err(uc_core::membership::RemovalIntentRepositoryError::Locked)
+        );
     }
 
     #[tokio::test]
@@ -647,12 +656,21 @@ mod tests {
             &wiring.wired.sync_engine,
             &wiring.wired.shared,
             None,
+            None,
         )
         .await
         .unwrap();
         let reachable = lifecycle
             .sync_engine_assembly
             .membership_attestation_is_reachable_for_test()
+            .await;
+        let removal_exchange_reachable = lifecycle
+            .sync_engine_assembly
+            .member_removal_exchange_is_reachable_for_test()
+            .await;
+        let removal_late_reachable = lifecycle
+            .sync_engine_assembly
+            .member_removal_late_is_reachable_for_test()
             .await;
         lifecycle
             .sync_engine_assembly
@@ -662,6 +680,14 @@ mod tests {
         assert!(
             reachable,
             "membership attestation protocol was not installed"
+        );
+        assert!(
+            removal_exchange_reachable,
+            "member removal exchange was not installed"
+        );
+        assert!(
+            removal_late_reachable,
+            "member removal late entry was not installed"
         );
     }
 

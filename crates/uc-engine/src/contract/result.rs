@@ -462,9 +462,8 @@ pub enum OperationResult {
     SharedDeviceRefreshStarted(SharedDeviceRefreshStartedSummary),
     SharedDeviceRefresh(Option<SharedDeviceRefreshSummary>),
     MemberSyncPreferences(MemberSyncPreferencesSummary),
-    MemberRemoved(MemberRevocationSummary),
-    MemberRevocationStatus(Option<MemberRevocationSummary>),
-    LegacyMemberRemoval(LegacyBootstrapSummary),
+    MemberRemoved(MemberRemovalSummary),
+    MemberRemovalStatus(MemberRemovalSummary),
     LegacyBootstrapStatus(Option<LegacyBootstrapSummary>),
     SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
@@ -661,11 +660,8 @@ impl fmt::Debug for OperationResult {
             Self::MemberRemoved(summary) => debug
                 .field("kind", &"member_removed")
                 .field("summary", summary),
-            Self::MemberRevocationStatus(summary) => debug
-                .field("kind", &"member_revocation_status")
-                .field("summary", summary),
-            Self::LegacyMemberRemoval(summary) => debug
-                .field("kind", &"legacy_member_removal")
+            Self::MemberRemovalStatus(summary) => debug
+                .field("kind", &"member_removal_status")
                 .field("summary", summary),
             Self::LegacyBootstrapStatus(summary) => debug
                 .field("kind", &"legacy_bootstrap_status")
@@ -992,21 +988,19 @@ impl fmt::Debug for SharedDeviceRefreshSummary {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MemberRevocationOutcome {
-    LocalOnly,
-    Recovering,
+pub enum MemberRemovalPhase {
     Applied,
+    Converging,
     Complete,
     RecoveryRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemberRevocationSummary {
-    pub revocation_id: Option<String>,
-    pub outcome: MemberRevocationOutcome,
-    pub pending_recipients: u64,
-    pub removed_device_ids: Vec<String>,
-    pub pending_recipient_device_ids: Vec<String>,
+pub struct MemberRemovalSummary {
+    pub phase: MemberRemovalPhase,
+    pub intent_count: u64,
+    pub effective_member_count: u64,
+    pub convergence_digest: Option<String>,
     pub updated_at_ms: i64,
 }
 

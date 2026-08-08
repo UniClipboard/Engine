@@ -37,6 +37,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 use uc_observability_contract::FlowId;
 
+use uc_core::membership::{RemovalAdmissionDecision, RemovalAdmissionGatePort};
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::pairing::session_message::{
     JoinerRequest, PairingRejectReason, PairingSessionMessage,
@@ -70,6 +71,7 @@ pub(crate) struct PairingInboundOrchestrator {
     pairing_invitation: Arc<dyn PairingInvitationPort>,
     holder: Arc<InMemoryPairingInvitationHolder>,
     clock: Arc<dyn ClockPort>,
+    removal_admission: Arc<dyn RemovalAdmissionGatePort>,
     handshake: Arc<SponsorHandshakeCoordinator>,
     admit_member: Arc<AdmitMemberUc>,
     trust_peer: Arc<TrustPeerUc>,
@@ -104,6 +106,7 @@ impl PairingInboundOrchestrator {
         pairing_invitation: Arc<dyn PairingInvitationPort>,
         holder: Arc<InMemoryPairingInvitationHolder>,
         clock: Arc<dyn ClockPort>,
+        removal_admission: Arc<dyn RemovalAdmissionGatePort>,
         handshake: Arc<SponsorHandshakeCoordinator>,
         admit_member: Arc<AdmitMemberUc>,
         trust_peer: Arc<TrustPeerUc>,
@@ -117,6 +120,7 @@ impl PairingInboundOrchestrator {
             pairing_invitation,
             holder,
             clock,
+            removal_admission,
             handshake,
             admit_member,
             trust_peer,
@@ -306,6 +310,20 @@ impl PairingInboundOrchestrator {
             .await
         {
             Ok(invitation) => {
+                if self
+                    .removal_admission
+                    .admission_decision(invitation.admission_generation())
+                    .await
+                    != RemovalAdmissionDecision::Allowed
+                {
+                    // An old or currently blocked invitation must not disclose the
+                    // space's current removal state before constructing an admission offer.
+                    self.handshake
+                        .reject(session, PairingRejectReason::AdmissionUnavailable)
+                        .await;
+                    self.emit_failure(session, PairingFailureReason::Internal);
+                    return None;
+                }
                 // 把 joiner_device_id 提到 root span 的 `peer.device_id`,
                 // 后续所有 child span / event 都自动继承,Sentry 上同一
                 // pairing flow 的事件可以一键 filter 出来。
@@ -1016,6 +1034,26 @@ mod tests {
     fn sponsor_fp() -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string("BBBBBBBBBBBBBBBB").unwrap()
     }
+
+    struct FixedRemovalAdmissionGate(RemovalAdmissionDecision);
+
+    #[async_trait]
+    impl RemovalAdmissionGatePort for FixedRemovalAdmissionGate {
+        async fn admission_decision(
+            &self,
+            _invitation_generation: u64,
+        ) -> RemovalAdmissionDecision {
+            self.0
+        }
+
+        async fn invitation_generation(&self) -> Result<u64, RemovalAdmissionDecision> {
+            match self.0 {
+                RemovalAdmissionDecision::Allowed => Ok(0),
+                decision => Err(decision),
+            }
+        }
+    }
+
     fn pending(code: &str) -> PairingInvitation {
         let issued = fixed_now();
         let expires = issued + Duration::minutes(5);
@@ -1024,6 +1062,7 @@ mod tests {
             issued,
             expires,
             DeviceId::new("sponsor-1"),
+            0,
         );
         inv
     }
@@ -1063,6 +1102,7 @@ mod tests {
         peer_addr_repo: Arc<MockPeerAddrRepo>,
         proof_verdicts: Vec<bool>,
         clock_ms: i64,
+        removal_admission: RemovalAdmissionDecision,
         /// Injectable analytics sink so capture-asserting tests can swap
         /// a `CapturingAnalyticsSink` in. Default is the noop sink for
         /// the legacy tests that don't care about telemetry. Wrapped
@@ -1082,6 +1122,7 @@ mod tests {
                 peer_addr_repo: permissive_peer_addr_repo(),
                 proof_verdicts: vec![true],
                 clock_ms: fixed_now_ms(),
+                removal_admission: RemovalAdmissionDecision::Allowed,
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsSink),
             }
         }
@@ -1117,6 +1158,7 @@ mod tests {
                 self.invitation_port.clone(),
                 self.holder.clone(),
                 Arc::new(FakeClock(self.clock_ms)) as Arc<dyn ClockPort>,
+                Arc::new(FixedRemovalAdmissionGate(self.removal_admission)),
                 handshake,
                 Arc::new(AdmitMemberUseCase::new(
                     self.member_repo.clone() as Arc<dyn MemberRepositoryPort>
@@ -1204,6 +1246,39 @@ mod tests {
             }
             other => panic!("expected Failure(InvitationExpired), got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn pending_removal_rejects_an_already_issued_invitation_before_admission() {
+        let mut b = Bundle::happy();
+        b.removal_admission = RemovalAdmissionDecision::AwaitingConvergence;
+        b.holder.insert(pending("OLD-INVITE")).await;
+        let sp = b.session_port.clone();
+        let member_repo = b.member_repo.clone();
+        let holder = b.holder.clone();
+        let (orch, mut outcomes) = b.build(drained_events());
+
+        orch.handle_event(PairingSessionEvent::Incoming {
+            session: PairingSessionId::new("blocked"),
+            message: PairingSessionMessage::Request(joiner_request("OLD-INVITE")),
+        })
+        .await;
+
+        assert_eq!(sp.sent().len(), 1);
+        assert!(matches!(
+            sp.sent()[0].1,
+            PairingSessionMessage::Reject(PairingReject {
+                reason: PairingRejectReason::AdmissionUnavailable
+            })
+        ));
+        assert!(member_repo.saved.lock().unwrap().is_empty());
+        assert_eq!(holder.len().await, 0);
+        assert!(matches!(
+            outcomes.try_recv(),
+            Ok(PairingOutcome::Failure {
+                reason: PairingFailureReason::Internal
+            })
+        ));
     }
 
     #[tokio::test]

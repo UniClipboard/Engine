@@ -9,12 +9,10 @@ use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
-    execute_continue_member_revocation, execute_list_devices,
-    execute_query_current_member_revocation, execute_query_legacy_bootstrap,
-    execute_query_member_revocation, execute_query_member_sync_preferences,
-    execute_query_membership_convergence, execute_query_shared_device_refresh,
-    execute_query_space_protection, execute_refresh_shared_devices, execute_remove_member,
-    execute_secure_remove_legacy_member, execute_update_member_sync_preferences,
+    execute_list_devices, execute_query_legacy_bootstrap, execute_query_member_removal,
+    execute_query_member_sync_preferences, execute_query_membership_convergence,
+    execute_query_shared_device_refresh, execute_query_space_protection,
+    execute_refresh_shared_devices, execute_remove_member, execute_update_member_sync_preferences,
 };
 use crate::operations::device::peer_connections::{
     execute_query_peer_connections, execute_refresh_peer_connections,
@@ -338,24 +336,8 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::RemoveMember(input) => {
                     execute_remove_member(self.current_facade().await?.as_ref(), input).await
                 }
-                Operation::SecureRemoveLegacyMember(input) => {
-                    execute_secure_remove_legacy_member(
-                        self.current_facade().await?.as_ref(),
-                        input,
-                    )
-                    .await
-                }
-                Operation::QueryMemberRevocation(input) => {
-                    execute_query_member_revocation(self.current_facade().await?.as_ref(), input)
-                        .await
-                }
-                Operation::QueryCurrentMemberRevocation => {
-                    execute_query_current_member_revocation(self.current_facade().await?.as_ref())
-                        .await
-                }
-                Operation::ContinueMemberRevocation(input) => {
-                    execute_continue_member_revocation(self.current_facade().await?.as_ref(), input)
-                        .await
+                Operation::QueryMemberRemoval => {
+                    execute_query_member_removal(self.current_facade().await?.as_ref()).await
                 }
                 Operation::QueryLegacyBootstrap(input) => {
                     execute_query_legacy_bootstrap(self.current_facade().await?.as_ref(), input)

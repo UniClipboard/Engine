@@ -87,8 +87,7 @@ pub async fn reconcile_peer_addresses(
 /// 启动期清理:删除所有"在 `trusted_peer_repo` 但不在 `member_repo`"的孤儿
 /// 条目。
 ///
-/// 配套 `MemberRosterFacade::revoke_member` 的级联清理:撤销成员时若 trust
-/// 删失败,或老版本 unpair 路径根本没碰过 trust 表,残留行会让本机继续把
+/// 启动期清理遗留 trust 条目:旧版本解除配对路径若未清理 trust 表,残留行会让本机继续把
 /// 已撤销设备当可信对端(#1023 之后 `TrustPeerUseCase::execute` 重配时显式
 /// 替换,残留行不再挡死重新配对,但孤儿 trust 行仍违反领域不变量)。
 /// reconcile 把不变量 `trusted_peer ⊆ member_repo` 重新拉齐。

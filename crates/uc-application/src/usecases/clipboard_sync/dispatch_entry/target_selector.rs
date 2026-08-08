@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
+use uc_core::membership::RemovalTargetGatePort;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_core::MemberRepositoryPort;
 
@@ -29,16 +30,31 @@ use super::{DispatchClipboardEntryInput, DispatchSyncError};
 pub(crate) struct TargetSelector {
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
+    removal_gate: Arc<dyn RemovalTargetGatePort>,
 }
 
 impl TargetSelector {
+    #[cfg(test)]
     pub(crate) fn new(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> Self {
+        Self::new_with_removal_gate(
+            peer_addr_repo,
+            member_repo,
+            Arc::new(super::AllowAllRemovalTargets),
+        )
+    }
+
+    pub(crate) fn new_with_removal_gate(
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        removal_gate: Arc<dyn RemovalTargetGatePort>,
+    ) -> Self {
         Self {
             peer_addr_repo,
             member_repo,
+            removal_gate,
         }
     }
 
@@ -67,6 +83,17 @@ impl TargetSelector {
                 if !filter.iter().any(|d| d == &record.device_id) {
                     continue;
                 }
+            }
+            if self
+                .removal_gate
+                .is_locally_removed(&record.device_id)
+                .await
+            {
+                info!(
+                    reason = "locally_removed",
+                    "dispatch: skipping locally removed peer"
+                );
+                continue;
             }
             if !self
                 .is_send_allowed(&record.device_id, &input.categories)
@@ -149,6 +176,32 @@ mod tests {
 
     fn selector(peer_addr_repo: MockPeerAddrRepo, member_repo: MockMemberRepo) -> TargetSelector {
         TargetSelector::new(Arc::new(peer_addr_repo), Arc::new(member_repo))
+    }
+
+    #[derive(Clone)]
+    struct RemovedTarget {
+        device_id: DeviceId,
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::membership::RemovalTargetGatePort for RemovedTarget {
+        async fn is_locally_removed(&self, device_id: &DeviceId) -> bool {
+            *device_id == self.device_id
+        }
+    }
+
+    fn selector_with_removed_target(
+        peer_addr_repo: MockPeerAddrRepo,
+        member_repo: MockMemberRepo,
+        removed_device_id: &str,
+    ) -> TargetSelector {
+        TargetSelector::new_with_removal_gate(
+            Arc::new(peer_addr_repo),
+            Arc::new(member_repo),
+            Arc::new(RemovedTarget {
+                device_id: dev(removed_device_id),
+            }),
+        )
     }
 
     /// `member_repo` returning the default (all-enabled) preferences for any
@@ -254,6 +307,23 @@ mod tests {
             .expect("select ok");
 
         assert_eq!(ids(&targets), vec!["peer-on"]);
+    }
+
+    #[tokio::test]
+    async fn select_excludes_a_member_removed_by_the_local_engine() {
+        let mut repo = MockPeerAddrRepo::new();
+        repo.expect_list()
+            .times(1)
+            .returning(|| Ok(vec![record("peer-retained"), record("peer-removed")]));
+
+        let selector =
+            selector_with_removed_target(repo, member_repo_all_enabled(), "peer-removed");
+        let targets = selector
+            .select(&dispatch_input(), &dev("self-device"))
+            .await
+            .expect("select ok");
+
+        assert_eq!(ids(&targets), vec!["peer-retained"]);
     }
 
     /// A `Text` snapshot is withheld from a peer whose `send_content_types`

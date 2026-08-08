@@ -48,7 +48,7 @@ use uc_core::security::IdentityFingerprint;
 ///
 /// postcard 非 schema-兼容，每次新增字段都升版本号；旧 peer 发来的低版本帧会走
 /// [`WireDecodeError::UnsupportedVersion`] 分支显式拒连，让排障信号明确。
-const WIRE_VERSION: u8 = 6;
+const WIRE_VERSION: u8 = 7;
 
 // ============================================================================
 // Wire types (infra-local)
@@ -139,6 +139,7 @@ struct WirePairingReject {
 #[derive(Serialize, Deserialize, Debug)]
 enum WireRejectReason {
     InvitationMismatch,
+    AdmissionUnavailable,
     PassphraseMismatch,
     UserRejected,
     Timeout,
@@ -253,6 +254,7 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
         PairingSessionMessage::Reject(r) => WireBody::Reject(WirePairingReject {
             reason: match &r.reason {
                 PairingRejectReason::InvitationMismatch => WireRejectReason::InvitationMismatch,
+                PairingRejectReason::AdmissionUnavailable => WireRejectReason::AdmissionUnavailable,
                 PairingRejectReason::PassphraseMismatch => WireRejectReason::PassphraseMismatch,
                 PairingRejectReason::UserRejected => WireRejectReason::UserRejected,
                 PairingRejectReason::Timeout => WireRejectReason::Timeout,
@@ -311,6 +313,7 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
         WireBody::Reject(r) => Ok(PairingSessionMessage::Reject(PairingReject {
             reason: match r.reason {
                 WireRejectReason::InvitationMismatch => PairingRejectReason::InvitationMismatch,
+                WireRejectReason::AdmissionUnavailable => PairingRejectReason::AdmissionUnavailable,
                 WireRejectReason::PassphraseMismatch => PairingRejectReason::PassphraseMismatch,
                 WireRejectReason::UserRejected => PairingRejectReason::UserRejected,
                 WireRejectReason::Timeout => PairingRejectReason::Timeout,
@@ -472,6 +475,7 @@ mod tests {
     fn reject_round_trips_all_reasons() {
         for reason in [
             PairingRejectReason::InvitationMismatch,
+            PairingRejectReason::AdmissionUnavailable,
             PairingRejectReason::PassphraseMismatch,
             PairingRejectReason::UserRejected,
             PairingRejectReason::Timeout,

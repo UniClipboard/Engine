@@ -732,17 +732,20 @@ impl AppFacade {
     pub async fn remove_member(
         &self,
         device_id: &str,
-    ) -> Result<crate::facade::MemberRevocationView, RosterError> {
-        self.member_roster.revoke_member(device_id).await
+    ) -> Result<crate::facade::MemberRemovalView, RosterError> {
+        self.member_roster.submit_member_removal(device_id).await
     }
 
-    pub async fn secure_remove_legacy_member(
+    pub async fn member_removal_status(
         &self,
-        device_id: &str,
-    ) -> Result<crate::facade::LegacyBootstrapView, RosterError> {
-        self.member_roster
-            .secure_remove_legacy_member(device_id)
-            .await
+    ) -> Result<crate::facade::MemberRemovalView, RosterError> {
+        self.member_roster.query_member_removal().await
+    }
+
+    pub fn subscribe_member_removal_events(
+        &self,
+    ) -> broadcast::Receiver<crate::facade::MemberRemovalView> {
+        self.member_roster.subscribe_member_removal_events()
     }
 
     pub async fn space_protection(
@@ -758,35 +761,6 @@ impl AppFacade {
         self.member_roster
             .query_legacy_bootstrap(bootstrap_id)
             .await
-    }
-
-    pub async fn member_revocation(
-        &self,
-        revocation_id: &str,
-    ) -> Result<Option<crate::facade::MemberRevocationView>, RosterError> {
-        self.member_roster.query_revocation(revocation_id).await
-    }
-
-    pub async fn current_member_revocation(
-        &self,
-    ) -> Result<Option<crate::facade::MemberRevocationView>, RosterError> {
-        self.member_roster.current_member_revocation().await
-    }
-
-    pub async fn continue_member_revocation(
-        &self,
-        revocation_id: &str,
-        permanently_lost_device_ids: &[String],
-    ) -> Result<crate::facade::MemberRevocationView, RosterError> {
-        self.member_roster
-            .continue_member_revocation(revocation_id, permanently_lost_device_ids)
-            .await
-    }
-
-    pub fn subscribe_member_revocation_events(
-        &self,
-    ) -> broadcast::Receiver<crate::facade::MemberRevocationView> {
-        self.member_roster.subscribe_member_revocation_events()
     }
 
     pub async fn diagnostics_status(

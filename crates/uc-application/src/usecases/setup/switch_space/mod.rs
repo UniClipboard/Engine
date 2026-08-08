@@ -707,6 +707,7 @@ fn map_redeem_err(err: RedeemPairingInvitationError) -> SwitchSpaceError {
         R::CorruptedKeyMaterial => SwitchSpaceError::CorruptedKeyMaterial,
         R::DeviceNameRequired => SwitchSpaceError::DeviceNameRequired,
         R::SponsorRejectedInvitation => SwitchSpaceError::SponsorRejectedInvitation,
+        R::SponsorAdmissionUnavailable => SwitchSpaceError::SponsorAdmissionUnavailable,
         R::SponsorDeclined => SwitchSpaceError::SponsorDeclined,
         R::SponsorTimedOut => SwitchSpaceError::Timeout,
         R::Timeout => SwitchSpaceError::Timeout,

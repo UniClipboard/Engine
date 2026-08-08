@@ -5,7 +5,7 @@ use crate::error_codes::*;
 use tracing::{error, info};
 use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, LegacyBootstrapState,
-    LegacyBootstrapView, MemberProtectionStatusView, MemberRevocationState, MemberRevocationView,
+    LegacyBootstrapView, MemberProtectionStatusView,
     MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
     MembershipConvergenceFacadeError, RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
@@ -17,12 +17,11 @@ use uc_application::membership::{
 use uc_core::ports::ReachabilityState;
 
 use crate::{
-    ContentTypesPatch, ContentTypesSummary, ContinueMemberRevocationInput, DeviceSummary,
-    EngineError, EngineErrorCategory, LegacyBootstrapOutcome, LegacyBootstrapSummary,
-    MemberProtectionStatusSummary, MemberProtectionSummary, MemberRevocationOutcome,
-    MemberRevocationSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
-    MembershipConvergenceStateSummary, MembershipConvergenceSummary, OperationResult,
-    QueryLegacyBootstrapInput, QueryMemberRevocationInput, QueryMemberSyncPreferencesInput,
+    ContentTypesPatch, ContentTypesSummary, DeviceSummary, EngineError, EngineErrorCategory,
+    LegacyBootstrapOutcome, LegacyBootstrapSummary, MemberProtectionStatusSummary,
+    MemberProtectionSummary, MemberRemovalPhase, MemberRemovalSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesSummary, MembershipConvergenceStateSummary, MembershipConvergenceSummary,
+    OperationResult, QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput,
     QuerySharedDeviceRefreshInput, RemoveMemberInput, SharedDeviceRefreshDeviceStateSummary,
     SharedDeviceRefreshDeviceSummary, SharedDeviceRefreshPhaseSummary,
     SharedDeviceRefreshStartedSummary, SharedDeviceRefreshSummary, SpaceProtectionModeSummary,
@@ -271,24 +270,27 @@ pub async fn execute_remove_member(
     input: RemoveMemberInput,
 ) -> Result<OperationResult, EngineError> {
     validate_device_id(&input.device_id)?;
-    let result = facade
+    let view = facade
         .remove_member(&input.device_id)
         .await
         .map_err(map_roster_error)?;
-    Ok(member_revocation_result(result))
+    Ok(OperationResult::MemberRemoved(member_removal_summary(view)))
 }
 
-pub async fn execute_secure_remove_legacy_member(
+pub async fn execute_query_member_removal(
     facade: &AppFacade,
-    input: RemoveMemberInput,
 ) -> Result<OperationResult, EngineError> {
-    validate_device_id(&input.device_id)?;
-    let result = facade
-        .secure_remove_legacy_member(&input.device_id)
+    let view = facade
+        .member_removal_status()
         .await
         .map_err(map_roster_error)?;
-    Ok(OperationResult::LegacyMemberRemoval(
-        legacy_bootstrap_summary(result),
+    info!(
+        operation = "query_member_removal",
+        phase = ?view.phase,
+        "member removal status query completed"
+    );
+    Ok(OperationResult::MemberRemovalStatus(
+        member_removal_summary(view),
     ))
 }
 
@@ -313,64 +315,6 @@ pub async fn execute_query_legacy_bootstrap(
     Ok(OperationResult::LegacyBootstrapStatus(
         result.map(legacy_bootstrap_summary),
     ))
-}
-
-pub async fn execute_query_member_revocation(
-    facade: &AppFacade,
-    input: QueryMemberRevocationInput,
-) -> Result<OperationResult, EngineError> {
-    validate_opaque_id(&input.revocation_id)?;
-    let result = facade
-        .member_revocation(&input.revocation_id)
-        .await
-        .map_err(map_roster_error)?;
-    Ok(OperationResult::MemberRevocationStatus(
-        result.map(member_revocation_summary),
-    ))
-}
-
-pub async fn execute_query_current_member_revocation(
-    facade: &AppFacade,
-) -> Result<OperationResult, EngineError> {
-    let result = facade
-        .current_member_revocation()
-        .await
-        .map_err(map_roster_error)?;
-    let result = result.map(member_revocation_summary);
-    info!(
-        operation = "query_current_member_revocation",
-        has_member_revocation = result.is_some(),
-        "current member revocation query completed"
-    );
-    Ok(OperationResult::MemberRevocationStatus(result))
-}
-
-pub async fn execute_continue_member_revocation(
-    facade: &AppFacade,
-    input: ContinueMemberRevocationInput,
-) -> Result<OperationResult, EngineError> {
-    validate_opaque_id(&input.revocation_id)?;
-    if input.permanently_lost_device_ids.is_empty() {
-        return Err(EngineError::new(
-            MEMBER_INVALID_INPUT_CODE,
-            EngineErrorCategory::InvalidInput,
-            false,
-        ));
-    }
-    for device_id in &input.permanently_lost_device_ids {
-        validate_device_id(device_id)?;
-    }
-    let result = facade
-        .continue_member_revocation(&input.revocation_id, &input.permanently_lost_device_ids)
-        .await
-        .map_err(map_roster_error)?;
-    Ok(OperationResult::MemberRevocationStatus(Some(
-        member_revocation_summary(result),
-    )))
-}
-
-fn member_revocation_result(result: MemberRevocationView) -> OperationResult {
-    OperationResult::MemberRemoved(member_revocation_summary(result))
 }
 
 fn space_protection_summary(result: SpaceProtectionView) -> SpaceProtectionSummary {
@@ -421,22 +365,25 @@ fn legacy_bootstrap_summary(result: LegacyBootstrapView) -> LegacyBootstrapSumma
     }
 }
 
-pub(crate) fn member_revocation_summary(result: MemberRevocationView) -> MemberRevocationSummary {
-    let outcome = match result.state {
-        MemberRevocationState::LocalOnly => MemberRevocationOutcome::LocalOnly,
-        MemberRevocationState::Recovering => MemberRevocationOutcome::Recovering,
-        MemberRevocationState::Applied => MemberRevocationOutcome::Applied,
-        MemberRevocationState::Complete => MemberRevocationOutcome::Complete,
-        MemberRevocationState::RecoveryRequired => MemberRevocationOutcome::RecoveryRequired,
+pub(crate) fn member_removal_summary(
+    view: uc_application::facade::MemberRemovalView,
+) -> MemberRemovalSummary {
+    let phase = match view.phase {
+        uc_application::facade::MemberRemovalPhaseView::Applied => MemberRemovalPhase::Applied,
+        uc_application::facade::MemberRemovalPhaseView::Converging => {
+            MemberRemovalPhase::Converging
+        }
+        uc_application::facade::MemberRemovalPhaseView::Complete => MemberRemovalPhase::Complete,
+        uc_application::facade::MemberRemovalPhaseView::RecoveryRequired => {
+            MemberRemovalPhase::RecoveryRequired
+        }
     };
-    MemberRevocationSummary {
-        revocation_id: result.revocation_id,
-        outcome,
-        pending_recipients: u64::try_from(result.pending_recipient_device_ids.len())
-            .unwrap_or(u64::MAX),
-        removed_device_ids: result.removed_device_ids,
-        pending_recipient_device_ids: result.pending_recipient_device_ids,
-        updated_at_ms: result.updated_at_ms,
+    MemberRemovalSummary {
+        phase,
+        intent_count: u64::try_from(view.intent_count).unwrap_or(u64::MAX),
+        effective_member_count: u64::try_from(view.effective_member_count).unwrap_or(u64::MAX),
+        convergence_digest: view.convergence_digest,
+        updated_at_ms: view.updated_at_ms,
     }
 }
 
@@ -509,17 +456,35 @@ fn member_preferences_result(preferences: MemberSyncPreferencesView) -> Operatio
 
 fn map_roster_error(error: RosterError) -> EngineError {
     let (code, category, retryable, variant) = match error {
+        RosterError::MemberRemovalUnavailable => (
+            1394,
+            EngineErrorCategory::Unavailable,
+            false,
+            "member_removal_unavailable",
+        ),
+        RosterError::MemberRemoval(_) => (
+            1397,
+            EngineErrorCategory::InvalidState,
+            false,
+            "member_removal_failed",
+        ),
+        RosterError::MemberRemovalInvalidInput => (
+            MEMBER_INVALID_INPUT_CODE,
+            EngineErrorCategory::InvalidInput,
+            false,
+            "member_removal_invalid_input",
+        ),
+        RosterError::MemberRemovalTargetNotFound => (
+            MEMBER_NOT_FOUND_CODE,
+            EngineErrorCategory::NotFound,
+            false,
+            "member_removal_target_not_found",
+        ),
         RosterError::NotFound(_) => (
             MEMBER_NOT_FOUND_CODE,
             EngineErrorCategory::NotFound,
             false,
             "not_found",
-        ),
-        RosterError::LocalDeviceRemoval => (
-            MEMBER_INVALID_INPUT_CODE,
-            EngineErrorCategory::InvalidInput,
-            false,
-            "local_device_removal",
         ),
         RosterError::Unavailable => (
             MEMBER_UNAVAILABLE_CODE,
@@ -539,48 +504,6 @@ fn map_roster_error(error: RosterError) -> EngineError {
             false,
             "local_identity",
         ),
-        RosterError::PeerAddressRepository(_) => (
-            MEMBER_PEER_ADDRESS_FAILED_CODE,
-            EngineErrorCategory::Internal,
-            false,
-            "peer_address_repository",
-        ),
-        RosterError::TrustedPeerRepository(_) => (
-            MEMBER_TRUSTED_PEER_FAILED_CODE,
-            EngineErrorCategory::Internal,
-            false,
-            "trusted_peer_repository",
-        ),
-        RosterError::GroupRevocation(_) => (
-            MEMBER_GROUP_REVOCATION_FAILED_CODE,
-            EngineErrorCategory::Internal,
-            true,
-            "group_revocation",
-        ),
-        RosterError::MemberRemovalInProgress => (
-            MEMBER_REMOVAL_IN_PROGRESS_CODE,
-            EngineErrorCategory::Conflict,
-            true,
-            "member_removal_in_progress",
-        ),
-        RosterError::MemberRemovalRecoveryRequired => (
-            MEMBER_REMOVAL_RECOVERY_REQUIRED_CODE,
-            EngineErrorCategory::InvalidState,
-            false,
-            "member_removal_recovery_required",
-        ),
-        RosterError::InvalidPermanentLossSelection => (
-            MEMBER_INVALID_PERMANENT_LOSS_SELECTION_CODE,
-            EngineErrorCategory::InvalidInput,
-            false,
-            "invalid_permanent_loss_selection",
-        ),
-        RosterError::LegacyBootstrapRequired => (
-            MEMBER_LEGACY_BOOTSTRAP_REQUIRED_CODE,
-            EngineErrorCategory::InvalidState,
-            false,
-            "legacy_bootstrap_required",
-        ),
         RosterError::GroupBootstrap(_) => (
             MEMBER_LEGACY_BOOTSTRAP_FAILED_CODE,
             EngineErrorCategory::Internal,
@@ -592,12 +515,6 @@ fn map_roster_error(error: RosterError) -> EngineError {
             EngineErrorCategory::Internal,
             true,
             "space_protection",
-        ),
-        RosterError::LocalMemberUnavailable => (
-            MEMBER_LOCAL_MEMBER_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-            "local_member_unavailable",
         ),
     };
     error!(
@@ -614,7 +531,7 @@ fn map_roster_error(error: RosterError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uc_application::facade::{MemberRevocationState, MemberRevocationView};
+    use uc_application::facade::{MemberRemovalPhaseView, MemberRemovalView};
 
     #[test]
     fn roster_failures_keep_stable_categories_and_distinct_codes() {
@@ -630,69 +547,39 @@ mod tests {
     }
 
     #[test]
-    fn active_member_removal_conflicts_have_stable_public_errors() {
-        let in_progress = map_roster_error(RosterError::MemberRemovalInProgress);
-        let recovery_required = map_roster_error(RosterError::MemberRemovalRecoveryRequired);
+    fn distributed_member_removal_errors_have_a_stable_public_mapping() {
+        let unavailable = map_roster_error(RosterError::MemberRemovalUnavailable);
+        let failed = map_roster_error(RosterError::MemberRemoval("internal detail".into()));
+        let invalid_input = map_roster_error(RosterError::MemberRemovalInvalidInput);
+        let target_not_found = map_roster_error(RosterError::MemberRemovalTargetNotFound);
 
-        assert_eq!(in_progress.code(), MEMBER_REMOVAL_IN_PROGRESS_CODE);
-        assert_eq!(in_progress.category(), EngineErrorCategory::Conflict);
-        assert!(in_progress.is_retryable());
-        assert_eq!(
-            recovery_required.code(),
-            MEMBER_REMOVAL_RECOVERY_REQUIRED_CODE
-        );
-        assert_eq!(
-            recovery_required.category(),
-            EngineErrorCategory::InvalidState
-        );
-        assert!(!recovery_required.is_retryable());
-        let invalid_selection = map_roster_error(RosterError::InvalidPermanentLossSelection);
-        assert_eq!(
-            invalid_selection.code(),
-            MEMBER_INVALID_PERMANENT_LOSS_SELECTION_CODE
-        );
-        assert_eq!(
-            invalid_selection.category(),
-            EngineErrorCategory::InvalidInput
-        );
-        assert!(!invalid_selection.is_retryable());
+        assert_eq!(unavailable.category(), EngineErrorCategory::Unavailable);
+        assert!(!unavailable.is_retryable());
+        assert_eq!(failed.category(), EngineErrorCategory::InvalidState);
+        assert!(!failed.is_retryable());
+        assert_eq!(invalid_input.category(), EngineErrorCategory::InvalidInput);
+        assert_eq!(target_not_found.category(), EngineErrorCategory::NotFound);
     }
 
     #[test]
-    fn member_revocation_progress_is_preserved_in_the_stable_result() {
-        let result = member_revocation_result(MemberRevocationView {
-            revocation_id: Some("revocation-a".into()),
-            state: MemberRevocationState::Applied,
-            pending_recipients: 2,
-            removed_device_ids: vec!["dev-removed".into()],
-            pending_recipient_device_ids: vec!["dev-c".into(), "dev-d".into()],
+    fn member_removal_progress_is_preserved_in_the_stable_result() {
+        let result = OperationResult::MemberRemoved(member_removal_summary(MemberRemovalView {
+            phase: MemberRemovalPhaseView::Applied,
+            intent_count: 1,
+            effective_member_count: 2,
+            convergence_digest: None,
             updated_at_ms: 123,
-        });
+        }));
 
         assert_eq!(
             result,
-            OperationResult::MemberRemoved(MemberRevocationSummary {
-                revocation_id: Some("revocation-a".into()),
-                outcome: MemberRevocationOutcome::Applied,
-                pending_recipients: 2,
-                removed_device_ids: vec!["dev-removed".into()],
-                pending_recipient_device_ids: vec!["dev-c".into(), "dev-d".into()],
+            OperationResult::MemberRemoved(MemberRemovalSummary {
+                phase: MemberRemovalPhase::Applied,
+                intent_count: 1,
+                effective_member_count: 2,
+                convergence_digest: None,
                 updated_at_ms: 123,
             })
         );
-    }
-
-    #[test]
-    fn recovering_member_revocation_is_exposed_in_the_stable_result() {
-        let summary = member_revocation_summary(MemberRevocationView {
-            revocation_id: Some("revocation-prepared".into()),
-            state: MemberRevocationState::Recovering,
-            pending_recipients: 0,
-            removed_device_ids: vec!["dev-removed".into()],
-            pending_recipient_device_ids: Vec::new(),
-            updated_at_ms: 123,
-        });
-
-        assert_eq!(summary.outcome, MemberRevocationOutcome::Recovering);
     }
 }

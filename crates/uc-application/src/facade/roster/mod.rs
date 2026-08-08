@@ -25,7 +25,7 @@ mod facade;
 
 pub use commands::{
     ContentTypesPatch, ContentTypesView, LegacyBootstrapState, LegacyBootstrapView,
-    MemberProtectionStatusView, MemberProtectionView, MemberRevocationState, MemberRevocationView,
+    MemberProtectionStatusView, MemberProtectionView, MemberRemovalPhaseView, MemberRemovalView,
     MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
     RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
 };

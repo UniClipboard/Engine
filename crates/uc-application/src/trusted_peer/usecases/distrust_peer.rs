@@ -13,7 +13,7 @@ pub struct DistrustPeer {
 /// 撤销对一台设备的信任（硬删）。
 ///
 /// 不连带撤销成员关系 —— DOMAIN §9.6 / T8：`DistrustPeerUseCase` 与
-/// `RevokeMemberUseCase` 是两个独立 UseCase，UI 的"解除配对"由 Facade
+/// 成员移除与解除配对是两个独立动作，UI 的"解除配对"由 Facade
 /// 级联调用。
 pub struct DistrustPeerUseCase<R> {
     repository: Arc<R>,

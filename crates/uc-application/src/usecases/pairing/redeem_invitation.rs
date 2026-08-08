@@ -316,6 +316,9 @@ fn map_redeem_error_to_pairing_failure_reason(
         RedeemPairingInvitationError::SponsorRejectedInvitation => {
             PairingFailureReason::SponsorRejectedInvitation
         }
+        RedeemPairingInvitationError::SponsorAdmissionUnavailable => {
+            PairingFailureReason::SponsorInternal
+        }
         RedeemPairingInvitationError::SponsorDeclined => PairingFailureReason::SponsorDeclined,
         RedeemPairingInvitationError::SponsorTimedOut => PairingFailureReason::SponsorTimedOut,
         RedeemPairingInvitationError::SponsorInternal(_) => PairingFailureReason::SponsorInternal,

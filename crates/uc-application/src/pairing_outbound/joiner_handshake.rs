@@ -440,6 +440,9 @@ fn map_sponsor_reject(reason: PairingRejectReason) -> RedeemPairingInvitationErr
         PairingRejectReason::InvitationMismatch => {
             RedeemPairingInvitationError::SponsorRejectedInvitation
         }
+        PairingRejectReason::AdmissionUnavailable => {
+            RedeemPairingInvitationError::SponsorAdmissionUnavailable
+        }
         // Sponsor's `verify_proof` failed = wrong passphrase — same
         // user-facing meaning as local `WrongPassphrase`, fold into one
         // variant so UI doesn't need to distinguish "who noticed first".

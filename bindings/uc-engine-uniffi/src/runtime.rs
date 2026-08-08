@@ -12,15 +12,14 @@ use uc_engine::observability::{
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
 use uc_engine::{
-    ClipboardRestoreMode, ClipboardRestoreOutcome, ContinueMemberRevocationInput, CreateSpaceInput,
-    Engine, EngineConfig, ExportEntryInput, HostCapabilities, HostCapabilityError,
-    HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot,
-    HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
-    JoinSpaceInput, NetworkSettingsPatch, ObserveClipboardChangeInput, Operation, OperationResult,
-    QueryMemberRevocationInput, QuerySharedDeviceRefreshInput, RecoverSessionInput,
-    RelayCredentialEdit, RemoveMemberInput, ResendEntryInput, RestoreClipboardInput,
-    SaveRelayInput, SaveRelayOutcome, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    SettingsPatch,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
+    ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
+    HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
+    HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
+    NetworkSettingsPatch, ObserveClipboardChangeInput, Operation, OperationResult,
+    QuerySharedDeviceRefreshInput, RecoverSessionInput, RelayCredentialEdit, RemoveMemberInput,
+    ResendEntryInput, RestoreClipboardInput, SaveRelayInput, SaveRelayOutcome, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput, SettingsPatch,
 };
 use zeroize::Zeroizing;
 
@@ -272,36 +271,20 @@ pub struct SharedDeviceRefresh {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum MemberRevocationOutcome {
-    LocalOnly,
-    Recovering,
+pub enum MemberRemovalPhase {
     Applied,
+    Converging,
     Complete,
     RecoveryRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct MemberRevocationResult {
-    pub revocation_id: Option<String>,
-    pub outcome: MemberRevocationOutcome,
-    pub pending_recipients: u64,
-    pub removed_device_ids: Vec<String>,
-    pub pending_recipient_device_ids: Vec<String>,
+pub struct MemberRemoval {
+    pub phase: MemberRemovalPhase,
+    pub intent_count: u64,
+    pub effective_member_count: u64,
+    pub convergence_digest: Option<String>,
     pub updated_at_ms: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum LegacyMemberRemovalOutcome {
-    AwaitingReadmission,
-    Complete,
-    RecoveryRequired,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct LegacyMemberRemovalResult {
-    pub bootstrap_id: String,
-    pub outcome: LegacyMemberRemovalOutcome,
-    pub pending_readmission: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -378,23 +361,10 @@ enum WorkerCommand {
     },
     RemoveMember {
         device_id: String,
-        response: mpsc::Sender<Result<MemberRevocationResult, BindingError>>,
+        response: mpsc::Sender<Result<MemberRemoval, BindingError>>,
     },
-    SecureRemoveLegacyMember {
-        device_id: String,
-        response: mpsc::Sender<Result<LegacyMemberRemovalResult, BindingError>>,
-    },
-    QueryMemberRevocation {
-        revocation_id: String,
-        response: mpsc::Sender<Result<Option<MemberRevocationResult>, BindingError>>,
-    },
-    QueryCurrentMemberRevocation {
-        response: mpsc::Sender<Result<Option<MemberRevocationResult>, BindingError>>,
-    },
-    ContinueMemberRevocation {
-        revocation_id: String,
-        permanently_lost_device_ids: Vec<String>,
-        response: mpsc::Sender<Result<MemberRevocationResult, BindingError>>,
+    QueryMemberRemoval {
+        response: mpsc::Sender<Result<MemberRemoval, BindingError>>,
     },
     ResendEntry {
         entry_id: String,
@@ -861,49 +831,15 @@ impl MobileEngine {
         })
     }
 
-    pub fn remove_member(&self, device_id: String) -> Result<MemberRevocationResult, BindingError> {
+    pub fn remove_member(&self, device_id: String) -> Result<MemberRemoval, BindingError> {
         self.request(|response| WorkerCommand::RemoveMember {
             device_id,
             response,
         })
     }
 
-    pub fn secure_remove_legacy_member(
-        &self,
-        device_id: String,
-    ) -> Result<LegacyMemberRemovalResult, BindingError> {
-        self.request(|response| WorkerCommand::SecureRemoveLegacyMember {
-            device_id,
-            response,
-        })
-    }
-
-    pub fn query_member_revocation(
-        &self,
-        revocation_id: String,
-    ) -> Result<Option<MemberRevocationResult>, BindingError> {
-        self.request(|response| WorkerCommand::QueryMemberRevocation {
-            revocation_id,
-            response,
-        })
-    }
-
-    pub fn query_current_member_revocation(
-        &self,
-    ) -> Result<Option<MemberRevocationResult>, BindingError> {
-        self.request(|response| WorkerCommand::QueryCurrentMemberRevocation { response })
-    }
-
-    pub fn continue_member_revocation(
-        &self,
-        revocation_id: String,
-        permanently_lost_device_ids: Vec<String>,
-    ) -> Result<MemberRevocationResult, BindingError> {
-        self.request(|response| WorkerCommand::ContinueMemberRevocation {
-            revocation_id,
-            permanently_lost_device_ids,
-            response,
-        })
+    pub fn query_member_removal(&self) -> Result<MemberRemoval, BindingError> {
+        self.request(|response| WorkerCommand::QueryMemberRemoval { response })
     }
 
     pub fn resend_entry(
@@ -1508,58 +1444,12 @@ async fn run_worker_loop(
                     .and_then(map_member_removed);
                 let _ = response.send(result);
             }
-            WorkerCommand::SecureRemoveLegacyMember {
-                device_id,
-                response,
-            } => {
+            WorkerCommand::QueryMemberRemoval { response } => {
                 let result = engine
-                    .execute(Operation::SecureRemoveLegacyMember(RemoveMemberInput {
-                        device_id,
-                    }))
+                    .execute(Operation::QueryMemberRemoval)
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_legacy_member_removal);
-                let _ = response.send(result);
-            }
-            WorkerCommand::QueryMemberRevocation {
-                revocation_id,
-                response,
-            } => {
-                let result = engine
-                    .execute(Operation::QueryMemberRevocation(
-                        QueryMemberRevocationInput { revocation_id },
-                    ))
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_member_revocation_status);
-                if let Err(error) = &result {
-                    log_mobile_query_failure("query_current_member_revocation", error);
-                }
-                let _ = response.send(result);
-            }
-            WorkerCommand::QueryCurrentMemberRevocation { response } => {
-                let result = engine
-                    .execute(Operation::QueryCurrentMemberRevocation)
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_member_revocation_status);
-                let _ = response.send(result);
-            }
-            WorkerCommand::ContinueMemberRevocation {
-                revocation_id,
-                permanently_lost_device_ids,
-                response,
-            } => {
-                let result = engine
-                    .execute(Operation::ContinueMemberRevocation(
-                        ContinueMemberRevocationInput {
-                            revocation_id,
-                            permanently_lost_device_ids,
-                        },
-                    ))
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_required_member_revocation_status);
+                    .and_then(map_member_removal_status);
                 let _ = response.send(result);
             }
             WorkerCommand::ResendEntry {
@@ -1871,9 +1761,9 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
             state: event.state,
             at_ms: event.at_ms,
         },
-        uc_engine::EngineEvent::MemberRevocationChanged(summary) => {
-            BindingEvent::MemberRevocationChanged {
-                revocation: map_member_revocation_summary(summary),
+        uc_engine::EngineEvent::MemberRemovalChanged(summary) => {
+            BindingEvent::MemberRemovalChanged {
+                removal: map_member_removal_summary(summary),
             }
         }
         uc_engine::EngineEvent::SharedDeviceRefreshChanged(summary) => {
@@ -1938,14 +1828,6 @@ map_enum!(map_shared_device_refresh_phase, uc_engine::SharedDeviceRefreshPhaseSu
 
 map_enum!(map_shared_device_refresh_device_state, uc_engine::SharedDeviceRefreshDeviceStateSummary => SharedDeviceRefreshDeviceState,
     Discovered, Connecting, Connected, AlreadyPresent, WaitingForPeer, WaitingForUpdate, VersionIncompatible, Rejected,
-);
-
-map_enum!(map_member_revocation_outcome, uc_engine::MemberRevocationOutcome => MemberRevocationOutcome,
-    LocalOnly, Recovering, Applied, Complete, RecoveryRequired,
-);
-
-map_enum!(map_legacy_bootstrap_outcome, uc_engine::LegacyBootstrapOutcome => LegacyMemberRemovalOutcome,
-    AwaitingReadmission, Complete, RecoveryRequired,
 );
 
 map_enum!(map_clipboard_origin, uc_engine::ClipboardOriginSummary => BindingClipboardOrigin,
@@ -2065,42 +1947,31 @@ fn map_shared_device_refresh_summary(
     }
 }
 
-fn map_member_removed(result: OperationResult) -> Result<MemberRevocationResult, BindingError> {
-    unpack_operation!(result, OperationResult::MemberRemoved(summary) => map_member_revocation_summary(summary))
+fn map_member_removed(result: OperationResult) -> Result<MemberRemoval, BindingError> {
+    match result {
+        OperationResult::MemberRemoved(summary) => Ok(map_member_removal_summary(summary)),
+        _ => Err(BindingError::UnexpectedResult),
+    }
 }
 
-fn map_legacy_member_removal(
-    result: OperationResult,
-) -> Result<LegacyMemberRemovalResult, BindingError> {
-    unpack_operation!(result, OperationResult::LegacyMemberRemoval(summary) => LegacyMemberRemovalResult {
-        bootstrap_id: summary.bootstrap_id,
-        outcome: map_legacy_bootstrap_outcome(summary.outcome),
-        pending_readmission: summary.pending_readmission,
-    })
+fn map_member_removal_status(result: OperationResult) -> Result<MemberRemoval, BindingError> {
+    match result {
+        OperationResult::MemberRemovalStatus(summary) => Ok(map_member_removal_summary(summary)),
+        _ => Err(BindingError::UnexpectedResult),
+    }
 }
 
-fn map_member_revocation_status(
-    result: OperationResult,
-) -> Result<Option<MemberRevocationResult>, BindingError> {
-    unpack_operation!(result, OperationResult::MemberRevocationStatus(summary) => summary
-        .map(map_member_revocation_summary))
-}
-
-fn map_required_member_revocation_status(
-    result: OperationResult,
-) -> Result<MemberRevocationResult, BindingError> {
-    map_member_revocation_status(result)?.ok_or(BindingError::UnexpectedResult)
-}
-
-fn map_member_revocation_summary(
-    summary: uc_engine::MemberRevocationSummary,
-) -> MemberRevocationResult {
-    MemberRevocationResult {
-        revocation_id: summary.revocation_id,
-        outcome: map_member_revocation_outcome(summary.outcome),
-        pending_recipients: summary.pending_recipients,
-        removed_device_ids: summary.removed_device_ids,
-        pending_recipient_device_ids: summary.pending_recipient_device_ids,
+fn map_member_removal_summary(summary: uc_engine::MemberRemovalSummary) -> MemberRemoval {
+    MemberRemoval {
+        phase: match summary.phase {
+            uc_engine::MemberRemovalPhase::Applied => MemberRemovalPhase::Applied,
+            uc_engine::MemberRemovalPhase::Converging => MemberRemovalPhase::Converging,
+            uc_engine::MemberRemovalPhase::Complete => MemberRemovalPhase::Complete,
+            uc_engine::MemberRemovalPhase::RecoveryRequired => MemberRemovalPhase::RecoveryRequired,
+        },
+        intent_count: summary.intent_count,
+        effective_member_count: summary.effective_member_count,
+        convergence_digest: summary.convergence_digest,
         updated_at_ms: summary.updated_at_ms,
     }
 }
@@ -2547,53 +2418,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn member_revocation_methods_and_events_share_the_complete_snapshot() {
-        let _query: fn(&MobileEngine) -> Result<Option<MemberRevocationResult>, BindingError> =
-            MobileEngine::query_current_member_revocation;
-        let _continue: fn(
-            &MobileEngine,
-            String,
-            Vec<String>,
-        ) -> Result<MemberRevocationResult, BindingError> =
-            MobileEngine::continue_member_revocation;
-        let event = map_engine_event(uc_engine::EngineEvent::MemberRevocationChanged(
-            uc_engine::MemberRevocationSummary {
-                revocation_id: Some("revocation-1".into()),
-                outcome: uc_engine::MemberRevocationOutcome::Applied,
-                pending_recipients: 1,
-                removed_device_ids: vec!["removed-1".into()],
-                pending_recipient_device_ids: vec!["waiting-1".into()],
+    fn member_removal_methods_and_events_share_the_complete_snapshot() {
+        let _query: fn(&MobileEngine) -> Result<MemberRemoval, BindingError> =
+            MobileEngine::query_member_removal;
+        let event = map_engine_event(uc_engine::EngineEvent::MemberRemovalChanged(
+            uc_engine::MemberRemovalSummary {
+                phase: uc_engine::MemberRemovalPhase::Converging,
+                intent_count: 2,
+                effective_member_count: 1,
+                convergence_digest: Some("digest-1".into()),
                 updated_at_ms: 42,
             },
         ));
 
         assert_eq!(
             event,
-            BindingEvent::MemberRevocationChanged {
-                revocation: MemberRevocationResult {
-                    revocation_id: Some("revocation-1".into()),
-                    outcome: MemberRevocationOutcome::Applied,
-                    pending_recipients: 1,
-                    removed_device_ids: vec!["removed-1".into()],
-                    pending_recipient_device_ids: vec!["waiting-1".into()],
+            BindingEvent::MemberRemovalChanged {
+                removal: MemberRemoval {
+                    phase: MemberRemovalPhase::Converging,
+                    intent_count: 2,
+                    effective_member_count: 1,
+                    convergence_digest: Some("digest-1".into()),
                     updated_at_ms: 42,
                 },
             }
         );
-    }
-
-    #[test]
-    fn recovering_member_revocation_survives_the_mobile_binding() {
-        let result = map_member_revocation_summary(uc_engine::MemberRevocationSummary {
-            revocation_id: Some("revocation-prepared".into()),
-            outcome: uc_engine::MemberRevocationOutcome::Recovering,
-            pending_recipients: 0,
-            removed_device_ids: vec!["removed-1".into()],
-            pending_recipient_device_ids: Vec::new(),
-            updated_at_ms: 42,
-        });
-
-        assert_eq!(result.outcome, MemberRevocationOutcome::Recovering);
     }
 
     #[test]
@@ -2857,32 +2706,6 @@ mod tests {
 
             assert_eq!(invitation.availability, binding_availability);
         }
-    }
-
-    #[test]
-    fn legacy_member_removal_survives_the_mobile_binding() {
-        let _public_method: fn(
-            &MobileEngine,
-            String,
-        ) -> Result<LegacyMemberRemovalResult, BindingError> =
-            MobileEngine::secure_remove_legacy_member;
-        let removal = map_legacy_member_removal(OperationResult::LegacyMemberRemoval(
-            uc_engine::LegacyBootstrapSummary {
-                bootstrap_id: "bootstrap-1".to_owned(),
-                outcome: uc_engine::LegacyBootstrapOutcome::AwaitingReadmission,
-                pending_readmission: 2,
-            },
-        ))
-        .expect("legacy member removal must map into the mobile binding");
-
-        assert_eq!(
-            removal,
-            LegacyMemberRemovalResult {
-                bootstrap_id: "bootstrap-1".to_owned(),
-                outcome: LegacyMemberRemovalOutcome::AwaitingReadmission,
-                pending_readmission: 2,
-            }
-        );
     }
 
     #[test]

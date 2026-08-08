@@ -34,7 +34,7 @@ struct ProbeView: View {
                         await model.listDevices()
                     }
                     commandButton("Member removal", systemImage: "person.crop.circle.badge.minus") {
-                        await model.queryCurrentMemberRemoval()
+                        await model.queryMemberRemoval()
                     }
                 }
 

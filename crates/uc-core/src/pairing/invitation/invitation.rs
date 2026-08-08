@@ -40,6 +40,7 @@ pub enum InvitationState {
 pub struct PairingInvitation {
     code: InvitationCode,
     issued_at: DateTime<Utc>,
+    admission_generation: u64,
     issuer_device_id: DeviceId,
     state: InvitationState,
 }
@@ -52,6 +53,7 @@ impl PairingInvitation {
         issued_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
         issuer_device_id: DeviceId,
+        admission_generation: u64,
     ) -> (Self, InvitationEvent) {
         let event = InvitationEvent::Issued {
             code: code.clone(),
@@ -61,6 +63,7 @@ impl PairingInvitation {
         let invitation = Self {
             code,
             issued_at,
+            admission_generation,
             issuer_device_id,
             state: InvitationState::Pending { expires_at },
         };
@@ -73,6 +76,10 @@ impl PairingInvitation {
 
     pub fn issued_at(&self) -> DateTime<Utc> {
         self.issued_at
+    }
+
+    pub fn admission_generation(&self) -> u64 {
+        self.admission_generation
     }
 
     pub fn issuer_device_id(&self) -> &DeviceId {
@@ -165,6 +172,7 @@ mod tests {
             issued,
             expires,
             fixed_issuer(),
+            0,
         )
     }
 

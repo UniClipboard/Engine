@@ -112,12 +112,11 @@ export interface OhSharedDeviceRefresh {
   unavailableSourceCount: number
 }
 
-export interface OhMemberRevocation {
-  revocationId?: string
-  outcome: 'local_only' | 'applied' | 'complete' | 'recovery_required'
-  pendingRecipients: number
-  removedDeviceIds: string[]
-  pendingRecipientDeviceIds: string[]
+export interface OhMemberRemoval {
+  phase: 'applied' | 'converging' | 'complete' | 'recovery_required'
+  intentCount: number
+  effectiveMemberCount: number
+  convergenceDigest?: string
   updatedAtMs: number
 }
 
@@ -131,7 +130,7 @@ export interface OhEngineEvent {
   errorCode?: number
   errorCategory?: string
   retryable?: boolean
-  memberRevocation?: OhMemberRevocation
+  memberRemoval?: OhMemberRemoval
   sharedDeviceRefresh?: OhSharedDeviceRefresh
   networkRecoveryPhase?: 'idle' | 'recovering' | 'retry_scheduled' | 'failed'
   nextRetryInMs?: number
@@ -157,13 +156,8 @@ export interface OhEngine {
   queryMembershipConvergence(): Promise<OhMembershipConvergence>
   refreshSharedDevices(): Promise<OhSharedDeviceRefreshStarted>
   querySharedDeviceRefresh(requestId: string): Promise<OhSharedDeviceRefresh | null>
-  removeMember(deviceId: string): Promise<OhMemberRevocation>
-  queryMemberRevocation(revocationId: string): Promise<OhMemberRevocation | null>
-  queryCurrentMemberRevocation(): Promise<OhMemberRevocation | null>
-  continueMemberRevocation(
-    revocationId: string,
-    permanentlyLostDeviceIds: string[]
-  ): Promise<OhMemberRevocation>
+  removeMember(deviceId: string): Promise<OhMemberRemoval>
+  queryMemberRemoval(): Promise<OhMemberRemoval>
   queryActiveClipboard(): Promise<OhActiveClipboard | null>
   lifecycleState(): Promise<string>
   suspend(): Promise<void>

@@ -75,10 +75,7 @@ pub enum OperationKind {
     QueryMemberSyncPreferences,
     UpdateMemberSyncPreferences,
     RemoveMember,
-    SecureRemoveLegacyMember,
-    QueryMemberRevocation,
-    QueryCurrentMemberRevocation,
-    ContinueMemberRevocation,
+    QueryMemberRemoval,
     QueryLegacyBootstrap,
     QuerySpaceProtection,
     SearchEntries,
@@ -174,10 +171,7 @@ impl fmt::Display for OperationKind {
             Self::QueryMemberSyncPreferences => "query_member_sync_preferences",
             Self::UpdateMemberSyncPreferences => "update_member_sync_preferences",
             Self::RemoveMember => "remove_member",
-            Self::SecureRemoveLegacyMember => "secure_remove_legacy_member",
-            Self::QueryMemberRevocation => "query_member_revocation",
-            Self::QueryCurrentMemberRevocation => "query_current_member_revocation",
-            Self::ContinueMemberRevocation => "continue_member_revocation",
+            Self::QueryMemberRemoval => "query_member_removal",
             Self::QueryLegacyBootstrap => "query_legacy_bootstrap",
             Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
@@ -299,10 +293,7 @@ pub enum Operation {
     QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput),
     UpdateMemberSyncPreferences(UpdateMemberSyncPreferencesInput),
     RemoveMember(RemoveMemberInput),
-    SecureRemoveLegacyMember(RemoveMemberInput),
-    QueryMemberRevocation(QueryMemberRevocationInput),
-    QueryCurrentMemberRevocation,
-    ContinueMemberRevocation(ContinueMemberRevocationInput),
+    QueryMemberRemoval,
     QueryLegacyBootstrap(QueryLegacyBootstrapInput),
     QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
@@ -398,10 +389,7 @@ impl Operation {
             Self::QueryMemberSyncPreferences(_) => OperationKind::QueryMemberSyncPreferences,
             Self::UpdateMemberSyncPreferences(_) => OperationKind::UpdateMemberSyncPreferences,
             Self::RemoveMember(_) => OperationKind::RemoveMember,
-            Self::SecureRemoveLegacyMember(_) => OperationKind::SecureRemoveLegacyMember,
-            Self::QueryMemberRevocation(_) => OperationKind::QueryMemberRevocation,
-            Self::QueryCurrentMemberRevocation => OperationKind::QueryCurrentMemberRevocation,
-            Self::ContinueMemberRevocation(_) => OperationKind::ContinueMemberRevocation,
+            Self::QueryMemberRemoval => OperationKind::QueryMemberRemoval,
             Self::QueryLegacyBootstrap(_) => OperationKind::QueryLegacyBootstrap,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
@@ -520,17 +508,6 @@ pub struct UpdateMemberSyncPreferencesInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveMemberInput {
     pub device_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueryMemberRevocationInput {
-    pub revocation_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContinueMemberRevocationInput {
-    pub revocation_id: String,
-    pub permanently_lost_device_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
