@@ -967,6 +967,16 @@ impl fmt::Debug for SpaceKeyMaterial {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedRevocationResolution {
+    TargetAbsent(SpaceKeyMaterial),
+    TargetPresent {
+        current_material: SpaceKeyMaterial,
+        stage: RevocationStage,
+    },
+    RecoveryRequired(Option<SpaceKeyMaterial>),
+}
+
 impl RevocationRecord {
     pub fn prepare(
         revocation_id: RevocationId,
@@ -1030,6 +1040,7 @@ impl RevocationRecord {
         let valid = matches!(
             (self.status, next),
             (RevocationStatus::Prepared, RevocationStatus::Staged)
+                | (RevocationStatus::Prepared, RevocationStatus::Complete)
                 | (RevocationStatus::Staged, RevocationStatus::Activated)
                 | (RevocationStatus::Activated, RevocationStatus::Distributing)
                 | (RevocationStatus::Distributing, RevocationStatus::Complete)
@@ -1048,6 +1059,20 @@ impl RevocationRecord {
             });
         }
         self.status = next;
+        self.updated_at_ms = now_ms;
+        Ok(())
+    }
+
+    pub fn rebase_prepared(
+        &mut self,
+        current_epoch: GroupEpoch,
+        now_ms: i64,
+    ) -> Result<(), KeyEpochError> {
+        if self.status != RevocationStatus::Prepared || current_epoch < self.previous_epoch {
+            return Err(KeyEpochError::InvalidRevocationRecord);
+        }
+        self.previous_epoch = current_epoch;
+        self.next_epoch = current_epoch.next()?;
         self.updated_at_ms = now_ms;
         Ok(())
     }

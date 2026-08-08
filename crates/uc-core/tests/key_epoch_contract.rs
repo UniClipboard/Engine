@@ -46,6 +46,46 @@ fn revocation_follows_the_forward_only_state_machine() {
 }
 
 #[test]
+fn verified_absent_target_completes_prepared_revocation_without_advancing_epoch() {
+    let mut record = RevocationRecord::prepare(
+        RevocationId::from_string("prepared-absent-target").unwrap(),
+        SpaceId::from_str("space-1"),
+        DeviceId::new("already-absent-device"),
+        GroupEpoch::new(4),
+        100,
+    )
+    .unwrap();
+
+    record
+        .transition_to(RevocationStatus::Complete, 110)
+        .unwrap();
+
+    assert_eq!(record.status(), RevocationStatus::Complete);
+    assert_eq!(record.previous_epoch(), GroupEpoch::new(4));
+    assert_eq!(record.next_epoch(), GroupEpoch::new(5));
+    assert_eq!(record.updated_at_ms(), 110);
+}
+
+#[test]
+fn prepared_revocation_rebases_on_verified_current_epoch() {
+    let mut record = RevocationRecord::prepare(
+        RevocationId::from_string("prepared-current-epoch").unwrap(),
+        SpaceId::from_str("space-1"),
+        DeviceId::new("removed-device"),
+        GroupEpoch::new(1),
+        100,
+    )
+    .unwrap();
+
+    record.rebase_prepared(GroupEpoch::new(3), 110).unwrap();
+
+    assert_eq!(record.status(), RevocationStatus::Prepared);
+    assert_eq!(record.previous_epoch(), GroupEpoch::new(3));
+    assert_eq!(record.next_epoch(), GroupEpoch::new(4));
+    assert_eq!(record.updated_at_ms(), 110);
+}
+
+#[test]
 fn activated_revocation_cannot_move_backwards() {
     let mut record = RevocationRecord::prepare(
         RevocationId::from_string("revocation-2").unwrap(),

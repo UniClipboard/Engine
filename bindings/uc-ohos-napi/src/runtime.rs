@@ -514,6 +514,7 @@ fn member_revocation(summary: uc_engine::MemberRevocationSummary) -> OhMemberRev
         revocation_id: summary.revocation_id,
         outcome: match summary.outcome {
             uc_engine::MemberRevocationOutcome::LocalOnly => "local_only",
+            uc_engine::MemberRevocationOutcome::Recovering => "recovering",
             uc_engine::MemberRevocationOutcome::Applied => "applied",
             uc_engine::MemberRevocationOutcome::Complete => "complete",
             uc_engine::MemberRevocationOutcome::RecoveryRequired => "recovery_required",
@@ -782,6 +783,22 @@ mod tests {
         assert_eq!(revocation.removed_device_ids, ["removed-1"]);
         assert_eq!(revocation.pending_recipient_device_ids, ["waiting-1"]);
         assert_eq!(revocation.updated_at_ms, 42.0);
+    }
+
+    #[test]
+    fn recovering_member_revocation_survives_the_harmony_binding() {
+        let event = map_event(EngineEvent::MemberRevocationChanged(
+            uc_engine::MemberRevocationSummary {
+                revocation_id: Some("revocation-prepared".into()),
+                outcome: uc_engine::MemberRevocationOutcome::Recovering,
+                pending_recipients: 0,
+                removed_device_ids: vec!["removed-1".into()],
+                pending_recipient_device_ids: Vec::new(),
+                updated_at_ms: 42,
+            },
+        ));
+
+        assert_eq!(event.member_revocation.unwrap().outcome, "recovering");
     }
 
     #[test]

@@ -273,6 +273,7 @@ pub struct SharedDeviceRefresh {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum MemberRevocationOutcome {
     LocalOnly,
+    Recovering,
     Applied,
     Complete,
     RecoveryRequired,
@@ -2063,6 +2064,7 @@ fn map_member_revocation_summary(
         revocation_id: summary.revocation_id,
         outcome: match summary.outcome {
             uc_engine::MemberRevocationOutcome::LocalOnly => MemberRevocationOutcome::LocalOnly,
+            uc_engine::MemberRevocationOutcome::Recovering => MemberRevocationOutcome::Recovering,
             uc_engine::MemberRevocationOutcome::Applied => MemberRevocationOutcome::Applied,
             uc_engine::MemberRevocationOutcome::Complete => MemberRevocationOutcome::Complete,
             uc_engine::MemberRevocationOutcome::RecoveryRequired => {
@@ -2594,6 +2596,20 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn recovering_member_revocation_survives_the_mobile_binding() {
+        let result = map_member_revocation_summary(uc_engine::MemberRevocationSummary {
+            revocation_id: Some("revocation-prepared".into()),
+            outcome: uc_engine::MemberRevocationOutcome::Recovering,
+            pending_recipients: 0,
+            removed_device_ids: vec!["removed-1".into()],
+            pending_recipient_device_ids: Vec::new(),
+            updated_at_ms: 42,
+        });
+
+        assert_eq!(result.outcome, MemberRevocationOutcome::Recovering);
     }
 
     #[test]

@@ -994,6 +994,7 @@ impl fmt::Debug for SharedDeviceRefreshSummary {
 #[serde(rename_all = "snake_case")]
 pub enum MemberRevocationOutcome {
     LocalOnly,
+    Recovering,
     Applied,
     Complete,
     RecoveryRequired,

@@ -46,8 +46,9 @@ pub use protection::{
 };
 pub use revocation::{
     ContentKeyId, ContentKeyPurpose, GroupEpoch, GroupRevocationResult, KeyEpochError,
-    PendingGroupUpdate, RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationStage,
-    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityMode,
+    PendingGroupUpdate, PreparedRevocationResolution, RevocationId, RevocationOutboxMessage,
+    RevocationRecord, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
+    SpaceSecurityMode,
 };
 pub use upgrade::{
     decide_legacy_upgrade, AdmissionReplayId, LegacyProtectionCommand, LegacyProtectionPort,

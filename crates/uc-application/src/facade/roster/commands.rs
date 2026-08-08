@@ -19,6 +19,7 @@ use uc_core::settings::model::ContentTypes;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberRevocationState {
     LocalOnly,
+    Recovering,
     Applied,
     Complete,
     RecoveryRequired,
