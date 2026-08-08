@@ -6,6 +6,7 @@ mod member;
 mod ports;
 mod preferences;
 mod protection;
+mod removal_intent;
 mod revocation;
 mod upgrade;
 
@@ -36,13 +37,27 @@ pub use ports::{
     MembershipGossipTransportError, MembershipGossipTransportPort, MembershipOutboxRepositoryError,
     MembershipOutboxRepositoryPort, MembershipSecurityState, MembershipSecurityUpdateError,
     MembershipSecurityUpdatePort, RelationshipStateResetError, RelationshipStateResetPort,
-    RevocationRepositoryPort, SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
-    VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
+    RemovalAdmissionDecision, RemovalAdmissionGatePort, RemovalExchangeEndpointPort,
+    RemovalExchangeError, RemovalExchangeMessage, RemovalExchangePort,
+    RemovalIntentRepositoryError, RemovalIntentRepositoryPort, RemovalIntentVerificationError,
+    RemovalIntentVerificationPort, RemovalLateAcceptance, RemovalLateRejectionReason,
+    RemovalLateSubmission, RemovalLateSubmissionEndpointPort, RemovalLateSubmissionError,
+    RemovalLateSubmissionPort, RemovalLateSubmissionTransportError, RemovalPendingJoinStorePort,
+    RemovalRecoveryError, RemovalRecoveryPort, RemovalTargetGatePort, RemovalViewMember,
+    RemovalViewSnapshot, RevocationRepositoryPort, SpaceSecurityStateResetError,
+    SpaceSecurityStateResetPort, VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
 };
 pub use preferences::MemberSyncPreferences;
 pub use protection::{
     LegacyBootstrapProgress, MemberProtection, MemberProtectionStatus, SpaceProtectionError,
     SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
+};
+pub use removal_intent::{
+    MemberInstanceId, MemberRemovalSummary, RemovalCausalCheckpoint, RemovalCausalProof,
+    RemovalCausalProofMember, RemovalCompletionReceipt, RemovalConvergence, RemovalIntentContent,
+    RemovalIntentId, RemovalIntentRejection, RemovalPersistedState, RemovalPhase,
+    RemovalPreparedRecovery, RemovalRecoveryMaterial, RemovalRecoveryPersisted,
+    SignedRemovalIntent, MAX_VIEW_MEMBERS,
 };
 pub use revocation::{
     ContentKeyId, ContentKeyPurpose, GroupEpoch, GroupRevocationResult, KeyEpochError,

@@ -41,6 +41,7 @@ pub use usecases::clipboard_sync::{
 // etc. The implementations stay in `usecases::clipboard_sync` but the
 // crate boundary only exposes them via the facade.
 pub mod file_transfer;
+pub mod member_removal;
 pub mod membership;
 pub(crate) mod pairing_inbound;
 pub(crate) mod pairing_invitation;

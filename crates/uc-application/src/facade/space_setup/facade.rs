@@ -186,6 +186,7 @@ impl SpaceFacade {
             peer_addr_repo,
             presence,
             analytics,
+            removal_admission,
         } = admission;
         let SpaceTransitionDeps {
             relationship_reset,
@@ -240,6 +241,7 @@ impl SpaceFacade {
             Arc::clone(&clock),
             Arc::clone(&invitation_holder),
             Arc::clone(&analytics),
+            Arc::clone(&removal_admission),
         ));
         // T8 · F1 hook: construct ensure_reachable_all early so peer_addr_repo /
         // device_identity can still be Arc::clone'd here — both are moved into
@@ -303,6 +305,7 @@ impl SpaceFacade {
             pairing_invitation,
             invitation_holder,
             Arc::clone(&clock),
+            Arc::clone(&removal_admission),
             sponsor_handshake,
             Arc::clone(&admit_member_uc),
             Arc::clone(&trust_peer_uc),
@@ -884,7 +887,8 @@ mod tests {
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
-        MembershipError, RelationshipStateResetError, RelationshipStateResetPort, SpaceMember,
+        MembershipError, RelationshipStateResetError, RelationshipStateResetPort,
+        RemovalAdmissionDecision, RemovalAdmissionGatePort, SpaceMember,
         SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
     };
     use uc_core::pairing::invitation::InvitationCode;
@@ -917,6 +921,22 @@ mod tests {
         AdmissionOffer, GroupAdmission, PreparedAdmissionOffer, PreparedGroupJoin, ProofDerivedKey,
         SpaceAccessProofArtifact,
     };
+
+    struct AllowRemovalAdmission;
+
+    #[async_trait]
+    impl RemovalAdmissionGatePort for AllowRemovalAdmission {
+        async fn admission_decision(
+            &self,
+            _invitation_generation: u64,
+        ) -> RemovalAdmissionDecision {
+            RemovalAdmissionDecision::Allowed
+        }
+
+        async fn invitation_generation(&self) -> Result<u64, RemovalAdmissionDecision> {
+            Ok(0)
+        }
+    }
     use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError, TrustedPeerRepositoryPort};
     use uc_core::SessionId;
 
@@ -1786,6 +1806,7 @@ mod tests {
                     as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
                 presence: Arc::new(FakePresence),
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
+                removal_admission: Arc::new(AllowRemovalAdmission),
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::new(NoopRelationshipStateReset),

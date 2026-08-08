@@ -39,6 +39,9 @@ rand = "0.9.2"
 hex = "0.4.3"
 url = "2"
 
+# Deterministic digest derivation for removal intents and convergence state.
+sha2 = "0.10"
+
 # Single source of truth for the blake3v1 content-identity algorithm, shared
 # with the mobile FFI crate so every implementation reaches the same hash.
 uc-content-hash = { path = "../uc-content-hash" }

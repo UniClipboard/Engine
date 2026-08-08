@@ -2365,7 +2365,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         .unwrap_err();
     assert_eq!(
         local_member.category(),
-        crate::EngineErrorCategory::InvalidInput
+        crate::EngineErrorCategory::InvalidState
     );
     let missing_member = engine
         .execute(crate::Operation::RemoveMember(crate::RemoveMemberInput {
@@ -2375,7 +2375,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         .unwrap_err();
     assert_eq!(
         missing_member.category(),
-        crate::EngineErrorCategory::NotFound
+        crate::EngineErrorCategory::InvalidState
     );
 
     assert_eq!(

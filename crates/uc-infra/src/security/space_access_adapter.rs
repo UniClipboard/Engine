@@ -215,10 +215,10 @@ struct AdmissionKdfOffer {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PortableKeyCatalog {
+pub(crate) struct PortableKeyCatalog {
     version: u8,
-    state: SpaceKeyState,
-    key_catalog: Vec<u8>,
+    pub(crate) state: SpaceKeyState,
+    pub(crate) key_catalog: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -247,7 +247,7 @@ fn map_group_aead_error(error: v1_aead::AeadError) -> EncryptionError {
     }
 }
 
-fn seal_group_catalog(
+pub(super) fn seal_group_catalog(
     wrapping_key: &MasterKey,
     material: &SpaceKeyMaterial,
 ) -> Result<Vec<u8>, EncryptionError> {
@@ -270,7 +270,7 @@ fn seal_group_catalog(
     serde_json::to_vec(&encrypted).map_err(|_| EncryptionError::KeyMaterialCorrupt)
 }
 
-fn open_group_catalog(
+pub(super) fn open_group_catalog(
     wrapping_key: &MasterKey,
     space_id: &SpaceId,
     epoch: u64,

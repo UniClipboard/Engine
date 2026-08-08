@@ -9,7 +9,7 @@ use crate::security::{v1_aead, MasterKey};
 
 use super::backend;
 
-pub(super) fn space_lookup_token(
+pub fn space_lookup_token(
     master_key: &MasterKey,
     space_id: &SpaceId,
 ) -> Result<String, KeyEpochError> {
@@ -31,7 +31,7 @@ pub(super) fn device_lookup_token(
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
-pub(super) fn seal<T: Serialize>(
+pub fn seal<T: Serialize>(
     master_key: &MasterKey,
     value: &T,
     aad: &[u8],
@@ -41,7 +41,7 @@ pub(super) fn seal<T: Serialize>(
     serde_json::to_vec(&encrypted).map_err(backend)
 }
 
-pub(super) fn open<T: DeserializeOwned>(
+pub fn open<T: DeserializeOwned>(
     master_key: &MasterKey,
     ciphertext: &[u8],
     aad: &[u8],

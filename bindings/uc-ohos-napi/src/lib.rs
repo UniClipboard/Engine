@@ -116,12 +116,11 @@ pub struct OhSharedDeviceRefresh {
 }
 
 #[napi(object)]
-pub struct OhMemberRevocation {
-    pub revocation_id: Option<String>,
-    pub outcome: String,
-    pub pending_recipients: u32,
-    pub removed_device_ids: Vec<String>,
-    pub pending_recipient_device_ids: Vec<String>,
+pub struct OhMemberRemoval {
+    pub phase: String,
+    pub intent_count: u32,
+    pub effective_member_count: u32,
+    pub convergence_digest: Option<String>,
     pub updated_at_ms: f64,
 }
 
@@ -171,7 +170,7 @@ pub struct OhEngineEvent {
     pub error_code: Option<u32>,
     pub error_category: Option<String>,
     pub retryable: Option<bool>,
-    pub member_revocation: Option<OhMemberRevocation>,
+    pub member_removal: Option<OhMemberRemoval>,
     pub shared_device_refresh: Option<OhSharedDeviceRefresh>,
     pub network_recovery_phase: Option<String>,
     pub next_retry_in_ms: Option<f64>,

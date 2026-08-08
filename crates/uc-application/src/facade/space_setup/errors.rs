@@ -58,6 +58,15 @@ pub enum InitializeSpaceError {
 /// having to import the infra-port enum.
 #[derive(Debug, Error)]
 pub enum IssuePairingInvitationError {
+    #[error("member removal is still converging")]
+    MemberRemovalInProgress,
+
+    #[error("member removal requires recovery before admitting a device")]
+    MemberRemovalRecoveryRequired,
+
+    #[error("member removal state is unavailable")]
+    MemberRemovalUnavailable,
+
     /// Underlying network runtime has not been started. UI should surface
     /// "start network first" (A1/A2 completing auto-starts it, so this
     /// typically means startup failed earlier and the user needs to retry).
@@ -133,6 +142,8 @@ pub enum RedeemPairingInvitationError {
     /// 过期或被别的 joiner 消费。
     #[error("sponsor did not recognise the invitation code")]
     SponsorRejectedInvitation,
+    #[error("sponsor cannot admit a device at this time")]
+    SponsorAdmissionUnavailable,
 
     /// sponsor UI 明确拒绝本次配对（Slice 1 未暴露审批 UI，保留语义位）。
     #[error("sponsor declined the pairing request")]
@@ -287,6 +298,8 @@ pub enum SwitchSpaceError {
     SponsorDeclined,
     #[error("sponsor did not recognise the invitation code")]
     SponsorRejectedInvitation,
+    #[error("sponsor cannot admit a device at this time")]
+    SponsorAdmissionUnavailable,
     #[error("sponsor handshake timed out")]
     Timeout,
     #[error("connection lost mid-handshake")]

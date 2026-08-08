@@ -22,6 +22,7 @@ pub mod node;
 pub mod persistable_addr;
 pub mod presence_adapter;
 pub mod relay_probe;
+pub mod removal_exchange_adapter;
 pub(crate) mod runtime_consts;
 pub mod transfer_progress_adapter;
 
@@ -67,4 +68,8 @@ pub use presence_adapter::{IrohPresenceAdapter, IrohPresenceHandler, PRESENCE_AL
 pub use relay_probe::{
     IrohRelayProbeAdapter, RelayProbeError as IrohRelayProbeError,
     RelayProbeReport as IrohRelayProbeReport,
+};
+pub use removal_exchange_adapter::{
+    IrohRemovalExchangeAdapter, IrohRemovalExchangeHandler, IrohRemovalLateHandler,
+    REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN,
 };

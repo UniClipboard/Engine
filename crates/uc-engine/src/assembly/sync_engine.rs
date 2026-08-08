@@ -53,6 +53,7 @@ use uc_application::facade::{
     MemberRosterFacade, MembershipConnectivityDeps, SpaceAdmissionDeps, SpaceApplicationRuntime,
     SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, TransferHostEvent,
 };
+use uc_application::member_removal::{RemovalCoordinator, RemovalCoordinatorDeps};
 use uc_application::membership::{build_membership_convergence, MembershipConvergenceDeps};
 use uc_application::proof::HmacProofAdapter;
 use uc_application::{
@@ -67,7 +68,6 @@ use uc_core::ports::space::ProofPort;
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ClipboardReceiverPort, ConnectionChannelPort, LocalIdentityPort, PresencePort,
-    ReachabilityState,
 };
 use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
 use uc_infra::network::iroh::{
@@ -81,8 +81,11 @@ use uc_infra::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
 pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
-use uc_infra::security::DefaultMembershipSecurityUpdateAdapter;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
+use uc_infra::security::{
+    DefaultMembershipSecurityUpdateAdapter, RemovalIntentVerificationAdapter,
+    RemovalRecoveryAdapter,
+};
 
 use crate::assembly::deps::{SharedRuntimeDeps, SyncEngineDeps};
 use crate::assembly::legacy_upgrade::install_automatic_legacy_upgrade;
@@ -162,9 +165,7 @@ pub struct SyncEngineAssembly {
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
     /// 与 sync assembly 同生命周期。
     outbound_progress_translator: OutboundProgressRuntime,
-    /// Retries encrypted group updates after restart and whenever peers
-    /// become reachable. Aborted explicitly during shutdown.
-    group_update_retry: JoinHandle<()>,
+    member_removal_runtime: uc_application::member_removal::MemberRemovalRuntime,
     automatic_legacy_upgrade: AutomaticLegacyUpgradeRuntime,
     space_application_runtime: SpaceApplicationRuntime,
 }
@@ -182,6 +183,20 @@ impl SyncEngineAssembly {
             .accepts_protocol_for_test(
                 uc_infra::network::iroh::membership_attestation_adapter::MEMBERSHIP_ATTESTATION_ALPN,
             )
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn member_removal_exchange_is_reachable_for_test(&self) -> bool {
+        self.iroh_node
+            .accepts_protocol_for_test(uc_infra::network::iroh::REMOVAL_EXCHANGE_ALPN)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn member_removal_late_is_reachable_for_test(&self) -> bool {
+        self.iroh_node
+            .accepts_protocol_for_test(uc_infra::network::iroh::REMOVAL_LATE_ALPN)
             .await
     }
 
@@ -222,86 +237,10 @@ impl SyncEngineAssembly {
         self.outbound_progress_translator
             .shutdown(transfer_reason)
             .await;
-        self.group_update_retry.abort();
+        self.member_removal_runtime.shutdown().await;
         self.space_application_runtime.shutdown().await;
         self.automatic_legacy_upgrade.shutdown().await;
         self.iroh_node.shutdown().await;
-    }
-}
-
-const GROUP_UPDATE_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
-const GROUP_UPDATE_RETRY_MAX_DELAY: Duration = Duration::from_secs(300);
-
-fn group_update_retry_delay(consecutive_failures: u32, has_pending_work: bool) -> Duration {
-    if !has_pending_work {
-        return GROUP_UPDATE_RETRY_MAX_DELAY;
-    }
-    let multiplier = 1u64 << consecutive_failures.min(4);
-    Duration::from_secs(
-        GROUP_UPDATE_RETRY_BASE_DELAY
-            .as_secs()
-            .saturating_mul(multiplier)
-            .min(GROUP_UPDATE_RETRY_MAX_DELAY.as_secs()),
-    )
-}
-
-fn spawn_group_update_retry(roster: Arc<MemberRosterFacade>) -> JoinHandle<()> {
-    let mut presence_events = roster.subscribe_presence_events();
-    tokio::spawn(async move {
-        let mut retry_interval = tokio::time::interval(GROUP_UPDATE_RETRY_BASE_DELAY);
-        retry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        retry_interval.tick().await;
-        let mut consecutive_failures = 0u32;
-        let mut next_timer_retry_at = Instant::now();
-        loop {
-            let timer_triggered = tokio::select! {
-                _ = retry_interval.tick() => true,
-                event = presence_events.recv() => match event {
-                    Ok(event) if event.state == ReachabilityState::Online => false,
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => false,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                },
-            };
-            if timer_triggered && Instant::now() < next_timer_retry_at {
-                continue;
-            }
-            match roster.resume_incomplete_revocations().await {
-                Ok(pending) => {
-                    consecutive_failures = 0;
-                    next_timer_retry_at =
-                        Instant::now() + group_update_retry_delay(0, !pending.is_empty());
-                }
-                Err(error) => {
-                    consecutive_failures = consecutive_failures.saturating_add(1);
-                    next_timer_retry_at =
-                        Instant::now() + group_update_retry_delay(consecutive_failures, true);
-                    if consecutive_failures == 1 {
-                        warn!(error = %error, "pending group updates could not be retried");
-                    } else {
-                        debug!(
-                            error = %error,
-                            consecutive_failures,
-                            "pending group update retry remains deferred"
-                        );
-                    }
-                }
-            }
-        }
-    })
-}
-
-#[cfg(test)]
-mod group_update_retry_tests {
-    use super::*;
-
-    #[test]
-    fn retry_delay_backs_off_failures_and_idles_without_pending_work() {
-        assert_eq!(group_update_retry_delay(0, true), Duration::from_secs(30));
-        assert_eq!(group_update_retry_delay(1, true), Duration::from_secs(60));
-        assert_eq!(group_update_retry_delay(3, true), Duration::from_secs(240));
-        assert_eq!(group_update_retry_delay(8, true), Duration::from_secs(300));
-        assert_eq!(group_update_retry_delay(0, false), Duration::from_secs(300));
     }
 }
 
@@ -577,6 +516,8 @@ mod outbound_progress_tests {
 pub enum SyncEngineAssemblyError {
     #[error(transparent)]
     IrohNode(#[from] IrohNodeError),
+    #[error("member removal runtime could not start: {0}")]
+    MemberRemovalRuntime(String),
 }
 
 /// Assemble the Slice 1 `SpaceFacade` from an already-wired dependency
@@ -621,6 +562,36 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.current_member_signatures),
         Arc::clone(&deps.security.fingerprint),
     );
+    let removal_identity = builder.build_membership_identity_adapter(
+        Arc::clone(&space_setup.membership_session),
+        Arc::clone(&deps.device.device_identity),
+        Arc::clone(&deps.settings),
+        Arc::clone(&deps.security.fingerprint),
+    );
+    let removal_exchange_adapter =
+        builder.build_member_removal_exchange_adapter(Arc::clone(&space_setup.peer_addr_repo));
+    let removal_coordinator = Arc::new(RemovalCoordinator::new(RemovalCoordinatorDeps {
+        repository: Arc::clone(&space_setup.removal_intent_repository),
+        verification: Arc::new(RemovalIntentVerificationAdapter),
+        exchange: removal_exchange_adapter.clone(),
+        late_submission: removal_exchange_adapter.clone(),
+        recovery: Arc::new(RemovalRecoveryAdapter::new(
+            space_setup.membership_session.as_ref().clone(),
+            Arc::clone(&space_setup.removal_key_epoch_repository),
+            removal_identity,
+            Arc::clone(&space_setup.removal_pending_join),
+        )),
+        member_signatures: Arc::clone(&space_setup.current_member_signatures),
+        member_repo: Arc::clone(&deps.device.member_repo),
+    }));
+    builder.install_member_removal(
+        &removal_exchange_adapter,
+        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&deps.security.fingerprint),
+        removal_coordinator.clone(),
+        removal_coordinator.clone(),
+    )?;
     let membership_transport = builder.build_membership_gossip_transport(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&deps.device.device_identity),
@@ -843,6 +814,7 @@ pub async fn build_sync_engine_assembly(
                 peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
                 presence: Arc::clone(&presence),
                 analytics: Arc::clone(&space_setup.analytics_facade),
+                removal_admission: removal_coordinator.clone(),
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::clone(&space_setup.relationship_reset),
@@ -862,29 +834,26 @@ pub async fn build_sync_engine_assembly(
     // 通过 `presence.ensure_reachable_all` 填好的缓存,`list_with_presence`
     // 能直接读到。Facade 本身是纯 thin wrapper,构造非常便宜。
     let roster = Arc::new(
-        MemberRosterFacade::new_with_group_delivery(
-            MemberRosterDeps {
-                member_repo: Arc::clone(&deps.device.member_repo),
-                peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
-                trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
-                local_identity: Arc::clone(&local_identity),
-                presence: Arc::clone(&presence),
-                connection_channel: Some(Arc::clone(&connection_channel)),
-            },
-            Arc::clone(&deps.security.space_access_ports.group_revocation),
-            group_update_dispatch,
-        )
+        MemberRosterFacade::new(MemberRosterDeps {
+            member_repo: Arc::clone(&deps.device.member_repo),
+            local_identity: Arc::clone(&local_identity),
+            presence: Arc::clone(&presence),
+            connection_channel: Some(Arc::clone(&connection_channel)),
+        })
         .with_group_bootstrap(Arc::clone(
             &deps.security.space_access_ports.group_bootstrap,
         ))
         .with_space_protection(Arc::clone(
             &deps.security.space_access_ports.space_protection,
-        )),
+        ))
+        .with_member_removal(Arc::clone(&removal_coordinator)),
     );
     if let Err(error) = roster.resume_legacy_bootstraps().await {
         warn!(error = %error, "legacy bootstrap recovery could not resume during startup");
     }
-    let group_update_retry = spawn_group_update_retry(Arc::clone(&roster));
+    let member_removal_runtime = roster
+        .start_member_removal_runtime()
+        .map_err(|error| SyncEngineAssemblyError::MemberRemovalRuntime(error.to_string()))?;
     let membership_gossip_runtime = membership_gossip
         .clone()
         .start(roster.subscribe_presence_events());
@@ -918,6 +887,8 @@ pub async fn build_sync_engine_assembly(
         ClipboardSyncFacade::new(ClipboardSyncDeps {
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             member_repo: Arc::clone(&deps.device.member_repo),
+            removal_gate: Arc::clone(&removal_coordinator)
+                as Arc<dyn uc_core::membership::RemovalTargetGatePort>,
             presence: Arc::clone(&presence),
             transfer_cipher: Arc::clone(&deps.security.transfer_cipher),
             clipboard_dispatch,
@@ -1090,7 +1061,7 @@ pub async fn build_sync_engine_assembly(
         clipboard_receiver,
         active_clipboard_lifecycle,
         outbound_progress_translator,
-        group_update_retry,
+        member_removal_runtime,
         automatic_legacy_upgrade,
         space_application_runtime,
     })

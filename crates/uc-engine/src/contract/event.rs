@@ -3,8 +3,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EngineError, EngineState, LifecycleAction, MemberRevocationSummary,
-    NetworkRecoveryStatusSummary, OperationTerminal, SharedDeviceRefreshSummary,
+    EngineError, EngineState, LifecycleAction, MemberRemovalSummary, NetworkRecoveryStatusSummary,
+    OperationTerminal, SharedDeviceRefreshSummary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ pub enum EngineEvent {
     PeerPresenceChanged(PeerPresenceChanged),
     /// A sponsor-side pairing handshake reached a terminal result.
     PairingCompleted(PairingCompletion),
-    MemberRevocationChanged(MemberRevocationSummary),
+    MemberRemovalChanged(MemberRemovalSummary),
     SharedDeviceRefreshChanged(SharedDeviceRefreshSummary),
     ActiveClipboardChanged(ActiveClipboardChanged),
     MobileLanSettingsChanged(MobileLanSettingsChanged),
@@ -72,7 +72,7 @@ impl EngineEvent {
             Self::DeliveryStatusChanged(_) => "delivery_status_changed",
             Self::PeerPresenceChanged(_) => "peer_presence_changed",
             Self::PairingCompleted(_) => "pairing_completed",
-            Self::MemberRevocationChanged(_) => "member_revocation_changed",
+            Self::MemberRemovalChanged(_) => "member_removal_changed",
             Self::SharedDeviceRefreshChanged(_) => "shared_device_refresh_changed",
             Self::ActiveClipboardChanged(_) => "active_clipboard_changed",
             Self::MobileLanSettingsChanged(_) => "mobile_lan_settings_changed",

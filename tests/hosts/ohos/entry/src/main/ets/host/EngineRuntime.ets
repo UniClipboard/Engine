@@ -1,5 +1,5 @@
 import engine from 'libuc_ohos_napi.so';
-import type { OhEngine, OhMemberRevocation } from 'libuc_ohos_napi.so';
+import type { OhEngine, OhMemberRemoval } from 'libuc_ohos_napi.so';
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { picker } from '@kit.CoreFileKit';
@@ -58,7 +58,7 @@ class EngineRuntime {
         )).selfDeviceId;
       }
       this.convergenceState = (await active.queryMembershipConvergence()).state;
-      this.applyMemberRemoval(await active.queryCurrentMemberRevocation());
+      this.applyMemberRemoval(await active.queryMemberRemoval());
       this.activeEngine = active;
       this.status = 'Ready';
       this.details = '';
@@ -126,7 +126,7 @@ class EngineRuntime {
     if (active === undefined) {
       throw new Error('OHOS_ENGINE_NOT_READY');
     }
-    this.applyMemberRemoval(await active.queryCurrentMemberRevocation());
+    this.applyMemberRemoval(await active.queryMemberRemoval());
     return this.snapshot();
   }
 
@@ -163,26 +163,18 @@ class EngineRuntime {
       throw new Error('OHOS_IDENTITY_CHANGED');
     }
     this.convergenceState = (await active.queryMembershipConvergence()).state;
-    this.applyMemberRemoval(await active.queryCurrentMemberRevocation());
+    this.applyMemberRemoval(await active.queryMemberRemoval());
     this.status = 'Ready';
     this.details = '';
   }
 
-  private applyMemberRemoval(revocation: OhMemberRevocation | null): void {
-    if (revocation === null) {
-      this.memberRemovalState = 'none';
-      return;
-    }
-    if (revocation.pendingRecipients !== revocation.pendingRecipientDeviceIds.length) {
-      throw new Error('OHOS_MEMBER_REMOVAL_COUNT_MISMATCH');
-    }
+  private applyMemberRemoval(removal: OhMemberRemoval): void {
     this.memberRemovalState = JSON.stringify({
-      revocationId: revocation.revocationId,
-      outcome: revocation.outcome,
-      pendingRecipients: revocation.pendingRecipients,
-      removedDeviceIds: revocation.removedDeviceIds,
-      pendingRecipientDeviceIds: revocation.pendingRecipientDeviceIds,
-      updatedAtMs: revocation.updatedAtMs
+      phase: removal.phase,
+      intentCount: removal.intentCount,
+      effectiveMemberCount: removal.effectiveMemberCount,
+      convergenceDigest: removal.convergenceDigest,
+      updatedAtMs: removal.updatedAtMs
     });
   }
 
