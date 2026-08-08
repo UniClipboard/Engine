@@ -145,6 +145,42 @@ pub(crate) struct MlsRemoval {
     pub(crate) wrapping_key: MasterKey,
 }
 
+pub(crate) struct MlsForwardRecovery {
+    pub(crate) sponsor_state: MlsClientState,
+    pub(crate) commit: Vec<u8>,
+    pub(crate) welcome: Option<Vec<u8>>,
+    pub(crate) epoch: u64,
+    pub(crate) wrapping_key: MasterKey,
+}
+
+impl std::fmt::Debug for MlsForwardRecovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MlsForwardRecovery")
+            .field("sponsor_state", &self.sponsor_state)
+            .field("commit_len", &self.commit.len())
+            .field("welcome_len", &self.welcome.as_ref().map(Vec::len))
+            .field("epoch", &self.epoch)
+            .field("wrapping_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+pub(crate) struct MlsMemberIdentity {
+    pub(crate) device_identity: Vec<u8>,
+    pub(crate) signature_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for MlsMemberIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MlsMemberIdentity")
+            .field("device_identity", &self.device_identity)
+            .field("signature_key_len", &self.signature_key.len())
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for MlsRemoval {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -279,21 +315,59 @@ impl MlsGroupEngine {
         expected_space_id: &[u8],
         welcome: &[u8],
     ) -> Result<CompletedMlsJoin, MlsGroupError> {
+        let message = MlsMessageIn::tls_deserialize_exact(welcome.to_vec()).map_err(|_| {
+            tracing::warn!(failure = "welcome_decode_failed", "MLS welcome rejected");
+            MlsGroupError::InvalidMessage
+        })?;
+        let welcome = match message.extract() {
+            MlsMessageBodyIn::Welcome(welcome) => welcome,
+            _ => {
+                tracing::warn!(
+                    failure = "welcome_message_type_invalid",
+                    "MLS welcome rejected"
+                );
+                return Err(MlsGroupError::InvalidMessage);
+            }
+        };
+        Self::complete_join_from_welcome(pending, expected_space_id, welcome)
+    }
+
+    /// Applies the raw `Welcome` emitted by fork recovery. Its serialization
+    /// is distinct from the MLS message envelope used for ordinary admission.
+    pub(crate) fn complete_recovery_join(
+        pending: PendingMlsJoin,
+        expected_space_id: &[u8],
+        welcome: &[u8],
+    ) -> Result<CompletedMlsJoin, MlsGroupError> {
+        let welcome = Welcome::tls_deserialize_exact(welcome.to_vec()).map_err(|_| {
+            tracing::warn!(
+                failure = "recovery_welcome_decode_failed",
+                "MLS recovery rejected"
+            );
+            MlsGroupError::InvalidMessage
+        })?;
+        Self::complete_join_from_welcome(pending, expected_space_id, welcome)
+    }
+
+    fn complete_join_from_welcome(
+        pending: PendingMlsJoin,
+        expected_space_id: &[u8],
+        welcome: Welcome,
+    ) -> Result<CompletedMlsJoin, MlsGroupError> {
         let (provider, stored) = restore(&pending.client_state)?;
         let signer = restore_signer(&provider, &stored)?;
-        let welcome = match MlsMessageIn::tls_deserialize_exact(welcome.to_vec())
-            .map_err(|_| MlsGroupError::InvalidMessage)?
-            .extract()
-        {
-            MlsMessageBodyIn::Welcome(welcome) => welcome,
-            _ => return Err(MlsGroupError::InvalidMessage),
-        };
-        let group =
+        let staged =
             StagedWelcome::new_from_welcome(&provider, group_config().join_config(), welcome, None)
-                .map_err(|_| MlsGroupError::Protocol)?
-                .into_group(&provider)
-                .map_err(|_| MlsGroupError::Protocol)?;
+                .map_err(|_| {
+                    tracing::warn!(failure = "welcome_staging_failed", "MLS welcome rejected");
+                    MlsGroupError::Protocol
+                })?;
+        let group = staged.into_group(&provider).map_err(|_| {
+            tracing::warn!(failure = "welcome_install_failed", "MLS welcome rejected");
+            MlsGroupError::Protocol
+        })?;
         if group.group_id().as_slice() != expected_space_id {
+            tracing::warn!(failure = "welcome_space_mismatch", "MLS welcome rejected");
             return Err(MlsGroupError::IdentityMismatch);
         }
         let wrapping_key = export_wrapping_key(&group, &provider)?;
@@ -344,6 +418,96 @@ impl MlsGroupEngine {
             epoch,
             wrapping_key,
         })
+    }
+
+    /// 执行者从自己的分叉成员集合生成恢复资料(ADR-015 前置验证 3)。
+    ///
+    /// `key_packages` 为有效保留成员(除执行者外)提供的备用 key package;
+    /// 没有 key package 的成员被永久移除。返回的 welcome 仅覆盖重新加入的
+    /// 有效保留成员,被移除成员无法获得或处理。
+    pub(crate) fn recover_forward(
+        sponsor_state: &MlsClientState,
+        key_packages: &[(&[u8], Vec<u8>)],
+    ) -> Result<MlsForwardRecovery, MlsGroupError> {
+        let (provider, stored) = restore(sponsor_state)?;
+        let signer = restore_signer(&provider, &stored)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let mut group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        let mut packages = Vec::with_capacity(key_packages.len());
+        for (device_identity, key_package) in key_packages {
+            let key_package = KeyPackageIn::tls_deserialize_exact(key_package.clone())
+                .map_err(|_| MlsGroupError::InvalidMessage)?
+                .validate(provider.crypto(), ProtocolVersion::Mls10)
+                .map_err(|_| MlsGroupError::InvalidMessage)?;
+            let credential =
+                BasicCredential::try_from(key_package.leaf_node().credential().clone())
+                    .map_err(|_| MlsGroupError::InvalidMessage)?;
+            if credential.identity() != *device_identity {
+                return Err(MlsGroupError::IdentityMismatch);
+            }
+            packages.push(key_package);
+        }
+        let staged = group
+            .recover_fork_by_readding(&[group.own_leaf_index()])
+            .map_err(|_| MlsGroupError::Protocol)?
+            .provide_key_packages(packages)
+            .load_psks(provider.storage())
+            .map_err(|_| MlsGroupError::Protocol)?
+            .build(provider.rand(), provider.crypto(), &signer, |_| true)
+            .map_err(|_| MlsGroupError::Protocol)?
+            .stage_commit(&provider)
+            .map_err(|_| MlsGroupError::Protocol)?;
+        let (commit, welcome, _) = staged.into_contents();
+        let welcome = welcome
+            .map(|welcome| welcome.tls_serialize_detached())
+            .transpose()
+            .map_err(|_| MlsGroupError::Protocol)?;
+        group
+            .merge_pending_commit(&provider)
+            .map_err(|_| MlsGroupError::Protocol)?;
+        let wrapping_key = export_wrapping_key(&group, &provider)?;
+        let epoch = group.epoch().as_u64();
+        let commit = commit
+            .tls_serialize_detached()
+            .map_err(|_| MlsGroupError::Protocol)?;
+        let sponsor_state = snapshot(&provider, &signer, Some(group.group_id().as_slice()))?;
+        Ok(MlsForwardRecovery {
+            sponsor_state,
+            commit,
+            welcome,
+            epoch,
+            wrapping_key,
+        })
+    }
+
+    /// 当前因果视图的成员身份列表(设备标识 + 签名公钥)。
+    pub(crate) fn view_members(
+        client_state: &MlsClientState,
+    ) -> Result<Vec<MlsMemberIdentity>, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        let mut members = Vec::new();
+        for member in group.members() {
+            let Ok(credential) = BasicCredential::try_from(member.credential) else {
+                continue;
+            };
+            members.push(MlsMemberIdentity {
+                device_identity: credential.identity().to_vec(),
+                signature_key: member.signature_key.as_slice().to_vec(),
+            });
+        }
+        Ok(members)
     }
 
     pub(crate) fn contains_active_member(
@@ -574,6 +738,26 @@ mod tests {
         .unwrap();
         assert_eq!(next.epoch, 3);
         assert_ne!(next.wrapping_key, joined.wrapping_key);
+    }
+
+    #[test]
+    fn retained_member_can_open_a_forward_recovery_welcome() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let original = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let admission =
+            MlsGroupEngine::admit_member(&sponsor, b"bob", &original.key_package).unwrap();
+        let fresh = MlsGroupEngine::prepare_join(b"bob").unwrap();
+
+        let recovery = MlsGroupEngine::recover_forward(
+            &admission.sponsor_state,
+            &[(b"bob" as &[u8], fresh.key_package.clone())],
+        )
+        .unwrap();
+        let welcome = recovery.welcome.as_deref().unwrap();
+        let rejoined = MlsGroupEngine::complete_recovery_join(fresh, b"space-a", welcome).unwrap();
+
+        assert_eq!(rejoined.epoch, recovery.epoch);
+        assert_eq!(rejoined.wrapping_key, recovery.wrapping_key);
     }
 
     #[test]

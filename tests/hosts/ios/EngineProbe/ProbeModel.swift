@@ -80,8 +80,8 @@ final class ProbeModel {
         _ = await run(["command": "list_devices"])
     }
 
-    func queryCurrentMemberRemoval() async {
-        _ = await run(["command": "query_current_member_revocation"])
+    func queryMemberRemoval() async {
+        _ = await run(["command": "query_member_removal"])
     }
 
     func sendText() async {

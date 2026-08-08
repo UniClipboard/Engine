@@ -12,7 +12,7 @@ use uc_engine::{
     HostClipboard, HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle,
     HostFileMetadata, HostSecureStorage, JoinSpaceInput, ListHistoryEntriesInput,
     MembershipConvergenceStateSummary, Operation, OperationResult, RecoverSessionInput,
-    SecretString, SendTargetOutcome, SendTextInput,
+    RemoveMemberInput, SecretString, SendTargetOutcome, SendTextInput,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -21,6 +21,15 @@ const PASSPHRASE: &str = "space-membership-e2e-passphrase";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const EXPIRES_AT_MS: i64 = 2_000_000_000_000;
+
+fn init_test_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        )
+        .with_test_writer()
+        .try_init();
+}
 
 #[derive(Clone, Default)]
 struct MemorySecureStorage {
@@ -116,6 +125,14 @@ impl DeviceHarness {
     }
 
     async fn start(&self) -> Engine {
+        self.start_with_relay_fallback(true).await
+    }
+
+    async fn start_local_only(&self) -> Engine {
+        self.start_with_relay_fallback(false).await
+    }
+
+    async fn start_with_relay_fallback(&self, allow_relay_fallback: bool) -> Engine {
         let root = self.root.path();
         let host = HostCapabilities::new(
             HostDirectories::new(
@@ -129,7 +146,8 @@ impl DeviceHarness {
             Box::new(EmptyFiles),
         );
         let config = EngineConfig::new("space-membership-e2e")
-            .with_rendezvous_base_url(self.rendezvous_base_url.clone());
+            .with_rendezvous_base_url(self.rendezvous_base_url.clone())
+            .with_test_relay_fallback(allow_relay_fallback);
         let (engine, _events) = Engine::start(config, host)
             .await
             .expect("start complete engine");
@@ -320,6 +338,120 @@ async fn offline_members_learn_about_each_other_and_keep_syncing_after_restart()
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("final C shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn member_removal_converges_across_three_independent_engine_directories() {
+    init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let device_b = DeviceHarness::new(rendezvous.uri());
+    let device_c = DeviceHarness::new(rendezvous.uri());
+    let engine_a = device_a.start_local_only().await;
+    let engine_b = device_b.start_local_only().await;
+    let engine_c = device_c.start_local_only().await;
+    let (space_id, a_id) = create_space(&engine_a, "Device A").await;
+    let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
+    let c_id = join_through(&engine_a, &engine_c, "Device C", &space_id).await;
+
+    wait_for_members(&engine_a, &[&b_id, &c_id]).await;
+    wait_for_members(&engine_b, &[&a_id]).await;
+    wait_for_members(&engine_c, &[&a_id]).await;
+
+    let submitted = engine_a
+        .execute(Operation::RemoveMember(RemoveMemberInput {
+            device_id: b_id.clone(),
+        }))
+        .await
+        .expect("submit member removal");
+    assert!(matches!(submitted, OperationResult::MemberRemoved(_)));
+
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        let a = member_removal_summary(&engine_a).await;
+        let c = member_removal_summary(&engine_c).await;
+        if a.phase == uc_engine::MemberRemovalPhase::Complete
+            && c.phase == uc_engine::MemberRemovalPhase::Complete
+            && a.effective_member_count == 2
+            && c.effective_member_count == 2
+            && a.convergence_digest == c.convergence_digest
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "member removal did not converge; A={a:?}; C={c:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    for engine in [engine_a, engine_b, engine_c] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down member removal engine");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn completed_removal_can_continue_from_the_recovered_member_state() {
+    init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let device_b = DeviceHarness::new(rendezvous.uri());
+    let device_c = DeviceHarness::new(rendezvous.uri());
+    let engine_a = device_a.start_local_only().await;
+    let engine_b = device_b.start_local_only().await;
+    let engine_c = device_c.start_local_only().await;
+    let (space_id, a_id) = create_space(&engine_a, "Device A").await;
+    let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
+    let c_id = join_through(&engine_a, &engine_c, "Device C", &space_id).await;
+
+    wait_for_members(&engine_a, &[&b_id, &c_id]).await;
+    wait_for_members(&engine_b, &[&a_id]).await;
+    wait_for_members(&engine_c, &[&a_id]).await;
+
+    engine_a
+        .execute(Operation::RemoveMember(RemoveMemberInput {
+            device_id: b_id.clone(),
+        }))
+        .await
+        .expect("submit first removal");
+    wait_until(WAIT_TIMEOUT, || async {
+        let a = member_removal_summary(&engine_a).await;
+        let c = member_removal_summary(&engine_c).await;
+        a.phase == uc_engine::MemberRemovalPhase::Complete
+            && c.phase == uc_engine::MemberRemovalPhase::Complete
+            && a.effective_member_count == 2
+            && c.effective_member_count == 2
+            && a.convergence_digest == c.convergence_digest
+    })
+    .await;
+
+    engine_a
+        .execute(Operation::RemoveMember(RemoveMemberInput {
+            device_id: c_id.clone(),
+        }))
+        .await
+        .expect("submit successor removal");
+    let successor = member_removal_summary(&engine_a).await;
+    assert_eq!(
+        successor.effective_member_count, 1,
+        "the successor intent must use only the recovered current members"
+    );
+    wait_until(WAIT_TIMEOUT, || async {
+        let current = member_removal_summary(&engine_a).await;
+        current.phase == uc_engine::MemberRemovalPhase::Complete
+            && current.effective_member_count == 1
+    })
+    .await;
+
+    for engine in [engine_a, engine_b, engine_c] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down member removal engine");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
@@ -594,6 +726,17 @@ async fn recover(engine: &Engine) {
             resumed: true,
         }
     );
+}
+
+async fn member_removal_summary(engine: &Engine) -> uc_engine::MemberRemovalSummary {
+    let result = engine
+        .execute(Operation::QueryMemberRemoval)
+        .await
+        .expect("query member removal state");
+    let OperationResult::MemberRemovalStatus(summary) = result else {
+        panic!("unexpected member removal query result: {result:?}");
+    };
+    summary
 }
 
 async fn assert_receive_ready(engine: &Engine, expected: bool) {

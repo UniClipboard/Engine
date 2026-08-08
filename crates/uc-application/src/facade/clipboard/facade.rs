@@ -9,6 +9,7 @@ use bytes::Bytes;
 use tracing::instrument;
 
 use uc_core::ids::{DeviceId, EntryId};
+use uc_core::membership::RemovalTargetGatePort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     CancelDirectoryAttemptTransfersPort, CleanupDirectoryStagingPort, ClipboardDispatchPort,
@@ -47,6 +48,8 @@ use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 pub struct ClipboardSyncDeps {
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
+    /// 已保存成员移除意图对发送路径的硬限制。
+    pub removal_gate: Arc<dyn RemovalTargetGatePort>,
     pub presence: Arc<dyn PresencePort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
     pub clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
@@ -190,7 +193,7 @@ impl ClipboardSyncFacade {
     }
 
     pub fn new(deps: ClipboardSyncDeps) -> Self {
-        let dispatch_uc = Arc::new(DispatchClipboardEntryUseCase::new(
+        let dispatch_uc = Arc::new(DispatchClipboardEntryUseCase::new_with_removal_gate(
             Arc::clone(&deps.peer_addr_repo),
             Arc::clone(&deps.member_repo),
             Arc::clone(&deps.presence),
@@ -204,6 +207,7 @@ impl ClipboardSyncFacade {
             Arc::clone(&deps.first_sync_state),
             Arc::clone(&deps.entry_delivery_repo),
             Arc::clone(&deps.host_event_bus),
+            Arc::clone(&deps.removal_gate),
         ));
         let view_uc = Arc::new(GetEntryDeliveryViewUseCase::new(
             Arc::clone(&deps.entry_repo),
@@ -943,6 +947,9 @@ mod tests {
         ClipboardSyncFacade::new(ClipboardSyncDeps {
             peer_addr_repo: Arc::new(peer_addr_repo),
             member_repo: Arc::new(make_member_repo_all_enabled()),
+            removal_gate: Arc::new(
+                crate::usecases::clipboard_sync::dispatch_entry::AllowAllRemovalTargets,
+            ),
             presence: Arc::new(presence),
             transfer_cipher: Arc::new(cipher),
             clipboard_dispatch: Arc::new(dispatch),

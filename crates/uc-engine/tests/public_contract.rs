@@ -1,16 +1,16 @@
 use uc_engine::{
-    ContentTypesPatch, ContentTypesSummary, ContinueMemberRevocationInput, CreateSpaceInput,
-    DeviceSummary, EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory,
-    EngineEvent, EngineState, EntrySummary, ExportEntryInput, HostFileHandle,
-    InvitationAvailability, JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary,
-    LocalDeviceSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
-    MembershipConvergenceStateSummary, MembershipConvergenceSummary, MigrationPhaseSummary,
-    MigrationProgressSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
-    QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, ResendEntryInput, SearchEntriesInput, SearchPageSummary,
-    SearchResultSummary, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary, SpaceProtectionSummary,
-    StorageStatsSummary, UnlockSpaceInput, UpdateMemberSyncPreferencesInput,
+    ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
+    EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
+    EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
+    JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary, LocalDeviceSummary,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MembershipConvergenceStateSummary,
+    MembershipConvergenceSummary, MigrationPhaseSummary, MigrationProgressSummary, Operation,
+    OperationKind, OperationResult, QueryHistoryInput, QueryLegacyBootstrapInput,
+    QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    ResendEntryInput, SearchEntriesInput, SearchPageSummary, SearchResultSummary, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput, SetupInvitationSummary, SetupStateSummary,
+    SpaceProtectionModeSummary, SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
+    UpdateMemberSyncPreferencesInput,
 };
 
 #[test]
@@ -129,21 +129,8 @@ fn every_public_operation_has_a_stable_kind() {
             OperationKind::RemoveMember,
         ),
         (
-            Operation::SecureRemoveLegacyMember(RemoveMemberInput {
-                device_id: "member-1".into(),
-            }),
-            OperationKind::SecureRemoveLegacyMember,
-        ),
-        (
-            Operation::QueryCurrentMemberRevocation,
-            OperationKind::QueryCurrentMemberRevocation,
-        ),
-        (
-            Operation::ContinueMemberRevocation(ContinueMemberRevocationInput {
-                revocation_id: "revocation-a".into(),
-                permanently_lost_device_ids: vec!["member-2".into()],
-            }),
-            OperationKind::ContinueMemberRevocation,
+            Operation::QueryMemberRemoval,
+            OperationKind::QueryMemberRemoval,
         ),
         (
             Operation::QueryLegacyBootstrap(QueryLegacyBootstrapInput {
@@ -1305,25 +1292,24 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
     assert!(format!("{preferences:?}").contains("member_sync_preferences"));
     assert!(format!(
         "{:?}",
-        OperationResult::MemberRemoved(uc_engine::MemberRevocationSummary {
-            revocation_id: Some("revocation-a".into()),
-            outcome: uc_engine::MemberRevocationOutcome::Applied,
-            pending_recipients: 1,
-            removed_device_ids: vec!["dev-removed".into()],
-            pending_recipient_device_ids: vec!["dev-waiting".into()],
+        OperationResult::MemberRemoved(uc_engine::MemberRemovalSummary {
+            phase: uc_engine::MemberRemovalPhase::Applied,
+            intent_count: 1,
+            effective_member_count: 2,
+            convergence_digest: None,
             updated_at_ms: 123,
         })
     )
     .contains("member_removed"));
     assert!(format!(
         "{:?}",
-        OperationResult::LegacyMemberRemoval(LegacyBootstrapSummary {
+        OperationResult::LegacyBootstrapStatus(Some(LegacyBootstrapSummary {
             bootstrap_id: "bootstrap-a".into(),
             outcome: LegacyBootstrapOutcome::AwaitingReadmission,
             pending_readmission: 1,
-        })
+        }))
     )
-    .contains("legacy_member_removal"));
+    .contains("legacy_bootstrap_status"));
     assert!(format!(
         "{:?}",
         OperationResult::SpaceProtection(SpaceProtectionSummary {
@@ -1613,17 +1599,16 @@ fn lagged_consumers_receive_a_refresh_event() {
 }
 
 #[test]
-fn member_revocation_changes_expose_a_full_replacement_snapshot() {
-    let event = EngineEvent::MemberRevocationChanged(uc_engine::MemberRevocationSummary {
-        revocation_id: Some("revocation-a".into()),
-        outcome: uc_engine::MemberRevocationOutcome::Applied,
-        pending_recipients: 1,
-        removed_device_ids: vec!["dev-removed".into()],
-        pending_recipient_device_ids: vec!["dev-waiting".into()],
+fn member_removal_changes_expose_a_full_replacement_snapshot() {
+    let event = EngineEvent::MemberRemovalChanged(uc_engine::MemberRemovalSummary {
+        phase: uc_engine::MemberRemovalPhase::Applied,
+        intent_count: 1,
+        effective_member_count: 2,
+        convergence_digest: None,
         updated_at_ms: 123,
     });
 
-    assert_eq!(event.kind(), "member_revocation_changed");
+    assert_eq!(event.kind(), "member_removal_changed");
 }
 
 #[test]

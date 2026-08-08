@@ -5,19 +5,19 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    ClipboardRestoreMode, ClipboardRestoreOutcome, ContinueMemberRevocationInput, CreateSpaceInput,
-    Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput,
-    HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation, OperationResult,
-    OperationTerminal, QueryMemberRevocationInput, QuerySharedDeviceRefreshInput,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
-    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
+    EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
+    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
+    QuerySharedDeviceRefreshInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
+    SendTextInput,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhLocalDevice, OhMemberRevocation, OhMembershipConvergence, OhNetworkRecoveryStatus,
-    OhSendReport, OhSessionRecovery, OhSharedDeviceRefresh, OhSharedDeviceRefreshDevice,
+    OhLocalDevice, OhMemberRemoval, OhMembershipConvergence, OhNetworkRecoveryStatus, OhSendReport,
+    OhSessionRecovery, OhSharedDeviceRefresh, OhSharedDeviceRefreshDevice,
     OhSharedDeviceRefreshStarted, OhSpaceCreated, OhSpaceJoined,
 };
 
@@ -190,71 +190,27 @@ impl OhEngine {
     }
 
     #[napi]
-    pub async fn remove_member(&self, device_id: String) -> napi::Result<OhMemberRevocation> {
+    pub async fn remove_member(&self, device_id: String) -> napi::Result<OhMemberRemoval> {
         let result = self
             .engine
             .execute(Operation::RemoveMember(RemoveMemberInput { device_id }))
             .await
             .map_err(engine_error)?;
         match result {
-            OperationResult::MemberRemoved(summary) => Ok(member_revocation(summary)),
+            OperationResult::MemberRemoved(summary) => member_removal(summary),
             _ => Err(unexpected_result()),
         }
     }
 
     #[napi]
-    pub async fn query_member_revocation(
-        &self,
-        revocation_id: String,
-    ) -> napi::Result<Option<OhMemberRevocation>> {
+    pub async fn query_member_removal(&self) -> napi::Result<OhMemberRemoval> {
         let result = self
             .engine
-            .execute(Operation::QueryMemberRevocation(
-                QueryMemberRevocationInput { revocation_id },
-            ))
+            .execute(Operation::QueryMemberRemoval)
             .await
             .map_err(engine_error)?;
         match result {
-            OperationResult::MemberRevocationStatus(summary) => Ok(summary.map(member_revocation)),
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn query_current_member_revocation(
-        &self,
-    ) -> napi::Result<Option<OhMemberRevocation>> {
-        let result = self
-            .engine
-            .execute(Operation::QueryCurrentMemberRevocation)
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::MemberRevocationStatus(summary) => Ok(summary.map(member_revocation)),
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn continue_member_revocation(
-        &self,
-        revocation_id: String,
-        permanently_lost_device_ids: Vec<String>,
-    ) -> napi::Result<OhMemberRevocation> {
-        let result = self
-            .engine
-            .execute(Operation::ContinueMemberRevocation(
-                ContinueMemberRevocationInput {
-                    revocation_id,
-                    permanently_lost_device_ids,
-                },
-            ))
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::MemberRevocationStatus(Some(summary)) => {
-                Ok(member_revocation(summary))
-            }
+            OperationResult::MemberRemovalStatus(summary) => member_removal(summary),
             _ => Err(unexpected_result()),
         }
     }
@@ -509,22 +465,20 @@ impl OhEngine {
     }
 }
 
-fn member_revocation(summary: uc_engine::MemberRevocationSummary) -> OhMemberRevocation {
-    OhMemberRevocation {
-        revocation_id: summary.revocation_id,
-        outcome: match summary.outcome {
-            uc_engine::MemberRevocationOutcome::LocalOnly => "local_only",
-            uc_engine::MemberRevocationOutcome::Recovering => "recovering",
-            uc_engine::MemberRevocationOutcome::Applied => "applied",
-            uc_engine::MemberRevocationOutcome::Complete => "complete",
-            uc_engine::MemberRevocationOutcome::RecoveryRequired => "recovery_required",
+fn member_removal(summary: uc_engine::MemberRemovalSummary) -> napi::Result<OhMemberRemoval> {
+    Ok(OhMemberRemoval {
+        phase: match summary.phase {
+            uc_engine::MemberRemovalPhase::Applied => "applied",
+            uc_engine::MemberRemovalPhase::Converging => "converging",
+            uc_engine::MemberRemovalPhase::Complete => "complete",
+            uc_engine::MemberRemovalPhase::RecoveryRequired => "recovery_required",
         }
         .to_owned(),
-        pending_recipients: u32::try_from(summary.pending_recipients).unwrap_or(u32::MAX),
-        removed_device_ids: summary.removed_device_ids,
-        pending_recipient_device_ids: summary.pending_recipient_device_ids,
+        intent_count: count_u64(summary.intent_count)?,
+        effective_member_count: count_u64(summary.effective_member_count)?,
+        convergence_digest: summary.convergence_digest,
         updated_at_ms: summary.updated_at_ms as f64,
-    }
+    })
 }
 
 fn engine_error(error: EngineError) -> napi::Error {
@@ -658,7 +612,7 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         error_code: None,
         error_category: None,
         retryable: None,
-        member_revocation: None,
+        member_removal: None,
         shared_device_refresh: None,
         network_recovery_phase: None,
         next_retry_in_ms: None,
@@ -686,8 +640,8 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
             map_event_error(error, &mut mapped);
         }
         EngineEvent::Fatal { error } => map_event_error(error, &mut mapped),
-        EngineEvent::MemberRevocationChanged(summary) => {
-            mapped.member_revocation = Some(member_revocation(summary));
+        EngineEvent::MemberRemovalChanged(summary) => {
+            mapped.member_removal = member_removal(summary).ok();
         }
         EngineEvent::SharedDeviceRefreshChanged(summary) => {
             mapped.shared_device_refresh = shared_device_refresh(summary).ok();
@@ -763,42 +717,24 @@ mod tests {
     use super::{count, map_event, membership_convergence};
 
     #[test]
-    fn member_revocation_event_keeps_the_complete_snapshot() {
-        let event = map_event(EngineEvent::MemberRevocationChanged(
-            uc_engine::MemberRevocationSummary {
-                revocation_id: Some("revocation-1".into()),
-                outcome: uc_engine::MemberRevocationOutcome::Applied,
-                pending_recipients: 1,
-                removed_device_ids: vec!["removed-1".into()],
-                pending_recipient_device_ids: vec!["waiting-1".into()],
+    fn member_removal_event_keeps_the_complete_snapshot() {
+        let event = map_event(EngineEvent::MemberRemovalChanged(
+            uc_engine::MemberRemovalSummary {
+                phase: uc_engine::MemberRemovalPhase::Converging,
+                intent_count: 2,
+                effective_member_count: 1,
+                convergence_digest: Some("digest-1".into()),
                 updated_at_ms: 42,
             },
         ));
 
-        assert_eq!(event.kind, "member_revocation_changed");
-        let revocation = event.member_revocation.unwrap();
-        assert_eq!(revocation.revocation_id.as_deref(), Some("revocation-1"));
-        assert_eq!(revocation.outcome, "applied");
-        assert_eq!(revocation.pending_recipients, 1);
-        assert_eq!(revocation.removed_device_ids, ["removed-1"]);
-        assert_eq!(revocation.pending_recipient_device_ids, ["waiting-1"]);
-        assert_eq!(revocation.updated_at_ms, 42.0);
-    }
-
-    #[test]
-    fn recovering_member_revocation_survives_the_harmony_binding() {
-        let event = map_event(EngineEvent::MemberRevocationChanged(
-            uc_engine::MemberRevocationSummary {
-                revocation_id: Some("revocation-prepared".into()),
-                outcome: uc_engine::MemberRevocationOutcome::Recovering,
-                pending_recipients: 0,
-                removed_device_ids: vec!["removed-1".into()],
-                pending_recipient_device_ids: Vec::new(),
-                updated_at_ms: 42,
-            },
-        ));
-
-        assert_eq!(event.member_revocation.unwrap().outcome, "recovering");
+        assert_eq!(event.kind, "member_removal_changed");
+        let removal = event.member_removal.unwrap();
+        assert_eq!(removal.phase, "converging");
+        assert_eq!(removal.intent_count, 2);
+        assert_eq!(removal.effective_member_count, 1);
+        assert_eq!(removal.convergence_digest.as_deref(), Some("digest-1"));
+        assert_eq!(removal.updated_at_ms, 42.0);
     }
 
     #[test]

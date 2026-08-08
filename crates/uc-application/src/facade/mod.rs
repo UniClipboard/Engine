@@ -151,9 +151,9 @@ pub use resource::{
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
     LegacyBootstrapState, LegacyBootstrapView, MemberProtectionStatusView, MemberProtectionView,
-    MemberRevocationState, MemberRevocationView, MemberRosterDeps, MemberRosterFacade,
-    MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
-    PresenceEvent, RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
+    MemberRemovalPhaseView, MemberRemovalView, MemberRosterDeps, MemberRosterFacade, MemberSummary,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView, PresenceEvent,
+    RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{
     map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,

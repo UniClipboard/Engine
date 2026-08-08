@@ -148,6 +148,9 @@ pub enum PairingRejectReason {
     /// Sponsor: incoming code didn't match any pending invitation (stale
     /// rendezvous entry or attacker replay).
     InvitationMismatch,
+    /// Sponsor: this space currently cannot admit a member. The reason is
+    /// intentionally not exposed on the pairing channel.
+    AdmissionUnavailable,
     /// Sponsor: joiner's challenge response didn't decrypt — wrong
     /// passphrase.
     PassphraseMismatch,

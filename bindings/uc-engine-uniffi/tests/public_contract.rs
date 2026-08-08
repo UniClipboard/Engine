@@ -555,19 +555,11 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
 
     let remove = engine.remove_member("missing-device".to_owned());
     assert!(matches!(remove, Err(BindingError::Engine { .. })));
-    assert_eq!(
-        engine
-            .query_current_member_revocation()
-            .expect("binding must query the current member removal"),
-        None
-    );
-    assert!(matches!(
-        engine.continue_member_revocation(
-            "missing-revocation".to_owned(),
-            vec!["missing-device".to_owned()],
-        ),
-        Err(BindingError::Engine { .. })
-    ));
+    let removal = engine
+        .query_member_removal()
+        .expect("binding must query the current member removal");
+    assert_eq!(removal.intent_count, 0);
+    assert_eq!(removal.effective_member_count, 1);
 
     engine
         .leave_space()

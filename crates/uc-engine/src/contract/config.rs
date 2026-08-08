@@ -13,6 +13,9 @@ pub struct EngineConfig {
     #[cfg(feature = "dev-tools")]
     #[serde(skip)]
     rendezvous_base_url: Option<String>,
+    #[cfg(feature = "dev-tools")]
+    #[serde(skip)]
+    test_relay_fallback: Option<bool>,
 }
 
 impl EngineConfig {
@@ -23,6 +26,8 @@ impl EngineConfig {
             portable_storage: false,
             #[cfg(feature = "dev-tools")]
             rendezvous_base_url: None,
+            #[cfg(feature = "dev-tools")]
+            test_relay_fallback: None,
         }
     }
 
@@ -54,10 +59,27 @@ impl EngineConfig {
         self
     }
 
+    #[cfg(feature = "dev-tools")]
+    pub fn with_test_relay_fallback(mut self, allow_relay_fallback: bool) -> Self {
+        self.test_relay_fallback = Some(allow_relay_fallback);
+        self
+    }
+
     pub(crate) fn rendezvous_base_url_override(&self) -> Option<String> {
         #[cfg(feature = "dev-tools")]
         {
             return self.rendezvous_base_url.clone();
+        }
+        #[cfg(not(feature = "dev-tools"))]
+        {
+            None
+        }
+    }
+
+    pub(crate) fn test_relay_fallback_override(&self) -> Option<bool> {
+        #[cfg(feature = "dev-tools")]
+        {
+            return self.test_relay_fallback;
         }
         #[cfg(not(feature = "dev-tools"))]
         {
@@ -77,6 +99,11 @@ impl fmt::Debug for EngineConfig {
         debug.field(
             "has_rendezvous_override",
             &self.rendezvous_base_url.is_some(),
+        );
+        #[cfg(feature = "dev-tools")]
+        debug.field(
+            "has_test_relay_fallback_override",
+            &self.test_relay_fallback.is_some(),
         );
         debug.finish()
     }

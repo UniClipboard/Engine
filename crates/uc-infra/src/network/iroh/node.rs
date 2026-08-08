@@ -36,9 +36,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    CurrentMemberSignaturePort, GroupRevocationPort, GroupUpdateDispatchPort,
-    LegacyUpgradeEndpointPort, MemberRepositoryPort, MembershipAttestationEndpointPort,
-    PeerAdmissionPort,
+    CurrentMemberSignaturePort, CurrentMembershipIdentityPort, GroupRevocationPort,
+    GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
+    MembershipAttestationEndpointPort, PeerAdmissionPort, RemovalExchangeEndpointPort,
+    RemovalLateSubmissionEndpointPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
@@ -79,6 +80,9 @@ use super::membership_attestation_adapter::{
 use super::net_recovery::DemandRecoveryCoordinator;
 use super::net_recovery::NetworkRecoveryObservationSource;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
+use super::removal_exchange_adapter::{
+    IrohRemovalExchangeAdapter, REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN,
+};
 use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
 };
@@ -981,6 +985,31 @@ impl IrohNodeBuilder {
         Ok(GroupUpdateHandlers { dispatch: adapter })
     }
 
+    pub fn install_member_removal(
+        &mut self,
+        adapter: &IrohRemovalExchangeAdapter,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        exchange_endpoint: Arc<dyn RemovalExchangeEndpointPort>,
+        late_submission: Arc<dyn RemovalLateSubmissionEndpointPort>,
+    ) -> Result<(), IrohNodeError> {
+        let handlers = adapter.handlers(
+            member_repo,
+            peer_admission,
+            fingerprint_factory,
+            exchange_endpoint,
+            late_submission,
+        );
+        let builder = self.take_router_builder()?;
+        self.router_builder = Some(
+            builder
+                .accept(REMOVAL_EXCHANGE_ALPN, handlers.exchange)
+                .accept(REMOVAL_LATE_ALPN, handlers.late),
+        );
+        Ok(())
+    }
+
     pub fn build_legacy_upgrade_adapter(
         &self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
@@ -1014,18 +1043,43 @@ impl IrohNodeBuilder {
         signatures: Arc<dyn CurrentMemberSignaturePort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Arc<IrohMembershipAttestationAdapter> {
-        let identity = Arc::new(IrohMembershipIdentityAdapter::new(
-            Arc::clone(&self.endpoint),
+        let identity = self.build_membership_identity_adapter(
             session,
             device_identity,
             settings,
             Arc::clone(&fingerprint_factory),
-        ));
+        );
         Arc::new(IrohMembershipAttestationAdapter::new(
             Arc::clone(&self.endpoint),
             identity,
             signatures,
             fingerprint_factory,
+        ))
+    }
+
+    pub fn build_membership_identity_adapter(
+        &self,
+        session: Arc<InMemorySession>,
+        device_identity: Arc<dyn DeviceIdentityPort>,
+        settings: Arc<dyn SettingsPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    ) -> Arc<dyn CurrentMembershipIdentityPort> {
+        Arc::new(IrohMembershipIdentityAdapter::new(
+            Arc::clone(&self.endpoint),
+            session,
+            device_identity,
+            settings,
+            fingerprint_factory,
+        ))
+    }
+
+    pub fn build_member_removal_exchange_adapter(
+        &self,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    ) -> Arc<IrohRemovalExchangeAdapter> {
+        Arc::new(IrohRemovalExchangeAdapter::new(
+            Arc::clone(&self.endpoint),
+            peer_addr_repo,
         ))
     }
 

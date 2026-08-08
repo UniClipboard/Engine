@@ -19,7 +19,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// 超出该上限的输入在 `DeviceId::new` 与反序列化路径上被显式拒绝。
 pub const DEVICE_ID_MAX_BYTES: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceId(ArrayString<DEVICE_ID_MAX_BYTES>);
 
 impl std::fmt::Display for DeviceId {

@@ -127,32 +127,31 @@ fn ohos_probe_exposes_membership_convergence_from_the_engine() {
 }
 
 #[test]
-fn ohos_probe_exposes_the_complete_member_revocation_contract() {
+fn ohos_probe_exposes_the_complete_member_removal_contract() {
     let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
     let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
     let page = read("tests/hosts/ohos/entry/src/main/ets/pages/Index.ets");
 
     for method in [
-        "removeMember(deviceId: string): Promise<OhMemberRevocation>",
-        "queryCurrentMemberRevocation(): Promise<OhMemberRevocation | null>",
-        "continueMemberRevocation(",
+        "removeMember(deviceId: string): Promise<OhMemberRemoval>",
+        "queryMemberRemoval(): Promise<OhMemberRemoval>",
         "nextEvent(timeoutMs: number): Promise<OhEngineEvent | null>",
     ] {
         assert!(declarations.contains(method), "missing method: {method}");
     }
     for field in [
-        "removedDeviceIds: string[]",
-        "pendingRecipientDeviceIds: string[]",
+        "phase: 'applied' | 'converging' | 'complete' | 'recovery_required'",
+        "intentCount: number",
+        "effectiveMemberCount: number",
+        "convergenceDigest?: string",
         "updatedAtMs: number",
-        "memberRevocation?: OhMemberRevocation",
+        "memberRemoval?: OhMemberRemoval",
     ] {
         assert!(declarations.contains(field), "missing field: {field}");
     }
-    assert!(runtime.contains("active.queryCurrentMemberRevocation()"));
-    assert!(runtime
-        .contains("revocation.pendingRecipients !== revocation.pendingRecipientDeviceIds.length"));
-    assert!(runtime.contains("removedDeviceIds: revocation.removedDeviceIds"));
-    assert!(runtime.contains("updatedAtMs: revocation.updatedAtMs"));
+    assert!(runtime.contains("active.queryMemberRemoval()"));
+    assert!(runtime.contains("effectiveMemberCount: removal.effectiveMemberCount"));
+    assert!(runtime.contains("updatedAtMs: removal.updatedAtMs"));
     assert!(page.contains("snapshot.memberRemovalState"));
     assert!(page.contains("Button('Member removal')"));
     assert!(page.contains("Member removal query failed"));
