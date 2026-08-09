@@ -78,9 +78,10 @@ impl MembershipConvergence {
         let mut auto = self.auto_shared_device_refresh.lock().await;
         let already_tracked = match &auto.mode {
             AutoSharedDeviceRefreshMode::Pending { space_id }
-            | AutoSharedDeviceRefreshMode::WaitingForSourceOnline { space_id } => {
-                space_id == &state.space_id
-            }
+            | AutoSharedDeviceRefreshMode::WaitingForSourceOnline {
+                space_id,
+                unavailable_sources: _,
+            } => space_id == &state.space_id,
             AutoSharedDeviceRefreshMode::Idle => false,
         };
         if already_tracked {
@@ -109,12 +110,25 @@ impl MembershipConvergence {
         )
     }
 
-    pub(super) async fn promote_auto_shared_device_refresh_to_pending(&self) {
+    pub(super) async fn promote_auto_shared_device_refresh_to_pending(
+        &self,
+        online_device: &uc_core::ids::DeviceId,
+    ) {
         let mut auto = self.auto_shared_device_refresh.lock().await;
-        if let AutoSharedDeviceRefreshMode::WaitingForSourceOnline { space_id } = &auto.mode {
-            auto.mode = AutoSharedDeviceRefreshMode::Pending {
-                space_id: space_id.clone(),
-            };
+        if let AutoSharedDeviceRefreshMode::WaitingForSourceOnline {
+            space_id,
+            unavailable_sources,
+        } = &auto.mode
+        {
+            let should_retry = unavailable_sources
+                .as_ref()
+                .map(|sources| sources.iter().any(|source| source == online_device))
+                .unwrap_or(true);
+            if should_retry {
+                auto.mode = AutoSharedDeviceRefreshMode::Pending {
+                    space_id: space_id.clone(),
+                };
+            }
         }
     }
 
@@ -124,34 +138,44 @@ impl MembershipConvergence {
         auto.last_completed_at_ms = None;
     }
 
-    async fn complete_auto_shared_device_refresh(&self, space_id: &SpaceId) {
-        let sources_unavailable = {
-            let active = self.shared_device_refresh.lock().await;
-            active
-                .as_ref()
-                .filter(|refresh| refresh.space_id == *space_id)
-                .map(|refresh| refresh.status.unavailable_source_count > 0)
-                .unwrap_or(false)
-        };
+    async fn complete_auto_shared_device_refresh(
+        &self,
+        space_id: &SpaceId,
+        unavailable_sources: Option<Vec<uc_core::ids::DeviceId>>,
+    ) {
         let now_ms = self.deps.clock.now_ms();
         let mut auto = self.auto_shared_device_refresh.lock().await;
         let tracked = match &auto.mode {
             AutoSharedDeviceRefreshMode::Pending { space_id: current }
-            | AutoSharedDeviceRefreshMode::WaitingForSourceOnline { space_id: current } => {
-                current == space_id
-            }
+            | AutoSharedDeviceRefreshMode::WaitingForSourceOnline {
+                space_id: current, ..
+            } => current == space_id,
             AutoSharedDeviceRefreshMode::Idle => false,
         };
         if !tracked {
             return;
         }
-        if sources_unavailable {
-            auto.mode = AutoSharedDeviceRefreshMode::WaitingForSourceOnline {
-                space_id: space_id.clone(),
-            };
-        } else {
-            auto.mode = AutoSharedDeviceRefreshMode::Idle;
-            auto.last_completed_at_ms = Some(now_ms);
+        let sources_unavailable = match &unavailable_sources {
+            None => true,
+            Some(sources) => !sources.is_empty(),
+        };
+        match unavailable_sources {
+            None => {
+                auto.mode = AutoSharedDeviceRefreshMode::WaitingForSourceOnline {
+                    space_id: space_id.clone(),
+                    unavailable_sources: None,
+                };
+            }
+            Some(sources) if sources.is_empty() => {
+                auto.mode = AutoSharedDeviceRefreshMode::Idle;
+                auto.last_completed_at_ms = Some(now_ms);
+            }
+            Some(sources) => {
+                auto.mode = AutoSharedDeviceRefreshMode::WaitingForSourceOnline {
+                    space_id: space_id.clone(),
+                    unavailable_sources: Some(sources),
+                };
+            }
         }
         debug!(
             sources_unavailable,
@@ -302,7 +326,8 @@ impl MembershipConvergence {
             Err(_) => {
                 self.record_shared_device_refresh_source_unavailable(&request_id)
                     .await;
-                self.complete_auto_shared_device_refresh(&space_id).await;
+                self.complete_auto_shared_device_refresh(&space_id, None)
+                    .await;
                 self.set_shared_device_refresh_phase(
                     &request_id,
                     SharedDeviceRefreshPhase::RoundCompleted,
@@ -311,6 +336,10 @@ impl MembershipConvergence {
                 .await;
                 return;
             }
+        };
+        let mut unavailable_sources = Vec::new();
+        let mut record_unavailable_source = |source_device_id: &uc_core::ids::DeviceId| {
+            unavailable_sources.push(source_device_id.clone());
         };
 
         for source_device_id in sources {
@@ -343,6 +372,7 @@ impl MembershipConvergence {
                     _ => {
                         self.record_shared_device_refresh_source_unavailable(&request_id)
                             .await;
+                        record_unavailable_source(&source_device_id);
                         break;
                     }
                 };
@@ -354,6 +384,7 @@ impl MembershipConvergence {
                 }) {
                     self.record_shared_device_refresh_source_unavailable(&request_id)
                         .await;
+                    record_unavailable_source(&source_device_id);
                     break;
                 }
                 for seed in page.seeds {
@@ -377,13 +408,15 @@ impl MembershipConvergence {
                     Some(_) => {
                         self.record_shared_device_refresh_source_unavailable(&request_id)
                             .await;
+                        record_unavailable_source(&source_device_id);
                         break;
                     }
                     None => break,
                 }
             }
         }
-        self.complete_auto_shared_device_refresh(&space_id).await;
+        self.complete_auto_shared_device_refresh(&space_id, Some(unavailable_sources))
+            .await;
         self.set_shared_device_refresh_phase(
             &request_id,
             SharedDeviceRefreshPhase::RoundCompleted,

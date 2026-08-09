@@ -156,8 +156,15 @@ struct ActiveSharedDeviceRefresh {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AutoSharedDeviceRefreshMode {
     Idle,
-    Pending { space_id: SpaceId },
-    WaitingForSourceOnline { space_id: SpaceId },
+    Pending {
+        space_id: SpaceId,
+    },
+    WaitingForSourceOnline {
+        space_id: SpaceId,
+        /// `None` means the failed sources could not be determined; any
+        /// device coming online then re-triggers the round.
+        unavailable_sources: Option<Vec<uc_core::ids::DeviceId>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
