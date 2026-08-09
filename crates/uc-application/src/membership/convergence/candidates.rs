@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
-    CandidateFailure, CandidateMergeOutcome, MemberSyncPreferences,
+    CandidateEvent, CandidateFailure, CandidateMergeOutcome, MemberSyncPreferences,
     MembershipAttestationEndpointError, MembershipAttestationEndpointPort,
     MembershipAttestationError, RelayedSecurityUpdate, SpaceMember, SpaceMembershipCandidate,
     SponsorCandidateSeed, VerifiedMembershipPeer,
@@ -46,8 +46,8 @@ impl MembershipConvergence {
                     if candidate.identity_fingerprint_hint() != &member.identity_fingerprint {
                         return Err(MembershipConvergenceError::VerificationRejected);
                     }
-                    let outcome = candidate.merge_sponsor_seed(seed, now_ms)?;
-                    candidate.mark_ready(now_ms);
+                    let (outcome, _) = candidate.apply(CandidateEvent::Seed(seed), now_ms)?;
+                    let _ = candidate.apply(CandidateEvent::Admitted, now_ms)?;
                     self.deps.candidate_repo.save(&candidate).await?;
                     Ok(outcome)
                 }
@@ -59,11 +59,13 @@ impl MembershipConvergence {
         }
         match existing {
             Some(mut candidate) => {
-                let outcome = candidate.merge_sponsor_seed(seed, now_ms)?;
-                if should_persist_merge(outcome) {
+                let (outcome, effect) = candidate.apply(CandidateEvent::Seed(seed), now_ms)?;
+                if effect.persist {
                     self.deps.candidate_repo.save(&candidate).await?;
                 }
-                self.wake.notify_one();
+                if effect.wake_runtime {
+                    self.wake.notify_one();
+                }
                 Ok(outcome)
             }
             None => {
@@ -146,16 +148,19 @@ impl MembershipConvergence {
         let now_ms = self.deps.clock.now_ms();
         let candidates = self.deps.candidate_repo.list(space_id).await?;
         let mut reawakened = 0usize;
-        for mut candidate in candidates
-            .into_iter()
-            .filter(|candidate| candidate.status() == CandidateStatus::WaitingForUpdate)
-        {
-            candidate.reawaken_for_retry(now_ms);
-            self.deps.candidate_repo.save(&candidate).await?;
+        for mut candidate in candidates {
+            let (outcome, effect) =
+                candidate.apply(CandidateEvent::SecurityMaterialApplied, now_ms)?;
+            if outcome != CandidateMergeOutcome::Updated {
+                continue;
+            }
+            if effect.persist {
+                self.deps.candidate_repo.save(&candidate).await?;
+            }
+            if effect.wake_runtime {
+                self.wake.notify_one();
+            }
             reawakened = reawakened.saturating_add(1);
-        }
-        if reawakened > 0 {
-            self.wake.notify_one();
         }
         Ok(reawakened)
     }
@@ -173,7 +178,7 @@ impl MembershipConvergence {
             .get(space_id, device_id)
             .await?
             .ok_or(MembershipConvergenceError::CandidateNotFound)?;
-        candidate.mark_verifying(now_ms);
+        candidate.apply(CandidateEvent::Confirming, now_ms)?;
         self.deps.candidate_repo.save(&candidate).await?;
 
         let verified = match self.deps.attestation.attest_candidate(&candidate).await {
@@ -187,39 +192,64 @@ impl MembershipConvergence {
                 } else {
                     CandidateFailure::Transport
                 };
-                candidate.mark_waiting_for_peer(
-                    failure,
-                    next_candidate_retry_at(&candidate, now_ms),
+                candidate.apply(
+                    CandidateEvent::AttestationFailed {
+                        failure,
+                        retry_at_ms: Some(next_candidate_retry_at(&candidate, now_ms)),
+                    },
                     now_ms,
-                );
+                )?;
                 self.deps.candidate_repo.save(&candidate).await?;
                 return Err(MembershipConvergenceError::PeerUnavailable);
             }
             Err(MembershipAttestationError::MissingSecurityUpdate) => {
-                candidate
-                    .mark_waiting_for_update(next_candidate_retry_at(&candidate, now_ms), now_ms);
+                candidate.apply(
+                    CandidateEvent::AttestationFailed {
+                        failure: CandidateFailure::MissingSecurityUpdate,
+                        retry_at_ms: Some(next_candidate_retry_at(&candidate, now_ms)),
+                    },
+                    now_ms,
+                )?;
                 self.deps.candidate_repo.save(&candidate).await?;
                 return Err(MembershipConvergenceError::WaitingForUpdate);
             }
             Err(MembershipAttestationError::VersionIncompatible) => {
-                candidate.mark_waiting_for_peer(
-                    CandidateFailure::VersionIncompatible,
-                    next_candidate_retry_at(&candidate, now_ms),
+                candidate.apply(
+                    CandidateEvent::AttestationFailed {
+                        failure: CandidateFailure::VersionIncompatible,
+                        retry_at_ms: Some(next_candidate_retry_at(&candidate, now_ms)),
+                    },
                     now_ms,
-                );
+                )?;
                 self.deps.candidate_repo.save(&candidate).await?;
                 return Err(MembershipConvergenceError::PeerUnavailable);
             }
             Err(MembershipAttestationError::Rejected) => {
-                candidate.mark_rejected(CandidateFailure::InvalidProof, now_ms);
+                candidate.apply(
+                    CandidateEvent::AttestationFailed {
+                        failure: CandidateFailure::InvalidProof,
+                        retry_at_ms: None,
+                    },
+                    now_ms,
+                )?;
                 self.deps.candidate_repo.save(&candidate).await?;
                 return Err(MembershipConvergenceError::VerificationRejected);
             }
         };
 
-        let merge = candidate.apply_verified_peer(&verified, now_ms);
-        if !matches!(merge, Ok(CandidateMergeOutcome::Updated)) {
-            candidate.mark_rejected(CandidateFailure::InvalidProof, now_ms);
+        let outcome = match candidate.apply(CandidateEvent::VerifiedPeer(verified.clone()), now_ms)
+        {
+            Ok((outcome, _)) => outcome,
+            Err(_) => CandidateMergeOutcome::Unchanged,
+        };
+        if outcome != CandidateMergeOutcome::Updated {
+            candidate.apply(
+                CandidateEvent::AttestationFailed {
+                    failure: CandidateFailure::InvalidProof,
+                    retry_at_ms: None,
+                },
+                now_ms,
+            )?;
             self.deps.candidate_repo.save(&candidate).await?;
             return Err(MembershipConvergenceError::VerificationRejected);
         }
@@ -239,11 +269,12 @@ impl MembershipConvergence {
             .await?;
         let mut candidate = match existing {
             Some(mut candidate) => {
-                let merge = candidate.apply_verified_peer(&verified, now_ms)?;
-                if merge != CandidateMergeOutcome::Updated {
+                let (outcome, _) =
+                    candidate.apply(CandidateEvent::VerifiedPeer(verified.clone()), now_ms)?;
+                if outcome != CandidateMergeOutcome::Updated {
                     return Err(MembershipConvergenceError::VerificationRejected);
                 }
-                candidate.mark_verifying(now_ms);
+                candidate.apply(CandidateEvent::Confirming, now_ms)?;
                 candidate
             }
             None => SpaceMembershipCandidate::from_verified_peer(
@@ -285,7 +316,7 @@ impl MembershipConvergence {
             joined_at: observed_at,
             sync_preferences: MemberSyncPreferences::default(),
         };
-        candidate.mark_ready(now_ms);
+        candidate.apply(CandidateEvent::Admitted, now_ms)?;
         self.deps
             .verified_peer_promotion
             .promote_verified_peer(&member, &trusted_peer, &address, candidate)

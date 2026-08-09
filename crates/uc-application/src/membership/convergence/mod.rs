@@ -6,7 +6,7 @@ use tokio::sync::{broadcast, Notify};
 use tracing::{info, warn};
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
-    CandidateFailure, CandidateMergeError, CandidateMergeOutcome, CandidateStatus,
+    CandidateEvent, CandidateFailure, CandidateMergeError, CandidateMergeOutcome, CandidateStatus,
     CurrentMemberSignaturePort, CurrentMembershipAnnouncementPort, CurrentMembershipIdentityError,
     DeviceAnnouncement, MemberRepositoryPort, MembershipAnnouncementRepositoryError,
     MembershipAnnouncementRepositoryPort, MembershipAttestationPort,
@@ -485,16 +485,6 @@ impl MembershipConvergence {
         let scheduled = Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX));
         scheduled.max(MIN_SCHEDULED_RECONCILE_DELAY).min(fallback)
     }
-}
-
-fn should_persist_merge(outcome: CandidateMergeOutcome) -> bool {
-    matches!(
-        outcome,
-        CandidateMergeOutcome::Updated
-            | CandidateMergeOutcome::IdentityConflict
-            | CandidateMergeOutcome::AnnouncementConflict
-            | CandidateMergeOutcome::SecurityHistoryConflict
-    )
 }
 
 fn gossip_reconcile_delay(device_id: &uc_core::ids::DeviceId) -> Duration {

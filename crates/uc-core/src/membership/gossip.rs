@@ -43,6 +43,63 @@ pub enum CandidateSource {
     DirectAttestation,
 }
 
+/// An event that advances the candidate state machine.
+///
+/// All candidate transitions go through
+/// [`SpaceMembershipCandidate::apply`]; events are the only way to change
+/// state, so the state graph stays visible in one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateEvent {
+    /// A sponsor-provided seed for this candidate.
+    Seed(SponsorCandidateSeed),
+    /// A verified announcement for this candidate.
+    VerifiedAnnouncement(DeviceAnnouncement),
+    /// Attestation succeeded and returned verified peer material.
+    VerifiedPeer(VerifiedMembershipPeer),
+    /// A direct attestation attempt started.
+    Confirming,
+    /// A direct attestation attempt failed.
+    ///
+    /// `retry_at_ms` carries the next retry deadline when the failure is
+    /// retryable; `None` marks a terminal rejection.
+    AttestationFailed {
+        failure: CandidateFailure,
+        retry_at_ms: Option<i64>,
+    },
+    /// Previously missing security material was applied to the space.
+    SecurityMaterialApplied,
+    /// The candidate was admitted into the member roster.
+    Admitted,
+}
+
+/// Side effects a transition asks the caller to perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateEffect {
+    /// The caller should persist the candidate.
+    pub persist: bool,
+    /// The caller should wake the convergence runtime.
+    pub wake_runtime: bool,
+}
+
+impl CandidateEffect {
+    pub const NONE: Self = Self {
+        persist: false,
+        wake_runtime: false,
+    };
+    pub const PERSIST: Self = Self {
+        persist: true,
+        wake_runtime: false,
+    };
+    pub const WAKE_RUNTIME: Self = Self {
+        persist: false,
+        wake_runtime: true,
+    };
+    pub const PERSIST_AND_WAKE: Self = Self {
+        persist: true,
+        wake_runtime: true,
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayedSecurityUpdate {
     pub previous_epoch: u64,
@@ -550,7 +607,7 @@ impl SpaceMembershipCandidate {
         })
     }
 
-    pub fn merge_sponsor_seed(
+    fn merge_sponsor_seed(
         &mut self,
         seed: SponsorCandidateSeed,
         now_ms: i64,
@@ -620,7 +677,7 @@ impl SpaceMembershipCandidate {
         }
     }
 
-    pub fn merge_verified_announcement(
+    fn merge_verified_announcement(
         &mut self,
         announcement: DeviceAnnouncement,
         now_ms: i64,
@@ -687,7 +744,7 @@ impl SpaceMembershipCandidate {
         self.updated_at_ms = now_ms;
     }
 
-    pub fn mark_waiting_for_peer(
+    fn mark_waiting_for_peer(
         &mut self,
         failure: CandidateFailure,
         next_attempt_at_ms: i64,
@@ -700,7 +757,7 @@ impl SpaceMembershipCandidate {
         self.updated_at_ms = now_ms;
     }
 
-    pub fn mark_waiting_for_update(&mut self, next_attempt_at_ms: i64, now_ms: i64) {
+    fn mark_waiting_for_update(&mut self, next_attempt_at_ms: i64, now_ms: i64) {
         self.status = CandidateStatus::WaitingForUpdate;
         self.last_failure = Some(CandidateFailure::MissingSecurityUpdate);
         self.next_attempt_at_ms = Some(next_attempt_at_ms);
@@ -709,45 +766,41 @@ impl SpaceMembershipCandidate {
 
     /// Return a `WaitingForUpdate` candidate to the retry queue.
     ///
-    /// No-op for any other status. The candidate becomes retryable
-    /// immediately, so a reconcile pass picks it up as soon as the
-    /// previously missing security material has arrived.
-    pub fn reawaken_for_retry(&mut self, now_ms: i64) {
+    /// No-op for any other status and reports whether the candidate was
+    /// moved back into the retry queue.
+    fn reawaken_for_retry(&mut self, now_ms: i64) -> bool {
         if self.status != CandidateStatus::WaitingForUpdate {
-            return;
+            return false;
         }
         self.status = CandidateStatus::Pending;
         self.last_failure = None;
         self.next_attempt_at_ms = Some(now_ms);
         self.updated_at_ms = now_ms;
+        true
     }
 
-    pub fn mark_verifying(&mut self, now_ms: i64) {
+    fn mark_verifying(&mut self, now_ms: i64) {
         self.status = CandidateStatus::Verifying;
         self.last_failure = None;
         self.next_attempt_at_ms = None;
         self.updated_at_ms = now_ms;
     }
 
-    pub fn mark_ready(&mut self, now_ms: i64) {
+    fn mark_ready(&mut self, now_ms: i64) {
         self.status = CandidateStatus::Ready;
         self.last_failure = None;
         self.next_attempt_at_ms = None;
         self.updated_at_ms = now_ms;
     }
 
-    pub fn mark_rejected(&mut self, failure: CandidateFailure, now_ms: i64) {
+    fn mark_rejected(&mut self, failure: CandidateFailure, now_ms: i64) {
         self.status = CandidateStatus::Rejected;
         self.last_failure = Some(failure);
         self.next_attempt_at_ms = None;
         self.updated_at_ms = now_ms;
     }
 
-    pub fn mark_blocked(&mut self, failure: CandidateFailure, now_ms: i64) {
-        self.block(failure, now_ms);
-    }
-
-    pub fn apply_verified_peer(
+    fn apply_verified_peer(
         &mut self,
         peer: &VerifiedMembershipPeer,
         now_ms: i64,
@@ -773,10 +826,97 @@ impl SpaceMembershipCandidate {
         Ok(CandidateMergeOutcome::Updated)
     }
 
+    /// Advance the candidate state machine with `event`.
+    ///
+    /// The returned outcome describes how the incoming material compared
+    /// with what the candidate already knew; the returned effect tells the
+    /// caller which side effects to perform (persist the candidate, wake
+    /// the convergence runtime, or both). Constructing a brand new
+    /// candidate is done with the `from_*` constructors instead.
+    pub fn apply(
+        &mut self,
+        event: CandidateEvent,
+        now_ms: i64,
+    ) -> Result<(CandidateMergeOutcome, CandidateEffect), CandidateMergeError> {
+        match event {
+            CandidateEvent::Seed(seed) => {
+                let outcome = self.merge_sponsor_seed(seed, now_ms)?;
+                let effect = CandidateEffect {
+                    persist: should_persist_merge(outcome),
+                    wake_runtime: true,
+                };
+                Ok((outcome, effect))
+            }
+            CandidateEvent::VerifiedAnnouncement(announcement) => {
+                let outcome = self.merge_verified_announcement(announcement, now_ms)?;
+                let effect = CandidateEffect {
+                    persist: should_persist_merge(outcome),
+                    wake_runtime: false,
+                };
+                Ok((outcome, effect))
+            }
+            CandidateEvent::VerifiedPeer(peer) => {
+                let outcome = self.apply_verified_peer(&peer, now_ms)?;
+                Ok((outcome, CandidateEffect::PERSIST))
+            }
+            CandidateEvent::Confirming => {
+                if self.is_terminal() {
+                    return Ok((CandidateMergeOutcome::Unchanged, CandidateEffect::NONE));
+                }
+                self.mark_verifying(now_ms);
+                Ok((CandidateMergeOutcome::Updated, CandidateEffect::PERSIST))
+            }
+            CandidateEvent::AttestationFailed {
+                failure,
+                retry_at_ms,
+            } => {
+                if self.is_terminal() {
+                    return Ok((CandidateMergeOutcome::Unchanged, CandidateEffect::NONE));
+                }
+                let retry_at = retry_at_ms.unwrap_or(now_ms);
+                match failure {
+                    CandidateFailure::MissingSecurityUpdate => {
+                        self.mark_waiting_for_update(retry_at, now_ms);
+                    }
+                    CandidateFailure::InvalidProof => {
+                        self.mark_rejected(failure, now_ms);
+                    }
+                    failure => {
+                        self.mark_waiting_for_peer(failure, retry_at, now_ms);
+                    }
+                }
+                Ok((CandidateMergeOutcome::Updated, CandidateEffect::PERSIST))
+            }
+            CandidateEvent::SecurityMaterialApplied => {
+                if self.reawaken_for_retry(now_ms) {
+                    Ok((
+                        CandidateMergeOutcome::Updated,
+                        CandidateEffect::PERSIST_AND_WAKE,
+                    ))
+                } else {
+                    Ok((CandidateMergeOutcome::Unchanged, CandidateEffect::NONE))
+                }
+            }
+            CandidateEvent::Admitted => {
+                if self.is_terminal() {
+                    return Ok((CandidateMergeOutcome::Unchanged, CandidateEffect::NONE));
+                }
+                self.mark_ready(now_ms);
+                Ok((CandidateMergeOutcome::Updated, CandidateEffect::PERSIST))
+            }
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            CandidateStatus::Blocked | CandidateStatus::Rejected
+        )
+    }
+
     pub fn space_id(&self) -> &SpaceId {
         &self.space_id
     }
-
     pub fn device_id(&self) -> &DeviceId {
         &self.device_id
     }
@@ -850,6 +990,16 @@ fn validate_seed(seed: &SponsorCandidateSeed, now_ms: i64) -> Result<(), Candida
     seed.validate_transfer_bounds()?;
     validate_expiry(seed.expires_at_ms, now_ms)?;
     Ok(())
+}
+
+fn should_persist_merge(outcome: CandidateMergeOutcome) -> bool {
+    matches!(
+        outcome,
+        CandidateMergeOutcome::Updated
+            | CandidateMergeOutcome::IdentityConflict
+            | CandidateMergeOutcome::AnnouncementConflict
+            | CandidateMergeOutcome::SecurityHistoryConflict
+    )
 }
 
 fn estimated_seed_transfer_bytes(seed: &SponsorCandidateSeed) -> usize {
@@ -940,12 +1090,13 @@ mod tests {
     use crate::security::IdentityFingerprint;
 
     use super::{
-        CandidateFailure, CandidateMergeError, CandidateMergeOutcome, CandidateSource,
-        CandidateStatus, DeviceAnnouncement, MembershipAnnouncementVersion, MembershipDigest,
-        MembershipEvent, MembershipEventBatch, MembershipGossipBoundsError,
-        MembershipGossipMessage, MembershipRequestMissing, MembershipSharedDevicePage,
-        MembershipSharedDevicePageRequest, PendingMembershipBatch, RelayedSecurityUpdate,
-        SpaceMembershipCandidate, SponsorCandidateSeed, MAX_GOSSIP_MESSAGE_BYTES,
+        CandidateEffect, CandidateEvent, CandidateFailure, CandidateMergeError,
+        CandidateMergeOutcome, CandidateSource, CandidateStatus, DeviceAnnouncement,
+        MembershipAnnouncementVersion, MembershipDigest, MembershipEvent, MembershipEventBatch,
+        MembershipGossipBoundsError, MembershipGossipMessage, MembershipRequestMissing,
+        MembershipSharedDevicePage, MembershipSharedDevicePageRequest, PendingMembershipBatch,
+        RelayedSecurityUpdate, SpaceMembershipCandidate, SponsorCandidateSeed,
+        VerifiedMembershipPeer, MAX_GOSSIP_MESSAGE_BYTES,
     };
 
     fn fingerprint(raw: &str) -> IdentityFingerprint {
@@ -1145,13 +1296,19 @@ mod tests {
         let mut candidate = SpaceMembershipCandidate::from_sponsor_seed(seed(200), 1_000).unwrap();
 
         assert_eq!(
-            candidate.merge_sponsor_seed(seed(200), 1_100).unwrap(),
+            candidate
+                .apply(CandidateEvent::Seed(seed(200)), 1_100)
+                .unwrap()
+                .0,
             CandidateMergeOutcome::Unchanged
         );
         let mut older = seed(199);
         older.transport_address_blob = b"stale-address".to_vec();
         assert_eq!(
-            candidate.merge_sponsor_seed(older, 1_200).unwrap(),
+            candidate
+                .apply(CandidateEvent::Seed(older), 1_200)
+                .unwrap()
+                .0,
             CandidateMergeOutcome::Stale
         );
         assert_eq!(candidate.transport_address_blob(), b"address-v1");
@@ -1170,7 +1327,10 @@ mod tests {
         });
 
         assert_eq!(
-            candidate.merge_sponsor_seed(newer, 1_100).unwrap(),
+            candidate
+                .apply(CandidateEvent::Seed(newer), 1_100)
+                .unwrap()
+                .0,
             CandidateMergeOutcome::Updated
         );
         assert_eq!(candidate.transport_address_blob(), b"address-v2");
@@ -1184,7 +1344,10 @@ mod tests {
         conflict.identity_fingerprint_hint = fingerprint("CONFLICTFP000001");
 
         assert_eq!(
-            candidate.merge_sponsor_seed(conflict, 1_100).unwrap(),
+            candidate
+                .apply(CandidateEvent::Seed(conflict), 1_100)
+                .unwrap()
+                .0,
             CandidateMergeOutcome::IdentityConflict
         );
         assert_eq!(candidate.status(), CandidateStatus::Blocked);
@@ -1212,8 +1375,12 @@ mod tests {
 
         assert_eq!(
             candidate
-                .merge_verified_announcement(announcement(8, 8), 1_100)
-                .unwrap(),
+                .apply(
+                    CandidateEvent::VerifiedAnnouncement(announcement(8, 8)),
+                    1_100,
+                )
+                .unwrap()
+                .0,
             CandidateMergeOutcome::Updated
         );
         assert_eq!(candidate.announcement_sequence(), Some(8));
@@ -1221,8 +1388,12 @@ mod tests {
 
         assert_eq!(
             candidate
-                .merge_verified_announcement(announcement(7, 7), 1_200)
-                .unwrap(),
+                .apply(
+                    CandidateEvent::VerifiedAnnouncement(announcement(7, 7)),
+                    1_200,
+                )
+                .unwrap()
+                .0,
             CandidateMergeOutcome::Stale
         );
         assert_eq!(candidate.announcement_sequence(), Some(8));
@@ -1232,15 +1403,156 @@ mod tests {
     fn same_announcement_sequence_with_different_content_blocks_candidate() {
         let mut candidate = SpaceMembershipCandidate::from_sponsor_seed(seed(100), 1_000).unwrap();
         candidate
-            .merge_verified_announcement(announcement(8, 8), 1_100)
+            .apply(
+                CandidateEvent::VerifiedAnnouncement(announcement(8, 8)),
+                1_100,
+            )
             .unwrap();
 
         assert_eq!(
             candidate
-                .merge_verified_announcement(announcement(8, 9), 1_200)
-                .unwrap(),
+                .apply(
+                    CandidateEvent::VerifiedAnnouncement(announcement(8, 9)),
+                    1_200,
+                )
+                .unwrap()
+                .0,
             CandidateMergeOutcome::AnnouncementConflict
         );
+        assert_eq!(candidate.status(), CandidateStatus::Blocked);
+    }
+
+    #[test]
+    fn attestation_failures_map_to_waiting_states_with_backoff() {
+        let mut candidate = SpaceMembershipCandidate::from_sponsor_seed(seed(100), 1_000).unwrap();
+        let (outcome, effect) = candidate
+            .apply(
+                CandidateEvent::AttestationFailed {
+                    failure: CandidateFailure::PeerOffline,
+                    retry_at_ms: Some(31_000),
+                },
+                1_100,
+            )
+            .unwrap();
+        assert_eq!(outcome, CandidateMergeOutcome::Updated);
+        assert_eq!(effect, CandidateEffect::PERSIST);
+        assert_eq!(candidate.status(), CandidateStatus::WaitingForPeer);
+        assert_eq!(
+            candidate.last_failure(),
+            Some(CandidateFailure::PeerOffline)
+        );
+        assert_eq!(candidate.attempt_count(), 1);
+        assert_eq!(candidate.next_attempt_at_ms(), Some(31_000));
+
+        candidate
+            .apply(
+                CandidateEvent::AttestationFailed {
+                    failure: CandidateFailure::MissingSecurityUpdate,
+                    retry_at_ms: Some(61_000),
+                },
+                1_200,
+            )
+            .unwrap();
+        assert_eq!(candidate.status(), CandidateStatus::WaitingForUpdate);
+        assert_eq!(candidate.next_attempt_at_ms(), Some(61_000));
+
+        candidate
+            .apply(
+                CandidateEvent::AttestationFailed {
+                    failure: CandidateFailure::InvalidProof,
+                    retry_at_ms: None,
+                },
+                1_300,
+            )
+            .unwrap();
+        assert_eq!(candidate.status(), CandidateStatus::Rejected);
+        assert_eq!(
+            candidate.last_failure(),
+            Some(CandidateFailure::InvalidProof)
+        );
+        assert_eq!(candidate.next_attempt_at_ms(), None);
+    }
+
+    #[test]
+    fn security_material_applied_reawakenes_only_waiting_for_update_candidates() {
+        let mut candidate = SpaceMembershipCandidate::from_sponsor_seed(seed(100), 1_000).unwrap();
+        let (outcome, effect) = candidate
+            .apply(CandidateEvent::SecurityMaterialApplied, 1_100)
+            .unwrap();
+        assert_eq!(outcome, CandidateMergeOutcome::Unchanged);
+        assert_eq!(effect, CandidateEffect::NONE);
+        assert_eq!(candidate.status(), CandidateStatus::Pending);
+
+        candidate
+            .apply(
+                CandidateEvent::AttestationFailed {
+                    failure: CandidateFailure::MissingSecurityUpdate,
+                    retry_at_ms: Some(61_000),
+                },
+                1_200,
+            )
+            .unwrap();
+        assert_eq!(candidate.status(), CandidateStatus::WaitingForUpdate);
+
+        let (outcome, effect) = candidate
+            .apply(CandidateEvent::SecurityMaterialApplied, 1_300)
+            .unwrap();
+        assert_eq!(outcome, CandidateMergeOutcome::Updated);
+        assert_eq!(effect, CandidateEffect::PERSIST_AND_WAKE);
+        assert_eq!(candidate.status(), CandidateStatus::Pending);
+        assert_eq!(candidate.last_failure(), None);
+        assert_eq!(candidate.next_attempt_at_ms(), Some(1_300));
+    }
+
+    #[test]
+    fn confirming_then_attestation_success_and_admission_reach_ready() {
+        let mut candidate = SpaceMembershipCandidate::from_sponsor_seed(seed(100), 1_000).unwrap();
+        candidate.apply(CandidateEvent::Confirming, 1_100).unwrap();
+        assert_eq!(candidate.status(), CandidateStatus::Verifying);
+        assert_eq!(candidate.next_attempt_at_ms(), None);
+
+        let peer = VerifiedMembershipPeer {
+            space_id: SpaceId::from("space-a"),
+            device_id: DeviceId::new("device-a"),
+            device_name: "Alice laptop verified".to_owned(),
+            identity_fingerprint: fingerprint("CANDIDATEFP00001"),
+            transport_public_key: b"transport-key".to_vec(),
+            transport_address_blob: b"self-address".to_vec(),
+        };
+        let (outcome, _) = candidate
+            .apply(CandidateEvent::VerifiedPeer(peer), 1_200)
+            .unwrap();
+        assert_eq!(outcome, CandidateMergeOutcome::Updated);
+
+        let (outcome, effect) = candidate.apply(CandidateEvent::Admitted, 1_300).unwrap();
+        assert_eq!(outcome, CandidateMergeOutcome::Updated);
+        assert_eq!(effect, CandidateEffect::PERSIST);
+        assert_eq!(candidate.status(), CandidateStatus::Ready);
+        assert_eq!(candidate.source(), &CandidateSource::DirectAttestation);
+    }
+
+    #[test]
+    fn terminal_states_stay_terminal_across_new_material() {
+        let mut candidate = SpaceMembershipCandidate::from_sponsor_seed(seed(100), 1_000).unwrap();
+        let mut conflict = seed(200);
+        conflict.identity_fingerprint_hint = fingerprint("CONFLICTFP000001");
+        candidate
+            .apply(CandidateEvent::Seed(conflict), 1_100)
+            .unwrap();
+        assert_eq!(candidate.status(), CandidateStatus::Blocked);
+
+        candidate
+            .apply(CandidateEvent::Seed(seed(300)), 1_200)
+            .unwrap();
+        assert_eq!(candidate.status(), CandidateStatus::Blocked);
+        candidate
+            .apply(
+                CandidateEvent::VerifiedAnnouncement(announcement(9, 9)),
+                1_300,
+            )
+            .unwrap();
+        assert_eq!(candidate.status(), CandidateStatus::Blocked);
+        candidate.apply(CandidateEvent::Admitted, 1_400).unwrap();
         assert_eq!(candidate.status(), CandidateStatus::Blocked);
     }
 }
