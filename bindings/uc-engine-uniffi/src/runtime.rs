@@ -709,9 +709,12 @@ impl MobileEngine {
         host: Arc<dyn BindingHost>,
         analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
     ) -> Result<Arc<Self>, BindingError> {
-        #[cfg(target_vendor = "apple")]
-        crate::apple::install_apple_tracing();
         let capabilities = host_capabilities(Arc::clone(&host), analytics)?;
+        let logs_dir = capabilities.directories().logs();
+        #[cfg(target_vendor = "apple")]
+        crate::apple::install_apple_tracing(logs_dir);
+        #[cfg(target_os = "android")]
+        crate::android::install_android_tracing(logs_dir);
         let config = EngineConfig::new(config.app_version).with_profile_id(config.profile_id);
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -2303,6 +2306,7 @@ fn host_capabilities(
         directories.private_data(),
         directories.cache(),
         directories.temporary(),
+        directories.logs(),
     ] {
         std::fs::create_dir_all(directory).map_err(|_| BindingError::HostIo)?;
     }

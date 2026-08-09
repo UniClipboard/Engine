@@ -4,6 +4,8 @@
 mod android;
 #[cfg(target_vendor = "apple")]
 mod apple;
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+mod file_log;
 mod runtime;
 
 pub use runtime::{

@@ -53,6 +53,7 @@ fn uniffi_binding_is_a_workspace_member_with_a_public_engine_boundary() {
             "tokio",
             "tracing",
             "tracing-android",
+            "tracing-appender",
             "tracing-oslog",
             "tracing-subscriber",
             "uc-engine",

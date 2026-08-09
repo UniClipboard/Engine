@@ -459,7 +459,7 @@ UC_ENGINE_UNIFFI_BUILD_LOCKED=1 \
   bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
 ```
 
-默认输出位于 `target/uc-engine-uniffi-dist/ios/`。
+默认输出位于 `target/uc-engine-uniffi-dist/ios/`。脚本默认产出同时含真机与模拟器切片的 XCFramework；设置 `UC_ENGINE_UNIFFI_SLICE=device` 或 `UC_ENGINE_UNIFFI_SLICE=simulator` 时只构建对应切片。
 
 ### Android
 
@@ -469,6 +469,14 @@ UC_ENGINE_UNIFFI_BUILD_LOCKED=1 \
 ```
 
 默认输出位于 `target/uc-engine-uniffi-dist/android/`。
+
+### 本地产物
+
+```bash
+bindings/uc-engine-uniffi/scripts/prepare-local-artifacts.mjs
+```
+
+按设备与模拟器拆分构建 iOS XCFramework，并构建 Android AAR，归集到 `.artifacts/local/{ios,ios-sim,android}/`，同时生成就绪清单 `.artifacts/local/local-prepared.json`（平台、版本、提交与主产物 sha256）。该目录不纳入版本控制；移动端本地开发可按运行目标切换使用。
 
 ### HarmonyOS
 

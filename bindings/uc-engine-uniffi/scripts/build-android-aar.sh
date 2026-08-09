@@ -15,10 +15,9 @@ GRADLEW="$REPO_ROOT/tests/hosts/android/gradlew"
 AAR_OUT="$DIST_DIR/UniClipboardEngine.aar"
 CHECKSUM_FILE="$DIST_DIR/UniClipboardEngine.checksum.txt"
 DEBUG_DIR="$DIST_ROOT/debug-symbols/android"
-CARGO_LOCKED=()
-
+CARGO_LOCKED_FLAG=""
 if [[ -n "${UC_ENGINE_UNIFFI_BUILD_LOCKED:-}" ]]; then
-  CARGO_LOCKED+=(--locked)
+  CARGO_LOCKED_FLAG="--locked"
 fi
 
 case "$(uname -s)" in
@@ -33,15 +32,15 @@ rm -rf "$STAGE_DIR" "$DIST_DIR" "$DEBUG_DIR"
 mkdir -p "$BINDINGS_DIR" "$JNI_DIR" "$DIST_DIR" "$DEBUG_DIR"
 
 echo "==> Generate Kotlin bindings from the host library"
-cargo build -p uc-engine-uniffi --release "${CARGO_LOCKED[@]}"
+cargo build -p uc-engine-uniffi --release $CARGO_LOCKED_FLAG
 cargo run -p uc-engine-uniffi --release --features bindgen-cli \
-  --bin uc-engine-uniffi-bindgen "${CARGO_LOCKED[@]}" -- \
+  --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG -- \
   generate --library "$HOST_LIBRARY" --language kotlin \
   --out-dir "$BINDINGS_DIR" --no-format
 
 echo "==> Build Android native libraries"
 cargo ndk -t arm64-v8a -t x86_64 \
-  build -p uc-engine-uniffi --release "${CARGO_LOCKED[@]}"
+  build -p uc-engine-uniffi --release $CARGO_LOCKED_FLAG
 mkdir -p "$JNI_DIR/arm64-v8a" "$JNI_DIR/x86_64"
 cp "$TARGET_DIR/aarch64-linux-android/release/libuc_engine_uniffi.so" \
   "$JNI_DIR/arm64-v8a/"
