@@ -1636,8 +1636,18 @@ impl RemovalNoticeEndpointPort for RemovalCoordinator {
 #[async_trait::async_trait]
 impl RemovalTargetGatePort for RemovalCoordinator {
     async fn is_locally_removed(&self, device_id: &DeviceId) -> bool {
-        match self.load_any_state().await {
-            Ok(state) => state.device_is_locally_removed(device_id),
+        let state = match self.load_any_state().await {
+            Ok(state) => state,
+            Err(_) => return true,
+        };
+        if !state.device_is_locally_removed(device_id) {
+            return false;
+        }
+
+        match self.deps.recovery.current_view().await {
+            Ok(view) => view.members.into_iter().any(|member| {
+                member.device_id == *device_id && state.locally_removed.contains(&member.instance)
+            }),
             Err(_) => true,
         }
     }

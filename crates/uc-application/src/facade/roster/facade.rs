@@ -22,7 +22,7 @@ use tracing::instrument;
 use uc_core::membership::{
     BootstrapId, GroupBootstrapPort, GroupBootstrapResult, LegacyBootstrapStatus,
     MemberProtectionStatus as CoreMemberProtectionStatus, MemberRepositoryPort,
-    SpaceProtectionMode as CoreSpaceProtectionMode, SpaceProtectionSnapshot,
+    RemovalTargetGatePort, SpaceProtectionMode as CoreSpaceProtectionMode, SpaceProtectionSnapshot,
     SpaceProtectionStatusPort,
 };
 use uc_core::ports::{ConnectionChannelPort, LocalIdentityPort, PresenceEvent, PresencePort};
@@ -59,6 +59,7 @@ pub struct MemberRosterFacade {
     space_protection: Option<Arc<dyn SpaceProtectionStatusPort>>,
     member_removal_events: broadcast::Sender<MemberRemovalView>,
     member_removal: Option<Arc<crate::member_removal::RemovalCoordinator>>,
+    removal_gate: Option<Arc<dyn RemovalTargetGatePort>>,
 }
 
 impl MemberRosterFacade {
@@ -73,6 +74,7 @@ impl MemberRosterFacade {
             space_protection: None,
             member_removal_events,
             member_removal: None,
+            removal_gate: None,
         }
     }
 
@@ -93,7 +95,14 @@ impl MemberRosterFacade {
         mut self,
         member_removal: Arc<crate::member_removal::RemovalCoordinator>,
     ) -> Self {
+        self.removal_gate = Some(member_removal.clone());
         self.member_removal = Some(member_removal);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_removal_gate(mut self, removal_gate: Arc<dyn RemovalTargetGatePort>) -> Self {
+        self.removal_gate = Some(removal_gate);
         self
     }
 
@@ -173,8 +182,8 @@ impl MemberRosterFacade {
             .collect())
     }
 
-    /// 列出对外 peer 快照。该方法复用 roster + presence 聚合规则,并隐藏
-    /// core `ReachabilityState` / `DeviceId` 等内部模型。
+    /// 列出对外有效 peer 快照。该方法复用 roster + presence 聚合规则，并排除
+    /// 已被本机移除的旧成员实例，避免原始成员记录重新暴露失效设备。
     ///
     /// Phase 96:每条 entry 顺带带上 `channel`(Direct/Relay/Offline/
     /// Unknown)。`connection_channel` port 缺省时降级为 `Unknown` —— UI
@@ -186,6 +195,11 @@ impl MemberRosterFacade {
         for entry in entries {
             if entry.is_local {
                 continue;
+            }
+            if let Some(removal_gate) = &self.removal_gate {
+                if removal_gate.is_locally_removed(&entry.device_id).await {
+                    continue;
+                }
             }
             let path = match &self.connection_channel {
                 Some(port) => port.path_for(&entry.device_id).await,
@@ -436,5 +450,128 @@ fn map_member_removal_error(error: RemovalCoordinatorError) -> RosterError {
         RemovalCoordinatorError::SelfTarget => RosterError::MemberRemovalInvalidInput,
         RemovalCoordinatorError::UnknownTarget => RosterError::MemberRemovalTargetNotFound,
         error => RosterError::MemberRemoval(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use uc_core::membership::{MemberSyncPreferences, MembershipError, SpaceMember};
+    use uc_core::ports::{LocalIdentityError, ReachabilityState};
+    use uc_core::security::IdentityFingerprint;
+
+    struct Members(Vec<SpaceMember>);
+
+    #[async_trait]
+    impl MemberRepositoryPort for Members {
+        async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
+            Ok(self
+                .0
+                .iter()
+                .find(|member| member.device_id == *device_id)
+                .cloned())
+        }
+
+        async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
+            Ok(self.0.clone())
+        }
+
+        async fn save(&self, _member: &SpaceMember) -> Result<(), MembershipError> {
+            Ok(())
+        }
+
+        async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
+            Ok(true)
+        }
+    }
+
+    struct LocalIdentity(IdentityFingerprint);
+
+    #[async_trait]
+    impl LocalIdentityPort for LocalIdentity {
+        async fn create(&self) -> Result<IdentityFingerprint, LocalIdentityError> {
+            Ok(self.0.clone())
+        }
+
+        async fn ensure(&self) -> Result<IdentityFingerprint, LocalIdentityError> {
+            Ok(self.0.clone())
+        }
+
+        async fn get_current_fingerprint(
+            &self,
+        ) -> Result<Option<IdentityFingerprint>, LocalIdentityError> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    struct StaticPresence;
+
+    #[async_trait]
+    impl PresencePort for StaticPresence {
+        async fn ensure_reachable(
+            &self,
+            _device_id: &DeviceId,
+        ) -> Result<ReachabilityState, uc_core::ports::PresenceError> {
+            Ok(ReachabilityState::Online)
+        }
+
+        async fn current_state(&self, _device_id: &DeviceId) -> ReachabilityState {
+            ReachabilityState::Online
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+            broadcast::channel(1).1
+        }
+    }
+
+    struct RemovedTarget(DeviceId);
+
+    #[async_trait]
+    impl RemovalTargetGatePort for RemovedTarget {
+        async fn is_locally_removed(&self, device_id: &DeviceId) -> bool {
+            *device_id == self.0
+        }
+    }
+
+    fn fingerprint(value: &str) -> IdentityFingerprint {
+        IdentityFingerprint::from_raw_string(value).unwrap()
+    }
+
+    fn member(device_id: &str, name: &str, fingerprint: IdentityFingerprint) -> SpaceMember {
+        SpaceMember {
+            device_id: DeviceId::new(device_id),
+            device_name: name.to_owned(),
+            identity_fingerprint: fingerprint,
+            joined_at: Utc::now(),
+            sync_preferences: MemberSyncPreferences::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_snapshots_exclude_a_locally_removed_member() {
+        let local = fingerprint("AAAAAAAAAAAAAAAA");
+        let roster = MemberRosterFacade::new(MemberRosterDeps {
+            member_repo: Arc::new(Members(vec![
+                member("alice", "A", local.clone()),
+                member("bob", "B", fingerprint("BBBBBBBBBBBBBBBB")),
+                member("charlie", "C", fingerprint("CCCCCCCCCCCCCCCC")),
+            ])),
+            local_identity: Arc::new(LocalIdentity(local)),
+            presence: Arc::new(StaticPresence),
+            connection_channel: None,
+        })
+        .with_removal_gate(Arc::new(RemovedTarget(DeviceId::new("bob"))));
+
+        let snapshots = roster.list_peer_snapshots().await.unwrap();
+        assert_eq!(
+            snapshots
+                .into_iter()
+                .map(|snapshot| snapshot.peer_id)
+                .collect::<Vec<_>>(),
+            vec!["charlie"]
+        );
     }
 }

@@ -62,7 +62,7 @@ use crate::usecases::setup::switch_space::{JoinerHandshakeRunner, SwitchSpaceUse
 use crate::usecases::setup::unlock_space::UnlockSpaceUseCase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort,
+    GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort, RemovalTargetGatePort,
 };
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::setup::MigrationStatePort;
@@ -125,6 +125,7 @@ pub struct SpaceFacade {
     migration_state: Arc<dyn MigrationStatePort>,
     blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
+    removal_gate: Arc<dyn RemovalTargetGatePort>,
     /// Held for the desktop keepalive scheduler — `list_paired_peer_device_ids`
     /// reads `peer_addr_repo.list()` and `ensure_reachable_one` forwards to
     /// `presence.ensure_reachable`. Both are thin wrappers driven by the
@@ -187,6 +188,7 @@ impl SpaceFacade {
             presence,
             analytics,
             removal_admission,
+            removal_gate,
         } = admission;
         let SpaceTransitionDeps {
             relationship_reset,
@@ -256,6 +258,7 @@ impl SpaceFacade {
             Arc::clone(&peer_addr_repo),
             presence,
             Arc::clone(&device_identity),
+            Arc::clone(&removal_gate),
         ));
         // Build the sponsor-side pairing stack: the handshake
         // coordinator owns wire I/O for the AdmissionOffer→Confirm flow;
@@ -377,6 +380,7 @@ impl SpaceFacade {
             migration_state: migration_state_for_facade,
             blob_migration_repo: blob_migration_repo_for_facade,
             member_repo: member_repo_for_facade,
+            removal_gate,
             peer_addr_repo: peer_addr_repo_for_facade,
             presence: presence_for_facade,
             local_device_id: local_device_id_for_facade,
@@ -774,31 +778,33 @@ impl SpaceFacade {
         self.ensure_reachable_all.execute().await
     }
 
-    /// List `DeviceId`s of every paired peer (local device filtered out).
+    /// List `DeviceId`s of every effective paired peer (local and removed
+    /// devices filtered out).
     ///
     /// Thin wrapper over `peer_addr_repo.list()` consumed by the desktop
     /// keepalive scheduler so its per-peer backoff state can discover new
-    /// peers and prune removed ones each tick. Mirrors the iteration source
-    /// `EnsureReachableAllUseCase` uses internally — peers without an addr
-    /// blob are silently absent rather than surfaced as "no address"
-    /// errors. The local DeviceId is filtered defensively (the repo
-    /// shouldn't contain it; see the same guard in `EnsureReachableAllUseCase`).
+    /// peers and prune removed ones each tick. Mirrors the effective target
+    /// set `EnsureReachableAllUseCase` uses internally — peers without an addr
+    /// blob are silently absent rather than surfaced as "no address" errors.
     pub async fn list_paired_peer_device_ids(
         &self,
     ) -> Result<Vec<DeviceId>, EnsureReachableAllError> {
         let records = self.peer_addr_repo.list().await.map_err(|err| {
             EnsureReachableAllError::Repository(format!("peer_addr_repo.list: {err}"))
         })?;
-        Ok(records
-            .into_iter()
-            .filter_map(|r| {
-                if r.device_id == self.local_device_id {
-                    None
-                } else {
-                    Some(r.device_id)
-                }
-            })
-            .collect())
+        let mut peers = Vec::with_capacity(records.len());
+        for record in records {
+            if record.device_id == self.local_device_id
+                || self
+                    .removal_gate
+                    .is_locally_removed(&record.device_id)
+                    .await
+            {
+                continue;
+            }
+            peers.push(record.device_id);
+        }
+        Ok(peers)
     }
 
     /// Ensure a single peer is reachable; thin wrapper over
@@ -888,7 +894,7 @@ mod tests {
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
         MembershipError, RelationshipStateResetError, RelationshipStateResetPort,
-        RemovalAdmissionDecision, RemovalAdmissionGatePort, SpaceMember,
+        RemovalAdmissionDecision, RemovalAdmissionGatePort, RemovalTargetGatePort, SpaceMember,
         SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
     };
     use uc_core::pairing::invitation::InvitationCode;
@@ -923,6 +929,13 @@ mod tests {
     };
 
     struct AllowRemovalAdmission;
+
+    #[async_trait]
+    impl RemovalTargetGatePort for AllowRemovalAdmission {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            false
+        }
+    }
 
     #[async_trait]
     impl RemovalAdmissionGatePort for AllowRemovalAdmission {
@@ -1807,6 +1820,7 @@ mod tests {
                 presence: Arc::new(FakePresence),
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
                 removal_admission: Arc::new(AllowRemovalAdmission),
+                removal_gate: Arc::new(AllowRemovalAdmission),
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::new(NoopRelationshipStateReset),
