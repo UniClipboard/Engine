@@ -700,10 +700,25 @@ impl SpaceMembershipCandidate {
         self.updated_at_ms = now_ms;
     }
 
-    pub fn mark_waiting_for_update(&mut self, now_ms: i64) {
+    pub fn mark_waiting_for_update(&mut self, next_attempt_at_ms: i64, now_ms: i64) {
         self.status = CandidateStatus::WaitingForUpdate;
         self.last_failure = Some(CandidateFailure::MissingSecurityUpdate);
-        self.next_attempt_at_ms = None;
+        self.next_attempt_at_ms = Some(next_attempt_at_ms);
+        self.updated_at_ms = now_ms;
+    }
+
+    /// Return a `WaitingForUpdate` candidate to the retry queue.
+    ///
+    /// No-op for any other status. The candidate becomes retryable
+    /// immediately, so a reconcile pass picks it up as soon as the
+    /// previously missing security material has arrived.
+    pub fn reawaken_for_retry(&mut self, now_ms: i64) {
+        if self.status != CandidateStatus::WaitingForUpdate {
+            return;
+        }
+        self.status = CandidateStatus::Pending;
+        self.last_failure = None;
+        self.next_attempt_at_ms = Some(now_ms);
         self.updated_at_ms = now_ms;
     }
 

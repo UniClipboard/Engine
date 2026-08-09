@@ -3884,6 +3884,177 @@ async fn auto_shared_device_refresh_retries_after_source_comes_online() {
     harness.runtime.shutdown().await;
 }
 
+fn seed_for_b(observed_at_ms: i64) -> SponsorCandidateSeed {
+    SponsorCandidateSeed {
+        space_id: SpaceId::from("space-a"),
+        device_id: DeviceId::new("device-b"),
+        device_name_hint: "Device B".to_owned(),
+        identity_fingerprint_hint: fingerprint("BBBBBBBBBBBBBBBB"),
+        transport_address_blob: b"address-b".to_vec(),
+        address_observed_at_ms: observed_at_ms,
+        source_device_id: DeviceId::new("device-a"),
+        security_updates: Vec::new(),
+        expires_at_ms: 100_000,
+    }
+}
+
+#[tokio::test]
+async fn waiting_for_update_candidate_retries_after_security_update_arrives() {
+    let members = Arc::new(InMemoryMemberRepository::default());
+    let trusted = Arc::new(InMemoryTrustedPeerRepository::default());
+    let candidates = Arc::new(InMemoryCandidateRepository::default());
+    let addresses = Arc::new(InMemoryPeerAddressRepository::default());
+    save_member(&members, "device-a", "Device A", "AAAAAAAAAAAAAAAA").await;
+    save_trusted_peer(&trusted, "device-c", "device-a", "AAAAAAAAAAAAAAAA").await;
+    let clock = Arc::new(ManualClock::new(1_000));
+    let attestation = Arc::new(ScriptedAttestation(Mutex::new(VecDeque::from([
+        Err(MembershipAttestationError::MissingSecurityUpdate),
+        Ok(verified_peer_b()),
+    ]))));
+    let gossip = Arc::new(MembershipConvergence::new(MembershipConvergenceDeps {
+        candidate_repo: candidates.clone(),
+        announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+        outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+        security_updates: membership_security(4),
+        transport: membership_transport(),
+        clock: clock.clone(),
+        device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-c"))),
+        announcement_material: Arc::new(FixedDeviceAnnouncementMaterial {
+            device_id: DeviceId::new("device-c"),
+            device_name: "Device C".to_owned(),
+        }),
+        member_signatures: Arc::new(AcceptingMemberSignatures),
+        fingerprint_factory: Arc::new(FixedFingerprintFactory),
+        attestation: attestation.clone(),
+        verified_peer_promotion: in_memory_promotion(
+            candidates.clone(),
+            members.clone(),
+            trusted.clone(),
+            addresses,
+        ),
+        member_repo: members.clone(),
+        trusted_peer_repo: trusted.clone(),
+        peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
+        hash: Arc::new(FixedHasher),
+    }));
+
+    gossip.accept_sponsor_seed(seed_for_b(100)).await.unwrap();
+    let error = gossip
+        .confirm_candidate(&SpaceId::from("space-a"), &DeviceId::new("device-b"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        MembershipConvergenceError::WaitingForUpdate
+    ));
+    let candidate = candidates
+        .get(&SpaceId::from("space-a"), &DeviceId::new("device-b"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.status(), CandidateStatus::WaitingForUpdate);
+    let retry_at = candidate.next_attempt_at_ms().unwrap();
+    assert!(retry_at > 1_000);
+
+    let outcome = gossip.reconcile_once().await.unwrap();
+    assert_eq!(outcome.confirmed_candidates, 0);
+    assert!(outcome.deferred_items >= 1);
+    assert_eq!(attestation.0.lock().unwrap().len(), 1);
+
+    gossip
+        .apply_relayed_security_updates(
+            &SpaceId::from("space-a"),
+            &[RelayedSecurityUpdate {
+                previous_epoch: 4,
+                next_epoch: 5,
+                payload: b"update-4-to-5".to_vec(),
+                digest: [9; 32],
+            }],
+        )
+        .await
+        .unwrap();
+    let candidate = candidates
+        .get(&SpaceId::from("space-a"), &DeviceId::new("device-b"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.status(), CandidateStatus::Pending);
+    assert!(candidate.next_attempt_at_ms().unwrap() <= 1_000);
+
+    let outcome = gossip.reconcile_once().await.unwrap();
+    assert_eq!(outcome.confirmed_candidates, 1);
+    assert!(members
+        .get(&DeviceId::new("device-b"))
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn waiting_for_update_candidate_defers_until_backoff_without_updates() {
+    let candidates = Arc::new(InMemoryCandidateRepository::default());
+    let clock = Arc::new(ManualClock::new(1_000));
+    let attestation = Arc::new(ScriptedAttestation(Mutex::new(VecDeque::from([
+        Err(MembershipAttestationError::MissingSecurityUpdate),
+        Ok(verified_peer_b()),
+    ]))));
+    let members = Arc::new(InMemoryMemberRepository::default());
+    let trusted = Arc::new(InMemoryTrustedPeerRepository::default());
+    let addresses = Arc::new(InMemoryPeerAddressRepository::default());
+    let gossip = Arc::new(MembershipConvergence::new(MembershipConvergenceDeps {
+        candidate_repo: candidates.clone(),
+        announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+        outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+        security_updates: membership_security(4),
+        transport: membership_transport(),
+        clock: clock.clone(),
+        device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-c"))),
+        announcement_material: Arc::new(FixedDeviceAnnouncementMaterial {
+            device_id: DeviceId::new("device-c"),
+            device_name: "Device C".to_owned(),
+        }),
+        member_signatures: Arc::new(AcceptingMemberSignatures),
+        fingerprint_factory: Arc::new(FixedFingerprintFactory),
+        attestation: attestation.clone(),
+        verified_peer_promotion: in_memory_promotion(
+            candidates.clone(),
+            members.clone(),
+            trusted.clone(),
+            addresses,
+        ),
+        member_repo: members.clone(),
+        trusted_peer_repo: trusted.clone(),
+        peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
+        hash: Arc::new(FixedHasher),
+    }));
+
+    gossip.accept_sponsor_seed(seed_for_b(100)).await.unwrap();
+    gossip
+        .confirm_candidate(&SpaceId::from("space-a"), &DeviceId::new("device-b"))
+        .await
+        .unwrap_err();
+    let candidate = candidates
+        .get(&SpaceId::from("space-a"), &DeviceId::new("device-b"))
+        .await
+        .unwrap()
+        .unwrap();
+    let retry_at = candidate.next_attempt_at_ms().unwrap();
+
+    clock.set(retry_at.saturating_sub(1));
+    let outcome = gossip.reconcile_once().await.unwrap();
+    assert_eq!(outcome.confirmed_candidates, 0);
+    assert_eq!(attestation.0.lock().unwrap().len(), 1);
+
+    clock.set(retry_at);
+    let outcome = gossip.reconcile_once().await.unwrap();
+    assert_eq!(outcome.confirmed_candidates, 1);
+    assert!(members
+        .get(&DeviceId::new("device-b"))
+        .await
+        .unwrap()
+        .is_some());
+}
+
 #[tokio::test]
 async fn auto_shared_device_refresh_ignores_online_events_from_other_devices() {
     let harness = auto_refresh_harness(

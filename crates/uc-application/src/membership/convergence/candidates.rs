@@ -103,6 +103,7 @@ impl MembershipConvergence {
         if &state.space_id != space_id {
             return Err(MembershipConvergenceError::VerificationRejected);
         }
+        let mut epoch_advanced = false;
         for update in updates {
             let digest = self
                 .deps
@@ -129,8 +130,34 @@ impl MembershipConvergence {
                 return Err(MembershipConvergenceError::VerificationRejected);
             }
             state.group_epoch = applied_epoch;
+            epoch_advanced = true;
+        }
+        if epoch_advanced {
+            self.reawaken_waiting_for_update_candidates(space_id)
+                .await?;
         }
         Ok(state.group_epoch)
+    }
+
+    async fn reawaken_waiting_for_update_candidates(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<usize, MembershipConvergenceError> {
+        let now_ms = self.deps.clock.now_ms();
+        let candidates = self.deps.candidate_repo.list(space_id).await?;
+        let mut reawakened = 0usize;
+        for mut candidate in candidates
+            .into_iter()
+            .filter(|candidate| candidate.status() == CandidateStatus::WaitingForUpdate)
+        {
+            candidate.reawaken_for_retry(now_ms);
+            self.deps.candidate_repo.save(&candidate).await?;
+            reawakened = reawakened.saturating_add(1);
+        }
+        if reawakened > 0 {
+            self.wake.notify_one();
+        }
+        Ok(reawakened)
     }
 
     pub(super) async fn confirm_candidate(
@@ -169,7 +196,8 @@ impl MembershipConvergence {
                 return Err(MembershipConvergenceError::PeerUnavailable);
             }
             Err(MembershipAttestationError::MissingSecurityUpdate) => {
-                candidate.mark_waiting_for_update(now_ms);
+                candidate
+                    .mark_waiting_for_update(next_candidate_retry_at(&candidate, now_ms), now_ms);
                 self.deps.candidate_repo.save(&candidate).await?;
                 return Err(MembershipConvergenceError::WaitingForUpdate);
             }
