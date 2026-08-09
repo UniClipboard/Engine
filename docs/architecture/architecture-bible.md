@@ -261,6 +261,24 @@ Space
 
 收到成员信息不等于立即信任。候选成员必须经过空间一致性、身份指纹、安全历史和直接证明验证后才能进入就绪状态。
 
+候选的状态转换由 `SpaceMembershipCandidate::apply(event)` 单一入口驱动，事件是状态变化的唯一途径；转换返回的效果（持久化、唤醒运行期）由调用方执行：
+
+```text
+事件：Seed / VerifiedAnnouncement / VerifiedPeer / Confirming / AttestationFailed
+     / SecurityMaterialApplied / Admitted
+
+Pending ──Confirming──────────────────────► Verifying
+Pending ──AttestationFailed(可重试)────────► WaitingForPeer / WaitingForUpdate（带退避）
+Verifying ──AttestationFailed(可重试)──────► WaitingForPeer / WaitingForUpdate
+Verifying ──AttestationFailed(InvalidProof)► Rejected（终态）
+Verifying ──VerifiedPeer(Updated)──────────► 合并资料，保持 Verifying
+Verifying ──Admitted──────────────────────► Ready（终态）
+WaitingForPeer ──Seed(新资料)──────────────► Pending
+WaitingForUpdate ──SecurityMaterialApplied► Pending（资料已到达，立即重试）
+任意状态 ──Seed/公告/证明(身份冲突)─────────► Blocked（终态）
+Blocked / Rejected：拒绝一切推进事件，终态不可回退
+```
+
 会话恢复成功后，成员关系收敛运行期自动调度一轮“已有设备查找”，向当前 Space 中已配对且可信的设备查询本机尚未认识的成员，并复用与手动刷新相同的确认、保存和状态通知流程。自动调度按 Space 合并：会话锁定时不开始；一次恢复只启动一轮，重复解锁、就绪或在线事件不产生重复查找；来源设备离线时等待其重新上线后继续，不进入无限重试。产品端不保存查找队列，也没有新增可见状态。
 
 ### LAN 兼容协议
@@ -652,6 +670,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 日期 | 修改范围 | 架构结论 |
 | --- | --- | --- |
 | 2026-08-10 | 会话恢复后在线状态刷新改为后台 | 会话恢复不再阻塞在逐端拨号上，presence 刷新移入后台任务，状态经既有 presence 事件到达；仅调整时序，无架构变化。 |
+| 2026-08-10 | uc-core 状态机建模规范 | `crates/uc-core/AGENTS.md` 新增强制规范：带生命周期的领域实体必须使用 `apply(event) -> (outcome, effect)` 单一转换入口，事件是状态变化的唯一途径；效果（持久化、唤醒）由调用方执行；构造与转换分离；终态不可回退；禁止 typestate 拆分持久化实体与第三方状态机库；转换矩阵与不变量测试要求。仅文档约定，无运行架构变化。 |
+| 2026-08-10 | 候选状态机事件化 | `SpaceMembershipCandidate` 的状态转换收敛为 `apply(CandidateEvent)` 单一入口，事件（Seed/VerifiedAnnouncement/VerifiedPeer/Confirming/AttestationFailed/SecurityMaterialApplied/Admitted）是状态变化的唯一途径；转换返回 `CandidateEffect`（持久化、唤醒运行期）由调用方执行。`merge_*`/`mark_*` 改为私有，`should_persist_merge` 移入核心，终态（Blocked/Rejected）不可回退；序列化格式、协议消息与对外行为不变，全 workspace 2590 测试通过。 |
 | 2026-08-10 | 等待资料更新候选的重试闭环 | 候选进入 `WaitingForUpdate` 后带与 `WaitingForPeer` 一致的指数退避继续重试，不再永久停住；收到并应用缺失安全更新（世代推进）时立即把本空间所有 `WaitingForUpdate` 候选唤醒为可重试。'会继续尝试'从此有真实的推进路径。 |
 | 2026-08-09 | 解锁后自动查找已共享设备 | 成员关系收敛运行期在会话解锁恢复成功后自动调度一轮已有设备查找，复用手动刷新同一查询、确认与状态通知流程；按 Space 合并，锁定时不开始，一次恢复只启动一轮，重复解锁、就绪或在线事件不产生重复查找，来源离线时等待其重新上线后继续且不无限重试，锁定重置自动调度。产品端不保存查找队列，无新增可见状态。 |
 | 2026-08-09 | 移除通知已实施 | 已验收移除意图的当前成员经独立受限通道 `removal-notice/1` 向被移除设备定向投递仅含空间沿革指纹、意图标识、目标成员/设备、签发者与签名的 `RemovedNotice`；接收方按本机保存的视图公开签名资料核对签发者并验签后写入独立的 `self_removed` 标记，`QueryMemberRemoval`/`MemberRemovalChanged` 携带 `removed`。通知不扩展现有 `RemovalExchangeMessage`(普通通道只接受当前成员)，非完成条件、失败不阻塞收敛；接收方拒绝类别与迟交入口一致(1 KiB/并发 4/每身份 10 秒一次)。重新准入产生新实例后旧标记惰性清除，重放旧通知不能再次锁定新实例；在线验收意图与收到通知写同一标记，L07 语义不变。spec 015、接口说明与逻辑通道表已同步，草案已合并删除。 |

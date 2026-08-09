@@ -156,6 +156,83 @@ pub enum DomainEvent {
 
 ---
 
+### 4.5 领域状态机建模规范（强制）
+
+凡是有生命周期、需要持久化、并接受外部输入推进的领域实体（如
+`SpaceMembershipCandidate`、投递批次的收发状态等），必须按下述模式建模。
+
+#### 4.5.1 单一转换入口：`apply(event) -> (outcome, effect)`
+
+状态变化只允许通过唯一的 `apply` 方法发生。事件是状态变化的唯一途径，
+不得通过散落的 `mark_*` / `set_*` / `merge_*` 公开方法直接改状态字段。
+
+```rust
+pub enum CandidateEvent {
+    Seed(SponsorCandidateSeed),
+    VerifiedAnnouncement(DeviceAnnouncement),
+    VerifiedPeer(VerifiedMembershipPeer),
+    Confirming,
+    AttestationFailed { failure: CandidateFailure, retry_at_ms: Option<i64> },
+    SecurityMaterialApplied,
+    Admitted,
+}
+
+pub struct CandidateEffect {
+    pub persist: bool,        // 调用方应持久化该实体
+    pub wake_runtime: bool,   // 调用方应唤醒收敛运行期
+}
+
+impl SpaceMembershipCandidate {
+    pub fn apply(
+        &mut self,
+        event: CandidateEvent,
+        now_ms: i64,
+    ) -> Result<(CandidateMergeOutcome, CandidateEffect), CandidateMergeError>;
+}
+```
+
+规则：
+
+- 状态字段（如 `status`）只被 `apply` 及其私有辅助方法修改；所有状态推进
+  分支必须显式写在 `apply` 里，使状态图在单一函数中可见。
+- **效果分离**：`apply` 只回答“状态怎么变、需要什么效果”，副作用（持久化、
+  唤醒运行期、网络动作）由调用方按返回的 `CandidateEffect` 执行。
+- **构造与转换分离**：新建实体用 `from_*` 构造器（初始状态在构造器中确定）；
+  已有实体的一切变化走 `apply`。
+- **终态不可回退**：终态（如 `Blocked` / `Rejected`）必须在 `apply` 内守卫，
+  拒绝任何推进事件；不允许后续事件把终态改回可重试状态。
+- 事件与效果语义必须保持为“数据合并 + 条件推进”的真实表达：乱序到达、
+  重复到达（幂等）、过期资料等合法结果用 `outcome` 表达（如 `Stale` /
+  `Unchanged`），不得用错误或例外表达业务常态。
+
+#### 4.5.2 事件集设计
+
+- 事件按“调用方语义”命名，不复制内部步骤：一个事件代表一次完整的外部
+  输入（资料到达、验证结果、环境信号），而不是内部操作的镜像。
+- 重试等待时间、失败类别等调用方已知的参数可以随事件携带
+  （如 `AttestationFailed { failure, retry_at_ms }`）；退避策略本身留在
+  应用层，核心只表达状态。
+- 新增事件时先回答：它是资料合并、验证结果还是环境信号？回答不清不得实现。
+
+#### 4.5.3 持久化与兼容
+
+- 实体保持单一可序列化结构（状态作为字段），**禁止**用 typestate（每状态
+  一个类型）拆分实体：会破坏持久化格式、repo 接口和跨重启恢复。
+- 不得引入第三方状态机库（见 §10 依赖纪律）；std / serde / thiserror 足以
+  实现本模式。
+- 状态枚举与事件枚举的序列化布局保持稳定；新增变体必须考虑旧数据兼容。
+
+#### 4.5.4 测试要求
+
+- **转换矩阵测试**：每个（事件 × 相关状态）的合法转换必须断言结果状态、
+  `outcome` 与 `effect`；非法转换（终态回退等）断言被拒绝。
+- **不变量测试**：终态不可回退、重复/乱序事件幂等、冲突不产生部分信任、
+  过期不复活。
+- 测试通过构造器 + 事件序列构造任意中间状态，**不得**为测试暴露额外
+  的状态写入方法（测试用 `apply` 是唯一构造路径）。
+
+---
+
 ## 5. Ports 设计规范
 
 ### 5.1 Ports 的作用

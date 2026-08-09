@@ -506,10 +506,12 @@ impl MembershipConvergence {
                     if candidate.identity_fingerprint_hint() != &member.identity_fingerprint {
                         return Err(MembershipConvergenceError::VerificationRejected);
                     }
-                    let outcome =
-                        candidate.merge_verified_announcement(announcement.clone(), now_ms)?;
-                    candidate.mark_ready(now_ms);
-                    if should_persist_merge(outcome) {
+                    let (outcome, effect) = candidate.apply(
+                        CandidateEvent::VerifiedAnnouncement(announcement.clone()),
+                        now_ms,
+                    )?;
+                    candidate.apply(CandidateEvent::Admitted, now_ms)?;
+                    if effect.persist {
                         self.deps.announcement_repo.save(&announcement).await?;
                     }
                     self.deps.candidate_repo.save(&candidate).await?;
@@ -521,18 +523,21 @@ impl MembershipConvergence {
                 }
             };
         }
-        let (candidate, outcome) = match existing_candidate {
+        let (candidate, outcome, persist) = match existing_candidate {
             Some(mut candidate) => {
-                let outcome =
-                    candidate.merge_verified_announcement(announcement.clone(), now_ms)?;
-                (candidate, outcome)
+                let (outcome, effect) = candidate.apply(
+                    CandidateEvent::VerifiedAnnouncement(announcement.clone()),
+                    now_ms,
+                )?;
+                (candidate, outcome, effect.persist)
             }
             None => (
                 SpaceMembershipCandidate::from_verified_announcement(announcement.clone(), now_ms)?,
                 CandidateMergeOutcome::Updated,
+                true,
             ),
         };
-        if should_persist_merge(outcome) {
+        if persist {
             self.deps.announcement_repo.save(&announcement).await?;
             self.deps.candidate_repo.save(&candidate).await?;
         }

@@ -1491,7 +1491,12 @@ mod tests {
         .unwrap();
         store.save_candidate(&candidate).await.unwrap();
         let mut ready_candidate = candidate.clone();
-        ready_candidate.mark_ready(member.joined_at.timestamp_millis());
+        ready_candidate
+            .apply(
+                uc_core::membership::CandidateEvent::Admitted,
+                member.joined_at.timestamp_millis(),
+            )
+            .unwrap();
         executor
             .run(|conn| {
                 diesel::sql_query(

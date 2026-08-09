@@ -7,8 +7,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    CandidateFailure, CandidateMergeOutcome, CandidateStatus, CurrentMemberSignatureError,
-    CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
+    CandidateEvent, CandidateFailure, CandidateMergeOutcome, CandidateStatus,
+    CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentityError, DeviceAnnouncement,
     MemberRepositoryPort, MembershipAnnouncementRepositoryError,
     MembershipAnnouncementRepositoryPort, MembershipAnnouncementVersion,
@@ -1036,7 +1036,7 @@ async fn newer_announcement_for_formal_member_keeps_candidate_ready() {
         900,
     )
     .unwrap();
-    candidate.mark_ready(950);
+    candidate.apply(CandidateEvent::Admitted, 950).unwrap();
     candidates.save(&candidate).await.unwrap();
     let gossip = announcement_gossip_with_members(
         candidates.clone(),
@@ -1922,7 +1922,7 @@ async fn reconcile_retries_a_verifying_candidate_after_interruption() {
     let trusted = Arc::new(InMemoryTrustedPeerRepository::default());
     let addresses = Arc::new(InMemoryPeerAddressRepository::default());
     let mut candidate = SpaceMembershipCandidate::from_sponsor_seed(seed(100), 1_000).unwrap();
-    candidate.mark_verifying(1_000);
+    candidate.apply(CandidateEvent::Confirming, 1_000).unwrap();
     candidates.save(&candidate).await.unwrap();
     let gossip = MembershipConvergence::new(MembershipConvergenceDeps {
         candidate_repo: candidates.clone(),
@@ -3353,9 +3353,25 @@ async fn runtime_pause_and_shutdown_control_inflight_shared_device_refresh() {
 fn candidate_retry_backs_off_and_has_stable_jitter() {
     let mut candidate = SpaceMembershipCandidate::from_sponsor_seed(seed(100), 1_000).unwrap();
     let first = next_candidate_retry_at(&candidate, 1_000);
-    candidate.mark_waiting_for_peer(CandidateFailure::PeerOffline, first, 1_000);
+    candidate
+        .apply(
+            CandidateEvent::AttestationFailed {
+                failure: CandidateFailure::PeerOffline,
+                retry_at_ms: Some(first),
+            },
+            1_000,
+        )
+        .unwrap();
     let second = next_candidate_retry_at(&candidate, 1_000);
-    candidate.mark_waiting_for_peer(CandidateFailure::PeerOffline, second, 1_000);
+    candidate
+        .apply(
+            CandidateEvent::AttestationFailed {
+                failure: CandidateFailure::PeerOffline,
+                retry_at_ms: Some(second),
+            },
+            1_000,
+        )
+        .unwrap();
     let third = next_candidate_retry_at(&candidate, 1_000);
 
     assert!(first >= 31_000);
@@ -3368,7 +3384,15 @@ fn candidate_retry_backs_off_and_has_stable_jitter() {
 async fn scheduled_reconcile_uses_the_persisted_candidate_retry_deadline() {
     let candidates = Arc::new(InMemoryCandidateRepository::default());
     let mut candidate = SpaceMembershipCandidate::from_sponsor_seed(seed(100), 1_000).unwrap();
-    candidate.mark_waiting_for_peer(CandidateFailure::PeerOffline, 31_500, 1_000);
+    candidate
+        .apply(
+            CandidateEvent::AttestationFailed {
+                failure: CandidateFailure::PeerOffline,
+                retry_at_ms: Some(31_500),
+            },
+            1_000,
+        )
+        .unwrap();
     candidates.save(&candidate).await.unwrap();
     let gossip = gossip(candidates, 1_000);
 
@@ -3397,7 +3421,15 @@ async fn convergence_status_is_derived_from_persisted_work_after_restart() {
         .await
         .unwrap()
         .unwrap();
-    candidate.mark_blocked(CandidateFailure::VersionIncompatible, 1_100);
+    candidate
+        .apply(
+            CandidateEvent::AttestationFailed {
+                failure: CandidateFailure::VersionIncompatible,
+                retry_at_ms: Some(31_500),
+            },
+            1_100,
+        )
+        .unwrap();
     candidates.save(&candidate).await.unwrap();
     let status = gossip(candidates, 1_100)
         .convergence_status(&SpaceId::from("space-a"))
