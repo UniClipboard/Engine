@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -3416,4 +3417,461 @@ async fn current_convergence_status_uses_the_active_membership_space() {
 
     assert_eq!(status.state, MembershipConvergenceState::Converging);
     assert_eq!(status.pending_count, 1);
+}
+
+struct ScriptedSharedDevicePageTransport {
+    pages: Mutex<VecDeque<Result<MembershipSharedDevicePage, MembershipGossipTransportError>>>,
+    shared_device_requests: Arc<AtomicUsize>,
+    sent: Mutex<Vec<MembershipGossipMessage>>,
+}
+
+#[async_trait]
+impl MembershipGossipTransportPort for ScriptedSharedDevicePageTransport {
+    async fn exchange(
+        &self,
+        _recipient: &DeviceId,
+        message: MembershipGossipMessage,
+    ) -> Result<MembershipGossipMessage, MembershipGossipTransportError> {
+        self.sent.lock().unwrap().push(message.clone());
+        match message {
+            MembershipGossipMessage::RequestSharedDevicePage(_) => {
+                self.shared_device_requests.fetch_add(1, Ordering::SeqCst);
+                let page = self
+                    .pages
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Err(MembershipGossipTransportError::Offline))?;
+                Ok(MembershipGossipMessage::SharedDevicePage(page))
+            }
+            MembershipGossipMessage::Digest(digest) => Ok(MembershipGossipMessage::RequestMissing(
+                MembershipRequestMissing {
+                    space_id: digest.space_id,
+                    announcement_devices: Vec::new(),
+                    security_updates_after_epoch: None,
+                },
+            )),
+            MembershipGossipMessage::EventBatch(batch) => Ok(MembershipGossipMessage::Ack(
+                uc_core::membership::MembershipAck {
+                    space_id: batch.space_id,
+                    batch_id: batch.batch_id,
+                },
+            )),
+            _ => Err(MembershipGossipTransportError::Rejected),
+        }
+    }
+}
+
+fn shared_device_page_b() -> MembershipSharedDevicePage {
+    MembershipSharedDevicePage {
+        space_id: SpaceId::from("space-a"),
+        seeds: vec![SponsorCandidateSeed {
+            space_id: SpaceId::from("space-a"),
+            device_id: DeviceId::new("device-b"),
+            device_name_hint: "Device B".to_owned(),
+            identity_fingerprint_hint: fingerprint("BBBBBBBBBBBBBBBB"),
+            transport_address_blob: b"address-b".to_vec(),
+            address_observed_at_ms: 700,
+            source_device_id: DeviceId::new("device-a"),
+            security_updates: Vec::new(),
+            expires_at_ms: 100_000,
+        }],
+        next_after_device_id: None,
+    }
+}
+
+fn verified_peer_b() -> VerifiedMembershipPeer {
+    VerifiedMembershipPeer {
+        space_id: SpaceId::from("space-a"),
+        device_id: DeviceId::new("device-b"),
+        device_name: "Device B".to_owned(),
+        identity_fingerprint: fingerprint("BBBBBBBBBBBBBBBB"),
+        transport_public_key: b"transport-key-b".to_vec(),
+        transport_address_blob: b"address-b".to_vec(),
+    }
+}
+
+fn verified_peer_c() -> VerifiedMembershipPeer {
+    VerifiedMembershipPeer {
+        space_id: SpaceId::from("space-a"),
+        device_id: DeviceId::new("device-c"),
+        device_name: "Device C".to_owned(),
+        identity_fingerprint: fingerprint("CCCCCCCCCCCCCCCC"),
+        transport_public_key: b"transport-key-c".to_vec(),
+        transport_address_blob: b"address-c".to_vec(),
+    }
+}
+
+async fn save_member(
+    members: &InMemoryMemberRepository,
+    device_id: &str,
+    device_name: &str,
+    fingerprint_raw: &str,
+) {
+    members
+        .save(&SpaceMember {
+            device_id: DeviceId::new(device_id),
+            device_name: device_name.to_owned(),
+            identity_fingerprint: fingerprint(fingerprint_raw),
+            joined_at: chrono::DateTime::from_timestamp_millis(500).unwrap(),
+            sync_preferences: uc_core::MemberSyncPreferences::default(),
+        })
+        .await
+        .unwrap();
+}
+
+async fn save_trusted_peer(
+    trusted: &InMemoryTrustedPeerRepository,
+    local_device_id: &str,
+    peer_device_id: &str,
+    fingerprint_raw: &str,
+) {
+    trusted
+        .save(&TrustedPeer {
+            local_device_id: DeviceId::new(local_device_id),
+            peer_device_id: DeviceId::new(peer_device_id),
+            peer_fingerprint: fingerprint(fingerprint_raw),
+            trusted_at: chrono::DateTime::from_timestamp_millis(500).unwrap(),
+        })
+        .await
+        .unwrap();
+}
+
+struct FixedDeviceAnnouncementMaterial {
+    device_id: DeviceId,
+    device_name: String,
+}
+
+#[async_trait]
+impl CurrentMembershipAnnouncementPort for FixedDeviceAnnouncementMaterial {
+    async fn current_announcement_material(
+        &self,
+    ) -> Result<CurrentMembershipAnnouncementMaterial, CurrentMembershipIdentityError> {
+        Ok(CurrentMembershipAnnouncementMaterial {
+            space_id: SpaceId::from("space-a"),
+            device_id: self.device_id.clone(),
+            device_name: self.device_name.clone(),
+            identity_fingerprint: fingerprint("ANNOUNCEMENTFP01"),
+            transport_public_key: b"key-a".to_vec(),
+            transport_address_blob: b"address-a".to_vec(),
+        })
+    }
+
+    async fn wait_for_announcement_change(&self) -> Result<(), CurrentMembershipIdentityError> {
+        std::future::pending::<()>().await;
+        Ok(())
+    }
+}
+
+struct AutoRefreshHarness {
+    transport: Arc<ScriptedSharedDevicePageTransport>,
+    members: Arc<InMemoryMemberRepository>,
+    trusted: Arc<InMemoryTrustedPeerRepository>,
+    presence_tx: tokio::sync::broadcast::Sender<uc_core::ports::PresenceEvent>,
+    runtime: super::MembershipConvergenceRuntime,
+    activity: super::MembershipConvergenceActivity,
+    gossip: Arc<MembershipConvergence>,
+}
+
+async fn auto_refresh_harness(
+    pages: Vec<Result<MembershipSharedDevicePage, MembershipGossipTransportError>>,
+    clock: Arc<dyn ClockPort>,
+) -> AutoRefreshHarness {
+    let members = Arc::new(InMemoryMemberRepository::default());
+    let trusted = Arc::new(InMemoryTrustedPeerRepository::default());
+    let candidates = Arc::new(InMemoryCandidateRepository::default());
+    let addresses = Arc::new(InMemoryPeerAddressRepository::default());
+    save_member(&members, "device-a", "Device A", "AAAAAAAAAAAAAAAA").await;
+    save_trusted_peer(&trusted, "device-c", "device-a", "AAAAAAAAAAAAAAAA").await;
+    let transport = Arc::new(ScriptedSharedDevicePageTransport {
+        pages: Mutex::new(VecDeque::from(pages)),
+        shared_device_requests: Arc::new(AtomicUsize::new(0)),
+        sent: Mutex::new(Vec::new()),
+    });
+    let gossip = Arc::new(MembershipConvergence::new(MembershipConvergenceDeps {
+        candidate_repo: candidates.clone(),
+        announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+        outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+        security_updates: membership_security(4),
+        transport: transport.clone(),
+        clock,
+        device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-c"))),
+        announcement_material: Arc::new(FixedDeviceAnnouncementMaterial {
+            device_id: DeviceId::new("device-c"),
+            device_name: "Device C".to_owned(),
+        }),
+        member_signatures: Arc::new(AcceptingMemberSignatures),
+        fingerprint_factory: Arc::new(FixedFingerprintFactory),
+        attestation: Arc::new(FixedAttestation(Ok(verified_peer_b()))),
+        verified_peer_promotion: in_memory_promotion(
+            candidates.clone(),
+            members.clone(),
+            trusted.clone(),
+            addresses,
+        ),
+        member_repo: members.clone(),
+        trusted_peer_repo: trusted.clone(),
+        peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
+        hash: Arc::new(FixedHasher),
+    }));
+    let (presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
+    let runtime = gossip.clone().start(presence_rx);
+    let activity = runtime.activity();
+    AutoRefreshHarness {
+        transport,
+        members,
+        trusted,
+        presence_tx,
+        runtime,
+        activity,
+        gossip,
+    }
+}
+
+async fn wait_until<F, Fut, T>(timeout: Duration, mut check: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    tokio::time::timeout(timeout, async {
+        loop {
+            if let Some(value) = check().await {
+                return value;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for condition"))
+}
+
+#[tokio::test]
+async fn auto_shared_device_refresh_discovers_missing_member_after_unlock_resume() {
+    let harness = auto_refresh_harness(
+        vec![Ok(shared_device_page_b())],
+        Arc::new(FixedClock(1_000)),
+    )
+    .await;
+    wait_until(Duration::from_secs(2), || async {
+        harness
+            .transport
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|message| matches!(message, MembershipGossipMessage::Digest(_)).then_some(()))
+    })
+    .await;
+    assert_eq!(
+        harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst),
+        0
+    );
+
+    harness.activity.resume().await.unwrap();
+    wait_until(Duration::from_secs(2), || async {
+        harness
+            .members
+            .get(&DeviceId::new("device-b"))
+            .await
+            .unwrap()
+            .map(|_| ())
+    })
+    .await;
+    assert_eq!(
+        harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert!(harness
+        .trusted
+        .get(&DeviceId::new("device-b"))
+        .await
+        .unwrap()
+        .is_some());
+
+    let b_members = Arc::new(InMemoryMemberRepository::default());
+    let b_trusted = Arc::new(InMemoryTrustedPeerRepository::default());
+    save_member(&b_members, "device-a", "Device A", "AAAAAAAAAAAAAAAA").await;
+    save_trusted_peer(&b_trusted, "device-b", "device-a", "AAAAAAAAAAAAAAAA").await;
+    let b = Arc::new(MembershipConvergence::new(MembershipConvergenceDeps {
+        candidate_repo: Arc::new(InMemoryCandidateRepository::default()),
+        announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+        outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+        security_updates: membership_security(4),
+        transport: membership_transport(),
+        clock: Arc::new(FixedClock(1_000)),
+        device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
+        announcement_material: Arc::new(FixedAnnouncementMaterial),
+        member_signatures: Arc::new(AcceptingMemberSignatures),
+        fingerprint_factory: Arc::new(FixedFingerprintFactory),
+        attestation: Arc::new(FixedAttestation(Ok(verified_peer_c()))),
+        verified_peer_promotion: in_memory_promotion(
+            Arc::new(InMemoryCandidateRepository::default()),
+            b_members.clone(),
+            b_trusted.clone(),
+            Arc::new(InMemoryPeerAddressRepository::default()),
+        ),
+        member_repo: b_members.clone(),
+        trusted_peer_repo: b_trusted.clone(),
+        peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
+        hash: Arc::new(FixedHasher),
+    }));
+    b.accept_verified_peer(verified_peer_c()).await.unwrap();
+    assert!(b_members
+        .get(&DeviceId::new("device-c"))
+        .await
+        .unwrap()
+        .is_some());
+
+    harness.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn auto_shared_device_refresh_waits_for_unlock_before_starting() {
+    let harness = auto_refresh_harness(
+        vec![Ok(shared_device_page_b())],
+        Arc::new(FixedClock(1_000)),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if harness
+                .transport
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| matches!(message, MembershipGossipMessage::Digest(_)))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst),
+        0
+    );
+
+    harness.activity.resume().await.unwrap();
+    wait_until(Duration::from_secs(2), || async {
+        (harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst)
+            > 0)
+        .then_some(())
+    })
+    .await;
+    harness.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn auto_shared_device_refresh_repeated_resumes_start_only_one_round() {
+    let harness = auto_refresh_harness(
+        vec![Ok(shared_device_page_b())],
+        Arc::new(FixedClock(1_000)),
+    )
+    .await;
+    let mut refresh_events = harness.gossip.subscribe_shared_device_refresh();
+    harness.activity.resume().await.unwrap();
+    harness.activity.resume().await.unwrap();
+    harness.activity.resume().await.unwrap();
+    wait_until(Duration::from_secs(2), || async {
+        (harness
+            .members
+            .get(&DeviceId::new("device-b"))
+            .await
+            .unwrap()
+            .is_some())
+        .then_some(())
+    })
+    .await;
+    loop {
+        let event = refresh_events.recv().await.unwrap();
+        if event.phase == SharedDeviceRefreshPhase::RoundCompleted {
+            break;
+        }
+    }
+    harness.activity.resume().await.unwrap();
+    harness.activity.resume().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst),
+        1
+    );
+    harness.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn auto_shared_device_refresh_retries_after_source_comes_online() {
+    let harness = auto_refresh_harness(
+        vec![
+            Err(MembershipGossipTransportError::Offline),
+            Ok(shared_device_page_b()),
+        ],
+        Arc::new(FixedClock(1_000)),
+    )
+    .await;
+    let mut refresh_events = harness.gossip.subscribe_shared_device_refresh();
+    harness.activity.resume().await.unwrap();
+    loop {
+        let event = refresh_events.recv().await.unwrap();
+        if event.phase == SharedDeviceRefreshPhase::RoundCompleted {
+            break;
+        }
+    }
+    assert_eq!(
+        harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert!(!harness
+        .members
+        .get(&DeviceId::new("device-b"))
+        .await
+        .unwrap()
+        .is_some());
+
+    harness
+        .presence_tx
+        .send(uc_core::ports::PresenceEvent {
+            device_id: DeviceId::new("device-a"),
+            state: uc_core::ports::ReachabilityState::Online,
+            at: chrono::DateTime::from_timestamp_millis(1_100).unwrap(),
+        })
+        .unwrap();
+    wait_until(Duration::from_secs(2), || async {
+        (harness
+            .members
+            .get(&DeviceId::new("device-b"))
+            .await
+            .unwrap()
+            .is_some())
+        .then_some(())
+    })
+    .await;
+    assert_eq!(
+        harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst),
+        2
+    );
+    harness.runtime.shutdown().await;
 }

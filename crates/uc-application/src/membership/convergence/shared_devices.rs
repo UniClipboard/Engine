@@ -1,4 +1,5 @@
 use super::*;
+use tracing::debug;
 
 impl MembershipConvergence {
     pub(crate) fn subscribe_shared_device_refresh(
@@ -58,6 +59,104 @@ impl MembershipConvergence {
             .as_ref()
             .filter(|refresh| refresh.initial_round_active)
             .map(|refresh| (refresh.status.request_id.clone(), refresh.space_id.clone()))
+    }
+
+    /// Schedule one shared device lookup after a session recovery.
+    ///
+    /// Repeated scheduling within one recovery is merged: only the first
+    /// call moves the coordinator from `Idle` to `Pending`. A completed
+    /// lookup also suppresses re-scheduling for a short cooldown, so
+    /// duplicate unlock or readiness notifications cannot start a second
+    /// round. Locking resets the coordinator, so the next unlock always
+    /// starts one fresh round.
+    pub(super) async fn schedule_auto_shared_device_refresh(&self) {
+        let state = match self.deps.security_updates.current_state().await {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        let now_ms = self.deps.clock.now_ms();
+        let mut auto = self.auto_shared_device_refresh.lock().await;
+        let already_tracked = match &auto.mode {
+            AutoSharedDeviceRefreshMode::Pending { space_id }
+            | AutoSharedDeviceRefreshMode::WaitingForSourceOnline { space_id } => {
+                space_id == &state.space_id
+            }
+            AutoSharedDeviceRefreshMode::Idle => false,
+        };
+        if already_tracked {
+            return;
+        }
+        if auto
+            .last_completed_at_ms
+            .map(|completed_at| {
+                now_ms.saturating_sub(completed_at) < AUTO_SHARED_DEVICE_REFRESH_COOLDOWN_MS
+            })
+            .unwrap_or(false)
+        {
+            return;
+        }
+        auto.mode = AutoSharedDeviceRefreshMode::Pending {
+            space_id: state.space_id,
+        };
+        debug!("auto shared device refresh scheduled after session recovery");
+        self.wake.notify_one();
+    }
+
+    pub(super) async fn auto_shared_device_refresh_pending(&self) -> bool {
+        matches!(
+            self.auto_shared_device_refresh.lock().await.mode,
+            AutoSharedDeviceRefreshMode::Pending { .. }
+        )
+    }
+
+    pub(super) async fn promote_auto_shared_device_refresh_to_pending(&self) {
+        let mut auto = self.auto_shared_device_refresh.lock().await;
+        if let AutoSharedDeviceRefreshMode::WaitingForSourceOnline { space_id } = &auto.mode {
+            auto.mode = AutoSharedDeviceRefreshMode::Pending {
+                space_id: space_id.clone(),
+            };
+        }
+    }
+
+    pub(super) async fn reset_auto_shared_device_refresh(&self) {
+        let mut auto = self.auto_shared_device_refresh.lock().await;
+        auto.mode = AutoSharedDeviceRefreshMode::Idle;
+        auto.last_completed_at_ms = None;
+    }
+
+    async fn complete_auto_shared_device_refresh(&self, space_id: &SpaceId) {
+        let sources_unavailable = {
+            let active = self.shared_device_refresh.lock().await;
+            active
+                .as_ref()
+                .filter(|refresh| refresh.space_id == *space_id)
+                .map(|refresh| refresh.status.unavailable_source_count > 0)
+                .unwrap_or(false)
+        };
+        let now_ms = self.deps.clock.now_ms();
+        let mut auto = self.auto_shared_device_refresh.lock().await;
+        let tracked = match &auto.mode {
+            AutoSharedDeviceRefreshMode::Pending { space_id: current }
+            | AutoSharedDeviceRefreshMode::WaitingForSourceOnline { space_id: current } => {
+                current == space_id
+            }
+            AutoSharedDeviceRefreshMode::Idle => false,
+        };
+        if !tracked {
+            return;
+        }
+        if sources_unavailable {
+            auto.mode = AutoSharedDeviceRefreshMode::WaitingForSourceOnline {
+                space_id: space_id.clone(),
+            };
+        } else {
+            auto.mode = AutoSharedDeviceRefreshMode::Idle;
+            auto.last_completed_at_ms = Some(now_ms);
+        }
+        debug!(
+            sources_unavailable,
+            "auto shared device refresh round completed"
+        );
     }
 
     async fn update_shared_device_refresh<F>(
@@ -203,6 +302,7 @@ impl MembershipConvergence {
             Err(_) => {
                 self.record_shared_device_refresh_source_unavailable(&request_id)
                     .await;
+                self.complete_auto_shared_device_refresh(&space_id).await;
                 self.set_shared_device_refresh_phase(
                     &request_id,
                     SharedDeviceRefreshPhase::RoundCompleted,
@@ -283,6 +383,7 @@ impl MembershipConvergence {
                 }
             }
         }
+        self.complete_auto_shared_device_refresh(&space_id).await;
         self.set_shared_device_refresh_phase(
             &request_id,
             SharedDeviceRefreshPhase::RoundCompleted,

@@ -37,6 +37,7 @@ const ANNOUNCEMENT_REFRESH_LEAD_MS: i64 = 24 * 60 * 60 * 1_000;
 const GOSSIP_RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const GOSSIP_RECONCILE_JITTER_WINDOW: Duration = Duration::from_secs(60);
 const MIN_SCHEDULED_RECONCILE_DELAY: Duration = Duration::from_millis(100);
+const AUTO_SHARED_DEVICE_REFRESH_COOLDOWN_MS: i64 = 60_000;
 
 pub struct MembershipConvergenceDeps {
     pub candidate_repo: Arc<dyn MembershipCandidateRepositoryPort>,
@@ -63,6 +64,7 @@ pub struct MembershipConvergence {
     wake: Arc<Notify>,
     shared_device_refresh: tokio::sync::Mutex<Option<ActiveSharedDeviceRefresh>>,
     shared_device_refresh_events: broadcast::Sender<SharedDeviceRefreshStatus>,
+    auto_shared_device_refresh: tokio::sync::Mutex<AutoSharedDeviceRefreshState>,
 }
 
 pub fn build_membership_convergence(deps: MembershipConvergenceDeps) -> Arc<MembershipConvergence> {
@@ -149,6 +151,19 @@ struct ActiveSharedDeviceRefresh {
     space_id: SpaceId,
     initial_round_active: bool,
     status: SharedDeviceRefreshStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AutoSharedDeviceRefreshMode {
+    Idle,
+    Pending { space_id: SpaceId },
+    WaitingForSourceOnline { space_id: SpaceId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutoSharedDeviceRefreshState {
+    mode: AutoSharedDeviceRefreshMode,
+    last_completed_at_ms: Option<i64>,
 }
 
 impl SharedDeviceRefreshStatus {
@@ -271,6 +286,10 @@ impl MembershipConvergence {
             wake: Arc::new(Notify::new()),
             shared_device_refresh: tokio::sync::Mutex::new(None),
             shared_device_refresh_events,
+            auto_shared_device_refresh: tokio::sync::Mutex::new(AutoSharedDeviceRefreshState {
+                mode: AutoSharedDeviceRefreshMode::Idle,
+                last_completed_at_ms: None,
+            }),
         }
     }
 
