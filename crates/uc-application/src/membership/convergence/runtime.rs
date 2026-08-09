@@ -166,7 +166,8 @@ impl MembershipConvergence {
                     event = presence_events.recv(), if !paused && presence_open => match event {
                         Ok(event) if event.state == uc_core::ports::ReachabilityState::Online => {
                             run_now = true;
-                            self.promote_auto_shared_device_refresh_to_pending().await;
+                            self.promote_auto_shared_device_refresh_to_pending(&event.device_id)
+                                .await;
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => {

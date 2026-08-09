@@ -3576,6 +3576,7 @@ struct AutoRefreshHarness {
 async fn auto_refresh_harness(
     pages: Vec<Result<MembershipSharedDevicePage, MembershipGossipTransportError>>,
     clock: Arc<dyn ClockPort>,
+    extra_known_members: Vec<(&str, &str, &str)>,
 ) -> AutoRefreshHarness {
     let members = Arc::new(InMemoryMemberRepository::default());
     let trusted = Arc::new(InMemoryTrustedPeerRepository::default());
@@ -3583,6 +3584,9 @@ async fn auto_refresh_harness(
     let addresses = Arc::new(InMemoryPeerAddressRepository::default());
     save_member(&members, "device-a", "Device A", "AAAAAAAAAAAAAAAA").await;
     save_trusted_peer(&trusted, "device-c", "device-a", "AAAAAAAAAAAAAAAA").await;
+    for (device_id, device_name, fingerprint_raw) in extra_known_members {
+        save_member(&members, device_id, device_name, fingerprint_raw).await;
+    }
     let transport = Arc::new(ScriptedSharedDevicePageTransport {
         pages: Mutex::new(VecDeque::from(pages)),
         shared_device_requests: Arc::new(AtomicUsize::new(0)),
@@ -3650,6 +3654,7 @@ async fn auto_shared_device_refresh_discovers_missing_member_after_unlock_resume
     let harness = auto_refresh_harness(
         vec![Ok(shared_device_page_b())],
         Arc::new(FixedClock(1_000)),
+        Vec::new(),
     )
     .await;
     wait_until(Duration::from_secs(2), || async {
@@ -3736,6 +3741,7 @@ async fn auto_shared_device_refresh_waits_for_unlock_before_starting() {
     let harness = auto_refresh_harness(
         vec![Ok(shared_device_page_b())],
         Arc::new(FixedClock(1_000)),
+        Vec::new(),
     )
     .await;
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -3781,6 +3787,7 @@ async fn auto_shared_device_refresh_repeated_resumes_start_only_one_round() {
     let harness = auto_refresh_harness(
         vec![Ok(shared_device_page_b())],
         Arc::new(FixedClock(1_000)),
+        Vec::new(),
     )
     .await;
     let mut refresh_events = harness.gossip.subscribe_shared_device_refresh();
@@ -3824,6 +3831,7 @@ async fn auto_shared_device_refresh_retries_after_source_comes_online() {
             Ok(shared_device_page_b()),
         ],
         Arc::new(FixedClock(1_000)),
+        Vec::new(),
     )
     .await;
     let mut refresh_events = harness.gossip.subscribe_shared_device_refresh();
@@ -3854,6 +3862,78 @@ async fn auto_shared_device_refresh_retries_after_source_comes_online() {
             device_id: DeviceId::new("device-a"),
             state: uc_core::ports::ReachabilityState::Online,
             at: chrono::DateTime::from_timestamp_millis(1_100).unwrap(),
+        })
+        .unwrap();
+    wait_until(Duration::from_secs(2), || async {
+        (harness
+            .members
+            .get(&DeviceId::new("device-b"))
+            .await
+            .unwrap()
+            .is_some())
+        .then_some(())
+    })
+    .await;
+    assert_eq!(
+        harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst),
+        2
+    );
+    harness.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn auto_shared_device_refresh_ignores_online_events_from_other_devices() {
+    let harness = auto_refresh_harness(
+        vec![
+            Err(MembershipGossipTransportError::Offline),
+            Ok(shared_device_page_b()),
+        ],
+        Arc::new(FixedClock(1_000)),
+        vec![("device-d", "Device D", "DDDDDDDDDDDDDDDD")],
+    )
+    .await;
+    let mut refresh_events = harness.gossip.subscribe_shared_device_refresh();
+    harness.activity.resume().await.unwrap();
+    loop {
+        let event = refresh_events.recv().await.unwrap();
+        if event.phase == SharedDeviceRefreshPhase::RoundCompleted {
+            break;
+        }
+    }
+    assert_eq!(
+        harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst),
+        1
+    );
+
+    harness
+        .presence_tx
+        .send(uc_core::ports::PresenceEvent {
+            device_id: DeviceId::new("device-d"),
+            state: uc_core::ports::ReachabilityState::Online,
+            at: chrono::DateTime::from_timestamp_millis(1_100).unwrap(),
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        harness
+            .transport
+            .shared_device_requests
+            .load(Ordering::SeqCst),
+        1
+    );
+
+    harness
+        .presence_tx
+        .send(uc_core::ports::PresenceEvent {
+            device_id: DeviceId::new("device-a"),
+            state: uc_core::ports::ReachabilityState::Online,
+            at: chrono::DateTime::from_timestamp_millis(1_200).unwrap(),
         })
         .unwrap();
     wait_until(Duration::from_secs(2), || async {
