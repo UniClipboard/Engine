@@ -46,6 +46,9 @@ impl MembershipConvergence {
             let mut shared_device_refresh: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None;
             loop {
                 if !paused && shared_device_refresh.is_none() {
+                    if self.auto_shared_device_refresh_pending().await {
+                        let _ = self.start_shared_device_refresh().await;
+                    }
                     if let Some((request_id, space_id)) = self.pending_shared_device_refresh().await
                     {
                         let gossip = Arc::clone(&self);
@@ -73,9 +76,11 @@ impl MembershipConvergence {
                                     paused = true;
                                     run_now = true;
                                     shared_device_refresh = None;
+                                    self.reset_auto_shared_device_refresh().await;
                                     break (None, Some(completed));
                                 }
                                 Some(MembershipConvergenceRuntimeCommand::Resume(completed)) => {
+                                    self.schedule_auto_shared_device_refresh().await;
                                     let _ = completed.send(());
                                 }
                                 Some(MembershipConvergenceRuntimeCommand::Shutdown(completed)) => {
@@ -133,11 +138,13 @@ impl MembershipConvergence {
                         Some(MembershipConvergenceRuntimeCommand::Pause(completed)) => {
                             paused = true;
                             shared_device_refresh = None;
+                            self.reset_auto_shared_device_refresh().await;
                             let _ = completed.send(());
                         }
                         Some(MembershipConvergenceRuntimeCommand::Resume(completed)) => {
                             paused = false;
                             run_now = true;
+                            self.schedule_auto_shared_device_refresh().await;
                             let _ = completed.send(());
                         }
                         Some(MembershipConvergenceRuntimeCommand::Shutdown(completed)) => {
@@ -159,6 +166,7 @@ impl MembershipConvergence {
                     event = presence_events.recv(), if !paused && presence_open => match event {
                         Ok(event) if event.state == uc_core::ports::ReachabilityState::Online => {
                             run_now = true;
+                            self.promote_auto_shared_device_refresh_to_pending().await;
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => {
