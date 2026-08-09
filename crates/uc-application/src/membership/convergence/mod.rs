@@ -3,13 +3,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{broadcast, Notify};
-use tracing::{info, warn};
+use tracing::info;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
     CandidateEvent, CandidateFailure, CandidateMergeError, CandidateMergeOutcome, CandidateStatus,
     CurrentMemberSignaturePort, CurrentMembershipAnnouncementPort, CurrentMembershipIdentityError,
     DeviceAnnouncement, MemberRepositoryPort, MembershipAnnouncementRepositoryError,
-    MembershipAnnouncementRepositoryPort, MembershipAttestationPort,
+    MembershipAnnouncementRepositoryPort, MembershipAppliedSecurityUpdateRepositoryError,
+    MembershipAppliedSecurityUpdateRepositoryPort, MembershipAttestationPort,
     MembershipCandidateRepositoryError, MembershipCandidateRepositoryPort, MembershipEvent,
     MembershipEventBatch, MembershipGossipBoundsError, MembershipGossipEndpointError,
     MembershipGossipEndpointPort, MembershipGossipMessage, MembershipGossipTransportPort,
@@ -44,6 +45,7 @@ pub struct MembershipConvergenceDeps {
     pub announcement_repo: Arc<dyn MembershipAnnouncementRepositoryPort>,
     pub outbox_repo: Arc<dyn MembershipOutboxRepositoryPort>,
     pub security_updates: Arc<dyn MembershipSecurityUpdatePort>,
+    pub applied_security_updates: Arc<dyn MembershipAppliedSecurityUpdateRepositoryPort>,
     pub transport: Arc<dyn MembershipGossipTransportPort>,
     pub clock: Arc<dyn ClockPort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
@@ -260,6 +262,8 @@ pub enum MembershipConvergenceError {
     DeliveryBatch(#[from] MembershipGossipBoundsError),
     #[error("membership security update failed: {0}")]
     SecurityUpdate(#[from] MembershipSecurityUpdateError),
+    #[error("membership applied update storage failed: {0}")]
+    AppliedSecurityUpdate(#[from] MembershipAppliedSecurityUpdateRepositoryError),
     #[error("membership candidate was not found")]
     CandidateNotFound,
     #[error("membership peer is unavailable")]
@@ -312,6 +316,14 @@ impl MembershipConvergence {
         };
 
         let mut candidates = self.load_pending(&state.space_id).await?;
+        let waiting_for_update = candidates
+            .iter()
+            .any(|candidate| candidate.status() == CandidateStatus::WaitingForUpdate);
+        if waiting_for_update {
+            self.pull_updates_from_connected_members(&mut outcome)
+                .await?;
+            candidates = self.load_pending(&state.space_id).await?;
+        }
         candidates.sort_by(|left, right| left.device_id().as_str().cmp(right.device_id().as_str()));
         for candidate in candidates {
             let deferred = match candidate.next_attempt_at_ms() {
@@ -371,6 +383,46 @@ impl MembershipConvergence {
             }
         }
         Ok(outcome)
+    }
+
+    /// Ask every connected member for security updates the local device is
+    /// still missing, so `WaitingForUpdate` candidates can resume without
+    /// depending on the provider's own push schedule.
+    async fn pull_updates_from_connected_members(
+        &self,
+        outcome: &mut MembershipGossipPassOutcome,
+    ) -> Result<(), MembershipConvergenceError> {
+        let local_device_id = self.deps.device_identity.current_device_id();
+        let mut members = self
+            .deps
+            .member_repo
+            .list()
+            .await
+            .map_err(|error| MembershipConvergenceError::Relationship(error.to_string()))?;
+        members.sort_by(|left, right| left.device_id.as_str().cmp(right.device_id.as_str()));
+        for member in members
+            .into_iter()
+            .filter(|member| member.device_id != local_device_id)
+        {
+            match self.pull_security_updates(&member.device_id).await {
+                Ok(applied) if applied > 0 => {
+                    info!(
+                        provider_device_id = %member.device_id.as_str(),
+                        applied_updates = applied,
+                        "membership security updates pulled from connected member"
+                    );
+                }
+                Ok(_) => {}
+                Err(
+                    MembershipConvergenceError::PeerUnavailable
+                    | MembershipConvergenceError::VerificationRejected,
+                ) => {
+                    outcome.deferred_items = outcome.deferred_items.saturating_add(1);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     async fn convergence_status(

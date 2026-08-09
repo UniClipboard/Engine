@@ -3,8 +3,10 @@ use async_trait::async_trait;
 use crate::ids::DeviceId;
 
 use super::error::MembershipError;
-use super::gossip::PendingMembershipBatch;
-use super::gossip::{DeviceAnnouncement, SpaceMembershipCandidate, VerifiedMembershipPeer};
+use super::gossip::{
+    DeviceAnnouncement, PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate,
+    VerifiedMembershipPeer,
+};
 use super::member::SpaceMember;
 use super::removal_intent::{
     MemberInstanceId, RemovalCausalProof, RemovalCompletionReceipt, RemovalIntentId, RemovalNotice,
@@ -201,6 +203,36 @@ pub trait MembershipSecurityUpdatePort: Send + Sync {
         &self,
         payload: &[u8],
     ) -> Result<u64, MembershipSecurityUpdateError>;
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum MembershipAppliedSecurityUpdateRepositoryError {
+    #[error("membership applied update storage is locked")]
+    Locked,
+    #[error("membership applied update storage is corrupt")]
+    Corrupt,
+    #[error("membership applied update repository failed: {0}")]
+    Repository(String),
+}
+
+/// Persistence for security updates this device has already applied.
+///
+/// Applied updates stay queryable so the device can relay them to peers
+/// that are still behind on the group epoch, even when the device itself
+/// was never a sponsor-seed candidate. `save` is idempotent per space and
+/// update digest.
+#[async_trait]
+pub trait MembershipAppliedSecurityUpdateRepositoryPort: Send + Sync {
+    async fn list(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<Vec<RelayedSecurityUpdate>, MembershipAppliedSecurityUpdateRepositoryError>;
+
+    async fn save(
+        &self,
+        space_id: &SpaceId,
+        update: &RelayedSecurityUpdate,
+    ) -> Result<(), MembershipAppliedSecurityUpdateRepositoryError>;
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]

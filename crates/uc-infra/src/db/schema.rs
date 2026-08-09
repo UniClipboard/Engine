@@ -235,16 +235,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    t_device (id) {
-        id -> Text,
-        name -> Text,
-        platform -> Text,
-        is_local -> Bool,
-        created_at -> BigInt,
-    }
-}
-
-diesel::table! {
     encrypted_relationship (kind, lookup_key) {
         kind -> Text,
         lookup_key -> Binary,
@@ -367,5 +357,4 @@ diesel::allow_tables_to_appear_in_same_query!(
     search_entry_tag,
     search_index_meta,
     search_posting,
-    t_device,
 );

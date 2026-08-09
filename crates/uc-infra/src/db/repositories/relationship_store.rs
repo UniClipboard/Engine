@@ -9,8 +9,8 @@ use tokio::sync::Mutex;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     CandidateStatus, DeviceAnnouncement, PendingMembershipBatch, RelationshipStateResetError,
-    RelationshipStateResetPort, SpaceMembershipCandidate, VerifiedPeerPromotionError,
-    VerifiedPeerPromotionPort,
+    RelationshipStateResetPort, RelayedSecurityUpdate, SpaceMembershipCandidate,
+    VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
@@ -48,6 +48,7 @@ enum RelationshipKind {
     Candidate,
     MembershipAnnouncement,
     MembershipOutbox,
+    MembershipAppliedSecurityUpdate,
 }
 
 impl RelationshipKind {
@@ -59,6 +60,7 @@ impl RelationshipKind {
             Self::Candidate => "candidate",
             Self::MembershipAnnouncement => "membership_announcement",
             Self::MembershipOutbox => "membership_outbox",
+            Self::MembershipAppliedSecurityUpdate => "membership_applied_security_update",
         }
     }
 }
@@ -169,6 +171,13 @@ struct MembershipAnnouncementPayloadV1 {
 struct MembershipOutboxPayloadV1 {
     version: u8,
     pending: PendingMembershipBatch,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MembershipAppliedSecurityUpdatePayloadV1 {
+    version: u8,
+    space_id: String,
+    update: RelayedSecurityUpdate,
 }
 
 #[derive(QueryableByName)]
@@ -916,6 +925,50 @@ where
         self.remove_payload(RelationshipKind::MembershipOutbox, &identity)
             .await
     }
+
+    pub async fn get_membership_applied_security_update(
+        &self,
+        space_id: &uc_core::ids::SpaceId,
+        next_epoch: u64,
+    ) -> Result<Option<RelayedSecurityUpdate>, RelationshipStoreError> {
+        let identity = membership_applied_security_update_identity(space_id, next_epoch);
+        self.get_payload(RelationshipKind::MembershipAppliedSecurityUpdate, &identity)
+            .await?
+            .map(|payload| decode_membership_applied_security_update(&payload))
+            .transpose()
+            .map(|decoded| decoded.map(|decoded| decoded.update))
+    }
+
+    pub async fn list_membership_applied_security_updates(
+        &self,
+        space_id: &uc_core::ids::SpaceId,
+    ) -> Result<Vec<RelayedSecurityUpdate>, RelationshipStoreError> {
+        self.list_payloads(RelationshipKind::MembershipAppliedSecurityUpdate)
+            .await?
+            .into_iter()
+            .map(|payload| decode_membership_applied_security_update(&payload))
+            .filter_map(|update| match update {
+                Ok(update) if &update.space_id == space_id.as_ref() => Some(Ok(update.update)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
+    pub async fn save_membership_applied_security_update(
+        &self,
+        space_id: &uc_core::ids::SpaceId,
+        update: &RelayedSecurityUpdate,
+    ) -> Result<(), RelationshipStoreError> {
+        let identity = membership_applied_security_update_identity(space_id, update.next_epoch);
+        let payload = encode_membership_applied_security_update(space_id, update)?;
+        self.save_payload(
+            RelationshipKind::MembershipAppliedSecurityUpdate,
+            &identity,
+            &payload,
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -989,6 +1042,18 @@ fn membership_outbox_identity(
         space_id.as_ref(),
         recipient_device_id.as_str(),
         batch_id
+    )
+}
+
+fn membership_applied_security_update_identity(
+    space_id: &uc_core::ids::SpaceId,
+    next_epoch: u64,
+) -> String {
+    format!(
+        "{}:{}:{}",
+        space_id.as_ref().len(),
+        space_id.as_ref(),
+        next_epoch
     )
 }
 
@@ -1114,6 +1179,29 @@ fn decode_membership_outbox(
     Ok(decoded.pending)
 }
 
+fn encode_membership_applied_security_update(
+    space_id: &uc_core::ids::SpaceId,
+    update: &RelayedSecurityUpdate,
+) -> Result<Vec<u8>, RelationshipStoreError> {
+    serde_json::to_vec(&MembershipAppliedSecurityUpdatePayloadV1 {
+        version: 1,
+        space_id: space_id.as_ref().to_owned(),
+        update: update.clone(),
+    })
+    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+}
+
+fn decode_membership_applied_security_update(
+    payload: &[u8],
+) -> Result<MembershipAppliedSecurityUpdatePayloadV1, RelationshipStoreError> {
+    let decoded: MembershipAppliedSecurityUpdatePayloadV1 =
+        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+    if decoded.version != 1 {
+        return Err(RelationshipStoreError::InvalidCiphertext);
+    }
+    Ok(decoded)
+}
+
 fn legacy_member_to_domain(row: LegacyMemberRow) -> Result<SpaceMember, RelationshipStoreError> {
     let joined_at = Utc
         .timestamp_opt(row.joined_at, 0)
@@ -1211,9 +1299,10 @@ mod tests {
     use uc_core::ids::ProfileId;
     use uc_core::membership::{
         CandidateStatus, DeviceAnnouncement, MembershipAnnouncementRepositoryPort,
-        MembershipCandidateRepositoryPort, MembershipEvent, MembershipEventBatch,
-        MembershipOutboxRepositoryPort, PendingMembershipBatch, RelationshipStateResetPort,
-        RelayedSecurityUpdate, SpaceMembershipCandidate, SponsorCandidateSeed,
+        MembershipAppliedSecurityUpdateRepositoryPort, MembershipCandidateRepositoryPort,
+        MembershipEvent, MembershipEventBatch, MembershipOutboxRepositoryPort,
+        PendingMembershipBatch, RelationshipStateResetPort, RelayedSecurityUpdate,
+        SpaceMembershipCandidate, SponsorCandidateSeed,
     };
     use uc_core::ports::security::current_profile::{CurrentProfileError, CurrentProfilePort};
     use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
@@ -1229,7 +1318,8 @@ mod tests {
     use crate::db::ports::DbExecutor;
     use crate::db::repositories::{
         DieselPeerAddressRepository, DieselSpaceMemberRepository, DieselTrustedPeerRepository,
-        EncryptedMembershipAnnouncementRepository, EncryptedMembershipCandidateRepository,
+        EncryptedMembershipAnnouncementRepository,
+        EncryptedMembershipAppliedSecurityUpdateRepository, EncryptedMembershipCandidateRepository,
         EncryptedMembershipOutboxRepository,
     };
 
@@ -1451,6 +1541,27 @@ mod tests {
             address_repo.get(&address.device_id).await.unwrap(),
             Some(address)
         );
+    }
+
+    #[tokio::test]
+    async fn applied_security_updates_roundtrip_encrypted_and_scoped_per_space() {
+        let (store, _executor, _tempdir) = store(Arc::new(FixedSubkey));
+        let repo = EncryptedMembershipAppliedSecurityUpdateRepository::new(store.clone());
+        let space_a = uc_core::ids::SpaceId::from("space-a");
+        let space_b = uc_core::ids::SpaceId::from("space-b");
+        let update = RelayedSecurityUpdate {
+            previous_epoch: 4,
+            next_epoch: 5,
+            payload: b"epoch-4-to-5".to_vec(),
+            digest: [7; 32],
+        };
+
+        repo.save(&space_a, &update).await.unwrap();
+        repo.save(&space_a, &update).await.unwrap();
+
+        let listed = repo.list(&space_a).await.unwrap();
+        assert_eq!(listed, vec![update.clone()]);
+        assert!(repo.list(&space_b).await.unwrap().is_empty());
     }
 
     #[tokio::test]

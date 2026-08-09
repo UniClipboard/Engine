@@ -611,6 +611,14 @@ impl IrohMembershipAttestationHandler {
             .await
             .map_err(|_| "epoch_unavailable")?;
         if epoch != hello.group_epoch || applied_epoch != hello.group_epoch {
+            warn!(
+                peer = %source_id.as_str(),
+                local_epoch = epoch,
+                peer_epoch = hello.group_epoch,
+                applied_epoch,
+                error_kind = "membership_attestation_epoch_mismatch",
+                "membership attestation rejected because the group epochs do not match"
+            );
             reject(&mut send, WireReject::EpochMismatch).await;
             return Err("epoch_mismatch");
         }

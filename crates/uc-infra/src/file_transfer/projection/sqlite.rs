@@ -435,6 +435,7 @@ mod tests {
              ALTER TABLE relationship_legacy_space_member RENAME TO space_member;\
              ALTER TABLE relationship_legacy_trusted_peer RENAME TO trusted_peer;\
              ALTER TABLE relationship_legacy_peer_address RENAME TO peer_address;\
+             DELETE FROM __diesel_schema_migrations WHERE version = '20260810000001';\
              DELETE FROM __diesel_schema_migrations WHERE version = '20260802000001';",
         )
         .unwrap();

@@ -85,6 +85,9 @@ pub struct SyncEngineDeps {
         Arc<dyn uc_core::membership::MembershipAnnouncementRepositoryPort>,
     /// Encrypted pending membership batches for offline recipients.
     pub membership_outbox_repo: Arc<dyn uc_core::membership::MembershipOutboxRepositoryPort>,
+    /// Encrypted security updates this device has applied and can relay.
+    pub membership_applied_security_update_repo:
+        Arc<dyn uc_core::membership::MembershipAppliedSecurityUpdateRepositoryPort>,
     /// Independent member signatures from the current OpenMLS member tree.
     pub current_member_signatures: Arc<dyn uc_core::membership::CurrentMemberSignaturePort>,
     /// The same unlocked session used by space access and encrypted storage.
