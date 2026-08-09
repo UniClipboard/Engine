@@ -84,7 +84,7 @@ pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 use uc_infra::security::{
     DefaultMembershipSecurityUpdateAdapter, RemovalIntentVerificationAdapter,
-    RemovalRecoveryAdapter,
+    RemovalNoticeVerificationAdapter, RemovalRecoveryAdapter,
 };
 
 use crate::assembly::deps::{SharedRuntimeDeps, SyncEngineDeps};
@@ -575,6 +575,8 @@ pub async fn build_sync_engine_assembly(
         verification: Arc::new(RemovalIntentVerificationAdapter),
         exchange: removal_exchange_adapter.clone(),
         late_submission: removal_exchange_adapter.clone(),
+        notice: removal_exchange_adapter.clone(),
+        notice_verification: Arc::new(RemovalNoticeVerificationAdapter),
         recovery: Arc::new(RemovalRecoveryAdapter::new(
             space_setup.membership_session.as_ref().clone(),
             Arc::clone(&space_setup.removal_key_epoch_repository),
@@ -583,12 +585,14 @@ pub async fn build_sync_engine_assembly(
         )),
         member_signatures: Arc::clone(&space_setup.current_member_signatures),
         member_repo: Arc::clone(&deps.device.member_repo),
+        own_device: deps.device.device_identity.current_device_id(),
     }));
     builder.install_member_removal(
         &removal_exchange_adapter,
         Arc::clone(&deps.device.member_repo),
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
+        removal_coordinator.clone(),
         removal_coordinator.clone(),
         removal_coordinator.clone(),
     )?;

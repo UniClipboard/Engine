@@ -225,6 +225,8 @@ pub struct MemberRemovalView {
     pub effective_member_count: usize,
     pub convergence_digest: Option<String>,
     pub updated_at_ms: i64,
+    /// 本机是否已经观察到自身被移出当前空间。
+    pub removed: bool,
 }
 
 impl MemberRemovalView {
@@ -245,6 +247,7 @@ impl MemberRemovalView {
                 .convergence_digest
                 .map(|digest| digest.iter().map(|byte| format!("{byte:02x}")).collect()),
             updated_at_ms: summary.updated_at_ms,
+            removed: summary.removed,
         }
     }
 }

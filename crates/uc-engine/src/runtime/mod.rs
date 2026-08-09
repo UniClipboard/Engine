@@ -835,6 +835,7 @@ mod tests {
                 effective_member_count: 2,
                 convergence_digest: None,
                 updated_at_ms: 42,
+                removed: false,
             })
             .unwrap();
 
@@ -847,6 +848,7 @@ mod tests {
                     effective_member_count: 2,
                     convergence_digest: None,
                     updated_at_ms: 42,
+                    removed: false,
                 }
             ))
         );

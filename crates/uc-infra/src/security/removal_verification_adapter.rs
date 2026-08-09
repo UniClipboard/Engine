@@ -12,7 +12,8 @@ use openmls_traits::crypto::OpenMlsCrypto;
 use openmls_traits::types::SignatureScheme;
 use uc_core::membership::{
     MemberInstanceId, RemovalCausalProof, RemovalIntentVerificationError,
-    RemovalIntentVerificationPort, SignedRemovalIntent,
+    RemovalIntentVerificationPort, RemovalNotice, RemovalNoticeVerificationError,
+    RemovalNoticeVerificationPort, SignedRemovalIntent,
 };
 
 pub struct RemovalIntentVerificationAdapter;
@@ -68,6 +69,34 @@ impl RemovalIntentVerificationPort for RemovalIntentVerificationAdapter {
             .is_err()
         {
             return Err(RemovalIntentVerificationError::BadSignature);
+        }
+        Ok(())
+    }
+}
+
+/// 移除通知验证适配器:签发者签名与视图公开签名资料的 ED25519 核对。
+///
+/// 成员资格(签发者属于接收方保存的因果视图)由调用方以其持有的视图资料
+/// 完成;本适配器只验证签名与提供公钥的绑定。
+pub struct RemovalNoticeVerificationAdapter;
+
+#[async_trait]
+impl RemovalNoticeVerificationPort for RemovalNoticeVerificationAdapter {
+    async fn verify_notice_signature(
+        &self,
+        notice: &RemovalNotice,
+        issuer_public_key: &[u8],
+    ) -> Result<(), RemovalNoticeVerificationError> {
+        if RustCrypto::default()
+            .verify_signature(
+                SignatureScheme::ED25519,
+                &notice.signing_payload(),
+                issuer_public_key,
+                &notice.signature,
+            )
+            .is_err()
+        {
+            return Err(RemovalNoticeVerificationError::BadSignature);
         }
         Ok(())
     }

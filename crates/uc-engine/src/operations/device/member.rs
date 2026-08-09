@@ -384,6 +384,7 @@ pub(crate) fn member_removal_summary(
         effective_member_count: u64::try_from(view.effective_member_count).unwrap_or(u64::MAX),
         convergence_digest: view.convergence_digest,
         updated_at_ms: view.updated_at_ms,
+        removed: view.removed,
     }
 }
 
@@ -569,6 +570,7 @@ mod tests {
             effective_member_count: 2,
             convergence_digest: None,
             updated_at_ms: 123,
+            removed: false,
         }));
 
         assert_eq!(
@@ -579,6 +581,7 @@ mod tests {
                 effective_member_count: 2,
                 convergence_digest: None,
                 updated_at_ms: 123,
+                removed: false,
             })
         );
     }

@@ -39,7 +39,7 @@ use uc_core::membership::{
     CurrentMemberSignaturePort, CurrentMembershipIdentityPort, GroupRevocationPort,
     GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
     MembershipAttestationEndpointPort, PeerAdmissionPort, RemovalExchangeEndpointPort,
-    RemovalLateSubmissionEndpointPort,
+    RemovalLateSubmissionEndpointPort, RemovalNoticeEndpointPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
@@ -81,7 +81,7 @@ use super::net_recovery::DemandRecoveryCoordinator;
 use super::net_recovery::NetworkRecoveryObservationSource;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
 use super::removal_exchange_adapter::{
-    IrohRemovalExchangeAdapter, REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN,
+    IrohRemovalExchangeAdapter, REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN, REMOVAL_NOTICE_ALPN,
 };
 use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
@@ -993,6 +993,7 @@ impl IrohNodeBuilder {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         exchange_endpoint: Arc<dyn RemovalExchangeEndpointPort>,
         late_submission: Arc<dyn RemovalLateSubmissionEndpointPort>,
+        notice_endpoint: Arc<dyn RemovalNoticeEndpointPort>,
     ) -> Result<(), IrohNodeError> {
         let handlers = adapter.handlers(
             member_repo,
@@ -1000,12 +1001,14 @@ impl IrohNodeBuilder {
             fingerprint_factory,
             exchange_endpoint,
             late_submission,
+            notice_endpoint,
         );
         let builder = self.take_router_builder()?;
         self.router_builder = Some(
             builder
                 .accept(REMOVAL_EXCHANGE_ALPN, handlers.exchange)
-                .accept(REMOVAL_LATE_ALPN, handlers.late),
+                .accept(REMOVAL_LATE_ALPN, handlers.late)
+                .accept(REMOVAL_NOTICE_ALPN, handlers.notice),
         );
         Ok(())
     }
