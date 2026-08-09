@@ -17,7 +17,12 @@ XCFRAMEWORK="$DIST_DIR/UniClipboardEngine.xcframework"
 XCFRAMEWORK_ZIP="$DIST_DIR/UniClipboardEngine.xcframework.zip"
 CHECKSUM_FILE="$DIST_DIR/UniClipboardEngine.checksum.txt"
 DEBUG_DIR="$DIST_ROOT/debug-symbols/ios"
-CARGO_LOCKED=()
+CARGO_LOCKED_FLAG=""
+SLICE="${UC_ENGINE_UNIFFI_SLICE:-universal}"
+case "$SLICE" in
+  device|simulator|universal) ;;
+  *) echo "UC_ENGINE_UNIFFI_SLICE must be device, simulator, or universal" >&2; exit 1 ;;
+esac
 
 selective_strip_archive() {
   local archive="$1"
@@ -57,7 +62,7 @@ selective_strip_archive() {
 }
 
 if [[ -n "${UC_ENGINE_UNIFFI_BUILD_LOCKED:-}" ]]; then
-  CARGO_LOCKED+=(--locked)
+  CARGO_LOCKED_FLAG="--locked"
 fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -80,41 +85,49 @@ mkdir -p \
   "$DEBUG_DIR"
 
 echo "==> Generate Swift bindings from the host library"
-cargo build -p uc-engine-uniffi --release "${CARGO_LOCKED[@]}"
+cargo build -p uc-engine-uniffi --release $CARGO_LOCKED_FLAG
 cargo run -p uc-engine-uniffi --release --features bindgen-cli \
-  --bin uc-engine-uniffi-bindgen "${CARGO_LOCKED[@]}" -- \
+  --bin uc-engine-uniffi-bindgen $CARGO_LOCKED_FLAG -- \
   generate --library "$TARGET_DIR/release/libuc_engine_uniffi.dylib" \
   --language swift --out-dir "$BINDINGS_DIR"
 cp "$BINDINGS_DIR/uc_engine_uniffiFFI.h" "$INCLUDE_DIR/"
 cp "$BINDINGS_DIR/uc_engine_uniffiFFI.modulemap" "$INCLUDE_DIR/module.modulemap"
 
-echo "==> Build iOS device and simulator libraries"
-cargo build -p uc-engine-uniffi --release --target aarch64-apple-ios "${CARGO_LOCKED[@]}"
-cargo build -p uc-engine-uniffi --release --target aarch64-apple-ios-sim "${CARGO_LOCKED[@]}"
-cargo build -p uc-engine-uniffi --release --target x86_64-apple-ios "${CARGO_LOCKED[@]}"
-cp "$TARGET_DIR/aarch64-apple-ios/release/libuc_engine_uniffi.a" "$DEVICE_DIR/"
-cp "$TARGET_DIR/aarch64-apple-ios-sim/release/libuc_engine_uniffi.a" \
-  "$SIMULATOR_ARM64_DIR/"
-cp "$TARGET_DIR/x86_64-apple-ios/release/libuc_engine_uniffi.a" \
-  "$SIMULATOR_X86_64_DIR/"
-cp "$DEVICE_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/device.a"
-cp "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/simulator-arm64.a"
-cp "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/simulator-x86_64.a"
-selective_strip_archive "$DEVICE_DIR/libuc_engine_uniffi.a"
-selective_strip_archive "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a"
-selective_strip_archive "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a"
-lipo -create \
-  "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a" \
-  "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a" \
-  -output "$SIMULATOR_DIR/libuc_engine_uniffi.a"
+if [[ "$SLICE" != "simulator" ]]; then
+  echo "==> Build iOS device library"
+  cargo build -p uc-engine-uniffi --release --target aarch64-apple-ios $CARGO_LOCKED_FLAG
+  cp "$TARGET_DIR/aarch64-apple-ios/release/libuc_engine_uniffi.a" "$DEVICE_DIR/"
+  cp "$DEVICE_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/device.a"
+  selective_strip_archive "$DEVICE_DIR/libuc_engine_uniffi.a"
+fi
+
+if [[ "$SLICE" != "device" ]]; then
+  echo "==> Build iOS simulator libraries"
+  cargo build -p uc-engine-uniffi --release --target aarch64-apple-ios-sim $CARGO_LOCKED_FLAG
+  cargo build -p uc-engine-uniffi --release --target x86_64-apple-ios $CARGO_LOCKED_FLAG
+  cp "$TARGET_DIR/aarch64-apple-ios-sim/release/libuc_engine_uniffi.a" \
+    "$SIMULATOR_ARM64_DIR/"
+  cp "$TARGET_DIR/x86_64-apple-ios/release/libuc_engine_uniffi.a" \
+    "$SIMULATOR_X86_64_DIR/"
+  cp "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/simulator-arm64.a"
+  cp "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/simulator-x86_64.a"
+  selective_strip_archive "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a"
+  selective_strip_archive "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a"
+  lipo -create \
+    "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a" \
+    "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a" \
+    -output "$SIMULATOR_DIR/libuc_engine_uniffi.a"
+fi
 
 echo "==> Create XCFramework"
-xcodebuild -create-xcframework \
-  -library "$DEVICE_DIR/libuc_engine_uniffi.a" \
-  -headers "$INCLUDE_DIR" \
-  -library "$SIMULATOR_DIR/libuc_engine_uniffi.a" \
-  -headers "$INCLUDE_DIR" \
-  -output "$XCFRAMEWORK"
+XCFRAMEWORK_ARGS=()
+if [[ "$SLICE" != "simulator" ]]; then
+  XCFRAMEWORK_ARGS+=(-library "$DEVICE_DIR/libuc_engine_uniffi.a" -headers "$INCLUDE_DIR")
+fi
+if [[ "$SLICE" != "device" ]]; then
+  XCFRAMEWORK_ARGS+=(-library "$SIMULATOR_DIR/libuc_engine_uniffi.a" -headers "$INCLUDE_DIR")
+fi
+xcodebuild -create-xcframework "${XCFRAMEWORK_ARGS[@]}" -output "$XCFRAMEWORK"
 
 cp "$BINDINGS_DIR/uc_engine_uniffi.swift" "$DIST_DIR/"
 ditto -c -k --keepParent "$XCFRAMEWORK" "$XCFRAMEWORK_ZIP"
