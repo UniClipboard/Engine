@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::path::Path;
 use std::sync::OnceLock;
 
 use jni::objects::{GlobalRef, JClass, JObject};
@@ -6,15 +7,23 @@ use jni::sys::{jboolean, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
 use tracing_subscriber::layer::SubscriberExt;
 
+use crate::file_log;
+
 static ANDROID_CONTEXT: OnceLock<GlobalRef> = OnceLock::new();
 static ANDROID_TRACING_INSTALLED: OnceLock<()> = OnceLock::new();
 
-fn install_android_tracing() {
+pub(crate) fn install_android_tracing(logs_dir: &Path) {
     ANDROID_TRACING_INSTALLED.get_or_init(|| {
         let Ok(layer) = tracing_android::layer("UcEngine") else {
             return;
         };
-        let subscriber = tracing_subscriber::registry().with(layer);
+        let subscriber: Box<dyn tracing::Subscriber + Send + Sync> =
+            match file_log::file_layer(logs_dir) {
+                Some(file_layer) => {
+                    Box::new(tracing_subscriber::registry().with(layer).with(file_layer))
+                }
+                None => Box::new(tracing_subscriber::registry().with(layer)),
+            };
         let _ = tracing::subscriber::set_global_default(subscriber);
     });
 }
@@ -25,7 +34,6 @@ pub extern "system" fn Java_expo_modules_ucengine_UcEngineModule_nativeInstallAn
     _class: JClass<'_>,
     context: JObject<'_>,
 ) -> jboolean {
-    install_android_tracing();
     let vm = match env.get_java_vm() {
         Ok(vm) => vm,
         Err(_) => return JNI_FALSE,
