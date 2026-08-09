@@ -29,6 +29,7 @@ function runWith(slice, distRoot) {
       stdio: 'inherit',
       env: {
         ...process.env,
+        UC_ENGINE_UNIFFI_BUILD_LOCKED: '1',
         UC_ENGINE_UNIFFI_SLICE: slice,
         UC_ENGINE_UNIFFI_DIST_DIR: distRoot,
       },
@@ -66,7 +67,11 @@ execFileSync(
   {
     cwd: repositoryRoot,
     stdio: 'inherit',
-    env: { ...process.env, UC_ENGINE_UNIFFI_DIST_DIR: androidDist },
+    env: {
+      ...process.env,
+      UC_ENGINE_UNIFFI_BUILD_LOCKED: '1',
+      UC_ENGINE_UNIFFI_DIST_DIR: androidDist,
+    },
   }
 )
 
