@@ -32,7 +32,7 @@ use uc_application::proof::HmacProofAdapter;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     MemberRepositoryPort, MembershipError, PeerAdmissionPort, RemovalAdmissionDecision,
-    RemovalAdmissionGatePort, SpaceMember,
+    RemovalAdmissionGatePort, RemovalTargetGatePort, SpaceMember,
 };
 use uc_core::ports::pairing::PairingSessionPort;
 use uc_core::ports::space::ProofPort;
@@ -58,6 +58,13 @@ use uc_infra::security::{
 // ─── in-memory fakes ────────────────────────────────────────────────────────
 
 struct AllowRemovalAdmission;
+
+#[async_trait]
+impl RemovalTargetGatePort for AllowRemovalAdmission {
+    async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+        false
+    }
+}
 
 #[async_trait]
 impl RemovalAdmissionGatePort for AllowRemovalAdmission {
@@ -437,6 +444,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
             presence,
             analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
             removal_admission: Arc::new(AllowRemovalAdmission),
+            removal_gate: Arc::new(AllowRemovalAdmission),
         },
         transition: SpaceTransitionDeps {
             relationship_reset: common::relationship_state_reset_noop(),

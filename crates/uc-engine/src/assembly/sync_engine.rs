@@ -819,6 +819,7 @@ pub async fn build_sync_engine_assembly(
                 presence: Arc::clone(&presence),
                 analytics: Arc::clone(&space_setup.analytics_facade),
                 removal_admission: removal_coordinator.clone(),
+                removal_gate: removal_coordinator.clone(),
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::clone(&space_setup.relationship_reset),

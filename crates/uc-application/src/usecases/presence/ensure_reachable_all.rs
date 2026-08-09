@@ -24,12 +24,13 @@
 //! `task_plan.md:842` 已锁定 N ≤ 10 假设,全员并发不做限流;N > 10
 //! 的资源放大属于 T-05(P3),Slice 2 Phase 1 不处理。
 //!
-//! ## 跳过本机
+//! ## 跳过本机和已移除设备
 //!
 //! 按 T5 语义 `peer_addr_repo` 只写对端地址,不写本机——repo 里应永远
 //! 不包含本机 DeviceId。依然在 usecase 里加一层防御性过滤,用
 //! `DeviceIdentityPort::current_device_id()` 对比:万一未来有代码误把
-//! 本机地址写进 repo,也不会 self-dial。
+//! 本机地址写进 repo,也不会 self-dial。成员移除已在本机生效的设备同样
+//! 不能被重新拨号；重新准入的新成员实例不受旧移除记录影响。
 
 use std::sync::Arc;
 
@@ -37,6 +38,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::ids::DeviceId;
+use uc_core::membership::RemovalTargetGatePort;
 use uc_core::ports::{
     DeviceIdentityPort, PeerAddressRepositoryPort, PresenceError, PresencePort, ReachabilityState,
 };
@@ -69,6 +71,7 @@ pub(crate) struct EnsureReachableAllUseCase {
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     presence: Arc<dyn PresencePort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
+    removal_gate: Arc<dyn RemovalTargetGatePort>,
 }
 
 impl EnsureReachableAllUseCase {
@@ -76,11 +79,13 @@ impl EnsureReachableAllUseCase {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         presence: Arc<dyn PresencePort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
+        removal_gate: Arc<dyn RemovalTargetGatePort>,
     ) -> Self {
         Self {
             peer_addr_repo,
             presence,
             device_identity,
+            removal_gate,
         }
     }
 
@@ -93,22 +98,26 @@ impl EnsureReachableAllUseCase {
         })?;
 
         let local = self.device_identity.current_device_id();
-        let targets: Vec<DeviceId> = records
-            .into_iter()
-            .filter_map(|record| {
-                if record.device_id == local {
-                    // Defensive: T5 never writes self, but guard against
-                    // future bugs that could cause a self-dial loop.
-                    debug!(
-                        device_id = %record.device_id.as_str(),
-                        "peer_addr_repo returned local device; skipping self-dial"
-                    );
-                    None
-                } else {
-                    Some(record.device_id)
-                }
-            })
-            .collect();
+        let mut targets = Vec::with_capacity(records.len());
+        for record in records {
+            if record.device_id == local {
+                // Defensive: T5 never writes self, but guard against
+                // future bugs that could cause a self-dial loop.
+                debug!(
+                    device_id = %record.device_id.as_str(),
+                    "peer_addr_repo returned local device; skipping self-dial"
+                );
+                continue;
+            }
+            if self
+                .removal_gate
+                .is_locally_removed(&record.device_id)
+                .await
+            {
+                continue;
+            }
+            targets.push(record.device_id);
+        }
 
         if targets.is_empty() {
             info!("ensure_reachable_all: no paired peers; report is empty");
@@ -223,6 +232,24 @@ mod tests {
         }
     }
 
+    struct AllowAllRemovalTargets;
+
+    #[async_trait]
+    impl RemovalTargetGatePort for AllowAllRemovalTargets {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            false
+        }
+    }
+
+    struct RemovedTarget(DeviceId);
+
+    #[async_trait]
+    impl RemovalTargetGatePort for RemovedTarget {
+        async fn is_locally_removed(&self, device_id: &DeviceId) -> bool {
+            *device_id == self.0
+        }
+    }
+
     fn record(device: &str, blob: &[u8]) -> PeerAddressRecord {
         PeerAddressRecord {
             device_id: DeviceId::new(device),
@@ -243,6 +270,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(local)),
+            Arc::new(AllowAllRemovalTargets),
         );
 
         let report = uc.execute().await.expect("ok");
@@ -262,6 +290,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(local)),
+            Arc::new(AllowAllRemovalTargets),
         );
 
         let err = uc.execute().await.unwrap_err();
@@ -289,6 +318,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(DeviceId::new("local-device"))),
+            Arc::new(AllowAllRemovalTargets),
         );
 
         let report = uc.execute().await.expect("ok");
@@ -329,6 +359,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(DeviceId::new("local-device"))),
+            Arc::new(AllowAllRemovalTargets),
         );
 
         let report = uc.execute().await.expect("ok");
@@ -363,6 +394,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(DeviceId::new("local-device"))),
+            Arc::new(AllowAllRemovalTargets),
         );
 
         let report = uc.execute().await.expect("ok");
@@ -420,6 +452,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(DeviceId::new("local-device"))),
+            Arc::new(AllowAllRemovalTargets),
         );
 
         let started = std::time::Instant::now();
@@ -431,5 +464,33 @@ mod tests {
             elapsed < Duration::from_millis(400),
             "ensure_reachable_all appears serial: {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn removed_peer_is_not_probed_during_a_refresh() {
+        let mut repo = MockPeerAddrRepo::new();
+        repo.expect_list().times(1).returning(|| {
+            Ok(vec![
+                record("removed", &[0x01]),
+                record("retained", &[0x02]),
+            ])
+        });
+        let mut presence = MockPresence::new();
+        presence
+            .expect_ensure_reachable()
+            .withf(|device| device.as_str() == "retained")
+            .times(1)
+            .returning(|_| Ok(ReachabilityState::Online));
+
+        let uc = EnsureReachableAllUseCase::new(
+            Arc::new(repo),
+            Arc::new(presence),
+            Arc::new(FixedDevice(DeviceId::new("local-device"))),
+            Arc::new(RemovedTarget(DeviceId::new("removed"))),
+        );
+
+        let report = uc.execute().await.expect("ok");
+        assert_eq!(report.total, 1);
+        assert_eq!(report.online, 1);
     }
 }

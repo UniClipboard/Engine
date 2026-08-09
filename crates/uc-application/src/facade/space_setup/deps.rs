@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use uc_core::membership::{
     MemberRepositoryPort, RelationshipStateResetPort, RemovalAdmissionGatePort,
-    SpaceSecurityStateResetPort,
+    RemovalTargetGatePort, SpaceSecurityStateResetPort,
 };
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
@@ -47,6 +47,7 @@ pub struct SpaceAdmissionDeps {
     pub presence: Arc<dyn PresencePort>,
     pub analytics: Arc<dyn AnalyticsFacade>,
     pub removal_admission: Arc<dyn RemovalAdmissionGatePort>,
+    pub removal_gate: Arc<dyn RemovalTargetGatePort>,
 }
 
 pub struct SpaceTransitionDeps {

@@ -14,7 +14,7 @@ use uc_core::membership::{
     RemovalCompletionReceipt, RemovalIntentContent, RemovalIntentRepositoryError,
     RemovalIntentRepositoryPort, RemovalLateAcceptance, RemovalLateRejectionReason,
     RemovalLateSubmission, RemovalPhase, RemovalRecoveryPersisted, RemovalRecoveryPort,
-    SignedRemovalIntent,
+    RemovalTargetGatePort, SignedRemovalIntent,
 };
 
 use super::test_support::{
@@ -375,6 +375,37 @@ async fn normal_exchange_never_sends_to_a_locally_removed_member() {
         .unwrap()
         .iter()
         .all(|(recipient, _)| recipient != &bob));
+}
+
+#[tokio::test]
+async fn receiving_a_removal_marks_the_target_as_locally_removed() {
+    let alice = device("alice");
+    let bob = device("bob");
+    let charlie = device("charlie");
+    let harness = Harness::build(&charlie, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    let intent = signed_intent(RemovalIntentContent {
+        space_lineage: "space-a".to_owned(),
+        view_epoch: 1,
+        view_members: sorted_view(vec![
+            instance("alice", 1),
+            instance("bob", 2),
+            instance("charlie", 3),
+        ]),
+        initiator: instance("alice", 1),
+        target: instance("bob", 2),
+    });
+
+    harness
+        .coordinator
+        .ingest_exchange(
+            &alice,
+            uc_core::membership::RemovalExchangeMessage::Intent(Box::new(intent)),
+            1_000,
+        )
+        .await
+        .unwrap();
+
+    assert!(harness.coordinator.is_locally_removed(&bob).await);
 }
 
 #[tokio::test]
@@ -2136,6 +2167,27 @@ async fn readmission_clears_a_stale_self_removed_marker() {
     assert!(!summary.removed);
     let state = bob_harness.repository.load_state().await.unwrap().unwrap();
     assert!(state.self_removed.is_none());
+}
+
+#[tokio::test]
+async fn re_admitted_member_is_not_treated_as_a_locally_removed_target() {
+    let alice = device("alice");
+    let bob = device("bob");
+    let harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2)]);
+    harness
+        .coordinator
+        .submit_removal(&bob, 1_000)
+        .await
+        .unwrap();
+
+    assert!(harness.coordinator.is_locally_removed(&bob).await);
+
+    *harness.recovery.members.lock().unwrap() = vec![
+        (device("alice"), instance("alice", 1)),
+        (bob.clone(), instance("bob", 9)),
+    ];
+
+    assert!(!harness.coordinator.is_locally_removed(&bob).await);
 }
 
 #[tokio::test]
