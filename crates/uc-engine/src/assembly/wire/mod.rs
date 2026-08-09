@@ -62,8 +62,8 @@ use uc_infra::db::repositories::{
     DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselRemovalIntentStore,
     DieselSpaceMemberRepository, DieselSpaceSecurityStore, DieselThumbnailRepository,
     DieselTrustedPeerRepository, EncryptedMembershipAnnouncementRepository,
-    EncryptedMembershipCandidateRepository, EncryptedMembershipOutboxRepository,
-    EncryptedRelationshipStore,
+    EncryptedMembershipAppliedSecurityUpdateRepository, EncryptedMembershipCandidateRepository,
+    EncryptedMembershipOutboxRepository, EncryptedRelationshipStore,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
@@ -301,6 +301,11 @@ pub fn wire_dependencies_from_inputs(
         Arc::new(EncryptedMembershipOutboxRepository::new(Arc::clone(
             &relationship_store,
         )));
+    let membership_applied_security_update_repo: Arc<
+        dyn uc_core::membership::MembershipAppliedSecurityUpdateRepositoryPort,
+    > = Arc::new(EncryptedMembershipAppliedSecurityUpdateRepository::new(
+        Arc::clone(&relationship_store),
+    ));
     let verified_peer_promotion: Arc<dyn uc_core::membership::VerifiedPeerPromotionPort> =
         relationship_store.clone();
     let relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort> =
@@ -644,6 +649,7 @@ pub fn wire_dependencies_from_inputs(
             verified_peer_promotion,
             membership_announcement_repo,
             membership_outbox_repo,
+            membership_applied_security_update_repo,
             current_member_signatures,
             membership_session,
             removal_intent_repository,

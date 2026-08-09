@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use tracing::{info, warn};
 
 use super::*;
 
@@ -555,6 +556,12 @@ impl MembershipConvergence {
             .await
             .map_err(|_| MembershipGossipEndpointError::Persistence)?;
         if state.space_id != digest.space_id {
+            warn!(
+                digest_space_id = %digest.space_id.as_ref(),
+                local_space_id = %state.space_id.as_ref(),
+                error_kind = "membership_digest_space_mismatch",
+                "membership digest rejected because the space does not match"
+            );
             return Err(MembershipGossipEndpointError::Rejected);
         }
         let local = self
@@ -603,6 +610,13 @@ impl MembershipConvergence {
             .await
             .map_err(|_| MembershipGossipEndpointError::Persistence)?;
         if state.space_id != request.space_id {
+            warn!(
+                requester_device_id = %requester_device_id.as_str(),
+                request_space_id = %request.space_id.as_ref(),
+                local_space_id = %state.space_id.as_ref(),
+                error_kind = "membership_shared_page_space_mismatch",
+                "shared device page request rejected because the space does not match"
+            );
             return Err(MembershipGossipEndpointError::Rejected);
         }
         if self
@@ -613,6 +627,11 @@ impl MembershipConvergence {
             .map_err(|_| MembershipGossipEndpointError::Persistence)?
             .is_none()
         {
+            warn!(
+                requester_device_id = %requester_device_id.as_str(),
+                error_kind = "membership_shared_page_requester_not_member",
+                "shared device page request rejected because the requester is not a member"
+            );
             return Err(MembershipGossipEndpointError::Rejected);
         }
 
@@ -639,6 +658,12 @@ impl MembershipConvergence {
 
         let now_ms = self.deps.clock.now_ms();
         let expires_at_ms = now_ms.saturating_add(DIRECT_ATTESTATION_TTL_MS);
+        let applied_updates = self
+            .deps
+            .applied_security_updates
+            .list(&state.space_id)
+            .await
+            .map_err(|_| MembershipGossipEndpointError::Persistence)?;
         let mut seeds = Vec::new();
         let mut next_member_index = 0usize;
         while next_member_index < members.len() {
@@ -650,7 +675,7 @@ impl MembershipConvergence {
                 .await
                 .map_err(|_| MembershipGossipEndpointError::Persistence)?
                 .ok_or(MembershipGossipEndpointError::Persistence)?;
-            seeds.push(SponsorCandidateSeed {
+            let mut seed = SponsorCandidateSeed {
                 space_id: state.space_id.clone(),
                 device_id: member.device_id,
                 device_name_hint: member.device_name.clone(),
@@ -658,9 +683,16 @@ impl MembershipConvergence {
                 transport_address_blob: address.addr_blob,
                 address_observed_at_ms: address.observed_at.timestamp_millis(),
                 source_device_id: local_device_id,
-                security_updates: Vec::new(),
+                security_updates: applied_updates.clone(),
                 expires_at_ms,
-            });
+            };
+            if seed.validate_transfer_bounds().is_err() {
+                seed.security_updates.clear();
+                if seed.validate_transfer_bounds().is_err() {
+                    return Err(MembershipGossipEndpointError::Rejected);
+                }
+            }
+            seeds.push(seed);
             let tentative = MembershipSharedDevicePage {
                 space_id: state.space_id.clone(),
                 seeds: seeds.clone(),
@@ -674,6 +706,24 @@ impl MembershipConvergence {
                 ) if seeds.len() > 1 => {
                     seeds.pop();
                     break;
+                }
+                Err(
+                    MembershipGossipBoundsError::MessageTooLarge
+                    | MembershipGossipBoundsError::TooManyDevices,
+                ) => {
+                    if let Some(last) = seeds.last_mut() {
+                        last.security_updates.clear();
+                        let trimmed_page = MembershipSharedDevicePage {
+                            space_id: state.space_id.clone(),
+                            seeds: seeds.clone(),
+                            next_after_device_id: None,
+                        };
+                        if trimmed_page.validate_transfer_bounds().is_ok() {
+                            next_member_index = next_member_index.saturating_add(1);
+                            continue;
+                        }
+                    }
+                    return Err(MembershipGossipEndpointError::Rejected);
                 }
                 Err(_) => return Err(MembershipGossipEndpointError::Rejected),
             }
@@ -702,6 +752,12 @@ impl MembershipConvergence {
             .await
             .map_err(|_| MembershipGossipEndpointError::Persistence)?;
         if state.space_id != request.space_id {
+            warn!(
+                request_space_id = %request.space_id.as_ref(),
+                local_space_id = %state.space_id.as_ref(),
+                error_kind = "membership_event_request_space_mismatch",
+                "membership event request rejected because the space does not match"
+            );
             return Err(MembershipGossipEndpointError::Rejected);
         }
         let mut events = Vec::new();
@@ -717,7 +773,13 @@ impl MembershipConvergence {
             }
         }
         if let Some(epoch) = request.security_updates_after_epoch {
-            let mut updates = self
+            let mut applied = self
+                .deps
+                .applied_security_updates
+                .list(&request.space_id)
+                .await
+                .map_err(|_| MembershipGossipEndpointError::Persistence)?;
+            let mut from_candidates = self
                 .deps
                 .candidate_repo
                 .list(&request.space_id)
@@ -725,6 +787,10 @@ impl MembershipConvergence {
                 .map_err(|_| MembershipGossipEndpointError::Persistence)?
                 .into_iter()
                 .flat_map(|candidate| candidate.security_updates().to_vec())
+                .collect::<Vec<_>>();
+            applied.append(&mut from_candidates);
+            let mut updates = applied
+                .into_iter()
                 .filter(|update| update.previous_epoch >= epoch)
                 .collect::<Vec<_>>();
             updates.sort_by_key(|update| update.previous_epoch);
@@ -876,13 +942,24 @@ impl MembershipConvergence {
             )
             .collect::<Vec<_>>();
         announcements.sort_by(|left, right| left.device_id.as_str().cmp(right.device_id.as_str()));
-        let group_update_head_digest = self
+        let mut known_updates = self
+            .deps
+            .applied_security_updates
+            .list(&state.space_id)
+            .await?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut candidate_updates = self
             .deps
             .candidate_repo
             .list(&state.space_id)
             .await?
             .into_iter()
             .flat_map(|candidate| candidate.security_updates().to_vec())
+            .collect::<Vec<_>>();
+        known_updates.append(&mut candidate_updates);
+        let group_update_head_digest = known_updates
+            .into_iter()
             .max_by_key(|update| update.next_epoch)
             .map(|update| update.digest);
         let response = self
@@ -939,6 +1016,45 @@ impl MembershipConvergence {
             _ => Err(MembershipConvergenceError::VerificationRejected),
         }
     }
+
+    /// Pull missing security updates from `provider`.
+    ///
+    /// The local device asks the provider for every update after the local
+    /// group epoch and applies whatever arrives, so a `WaitingForUpdate`
+    /// candidate can resume without waiting for the provider to push on its
+    /// own schedule. Returns the number of updates applied.
+    pub(super) async fn pull_security_updates(
+        &self,
+        provider: &uc_core::ids::DeviceId,
+    ) -> Result<usize, MembershipConvergenceError> {
+        let state = self.deps.security_updates.current_state().await?;
+        let request = uc_core::membership::MembershipRequestMissing {
+            space_id: state.space_id.clone(),
+            announcement_devices: Vec::new(),
+            security_updates_after_epoch: Some(state.group_epoch),
+        };
+        let response = self
+            .deps
+            .transport
+            .exchange(provider, MembershipGossipMessage::RequestMissing(request))
+            .await
+            .map_err(map_gossip_transport_error)?;
+        let MembershipGossipMessage::EventBatch(batch) = response else {
+            return Err(MembershipConvergenceError::VerificationRejected);
+        };
+        if batch.space_id != state.space_id {
+            return Err(MembershipConvergenceError::VerificationRejected);
+        }
+        let mut applied = 0usize;
+        for event in &batch.events {
+            if let MembershipEvent::SecurityUpdate(update) = event {
+                self.apply_relayed_security_updates(&batch.space_id, std::slice::from_ref(update))
+                    .await?;
+                applied = applied.saturating_add(1);
+            }
+        }
+        Ok(applied)
+    }
 }
 
 #[async_trait]
@@ -993,18 +1109,33 @@ impl MembershipGossipEndpointPort for MembershipConvergence {
                                 })?;
                         }
                         MembershipEvent::SecurityUpdate(update) => {
-                            self.apply_relayed_security_updates(
-                                &batch.space_id,
-                                std::slice::from_ref(update),
-                            )
-                            .await
-                            .map_err(|error| match error {
-                                MembershipConvergenceError::VerificationRejected
-                                | MembershipConvergenceError::WaitingForUpdate => {
-                                    MembershipGossipEndpointError::Rejected
-                                }
-                                _ => MembershipGossipEndpointError::Persistence,
-                            })?;
+                            let applied = self
+                                .apply_relayed_security_updates(
+                                    &batch.space_id,
+                                    std::slice::from_ref(update),
+                                )
+                                .await
+                                .map_err(|error| match error {
+                                    MembershipConvergenceError::VerificationRejected
+                                    | MembershipConvergenceError::WaitingForUpdate => {
+                                        warn!(
+                                            source_device_id = %source_device_id.as_str(),
+                                            update_next_epoch = update.next_epoch,
+                                            error_kind = "membership_security_update_rejected",
+                                            error_reason = %error,
+                                            "relayed security update rejected"
+                                        );
+                                        MembershipGossipEndpointError::Rejected
+                                    }
+                                    _ => MembershipGossipEndpointError::Persistence,
+                                })?;
+                            if applied == update.next_epoch {
+                                info!(
+                                    source_device_id = %source_device_id.as_str(),
+                                    applied_group_epoch = applied,
+                                    "relayed security update applied"
+                                );
+                            }
                         }
                         MembershipEvent::Announcement(announcement) => {
                             self.accept_verified_announcement(announcement.clone())

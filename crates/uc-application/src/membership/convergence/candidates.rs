@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
+use tracing::warn;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
     CandidateEvent, CandidateFailure, CandidateMergeOutcome, MemberSyncPreferences,
@@ -131,6 +132,11 @@ impl MembershipConvergence {
             if applied_epoch != update.next_epoch {
                 return Err(MembershipConvergenceError::VerificationRejected);
             }
+            self.deps
+                .applied_security_updates
+                .save(space_id, update)
+                .await
+                .map_err(MembershipConvergenceError::from)?;
             state.group_epoch = applied_epoch;
             epoch_advanced = true;
         }
@@ -203,6 +209,21 @@ impl MembershipConvergence {
                 return Err(MembershipConvergenceError::PeerUnavailable);
             }
             Err(MembershipAttestationError::MissingSecurityUpdate) => {
+                let local_epoch = self
+                    .deps
+                    .security_updates
+                    .current_state()
+                    .await
+                    .map(|state| state.group_epoch)
+                    .unwrap_or_default();
+                warn!(
+                    candidate_device_id = %candidate.device_id().as_str(),
+                    local_group_epoch = local_epoch,
+                    candidate_update_count = candidate.security_updates().len(),
+                    retry_at_ms = next_candidate_retry_at(&candidate, now_ms),
+                    error_kind = "membership_attestation_missing_security_update",
+                    "candidate attestation deferred until the missing security update arrives"
+                );
                 candidate.apply(
                     CandidateEvent::AttestationFailed {
                         failure: CandidateFailure::MissingSecurityUpdate,

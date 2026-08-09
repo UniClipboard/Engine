@@ -31,6 +31,7 @@ pub use ports::{
     CurrentMembershipIdentity, CurrentMembershipIdentityError, CurrentMembershipIdentityPort,
     GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, MemberRepositoryPort,
     MembershipAnnouncementRepositoryError, MembershipAnnouncementRepositoryPort,
+    MembershipAppliedSecurityUpdateRepositoryError, MembershipAppliedSecurityUpdateRepositoryPort,
     MembershipAttestationEndpointError, MembershipAttestationEndpointPort,
     MembershipAttestationError, MembershipAttestationPort, MembershipCandidateRepositoryError,
     MembershipCandidateRepositoryPort, MembershipGossipEndpointError, MembershipGossipEndpointPort,

@@ -12,6 +12,7 @@ use uc_core::membership::{
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentityError, DeviceAnnouncement,
     MemberRepositoryPort, MembershipAnnouncementRepositoryError,
     MembershipAnnouncementRepositoryPort, MembershipAnnouncementVersion,
+    MembershipAppliedSecurityUpdateRepositoryError, MembershipAppliedSecurityUpdateRepositoryPort,
     MembershipAttestationError, MembershipAttestationPort, MembershipCandidateRepositoryError,
     MembershipCandidateRepositoryPort, MembershipDigest, MembershipError, MembershipEvent,
     MembershipEventBatch, MembershipGossipEndpointPort, MembershipGossipMessage,
@@ -619,6 +620,31 @@ fn membership_security(group_epoch: u64) -> Arc<InMemoryMembershipSecurity> {
 }
 
 #[derive(Default)]
+struct InMemoryAppliedSecurityUpdateRepository(Mutex<Vec<RelayedSecurityUpdate>>);
+
+#[async_trait]
+impl MembershipAppliedSecurityUpdateRepositoryPort for InMemoryAppliedSecurityUpdateRepository {
+    async fn list(
+        &self,
+        _space_id: &SpaceId,
+    ) -> Result<Vec<RelayedSecurityUpdate>, MembershipAppliedSecurityUpdateRepositoryError> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+
+    async fn save(
+        &self,
+        _space_id: &SpaceId,
+        update: &RelayedSecurityUpdate,
+    ) -> Result<(), MembershipAppliedSecurityUpdateRepositoryError> {
+        let mut updates = self.0.lock().unwrap();
+        if !updates.iter().any(|known| known.digest == update.digest) {
+            updates.push(update.clone());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 struct InMemoryMemberRepository(Mutex<HashMap<DeviceId, SpaceMember>>);
 
 #[async_trait]
@@ -837,6 +863,7 @@ fn gossip(repo: Arc<InMemoryCandidateRepository>, now_ms: i64) -> MembershipConv
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(now_ms)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -876,6 +903,7 @@ fn announcement_gossip_with_members(
         announcement_repo: announcements,
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -939,6 +967,7 @@ async fn sponsor_seed_for_formal_member_does_not_create_pending_candidate() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -991,6 +1020,7 @@ async fn sponsor_seed_cannot_replace_formal_member_identity() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -1144,6 +1174,7 @@ async fn sponsor_seed_batch_contains_current_members_and_recipient_updates() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(6),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -1222,6 +1253,7 @@ async fn sponsor_preparation_persists_joiner_seed_for_existing_member() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: outbox.clone(),
         security_updates: membership_security(6),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -1325,6 +1357,7 @@ async fn sponsor_preparation_splits_oversized_existing_member_delivery_for_joine
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: outbox.clone(),
         security_updates: membership_security(6),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -1419,6 +1452,7 @@ async fn sponsor_preparation_fails_when_joiner_delivery_cannot_be_queued() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(FailingMembershipOutbox),
         security_updates: membership_security(6),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -1471,6 +1505,7 @@ async fn relayed_security_updates_are_applied_contiguously() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: security.clone(),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -1540,6 +1575,7 @@ async fn lost_response_keeps_membership_batch_until_a_matching_ack_arrives() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: outbox.clone(),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: transport.clone(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -1613,6 +1649,7 @@ async fn incompatible_existing_member_keeps_convergence_waiting_for_upgrade() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: outbox.clone(),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: transport.clone(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -1680,6 +1717,7 @@ async fn inbound_event_batch_persists_candidate_and_returns_matching_ack() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -1819,6 +1857,7 @@ async fn successful_attestation_promotes_all_formal_relationships() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -1883,6 +1922,7 @@ async fn failed_atomic_promotion_keeps_formal_relationships_hidden() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -1929,6 +1969,7 @@ async fn reconcile_retries_a_verifying_candidate_after_interruption() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -1971,6 +2012,7 @@ async fn offline_attestation_keeps_candidate_retryable_without_formal_membership
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -2021,6 +2063,7 @@ async fn upgraded_candidate_automatically_completes_on_its_persisted_retry() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: clock.clone(),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -2099,6 +2142,7 @@ async fn mismatched_verified_identity_is_rejected_before_formal_membership() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -2143,6 +2187,7 @@ async fn verified_inbound_peer_is_promoted_even_without_a_prior_candidate() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -2198,6 +2243,7 @@ async fn simultaneous_attestations_converge_to_one_formal_relationship() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -2257,6 +2303,7 @@ async fn digest_requests_newer_announcement_and_missing_request_returns_stored_e
         announcement_repo: announcements,
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -2352,6 +2399,7 @@ async fn shared_device_page_returns_other_members_in_stable_cursor_order() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -2455,6 +2503,7 @@ async fn shared_device_refresh_reuses_active_request_and_publishes_queryable_sna
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: transport.clone(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -2576,6 +2625,7 @@ async fn shared_device_refresh_connects_discovered_member_and_keeps_display_data
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: transport.clone(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -2676,6 +2726,7 @@ async fn shared_device_refresh_updates_the_same_request_after_offline_candidate_
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport,
         clock: clock.clone(),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -2841,6 +2892,7 @@ async fn local_announcement_is_signed_once_and_reused_after_restart() {
             announcement_repo: announcements.clone(),
             outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
             security_updates: membership_security(4),
+            applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
             transport: membership_transport(),
             clock: Arc::new(FixedClock(1_000)),
             device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -2891,6 +2943,7 @@ async fn synchronize_member_completes_digest_request_batch_and_matching_ack() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: transport.clone(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -2945,6 +2998,7 @@ async fn reconcile_once_delivers_due_outbox_and_promotes_due_candidate() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: outbox.clone(),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: Arc::new(FixedMembershipTransport(Mutex::new(Ok(
             MembershipGossipMessage::Ack(uc_core::membership::MembershipAck {
                 space_id: SpaceId::from("space-a"),
@@ -3039,6 +3093,7 @@ async fn runtime_runs_on_start_pauses_resumes_and_shuts_down() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: transport.clone(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -3152,6 +3207,7 @@ async fn local_address_change_immediately_refreshes_and_propagates_announcement(
         announcement_repo: announcements.clone(),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: transport.clone(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
@@ -3230,6 +3286,7 @@ async fn runtime_pause_interrupts_an_inflight_network_pass() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: Arc::new(BlockingMembershipTransport {
             started: Arc::clone(&started),
             active: Arc::clone(&active),
@@ -3296,6 +3353,7 @@ async fn runtime_pause_and_shutdown_control_inflight_shared_device_refresh() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: Arc::new(BlockingSharedDeviceRefreshTransport {
             started: Arc::clone(&started),
             active: Arc::clone(&active),
@@ -3629,6 +3687,7 @@ async fn auto_refresh_harness(
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: transport.clone(),
         clock,
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-c"))),
@@ -3740,6 +3799,7 @@ async fn auto_shared_device_refresh_discovers_missing_member_after_unlock_resume
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: Arc::new(FixedClock(1_000)),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-b"))),
@@ -3948,6 +4008,7 @@ async fn waiting_for_update_candidate_retries_after_security_update_arrives() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: clock.clone(),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-c"))),
@@ -4038,6 +4099,7 @@ async fn waiting_for_update_candidate_defers_until_backoff_without_updates() {
         announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
         outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
         security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
         transport: membership_transport(),
         clock: clock.clone(),
         device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-c"))),
@@ -4157,4 +4219,214 @@ async fn auto_shared_device_refresh_ignores_online_events_from_other_devices() {
         2
     );
     harness.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn applied_security_updates_are_saved_and_served_to_missing_peers() {
+    let applied = Arc::new(InMemoryAppliedSecurityUpdateRepository::default());
+    let security = membership_security(4);
+    let gossip = MembershipConvergence::new(MembershipConvergenceDeps {
+        candidate_repo: Arc::new(InMemoryCandidateRepository::default()),
+        announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+        outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+        security_updates: security.clone(),
+        applied_security_updates: applied.clone(),
+        transport: membership_transport(),
+        clock: Arc::new(FixedClock(1_000)),
+        device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
+        announcement_material: Arc::new(FixedAnnouncementMaterial),
+        member_signatures: Arc::new(AcceptingMemberSignatures),
+        fingerprint_factory: Arc::new(FixedFingerprintFactory),
+        attestation: Arc::new(FixedAttestation(Ok(verified_peer()))),
+        verified_peer_promotion: Arc::new(NoopVerifiedPeerPromotion),
+        member_repo: Arc::new(InMemoryMemberRepository::default()),
+        trusted_peer_repo: Arc::new(InMemoryTrustedPeerRepository::default()),
+        peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
+        hash: Arc::new(FixedHasher),
+    });
+    let update = RelayedSecurityUpdate {
+        previous_epoch: 4,
+        next_epoch: 5,
+        payload: b"update-4-to-5".to_vec(),
+        digest: [9; 32],
+    };
+
+    let epoch = gossip
+        .apply_relayed_security_updates(&SpaceId::from("space-a"), &[update.clone()])
+        .await
+        .unwrap();
+    assert_eq!(epoch, 5);
+    let stored = applied.list(&SpaceId::from("space-a")).await.unwrap();
+    assert_eq!(stored, vec![update.clone()]);
+
+    let response = MembershipGossipEndpointPort::handle_message(
+        &gossip,
+        &DeviceId::new("device-c"),
+        MembershipGossipMessage::RequestMissing(MembershipRequestMissing {
+            space_id: SpaceId::from("space-a"),
+            announcement_devices: Vec::new(),
+            security_updates_after_epoch: Some(4),
+        }),
+    )
+    .await
+    .unwrap();
+    let MembershipGossipMessage::EventBatch(batch) = response else {
+        panic!("missing request did not return an event batch");
+    };
+    assert!(batch
+        .events
+        .contains(&MembershipEvent::SecurityUpdate(update)));
+}
+
+#[tokio::test]
+async fn waiting_for_update_candidate_pulls_updates_from_connected_members() {
+    let members = Arc::new(InMemoryMemberRepository::default());
+    let trusted = Arc::new(InMemoryTrustedPeerRepository::default());
+    let candidates = Arc::new(InMemoryCandidateRepository::default());
+    let addresses = Arc::new(InMemoryPeerAddressRepository::default());
+    save_member(&members, "device-a", "Device A", "AAAAAAAAAAAAAAAA").await;
+    save_trusted_peer(&trusted, "device-c", "device-a", "AAAAAAAAAAAAAAAA").await;
+    let clock = Arc::new(ManualClock::new(1_000));
+    let attestation = Arc::new(ScriptedAttestation(Mutex::new(VecDeque::from([
+        Err(MembershipAttestationError::MissingSecurityUpdate),
+        Ok(verified_peer_b()),
+    ]))));
+    let update = RelayedSecurityUpdate {
+        previous_epoch: 4,
+        next_epoch: 5,
+        payload: b"update-4-to-5".to_vec(),
+        digest: [9; 32],
+    };
+    let transport = Arc::new(ScriptedMembershipTransport {
+        responses: Mutex::new(VecDeque::from([Ok(MembershipGossipMessage::EventBatch(
+            MembershipEventBatch {
+                space_id: SpaceId::from("space-a"),
+                batch_id: [3; 32],
+                events: vec![MembershipEvent::SecurityUpdate(update.clone())],
+            },
+        ))])),
+        sent: Mutex::new(Vec::new()),
+    });
+    let gossip = Arc::new(MembershipConvergence::new(MembershipConvergenceDeps {
+        candidate_repo: candidates.clone(),
+        announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+        outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+        security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
+        transport: transport.clone(),
+        clock: clock.clone(),
+        device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-c"))),
+        announcement_material: Arc::new(FixedDeviceAnnouncementMaterial {
+            device_id: DeviceId::new("device-c"),
+            device_name: "Device C".to_owned(),
+        }),
+        member_signatures: Arc::new(AcceptingMemberSignatures),
+        fingerprint_factory: Arc::new(FixedFingerprintFactory),
+        attestation: attestation.clone(),
+        verified_peer_promotion: in_memory_promotion(
+            candidates.clone(),
+            members.clone(),
+            trusted.clone(),
+            addresses,
+        ),
+        member_repo: members.clone(),
+        trusted_peer_repo: trusted.clone(),
+        peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
+        hash: Arc::new(FixedHasher),
+    }));
+
+    gossip.accept_sponsor_seed(seed_for_b(100)).await.unwrap();
+    gossip
+        .confirm_candidate(&SpaceId::from("space-a"), &DeviceId::new("device-b"))
+        .await
+        .unwrap_err();
+    let candidate = candidates
+        .get(&SpaceId::from("space-a"), &DeviceId::new("device-b"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.status(), CandidateStatus::WaitingForUpdate);
+
+    let outcome = gossip.reconcile_once().await.unwrap();
+    assert_eq!(outcome.confirmed_candidates, 1);
+    assert!(members
+        .get(&DeviceId::new("device-b"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(transport
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|message| matches!(
+            message,
+            MembershipGossipMessage::RequestMissing(request)
+                if request.security_updates_after_epoch == Some(4)
+        )));
+}
+
+#[tokio::test]
+async fn shared_device_page_carries_applied_security_updates() {
+    let members = Arc::new(InMemoryMemberRepository::default());
+    let addresses = Arc::new(InMemoryPeerAddressRepository::default());
+    save_member(&members, "device-b", "Device B", "BBBBBBBBBBBBBBBB").await;
+    save_member(&members, "device-c", "Device C", "CCCCCCCCCCCCCCCC").await;
+    addresses
+        .upsert(&PeerAddressRecord {
+            device_id: DeviceId::new("device-b"),
+            addr_blob: b"address-b".to_vec(),
+            observed_at: chrono::DateTime::from_timestamp_millis(700).unwrap(),
+        })
+        .await
+        .unwrap();
+    let applied = Arc::new(InMemoryAppliedSecurityUpdateRepository::default());
+    applied
+        .save(
+            &SpaceId::from("space-a"),
+            &RelayedSecurityUpdate {
+                previous_epoch: 4,
+                next_epoch: 5,
+                payload: b"update-4-to-5".to_vec(),
+                digest: [9; 32],
+            },
+        )
+        .await
+        .unwrap();
+    let gossip = MembershipConvergence::new(MembershipConvergenceDeps {
+        candidate_repo: Arc::new(InMemoryCandidateRepository::default()),
+        announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+        outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+        security_updates: membership_security(4),
+        applied_security_updates: applied,
+        transport: membership_transport(),
+        clock: Arc::new(FixedClock(1_000)),
+        device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
+        announcement_material: Arc::new(FixedAnnouncementMaterial),
+        member_signatures: Arc::new(AcceptingMemberSignatures),
+        fingerprint_factory: Arc::new(FixedFingerprintFactory),
+        attestation: Arc::new(FixedAttestation(Ok(verified_peer()))),
+        verified_peer_promotion: Arc::new(NoopVerifiedPeerPromotion),
+        member_repo: members,
+        trusted_peer_repo: Arc::new(InMemoryTrustedPeerRepository::default()),
+        peer_address_repo: addresses,
+        hash: Arc::new(FixedHasher),
+    });
+
+    let response = MembershipGossipEndpointPort::handle_message(
+        &gossip,
+        &DeviceId::new("device-c"),
+        MembershipGossipMessage::RequestSharedDevicePage(MembershipSharedDevicePageRequest {
+            space_id: SpaceId::from("space-a"),
+            after_device_id: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let MembershipGossipMessage::SharedDevicePage(page) = response else {
+        panic!("shared device request did not return a page");
+    };
+    assert_eq!(page.seeds.len(), 1);
+    assert_eq!(page.seeds[0].security_updates.len(), 1);
+    assert_eq!(page.seeds[0].security_updates[0].next_epoch, 5);
 }

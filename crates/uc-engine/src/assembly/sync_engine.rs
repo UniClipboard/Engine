@@ -614,6 +614,7 @@ pub async fn build_sync_engine_assembly(
             Arc::clone(&space_setup.current_member_signatures),
             Arc::clone(&deps.security.space_access_ports.group_revocation),
         )),
+        applied_security_updates: Arc::clone(&space_setup.membership_applied_security_update_repo),
         transport: membership_transport.clone(),
         clock: Arc::clone(&deps.system.clock),
         device_identity: Arc::clone(&deps.device.device_identity),

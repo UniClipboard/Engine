@@ -1,5 +1,5 @@
 use super::*;
-use tracing::debug;
+use tracing::{debug, warn};
 
 impl MembershipConvergence {
     pub(crate) fn subscribe_shared_device_refresh(
@@ -513,7 +513,15 @@ impl MembershipConvergence {
                         self.shared_device_refresh_candidate_state(space_id, &device_id)
                             .await
                     }
-                    Err(_) => SharedDeviceRefreshDeviceState::Rejected,
+                    Err(error) => {
+                        warn!(
+                            candidate_device_id = %device_id.as_str(),
+                            error_reason = %error,
+                            error_kind = "membership_shared_device_connect_rejected",
+                            "shared device candidate rejected while connecting"
+                        );
+                        SharedDeviceRefreshDeviceState::Rejected
+                    }
                 };
                 self.set_shared_device_refresh_device(request_id, device_id, device_name, state)
                     .await;
