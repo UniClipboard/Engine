@@ -42,9 +42,11 @@ pub use ports::{
     RemovalIntentRepositoryError, RemovalIntentRepositoryPort, RemovalIntentVerificationError,
     RemovalIntentVerificationPort, RemovalLateAcceptance, RemovalLateRejectionReason,
     RemovalLateSubmission, RemovalLateSubmissionEndpointPort, RemovalLateSubmissionError,
-    RemovalLateSubmissionPort, RemovalLateSubmissionTransportError, RemovalPendingJoinStorePort,
-    RemovalRecoveryError, RemovalRecoveryPort, RemovalTargetGatePort, RemovalViewMember,
-    RemovalViewSnapshot, RevocationRepositoryPort, SpaceSecurityStateResetError,
+    RemovalLateSubmissionPort, RemovalLateSubmissionTransportError, RemovalNoticeAcceptance,
+    RemovalNoticeEndpointPort, RemovalNoticeError, RemovalNoticePort, RemovalNoticeRejectionReason,
+    RemovalNoticeTransportError, RemovalNoticeVerificationError, RemovalNoticeVerificationPort,
+    RemovalPendingJoinStorePort, RemovalRecoveryError, RemovalRecoveryPort, RemovalTargetGatePort,
+    RemovalViewMember, RemovalViewSnapshot, RevocationRepositoryPort, SpaceSecurityStateResetError,
     SpaceSecurityStateResetPort, VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
 };
 pub use preferences::MemberSyncPreferences;
@@ -55,7 +57,7 @@ pub use protection::{
 pub use removal_intent::{
     MemberInstanceId, MemberRemovalSummary, RemovalCausalCheckpoint, RemovalCausalProof,
     RemovalCausalProofMember, RemovalCompletionReceipt, RemovalConvergence, RemovalIntentContent,
-    RemovalIntentId, RemovalIntentRejection, RemovalPersistedState, RemovalPhase,
+    RemovalIntentId, RemovalIntentRejection, RemovalNotice, RemovalPersistedState, RemovalPhase,
     RemovalPreparedRecovery, RemovalRecoveryMaterial, RemovalRecoveryPersisted,
     SignedRemovalIntent, MAX_VIEW_MEMBERS,
 };

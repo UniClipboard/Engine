@@ -1298,6 +1298,7 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
             effective_member_count: 2,
             convergence_digest: None,
             updated_at_ms: 123,
+            removed: false,
         })
     )
     .contains("member_removed"));
@@ -1606,6 +1607,7 @@ fn member_removal_changes_expose_a_full_replacement_snapshot() {
         effective_member_count: 2,
         convergence_digest: None,
         updated_at_ms: 123,
+        removed: false,
     });
 
     assert_eq!(event.kind(), "member_removal_changed");

@@ -725,6 +725,7 @@ mod tests {
                 effective_member_count: 1,
                 convergence_digest: Some("digest-1".into()),
                 updated_at_ms: 42,
+                removed: true,
             },
         ));
 

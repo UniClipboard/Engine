@@ -16,8 +16,10 @@ use uc_core::membership::{
     RemovalIntentId, RemovalIntentRepositoryError, RemovalIntentRepositoryPort,
     RemovalIntentVerificationError, RemovalIntentVerificationPort, RemovalLateAcceptance,
     RemovalLateSubmission, RemovalLateSubmissionPort, RemovalLateSubmissionTransportError,
-    RemovalPersistedState, RemovalPreparedRecovery, RemovalRecoveryError, RemovalRecoveryMaterial,
-    RemovalRecoveryPort, RemovalViewMember, RemovalViewSnapshot, SignedRemovalIntent, SpaceMember,
+    RemovalNotice, RemovalNoticeAcceptance, RemovalNoticePort, RemovalNoticeTransportError,
+    RemovalNoticeVerificationError, RemovalNoticeVerificationPort, RemovalPersistedState,
+    RemovalPreparedRecovery, RemovalRecoveryError, RemovalRecoveryMaterial, RemovalRecoveryPort,
+    RemovalViewMember, RemovalViewSnapshot, SignedRemovalIntent, SpaceMember,
 };
 use uc_core::security::IdentityFingerprint;
 
@@ -176,6 +178,57 @@ impl RemovalLateSubmissionPort for MemoryRemovalLateExchange {
             .unwrap()
             .push((recipient.clone(), submission));
         Ok(RemovalLateAcceptance::Accepted { intent_id })
+    }
+}
+
+/// 内存版移除通知通道:只记录发出的通知并返回有界结果。
+#[derive(Clone, Default)]
+pub struct MemoryRemovalNoticeExchange {
+    pub sent: Arc<Mutex<Vec<(DeviceId, RemovalNotice)>>>,
+    /// 下一次发送失败,用于验证通知失败不会阻塞收敛。
+    pub fail_next: Arc<Mutex<bool>>,
+    /// 持续离线,直到关闭;用于模拟目标设备长时间不可达。
+    pub offline: Arc<Mutex<bool>>,
+}
+
+#[async_trait]
+impl RemovalNoticePort for MemoryRemovalNoticeExchange {
+    async fn send_notice(
+        &self,
+        recipient: &DeviceId,
+        notice: RemovalNotice,
+    ) -> Result<RemovalNoticeAcceptance, RemovalNoticeTransportError> {
+        if *self.offline.lock().unwrap() || std::mem::take(&mut *self.fail_next.lock().unwrap()) {
+            return Err(RemovalNoticeTransportError::Offline);
+        }
+        self.sent
+            .lock()
+            .unwrap()
+            .push((recipient.clone(), notice.clone()));
+        Ok(RemovalNoticeAcceptance::Accepted {
+            intent_id: notice.intent_id,
+        })
+    }
+}
+
+/// 通知签名验证占位:默认通过,可注入失败。
+#[derive(Clone, Default)]
+pub struct AcceptingNoticeVerifier {
+    pub failure: Arc<Mutex<Option<RemovalNoticeVerificationError>>>,
+}
+
+#[async_trait]
+impl RemovalNoticeVerificationPort for AcceptingNoticeVerifier {
+    async fn verify_notice_signature(
+        &self,
+        _notice: &RemovalNotice,
+        _issuer_public_key: &[u8],
+    ) -> Result<(), RemovalNoticeVerificationError> {
+        if let Some(error) = self.failure.lock().unwrap().clone() {
+            Err(error)
+        } else {
+            Ok(())
+        }
     }
 }
 

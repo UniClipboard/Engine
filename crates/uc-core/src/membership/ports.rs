@@ -7,7 +7,7 @@ use super::gossip::PendingMembershipBatch;
 use super::gossip::{DeviceAnnouncement, SpaceMembershipCandidate, VerifiedMembershipPeer};
 use super::member::SpaceMember;
 use super::removal_intent::{
-    MemberInstanceId, RemovalCausalProof, RemovalCompletionReceipt, RemovalIntentId,
+    MemberInstanceId, RemovalCausalProof, RemovalCompletionReceipt, RemovalIntentId, RemovalNotice,
     RemovalPersistedState, RemovalPreparedRecovery, RemovalRecoveryMaterial, SignedRemovalIntent,
 };
 use super::revocation::{
@@ -779,6 +779,95 @@ pub trait RemovalLateSubmissionEndpointPort: Send + Sync {
         &self,
         submission: RemovalLateSubmission,
     ) -> Result<RemovalLateAcceptance, RemovalLateSubmissionError>;
+}
+
+/// 移除通知的有界接收结果。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemovalNoticeAcceptance {
+    /// 通知已验收并持久化。
+    Accepted { intent_id: RemovalIntentId },
+    /// 通知此前已验收(幂等)。
+    AlreadyKnown { intent_id: RemovalIntentId },
+    /// 拒绝通知。稳定失败类别,不包含业务内容。
+    Rejected {
+        reason: RemovalNoticeRejectionReason,
+    },
+}
+
+/// 移除通知的稳定拒绝类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemovalNoticeRejectionReason {
+    Invalid,
+    SpaceMismatch,
+    Unavailable,
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum RemovalNoticeTransportError {
+    #[error("removal notice recipient is offline")]
+    Offline,
+    #[error("removal notice transport failed")]
+    Transport,
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum RemovalNoticeError {
+    #[error("removal notice was rejected")]
+    Rejected,
+    #[error("removal notice limit exceeded")]
+    LimitExceeded,
+    #[error("removal notice could not be persisted")]
+    Persistence,
+    #[error("removal notice endpoint is unavailable")]
+    Unavailable,
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum RemovalNoticeVerificationError {
+    #[error("removal notice issuer is not a view member")]
+    InvalidMembership,
+    #[error("removal notice signature is invalid")]
+    BadSignature,
+    #[error("removal notice verification is unavailable")]
+    Unavailable,
+}
+
+/// 当前成员向被移除设备定向投递移除通知的受限发送端。
+///
+/// 通知只携带“成员资格已终止”的稳定事实,不含成员列表、收敛摘要、
+/// 安全代次、密钥或内容;接收方只返回有界结果。
+#[async_trait]
+pub trait RemovalNoticePort: Send + Sync {
+    async fn send_notice(
+        &self,
+        recipient: &DeviceId,
+        notice: RemovalNotice,
+    ) -> Result<RemovalNoticeAcceptance, RemovalNoticeTransportError>;
+}
+
+/// 被移除设备接收移除通知的受限入口。
+///
+/// 接收方按本机已保存的因果视图公开签名资料核对签发者并验签;
+/// 任一核对失败即拒绝且不改变状态(失败关闭)。
+#[async_trait]
+pub trait RemovalNoticeEndpointPort: Send + Sync {
+    async fn handle_notice(
+        &self,
+        notice: RemovalNotice,
+    ) -> Result<RemovalNoticeAcceptance, RemovalNoticeError>;
+}
+
+/// 移除通知的密码学验证:签发者签名与公钥匹配。
+///
+/// 签发者必须属于接收方保存的因果视图(成员资格核对由调用方完成,
+/// 它持有视图公开签名资料);本端口只验证签名本身。
+#[async_trait]
+pub trait RemovalNoticeVerificationPort: Send + Sync {
+    async fn verify_notice_signature(
+        &self,
+        notice: &RemovalNotice,
+        issuer_public_key: &[u8],
+    ) -> Result<(), RemovalNoticeVerificationError>;
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]

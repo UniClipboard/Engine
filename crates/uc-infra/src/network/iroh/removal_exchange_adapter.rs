@@ -20,7 +20,8 @@ use uc_core::membership::{
     MemberRepositoryPort, PeerAdmissionPort, RemovalExchangeEndpointPort, RemovalExchangeError,
     RemovalExchangeMessage, RemovalExchangePort, RemovalLateAcceptance, RemovalLateSubmission,
     RemovalLateSubmissionEndpointPort, RemovalLateSubmissionError, RemovalLateSubmissionPort,
-    RemovalLateSubmissionTransportError,
+    RemovalLateSubmissionTransportError, RemovalNoticeAcceptance, RemovalNoticeEndpointPort,
+    RemovalNoticePort, RemovalNoticeTransportError,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
@@ -29,12 +30,15 @@ use super::connect_with_staggered_retry;
 
 pub const REMOVAL_EXCHANGE_ALPN: &[u8] = b"uniclipboard/removal-exchange/1";
 pub const REMOVAL_LATE_ALPN: &[u8] = b"uniclipboard/removal-late/1";
+pub const REMOVAL_NOTICE_ALPN: &[u8] = b"uniclipboard/removal-notice/1";
 
 const MAX_EXCHANGE_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 const MAX_LATE_SUBMISSION_SIZE: usize = 1024 * 1024;
 const MAX_LATE_SUBMISSION_CONCURRENCY: usize = 4;
 const MAX_LATE_IDENTITIES: usize = 256;
 const LATE_SUBMISSION_MIN_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_NOTICE_SIZE: usize = 1024;
+const MAX_NOTICE_CONCURRENCY: usize = 4;
 const EXCHANGE_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACK_ACCEPTED: u8 = 1;
 const ACK_REJECTED: u8 = 2;
@@ -57,13 +61,15 @@ mod tests {
         RemovalExchangeEndpointPort, RemovalExchangeError, RemovalExchangeMessage,
         RemovalExchangePort, RemovalIntentContent, RemovalLateAcceptance, RemovalLateSubmission,
         RemovalLateSubmissionEndpointPort, RemovalLateSubmissionError, RemovalLateSubmissionPort,
+        RemovalNoticeAcceptance, RemovalNoticeEndpointPort, RemovalNoticeError,
         SignedRemovalIntent, SpaceMember,
     };
     use uc_core::ports::security::IdentityFingerprintFactoryPort;
     use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
 
     use super::{
-        IrohRemovalExchangeAdapter, LateSubmissionLimiter, REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN,
+        IrohRemovalExchangeAdapter, LateSubmissionLimiter, RemovalNoticePort,
+        REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN, REMOVAL_NOTICE_ALPN,
     };
     use crate::security::Sha256IdentityFingerprintFactory;
 
@@ -180,6 +186,22 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingNoticeEndpoint(Mutex<Vec<uc_core::membership::RemovalNotice>>);
+
+    #[async_trait]
+    impl RemovalNoticeEndpointPort for RecordingNoticeEndpoint {
+        async fn handle_notice(
+            &self,
+            notice: uc_core::membership::RemovalNotice,
+        ) -> Result<RemovalNoticeAcceptance, RemovalNoticeError> {
+            self.0.lock().unwrap().push(notice.clone());
+            Ok(RemovalNoticeAcceptance::Accepted {
+                intent_id: notice.intent_id,
+            })
+        }
+    }
+
     fn member(seed: [u8; 32], device_id: &str) -> SpaceMember {
         let factory = Sha256IdentityFingerprintFactory;
         let identity_fingerprint = factory
@@ -261,6 +283,7 @@ mod tests {
 
         let exchange_endpoint = Arc::new(RecordingExchangeEndpoint::default());
         let late_endpoint = Arc::new(RecordingLateEndpoint::default());
+        let notice_endpoint = Arc::new(RecordingNoticeEndpoint::default());
         let receiver_adapter = IrohRemovalExchangeAdapter::new(
             Arc::clone(&receiver),
             Arc::new(MemoryPeerAddresses::default()),
@@ -271,10 +294,12 @@ mod tests {
             Arc::new(Sha256IdentityFingerprintFactory),
             exchange_endpoint.clone(),
             late_endpoint.clone(),
+            notice_endpoint.clone(),
         );
         let router = Router::builder((*receiver).clone())
             .accept(REMOVAL_EXCHANGE_ALPN, handlers.exchange)
             .accept(REMOVAL_LATE_ALPN, handlers.late)
+            .accept(REMOVAL_NOTICE_ALPN, handlers.notice)
             .spawn();
 
         let addresses: Arc<dyn PeerAddressRepositoryPort> =
@@ -321,6 +346,28 @@ mod tests {
         ));
         assert_eq!(exchange_endpoint.0.lock().unwrap().len(), 1);
         assert_eq!(late_endpoint.0.lock().unwrap().len(), 1);
+
+        let notice = uc_core::membership::RemovalNotice {
+            space_lineage_fingerprint: [7; 32],
+            intent_id: uc_core::membership::RemovalIntentId::from_bytes([9; 32]),
+            target_instance: uc_core::membership::MemberInstanceId::from_bytes([3; 32]),
+            target_device_id: DeviceId::new("bob"),
+            issuer_instance: uc_core::membership::MemberInstanceId::from_bytes([1; 32]),
+            signature: vec![1, 2, 3],
+        };
+        let notice_acceptance = sender_adapter
+            .send_notice(&DeviceId::new("bob"), notice.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            notice_acceptance,
+            uc_core::membership::RemovalNoticeAcceptance::Accepted { .. }
+        ));
+        assert_eq!(notice_endpoint.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            notice_endpoint.0.lock().unwrap().first().unwrap().intent_id,
+            notice.intent_id
+        );
 
         router.shutdown().await.ok();
         sender.close().await;
@@ -378,6 +425,13 @@ struct LateHandlerState {
     late_limiter: LateSubmissionLimiter,
 }
 
+/// 受限通知入口所需的状态。
+struct NoticeHandlerState {
+    notice_endpoint: Arc<dyn RemovalNoticeEndpointPort>,
+    notice_concurrency: Arc<tokio::sync::Semaphore>,
+    notice_limiter: LateSubmissionLimiter,
+}
+
 /// 普通成员之间的移除意图交换。
 pub struct IrohRemovalExchangeAdapter {
     endpoint: Arc<Endpoint>,
@@ -387,6 +441,7 @@ pub struct IrohRemovalExchangeAdapter {
 pub(crate) struct IrohRemovalHandlers {
     pub(crate) exchange: IrohRemovalExchangeHandler,
     pub(crate) late: IrohRemovalLateHandler,
+    pub(crate) notice: IrohRemovalNoticeHandler,
 }
 
 impl IrohRemovalExchangeAdapter {
@@ -407,6 +462,7 @@ impl IrohRemovalExchangeAdapter {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         exchange_endpoint: Arc<dyn RemovalExchangeEndpointPort>,
         late_submission: Arc<dyn RemovalLateSubmissionEndpointPort>,
+        notice_endpoint: Arc<dyn RemovalNoticeEndpointPort>,
     ) -> IrohRemovalHandlers {
         IrohRemovalHandlers {
             exchange: IrohRemovalExchangeHandler {
@@ -424,6 +480,15 @@ impl IrohRemovalExchangeAdapter {
                         MAX_LATE_SUBMISSION_CONCURRENCY,
                     )),
                     late_limiter: LateSubmissionLimiter::default(),
+                }),
+            },
+            notice: IrohRemovalNoticeHandler {
+                state: Arc::new(NoticeHandlerState {
+                    notice_endpoint,
+                    notice_concurrency: Arc::new(tokio::sync::Semaphore::new(
+                        MAX_NOTICE_CONCURRENCY,
+                    )),
+                    notice_limiter: LateSubmissionLimiter::default(),
                 }),
             },
         }
@@ -568,6 +633,70 @@ impl RemovalLateSubmissionPort for IrohRemovalExchangeAdapter {
             .map_err(|_| RemovalLateSubmissionTransportError::Transport)?
             .map_err(|_| RemovalLateSubmissionTransportError::Transport)?;
         postcard::from_bytes(&response).map_err(|_| RemovalLateSubmissionTransportError::Transport)
+    }
+}
+
+#[async_trait]
+impl RemovalNoticePort for IrohRemovalExchangeAdapter {
+    async fn send_notice(
+        &self,
+        recipient: &DeviceId,
+        notice: uc_core::membership::RemovalNotice,
+    ) -> Result<RemovalNoticeAcceptance, RemovalNoticeTransportError> {
+        let payload =
+            postcard::to_stdvec(&notice).map_err(|_| RemovalNoticeTransportError::Transport)?;
+        if payload.len() > MAX_NOTICE_SIZE {
+            return Err(RemovalNoticeTransportError::Transport);
+        }
+        let addr = self
+            .resolve_addr(recipient)
+            .await
+            .ok_or(RemovalNoticeTransportError::Offline)?;
+        let connection = connect_with_staggered_retry(
+            Arc::clone(&self.endpoint),
+            addr,
+            REMOVAL_NOTICE_ALPN,
+            "removal-notice",
+        )
+        .await
+        .map_err(|_| RemovalNoticeTransportError::Offline)?;
+        let (mut send, mut recv) = tokio::time::timeout(EXCHANGE_IO_TIMEOUT, connection.open_bi())
+            .await
+            .map_err(|_| RemovalNoticeTransportError::Transport)?
+            .map_err(|_| RemovalNoticeTransportError::Transport)?;
+        let length =
+            u32::try_from(payload.len()).map_err(|_| RemovalNoticeTransportError::Transport)?;
+        send.write_all(&length.to_be_bytes())
+            .await
+            .map_err(|_| RemovalNoticeTransportError::Transport)?;
+        send.write_all(&payload)
+            .await
+            .map_err(|_| RemovalNoticeTransportError::Transport)?;
+        send.finish()
+            .map_err(|_| RemovalNoticeTransportError::Transport)?;
+        let mut ack = [0u8; 1];
+        tokio::time::timeout(EXCHANGE_IO_TIMEOUT, recv.read_exact(&mut ack))
+            .await
+            .map_err(|_| RemovalNoticeTransportError::Transport)?
+            .map_err(|_| RemovalNoticeTransportError::Transport)?;
+        if ack[0] != ACK_ACCEPTED {
+            return Err(RemovalNoticeTransportError::Transport);
+        }
+        let mut response_length = [0u8; 4];
+        tokio::time::timeout(EXCHANGE_IO_TIMEOUT, recv.read_exact(&mut response_length))
+            .await
+            .map_err(|_| RemovalNoticeTransportError::Transport)?
+            .map_err(|_| RemovalNoticeTransportError::Transport)?;
+        let response_length = u32::from_be_bytes(response_length) as usize;
+        if response_length == 0 || response_length > MAX_NOTICE_SIZE {
+            return Err(RemovalNoticeTransportError::Transport);
+        }
+        let mut response = vec![0u8; response_length];
+        tokio::time::timeout(EXCHANGE_IO_TIMEOUT, recv.read_exact(&mut response))
+            .await
+            .map_err(|_| RemovalNoticeTransportError::Transport)?
+            .map_err(|_| RemovalNoticeTransportError::Transport)?;
+        postcard::from_bytes(&response).map_err(|_| RemovalNoticeTransportError::Transport)
     }
 }
 
@@ -750,6 +879,113 @@ impl ProtocolHandler for IrohRemovalLateHandler {
         let _ = connection.closed().await;
         Ok(())
     }
+}
+
+/// 受限移除通知入口:接收当前成员定向投递的移除通知。
+///
+/// 不检查成员资格(接收者本就不在成员集合中);通知内容的核对由
+/// 应用层按本机保存的因果视图完成。固定上限:单条 1 KiB、全局并发 4、
+/// 每身份 10 秒一次,与迟交入口一致。
+#[derive(Clone)]
+pub struct IrohRemovalNoticeHandler {
+    state: Arc<NoticeHandlerState>,
+}
+
+impl std::fmt::Debug for IrohRemovalNoticeHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IrohRemovalNoticeHandler")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProtocolHandler for IrohRemovalNoticeHandler {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let (mut send, mut recv) =
+            match tokio::time::timeout(EXCHANGE_IO_TIMEOUT, connection.accept_bi()).await {
+                Ok(Ok(streams)) => streams,
+                _ => {
+                    debug!("removal notice stream accept failed");
+                    return Ok(());
+                }
+            };
+        let Ok(_permit) = self.state.notice_concurrency.try_acquire() else {
+            emit_notice_rejection(&mut send).await;
+            let _ = connection.closed().await;
+            return Ok(());
+        };
+        if !self
+            .state
+            .notice_limiter
+            .allow(connection.remote_id().as_bytes(), Instant::now())
+        {
+            emit_notice_rejection(&mut send).await;
+            let _ = connection.closed().await;
+            return Ok(());
+        }
+        let Some(notice) = read_length_prefixed(&mut recv, MAX_NOTICE_SIZE).await else {
+            emit_exchange_reply(&mut send, ACK_REJECTED, None).await;
+            let _ = connection.closed().await;
+            return Ok(());
+        };
+        let notice: uc_core::membership::RemovalNotice = match postcard::from_bytes(&notice) {
+            Ok(notice) => notice,
+            Err(_) => {
+                emit_exchange_reply(&mut send, ACK_REJECTED, None).await;
+                let _ = connection.closed().await;
+                return Ok(());
+            }
+        };
+        let acceptance = match self.state.notice_endpoint.handle_notice(notice).await {
+            Ok(acceptance) => acceptance,
+            Err(error) => {
+                warn!(
+                    failure = "notice_rejected",
+                    "removal notice handling failed"
+                );
+                let bounded = RemovalNoticeAcceptance::Rejected {
+                    reason: uc_core::membership::RemovalNoticeRejectionReason::Unavailable,
+                };
+                let _ = error;
+                let payload = match postcard::to_stdvec(&bounded) {
+                    Ok(payload) => payload,
+                    Err(_) => {
+                        emit_exchange_reply(&mut send, ACK_REJECTED, None).await;
+                        let _ = connection.closed().await;
+                        return Ok(());
+                    }
+                };
+                emit_exchange_reply(&mut send, ACK_ACCEPTED, Some(&payload)).await;
+                let _ = connection.closed().await;
+                return Ok(());
+            }
+        };
+        let payload = match postcard::to_stdvec(&acceptance) {
+            Ok(payload) => payload,
+            Err(_) => {
+                emit_exchange_reply(&mut send, ACK_REJECTED, None).await;
+                let _ = connection.closed().await;
+                return Ok(());
+            }
+        };
+        emit_exchange_reply(&mut send, ACK_ACCEPTED, Some(&payload)).await;
+        let _ = connection.closed().await;
+        Ok(())
+    }
+}
+
+async fn emit_notice_rejection(send: &mut iroh::endpoint::SendStream) {
+    let rejection = RemovalNoticeAcceptance::Rejected {
+        reason: uc_core::membership::RemovalNoticeRejectionReason::Unavailable,
+    };
+    let payload = match postcard::to_stdvec(&rejection) {
+        Ok(payload) => payload,
+        Err(_) => {
+            emit_exchange_reply(send, ACK_REJECTED, None).await;
+            return;
+        }
+    };
+    emit_exchange_reply(send, ACK_ACCEPTED, Some(&payload)).await;
 }
 
 async fn emit_late_limit_rejection(send: &mut iroh::endpoint::SendStream) {

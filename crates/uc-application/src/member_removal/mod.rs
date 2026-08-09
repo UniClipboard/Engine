@@ -22,8 +22,11 @@ use uc_core::membership::{
     RemovalIntentRepositoryPort, RemovalIntentVerificationError, RemovalIntentVerificationPort,
     RemovalLateAcceptance, RemovalLateRejectionReason, RemovalLateSubmission,
     RemovalLateSubmissionEndpointPort, RemovalLateSubmissionError, RemovalLateSubmissionPort,
-    RemovalLateSubmissionTransportError, RemovalPersistedState, RemovalPhase,
-    RemovalRecoveryPersisted, RemovalRecoveryPort, RemovalTargetGatePort, SignedRemovalIntent,
+    RemovalLateSubmissionTransportError, RemovalNotice, RemovalNoticeAcceptance,
+    RemovalNoticeEndpointPort, RemovalNoticeError, RemovalNoticePort, RemovalNoticeRejectionReason,
+    RemovalNoticeTransportError, RemovalNoticeVerificationPort, RemovalPersistedState,
+    RemovalPhase, RemovalRecoveryPersisted, RemovalRecoveryPort, RemovalTargetGatePort,
+    SignedRemovalIntent,
 };
 
 pub use errors::RemovalCoordinatorError;
@@ -42,9 +45,13 @@ pub struct RemovalCoordinatorDeps {
     pub verification: Arc<dyn RemovalIntentVerificationPort>,
     pub exchange: Arc<dyn RemovalExchangePort>,
     pub late_submission: Arc<dyn RemovalLateSubmissionPort>,
+    pub notice: Arc<dyn RemovalNoticePort>,
+    pub notice_verification: Arc<dyn RemovalNoticeVerificationPort>,
     pub recovery: Arc<dyn RemovalRecoveryPort>,
     pub member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
+    /// 本机设备标识(移除通知的目标核对)。
+    pub own_device: DeviceId,
 }
 
 /// 分布式成员移除协调器。
@@ -66,6 +73,11 @@ enum Outgoing {
         recipient: DeviceId,
         intent: SignedRemovalIntent,
     },
+    /// 受限通知通道:向被移除设备定向投递移除通知。
+    Notice {
+        recipient: DeviceId,
+        notice: RemovalNotice,
+    },
 }
 
 /// 一次锁外网络交互的结果。
@@ -74,6 +86,8 @@ enum ExchangeOutcome {
     Message(RemovalExchangeMessage),
     /// 受限迟交入口已接受(结果有界,不读取具体内容)。
     LateAccepted,
+    /// 受限通知通道已接受(结果有界,不读取具体内容)。
+    NoticeAccepted,
 }
 
 impl RemovalCoordinator {
@@ -106,6 +120,10 @@ impl RemovalCoordinator {
             admission_generation: 0,
             phase: RemovalPhase::Applied,
             updated_at_ms: 0,
+            self_removed: None,
+            self_removed_target: None,
+            notified_removals: BTreeSet::new(),
+            view_signing_keys: BTreeMap::new(),
         }
     }
 
@@ -152,7 +170,7 @@ impl RemovalCoordinator {
                     .cloned()
             })
             .ok_or(RemovalCoordinatorError::NotAMember)?;
-        if state.own_instance_removed(&own_member.instance) {
+        if self.refresh_self_removed(&mut state).await? {
             // L07:本机已观察到自己被移除,拒绝创建新意图。
             return Err(RemovalCoordinatorError::OwnInstanceRemoved);
         }
@@ -179,6 +197,10 @@ impl RemovalCoordinator {
                 .member_devices
                 .entry(member.instance)
                 .or_insert_with(|| member.device_id.clone());
+            state
+                .view_signing_keys
+                .entry(member.instance)
+                .or_insert_with(|| member.signing_public_key.clone());
         }
         let mut view_members = view
             .members
@@ -524,6 +546,18 @@ impl RemovalCoordinator {
                                 RemovalExchangeError::Offline
                             }
                         }),
+                    Outgoing::Notice { recipient, notice } => self
+                        .deps
+                        .notice
+                        .send_notice(recipient, notice.clone())
+                        .await
+                        .map(|_| ExchangeOutcome::NoticeAccepted)
+                        .map_err(|error| match error {
+                            RemovalNoticeTransportError::Transport => {
+                                RemovalExchangeError::Transport
+                            }
+                            RemovalNoticeTransportError::Offline => RemovalExchangeError::Offline,
+                        }),
                 };
                 responses.push((item, outcome));
             }
@@ -542,11 +576,15 @@ impl RemovalCoordinator {
     /// 只做本地状态推进与持久化,不发起网络;网络交换统一在锁外进行。
     async fn reconcile_plan(&self, now_ms: i64) -> Result<Vec<Outgoing>, RemovalCoordinatorError> {
         let mut state = self.load_any_state().await?;
-        if state.phase == RemovalPhase::Complete {
-            return self.completion_broadcast_plan(&mut state, now_ms).await;
-        }
         if state.phase == RemovalPhase::RecoveryRequired {
             return Ok(Vec::new());
+        }
+        // 移除通知在所有推进阶段都尽力补发(RecoveryRequired 除外):目标
+        // 设备上线或重试周期到来时投递,发送成功写入进度。
+        let mut outgoing = self.notice_plan(&mut state, now_ms).await?;
+        if state.phase == RemovalPhase::Complete {
+            outgoing.extend(self.completion_broadcast_plan(&mut state, now_ms).await?);
+            return Ok(outgoing);
         }
         let convergence = state.convergence();
         if convergence.is_empty() {
@@ -610,7 +648,8 @@ impl RemovalCoordinator {
             // 本机已被移除:不参与恢复，只能通过受限入口迟交已保存的历史意图。
             return self.late_submission_plan(&mut state, own, now_ms).await;
         }
-        let mut outgoing = self.exchange_intents_plan(&mut state, now_ms).await?;
+        let mut exchange_outgoing = self.exchange_intents_plan(&mut state, now_ms).await?;
+        outgoing.append(&mut exchange_outgoing);
         let executor = effective
             .iter()
             .next()
@@ -959,8 +998,13 @@ impl RemovalCoordinator {
                         .insert((recipient, intent.intent_id), now_ms);
                     progressed = true;
                 }
+                (Outgoing::Notice { notice, .. }, Ok(_)) => {
+                    state.notified_removals.insert(notice.intent_id);
+                    progressed = true;
+                }
                 (Outgoing::Exchange { .. }, Ok(_)) | (Outgoing::Exchange { .. }, Err(_)) => {}
                 (Outgoing::Late { .. }, Err(_)) => {}
+                (Outgoing::Notice { .. }, Err(_)) => {}
             }
         }
         if state.phase == RemovalPhase::Converging {
@@ -1062,6 +1106,202 @@ impl RemovalCoordinator {
         Ok(outgoing)
     }
 
+    /// 向已生效意图的被移除目标设备发送移除通知(尽力而为,非完成条件)。
+    ///
+    /// 任何已验收该意图的当前成员都能补发,不依赖发起设备在线;发送成功
+    /// 写入投递进度,失败只保留待处理。通知只含稳定事实标记,不参与收敛
+    /// 与完成判定。
+    async fn notice_plan(
+        &self,
+        state: &mut RemovalPersistedState,
+        now_ms: i64,
+    ) -> Result<Vec<Outgoing>, RemovalCoordinatorError> {
+        let mut outgoing = Vec::new();
+        for intent in &state.intents {
+            if state.notified_removals.contains(&intent.intent_id) {
+                continue;
+            }
+            let Some(target_device) = self.device_for_instance(state, intent.content.target).await
+            else {
+                continue;
+            };
+            if !state.device_is_locally_removed(&target_device) {
+                continue;
+            }
+            outgoing.push(Outgoing::Notice {
+                recipient: target_device,
+                notice: self.build_notice(state, intent).await?,
+            });
+        }
+        if !outgoing.is_empty() {
+            state.updated_at_ms = now_ms;
+            self.persist(state).await?;
+        }
+        Ok(outgoing)
+    }
+
+    /// 构造一条由本机签发、针对给定意图的移除通知。
+    async fn build_notice(
+        &self,
+        state: &RemovalPersistedState,
+        intent: &SignedRemovalIntent,
+    ) -> Result<RemovalNotice, RemovalCoordinatorError> {
+        let own = self
+            .deps
+            .recovery
+            .own_instance()
+            .await?
+            .ok_or(RemovalCoordinatorError::NotAMember)?;
+        let target_device = self
+            .device_for_instance(state, intent.content.target)
+            .await
+            .ok_or(RemovalCoordinatorError::UnknownTarget)?;
+        let mut notice = RemovalNotice {
+            space_lineage_fingerprint: RemovalNotice::space_lineage_fingerprint(
+                &state.space_lineage,
+            ),
+            intent_id: intent.intent_id,
+            target_instance: intent.content.target,
+            target_device_id: target_device,
+            issuer_instance: own,
+            signature: Vec::new(),
+        };
+        let payload = notice.signing_payload();
+        notice.signature = self
+            .deps
+            .member_signatures
+            .sign_current_member_payload(&payload)
+            .await?;
+        Ok(notice)
+    }
+
+    /// 受限通知入口:接收一条移除通知并验收。
+    ///
+    /// 与本机保存的因果视图核对空间、签发者与目标;任一核对失败即拒绝且
+    /// 不改变状态(失败关闭)。验收后写入 `self_removed`(幂等),与后台
+    /// 推进在同一锁内串行。
+    pub async fn handle_notice(
+        &self,
+        notice: RemovalNotice,
+        now_ms: i64,
+    ) -> Result<RemovalNoticeAcceptance, RemovalNoticeError> {
+        let _guard = self.state_lock.lock().await;
+        let mut state = self
+            .load_any_state()
+            .await
+            .map_err(|_| RemovalNoticeError::Unavailable)?;
+        if state.space_lineage.is_empty()
+            || RemovalNotice::space_lineage_fingerprint(&state.space_lineage)
+                != notice.space_lineage_fingerprint
+        {
+            return Ok(RemovalNoticeAcceptance::Rejected {
+                reason: RemovalNoticeRejectionReason::SpaceMismatch,
+            });
+        }
+        if state.self_removed == Some(notice.intent_id) {
+            return Ok(RemovalNoticeAcceptance::AlreadyKnown {
+                intent_id: notice.intent_id,
+            });
+        }
+        let Some(issuer_key) = self.lookup_issuer_key(&state, &notice).await else {
+            return Ok(RemovalNoticeAcceptance::Rejected {
+                reason: RemovalNoticeRejectionReason::Invalid,
+            });
+        };
+        if self
+            .deps
+            .notice_verification
+            .verify_notice_signature(&notice, &issuer_key)
+            .await
+            .is_err()
+        {
+            return Ok(RemovalNoticeAcceptance::Rejected {
+                reason: RemovalNoticeRejectionReason::Invalid,
+            });
+        }
+        if !self.notice_targets_own_device(&notice).await {
+            return Ok(RemovalNoticeAcceptance::Rejected {
+                reason: RemovalNoticeRejectionReason::Invalid,
+            });
+        }
+        state.self_removed = Some(notice.intent_id);
+        state.self_removed_target = Some(notice.target_instance);
+        state.updated_at_ms = now_ms;
+        self.persist(&state)
+            .await
+            .map_err(|_| RemovalNoticeError::Persistence)?;
+        self.wake.notify_one();
+        info!(intent = %notice.intent_id, "removal notice accepted");
+        Ok(RemovalNoticeAcceptance::Accepted {
+            intent_id: notice.intent_id,
+        })
+    }
+
+    /// 签发者公开签名资料:先查本机已保存的视图资料,再以当前视图兜底。
+    async fn lookup_issuer_key(
+        &self,
+        state: &RemovalPersistedState,
+        notice: &RemovalNotice,
+    ) -> Option<Vec<u8>> {
+        if let Some(key) = state.view_signing_keys.get(&notice.issuer_instance) {
+            return Some(key.clone());
+        }
+        self.deps
+            .recovery
+            .current_view()
+            .await
+            .ok()
+            .and_then(|view| {
+                view.members
+                    .into_iter()
+                    .find(|member| member.instance == notice.issuer_instance)
+                    .map(|member| member.signing_public_key)
+            })
+    }
+
+    /// 通知目标必须是本机:当前实例为目标实例;本机已无当前实例时目标
+    /// 设备必须匹配本机设备(失败关闭,不猜测)。
+    async fn notice_targets_own_device(&self, notice: &RemovalNotice) -> bool {
+        match self.deps.recovery.own_instance().await {
+            Ok(Some(own)) => own == notice.target_instance,
+            _ => notice.target_device_id == self.deps.own_device,
+        }
+    }
+
+    /// 本机是否已被移出当前空间;惰性清除已失效的旧标记。
+    ///
+    /// 本机重新准入产生新实例后,旧标记指向的意图目标不再是当前实例,
+    /// 此处清除并持久化,避免旧事实阻塞新实例(L07 检查与查询共用)。
+    /// 本机从未保存过该意图(离线期间被移除)时无法核对,保留标记。
+    async fn refresh_self_removed(
+        &self,
+        state: &mut RemovalPersistedState,
+    ) -> Result<bool, RemovalCoordinatorError> {
+        let Some(removed_intent_id) = state.self_removed else {
+            return Ok(false);
+        };
+        let Some(own) = self.deps.recovery.own_instance().await? else {
+            // 本机没有当前实例:与“已被移除”的事实一致。
+            return Ok(true);
+        };
+        let still_target = match state
+            .intents
+            .iter()
+            .find(|intent| intent.intent_id == removed_intent_id)
+        {
+            Some(intent) => intent.content.target == own,
+            // 意图尚未复制到本机:以通知/验收时记录的目标实例核对。
+            None => state.self_removed_target == Some(own),
+        };
+        if still_target {
+            return Ok(true);
+        }
+        state.self_removed = None;
+        state.self_removed_target = None;
+        self.persist(state).await?;
+        Ok(false)
+    }
+
     /// 验收一条意图:验证、去重、持久化,并立即应用本机安全限制。
     /// 返回 `true` 表示新意图。
     async fn accept_intent(
@@ -1108,6 +1348,13 @@ impl RemovalCoordinator {
         {
             state.locally_removed_devices.insert(target);
         }
+        // 意图目标为本机当前实例:本机观察到自身被移除(与移除通知同一标记)。
+        if let Ok(Some(own)) = self.deps.recovery.own_instance().await {
+            if intent.content.target == own {
+                state.self_removed = Some(intent.intent_id);
+                state.self_removed_target = Some(intent.content.target);
+            }
+        }
         state.intents.push(intent.clone());
         state.completed_member_count = None;
         state.admission_generation = state.admission_generation.saturating_add(1);
@@ -1135,8 +1382,12 @@ impl RemovalCoordinator {
         &self,
         now_ms: i64,
     ) -> Result<MemberRemovalSummary, RemovalCoordinatorError> {
-        let state = self.load_any_state().await?;
+        let _guard = self.state_lock.lock().await;
+        let mut state = self.load_any_state().await?;
+        // 惰性清除重新准入后失效的旧标记,保证一次查询返回当前完整事实。
+        let removed = self.refresh_self_removed(&mut state).await?;
         let mut summary = self.summary(&state, now_ms);
+        summary.removed = removed;
         if state.intents.is_empty() {
             summary.effective_member_count = self.deps.member_repo.list().await?.len();
         }
@@ -1176,6 +1427,7 @@ impl RemovalCoordinator {
                 Some(convergence.convergence_digest())
             },
             now_ms.max(state.updated_at_ms),
+            state.self_removed.is_some(),
         )
     }
 
@@ -1255,6 +1507,10 @@ impl RemovalCoordinator {
                     .member_devices
                     .entry(member.instance)
                     .or_insert(member.device_id);
+                state
+                    .view_signing_keys
+                    .entry(member.instance)
+                    .or_insert(member.signing_public_key);
             }
         }
     }
@@ -1362,6 +1618,17 @@ impl RemovalLateSubmissionEndpointPort for RemovalCoordinator {
         submission: RemovalLateSubmission,
     ) -> Result<RemovalLateAcceptance, RemovalLateSubmissionError> {
         self.handle_late_submission(submission, chrono::Utc::now().timestamp_millis())
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl RemovalNoticeEndpointPort for RemovalCoordinator {
+    async fn handle_notice(
+        &self,
+        notice: RemovalNotice,
+    ) -> Result<RemovalNoticeAcceptance, RemovalNoticeError> {
+        self.handle_notice(notice, chrono::Utc::now().timestamp_millis())
             .await
     }
 }

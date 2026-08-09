@@ -18,8 +18,9 @@ use uc_core::membership::{
 };
 
 use super::test_support::{
-    ConfigurableVerifier, FakeRemovalRecovery, FixedSigner, MemoryMemberRepository,
-    MemoryRemovalExchange, MemoryRemovalIntentRepository, MemoryRemovalLateExchange,
+    AcceptingNoticeVerifier, ConfigurableVerifier, FakeRemovalRecovery, FixedSigner,
+    MemoryMemberRepository, MemoryRemovalExchange, MemoryRemovalIntentRepository,
+    MemoryRemovalLateExchange, MemoryRemovalNoticeExchange,
 };
 use super::{RemovalCoordinator, RemovalCoordinatorDeps, RemovalCoordinatorError};
 
@@ -105,6 +106,8 @@ struct Harness {
     coordinator: Arc<RemovalCoordinator>,
     exchange: MemoryRemovalExchange,
     late_exchange: MemoryRemovalLateExchange,
+    notice_exchange: MemoryRemovalNoticeExchange,
+    notice_verifier: AcceptingNoticeVerifier,
     repository: MemoryRemovalIntentRepository,
     recovery: FakeRemovalRecovery,
     verifier: ConfigurableVerifier,
@@ -117,6 +120,7 @@ impl Harness {
         let repository = MemoryRemovalIntentRepository::with_lineage("space-a");
         let exchange = MemoryRemovalExchange::default();
         let late_exchange = MemoryRemovalLateExchange::default();
+        let notice_exchange = MemoryRemovalNoticeExchange::default();
         let verifier = ConfigurableVerifier::default();
         let member_repo = MemoryMemberRepository::default();
         let signer = FixedSigner::default();
@@ -125,14 +129,18 @@ impl Harness {
             .map(|(name, key)| (device(name), instance(name, *key)))
             .collect();
         let recovery = FakeRemovalRecovery::new(own_device.clone(), members_vec);
+        let notice_verifier = AcceptingNoticeVerifier::default();
         let coordinator = Arc::new(RemovalCoordinator::new(RemovalCoordinatorDeps {
             repository: Arc::new(repository.clone()),
             verification: Arc::new(verifier.clone()),
             exchange: Arc::new(exchange.clone()),
             late_submission: Arc::new(late_exchange.clone()),
+            notice: Arc::new(notice_exchange.clone()),
+            notice_verification: Arc::new(notice_verifier.clone()),
             recovery: Arc::new(recovery.clone()),
             member_signatures: Arc::new(signer.clone()),
             member_repo: Arc::new(member_repo.clone()),
+            own_device: own_device.clone(),
         }));
         for (name, _) in &members {
             member_repo.add(device(name));
@@ -141,6 +149,8 @@ impl Harness {
             coordinator,
             exchange,
             late_exchange,
+            notice_exchange,
+            notice_verifier,
             repository,
             recovery,
             verifier,
@@ -155,9 +165,12 @@ impl Harness {
             verification: Arc::new(self.verifier.clone()),
             exchange: Arc::new(self.exchange.clone()),
             late_submission: Arc::new(self.late_exchange.clone()),
+            notice: Arc::new(self.notice_exchange.clone()),
+            notice_verification: Arc::new(self.notice_verifier.clone()),
             recovery: Arc::new(self.recovery.clone()),
             member_signatures: Arc::new(self.signer.clone()),
             member_repo: Arc::new(self.member_repo.clone()),
+            own_device: self.recovery.own_device.clone(),
         }))
     }
 }
@@ -1591,6 +1604,14 @@ async fn completed_executor_retries_a_completion_notification_after_transport_fa
     harness.repository.save_state(&state).await.unwrap();
 
     harness.exchange.fail_next_complete();
+    // 通知通道在同一推进周期内也保持不可达:完成通知与移除通知都失败时,
+    // 不记录任何投递进度,重启后一起重试。
+    harness
+        .notice_exchange
+        .fail_next
+        .lock()
+        .unwrap()
+        .clone_from(&true);
     harness.coordinator.reconcile(1001).await.unwrap();
     let after_failure = harness.repository.load_state().await.unwrap().unwrap();
     assert!(after_failure
@@ -1599,6 +1620,7 @@ async fn completed_executor_retries_a_completion_notification_after_transport_fa
         .unwrap()
         .completion_deliveries
         .is_empty());
+    assert!(after_failure.notified_removals.is_empty());
 
     harness.restart().reconcile(1002).await.unwrap();
     let after_retry = harness.repository.load_state().await.unwrap().unwrap();
@@ -1673,4 +1695,493 @@ async fn retained_member_rejects_out_of_order_recovery_material() {
     let state = harness.repository.load_state().await.unwrap().unwrap();
     assert_eq!(state.applied_digest, Some(digest));
     assert_eq!(harness.recovery.applied.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn removed_device_receives_a_notice_and_marks_itself_removed() {
+    // N01:B 离线期间被 A 移除;A 的后台推进向 B 投递移除通知,B 验收后
+    // QueryMemberRemoval 返回 removed: true,且 A 不重复投递。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+    alice_harness.coordinator.reconcile(1001).await.unwrap();
+
+    let state_before = alice_harness
+        .repository
+        .load_state()
+        .await
+        .unwrap()
+        .unwrap();
+    eprintln!(
+        "N01 intents={} targets={:?} phase={:?}",
+        state_before.intents.len(),
+        state_before
+            .intents
+            .iter()
+            .map(|i| format!("{:?}", i.content.target))
+            .collect::<Vec<_>>(),
+        state_before.phase
+    );
+
+    let sent = alice_harness.notice_exchange.sent.lock().unwrap().clone();
+    eprintln!("N01 sent notices: {:?}", sent.len());
+    eprintln!(
+        "N01 state: notified={:?} locally_removed_devices={:?} member_devices={:?}",
+        alice_harness
+            .repository
+            .load_state()
+            .await
+            .unwrap()
+            .map(|s| s.notified_removals),
+        alice_harness
+            .repository
+            .load_state()
+            .await
+            .unwrap()
+            .map(|s| s.locally_removed_devices),
+        alice_harness
+            .repository
+            .load_state()
+            .await
+            .unwrap()
+            .map(|s| s.member_devices),
+    );
+    assert_eq!(sent.len(), 1);
+    let (recipient, notice) = &sent[0];
+    assert_eq!(recipient, &device("bob"));
+    assert_eq!(notice.target_instance, instance("bob", 2));
+    assert_eq!(notice.issuer_instance, instance("alice", 1));
+
+    // B 上线,收到 A 的通知并验收。
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    let acceptance = bob_harness
+        .coordinator
+        .handle_notice(notice.clone(), 1002)
+        .await
+        .unwrap();
+    assert!(matches!(
+        acceptance,
+        uc_core::membership::RemovalNoticeAcceptance::Accepted { .. }
+    ));
+    let state = bob_harness.repository.load_state().await.unwrap().unwrap();
+    assert_eq!(state.self_removed, Some(notice.intent_id));
+    let summary = bob_harness.coordinator.query(1003).await.unwrap();
+    assert!(summary.removed);
+    assert_eq!(summary.phase, RemovalPhase::Applied);
+
+    // A 的记录进度避免重复投递。
+    alice_harness.coordinator.reconcile(1004).await.unwrap();
+    assert_eq!(alice_harness.notice_exchange.sent.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn another_member_can_forward_the_notice_after_the_initiator_is_gone() {
+    // N02:发起者 A 永久离线后,已验收意图的 C 也能补发通知。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+
+    // C 验收 A 的意图后自行推进并补发通知。
+    let charlie = device("charlie");
+    let charlie_harness = Harness::build(&charlie, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    let intent = alice_harness
+        .repository
+        .load_state()
+        .await
+        .unwrap()
+        .unwrap()
+        .intents
+        .into_iter()
+        .next()
+        .unwrap();
+    charlie_harness
+        .coordinator
+        .ingest_exchange(
+            &alice,
+            uc_core::membership::RemovalExchangeMessage::Intent(Box::new(intent)),
+            1001,
+        )
+        .await
+        .unwrap();
+    charlie_harness.coordinator.reconcile(1002).await.unwrap();
+
+    let sent = charlie_harness.notice_exchange.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    let (recipient, notice) = &sent[0];
+    assert_eq!(recipient, &device("bob"));
+    assert_eq!(notice.issuer_instance, instance("charlie", 3));
+
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    let acceptance = bob_harness
+        .coordinator
+        .handle_notice(notice.clone(), 1003)
+        .await
+        .unwrap();
+    assert!(matches!(
+        acceptance,
+        uc_core::membership::RemovalNoticeAcceptance::Accepted { .. }
+    ));
+    assert!(bob_harness.coordinator.query(1004).await.unwrap().removed);
+}
+
+#[tokio::test]
+async fn online_removal_marks_self_removed_via_the_intent() {
+    // B 在线时验收移除自己的意图,与移除通知写同一标记,查询立即为 removed。
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    let initiator = instance("alice", 1);
+    let target = instance("bob", 2);
+    let content = uc_core::membership::RemovalIntentContent {
+        space_lineage: "space-a".to_owned(),
+        view_epoch: 1,
+        view_members: sorted_view(vec![initiator, target, instance("charlie", 3)]),
+        initiator,
+        target,
+    };
+    let intent = signed_intent(content);
+    bob_harness
+        .coordinator
+        .ingest_exchange(
+            &device("alice"),
+            uc_core::membership::RemovalExchangeMessage::Intent(Box::new(intent.clone())),
+            1000,
+        )
+        .await
+        .unwrap();
+    let state = bob_harness.repository.load_state().await.unwrap().unwrap();
+    assert_eq!(state.self_removed, Some(intent.intent_id));
+    assert!(bob_harness.coordinator.query(1001).await.unwrap().removed);
+}
+
+#[tokio::test]
+async fn removed_device_rejects_creating_a_new_intent_after_the_notice() {
+    // N06/L07:收到移除通知后,本机经正常入口移除他人被立即拒绝。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+    alice_harness.coordinator.reconcile(1001).await.unwrap();
+    let (_, notice) = alice_harness
+        .notice_exchange
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .unwrap();
+
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    bob_harness
+        .coordinator
+        .handle_notice(notice, 1002)
+        .await
+        .unwrap();
+    let error = bob_harness
+        .coordinator
+        .submit_removal(&device("charlie"), 1003)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, RemovalCoordinatorError::OwnInstanceRemoved));
+}
+
+#[tokio::test]
+async fn notice_from_another_space_is_rejected_without_state_change() {
+    // N04:空间指纹不符的通知被拒绝,状态不变。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+    alice_harness.coordinator.reconcile(1001).await.unwrap();
+    let (_, notice) = alice_harness
+        .notice_exchange
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .unwrap();
+
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2)]);
+    bob_harness
+        .coordinator
+        .handle_notice(
+            uc_core::membership::RemovalNotice {
+                space_lineage_fingerprint: [9; 32],
+                ..notice.clone()
+            },
+            1002,
+        )
+        .await
+        .unwrap();
+    let state = bob_harness.repository.load_state().await.unwrap();
+    assert!(state.is_none() || state.unwrap().self_removed.is_none());
+}
+
+#[tokio::test]
+async fn notice_from_an_unknown_issuer_is_rejected() {
+    // N04:签发者不在本机保存的视图资料中 → 拒绝且状态不变。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+    alice_harness.coordinator.reconcile(1001).await.unwrap();
+    let (_, notice) = alice_harness
+        .notice_exchange
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .unwrap();
+
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2)]);
+    let acceptance = bob_harness
+        .coordinator
+        .handle_notice(
+            uc_core::membership::RemovalNotice {
+                issuer_instance: instance("mallory", 5),
+                ..notice
+            },
+            1002,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        acceptance,
+        uc_core::membership::RemovalNoticeAcceptance::Rejected {
+            reason: uc_core::membership::RemovalNoticeRejectionReason::Invalid
+        }
+    ));
+    let state = bob_harness.repository.load_state().await.unwrap();
+    assert!(state.is_none() || state.unwrap().self_removed.is_none());
+}
+
+#[tokio::test]
+async fn notice_with_a_bad_signature_is_rejected() {
+    // N04:签名验证失败 → 拒绝且状态不变。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+    alice_harness.coordinator.reconcile(1001).await.unwrap();
+    let (_, notice) = alice_harness
+        .notice_exchange
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .unwrap();
+
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2)]);
+    *bob_harness.notice_verifier.failure.lock().unwrap() =
+        Some(uc_core::membership::RemovalNoticeVerificationError::BadSignature);
+    let acceptance = bob_harness
+        .coordinator
+        .handle_notice(notice, 1002)
+        .await
+        .unwrap();
+    assert!(matches!(
+        acceptance,
+        uc_core::membership::RemovalNoticeAcceptance::Rejected {
+            reason: uc_core::membership::RemovalNoticeRejectionReason::Invalid
+        }
+    ));
+    let state = bob_harness.repository.load_state().await.unwrap();
+    assert!(state.is_none() || state.unwrap().self_removed.is_none());
+}
+
+#[tokio::test]
+async fn duplicate_notice_is_idempotent() {
+    // N05:重复通知幂等,第二次返回“已知”。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+    alice_harness.coordinator.reconcile(1001).await.unwrap();
+    let (_, notice) = alice_harness
+        .notice_exchange
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .unwrap();
+
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2)]);
+    let first = bob_harness
+        .coordinator
+        .handle_notice(notice.clone(), 1002)
+        .await
+        .unwrap();
+    assert!(matches!(
+        first,
+        uc_core::membership::RemovalNoticeAcceptance::Accepted { .. }
+    ));
+    let second = bob_harness
+        .coordinator
+        .handle_notice(notice, 1003)
+        .await
+        .unwrap();
+    assert!(matches!(
+        second,
+        uc_core::membership::RemovalNoticeAcceptance::AlreadyKnown { .. }
+    ));
+}
+
+#[tokio::test]
+async fn notice_failure_does_not_block_convergence() {
+    // N07:通知不可达不阻塞收敛与完成判定;失败只保留待处理,后续重试。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2), ("charlie", 3)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+    // 目标持续离线:本机推进不受影响,通知进度保持为空。
+    *alice_harness.notice_exchange.offline.lock().unwrap() = true;
+    alice_harness.coordinator.reconcile(1001).await.unwrap();
+    let sent = alice_harness.notice_exchange.sent.lock().unwrap().clone();
+    assert!(sent.is_empty());
+    let state = alice_harness
+        .repository
+        .load_state()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.notified_removals.is_empty());
+    assert_eq!(state.phase, RemovalPhase::Converging);
+
+    // 目标上线:同一后台推进补发并记录进度。
+    *alice_harness.notice_exchange.offline.lock().unwrap() = false;
+    alice_harness.coordinator.reconcile(1002).await.unwrap();
+    assert_eq!(alice_harness.notice_exchange.sent.lock().unwrap().len(), 1);
+    let state = alice_harness
+        .repository
+        .load_state()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state
+        .notified_removals
+        .contains(&state.intents[0].intent_id));
+}
+
+#[tokio::test]
+async fn readmission_clears_a_stale_self_removed_marker() {
+    // N08:重新加入产生新实例后,旧标记被清除,新实例不受影响。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+    alice_harness.coordinator.reconcile(1001).await.unwrap();
+    let (_, notice) = alice_harness
+        .notice_exchange
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .unwrap();
+
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2)]);
+    bob_harness
+        .coordinator
+        .handle_notice(notice, 1002)
+        .await
+        .unwrap();
+    assert!(bob_harness.coordinator.query(1003).await.unwrap().removed);
+
+    // B 重新加入:当前视图产生新成员实例(新签名密钥)。
+    *bob_harness.recovery.members.lock().unwrap() = vec![
+        (device("alice"), instance("alice", 1)),
+        (device("bob"), instance("bob", 9)),
+    ];
+    let summary = bob_harness.coordinator.query(1004).await.unwrap();
+    assert!(!summary.removed);
+    let state = bob_harness.repository.load_state().await.unwrap().unwrap();
+    assert!(state.self_removed.is_none());
+}
+
+#[tokio::test]
+async fn stale_notice_does_not_relock_a_readmitted_instance() {
+    // N08:重新加入后重放的旧通知被拒绝,不会再次锁定新实例。
+    let alice = device("alice");
+    let alice_harness = Harness::build(&alice, vec![("alice", 1), ("bob", 2)]);
+    alice_harness
+        .coordinator
+        .submit_removal(&device("bob"), 1000)
+        .await
+        .unwrap();
+    alice_harness.coordinator.reconcile(1001).await.unwrap();
+    let (_, notice) = alice_harness
+        .notice_exchange
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .unwrap();
+
+    let bob = device("bob");
+    let bob_harness = Harness::build(&bob, vec![("alice", 1), ("bob", 2)]);
+    bob_harness
+        .coordinator
+        .handle_notice(notice.clone(), 1002)
+        .await
+        .unwrap();
+    *bob_harness.recovery.members.lock().unwrap() = vec![
+        (device("alice"), instance("alice", 1)),
+        (device("bob"), instance("bob", 9)),
+    ];
+    bob_harness.coordinator.query(1004).await.unwrap();
+
+    let acceptance = bob_harness
+        .coordinator
+        .handle_notice(notice, 1005)
+        .await
+        .unwrap();
+    assert!(matches!(
+        acceptance,
+        uc_core::membership::RemovalNoticeAcceptance::Rejected {
+            reason: uc_core::membership::RemovalNoticeRejectionReason::Invalid
+        }
+    ));
+    let state = bob_harness.repository.load_state().await.unwrap().unwrap();
+    assert!(state.self_removed.is_none());
 }

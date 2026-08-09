@@ -427,6 +427,21 @@ pub struct RemovalPersistedState {
     pub admission_generation: u64,
     pub phase: RemovalPhase,
     pub updated_at_ms: i64,
+    /// 本机已被移出当前空间的稳定事实:记录移除本机的意图标识,写入即幂等。
+    /// 与 `locally_removed`(本机作为移除方的生效目标集合)语义分离。
+    #[serde(default)]
+    pub self_removed: Option<RemovalIntentId>,
+    /// `self_removed` 意图的目标成员实例。意图尚未复制到本机时,以它核对
+    /// 本机当前实例,避免重新准入产生的新实例被旧标记误伤。
+    #[serde(default)]
+    pub self_removed_target: Option<MemberInstanceId>,
+    /// 已成功通知被移除设备的意图。尽力而为的投递进度,不是完成条件;
+    /// 发送失败只保留待处理,由后台推进重试。
+    #[serde(default)]
+    pub notified_removals: BTreeSet<RemovalIntentId>,
+    /// 本机已观察过的因果视图成员公开签名资料(移除通知的签发者核对)。
+    #[serde(default)]
+    pub view_signing_keys: BTreeMap<MemberInstanceId, Vec<u8>>,
 }
 
 impl RemovalPersistedState {
@@ -450,7 +465,7 @@ impl RemovalPersistedState {
 
     /// 本机实例是否已被本机判定移除(本机已观察到自身被移除)。
     pub fn own_instance_removed(&self, own_instance: &MemberInstanceId) -> bool {
-        self.locally_removed.contains(own_instance)
+        self.self_removed.is_some() || self.locally_removed.contains(own_instance)
     }
 
     /// 目标设备是否已被本机限制发送。
@@ -478,6 +493,8 @@ pub struct MemberRemovalSummary {
     pub effective_member_count: usize,
     pub convergence_digest: Option<[u8; 32]>,
     pub updated_at_ms: i64,
+    /// 本机是否已经观察到自身被移出当前空间。
+    pub removed: bool,
 }
 
 impl MemberRemovalSummary {
@@ -487,6 +504,7 @@ impl MemberRemovalSummary {
         effective_member_count: usize,
         convergence_digest: Option<[u8; 32]>,
         updated_at_ms: i64,
+        removed: bool,
     ) -> Self {
         Self {
             phase,
@@ -494,7 +512,49 @@ impl MemberRemovalSummary {
             effective_member_count,
             convergence_digest,
             updated_at_ms,
+            removed,
         }
+    }
+}
+
+/// 定向移除通知:告知单一被移除设备其成员资格已终止的稳定事实。
+///
+/// 只含空间沿革指纹、移除意图标识、目标成员实例与设备、签发者成员实例和
+/// 签名;不含收敛摘要、成员列表、密钥、内容或因果证明。签发者必须是通知
+/// 接收方已保存因果视图中的成员,签名由该成员在视图中的公开签名资料验证。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovalNotice {
+    /// 空间沿革指纹(空间隔离,不含沿革原文)。
+    pub space_lineage_fingerprint: [u8; 32],
+    /// 移除本机的意图稳定标识(幂等去重与审计锚点)。
+    pub intent_id: RemovalIntentId,
+    /// 意图目标成员实例。
+    pub target_instance: MemberInstanceId,
+    /// 目标设备(接收方核对是否本机)。
+    pub target_device_id: DeviceId,
+    /// 签发者成员实例(接收方以本机保存的视图公开签名资料核对)。
+    pub issuer_instance: MemberInstanceId,
+    /// 签发者对规范编码的签名。
+    pub signature: Vec<u8>,
+}
+
+impl RemovalNotice {
+    /// 从空间沿革原文推导稳定指纹;指纹不包含沿革原文。
+    pub fn space_lineage_fingerprint(lineage: &str) -> [u8; 32] {
+        Sha256::digest(format!("uc-removal-notice-lineage-v1|{lineage}")).into()
+    }
+
+    /// 规范字节编码(签名负载)。除签名外的全部字段都参与编码。
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut buffer = Vec::with_capacity(32 + 32 + 32 + 64 + 32 + 8);
+        buffer.extend_from_slice(b"uniclipboard-removal-notice/v1\0");
+        buffer.extend_from_slice(&self.space_lineage_fingerprint);
+        buffer.extend_from_slice(self.intent_id.as_bytes());
+        buffer.extend_from_slice(self.target_instance.as_bytes());
+        buffer.extend_from_slice(self.target_device_id.as_str().as_bytes());
+        buffer.push(0);
+        buffer.extend_from_slice(self.issuer_instance.as_bytes());
+        buffer
     }
 }
 
@@ -612,6 +672,7 @@ impl RemovalConvergence {
                 Some(self.convergence_digest())
             },
             now_ms,
+            false,
         )
     }
 }

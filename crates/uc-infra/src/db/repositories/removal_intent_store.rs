@@ -458,6 +458,10 @@ mod tests {
             admission_generation: 1,
             phase: RemovalPhase::Converging,
             updated_at_ms: 123,
+            self_removed: None,
+            self_removed_target: None,
+            notified_removals: BTreeSet::new(),
+            view_signing_keys: BTreeMap::new(),
         }
     }
 

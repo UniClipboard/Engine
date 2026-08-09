@@ -1002,6 +1002,8 @@ pub struct MemberRemovalSummary {
     pub effective_member_count: u64,
     pub convergence_digest: Option<String>,
     pub updated_at_ms: i64,
+    /// 本机是否已经观察到自身被移出当前空间。
+    pub removed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -285,6 +285,8 @@ pub struct MemberRemoval {
     pub effective_member_count: u64,
     pub convergence_digest: Option<String>,
     pub updated_at_ms: i64,
+    /// 本机是否已经观察到自身被移出当前空间。
+    pub removed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -1973,6 +1975,7 @@ fn map_member_removal_summary(summary: uc_engine::MemberRemovalSummary) -> Membe
         effective_member_count: summary.effective_member_count,
         convergence_digest: summary.convergence_digest,
         updated_at_ms: summary.updated_at_ms,
+        removed: summary.removed,
     }
 }
 
@@ -2428,6 +2431,7 @@ mod tests {
                 effective_member_count: 1,
                 convergence_digest: Some("digest-1".into()),
                 updated_at_ms: 42,
+                removed: true,
             },
         ));
 
@@ -2440,6 +2444,7 @@ mod tests {
                     effective_member_count: 1,
                     convergence_digest: Some("digest-1".into()),
                     updated_at_ms: 42,
+                    removed: true,
                 },
             }
         );

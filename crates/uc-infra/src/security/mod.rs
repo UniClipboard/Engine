@@ -47,7 +47,9 @@ pub use legacy_upgrade::DefaultLegacyProtection;
 pub use membership_security_update_adapter::DefaultMembershipSecurityUpdateAdapter;
 pub use peer_admission_adapter::MlsPeerAdmissionAdapter;
 pub use removal_recovery_adapter::RemovalRecoveryAdapter;
-pub use removal_verification_adapter::RemovalIntentVerificationAdapter;
+pub use removal_verification_adapter::{
+    RemovalIntentVerificationAdapter, RemovalNoticeVerificationAdapter,
+};
 pub(crate) use secrets::MasterKey;
 pub use session::InMemorySession;
 pub use space_access_adapter::DefaultSpaceAccessAdapter;

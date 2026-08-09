@@ -71,5 +71,5 @@ pub use relay_probe::{
 };
 pub use removal_exchange_adapter::{
     IrohRemovalExchangeAdapter, IrohRemovalExchangeHandler, IrohRemovalLateHandler,
-    REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN,
+    IrohRemovalNoticeHandler, REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN, REMOVAL_NOTICE_ALPN,
 };
