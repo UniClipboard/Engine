@@ -23,7 +23,7 @@ pub struct InitializeSpaceInput {
     pub device_name: Option<String>,
 }
 
-/// Internal command for [`crate::usecases::setup::initialize_space::InitializeSpaceUseCase`].
+/// Internal command for [`crate::space::lifecycle::initialize_space::InitializeSpaceUseCase`].
 #[derive(Debug)]
 pub(crate) struct InitializeSpaceCommand {
     /// User-entered passphrase protecting the new space.
@@ -67,7 +67,7 @@ pub struct UnlockSpaceInput {
     pub passphrase: String,
 }
 
-/// Internal command for [`crate::usecases::setup::unlock_space::UnlockSpaceUseCase`].
+/// Internal command for [`crate::space::lifecycle::unlock_space::UnlockSpaceUseCase`].
 #[derive(Debug)]
 pub(crate) struct UnlockSpaceCommand {
     pub passphrase: Passphrase,
@@ -123,7 +123,7 @@ pub struct RedeemPairingInvitationInput {
     pub passphrase: String,
 }
 
-/// Internal command for [`crate::usecases::pairing::redeem_invitation::RedeemPairingInvitationUseCase`].
+/// Internal command for [`crate::space::admission::redeem_invitation::RedeemPairingInvitationUseCase`].
 ///
 /// Joiner-side UX gathers both fields up front: the user types the
 /// invitation code the sponsor shared and the space passphrase the sponsor
@@ -226,7 +226,7 @@ pub enum UnreadableHistoryPolicy {
     PreserveAndContinue,
 }
 
-/// Internal command for [`crate::usecases::setup::switch_space::SwitchSpaceUseCase`].
+/// Internal command for [`crate::space::lifecycle::switch_space::SwitchSpaceUseCase`].
 #[derive(Debug)]
 pub(crate) struct SwitchSpaceCommand {
     pub code: InvitationCode,

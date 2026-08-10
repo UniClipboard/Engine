@@ -89,12 +89,12 @@ impl MemberRosterFacade {
         self
     }
 
-    pub fn with_workspace_convergence(
+    pub fn with_convergence(
         mut self,
-        convergence: Arc<crate::space::convergence::WorkspaceConvergence>,
+        convergence: Arc<crate::space::convergence::assembly::SpaceConvergenceAssembly>,
     ) -> Self {
-        self.removal_gate = Some(convergence.clone());
-        self.workspace_convergence = Some(convergence);
+        self.removal_gate = Some(convergence.removal_gate());
+        self.workspace_convergence = Some(Arc::clone(&convergence.workspace));
         self
     }
 
@@ -112,16 +112,6 @@ impl MemberRosterFacade {
                 let (sender, _) = broadcast::channel(1);
                 sender.subscribe()
             })
-    }
-
-    pub fn start_workspace_convergence_runtime(
-        &self,
-    ) -> Result<crate::space::convergence::WorkspaceConvergenceRuntime, RosterError> {
-        let convergence = self
-            .workspace_convergence
-            .as_ref()
-            .ok_or(RosterError::MemberRemovalUnavailable)?;
-        Ok(convergence.clone().start(self.presence.subscribe()))
     }
 
     /// 聚合当前所有成员 + 各自 presence 状态 + 本机标记。

@@ -84,7 +84,7 @@ UI / CLI / Daemon API
 * `uc-app` **不可以依赖**具体 infra 实现类型
 * `uc-app` **不可以自己重新定义领域真相**
 * `uc-app` **不可以承担表示层职责**
-* 对外只暴露 `src/facade/` 目录下的 **Facade**（以及经 Facade 转发的 UseCase / Command / Query / Result / Error / 状态枚举）作为应用层入口；业务子模块（`pairing/`、`setup/`、`clipboard_capture/`、`usecases/*` 等）与 Orchestrator / StateMachine / SessionManager 等实现细节一律 `pub(crate)`，外部 crate 不得直接访问 —— 详见 §11.4
+* 对外只暴露 `src/facade/` 目录下的 **Facade**（以及经 Facade 转发的 Command / Query / Result / Error / 状态枚举）作为应用层入口；业务子模块（`space/`、`clipboard/`、`transfer/`、`search/`、`settings/` 等）与 UseCase / Orchestrator / StateMachine / SessionManager 等实现细节一律 `pub(crate)`，外部 crate 不得直接访问 —— 详见 §11.4
 
 ---
 
@@ -324,17 +324,15 @@ uc-app/
   src/
     facade/         # 唯一对外入口；按业务领域提供稳定接口
     clipboard/      # 捕获、历史、恢复、出入站、活动剪贴板
-    space/          # 创建、解锁、会话、准入、切换与迁移
-    membership/     # 名单、成员变化、收敛、移除和恢复
+    space/          # lifecycle、admission、roster、convergence
     transfer/       # 内容与文件传输的完整流程
     search/         # 查询、索引和维护
     settings/       # 设置、升级与配置迁移
-    runtime/        # 持续运行、暂停、恢复和关闭
     deps.rs         # 仅保存组装所需的依赖分组，不含流程
     support/        # 小型、无业务所有权的共用能力
 ```
 
-领域目录内部可以按职责继续细分，例如 `usecase.rs`、`coordinator.rs`、`runtime.rs`、`commands.rs`、`queries.rs`、`errors.rs`。文件名服务于领域，不得让同一领域同时分散在根目录、`usecases/` 和 `facade/` 三处。
+领域目录内部可以按职责继续细分，例如 `usecase.rs`、`coordinator.rs`、`runtime.rs`、`commands.rs`、`queries.rs`、`errors.rs`。文件名服务于领域，不得让同一领域同时分散在根目录、集中或嵌套的 `usecases/` 和 `facade/` 三处。`facade/` 只保存稳定入口与外部需要理解的类型；运行期、协调器、会话、缓存、事件总线、投影构建和内部适配必须留在所属领域或 `support/`。
 
 不推荐按“技术角色”切碎，例如：
 
@@ -582,7 +580,7 @@ Facade 内部可以调用：
 * 多阶段流程细节
 * 大量领域判断
 
-`AppFacade` 只负责聚合业务领域入口，不能成为所有动作的平铺转发清单。它应让调用方通过少量领域入口理解系统，例如空间、剪贴板、成员、传输、搜索和设置；每个领域 facade 再提供该领域完整的命令、查询和订阅。
+`AppFacade` 只负责聚合业务领域入口，不能成为所有动作的平铺转发清单。它应让调用方通过少量领域入口理解系统，例如空间（含成员）、剪贴板、传输、搜索和设置；每个领域 facade 再提供该领域完整的命令、查询和订阅。
 
 ---
 
@@ -611,8 +609,8 @@ Facade 内部可以调用：
 换言之：
 
 * 外部消费者只能 `use uc_application::facade::...`（或等价的顶层 `pub use` 再导出，但再导出的来源必须是 `src/facade/`）
-* 外部消费者 **不得** `use uc_application::pairing::...` / `uc_application::setup::...` / `uc_application::clipboard_capture::...` 等业务子模块的任何类型、函数、构造器
-* 业务子模块（如 `pairing/`、`setup/`、`clipboard_capture/`、`usecases/*`）对外 crate 的默认可见性应为 `pub(crate)`，只对 crate 内部的 facade 层开放
+* 外部消费者 **不得** `use uc_application::space::...` / `uc_application::clipboard::...` / `uc_application::transfer::...` 等业务子模块的任何类型、函数、构造器
+* 业务子模块（如 `space/`、`clipboard/`、`transfer/`、`search/`、`settings/`）对外 crate 的默认可见性应为 `pub(crate)`；它们的实现只能由 crate 内部使用
 * `deps.rs` 是唯一例外：它只允许公开 Engine 组装所需的数据分组；不得公开业务动作、流程状态或内部负责人。Engine 通过它取得依赖后，仍只能调用 facade 的业务入口。
 
 一句话记忆：
@@ -624,25 +622,25 @@ External (daemon / tauri / CLI / bootstrap)
         ↓     只能从这里进入
     src/facade/                     ← 唯一对外入口目录
       ├── app_facade.rs             (AppFacade: 顶层聚合)
-      ├── <domain>/mod.rs           (DomainFacade: 域级入口)
-      └── <domain>/...              (该域下 pub(crate) 的 usecase/orchestrator/state)
+      ├── <domain>.rs               (DomainFacade 与公开合同)
+      └── 事件、状态、命令、查询、结果和错误
         ↓
-    业务子模块 (pairing/ setup/ clipboard_capture/ usecases/...)
+    业务子模块 (clipboard/ space/ transfer/ search/ settings/...)
         ↓     pub(crate)，对外 crate 不可见
-    Orchestrator / StateMachine / SessionManager / Handler
+    用例 / 协调器 / 运行期 / 会话 / 私有适配
         ↓
     Ports (uc-core)
 ```
 
 ### 11.4.2 Facade 目录的组织规则
 
-* 所有 Facade 类型必须定义在 `src/facade/` 目录下
-* 顶层 `AppFacade` 聚合各域 Facade；每个域 Facade（`SpaceFacade`、`ClipboardSyncFacade`、`PairingFacade` 等）暴露该域的应用动作
+* 所有 Facade 类型和其公开合同必须定义在 `src/facade/` 目录下；Facade 所调用的流程实现不在该目录
+* 顶层 `AppFacade` 聚合各域 Facade；每个域 Facade（`SpaceFacade`、`ClipboardFacade`、`TransferFacade` 等）暴露该域的应用动作
 * `src/facade/mod.rs` 的 `pub use` 是 crate 对外的**白名单**。只允许导出：
   * Facade 类型本身（`AppFacade`、`<Domain>Facade`）
   * Facade 方法的输入输出类型：Command / Query / Result / Error / 显式状态枚举
-  * Facade 构造所需的 Deps 结构（供 bootstrap 组装）
   * 外部需订阅的事件类型 / event port trait
+* Facade 的组装数据只放在 `deps.rs`；`facade/` 不保存 `*Deps` 构造组、事件总线、缓存或具体适配
 * **禁止**在 `src/facade/mod.rs` 里 `pub use` 任何 `*Orchestrator` / `*SessionManager` / `*StateMachine` / `*Handler` / 业务子模块内部类型
 * UseCase 类型若需要被外部以"无状态动作"形式直接调用，也必须通过 Facade 目录下某个 Facade 的方法转发；不鼓励把裸 UseCase 当作对外 API 暴露
 
@@ -661,10 +659,10 @@ External (daemon / tauri / CLI / bootstrap)
 
 ### 11.4.5 反模式
 
-* 外部代码里出现 `use uc_application::pairing::PairingOrchestrator;` / `use uc_application::setup::SetupStateMachine;` 等绕过 `facade/` 的 import
-* 在 `lib.rs` 写 `pub mod pairing;` / `pub mod setup;` 让业务子模块直接对外
+* 外部代码里出现 `use uc_application::space::...` / `use uc_application::clipboard::...` 等绕过 `facade/` 的 import
+* 在 `lib.rs` 写 `pub mod space;` / `pub mod clipboard;` 让业务子模块直接对外
 * 在业务子模块的 `mod.rs` 写 `pub use orchestrator::*Orchestrator` 把内部类型顶出去
-* 在 bootstrap context 里暴露 `pairing_orchestrator: Arc<PairingOrchestrator>`（应为 `pairing_facade: Arc<PairingFacade>`，且 `PairingFacade` 定义在 `src/facade/` 下）
+* 在 bootstrap context 里暴露 `space_coordinator: Arc<SpaceCoordinator>`（应为 `space_facade: Arc<SpaceFacade>`，且 `SpaceFacade` 定义在 `src/facade/` 下）
 * 外部 crate 同时拿到 `Arc<Facade>` 和 `Arc<Orchestrator>` —— 封装等于装饰
 * 为了测试方便把 Orchestrator 改成 `pub` —— 正确做法是 crate 内对 Orchestrator 写单元测试，crate 外只通过 Facade 写集成测试
 

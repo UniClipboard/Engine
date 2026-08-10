@@ -31,7 +31,7 @@
 //! collected up front (Slice 1 UX).
 //!
 //! [`JoinerHandshakeCoordinator`]:
-//!     crate::space::convergence::admission::joiner::joiner_handshake::JoinerHandshakeCoordinator
+//!     crate::space::admission::joiner::joiner_handshake::JoinerHandshakeCoordinator
 
 use std::sync::Arc;
 
@@ -45,8 +45,8 @@ use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::facade::space_setup::commands::RedeemPairingInvitationCommand;
 use crate::facade::space_setup::{RedeemPairingInvitationError, RedeemPairingInvitationResult};
-use crate::space::convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
-use crate::space::convergence::admission::joiner::joiner_handshake::{
+use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::space::admission::joiner::joiner_handshake::{
     JoinerHandshakeCoordinator, JoinerHandshakeOutcome,
 };
 
@@ -246,7 +246,7 @@ fn map_redeem_error_to_pairing_failure_reason(
 #[cfg(test)]
 mod tests {
     //! Composition tests only: wire + crypto covered in
-    //! [`crate::space::convergence::admission::joiner::joiner_handshake::tests`].
+    //! [`crate::space::admission::joiner::joiner_handshake::tests`].
     //! Here we verify the joiner side of the admission seam (ADR-017):
     //! the workspace owner saves the local readiness facts before the
     //! readiness reply leaves the device, and the admission-saved

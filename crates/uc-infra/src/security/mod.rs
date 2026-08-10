@@ -1,3 +1,4 @@
+mod admission_proof;
 mod blob_cipher_adapter;
 pub mod crypto_model;
 mod decrypting_clipboard_event_repo;
@@ -26,6 +27,7 @@ pub(crate) mod v1_aead;
 
 use std::sync::Arc;
 
+pub use admission_proof::HmacProofAdapter;
 pub use blob_cipher_adapter::BlobCipherAdapter;
 pub use crypto_model::{
     EncryptedBlob, KdfParams, KdfParamsV1, KeyScope, KeySlot, KeySlotConvertError, KeySlotFile,

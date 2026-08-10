@@ -550,6 +550,31 @@ fn membership_transport() -> Arc<FixedMembershipTransport> {
     ))))
 }
 
+/// Minimal `MembershipConvergenceDeps` for tests that only need an inert
+/// gossip owner (e.g. facade assembly). Every port is an in-memory or
+/// fixed-value double; nothing dials or persists.
+pub(crate) fn test_deps() -> MembershipConvergenceDeps {
+    MembershipConvergenceDeps {
+        candidate_repo: Arc::new(InMemoryCandidateRepository::default()),
+        announcement_repo: Arc::new(InMemoryAnnouncementRepository::default()),
+        outbox_repo: Arc::new(InMemoryMembershipOutbox::default()),
+        security_updates: membership_security(4),
+        applied_security_updates: Arc::new(InMemoryAppliedSecurityUpdateRepository::default()),
+        transport: membership_transport(),
+        clock: Arc::new(FixedClock(0)),
+        device_identity: Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
+        announcement_material: Arc::new(FixedAnnouncementMaterial),
+        member_signatures: Arc::new(AcceptingMemberSignatures),
+        fingerprint_factory: Arc::new(FixedFingerprintFactory),
+        attestation: Arc::new(FixedAttestation(Ok(verified_peer()))),
+        verified_peer_promotion: Arc::new(NoopVerifiedPeerPromotion),
+        member_repo: Arc::new(InMemoryMemberRepository::default()),
+        trusted_peer_repo: Arc::new(InMemoryTrustedPeerRepository::default()),
+        peer_address_repo: Arc::new(InMemoryPeerAddressRepository::default()),
+        hash: Arc::new(FixedHasher),
+    }
+}
+
 #[async_trait]
 impl MembershipSecurityUpdatePort for InMemoryMembershipSecurity {
     async fn current_state(

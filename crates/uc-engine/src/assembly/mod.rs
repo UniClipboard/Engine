@@ -4,7 +4,6 @@ pub(crate) mod deps;
 pub(crate) mod facade;
 pub(crate) mod file_transfer;
 pub(crate) mod host;
-pub(crate) mod legacy_upgrade;
 pub(crate) mod lifecycle;
 #[cfg(feature = "lan-compat")]
 pub(crate) mod mobile_lan;

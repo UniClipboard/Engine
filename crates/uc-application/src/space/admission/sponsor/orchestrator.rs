@@ -47,10 +47,11 @@ use uc_observability_contract::analytics::{
     AnalyticsFacade, Event, PairingFailureReason, PairingMethod,
 };
 
-use crate::space::convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
-use crate::space::convergence::admission::invitation::holder::{
+use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::space::admission::invitation::holder::{
     InMemoryPairingInvitationHolder, TakeMatchingError,
 };
+use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
 
 use super::sponsor_handshake::{JoinerFacts, SponsorHandshakeCoordinator, Verdict};
 
@@ -636,8 +637,8 @@ mod tests {
         AnalyticsFacade, AnalyticsPort, DefaultAnalyticsFacade, NoopAnalyticsIdentity,
     };
 
-    use crate::space::convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
-    use crate::space::convergence::admission::invitation::holder::InMemoryPairingInvitationHolder;
+    use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
+    use crate::space::admission::invitation::holder::InMemoryPairingInvitationHolder;
     use crate::space::convergence::WorkspaceConvergenceError;
 
     // ── fakes ────────────────────────────────────────────────────────────
@@ -844,6 +845,18 @@ mod tests {
     }
 
     mockall::mock! {
+        GroupUpdateDelivery {}
+
+        #[async_trait]
+        impl GroupUpdateDeliveryPort for GroupUpdateDelivery {
+            async fn deliver_pending(
+                &self,
+                now_ms: i64,
+            ) -> Result<usize, uc_core::membership::KeyEpochError>;
+        }
+    }
+
+    mockall::mock! {
         SpaceAccess {}
 
         #[async_trait]
@@ -880,6 +893,12 @@ mod tests {
                 group_epoch: u64,
             ) -> Result<(), SpaceAccessError>;
         }
+    }
+
+    fn noop_delivery() -> Arc<MockGroupUpdateDelivery> {
+        let mut delivery = MockGroupUpdateDelivery::new();
+        delivery.expect_deliver_pending().returning(|_| Ok(0));
+        Arc::new(delivery)
     }
 
     fn sponsor_space_access() -> Arc<MockSpaceAccess> {
@@ -1089,7 +1108,7 @@ mod tests {
                 self.session_port.clone() as Arc<dyn PairingSessionPort>,
                 space_access.clone(),
                 space_access,
-                None,
+                noop_delivery(),
                 Arc::new(NoopMemberRepo),
                 Arc::new(ScriptedProof(StdMutex::new(self.proof_verdicts))),
                 Arc::new(FixedLocal(sponsor_fp())),

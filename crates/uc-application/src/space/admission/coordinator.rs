@@ -1,14 +1,12 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use super::space_setup::{
+use crate::facade::settings::{GeneralSettingsPatch, SettingsFacade, SettingsPatch};
+use crate::facade::space_setup::{
     CancelInvitationError, IssuePairingInvitationError, IssuePairingInvitationResult,
-    PairingInvitationAddressCandidate, SwitchSpaceError, SwitchSpaceInput, SwitchSpaceResult,
-    UnreadableHistoryPolicy,
-};
-use super::{
-    GeneralSettingsPatch, RedeemPairingInvitationError, RedeemPairingInvitationInput,
-    RedeemPairingInvitationResult, SettingsFacade, SettingsPatch, SpaceFacade,
+    PairingInvitationAddressCandidate, RedeemPairingInvitationError, RedeemPairingInvitationInput,
+    RedeemPairingInvitationResult, SpaceFacade, SwitchSpaceError, SwitchSpaceInput,
+    SwitchSpaceResult, UnreadableHistoryPolicy,
 };
 
 pub struct JoinSpaceInput {

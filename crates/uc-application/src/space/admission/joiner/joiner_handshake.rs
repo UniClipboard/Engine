@@ -521,7 +521,7 @@ fn variant_name(message: &PairingSessionMessage) -> &'static str {
 mod tests {
     //! Wire + crypto tests live here. Composition (admit → trust →
     //! setup-status ordering) belongs to
-    //! [`crate::usecases::pairing::redeem_invitation::tests`].
+    //! [`crate::space::admission::redeem_invitation::tests`].
     use super::*;
 
     use std::collections::VecDeque;

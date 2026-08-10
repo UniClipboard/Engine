@@ -28,7 +28,6 @@ use uc_application::facade::space_setup::{
     InitializeSpaceInput, RedeemPairingInvitationInput, SpaceAdmissionDeps, SpaceFacade,
     SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
 };
-use uc_application::proof::HmacProofAdapter;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     MemberRepositoryPort, MembershipError, PeerAdmissionPort, RemovalAdmissionDecision,
@@ -47,6 +46,7 @@ use uc_infra::db::executor::DieselSqliteExecutor;
 use uc_infra::db::pool::init_db_pool;
 use uc_infra::db::repositories::DieselSpaceSecurityStore;
 use uc_infra::network::iroh::IrohNodeConfig;
+use uc_infra::security::HmacProofAdapter;
 
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::{IrohIdentityStore, IrohNode, IrohNodeBuilder, PairingHandlers};
@@ -444,7 +444,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
             presence,
             analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
             removal_gate: Arc::new(AllowRemovalAdmission),
-            workspace_convergence: common::test_workspace_convergence(
+            convergence: common::test_workspace_convergence(
                 Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
                 Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,
                 Arc::clone(&peer_addr_repo) as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
