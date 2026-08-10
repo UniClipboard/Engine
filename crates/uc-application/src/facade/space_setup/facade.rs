@@ -44,6 +44,11 @@ use crate::facade::space_setup::errors::{
     InitializeSpaceError, IssuePairingInvitationError, TryResumeSessionError, UnlockSpaceError,
 };
 use crate::group_update_delivery::{GroupUpdateDelivery, GroupUpdateDeliveryPort};
+use crate::space::convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::space::convergence::admission::invitation::InMemoryPairingInvitationHolder;
+use crate::space::convergence::admission::joiner::joiner_handshake::JoinerHandshakeCoordinator;
+use crate::space::convergence::admission::sponsor::orchestrator::PairingInboundOrchestrator;
+use crate::space::convergence::admission::sponsor::sponsor_handshake::SponsorHandshakeCoordinator;
 use crate::usecases::pairing::issue_invitation::IssuePairingInvitationUseCase;
 use crate::usecases::pairing::redeem_invitation::RedeemPairingInvitationUseCase;
 use crate::usecases::presence::ensure_reachable_all::{
@@ -52,11 +57,6 @@ use crate::usecases::presence::ensure_reachable_all::{
 use crate::usecases::setup::initialize_space::InitializeSpaceUseCase;
 use crate::usecases::setup::switch_space::{JoinerHandshakeRunner, SwitchSpaceUseCase};
 use crate::usecases::setup::unlock_space::UnlockSpaceUseCase;
-use crate::workspace_convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
-use crate::workspace_convergence::admission::invitation::InMemoryPairingInvitationHolder;
-use crate::workspace_convergence::admission::joiner::joiner_handshake::JoinerHandshakeCoordinator;
-use crate::workspace_convergence::admission::sponsor::orchestrator::PairingInboundOrchestrator;
-use crate::workspace_convergence::admission::sponsor::sponsor_handshake::SponsorHandshakeCoordinator;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort,
@@ -880,8 +880,8 @@ mod tests {
 
     use crate::deps::SpaceAccessPorts;
     use crate::facade::space_setup::UnreadableHistoryPolicy;
-    use crate::workspace_convergence::tests::MemoryWorkspaceRepository;
-    use crate::workspace_convergence::WorkspaceConvergence;
+    use crate::space::convergence::tests::MemoryWorkspaceRepository;
+    use crate::space::convergence::WorkspaceConvergence;
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
     use uc_core::setup::SetupStatus;
@@ -1768,7 +1768,7 @@ mod tests {
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
                 removal_gate: Arc::new(AllowRemovalAdmission),
                 workspace_convergence: WorkspaceConvergence::new(
-                    crate::workspace_convergence::tests::test_deps(
+                    crate::space::convergence::tests::test_deps(
                         Arc::new(MemoryWorkspaceRepository::default()),
                         "device-1",
                         Vec::new(),

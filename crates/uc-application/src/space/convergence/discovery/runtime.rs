@@ -210,7 +210,9 @@ impl MembershipConvergenceActivity {
 }
 
 #[async_trait]
-impl crate::membership::MembershipConvergenceActivityPort for MembershipConvergenceActivity {
+impl crate::space::convergence::discovery::MembershipConvergenceActivityPort
+    for MembershipConvergenceActivity
+{
     async fn pause(&self) -> Result<(), String> {
         self.pause().await.map_err(|error| error.to_string())
     }

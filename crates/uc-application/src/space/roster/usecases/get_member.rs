@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use uc_core::{DeviceId, MemberRepositoryPort, SpaceMember};
 
-use crate::membership::errors::MembershipApplicationError;
+use crate::space::roster::errors::MembershipApplicationError;
 
 /// Input for looking up a single member by device id.
 #[derive(Debug, Clone)]

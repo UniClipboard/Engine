@@ -47,8 +47,8 @@ use uc_observability_contract::analytics::{
     AnalyticsFacade, Event, PairingFailureReason, PairingMethod,
 };
 
-use crate::workspace_convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
-use crate::workspace_convergence::admission::invitation::holder::{
+use crate::space::convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::space::convergence::admission::invitation::holder::{
     InMemoryPairingInvitationHolder, TakeMatchingError,
 };
 
@@ -598,7 +598,7 @@ mod tests {
     //!
     //! The handshake wire adapter is covered in `sponsor_handshake::tests`;
     //! the owner's own save boundaries in
-    //! `crate::workspace_convergence::tests`. Here we scope to the
+    //! `crate::space::convergence::tests`. Here we scope to the
     //! composition glue: which branches call the owner in which order,
     //! and that no member state is saved by the channel itself.
     use super::*;
@@ -636,9 +636,9 @@ mod tests {
         AnalyticsFacade, AnalyticsPort, DefaultAnalyticsFacade, NoopAnalyticsIdentity,
     };
 
-    use crate::workspace_convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
-    use crate::workspace_convergence::admission::invitation::holder::InMemoryPairingInvitationHolder;
-    use crate::workspace_convergence::WorkspaceConvergenceError;
+    use crate::space::convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
+    use crate::space::convergence::admission::invitation::holder::InMemoryPairingInvitationHolder;
+    use crate::space::convergence::WorkspaceConvergenceError;
 
     // ── fakes ────────────────────────────────────────────────────────────
 

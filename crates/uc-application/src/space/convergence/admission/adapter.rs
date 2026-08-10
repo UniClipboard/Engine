@@ -24,7 +24,7 @@ use uc_core::membership::{
 };
 use uc_core::ports::pairing::PairingSessionId;
 
-use crate::workspace_convergence::{WorkspaceConvergence, WorkspaceConvergenceError};
+use crate::space::convergence::{WorkspaceConvergence, WorkspaceConvergenceError};
 
 /// The workspace-owner side of the admission seam. Implemented by
 /// [`WorkspaceConvergence`]; consumed only by the pairing channel inside

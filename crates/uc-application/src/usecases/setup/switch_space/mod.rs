@@ -90,8 +90,8 @@ use crate::facade::space_setup::commands::SwitchSpaceCommand;
 use crate::facade::space_setup::{
     RedeemPairingInvitationError, SwitchSpaceError, SwitchSpaceResult, UnreadableHistoryPolicy,
 };
-use crate::workspace_convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
-use crate::workspace_convergence::admission::joiner::joiner_handshake::{
+use crate::space::convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::space::convergence::admission::joiner::joiner_handshake::{
     JoinerHandshakeCoordinator, JoinerHandshakeOutcome, PendingJoinerHandshake,
 };
 

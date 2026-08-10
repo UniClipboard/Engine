@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use uc_core::{MemberRepositoryPort, SpaceMember};
 
-use crate::membership::errors::MembershipApplicationError;
+use crate::space::roster::errors::MembershipApplicationError;
 
 /// 列出本机空间内所有已接纳的成员。
 ///

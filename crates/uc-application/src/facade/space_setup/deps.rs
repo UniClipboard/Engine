@@ -21,7 +21,7 @@ use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard_write::MobileConsumableBackfill;
 use crate::deps::SpaceAccessPorts;
-use crate::workspace_convergence::WorkspaceConvergence;
+use crate::space::convergence::WorkspaceConvergence;
 
 pub struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,

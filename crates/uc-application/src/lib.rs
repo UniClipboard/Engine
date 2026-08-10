@@ -41,9 +41,9 @@ pub use usecases::clipboard_sync::{
 // etc. The implementations stay in `usecases::clipboard_sync` but the
 // crate boundary only exposes them via the facade.
 pub mod file_transfer;
-pub mod membership;
 pub mod proof;
 pub mod receive_reconciliation;
+pub mod space;
 pub mod trusted_peer;
 /// `pub` (not `pub(crate)`) only because Slice 2 Phase 3 · T10 needs a
 /// publicly-reachable path to `usecases::clipboard_sync::payload_codec
@@ -52,4 +52,3 @@ pub mod trusted_peer;
 /// cap, so only explicitly `pub` items inside leak out; the public
 /// surface stays minimal.
 pub mod usecases;
-pub mod workspace_convergence;

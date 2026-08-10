@@ -21,7 +21,7 @@ use uc_core::membership::{
 };
 use uc_core::ports::{ClockPort, DeviceIdentityPort};
 
-use crate::workspace_convergence::{
+use crate::space::convergence::{
     WorkspaceConvergence, WorkspaceConvergenceDeps, WorkspaceConvergenceError,
 };
 
