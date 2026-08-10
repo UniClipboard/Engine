@@ -27,7 +27,9 @@ use crate::pairing::{InvitationCode, PairingSessionMessage};
 /// Adapters pick the concrete format (iroh EndpointId + stream id, UUID,
 /// …); the core only uses it for correlation between dial/send/recv/close
 /// and between sponsor-side events and subsequent operations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct PairingSessionId(String);
 
 impl PairingSessionId {

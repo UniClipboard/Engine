@@ -10,7 +10,7 @@ mod in_flight;
 
 use crate::runtime::ProductionRuntime;
 #[cfg(feature = "dev-tools")]
-use crate::{DevOperation, DevOperationResult, DevPairingOutcomeStream};
+use crate::{DevOperation, DevOperationResult};
 use crate::{
     EngineConfig, EngineError, EngineErrorCategory, EngineEvent, EngineState, HostCapabilities,
     LifecycleAction, Operation, OperationResult, OperationTerminal,
@@ -38,15 +38,6 @@ pub(crate) trait EngineRuntime: Send + Sync {
     ) -> Result<DevOperationResult, EngineError> {
         Err(EngineError::new(
             1901,
-            EngineErrorCategory::Unavailable,
-            false,
-        ))
-    }
-
-    #[cfg(feature = "dev-tools")]
-    async fn dev_pairing_outcomes(&self) -> Result<DevPairingOutcomeStream, EngineError> {
-        Err(EngineError::new(
-            1902,
             EngineErrorCategory::Unavailable,
             false,
         ))
@@ -160,14 +151,6 @@ impl Engine {
             });
         }
         result
-    }
-
-    #[cfg(feature = "dev-tools")]
-    pub async fn dev_pairing_outcomes(&self) -> Result<DevPairingOutcomeStream, EngineError> {
-        if !self.state.lock().await.accepts_operations() {
-            return Err(invalid_state_error());
-        }
-        self.runtime.dev_pairing_outcomes().await
     }
 
     pub async fn quiesce(&self, deadline: Duration) -> Result<(), EngineError> {

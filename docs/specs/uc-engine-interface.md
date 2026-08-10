@@ -33,8 +33,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `StateChanged` | 生命周期状态已经改变 |
 | `IncomingEntry` | 收到一条具有完整摘要的新内容 |
 | `TransferProgress` | 文件传输进度发生变化 |
-| `PairingCompleted` | 本机作为邀请方时，一次已匹配的配对流程成功或失败 |
-| `WorkspaceConvergenceChanged` | 工作空间收敛状态发生变化，携带完整当前状态 |
+| `WorkspaceConvergenceChanged` | 工作空间收敛状态发生变化，携带完整当前状态；加入与移除结果只经此表达（ADR-017，配对会话终态不再作为对外结果） |
 | `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |

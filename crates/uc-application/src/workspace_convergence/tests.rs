@@ -102,7 +102,7 @@ impl uc_core::membership::RemovalNoticeVerificationPort for RejectingNoticeVerif
 }
 
 #[derive(Clone, Default)]
-struct MemoryWorkspaceRepository {
+pub(crate) struct MemoryWorkspaceRepository {
     state: Arc<Mutex<Option<WorkspaceConvergenceState>>>,
     failure: Arc<Mutex<Option<WorkspaceConvergenceRepositoryError>>>,
 }
@@ -323,8 +323,21 @@ fn instance(byte: u8) -> MemberInstanceId {
 
 fn harness(own_device: &str, members: Vec<(DeviceId, MemberInstanceId)>) -> Harness {
     let repository = MemoryWorkspaceRepository::default();
-    let owner = WorkspaceConvergence::new(WorkspaceConvergenceDeps {
-        repository: Arc::new(repository.clone()),
+    let owner =
+        WorkspaceConvergence::new(test_deps(Arc::new(repository.clone()), own_device, members));
+    Harness { owner, repository }
+}
+
+/// Build the full dependency set with no-op defaults for every port except
+/// the repository and the recovery view. Shared with other test modules in
+/// this crate (`pub(crate)` under `cfg(test)`).
+pub(crate) fn test_deps(
+    repository: Arc<dyn WorkspaceConvergenceRepositoryPort>,
+    own_device: &str,
+    members: Vec<(DeviceId, MemberInstanceId)>,
+) -> WorkspaceConvergenceDeps {
+    WorkspaceConvergenceDeps {
+        repository,
         verification: Arc::new(AcceptingVerifier),
         recovery: Arc::new(FakeRecovery::new(DeviceId::new(own_device), members)),
         member_signatures: Arc::new(FixedSigner),
@@ -340,9 +353,65 @@ fn harness(own_device: &str, members: Vec<(DeviceId, MemberInstanceId)>) -> Harn
         late_submission: Arc::new(UnusedLate),
         notice: Arc::new(UnusedNotice),
         notice_verification: Arc::new(RejectingNoticeVerification),
+        trusted_peer_repo: Arc::new(TestTrustedPeerRepo),
+        peer_addr_repo: Arc::new(TestPeerAddrRepo),
         own_device: DeviceId::new(own_device),
-    });
-    Harness { owner, repository }
+    }
+}
+
+struct TestTrustedPeerRepo;
+#[async_trait]
+impl uc_core::trusted_peer::TrustedPeerRepositoryPort for TestTrustedPeerRepo {
+    async fn get(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<Option<uc_core::trusted_peer::TrustedPeer>, uc_core::trusted_peer::TrustedPeerError>
+    {
+        Ok(None)
+    }
+    async fn list(
+        &self,
+    ) -> Result<Vec<uc_core::trusted_peer::TrustedPeer>, uc_core::trusted_peer::TrustedPeerError>
+    {
+        Ok(Vec::new())
+    }
+    async fn save(
+        &self,
+        _peer: &uc_core::trusted_peer::TrustedPeer,
+    ) -> Result<(), uc_core::trusted_peer::TrustedPeerError> {
+        Ok(())
+    }
+    async fn remove(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<bool, uc_core::trusted_peer::TrustedPeerError> {
+        Ok(true)
+    }
+}
+
+struct TestPeerAddrRepo;
+#[async_trait]
+impl uc_core::ports::PeerAddressRepositoryPort for TestPeerAddrRepo {
+    async fn get(
+        &self,
+        _device: &DeviceId,
+    ) -> Result<Option<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+        Ok(None)
+    }
+    async fn upsert(
+        &self,
+        _record: &uc_core::ports::PeerAddressRecord,
+    ) -> Result<(), uc_core::ports::PeerAddressError> {
+        Ok(())
+    }
+    async fn list(
+        &self,
+    ) -> Result<Vec<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+        Ok(Vec::new())
+    }
+    async fn remove(&self, _device: &DeviceId) -> Result<(), uc_core::ports::PeerAddressError> {
+        Ok(())
+    }
 }
 
 fn uc_application_test_member_repo() -> impl MemberRepositoryPort {
@@ -852,6 +921,8 @@ async fn reconcile_propagates_intents_and_removal_notices() {
         late_submission: Arc::new(UnusedLate),
         notice: Arc::new(UnusedNotice),
         notice_verification: Arc::new(RejectingNoticeVerification),
+        trusted_peer_repo: Arc::new(TestTrustedPeerRepo),
+        peer_addr_repo: Arc::new(TestPeerAddrRepo),
         own_device: DeviceId::new("device-a"),
     });
     seeded_two_member_state(&repository, a, b, a).await;

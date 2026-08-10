@@ -1378,7 +1378,6 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
             summary.refresh_requests += 1;
         }
         EngineEvent::PeerPresenceChanged(_) => summary.refresh_requests += 1,
-        EngineEvent::PairingCompleted(_) => {}
         EngineEvent::WorkspaceConvergenceChanged(snapshot) => {
             summary.member_removal_changes += 1;
             summary.last_workspace_phase = Some(

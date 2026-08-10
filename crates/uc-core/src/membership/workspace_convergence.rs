@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::ids::DeviceId;
+use crate::ports::pairing::PairingSessionId;
 use crate::security::IdentityFingerprint;
 
 use super::gossip::RelayedSecurityUpdate;
@@ -214,12 +215,53 @@ pub struct PendingHandoff {
     pub has_more: bool,
 }
 
+/// The sponsor's in-flight admission record for one join attempt. Saved
+/// before the sponsor starts waiting for the joiner's readiness, and
+/// cleared in the same commit that saves the admission change. It survives
+/// restarts so the sponsor re-awaits the same joiner's readiness instead of
+/// saving a second member instance or a duplicated change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAdmissionRecord {
+    pub joiner_device_id: DeviceId,
+    /// The admission generation the invitation was bound to. The change is
+    /// only committed while the generation has not advanced.
+    pub invitation_generation: u64,
+    pub created_at_ms: i64,
+}
+
+/// The sponsor's confirmation that the joiner's admission change and the
+/// pending handoff facts were saved in one commit. The joiner records it as
+/// its local admission progress before it may take part in ordinary content
+/// exchange.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionCommittedFacts {
+    pub change_digest: [u8; 32],
+    pub change_count: u64,
+    pub sponsor_facts: AdmissionChangeFacts,
+}
+
 /// Event that advances the workspace convergence state machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkspaceConvergenceEvent {
     /// The local device saved a new workspace change (an admission after
     /// the joiner's readiness, a removal, or a verified relayed change).
     CommittedChange(WorkspaceChange),
+    /// The sponsor saved the in-flight admission record before waiting for
+    /// the joiner's readiness. Idempotent for the same session and joiner.
+    AdmissionBegan {
+        session: PairingSessionId,
+        joiner_device_id: DeviceId,
+        invitation_generation: u64,
+    },
+    /// The sponsor cleared an in-flight admission record in the same commit
+    /// that saved the joiner's admission change. Idempotent for a missing
+    /// session.
+    AdmissionCleared { session: PairingSessionId },
+    /// The joiner durably recorded the sponsor's confirmation that its
+    /// admission change was saved; it may now take part in ordinary content
+    /// exchange and count itself into completion confirmations. Idempotent
+    /// for the same digest.
+    LocalAdmissionCommitted(AdmissionCommittedFacts),
     /// An effective member confirmed the current digest.
     ConfirmationReceived(WorkspaceConfirmation),
     /// A recipient durably confirmed a continuous range of the current
@@ -355,6 +397,13 @@ pub struct WorkspaceConvergenceState {
     /// changes. Removed instances stay in the mapping so the content-send
     /// gate and the removal-notice planner can resolve historical targets.
     pub member_devices: BTreeMap<MemberInstanceId, DeviceId>,
+    /// In-flight sponsor admission records by pairing session. Saved before
+    /// the sponsor waits for the joiner's readiness; cleared in the commit
+    /// that saves the admission change. Survives restarts.
+    pub pending_admissions: BTreeMap<PairingSessionId, PendingAdmissionRecord>,
+    /// The sponsor's admission-saved confirmation recorded by the local
+    /// joiner. `None` until the joiner receives the confirmation.
+    pub local_admission_committed: Option<AdmissionCommittedFacts>,
     pub phase: WorkspacePhase,
     pub failure_category: Option<WorkspaceFailureCategory>,
     /// Monotonic revision bumped on every successful persist.
@@ -379,6 +428,8 @@ impl Default for WorkspaceConvergenceState {
             notified_removals: BTreeSet::new(),
             accepted_removal_notices: BTreeSet::new(),
             member_devices: BTreeMap::new(),
+            pending_admissions: BTreeMap::new(),
+            local_admission_committed: None,
             phase: WorkspacePhase::LocallyApplied,
             failure_category: None,
             revision: 0,
@@ -819,6 +870,70 @@ impl WorkspaceConvergenceState {
                     effect,
                 ))
             }
+            WorkspaceConvergenceEvent::AdmissionBegan {
+                session,
+                joiner_device_id,
+                invitation_generation,
+            } => {
+                let changed = self
+                    .pending_admissions
+                    .insert(
+                        session.clone(),
+                        PendingAdmissionRecord {
+                            joiner_device_id,
+                            invitation_generation,
+                            created_at_ms: now_ms,
+                        },
+                    )
+                    .is_none();
+                Ok((
+                    if changed {
+                        WorkspaceMergeOutcome::Updated
+                    } else {
+                        WorkspaceMergeOutcome::Unchanged
+                    },
+                    if changed {
+                        WorkspaceEffect::PERSIST
+                    } else {
+                        WorkspaceEffect::NONE
+                    },
+                ))
+            }
+            WorkspaceConvergenceEvent::AdmissionCleared { session } => {
+                let changed = self.pending_admissions.remove(&session).is_some();
+                self.advance(now_ms);
+                Ok((
+                    if changed {
+                        WorkspaceMergeOutcome::Updated
+                    } else {
+                        WorkspaceMergeOutcome::Unchanged
+                    },
+                    if changed {
+                        WorkspaceEffect::PERSIST
+                    } else {
+                        WorkspaceEffect::NONE
+                    },
+                ))
+            }
+            WorkspaceConvergenceEvent::LocalAdmissionCommitted(facts) => {
+                let changed = self.local_admission_committed.as_ref() != Some(&facts);
+                if changed {
+                    self.local_admission_committed = Some(facts);
+                }
+                self.advance(now_ms);
+                Ok((
+                    if changed {
+                        WorkspaceMergeOutcome::Updated
+                    } else {
+                        WorkspaceMergeOutcome::Unchanged
+                    },
+                    if changed {
+                        WorkspaceEffect::PERSIST
+                    } else {
+                        WorkspaceEffect::NONE
+                    },
+                ))
+            }
             WorkspaceConvergenceEvent::ConfirmationReceived(confirmation) => {
                 let effect = self.apply_confirmation(confirmation, now_ms)?;
                 Ok((WorkspaceMergeOutcome::Updated, effect))
@@ -934,10 +1049,13 @@ impl WorkspaceConvergenceState {
                 if instance_changed {
                     // A re-admission creates a new member instance; old
                     // instance facts (own removal, confirmations, pending
-                    // handoffs) must not leak into the new instance.
+                    // handoffs, admission progress) must not leak into the
+                    // new instance.
                     self.removed = false;
                     self.confirmed.clear();
                     self.pending_handoffs.clear();
+                    self.pending_admissions.clear();
+                    self.local_admission_committed = None;
                 }
                 self.phase = WorkspacePhase::LocallyApplied;
                 self.advance(now_ms);

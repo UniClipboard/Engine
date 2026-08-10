@@ -438,6 +438,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
 
     let (migration_state, key_migration, blob_migration_repo, blob_cipher) =
         common::migration_noop_deps();
+    let device_identity_for_convergence = Arc::clone(&device_identity);
     let facade = Arc::new(SpaceFacade::new(SpaceFacadeDeps {
         session: SpaceSessionDeps {
             space_access: SpaceAccessPorts::from_adapter(space_access),
@@ -445,12 +446,11 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
             mobile_consumable_backfill: common::mobile_consumable_backfill_noop(),
         },
         admission: SpaceAdmissionDeps {
-            local_identity,
+            local_identity: Arc::clone(&local_identity),
             device_identity,
             member_repo: Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
             settings: Arc::clone(&settings) as Arc<dyn SettingsPort>,
             clock: Arc::new(SystemClock),
-            membership_gossip: common::membership_gossip_noop(),
             pairing_invitation,
             pairing_invitation_addresses,
             pairing_invitation_by_address,
@@ -462,9 +462,17 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
                 as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
             presence,
             analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
-            removal_admission: Arc::new(AllowRemovalAdmission),
             removal_gate: Arc::new(AllowRemovalAdmission),
-            workspace_convergence: None,
+            workspace_convergence: common::test_workspace_convergence(
+                Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
+                Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,
+                Arc::clone(&peer_addr_repo) as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
+                Arc::clone(&device_identity_for_convergence),
+                Arc::clone(&local_identity),
+                Arc::clone(&pairing_session) as Arc<dyn PairingSessionPort>,
+                Arc::clone(&settings) as Arc<dyn SettingsPort>,
+                Arc::new(SystemClock),
+            ),
         },
         transition: SpaceTransitionDeps {
             relationship_reset: common::relationship_state_reset_noop(),

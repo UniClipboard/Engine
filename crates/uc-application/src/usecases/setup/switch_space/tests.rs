@@ -12,22 +12,25 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use mockall::predicate;
-use uc_core::ports::pairing::DiscoveryChannel;
+use uc_core::ports::pairing::{DiscoveryChannel, PairingSessionId};
 
 use uc_core::ids::{DeviceId, EventId, RepresentationId};
 use uc_core::membership::{
-    MembershipError, RelationshipStateResetError, RelationshipStateResetPort, SpaceMember,
-    SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
+    AdmissionChangeFacts, AdmissionCommittedFacts, MemberInstanceId, RelationshipStateResetError,
+    RelationshipStateResetPort, RemovalAdmissionDecision, SpaceSecurityStateResetError,
+    SpaceSecurityStateResetPort, WorkspacePhase, WorkspaceSnapshot,
 };
 use uc_core::pairing::invitation::InvitationCode;
-use uc_core::ports::PeerAddressError;
+use uc_core::pairing::SponsorAdmissionCommitted;
 use uc_core::security::IdentityFingerprint;
 use uc_core::setup::SetupStatus;
-use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
 use uc_observability_contract::analytics::{
     AnalyticsFacade, NoopAnalyticsFacade, ResetIdentityError, SelfMintedAdoptRequest,
 };
 use uuid::Uuid;
+
+use crate::workspace_convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::workspace_convergence::WorkspaceConvergenceError;
 
 // ── 端口替身（mockall）──────────────────────────────────────────────────
 
@@ -142,59 +145,90 @@ mockall::mock! {
             &self,
             code: &InvitationCode,
             passphrase: &Passphrase,
-        ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError>;
-    }
-}
-
-mockall::mock! {
-    pub MemberRepo {}
-
-    #[async_trait]
-    impl MemberRepositoryPort for MemberRepo {
-        async fn get(
+        ) -> Result<PendingJoinerHandshake, RedeemPairingInvitationError>;
+        async fn complete(
             &self,
-            device_id: &DeviceId,
-        ) -> Result<Option<SpaceMember>, MembershipError>;
-        async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError>;
-        async fn save(&self, member: &SpaceMember) -> Result<(), MembershipError>;
-        async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError>;
+            pending: PendingJoinerHandshake,
+            admission: AdmissionChangeFacts,
+        ) -> Result<SponsorAdmissionCommitted, RedeemPairingInvitationError>;
     }
 }
 
-mockall::mock! {
-    pub TrustRepo {}
+/// Workspace-owner double for the admission seam: records every call and
+/// lets tests inject failures. The switch-space use case is verified
+/// against this double, never against a real owner.
+#[derive(Default)]
+struct RecordingOwner {
+    fail_readiness: Mutex<bool>,
+    fail_committed: Mutex<bool>,
+}
 
-    #[async_trait]
-    impl TrustedPeerRepositoryPort for TrustRepo {
-        async fn get(
-            &self,
-            device_id: &DeviceId,
-        ) -> Result<Option<TrustedPeer>, TrustedPeerError>;
-        async fn list(&self) -> Result<Vec<TrustedPeer>, TrustedPeerError>;
-        async fn save(&self, peer: &TrustedPeer) -> Result<(), TrustedPeerError>;
-        async fn remove(&self, device_id: &DeviceId) -> Result<bool, TrustedPeerError>;
+#[async_trait]
+impl WorkspaceAdmissionOwnerPort for RecordingOwner {
+    async fn admission_decision(&self, _: u64) -> RemovalAdmissionDecision {
+        RemovalAdmissionDecision::Allowed
+    }
+    async fn begin_admission(
+        &self,
+        _: &PairingSessionId,
+        _: &DeviceId,
+        _: u64,
+    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+        unimplemented!("sponsor-side method not exercised in switch-space tests")
+    }
+    async fn commit_joiner_admission(
+        &self,
+        _: &PairingSessionId,
+        _: AdmissionChangeFacts,
+    ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
+        unimplemented!("sponsor-side method not exercised in switch-space tests")
+    }
+    async fn local_admission_facts(
+        &self,
+    ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError> {
+        Ok(AdmissionChangeFacts {
+            member_instance: MemberInstanceId::from_bytes([7; 32]),
+            device_id: DeviceId::new("local-device"),
+            device_name: "local-laptop".into(),
+            identity_fingerprint: fp_local(),
+            transport_public_key: vec![5; 32],
+            transport_address_blob: Vec::new(),
+            identity_signature: vec![6; 64],
+        })
+    }
+    async fn record_local_readiness(
+        &self,
+        _own_instance: MemberInstanceId,
+    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+        if *self.fail_readiness.lock().unwrap() {
+            return Err(WorkspaceConvergenceError::Unavailable);
+        }
+        Ok(switch_snapshot())
+    }
+    async fn record_admission_committed(
+        &self,
+        _confirmation: AdmissionCommittedFacts,
+    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+        if *self.fail_committed.lock().unwrap() {
+            return Err(WorkspaceConvergenceError::Unavailable);
+        }
+        Ok(switch_snapshot())
     }
 }
 
-mockall::mock! {
-    pub PeerAddrRepo {}
-
-    #[async_trait]
-    impl PeerAddressRepositoryPort for PeerAddrRepo {
-        async fn get(
-            &self,
-            device: &DeviceId,
-        ) -> Result<Option<PeerAddressRecord>, PeerAddressError>;
-        async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError>;
-        async fn list(&self) -> Result<Vec<PeerAddressRecord>, PeerAddressError>;
-        async fn remove(&self, device: &DeviceId) -> Result<(), PeerAddressError>;
-    }
-}
-
-struct FixedClock(i64);
-impl ClockPort for FixedClock {
-    fn now_ms(&self) -> i64 {
-        self.0
+fn switch_snapshot() -> WorkspaceSnapshot {
+    WorkspaceSnapshot {
+        phase: WorkspacePhase::LocallyApplied,
+        revision: 1,
+        change_count: 0,
+        removal_intent_count: 0,
+        effective_member_count: 1,
+        confirmed_member_count: 0,
+        waiting_member_count: 0,
+        convergence_digest: None,
+        removed: false,
+        updated_at_ms: 0,
+        failure_category: None,
     }
 }
 
@@ -311,6 +345,38 @@ fn outcome_default() -> JoinerHandshakeOutcome {
         sponsor_space_person_id: None,
     }
 }
+fn pending_default() -> PendingJoinerHandshake {
+    PendingJoinerHandshake {
+        session: PairingSessionId::new("session-1"),
+        outcome: outcome_default(),
+    }
+}
+
+fn pending_with_sponsor_person() -> PendingJoinerHandshake {
+    PendingJoinerHandshake {
+        session: PairingSessionId::new("session-1"),
+        outcome: outcome_with_sponsor_person(),
+    }
+}
+
+fn committed_default() -> SponsorAdmissionCommitted {
+    SponsorAdmissionCommitted {
+        facts: AdmissionCommittedFacts {
+            change_digest: [0x11; 32],
+            change_count: 2,
+            sponsor_facts: AdmissionChangeFacts {
+                member_instance: MemberInstanceId::from_bytes([9; 32]),
+                device_id: DeviceId::new("sponsor-device"),
+                device_name: "sponsor-laptop".into(),
+                identity_fingerprint: fp_sponsor(),
+                transport_public_key: vec![3; 32],
+                transport_address_blob: Vec::new(),
+                identity_signature: vec![4; 64],
+            },
+        },
+    }
+}
+
 fn already_setup() -> SetupStatus {
     SetupStatus {
         has_completed: true,
@@ -331,7 +397,7 @@ fn cmd_preserving_unreadable_history() -> SwitchSpaceCommand {
     }
 }
 
-/// 把 9 个 mock 装配成 `SwitchSpaceUseCase` 的 builder。
+/// 把 mock 与 double 装配成 `SwitchSpaceUseCase` 的 builder。
 struct Env {
     setup_status: MockSetupStatusRepo,
     migration_state: MockMigrationStateRepo,
@@ -339,9 +405,7 @@ struct Env {
     blob_migration_repo: MockBlobMigrationRepo,
     blob_cipher: MockBlobCipher,
     handshake: MockHandshake,
-    member_repo: MockMemberRepo,
-    trust_repo: MockTrustRepo,
-    peer_addr_repo: MockPeerAddrRepo,
+    owner: Arc<RecordingOwner>,
     relationship_reset: Arc<RecordingRelationshipStateReset>,
     space_security_reset: Arc<RecordingSpaceSecurityStateReset>,
 }
@@ -355,9 +419,7 @@ impl Env {
             blob_migration_repo: MockBlobMigrationRepo::new(),
             blob_cipher: MockBlobCipher::new(),
             handshake: MockHandshake::new(),
-            member_repo: MockMemberRepo::new(),
-            trust_repo: MockTrustRepo::new(),
-            peer_addr_repo: MockPeerAddrRepo::new(),
+            owner: Arc::new(RecordingOwner::default()),
             relationship_reset: Arc::new(RecordingRelationshipStateReset::default()),
             space_security_reset: Arc::new(RecordingSpaceSecurityStateReset::default()),
         }
@@ -368,12 +430,6 @@ impl Env {
     }
 
     fn build_with_facade(self, analytics: Arc<dyn AnalyticsFacade>) -> SwitchSpaceUseCase {
-        let admit = Arc::new(AdmitMemberUseCase::new(
-            Arc::new(self.member_repo) as Arc<dyn MemberRepositoryPort>
-        ));
-        let trust = Arc::new(TrustPeerUseCase::new(
-            Arc::new(self.trust_repo) as Arc<dyn TrustedPeerRepositoryPort>
-        ));
         SwitchSpaceUseCase::new(
             Arc::new(self.setup_status),
             Arc::new(self.migration_state),
@@ -381,13 +437,10 @@ impl Env {
             Arc::new(self.blob_migration_repo),
             Arc::new(self.blob_cipher),
             Arc::new(self.handshake) as Arc<dyn JoinerHandshakeRunner>,
-            admit,
-            trust,
-            Arc::new(self.peer_addr_repo) as Arc<dyn PeerAddressRepositoryPort>,
             self.relationship_reset,
             self.space_security_reset,
-            Arc::new(FixedClock(0)),
             analytics,
+            self.owner.clone() as Arc<dyn WorkspaceAdmissionOwnerPort>,
         )
     }
 }
@@ -473,18 +526,13 @@ async fn happy_path_executes_all_4_phases() {
         .expect_upsert_record()
         .return_once(|_| Ok(()));
 
-    // Phase 2 — handshake + admit + trust
+    // Phase 2 — handshake + readiness/commit via the workspace owner
     env.handshake
         .expect_run()
-        .return_once(|_, _| Ok(outcome_default()));
-    // AdmitMemberUseCase / TrustPeerUseCase 都先 get 后 save——返回 None
-    // 走 fresh-admit 路径(Some 会走 #1023 的重配替换路径)。
-    env.member_repo.expect_get().return_once(|_| Ok(None));
-    env.member_repo.expect_save().return_once(|_| Ok(()));
-    env.trust_repo.expect_get().return_once(|_| Ok(None));
-    env.trust_repo.expect_save().return_once(|_| Ok(()));
-    // sponsor_transport_address_blob 是空 Vec，peer_addr_repo.upsert 不应被调。
-    env.peer_addr_repo.expect_upsert().times(0);
+        .return_once(|_, _| Ok(pending_default()));
+    env.handshake
+        .expect_complete()
+        .return_once(|_, _| Ok(committed_default()));
 
     // Phase 3 — swap
     env.blob_migration_repo
@@ -651,12 +699,10 @@ async fn confirmed_switch_preserves_unreadable_history_and_migrates_readable_row
 
     env.handshake
         .expect_run()
-        .return_once(|_, _| Ok(outcome_default()));
-    env.member_repo.expect_get().return_once(|_| Ok(None));
-    env.member_repo.expect_save().return_once(|_| Ok(()));
-    env.trust_repo.expect_get().return_once(|_| Ok(None));
-    env.trust_repo.expect_save().return_once(|_| Ok(()));
-    env.peer_addr_repo.expect_upsert().times(0);
+        .return_once(|_, _| Ok(pending_default()));
+    env.handshake
+        .expect_complete()
+        .return_once(|_, _| Ok(committed_default()));
 
     env.blob_migration_repo
         .expect_count_records()
@@ -877,10 +923,10 @@ async fn resume_swapped_replays_phase4_only() {
     env.build().resume_pending().await.unwrap();
 }
 
-/// 覆盖：handshake 后 admit 失败短路——peer_addr_repo.upsert 不应被调到，
-/// trust 也不会。但 backup 表 + migration_key + state 仍要清掉。
+/// 覆盖：握手后负责人保存本机就绪事实失败——短路 phase 2，不再发送
+/// 就绪回复；backup 表 + migration_key + state 仍要清掉。
 #[tokio::test]
-async fn admit_failure_aborts_phase2_and_cleans_up() {
+async fn readiness_save_failure_aborts_phase2_and_cleans_up() {
     let mut env = Env::new();
     env.setup_status
         .expect_get_status()
@@ -898,16 +944,10 @@ async fn admit_failure_aborts_phase2_and_cleans_up() {
 
     env.handshake
         .expect_run()
-        .return_once(|_, _| Ok(outcome_default()));
-    // admit 流程会先 get 再 save——get 返 None 后 save 才报 db 错。
-    env.member_repo.expect_get().return_once(|_| Ok(None));
-    env.member_repo
-        .expect_save()
-        .return_once(|_| Err(MembershipError::Repository("db down".into())));
-    // trust_repo / peer_addr_repo.upsert 不应被调
-    env.trust_repo.expect_get().times(0);
-    env.trust_repo.expect_save().times(0);
-    env.peer_addr_repo.expect_upsert().times(0);
+        .return_once(|_, _| Ok(pending_default()));
+    *env.owner.fail_readiness.lock().unwrap() = true;
+    // 就绪保存失败后 complete(发 Ready) 不应被调到。
+    env.handshake.expect_complete().times(0);
 
     // Cleanup
     env.blob_migration_repo
@@ -924,9 +964,9 @@ async fn admit_failure_aborts_phase2_and_cleans_up() {
     let err = env.build().execute(cmd_default()).await.unwrap_err();
     match err {
         SwitchSpaceError::Internal(m) => {
-            assert!(m.contains("admit_member"), "msg = {m}");
+            assert!(m.contains("save local readiness"), "msg = {m}");
         }
-        other => panic!("expected Internal(admit_member: ...), got {other:?}"),
+        other => panic!("expected Internal(save local readiness: ...), got {other:?}"),
     }
 }
 
@@ -975,12 +1015,10 @@ async fn happy_path_persists_identity_intent_and_invokes_adopt() {
     // Phase 2 — sponsor delivers a `space_person_id`.
     env.handshake
         .expect_run()
-        .return_once(|_, _| Ok(outcome_with_sponsor_person()));
-    env.member_repo.expect_get().return_once(|_| Ok(None));
-    env.member_repo.expect_save().return_once(|_| Ok(()));
-    env.trust_repo.expect_get().return_once(|_| Ok(None));
-    env.trust_repo.expect_save().return_once(|_| Ok(()));
-    env.peer_addr_repo.expect_upsert().times(0);
+        .return_once(|_, _| Ok(pending_with_sponsor_person()));
+    env.handshake
+        .expect_complete()
+        .return_once(|_, _| Ok(committed_default()));
 
     // Phase 3 — no records to swap.
     env.blob_migration_repo

@@ -313,56 +313,28 @@ UI / CLI / daemon API 不应直接理解：
 
 ## 7. 模块组织规范
 
-推荐按业务流程和能力组织：
+### 7.1 根目录只表达稳定分类
+
+`src/` 根目录不是历史功能的堆放处。一个目录只能回答一个问题：它是对外入口、某个业务领域的完整流程、持续运行的流程、组装数据，还是小型共享能力。
+
+目标结构如下；实现迁移时按一个业务领域完整移动，不能只搬一半文件后保留旧路径。
 
 ```text
 uc-app/
   src/
-    setup/
-      mod.rs
-      facade.rs
-      commands.rs
-      queries.rs
-      orchestrator.rs
-      state_machine.rs
-      state.rs
-      events.rs
-      errors.rs
-
-    clipboard_capture/
-      mod.rs
-      usecase.rs
-      commands.rs
-      errors.rs
-
-    clipboard_sync/
-      mod.rs
-      orchestrator.rs
-      session.rs
-      events.rs
-      errors.rs
-
-    search/
-      mod.rs
-      facade.rs
-      usecase.rs
-      query.rs
-      result.rs
-      errors.rs
-
-    settings/
-      mod.rs
-      facade.rs
-      usecase.rs
-      commands.rs
-      errors.rs
-
-    shared/
-      mod.rs
-      pagination.rs
-      application_event.rs
-      trace.rs
+    facade/         # 唯一对外入口；按业务领域提供稳定接口
+    clipboard/      # 捕获、历史、恢复、出入站、活动剪贴板
+    space/          # 创建、解锁、会话、准入、切换与迁移
+    membership/     # 名单、成员变化、收敛、移除和恢复
+    transfer/       # 内容与文件传输的完整流程
+    search/         # 查询、索引和维护
+    settings/       # 设置、升级与配置迁移
+    runtime/        # 持续运行、暂停、恢复和关闭
+    deps.rs         # 仅保存组装所需的依赖分组，不含流程
+    support/        # 小型、无业务所有权的共用能力
 ```
+
+领域目录内部可以按职责继续细分，例如 `usecase.rs`、`coordinator.rs`、`runtime.rs`、`commands.rs`、`queries.rs`、`errors.rs`。文件名服务于领域，不得让同一领域同时分散在根目录、`usecases/` 和 `facade/` 三处。
 
 不推荐按“技术角色”切碎，例如：
 
@@ -375,6 +347,17 @@ handlers/
 ```
 
 这种结构后面很容易失焦。
+
+### 7.2 目录归属的判断顺序
+
+新增代码前依次回答：
+
+1. 这是谁的完整结果？先归入对应业务领域，不能先按“它是一个 use case”决定目录。
+2. 调用结束后流程是否仍会等待事件、重试或跨重启继续？是则归该领域的 `runtime` / `coordinator`，否则才是短动作 use case。
+3. 外部调用方是否需要理解它？需要时只在 `facade/` 暴露意图、结果、查询或订阅；实现仍留在业务领域。
+4. 它是否只有组装意义、没有业务顺序？只有这种情况才进入 `deps.rs`；实际装配仍属于 `uc-engine`。
+
+`workspace_convergence`、`trusted_peer`、`pairing`、`clipboard_capture` 这类已有根目录模块在迁移时必须归入一个明确的空间、成员或剪贴板领域。禁止以“先保留原位置”为由长期形成两套入口。
 
 ---
 
@@ -422,7 +405,21 @@ pub struct StartJoinSpaceResult {
 
 ---
 
-## 8.3 Use Case 应避免承担长生命周期状态
+## 8.3 Use Case、Coordinator 与 Facade 的分工
+
+三者不能按文件大小或是否给上层调用区分，必须按完整职责区分：
+
+| 类型 | 唯一职责 | 可以做什么 | 不可以做什么 |
+| --- | --- | --- | --- |
+| Use Case | 完成一个明确且短暂的用户或系统动作 | 调用多个 port，决定本次动作顺序、事务边界和稳定结果 | 对外暴露内部构造、长期等待事件、持有重试或会话状态 |
+| Coordinator / Runtime | 持续推进一个需要事件、超时、重试、暂停、恢复或关闭的完整流程 | 持有流程状态，统一处理事件、重试和关闭 | 把步骤暴露给 facade、调用方或其他领域手工拼接 |
+| Facade | 提供调用方只需理解一次的稳定入口 | 选择一个内部负责人，转换为稳定命令、查询、结果或订阅 | 实现业务判断、状态推进、循环、退避、超时、持久化或协议处理 |
+
+一个动作若只需调用单个 use case，facade 仍可以是薄入口：它的价值是稳定接口，不是重复实现。一个 facade 若需要根据中间结果决定下一步，必须先建立或扩展私有的 use case / coordinator，再由 facade 调用它。
+
+---
+
+## 8.4 Use Case 应避免承担长生命周期状态
 
 短动作适合 `UseCase`。
 
@@ -585,6 +582,8 @@ Facade 内部可以调用：
 * 多阶段流程细节
 * 大量领域判断
 
+`AppFacade` 只负责聚合业务领域入口，不能成为所有动作的平铺转发清单。它应让调用方通过少量领域入口理解系统，例如空间、剪贴板、成员、传输、搜索和设置；每个领域 facade 再提供该领域完整的命令、查询和订阅。
+
 ---
 
 ## 11.3 Facade 输出应面向应用语义，而不是领域内部细节
@@ -607,13 +606,14 @@ Facade 内部可以调用：
 
 ### 11.4.1 强制铁律（必读）
 
-**外部 crate（daemon / tauri / CLI / bootstrap / 任何非 `uc-application` 的消费者）访问 `uc-application` 的能力，唯一合法路径是 `src/facade/` 下暴露的 Facade 与 UseCase。**
+**外部 crate（daemon / tauri / CLI / bootstrap / 任何非 `uc-application` 的消费者）访问 `uc-application` 的业务能力，唯一合法路径是 `src/facade/` 下暴露的 Facade、命令、查询、结果、错误和状态。**
 
 换言之：
 
 * 外部消费者只能 `use uc_application::facade::...`（或等价的顶层 `pub use` 再导出，但再导出的来源必须是 `src/facade/`）
 * 外部消费者 **不得** `use uc_application::pairing::...` / `uc_application::setup::...` / `uc_application::clipboard_capture::...` 等业务子模块的任何类型、函数、构造器
 * 业务子模块（如 `pairing/`、`setup/`、`clipboard_capture/`、`usecases/*`）对外 crate 的默认可见性应为 `pub(crate)`，只对 crate 内部的 facade 层开放
+* `deps.rs` 是唯一例外：它只允许公开 Engine 组装所需的数据分组；不得公开业务动作、流程状态或内部负责人。Engine 通过它取得依赖后，仍只能调用 facade 的业务入口。
 
 一句话记忆：
 
@@ -648,7 +648,7 @@ External (daemon / tauri / CLI / bootstrap)
 
 ### 11.4.3 Crate 根 `lib.rs` 的纪律
 
-* `lib.rs` 的顶层 `pub mod` / `pub use` **只允许**暴露 `facade` 模块（或从 `facade` 再导出的符号）
+* `lib.rs` 的顶层 `pub mod` / `pub use` **只允许**暴露 `facade` 模块（或从 `facade` 再导出的符号）以及 `deps.rs` 的纯组装数据
 * 业务子模块在 `lib.rs` 中必须是 `pub(crate) mod <domain>;` 或完全不 `pub`
 * 如需为测试开放内部可见性，使用 `pub(crate)` + `#[cfg(test)]` 或独立的 `mod tests`，**绝不**为了测试把业务子模块整体升级为 `pub`
 

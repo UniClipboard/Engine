@@ -632,6 +632,8 @@ pub async fn build_sync_engine_assembly(
         late_submission: removal_exchange_adapter.clone(),
         notice: removal_exchange_adapter.clone(),
         notice_verification: Arc::new(RemovalNoticeVerificationAdapter),
+        trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
+        peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
         own_device: deps.device.device_identity.current_device_id(),
     });
     builder.install_member_removal(
@@ -834,7 +836,6 @@ pub async fn build_sync_engine_assembly(
                 member_repo: Arc::clone(&deps.device.member_repo),
                 settings: Arc::clone(&deps.settings),
                 clock: Arc::clone(&deps.system.clock),
-                membership_gossip: membership_gossip.clone(),
                 pairing_invitation: handlers.invitation,
                 pairing_invitation_addresses: handlers.invitation_addresses,
                 pairing_invitation_by_address: handlers.invitation_by_address,
@@ -845,11 +846,9 @@ pub async fn build_sync_engine_assembly(
                 peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
                 presence: Arc::clone(&presence),
                 analytics: Arc::clone(&space_setup.analytics_facade),
-                removal_admission: Arc::clone(&workspace_convergence)
-                    as Arc<dyn uc_core::membership::RemovalAdmissionGatePort>,
                 removal_gate: Arc::clone(&workspace_convergence)
                     as Arc<dyn uc_core::membership::RemovalTargetGatePort>,
-                workspace_convergence: Some(Arc::clone(&workspace_convergence)),
+                workspace_convergence: Arc::clone(&workspace_convergence),
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::clone(&space_setup.relationship_reset),

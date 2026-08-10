@@ -804,6 +804,7 @@ fn message_kind(message: &PairingSessionMessage) -> &'static str {
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
         PairingSessionMessage::Confirm(_) => "Confirm",
         PairingSessionMessage::Ready(_) => "Ready",
+        PairingSessionMessage::AdmissionCommitted(_) => "AdmissionCommitted",
         PairingSessionMessage::Reject(_) => "Reject",
     }
 }

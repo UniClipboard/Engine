@@ -14,9 +14,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use uc_application::clipboard_write::MobileConsumableBackfill;
-use uc_application::membership::{
-    MembershipConvergenceError, PairingMembershipConvergencePort, SponsorSeedBatchContext,
-};
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
 use uc_core::ids::{EventId, RepresentationId, SpaceId};
 use uc_core::membership::{
@@ -43,24 +40,6 @@ impl MobileConsumableBackfill for NoopMobileConsumableBackfill {
 
 pub fn mobile_consumable_backfill_noop() -> Arc<dyn MobileConsumableBackfill> {
     Arc::new(NoopMobileConsumableBackfill)
-}
-
-pub struct NoopPairingMembershipGossip;
-
-#[async_trait]
-impl PairingMembershipConvergencePort for NoopPairingMembershipGossip {
-    async fn prepare_sponsor_membership(
-        &self,
-        _context: SponsorSeedBatchContext,
-    ) -> Result<(), MembershipConvergenceError> {
-        Ok(())
-    }
-
-    fn notify_pending_delivery(&self) {}
-}
-
-pub fn membership_gossip_noop() -> Arc<dyn PairingMembershipConvergencePort> {
-    Arc::new(NoopPairingMembershipGossip)
 }
 
 pub struct NoopRelationshipStateReset;
@@ -227,4 +206,355 @@ pub fn migration_noop_deps() -> (
         Arc::new(NoopBlobMigrationRepo),
         Arc::new(NoopBlobCipher),
     )
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Workspace convergence test owner (ADR-017): the pairing e2e tests drive
+// the real admission seam, so the sponsor/joiner sides need a real
+// `WorkspaceConvergence` whose member/trust/address persistence lands in
+// the same repositories the e2e asserts on. Every other port is a minimal
+// no-op; removal/notice/recovery flows are out of scope for these tests.
+// ───────────────────────────────────────────────────────────────────────
+
+use std::sync::Mutex;
+
+use uc_application::workspace_convergence::{WorkspaceConvergence, WorkspaceConvergenceDeps};
+use uc_core::ids::DeviceId;
+use uc_core::membership::{
+    CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
+    CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityError,
+    CurrentMembershipIdentityPort, MemberInstanceId, MemberRepositoryPort,
+    MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalCausalProof,
+    RemovalCausalProofMember, RemovalExchangeMessage, RemovalIntentVerificationError,
+    RemovalIntentVerificationPort, RemovalLateAcceptance, RemovalLateRejectionReason,
+    RemovalLateSubmission, RemovalLateSubmissionPort, RemovalNotice, RemovalNoticeAcceptance,
+    RemovalNoticePort, RemovalNoticeVerificationError, RemovalNoticeVerificationPort,
+    RemovalRecoveryError, RemovalRecoveryPort, RemovalViewMember, RemovalViewSnapshot,
+    SignedRemovalIntent, WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
+    WorkspaceConvergenceState,
+};
+use uc_core::ports::{ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, SettingsPort};
+use uc_core::security::IdentityFingerprint;
+use uc_core::setup::SetupStatus;
+use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError, TrustedPeerRepositoryPort};
+
+/// Build a workspace convergence owner whose member/trust/address writes go
+/// through the provided repositories (mirroring production assembly), with
+/// no-op ports everywhere else. The local member instance is derived
+/// deterministically from the local device id.
+pub fn test_workspace_convergence(
+    member_repo: Arc<dyn MemberRepositoryPort>,
+    trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
+    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    device_identity: Arc<dyn DeviceIdentityPort>,
+    local_identity: Arc<dyn uc_core::ports::LocalIdentityPort>,
+    pairing_session: Arc<dyn uc_core::ports::pairing::PairingSessionPort>,
+    settings: Arc<dyn SettingsPort>,
+    clock: Arc<dyn ClockPort>,
+) -> Arc<WorkspaceConvergence> {
+    let own_device = device_identity.current_device_id();
+    WorkspaceConvergence::new(WorkspaceConvergenceDeps {
+        repository: Arc::new(MemoryWorkspaceRepo::default()),
+        verification: Arc::new(NoopIntentVerifier),
+        recovery: Arc::new(FixedRecovery::new(own_device)),
+        member_signatures: Arc::new(FixedSigner),
+        member_repo,
+        membership_identity: Arc::new(FixedMembershipIdentity::new(
+            own_device,
+            Arc::clone(&settings),
+            Arc::clone(&local_identity),
+        )),
+        announcement_material: Arc::new(FixedAnnouncementMaterial::new(
+            own_device,
+            Arc::clone(&settings),
+            Arc::clone(&local_identity),
+            Arc::clone(&pairing_session),
+        )),
+        security_updates: Arc::new(NoopSecurityUpdates),
+        clock,
+        device_identity,
+        exchange: Arc::new(NoopExchange),
+        late_submission: Arc::new(NoopLateSubmission),
+        notice: Arc::new(NoopNotice),
+        notice_verification: Arc::new(NoopNoticeVerification),
+        trusted_peer_repo,
+        peer_addr_repo,
+        own_device,
+    })
+}
+
+#[derive(Clone, Default)]
+struct MemoryWorkspaceRepo {
+    state: Arc<Mutex<Option<WorkspaceConvergenceState>>>,
+}
+#[async_trait]
+impl WorkspaceConvergenceRepositoryPort for MemoryWorkspaceRepo {
+    async fn save_state(
+        &self,
+        state: &WorkspaceConvergenceState,
+    ) -> Result<(), WorkspaceConvergenceRepositoryError> {
+        *self.state.lock().unwrap() = Some(state.clone());
+        Ok(())
+    }
+    async fn load_state(
+        &self,
+    ) -> Result<Option<WorkspaceConvergenceState>, WorkspaceConvergenceRepositoryError> {
+        Ok(self.state.lock().unwrap().clone())
+    }
+}
+
+struct NoopIntentVerifier;
+#[async_trait]
+impl RemovalIntentVerificationPort for NoopIntentVerifier {
+    async fn verify_intent(
+        &self,
+        _intent: &SignedRemovalIntent,
+    ) -> Result<(), RemovalIntentVerificationError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct FixedRecovery {
+    own_device: DeviceId,
+}
+impl FixedRecovery {
+    fn new(own_device: DeviceId) -> Self {
+        Self { own_device }
+    }
+    fn own_instance(&self) -> MemberInstanceId {
+        let bytes: [u8; 32] = {
+            let mut b = [0u8; 32];
+            let id = self.own_device.as_str();
+            let n = id.len().min(32);
+            b[..n].copy_from_slice(id.as_bytes()[..n].try_into().unwrap());
+            b
+        };
+        MemberInstanceId::from_bytes(bytes)
+    }
+}
+#[async_trait]
+impl RemovalRecoveryPort for FixedRecovery {
+    async fn current_view(&self) -> Result<RemovalViewSnapshot, RemovalRecoveryError> {
+        let member = RemovalViewMember {
+            device_id: self.own_device,
+            instance: self.own_instance(),
+            signing_public_key: self.own_instance().as_bytes().to_vec(),
+        };
+        let causal = RemovalCausalProofMember {
+            device_id: member.device_id,
+            instance: member.instance,
+            signing_public_key: member.signing_public_key.clone(),
+        };
+        Ok(RemovalViewSnapshot {
+            epoch: 1,
+            members: vec![member],
+            causal_proof: RemovalCausalProof::new(1, vec![causal]),
+        })
+    }
+    async fn own_instance(&self) -> Result<Option<MemberInstanceId>, RemovalRecoveryError> {
+        Ok(Some(self.own_instance()))
+    }
+}
+
+#[derive(Clone, Default)]
+struct FixedSigner;
+#[async_trait]
+impl CurrentMemberSignaturePort for FixedSigner {
+    async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
+        Ok(1)
+    }
+    async fn sign_current_member_payload(
+        &self,
+        _payload: &[u8],
+    ) -> Result<Vec<u8>, CurrentMemberSignatureError> {
+        Ok(b"test-signature".to_vec())
+    }
+    async fn verify_current_member_payload(
+        &self,
+        _member: &DeviceId,
+        _payload: &[u8],
+        _signature: &[u8],
+    ) -> Result<bool, CurrentMemberSignatureError> {
+        Ok(true)
+    }
+}
+
+#[derive(Clone)]
+struct FixedMembershipIdentity {
+    device_id: DeviceId,
+    settings: Arc<dyn SettingsPort>,
+    local_identity: Arc<dyn uc_core::ports::LocalIdentityPort>,
+}
+impl FixedMembershipIdentity {
+    fn new(
+        device_id: DeviceId,
+        settings: Arc<dyn SettingsPort>,
+        local_identity: Arc<dyn uc_core::ports::LocalIdentityPort>,
+    ) -> Self {
+        Self {
+            device_id,
+            settings,
+            local_identity,
+        }
+    }
+    async fn fingerprint(&self) -> IdentityFingerprint {
+        self.local_identity
+            .ensure()
+            .await
+            .unwrap_or_else(|_| IdentityFingerprint::from_raw_string("ABCDEFGHIJKLMNOP").unwrap())
+    }
+}
+#[async_trait]
+impl CurrentMembershipIdentityPort for FixedMembershipIdentity {
+    async fn current_membership_identity(
+        &self,
+    ) -> Result<CurrentMembershipIdentity, CurrentMembershipIdentityError> {
+        let name = self
+            .settings
+            .load()
+            .await
+            .ok()
+            .and_then(|s| s.general.device_name)
+            .unwrap_or_else(|| "test-device".to_owned());
+        Ok(CurrentMembershipIdentity {
+            space_id: uc_core::ids::SpaceId::from_str("e2e-space"),
+            device_id: self.device_id,
+            device_name: name,
+            identity_fingerprint: self.fingerprint().await,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct FixedAnnouncementMaterial {
+    device_id: DeviceId,
+    settings: Arc<dyn SettingsPort>,
+    local_identity: Arc<dyn uc_core::ports::LocalIdentityPort>,
+    pairing_session: Arc<dyn uc_core::ports::pairing::PairingSessionPort>,
+}
+impl FixedAnnouncementMaterial {
+    fn new(
+        device_id: DeviceId,
+        settings: Arc<dyn SettingsPort>,
+        local_identity: Arc<dyn uc_core::ports::LocalIdentityPort>,
+        pairing_session: Arc<dyn uc_core::ports::pairing::PairingSessionPort>,
+    ) -> Self {
+        Self {
+            device_id,
+            settings,
+            local_identity,
+            pairing_session,
+        }
+    }
+}
+#[async_trait]
+impl CurrentMembershipAnnouncementPort for FixedAnnouncementMaterial {
+    async fn current_announcement_material(
+        &self,
+    ) -> Result<CurrentMembershipAnnouncementMaterial, CurrentMembershipIdentityError> {
+        let name = self
+            .settings
+            .load()
+            .await
+            .ok()
+            .and_then(|s| s.general.device_name)
+            .unwrap_or_else(|| "test-device".to_owned());
+        Ok(CurrentMembershipAnnouncementMaterial {
+            space_id: uc_core::ids::SpaceId::from_str("e2e-space"),
+            device_id: self.device_id,
+            device_name: name,
+            identity_fingerprint: self.local_identity.ensure().await.unwrap_or_else(|_| {
+                IdentityFingerprint::from_raw_string("ABCDEFGHIJKLMNOP").unwrap()
+            }),
+            transport_public_key: vec![1; 32],
+            transport_address_blob: self
+                .pairing_session
+                .local_transport_address_blob()
+                .await
+                .unwrap_or_default(),
+        })
+    }
+    async fn wait_for_announcement_change(&self) -> Result<(), CurrentMembershipIdentityError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+struct NoopSecurityUpdates;
+#[async_trait]
+impl MembershipSecurityUpdatePort for NoopSecurityUpdates {
+    async fn current_state(
+        &self,
+    ) -> Result<uc_core::membership::MembershipSecurityState, MembershipSecurityUpdateError> {
+        Ok(uc_core::membership::MembershipSecurityState {
+            space_id: uc_core::ids::SpaceId::from_str("e2e-space"),
+            group_epoch: 0,
+        })
+    }
+    async fn apply_group_epoch_update(
+        &self,
+        _payload: &[u8],
+    ) -> Result<u64, MembershipSecurityUpdateError> {
+        Ok(0)
+    }
+}
+
+#[derive(Clone, Default)]
+struct NoopExchange;
+#[async_trait]
+impl uc_core::membership::RemovalExchangePort for NoopExchange {
+    async fn exchange(
+        &self,
+        _recipient: &DeviceId,
+        _message: RemovalExchangeMessage,
+    ) -> Result<RemovalExchangeMessage, uc_core::membership::RemovalExchangeError> {
+        Ok(RemovalExchangeMessage::IntentAck(
+            uc_core::membership::RemovalIntentId::from_bytes([0; 32]),
+        ))
+    }
+}
+
+#[derive(Clone, Default)]
+struct NoopLateSubmission;
+#[async_trait]
+impl RemovalLateSubmissionPort for NoopLateSubmission {
+    async fn submit_late(
+        &self,
+        _recipient: &DeviceId,
+        _submission: RemovalLateSubmission,
+    ) -> Result<RemovalLateAcceptance, uc_core::membership::RemovalLateSubmissionTransportError>
+    {
+        Ok(RemovalLateAcceptance::Rejected {
+            reason: RemovalLateRejectionReason::Invalid,
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct NoopNotice;
+#[async_trait]
+impl RemovalNoticePort for NoopNotice {
+    async fn send_notice(
+        &self,
+        _recipient: &DeviceId,
+        _notice: RemovalNotice,
+    ) -> Result<RemovalNoticeAcceptance, uc_core::membership::RemovalNoticeTransportError> {
+        Ok(RemovalNoticeAcceptance::Accepted {
+            intent_id: uc_core::membership::RemovalIntentId::from_bytes([0; 32]),
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct NoopNoticeVerification;
+#[async_trait]
+impl RemovalNoticeVerificationPort for NoopNoticeVerification {
+    async fn verify_notice_signature(
+        &self,
+        _notice: &RemovalNotice,
+        _issuer_public_key: &[u8],
+    ) -> Result<(), RemovalNoticeVerificationError> {
+        Ok(())
+    }
 }

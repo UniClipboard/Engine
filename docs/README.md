@@ -34,3 +34,4 @@
 - [ADR-014：应用层使用动态 Port](adr/014-dynamic-ports-in-use-cases.md)
 - [ADR-015：离线优先成员移除](adr/015-offline-first-member-removal.md)
 - [ADR-016：工作空间全局收敛](adr/016-workspace-wide-convergence.md)
+- [ADR-017：配对作为工作空间内部的准入通道](adr/017-pairing-as-workspace-admission.md)

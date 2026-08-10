@@ -17,10 +17,11 @@
 //! Removed instances keep only the restricted late-submission and
 //! removal-notice entries.
 
+pub(crate) mod admission;
 mod runtime;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::sync::Arc;
 
@@ -43,7 +44,8 @@ use uc_core::membership::{
     WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
     WorkspaceConvergenceState, WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
 };
-use uc_core::ports::{ClockPort, DeviceIdentityPort};
+use uc_core::ports::{ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort};
+use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
 pub use runtime::WorkspaceConvergenceRuntime;
 
@@ -77,6 +79,8 @@ pub enum WorkspaceConvergenceError {
     InvalidHandoff,
     #[error("workspace convergence state is inconsistent: {0}")]
     Inconsistent(String),
+    #[error("workspace convergence admission storage failed: {0}")]
+    AdmissionStorage(String),
     #[error("workspace convergence is unavailable")]
     Unavailable,
 }
@@ -101,6 +105,10 @@ pub struct WorkspaceConvergenceDeps {
     /// Restricted entry used to notify a removed target device.
     pub notice: Arc<dyn RemovalNoticePort>,
     pub notice_verification: Arc<dyn RemovalNoticeVerificationPort>,
+    /// Member roster persistence: admission commits write the admitted
+    /// member facts here in the same save boundary.
+    pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
+    pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     pub own_device: DeviceId,
 }
 
@@ -357,29 +365,100 @@ impl WorkspaceConvergence {
         Ok(facts)
     }
 
+    /// Save the sponsor's in-flight admission record before it starts
+    /// waiting for the joiner's readiness. Survives restarts so the sponsor
+    /// re-awaits the same joiner's readiness instead of saving a second
+    /// member instance or a duplicated change. Idempotent for the same
+    /// session and joiner.
+    pub async fn begin_admission(
+        &self,
+        session: &uc_core::ports::pairing::PairingSessionId,
+        joiner_device_id: &DeviceId,
+        invitation_generation: u64,
+    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+        let _guard = self.state_lock.lock().await;
+        let now_ms = self.deps.clock.now_ms();
+        let mut state = self.load_state().await?;
+        let (outcome, effect) = state
+            .apply(
+                WorkspaceConvergenceEvent::AdmissionBegan {
+                    session: session.clone(),
+                    joiner_device_id: joiner_device_id.clone(),
+                    invitation_generation,
+                },
+                now_ms,
+            )
+            .map_err(|_| {
+                WorkspaceConvergenceError::Inconsistent("admission begin rejected".to_owned())
+            })?;
+        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
+            self.persist(&state).await?;
+        }
+        self.notify();
+        Ok(state.snapshot())
+    }
+
+    /// The sponsor's saved in-flight admission record for a pairing session,
+    /// if any. Used after a restart to re-await the same joiner's readiness.
+    pub async fn pending_admission(
+        &self,
+        session: &uc_core::ports::pairing::PairingSessionId,
+    ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>
+    {
+        let state = self.load_state().await?;
+        Ok(state.pending_admissions.get(session).cloned())
+    }
+
     /// Commit the readiness-confirmed admission in the single owner. On the
     /// first pairing the sponsor's already active member instance is seeded
-    /// together with the joining instance in one repository save.
-    pub async fn record_pairing_admission(
+    /// together with the joining instance in one repository save. The
+    /// admission change, the joiner's pending handoff facts and the
+    /// confirmation material are saved in the same commit; the in-flight
+    /// admission record is cleared there as well. The returned confirmation
+    /// is sent back to the joiner over the pairing channel.
+    pub async fn commit_joiner_admission(
         &self,
+        session: &uc_core::ports::pairing::PairingSessionId,
         joiner: uc_core::membership::AdmissionChangeFacts,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+    ) -> Result<uc_core::membership::AdmissionCommittedFacts, WorkspaceConvergenceError> {
         let _guard = self.state_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
         if state.removed {
             return Err(WorkspaceConvergenceError::OwnInstanceRemoved);
         }
+        if let Some(record) = state.pending_admissions.get(session) {
+            if record.joiner_device_id != joiner.device_id {
+                return Err(WorkspaceConvergenceError::Inconsistent(
+                    "joiner readiness does not match the in-flight admission".to_owned(),
+                ));
+            }
+            if record.invitation_generation < state.removal_intents.len() as u64 {
+                // The admission generation advanced after the invitation was
+                // bound; an old invitation cannot recover its old authority.
+                return Err(WorkspaceConvergenceError::Inconsistent(
+                    "admission generation advanced".to_owned(),
+                ));
+            }
+        }
         let own = self.local_admission_facts().await?;
         let mut additions = Vec::new();
         if !state.effective_members().contains(&own.member_instance) {
-            additions.push(own);
+            additions.push(own.clone());
         }
         if !state.effective_members().contains(&joiner.member_instance) {
-            additions.push(joiner);
+            additions.push(joiner.clone());
         }
-        for facts in additions {
-            let change = self.build_admission_change(&state, facts, now_ms);
+        if additions.is_empty() {
+            return Err(WorkspaceConvergenceError::Inconsistent(
+                "admission unchanged".to_owned(),
+            ));
+        }
+        // The roster persistence failures abort the commit before any
+        // workspace change is persisted, keeping the save boundary intact.
+        self.save_member_facts(&joiner, now_ms).await?;
+        for facts in &additions {
+            let change = self.build_admission_change(&state, facts.clone(), now_ms);
             let (outcome, effect) = state
                 .apply(WorkspaceConvergenceEvent::CommittedChange(change), now_ms)
                 .map_err(|_| {
@@ -391,10 +470,121 @@ impl WorkspaceConvergence {
                 ));
             }
         }
+        // Pending handoff facts for the joiner: it must receive the whole
+        // continuous chain from its own saved state (no change yet).
+        let Some(digest) = state.current_digest() else {
+            return Err(WorkspaceConvergenceError::Inconsistent(
+                "admission produced no digest".to_owned(),
+            ));
+        };
+        let (outcome, effect) = state
+            .apply(
+                WorkspaceConvergenceEvent::PendingHandoffCreated {
+                    recipient: joiner.member_instance,
+                    recipient_device: joiner.device_id,
+                    confirmed_epoch: 0,
+                    target_digest: *digest.as_bytes(),
+                    has_more: false,
+                },
+                now_ms,
+            )
+            .map_err(|_| WorkspaceConvergenceError::InvalidHandoff)?;
+        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
+            self.persist(&state).await?;
+        }
+        let _ = state.apply(
+            WorkspaceConvergenceEvent::AdmissionCleared {
+                session: session.clone(),
+            },
+            now_ms,
+        );
         self.persist(&state).await?;
         self.publish(&state);
         self.notify();
+        info!(joiner_device_id = %joiner.device_id.as_str(), "workspace admission change recorded");
+        Ok(uc_core::membership::AdmissionCommittedFacts {
+            change_digest: *digest.as_bytes(),
+            change_count: state.changes.len() as u64,
+            sponsor_facts: own,
+        })
+    }
+
+    /// The joiner durably records the sponsor's admission-saved
+    /// confirmation. Until then it stays locally ready and must not take
+    /// part in ordinary content exchange. The sponsor's member facts carried
+    /// by the confirmation are persisted in the same save boundary.
+    pub async fn record_admission_committed(
+        &self,
+        confirmation: uc_core::membership::AdmissionCommittedFacts,
+    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+        let _guard = self.state_lock.lock().await;
+        let now_ms = self.deps.clock.now_ms();
+        let mut state = self.load_state().await?;
+        self.save_member_facts(&confirmation.sponsor_facts, now_ms)
+            .await?;
+        let (outcome, effect) = state
+            .apply(
+                WorkspaceConvergenceEvent::LocalAdmissionCommitted(confirmation),
+                now_ms,
+            )
+            .map_err(|_| {
+                WorkspaceConvergenceError::Inconsistent("admission committed rejected".to_owned())
+            })?;
+        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
+            self.persist(&state).await?;
+        }
+        self.notify();
         Ok(state.snapshot())
+    }
+
+    /// Persist the admitted member's roster facts (member instance, trust
+    /// record and transport address) as part of the admission save boundary.
+    async fn save_member_facts(
+        &self,
+        facts: &uc_core::membership::AdmissionChangeFacts,
+        now_ms: i64,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        let joined_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms)
+            .ok_or_else(|| WorkspaceConvergenceError::AdmissionStorage("clock".to_owned()))?;
+        let sync_preferences = match self.deps.member_repo.get(&facts.device_id).await {
+            Ok(Some(existing)) => existing.sync_preferences,
+            _ => uc_core::MemberSyncPreferences::default(),
+        };
+        let member = uc_core::SpaceMember {
+            device_id: facts.device_id.clone(),
+            device_name: facts.device_name.clone(),
+            identity_fingerprint: facts.identity_fingerprint.clone(),
+            joined_at,
+            sync_preferences,
+        };
+        self.deps
+            .member_repo
+            .save(&member)
+            .await
+            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
+        let peer = uc_core::trusted_peer::TrustedPeer {
+            local_device_id: self.deps.device_identity.current_device_id(),
+            peer_device_id: facts.device_id.clone(),
+            peer_fingerprint: facts.identity_fingerprint.clone(),
+            trusted_at: joined_at,
+        };
+        self.deps
+            .trusted_peer_repo
+            .save(&peer)
+            .await
+            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
+        if !facts.transport_address_blob.is_empty() {
+            self.deps
+                .peer_addr_repo
+                .upsert(&uc_core::ports::PeerAddressRecord {
+                    device_id: facts.device_id.clone(),
+                    addr_blob: facts.transport_address_blob.clone(),
+                    observed_at: joined_at,
+                })
+                .await
+                .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
+        }
+        Ok(())
     }
 
     fn build_admission_change(

@@ -39,7 +39,7 @@ use uc_observability_contract::analytics::{
 use crate::facade::space_setup::{
     InvitationAvailability, IssuePairingInvitationError, IssuePairingInvitationResult,
 };
-use crate::pairing_invitation::InMemoryPairingInvitationHolder;
+use crate::workspace_convergence::admission::invitation::InMemoryPairingInvitationHolder;
 
 pub(crate) struct IssuePairingInvitationUseCase {
     pairing_invitation: Arc<dyn PairingInvitationPort>,

@@ -20,7 +20,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
 
@@ -44,14 +43,7 @@ use crate::facade::space_setup::errors::{
 use crate::facade::space_setup::errors::{
     InitializeSpaceError, IssuePairingInvitationError, TryResumeSessionError, UnlockSpaceError,
 };
-use crate::facade::space_setup::events::PairingOutcome;
 use crate::group_update_delivery::{GroupUpdateDelivery, GroupUpdateDeliveryPort};
-use crate::membership::usecases::AdmitMemberUseCase;
-use crate::pairing_inbound::orchestrator::PairingInboundOrchestrator;
-use crate::pairing_inbound::sponsor_handshake::SponsorHandshakeCoordinator;
-use crate::pairing_invitation::InMemoryPairingInvitationHolder;
-use crate::pairing_outbound::joiner_handshake::JoinerHandshakeCoordinator;
-use crate::trusted_peer::usecases::TrustPeerUseCase;
 use crate::usecases::pairing::issue_invitation::IssuePairingInvitationUseCase;
 use crate::usecases::pairing::redeem_invitation::RedeemPairingInvitationUseCase;
 use crate::usecases::presence::ensure_reachable_all::{
@@ -60,9 +52,15 @@ use crate::usecases::presence::ensure_reachable_all::{
 use crate::usecases::setup::initialize_space::InitializeSpaceUseCase;
 use crate::usecases::setup::switch_space::{JoinerHandshakeRunner, SwitchSpaceUseCase};
 use crate::usecases::setup::unlock_space::UnlockSpaceUseCase;
+use crate::workspace_convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::workspace_convergence::admission::invitation::InMemoryPairingInvitationHolder;
+use crate::workspace_convergence::admission::joiner::joiner_handshake::JoinerHandshakeCoordinator;
+use crate::workspace_convergence::admission::sponsor::orchestrator::PairingInboundOrchestrator;
+use crate::workspace_convergence::admission::sponsor::sponsor_handshake::SponsorHandshakeCoordinator;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort, RemovalTargetGatePort,
+    GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort,
+    RemovalAdmissionGatePort, RemovalTargetGatePort,
 };
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::setup::MigrationStatePort;
@@ -85,10 +83,6 @@ pub struct SpaceFacade {
     /// spawned during construction. Aborted in [`Self::on_shutdown`] so
     /// the event loop doesn't outlive the facade.
     pairing_inbound_handle: JoinHandle<()>,
-    /// Broadcast source of sponsor-side pairing completion events.
-    /// Held on the facade so [`Self::subscribe_pairing_completion`] can
-    /// hand out fresh receivers as long as the facade is alive.
-    pairing_outcome_tx: broadcast::Sender<PairingOutcome>,
     /// Held for [`Self::try_resume_session`] — the silent resume path needs
     /// both the setup flag (to decide whether there's anything to resume at
     /// all) and direct access to [`ResumeSpaceSessionPort::try_resume_session`].
@@ -176,20 +170,18 @@ impl SpaceFacade {
             member_repo,
             settings,
             clock,
-            membership_gossip,
             pairing_invitation,
             pairing_invitation_addresses,
             pairing_invitation_by_address,
             pairing_session,
             pairing_events,
             proof_port,
-            trusted_peer_repo,
             peer_addr_repo,
             presence,
             analytics,
-            removal_admission,
             removal_gate,
             workspace_convergence,
+            ..
         } = admission;
         let SpaceTransitionDeps {
             relationship_reset,
@@ -244,7 +236,7 @@ impl SpaceFacade {
             Arc::clone(&clock),
             Arc::clone(&invitation_holder),
             Arc::clone(&analytics),
-            Arc::clone(&removal_admission),
+            Arc::clone(&workspace_convergence) as Arc<dyn RemovalAdmissionGatePort>,
         ));
         // T8 · F1 hook: construct ensure_reachable_all early so peer_addr_repo /
         // device_identity can still be Arc::clone'd here — both are moved into
@@ -277,11 +269,6 @@ impl SpaceFacade {
         // 握手消息（实测 #486 复测 13:02 那次 sponsor accept_bi 卡 23s
         // 又 read_exact 卡 34s，joiner 60s TTL 先到 abort）。
         let handshake_ttl = Duration::from_secs(180);
-        // admit/trust 两侧都要用 —— sponsor orchestrator 把 joiner 登记
-        // 进本机；joiner use case 把 sponsor 登记进本机。构造一次 Arc
-        // 共享即可，不给一边复制一边。
-        let admit_member_uc = Arc::new(AdmitMemberUseCase::new(Arc::clone(&member_repo)));
-        let trust_peer_uc = Arc::new(TrustPeerUseCase::new(Arc::clone(&trusted_peer_repo)));
 
         let sponsor_handshake = SponsorHandshakeCoordinator::new(
             Arc::clone(&pairing_session),
@@ -289,7 +276,6 @@ impl SpaceFacade {
             Arc::clone(&space_access.group_admission),
             group_update_delivery,
             Arc::clone(&member_repo),
-            Arc::clone(&membership_gossip),
             Arc::clone(&proof_port),
             Arc::clone(&local_identity),
             Arc::clone(&device_identity),
@@ -298,31 +284,19 @@ impl SpaceFacade {
             Arc::clone(&analytics),
             handshake_ttl,
         );
-        // Capacity 16 is more than enough: the outcome fires at most
-        // once per handshake and typical subscribers (CLI `invite`, GUI)
-        // drain as they arrive. Lag from a slow subscriber would drop the
-        // oldest events, which is acceptable — a slow consumer caring
-        // only about the latest attempt is fine.
-        let (pairing_outcome_tx, _initial_rx) = broadcast::channel(16);
         let inbound_orchestrator = Arc::new(PairingInboundOrchestrator::new(
             pairing_events,
             pairing_invitation,
             invitation_holder,
             Arc::clone(&clock),
-            Arc::clone(&removal_admission),
             sponsor_handshake,
-            Arc::clone(&admit_member_uc),
-            Arc::clone(&trust_peer_uc),
-            Arc::clone(&peer_addr_repo),
-            local_device_id,
-            workspace_convergence.clone(),
-            pairing_outcome_tx.clone(),
+            Arc::clone(&workspace_convergence) as Arc<dyn WorkspaceAdmissionOwnerPort>,
             Arc::clone(&analytics),
         ));
         let pairing_inbound_handle = inbound_orchestrator.spawn();
 
         // joiner-side symmetric: coordinator holds wire + crypto, use
-        // case composes it with admit/trust/setup-status.
+        // case composes it with the workspace owner's admission saves.
         let joiner_handshake = JoinerHandshakeCoordinator::new(
             pairing_session,
             Arc::clone(&space_access.derive_admission_proof_key),
@@ -333,9 +307,9 @@ impl SpaceFacade {
             settings,
             handshake_ttl,
         );
-        // Switch-space 复用同一个 handshake coordinator + admit/trust/peer
-        // /clock，所以这些先 clone 一份给 switch-space use case，剩下的再
-        // move 进 redeem use case（与既有 use case 装配模式一致）。
+        // Switch-space 复用同一个 handshake coordinator + peer/clock，所以
+        // 这些先 clone 一份给 switch-space use case，剩下的再 move 进
+        // redeem use case（与既有 use case 装配模式一致）。
         let migration_state_for_facade = Arc::clone(&migration_state);
         let blob_migration_repo_for_facade = Arc::clone(&blob_migration_repo);
         let switch_space = Arc::new(SwitchSpaceUseCase::new(
@@ -345,24 +319,17 @@ impl SpaceFacade {
             Arc::clone(&blob_migration_repo),
             blob_cipher,
             Arc::clone(&joiner_handshake) as Arc<dyn JoinerHandshakeRunner>,
-            Arc::clone(&admit_member_uc),
-            Arc::clone(&trust_peer_uc),
-            Arc::clone(&peer_addr_repo),
             relationship_reset,
             space_security_reset,
-            Arc::clone(&clock),
             Arc::clone(&analytics),
+            Arc::clone(&workspace_convergence) as Arc<dyn WorkspaceAdmissionOwnerPort>,
         ));
         let redeem_pairing_invitation = Arc::new(RedeemPairingInvitationUseCase::new(
             joiner_handshake,
-            admit_member_uc,
-            trust_peer_uc,
             setup_status,
-            peer_addr_repo,
             Arc::clone(&resume_session_for_facade),
-            clock,
-            analytics,
-            workspace_convergence,
+            Arc::clone(&analytics),
+            Arc::clone(&workspace_convergence) as Arc<dyn WorkspaceAdmissionOwnerPort>,
         ));
 
         Self {
@@ -371,7 +338,6 @@ impl SpaceFacade {
             issue_pairing_invitation,
             redeem_pairing_invitation,
             pairing_inbound_handle,
-            pairing_outcome_tx,
             resume_session: resume_session_for_facade,
             factory_reset: factory_reset_for_facade,
             relationship_reset: relationship_reset_for_facade,
@@ -512,16 +478,6 @@ impl SpaceFacade {
             phase: phase.as_ref().map(MigrationPhaseKind::from),
             backup_record_count,
         })
-    }
-
-    /// Subscribe to sponsor-side pairing completion events.
-    ///
-    /// Each call returns a fresh receiver sharing the facade's broadcast
-    /// source. Receivers must be obtained **before** the awaited handshake
-    /// starts; lag policy follows `tokio::sync::broadcast` (oldest events
-    /// are dropped if a subscriber falls behind `capacity`).
-    pub fn subscribe_pairing_completion(&self) -> broadcast::Receiver<PairingOutcome> {
-        self.pairing_outcome_tx.subscribe()
     }
 
     /// A1 · Create the encrypted space on a fresh device. On success the
@@ -924,6 +880,8 @@ mod tests {
 
     use crate::deps::SpaceAccessPorts;
     use crate::facade::space_setup::UnreadableHistoryPolicy;
+    use crate::workspace_convergence::tests::MemoryWorkspaceRepository;
+    use crate::workspace_convergence::WorkspaceConvergence;
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
     use uc_core::setup::SetupStatus;
@@ -1719,20 +1677,6 @@ mod tests {
         }
     }
 
-    struct NoopPairingMembershipGossip;
-
-    #[async_trait]
-    impl crate::membership::PairingMembershipConvergencePort for NoopPairingMembershipGossip {
-        async fn prepare_sponsor_membership(
-            &self,
-            _context: crate::membership::SponsorSeedBatchContext,
-        ) -> Result<(), crate::membership::MembershipConvergenceError> {
-            Ok(())
-        }
-
-        fn notify_pending_delivery(&self) {}
-    }
-
     fn default_fingerprint() -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string("ABCDEFGHIJKLMNOP").unwrap()
     }
@@ -1811,7 +1755,6 @@ mod tests {
                 member_repo,
                 settings,
                 clock: Arc::new(FixedClock(0)),
-                membership_gossip: Arc::new(NoopPairingMembershipGossip),
                 pairing_invitation: pairing_invitation.clone(),
                 pairing_invitation_addresses: pairing_invitation.clone(),
                 pairing_invitation_by_address: pairing_invitation.clone(),
@@ -1823,9 +1766,14 @@ mod tests {
                     as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
                 presence: Arc::new(FakePresence),
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
-                removal_admission: Arc::new(AllowRemovalAdmission),
                 removal_gate: Arc::new(AllowRemovalAdmission),
-                workspace_convergence: None,
+                workspace_convergence: WorkspaceConvergence::new(
+                    crate::workspace_convergence::tests::test_deps(
+                        Arc::new(MemoryWorkspaceRepository::default()),
+                        "device-1",
+                        Vec::new(),
+                    ),
+                ),
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::new(NoopRelationshipStateReset),

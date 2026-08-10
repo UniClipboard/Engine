@@ -69,25 +69,20 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Passphrase};
 use uc_core::ids::SpaceId;
-use uc_core::membership::{
-    MemberRepositoryPort, MemberSyncPreferences, RelationshipStateResetPort,
-    SpaceSecurityStateResetPort,
-};
+use uc_core::membership::{RelationshipStateResetPort, SpaceSecurityStateResetPort};
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::ports::clipboard::{BlobMigrationRepoError, BlobMigrationRepoPort, MigrationRecord};
 use uc_core::ports::security::{
     BlobCipherError, BlobCipherPort, KeyMigrationError, KeyMigrationPort,
 };
 use uc_core::ports::setup::{MigrationStateError, MigrationStatePort};
-use uc_core::ports::{ClockPort, PeerAddressRecord, PeerAddressRepositoryPort, SetupStatusPort};
+use uc_core::ports::SetupStatusPort;
 use uc_core::setup::{MigrationPhase, MigrationRunId, SetupStatus};
-use uc_core::TrustedPeerRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsFacade;
 use uuid::Uuid;
 
@@ -95,16 +90,10 @@ use crate::facade::space_setup::commands::SwitchSpaceCommand;
 use crate::facade::space_setup::{
     RedeemPairingInvitationError, SwitchSpaceError, SwitchSpaceResult, UnreadableHistoryPolicy,
 };
-use crate::membership::errors::MembershipApplicationError;
-use crate::membership::usecases::{AdmitMember, AdmitMemberUseCase};
-use crate::pairing_outbound::joiner_handshake::{
-    JoinerHandshakeCoordinator, JoinerHandshakeOutcome,
+use crate::workspace_convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::workspace_convergence::admission::joiner::joiner_handshake::{
+    JoinerHandshakeCoordinator, JoinerHandshakeOutcome, PendingJoinerHandshake,
 };
-use crate::trusted_peer::errors::TrustedPeerApplicationError;
-use crate::trusted_peer::usecases::{TrustPeer, TrustPeerUseCase};
-
-pub(crate) type AdmitMemberUc = AdmitMemberUseCase<dyn MemberRepositoryPort>;
-pub(crate) type TrustPeerUc = TrustPeerUseCase<dyn TrustedPeerRepositoryPort>;
 
 struct Phase1Preparation {
     run_id: MigrationRunId,
@@ -117,16 +106,27 @@ struct Phase1Preparation {
 // wrapper（见底部 `impl JoinerHandshakeRunner for JoinerHandshakeCoordinator`）。
 // ---------------------------------------------------------------------------
 
-/// 把 `JoinerHandshakeCoordinator::handshake` 抽象为单方法 trait——只有
+/// 把 `JoinerHandshakeCoordinator` 的准入两步抽象为 trait——只有
 /// switch-space use case 需要这一层间接，让单元测试能用 `mockall` 隔离
-/// handshake 的 wire+crypto 子图。
+/// handshake 的 wire+crypto 子图。与 redeem use case 使用同一加入语义：
+/// 先取回 pending 会话，再由工作空间负责人保存本机就绪事实后发送就绪回复
+/// 并等待"准入变化已保存"确认。
 #[async_trait]
 pub(crate) trait JoinerHandshakeRunner: Send + Sync {
+    /// Dial + handshake through the sponsor's `Confirm`; returns the open
+    /// session the caller completes with its verified admission facts.
     async fn run(
         &self,
         code: &InvitationCode,
         passphrase: &Passphrase,
-    ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError>;
+    ) -> Result<PendingJoinerHandshake, RedeemPairingInvitationError>;
+
+    /// Send the readiness reply and await the admission-saved confirmation.
+    async fn complete(
+        &self,
+        pending: PendingJoinerHandshake,
+        admission: uc_core::membership::AdmissionChangeFacts,
+    ) -> Result<uc_core::pairing::SponsorAdmissionCommitted, RedeemPairingInvitationError>;
 }
 
 #[async_trait]
@@ -135,8 +135,16 @@ impl JoinerHandshakeRunner for JoinerHandshakeCoordinator {
         &self,
         code: &InvitationCode,
         passphrase: &Passphrase,
-    ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
-        self.handshake_and_complete(code, passphrase).await
+    ) -> Result<PendingJoinerHandshake, RedeemPairingInvitationError> {
+        self.handshake(code, passphrase).await
+    }
+
+    async fn complete(
+        &self,
+        pending: PendingJoinerHandshake,
+        admission: uc_core::membership::AdmissionChangeFacts,
+    ) -> Result<uc_core::pairing::SponsorAdmissionCommitted, RedeemPairingInvitationError> {
+        self.complete(pending, admission).await
     }
 }
 
@@ -155,17 +163,18 @@ pub(crate) struct SwitchSpaceUseCase {
     blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
     blob_cipher: Arc<dyn BlobCipherPort>,
     handshake: Arc<dyn JoinerHandshakeRunner>,
-    admit_member: Arc<AdmitMemberUc>,
-    trust_peer: Arc<TrustPeerUc>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     relationship_reset: Arc<dyn RelationshipStateResetPort>,
     space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,
-    clock: Arc<dyn ClockPort>,
     /// Switches the local analytics identity to the target Space's
     /// person once commit phase has succeeded. `None` on the target
     /// sponsor side falls back to Solo so cross-Space switches never
     /// strand the device on the old person.
     analytics: Arc<dyn AnalyticsFacade>,
+    /// The workspace owner behind the admission seam. Switch-space joins
+    /// the target space through the same admission semantics as
+    /// `RedeemPairingInvitationUseCase`; there is no second handshake
+    /// orchestration path.
+    workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
 }
 
 impl SwitchSpaceUseCase {
@@ -177,13 +186,10 @@ impl SwitchSpaceUseCase {
         blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
         blob_cipher: Arc<dyn BlobCipherPort>,
         handshake: Arc<dyn JoinerHandshakeRunner>,
-        admit_member: Arc<AdmitMemberUc>,
-        trust_peer: Arc<TrustPeerUc>,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         relationship_reset: Arc<dyn RelationshipStateResetPort>,
         space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,
-        clock: Arc<dyn ClockPort>,
         analytics: Arc<dyn AnalyticsFacade>,
+        workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
     ) -> Self {
         Self {
             setup_status,
@@ -192,13 +198,10 @@ impl SwitchSpaceUseCase {
             blob_migration_repo,
             blob_cipher,
             handshake,
-            admit_member,
-            trust_peer,
-            peer_addr_repo,
             relationship_reset,
             space_security_reset,
-            clock,
             analytics,
+            workspace_convergence,
         }
     }
 
@@ -482,11 +485,15 @@ impl SwitchSpaceUseCase {
         code: &InvitationCode,
         new_passphrase: &Passphrase,
     ) -> Result<JoinerHandshakeOutcome, SwitchSpaceError> {
-        let outcome = self
+        // 与 redeem use case 相同的统一加入语义：握手到 Confirm 后，先由
+        // 工作空间负责人保存本机就绪事实，再发送就绪回复并等待"准入变化
+        // 已保存"确认。不形成第二条握手编排路径。
+        let pending = self
             .handshake
             .run(code, new_passphrase)
             .await
             .map_err(map_redeem_err)?;
+        let outcome = pending.outcome().clone();
         self.relationship_reset
             .clear_all_relationships()
             .await
@@ -495,43 +502,30 @@ impl SwitchSpaceUseCase {
             .clear_space_security_state_except(&outcome.space_id)
             .await
             .map_err(|error| SwitchSpaceError::Storage(error.to_string()))?;
-        let now = self.now_utc()?;
-
-        let admit_input = AdmitMember {
-            device_id: outcome.sponsor_device_id,
-            device_name: outcome.sponsor_device_name.clone(),
-            identity_fingerprint: outcome.sponsor_identity_fingerprint.clone(),
-            joined_at: now,
-            sync_preferences: MemberSyncPreferences::default(),
-        };
-        self.admit_member
-            .execute(admit_input)
+        let admission = self
+            .workspace_convergence
+            .local_admission_facts()
             .await
-            .map_err(map_admit_err)?;
-
-        let trust_input = TrustPeer {
-            local_device_id: outcome.self_device_id,
-            peer_device_id: outcome.sponsor_device_id,
-            peer_fingerprint: outcome.sponsor_identity_fingerprint.clone(),
-            trusted_at: now,
-        };
-        self.trust_peer
-            .execute(trust_input)
+            .map_err(|error| {
+                SwitchSpaceError::Internal(format!("prepare workspace admission: {error}"))
+            })?;
+        self.workspace_convergence
+            .record_local_readiness(admission.member_instance)
             .await
-            .map_err(map_trust_err)?;
-
-        // peer_addr_repo upsert 与 redeem use case 一致：失败仅 warn。
-        if !outcome.sponsor_transport_address_blob.is_empty() {
-            let record = PeerAddressRecord {
-                device_id: outcome.sponsor_device_id,
-                addr_blob: outcome.sponsor_transport_address_blob.clone(),
-                observed_at: now,
-            };
-            if let Err(err) = self.peer_addr_repo.upsert(&record).await {
-                warn!(error = %err, "peer_addr_repo.upsert failed (best-effort, ignored)");
-            }
-        }
-
+            .map_err(|error| {
+                SwitchSpaceError::Internal(format!("save local readiness: {error}"))
+            })?;
+        let committed = self
+            .handshake
+            .complete(pending, admission)
+            .await
+            .map_err(|error| SwitchSpaceError::Internal(format!("complete admission: {error}")))?;
+        self.workspace_convergence
+            .record_admission_committed(committed.facts)
+            .await
+            .map_err(|error| {
+                SwitchSpaceError::Internal(format!("record admission committed: {error}"))
+            })?;
         Ok(outcome)
     }
 
@@ -637,11 +631,6 @@ impl SwitchSpaceUseCase {
             warn!(error = %err, "phase2-cleanup: migration_state.set_current(None) failed");
         }
     }
-
-    fn now_utc(&self) -> Result<DateTime<Utc>, SwitchSpaceError> {
-        DateTime::<Utc>::from_timestamp_millis(self.clock.now_ms())
-            .ok_or_else(|| SwitchSpaceError::Internal("clock returned invalid timestamp".into()))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -685,14 +674,6 @@ fn map_migration_state_err(err: MigrationStateError) -> SwitchSpaceError {
         MigrationStateError::Storage(m) => SwitchSpaceError::Storage(m),
         MigrationStateError::Internal(m) => SwitchSpaceError::Internal(m),
     }
-}
-
-fn map_admit_err(err: MembershipApplicationError) -> SwitchSpaceError {
-    SwitchSpaceError::Internal(format!("admit_member: {err}"))
-}
-
-fn map_trust_err(err: TrustedPeerApplicationError) -> SwitchSpaceError {
-    SwitchSpaceError::Internal(format!("trust_peer: {err}"))
 }
 
 fn map_redeem_err(err: RedeemPairingInvitationError) -> SwitchSpaceError {

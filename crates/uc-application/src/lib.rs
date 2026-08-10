@@ -42,9 +42,6 @@ pub use usecases::clipboard_sync::{
 // crate boundary only exposes them via the facade.
 pub mod file_transfer;
 pub mod membership;
-pub(crate) mod pairing_inbound;
-pub(crate) mod pairing_invitation;
-pub(crate) mod pairing_outbound;
 pub mod proof;
 pub mod receive_reconciliation;
 pub mod trusted_peer;
