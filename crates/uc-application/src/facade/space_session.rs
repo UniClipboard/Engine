@@ -243,9 +243,16 @@ impl SpaceSessionCoordinator {
             .await
             .map_err(|error| SpaceSessionError::Recovery(error.to_string()))?;
         if resumed {
-            if let Err(error) = self.session_access.refresh_presence().await {
-                warn!(error = %error, "presence refresh failed after session recovery");
-            }
+            // Dialing every known peer can take seconds when relays are
+            // unreachable. Run presence refresh in the background so session
+            // recovery never blocks startup on network timeouts; peer state
+            // arrives later through presence events.
+            let presence = Arc::clone(&self.session_access);
+            tokio::spawn(async move {
+                if let Err(error) = presence.refresh_presence().await {
+                    warn!(error = %error, "presence refresh failed after session recovery");
+                }
+            });
         }
         self.activities.resume_after_session_ready().await?;
         Ok(RecoverSpaceSessionResult {
