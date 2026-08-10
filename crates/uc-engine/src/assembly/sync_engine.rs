@@ -528,6 +528,7 @@ pub async fn build_sync_engine_assembly(
     deps: &AppDeps,
     space_setup: &SyncEngineDeps,
     shared: &SharedRuntimeDeps,
+    #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     iroh_config: IrohNodeConfig,
 ) -> Result<SyncEngineAssembly, SyncEngineAssemblyError> {
     // IdentityFingerprintFactory is stateless — the one in SecurityPorts is
@@ -898,7 +899,7 @@ pub async fn build_sync_engine_assembly(
     // 生命周期(随 `iroh_node.shutdown()` 自然退出 `RecvError::Closed`,
     // `SyncEngineAssembly::shutdown` 显式 `abort()` 加速过程)。
     #[cfg(feature = "lan-compat")]
-    let mobile_device_repo = Arc::clone(&deps.mobile_sync.devices.find_by_id);
+    let mobile_device_repo = Arc::clone(&mobile_sync_ports.devices.find_by_id);
     #[cfg(not(feature = "lan-compat"))]
     let mobile_device_repo: Arc<dyn uc_core::ports::FindMobileDeviceByIdPort> =
         Arc::new(UnavailableMobileDeviceLookup);

@@ -31,8 +31,8 @@
 //! `announce_local_activation` 内部对 register / dispatch 失败仍是
 //! best-effort 降级。
 //!
-//! [`MobileActivationAnnouncePort`]: crate::usecases::mobile_sync::apply_incoming::MobileActivationAnnouncePort
-//! [`ActiveClipboardFacade`]: crate::clipboard::active::ActiveClipboardFacade
+//! [`MobileActivationAnnouncePort`]: crate::usecases::apply_incoming::MobileActivationAnnouncePort
+//! [`ActiveClipboardFacade`]: uc_application::facade::ActiveClipboardFacade
 
 use std::sync::Arc;
 
@@ -40,8 +40,8 @@ use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::EntryId;
 use uc_core::SystemClipboardSnapshot;
 
-use crate::clipboard::active::ActiveClipboardFacade;
-use crate::usecases::mobile_sync::apply_incoming::MobileActivationAnnouncePort;
+use crate::usecases::apply_incoming::MobileActivationAnnouncePort;
+use uc_application::facade::ActiveClipboardFacade;
 
 /// Narrow seam over [`ActiveClipboardFacade::announce_local_activation`]: stamp
 /// a local activation, advance the cross-device register, and fan the 0xC3

@@ -54,7 +54,7 @@ use tracing::{debug, instrument, warn};
 
 use uc_core::ports::mobile_sync::{LatestClipboardSnapshotError, LatestClipboardSnapshotPort};
 
-use crate::usecases::mobile_sync::clipboard_doc::{SyncClipboardItemType, SyncClipboardMeta};
+use crate::usecases::clipboard_doc::{SyncClipboardItemType, SyncClipboardMeta};
 
 use super::sync_clipboard_mapping::{classify_for_sync, derive_data_name, profile_hash_for_sync};
 

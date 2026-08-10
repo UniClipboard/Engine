@@ -14,7 +14,7 @@ use uc_core::clipboard::is_file_mime_or_format;
 use uc_core::ids::EntryId;
 use uc_core::mobile_sync::LatestPasteRepresentation;
 
-use crate::usecases::mobile_sync::clipboard_doc::SyncClipboardItemType;
+use crate::usecases::clipboard_doc::SyncClipboardItemType;
 
 /// 把 paste rep 翻成 SyncClipboard 协议的 4 个 `type` 之一。
 ///

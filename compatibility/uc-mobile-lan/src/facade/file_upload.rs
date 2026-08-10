@@ -9,12 +9,12 @@ use uc_core::mobile_sync::{MobileDeviceId, StagedFile, StagingHandle};
 use uc_core::ports::MobileFileStagingPort;
 use uc_core::{FileTransferCancellationReason, FileTransferFailureReason};
 
-use crate::facade::file_transfer::{
-    BeginReceiverTransfer, FileTransferFacade, FileTransferSession, ReceiverTransferRegistration,
-};
-use crate::usecases::mobile_sync::apply_incoming::{
+use crate::usecases::apply_incoming::{
     ApplyIncomingMobileClipError, ApplyIncomingMobileClipInput, ApplyIncomingMobileClipOutcome,
     ApplyIncomingMobileClipUseCase, IncomingMobileClipEvent,
+};
+use uc_application::facade::file_transfer::{
+    BeginReceiverTransfer, FileTransferFacade, FileTransferSession, ReceiverTransferRegistration,
 };
 
 const MOBILE_UPLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -487,10 +487,179 @@ mod tests {
     use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
     use uc_infra::file_transfer::{InMemoryEventPublisher, InMemoryEventStore};
 
-    use crate::facade::file_transfer::{FileTransferFacade, FileTransferFacadeDeps};
-    use crate::usecases::mobile_sync::apply_incoming::{
+    use crate::usecases::apply_incoming::{
         ApplyIncomingMobileClipError, ApplyIncomingMobileClipOutcome,
     };
+    use uc_application::facade::file_transfer::{
+        FileTransferFacade, FileTransferFacadeDeps, FileTransferLifecycleDeps,
+    };
+    use uc_application::facade::HostEventBus;
+
+    #[derive(Default)]
+    struct NoopLifecycle;
+    #[async_trait::async_trait]
+    impl uc_core::ports::ListExpiredInflightTransfersPort for NoopLifecycle {
+        async fn list_expired_inflight(
+            &self,
+            _pending_cutoff: i64,
+            _transferring_cutoff: i64,
+        ) -> Result<
+            Vec<uc_core::ports::file_transfer::ExpiredInflightTransfer>,
+            uc_core::ports::file_transfer::FileTransferProjectionError,
+        > {
+            Ok(vec![])
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::FailInflightTransfersPort for NoopLifecycle {
+        async fn mark_failed(
+            &self,
+            _transfer_id: &str,
+            _reason: &str,
+            _now_ms: i64,
+        ) -> Result<(), uc_core::ports::file_transfer::FileTransferProjectionError> {
+            Ok(())
+        }
+        async fn bulk_fail_inflight(
+            &self,
+            _reason: &str,
+            _now_ms: i64,
+        ) -> Result<
+            Vec<uc_core::ports::file_transfer::ExpiredInflightTransfer>,
+            uc_core::ports::file_transfer::FileTransferProjectionError,
+        > {
+            Ok(vec![])
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::EnsureFileTransferPrivacyMaintenancePort for NoopLifecycle {
+        async fn ensure_file_transfer_privacy_maintenance(
+            &self,
+        ) -> Result<(), uc_core::ports::FileTransferPrivacyMaintenanceError> {
+            Ok(())
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::inbound_file_target::ResolveInboundSaveDirPort for NoopLifecycle {
+        async fn resolve_save_dir(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::GetEntryAttemptPort for NoopLifecycle {
+        async fn get_entry_attempt(
+            &self,
+            _entry_id: &str,
+        ) -> Result<Option<uc_core::ports::EntryReceiveAttempt>, uc_core::ports::AttemptError>
+        {
+            Ok(None)
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::ListNonTerminalAttemptsPort for NoopLifecycle {
+        async fn list_non_terminal_attempts(
+            &self,
+        ) -> Result<Vec<uc_core::ports::EntryReceiveAttempt>, uc_core::ports::AttemptError>
+        {
+            Ok(vec![])
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::ListUnsettledReceiveArtifactsPort for NoopLifecycle {
+        async fn list_unsettled_receive_artifacts(
+            &self,
+        ) -> Result<
+            Vec<uc_core::ports::ReceiveArtifactRecord>,
+            uc_core::ports::ReceiveArtifactLogError,
+        > {
+            Ok(vec![])
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::GetDirectoryPublishRecordPort for NoopLifecycle {
+        async fn get_publish_record(
+            &self,
+            _entry_id: &str,
+            _attempt_id: &str,
+        ) -> Result<Option<uc_core::ports::DirectoryPublishRecord>, uc_core::ports::PublishLogError>
+        {
+            Ok(None)
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::BeginReceiveFailurePort for NoopLifecycle {
+        async fn begin_receive_failure(
+            &self,
+            _entry_id: &str,
+            _attempt_id: &str,
+            _now_ms: i64,
+        ) -> Result<uc_core::ports::BeginReceiveFailureOutcome, uc_core::ports::AttemptError>
+        {
+            Ok(uc_core::ports::BeginReceiveFailureOutcome::Begun)
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::CleanupReceiveArtifactsPort for NoopLifecycle {
+        async fn cleanup_receive_artifacts(
+            &self,
+            _artifacts: &[uc_core::ports::ReceiveArtifact],
+        ) -> Result<(), uc_core::ports::ReceiveArtifactLogError> {
+            Ok(())
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::CommitInboundReceivePort for NoopLifecycle {
+        async fn commit_inbound_receive(
+            &self,
+            _settlement: &uc_core::ports::InboundReceiveSettlement,
+        ) -> Result<(), uc_core::ports::InboundReceiveCommitError> {
+            Ok(())
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::ListProvisionalReceivesPort for NoopLifecycle {
+        async fn list_provisional_receives(
+            &self,
+        ) -> Result<
+            Vec<uc_core::ports::ProvisionalReceiveRecovery>,
+            uc_core::ports::ProvisionalReceiveError,
+        > {
+            Ok(vec![])
+        }
+    }
+    #[async_trait::async_trait]
+    impl uc_core::ports::FinalizeProvisionalReceivePort for NoopLifecycle {
+        async fn finalize_provisional_receive(
+            &self,
+            _transfer_id: &str,
+            _action: uc_core::ports::ProvisionalReceiveAction,
+            _now_ms: i64,
+        ) -> Result<(), uc_core::ports::ProvisionalReceiveError> {
+            Ok(())
+        }
+    }
+
+    fn noop_lifecycle_deps() -> FileTransferLifecycleDeps {
+        let noop = Arc::new(NoopLifecycle);
+        FileTransferLifecycleDeps {
+            list_expired: Arc::clone(&noop) as _,
+            fail_inflight: Arc::clone(&noop) as _,
+            get_receive_attempt: Arc::clone(&noop) as _,
+            list_receive_attempts: Arc::clone(&noop) as _,
+            list_unsettled_artifacts: Arc::clone(&noop) as _,
+            get_directory_publish: Arc::clone(&noop) as _,
+            begin_receive_failure: Arc::clone(&noop) as _,
+            cleanup_artifacts: Arc::clone(&noop) as _,
+            commit_inbound: Arc::clone(&noop) as _,
+            list_provisional: Arc::clone(&noop) as _,
+            finalize_provisional: Arc::clone(&noop) as _,
+            privacy_maintenance: Arc::clone(&noop) as _,
+            save_dir_resolver: Arc::clone(&noop) as _,
+            file_cache_dir: std::path::PathBuf::new(),
+            clock: Arc::new(FixedClock),
+            host_event_bus: Arc::new(HostEventBus::new()),
+        }
+    }
 
     use super::{
         BeginMobileFileUpload, CompleteMobileFileUpload, MobileFileUploadApplyPort,
@@ -722,6 +891,7 @@ mod tests {
             provisional_path,
             provisional_finalize,
             clock: Arc::new(FixedClock),
+            lifecycle: noop_lifecycle_deps(),
         }));
         let staging_port: Arc<dyn MobileFileStagingPort> = staging.clone();
         let apply_port: Arc<dyn MobileFileUploadApplyPort> = apply.clone();

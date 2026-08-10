@@ -78,7 +78,7 @@ struct ProductionSession {
     history_maintenance: HistoryMaintenanceRuntime,
     search_runtime: uc_application::facade::SearchRuntime,
     #[cfg(feature = "lan-compat")]
-    mobile_sync: Arc<uc_application::facade::MobileSyncFacade>,
+    mobile_sync: Arc<uc_mobile_lan::MobileSyncFacade>,
     clipboard: ClipboardRuntime,
     sync_engine: SyncEngineAssembly,
     tasks: Arc<TaskRegistry>,
@@ -340,6 +340,8 @@ impl ProductionRuntime {
             &wired.deps,
             &wired.sync_engine,
             &wired.shared,
+            #[cfg(feature = "lan-compat")]
+            wired.mobile_sync_ports.clone(),
             factory.rendezvous_base_url.clone(),
             factory.relay_fallback_override,
         )
@@ -354,6 +356,7 @@ impl ProductionRuntime {
         let mobile_sync = build_mobile_sync_facade(
             &wired.deps,
             paths,
+            wired.mobile_sync_ports.clone(),
             Arc::clone(&clipboard.apply_inbound),
             Some(Arc::clone(&wired.shared.file_transfer_facade)),
             None,
@@ -489,7 +492,7 @@ impl ProductionRuntime {
     #[cfg(feature = "lan-compat")]
     async fn current_mobile_sync(
         &self,
-    ) -> Result<Arc<uc_application::facade::MobileSyncFacade>, EngineError> {
+    ) -> Result<Arc<uc_mobile_lan::MobileSyncFacade>, EngineError> {
         self.current_session_field(|session| Arc::clone(&session.mobile_sync))
             .await
     }

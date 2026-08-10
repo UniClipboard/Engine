@@ -188,6 +188,11 @@ pub struct WiredDependencies {
     /// daemon main-loop-only bypass deps (see [`DaemonRuntimeDeps`]).
     #[cfg(feature = "lan-compat")]
     pub daemon_runtime: DaemonRuntimeDeps,
+    /// Mobile-sync port bundle assembled at wire time (ADR-018 stage 4);
+    /// carried on the wiring so `uc-application` stays free of LAN-only
+    /// port types.
+    #[cfg(feature = "lan-compat")]
+    pub mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     /// Process-level handles shared by ≥2 assembly targets (see
     /// [`SharedRuntimeDeps`]).
     pub shared: SharedRuntimeDeps,

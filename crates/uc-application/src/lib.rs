@@ -5,6 +5,8 @@ pub mod deps;
 pub mod facade;
 pub mod file_sync;
 pub(crate) mod search;
+pub(crate) mod settings;
+pub(crate) mod support;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod transfer;

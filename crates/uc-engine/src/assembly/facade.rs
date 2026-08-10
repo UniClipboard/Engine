@@ -13,10 +13,7 @@ use uc_application::facade::settings::{
 };
 use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
-use uc_application::facade::{
-    ActiveClipboardFacade, FileTransferFacade, IncomingMobileBuffer, MobileSyncFacade,
-    MobileSyncFacadeDeps, MobileSyncSnapshotPorts,
-};
+use uc_application::facade::{ActiveClipboardFacade, FileTransferFacade};
 use uc_application::facade::{
     AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardCaptureFacade,
     ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardOutboundFacade,
@@ -36,6 +33,10 @@ use uc_infra::mobile_sync::{
     OsRngCredentialsMinter,
 };
 use uc_infra::network::iroh::{IrohRelayProbeAdapter, IrohRelayProbeError, IrohRelayProbeReport};
+#[cfg(feature = "lan-compat")]
+use uc_mobile_lan::{
+    IncomingMobileBuffer, MobileSyncFacade, MobileSyncFacadeDeps, MobileSyncSnapshotPorts,
+};
 
 // ---------------------------------------------------------------------------
 // IrohRelayDiagnosticAdapter
@@ -138,6 +139,7 @@ fn build_clipboard_capture_facade(deps: &AppDeps) -> Arc<ClipboardCaptureFacade>
 pub fn build_mobile_sync_facade(
     deps: &AppDeps,
     storage_paths: &AppPaths,
+    mobile_ports: uc_mobile_lan::MobileSyncPorts,
     apply_inbound: Arc<ApplyInboundClipboardUseCase>,
     file_transfer: Option<Arc<FileTransferFacade>>,
     // GUI daemon 装配传 `Some(controller)` —— update_settings 写盘后即时
@@ -170,8 +172,8 @@ pub fn build_mobile_sync_facade(
         // 装配处直接 new 即可。
         credentials_minter: Arc::new(OsRngCredentialsMinter),
         password_hasher: Arc::new(Argon2idPasswordHasher),
-        devices: deps.mobile_sync.devices.clone(),
-        endpoint_info: deps.mobile_sync.endpoint_info.clone(),
+        devices: mobile_ports.devices.clone(),
+        endpoint_info: mobile_ports.endpoint_info.clone(),
         lan_interface_probe: Arc::new(NetworkInterfaceLanProbe::new()),
         settings: deps.settings.clone(),
         apply_inbound,

@@ -76,9 +76,7 @@ pub struct V3BlobRef {
 ///
 /// The envelope bytes are the application-layer plaintext; the transfer
 /// cipher (`TransferCipherPort`) wraps them before they hit the wire.
-pub(crate) fn encode_snapshot_to_v3_bytes(
-    snapshot: &SystemClipboardSnapshot,
-) -> Result<(Bytes, String)> {
+pub fn encode_snapshot_to_v3_bytes(snapshot: &SystemClipboardSnapshot) -> Result<(Bytes, String)> {
     // V3 envelope BinaryRepresentation 仅承载 inline 字节;LocalFile source 必须在
     // dispatch 之前由 capture pipeline 物化到 blob 仓库,outbound 通过 V3BlobRef
     // 通道引用,因此 envelope 编码阶段 LocalFile 不应出现。这里用 expect_inline_bytes

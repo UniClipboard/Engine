@@ -342,26 +342,6 @@ pub struct SystemPorts {
 /// Registered-device intent ports facing the application layer.
 ///
 /// The composition root coerces one Diesel device-repository adapter into each
-/// of these; each consumer takes only the slice it needs, never the whole
-/// aggregate store (see ports.md §8.3).
-#[cfg(feature = "lan-compat")]
-#[derive(Clone)]
-pub struct MobileDevicePorts {
-    pub find_by_username: Arc<dyn FindMobileDeviceByUsernamePort>,
-    pub find_by_id: Arc<dyn FindMobileDeviceByIdPort>,
-    pub list: Arc<dyn ListMobileDevicesPort>,
-    pub save: Arc<dyn SaveMobileDevicePort>,
-    pub delete: Arc<dyn DeleteMobileDevicePort>,
-    pub update: Arc<dyn UpdateMobileDevicePort>,
-}
-
-#[cfg(feature = "lan-compat")]
-#[derive(Clone)]
-pub struct MobileSyncPorts {
-    pub devices: MobileDevicePorts,
-    pub endpoint_info: Arc<dyn MobileSyncEndpointInfoPort>,
-}
-
 /// Application dependency grouping (non-Builder, just parameter grouping)
 /// 应用依赖分组（非 Builder，仅参数打包）
 ///
@@ -409,9 +389,6 @@ pub struct AppDeps {
     pub system: SystemPorts,
     /// Search-domain ports (index, key derivation, pipeline) / 搜索领域端口
     pub search: SearchPorts,
-    /// Mobile-sync 领域端口 / Mobile sync domain ports.
-    #[cfg(feature = "lan-compat")]
-    pub mobile_sync: MobileSyncPorts,
     /// 产品 telemetry 上报 sink（横切关注点）。
     ///
     /// bootstrap 装配时用带开关的 observer 包一层真实 sink（dev=`StdoutSink`、

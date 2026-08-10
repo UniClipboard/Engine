@@ -24,7 +24,7 @@ use std::sync::{Arc, RwLock};
 
 use tracing::warn;
 
-use super::{EmitError, HostEvent, HostEventEmitterPort};
+use uc_core::ports::host_event::{EmitError, HostEvent, HostEventEmitterPort};
 
 /// 一个挂在 bus 上的 emitter,带名字便于排障与精准注销。
 struct Registered {

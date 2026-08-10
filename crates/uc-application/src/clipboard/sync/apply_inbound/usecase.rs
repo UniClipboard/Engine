@@ -103,7 +103,8 @@ enum InboundApplyMode {
         resurface: ResurfacePorts,
     },
     StoreOnlyPull,
-    #[cfg(test)]
+    /// Inert apply path for tests and inert wiring: writes without any
+    /// materializer, live index or receive tracking.
     Test {
         write: Arc<dyn InboundWrite>,
         resurface: Option<ResurfacePorts>,
@@ -187,7 +188,6 @@ impl ApplyInboundClipboardUseCase {
         match &self.mode {
             InboundApplyMode::InteractiveReceive { write, .. } => Some(write),
             InboundApplyMode::StoreOnlyPull => None,
-            #[cfg(test)]
             InboundApplyMode::Test { write, .. } => Some(write),
         }
     }
@@ -205,7 +205,6 @@ impl ApplyInboundClipboardUseCase {
                 ..
             } => Some((active_register, mobile_consumability)),
             InboundApplyMode::StoreOnlyPull => None,
-            #[cfg(test)]
             InboundApplyMode::Test { .. } => None,
         }
     }
@@ -214,7 +213,6 @@ impl ApplyInboundClipboardUseCase {
         match &self.mode {
             InboundApplyMode::InteractiveReceive { resurface, .. } => Some(resurface),
             InboundApplyMode::StoreOnlyPull => None,
-            #[cfg(test)]
             InboundApplyMode::Test { resurface, .. } => resurface.as_ref(),
         }
     }
@@ -284,8 +282,11 @@ impl ApplyInboundClipboardUseCase {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn new(
+    /// Test-only construction for the inert apply-inbound path (no blob
+    /// materializer, no live index). `#[doc(hidden)]` because external
+    /// production callers must use `interactive_receive` / `store_only_pull`.
+    #[doc(hidden)]
+    pub fn new(
         entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
         capture: Arc<dyn InboundCapture>,
         write: Arc<dyn InboundWrite>,
@@ -397,8 +398,8 @@ impl ApplyInboundClipboardUseCase {
     /// Test-only resurface seam, so focused tests can mock one method instead
     /// of standing up six repository ports. Production modes encode whether
     /// resurfacing exists in their constructors.
-    #[cfg(test)]
-    pub(crate) fn with_resurface_ports(
+    #[doc(hidden)]
+    pub fn with_resurface_ports(
         mut self,
         rebuild: Arc<dyn InboundSnapshotRebuild>,
         touch_entry: Arc<dyn TouchClipboardEntryPort>,

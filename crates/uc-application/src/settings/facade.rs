@@ -4,7 +4,6 @@ use tracing::instrument;
 
 use uc_core::ports::SettingsPort;
 
-use crate::facade::settings::models::{SettingsPatch, SettingsView};
 use crate::facade::settings::relay_configuration::{RelayConfiguration, RelayConfigurationError};
 use crate::facade::settings::relay_diagnostic::{
     RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
@@ -12,6 +11,7 @@ use crate::facade::settings::relay_diagnostic::{
 use crate::facade::settings::{
     RelayCredentialEdit, RelayCredentials, RelayCredentialsError, RelayProbeCredential,
 };
+use crate::settings::models::{SettingsPatch, SettingsView};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsFacadeError {

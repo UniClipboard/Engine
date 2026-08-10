@@ -24,7 +24,9 @@ use uc_core::file_transfer::{
 };
 use uc_core::ports::{FindAttemptIdForTransferPort, FindEntryIdForTransferPort};
 
-use super::{HostEvent, HostEventBus, OutboundEntryIdCache, TransferHostEvent};
+use crate::facade::host_event::HostEventBus;
+use crate::support::outbound_entry_cache::OutboundEntryIdCache;
+use uc_core::ports::host_event::{HostEvent, TransferHostEvent};
 
 pub struct FileTransferHostEventPublisher {
     bus: Arc<HostEventBus>,

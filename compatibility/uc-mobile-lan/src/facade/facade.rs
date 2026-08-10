@@ -55,21 +55,15 @@ use uc_core::ports::{
 };
 use uc_observability_contract::analytics::AnalyticsPort;
 
-use crate::clipboard::active::ActiveClipboardFacade;
-use crate::clipboard::outbound::ClipboardOutboundFacade;
-use crate::clipboard::sync::apply_inbound::ApplyInboundClipboardUseCase;
 use crate::deps::MobileDevicePorts;
-use crate::facade::file_transfer::FileTransferFacade;
-use crate::facade::mobile_sync::activation_announce_adapter::MobileActivationAnnounceAdapter;
-use crate::facade::mobile_sync::file_upload::{
+use crate::facade::activation_announce_adapter::MobileActivationAnnounceAdapter;
+use crate::facade::file_upload::{
     BeginMobileFileUpload, MobileFileUploadApplyPort, MobileFileUploadCoordinator,
     MobileFileUploadError, MobileFileUploadHandle,
 };
-use crate::facade::mobile_sync::outbound_adapter::ClipboardOutboundFanOutAdapter;
-use crate::usecases::mobile_sync::apply_incoming::{
-    MobileActivationAnnouncePort, MobileInboundFanOutPort,
-};
-use crate::usecases::mobile_sync::{
+use crate::facade::outbound_adapter::ClipboardOutboundFanOutAdapter;
+use crate::usecases::apply_incoming::{MobileActivationAnnouncePort, MobileInboundFanOutPort};
+use crate::usecases::{
     apply_incoming::ApplyIncomingMobileClipUseCase,
     authenticate_basic::AuthenticateBasicAuthUseCase, get_file::GetMobileSyncFileUseCase,
     get_latest_doc::GetLatestMobileSyncDocUseCase, get_settings::GetMobileSyncSettingsUseCase,
@@ -78,44 +72,44 @@ use crate::usecases::mobile_sync::{
     register_device::RegisterMobileShortcutDeviceUseCase, revoke_device::RevokeMobileDeviceUseCase,
     update_device::UpdateMobileDeviceUseCase, update_settings::UpdateMobileSyncSettingsUseCase,
 };
+use uc_application::facade::file_transfer::FileTransferFacade;
+use uc_application::facade::ActiveClipboardFacade;
+use uc_application::facade::ClipboardOutboundFacade;
+use uc_application::ApplyInboundClipboardUseCase;
 
 // ── 对外类型 re-export ─────────────────────────────────────────────────
 
-pub use crate::usecases::mobile_sync::apply_incoming::{
+pub use crate::usecases::apply_incoming::{
     ApplyIncomingMobileClipError, ApplyIncomingMobileClipInput, ApplyIncomingMobileClipOutcome,
     IncomingMobileBuffer, IncomingMobileClipEvent,
 };
-pub use crate::usecases::mobile_sync::authenticate_basic::{
+pub use crate::usecases::authenticate_basic::{
     AuthenticateBasicAuthError, AuthenticateBasicAuthInput, AuthenticatedDevice,
 };
-pub use crate::usecases::mobile_sync::clipboard_doc::{SyncClipboardItemType, SyncClipboardMeta};
-pub use crate::usecases::mobile_sync::get_file::{GetMobileSyncFileError, GetMobileSyncFileOutput};
-pub use crate::usecases::mobile_sync::get_latest_doc::GetLatestMobileSyncDocError;
-pub use crate::usecases::mobile_sync::get_settings::{
+pub use crate::usecases::clipboard_doc::{SyncClipboardItemType, SyncClipboardMeta};
+pub use crate::usecases::get_file::{GetMobileSyncFileError, GetMobileSyncFileOutput};
+pub use crate::usecases::get_latest_doc::GetLatestMobileSyncDocError;
+pub use crate::usecases::get_settings::{
     GetMobileSyncSettingsError, MobileSyncSettingsView, ShortcutInstallMethod,
     ShortcutInstallMethodOption,
 };
-pub use crate::usecases::mobile_sync::latest_snapshot_adapter::MobileSyncSnapshotPorts;
-pub use crate::usecases::mobile_sync::list_devices::{ListMobileDevicesError, MobileDeviceSummary};
-pub use crate::usecases::mobile_sync::list_lan_interfaces::{
-    LanInterfaceOption, ListLanInterfacesError,
-};
-pub use crate::usecases::mobile_sync::register_device::{
+pub use crate::usecases::latest_snapshot_adapter::MobileSyncSnapshotPorts;
+pub use crate::usecases::list_devices::{ListMobileDevicesError, MobileDeviceSummary};
+pub use crate::usecases::list_lan_interfaces::{LanInterfaceOption, ListLanInterfacesError};
+pub use crate::usecases::register_device::{
     RegisterMobileShortcutDeviceError, RegisterMobileShortcutDeviceInput,
     RegisterMobileShortcutDeviceOutput,
 };
 // `SYNC_CLIPBOARD_EX_INSTALL_URL` 是 const 值, rustc 在 `pub use {}` 组里
 // 与类型混合时会误报 unused; 单独一行 re-export 让它独立绑定, 避免 warning
 // (功能上等价)。
-pub use crate::usecases::mobile_sync::register_device::SYNC_CLIPBOARD_EX_INSTALL_URL;
-pub use crate::usecases::mobile_sync::revoke_device::{
-    RevokeMobileDeviceError, RevokeMobileDeviceInput,
-};
-pub use crate::usecases::mobile_sync::update_device::{
+pub use crate::usecases::register_device::SYNC_CLIPBOARD_EX_INSTALL_URL;
+pub use crate::usecases::revoke_device::{RevokeMobileDeviceError, RevokeMobileDeviceInput};
+pub use crate::usecases::update_device::{
     MobileDevicePasswordEdit, UpdateMobileDeviceError, UpdateMobileDeviceInput,
     UpdateMobileDeviceOutput,
 };
-pub use crate::usecases::mobile_sync::update_settings::{
+pub use crate::usecases::update_settings::{
     UpdateMobileSyncSettingsError, UpdateMobileSyncSettingsInput, UpdateMobileSyncSettingsOutput,
 };
 
@@ -405,7 +399,7 @@ impl MobileSyncFacade {
 
     /// 登记一台 iPhone Shortcut 设备:颁发 (username, password) Basic Auth
     /// 凭据 + 渲染 SyncClipboard install URL 的二维码。详见
-    /// [`RegisterMobileShortcutDeviceUseCase`](crate::usecases::mobile_sync::register_device::RegisterMobileShortcutDeviceUseCase)。
+    /// [`RegisterMobileShortcutDeviceUseCase`](crate::usecases::register_device::RegisterMobileShortcutDeviceUseCase)。
     pub async fn register_device(
         &self,
         input: RegisterMobileShortcutDeviceInput,
@@ -494,7 +488,7 @@ impl MobileSyncFacade {
     }
 
     /// 校验 LAN HTTP 请求的 `Authorization: basic ...` 头。详见
-    /// [`AuthenticateBasicAuthUseCase`](crate::usecases::mobile_sync::authenticate_basic::AuthenticateBasicAuthUseCase)。
+    /// [`AuthenticateBasicAuthUseCase`](crate::usecases::authenticate_basic::AuthenticateBasicAuthUseCase)。
     pub async fn authenticate_basic(
         &self,
         input: AuthenticateBasicAuthInput,
@@ -645,7 +639,7 @@ mod tests {
     //! `snapshot_ports` 用 5 个 unimplemented stub。
 
     use super::*;
-    use crate::clipboard::write::ClipboardWriteIntent;
+    use uc_application::facade::clipboard_write::ClipboardWriteIntent;
 
     use std::sync::Mutex;
 
@@ -674,7 +668,7 @@ mod tests {
     use uc_core::BlobId;
     use uc_core::DeviceId;
 
-    use crate::clipboard::sync::apply_inbound::{InboundCapture, InboundWrite};
+    use uc_application::facade::{InboundCapture, InboundWrite};
     use uc_core::blob::ports::BlobReaderPort;
     use uc_core::SystemClipboardSnapshot;
 

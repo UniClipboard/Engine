@@ -10,8 +10,8 @@ publish = false
 default = []
 dev-tools = []
 lan-compat = [
+  "dep:uc-mobile-lan",
   "dep:uc-mobile-proto",
-  "uc-application/lan-compat",
   "uc-infra/lan-compat",
 ]
 
@@ -28,6 +28,7 @@ uuid = { version = "1", features = ["v4", "fast-rng"] }
 uc-application = { path = "../uc-application" }
 uc-core = { path = "../uc-core", features = ["task-registry"] }
 uc-infra = { path = "../uc-infra" }
+uc-mobile-lan = { path = "../../compatibility/uc-mobile-lan", optional = true }
 uc-mobile-proto = { path = "../../compatibility/uc-mobile-proto", optional = true }
 uc-observability-contract = { path = "../uc-observability-contract" }
 zeroize = "1.8"

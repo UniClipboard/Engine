@@ -1,9 +1,9 @@
-use uc_application::facade::mobile_sync::{
+use uc_core::mobile_sync::MobileDeviceId;
+use uc_mobile_lan::{
     ApplyIncomingMobileClipError, ApplyIncomingMobileClipOutcome, CheckContentAvailableError,
     GetLatestMobileSyncDocError, GetMobileSyncFileError, MobileSyncFacade, SyncClipboardItemType,
     SyncClipboardMeta,
 };
-use uc_core::mobile_sync::MobileDeviceId;
 
 use crate::{
     ApplyMobileSyncDocumentInput, EngineError, EngineErrorCategory, MobileContentAvailabilityInput,

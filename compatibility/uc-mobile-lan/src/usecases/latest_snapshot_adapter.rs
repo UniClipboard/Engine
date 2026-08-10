@@ -34,8 +34,8 @@
 //! - **An underlying port errors** (repo failure / blob unreadable / corrupt
 //!   payload_state) → return `Err(Resolution(...))`, route 500.
 //! - This policy matches the existing NotFound-vs-Port split in
-//!   [`crate::usecases::mobile_sync::get_latest_doc`] /
-//!   [`crate::usecases::mobile_sync::get_file`] — the use-case layer no longer
+//!   [`crate::usecases::get_latest_doc`] /
+//!   [`crate::usecases::get_file`] — the use-case layer no longer
 //!   re-decides "is it None or Err".
 //!
 //! ## Visibility

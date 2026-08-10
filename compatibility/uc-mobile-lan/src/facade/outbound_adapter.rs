@@ -42,8 +42,8 @@
 //! 是否成功只取决于"本机入站是否生效", fan-out 是事后传播, 网络出口故
 //! 障不应倒灌成 HTTP 4xx/5xx 让 iPhone 端误判而触发用户重传。
 //!
-//! [`MobileInboundFanOutPort`]: crate::usecases::mobile_sync::apply_incoming::MobileInboundFanOutPort
-//! [`ClipboardOutboundFacade`]: crate::clipboard::outbound::ClipboardOutboundFacade
+//! [`MobileInboundFanOutPort`]: crate::usecases::apply_incoming::MobileInboundFanOutPort
+//! [`ClipboardOutboundFacade`]: uc_application::facade::ClipboardOutboundFacade
 
 use std::sync::Arc;
 
@@ -53,10 +53,10 @@ use uc_core::ids::EntryId;
 use uc_core::mobile_sync::MobileDeviceId;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 
-use crate::clipboard::outbound::{
+use crate::usecases::apply_incoming::MobileInboundFanOutPort;
+use uc_application::facade::{
     ClipboardOutboundFacade, ClipboardOutboundInput, ClipboardOutboundOutcome,
 };
-use crate::usecases::mobile_sync::apply_incoming::MobileInboundFanOutPort;
 
 /// `MobileInboundFanOutPort` 的生产实现, 委托给 [`ClipboardOutboundFacade`]。
 pub(crate) struct ClipboardOutboundFanOutAdapter {
