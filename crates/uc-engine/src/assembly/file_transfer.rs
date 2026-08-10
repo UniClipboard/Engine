@@ -38,6 +38,7 @@ pub fn build_file_transfer_assembly(
     file_transfer: FileTransferPorts,
     directory_receive: DirectoryReceivePorts,
     clock: Arc<dyn ClockPort>,
+    receive_readiness: Arc<uc_application::facade::ReceiveReadinessCoordinator>,
     save_dir_resolver: Arc<dyn ResolveInboundSaveDirPort>,
     file_cache_dir: PathBuf,
 ) -> FileTransferAssembly {
@@ -78,6 +79,7 @@ pub fn build_file_transfer_assembly(
             file_cache_dir,
             clock,
             host_event_bus,
+            receive_readiness,
         },
     }));
 

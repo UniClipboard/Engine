@@ -126,6 +126,11 @@ pub struct DaemonRuntimeDeps {
 /// meaningful boundary; mirrors the [`BackgroundRuntimeDeps`] precedent.
 #[derive(Clone)]
 pub struct SharedRuntimeDeps {
+    /// Shared receive-readiness gate: the same coordinator is injected into
+    /// the file-transfer lifecycle (which opens it) and the clipboard
+    /// inbound apply path (which waits on it), so one open gate unblocks
+    /// every receiver.
+    pub receive_readiness: Arc<uc_application::facade::ReceiveReadinessCoordinator>,
     /// Shared host-event bus created at wire time with the "logging" emitter
     /// already registered (event type names → `tracing::debug`), so non-GUI /
     /// CLI processes have a sensible default transport. Callers register their

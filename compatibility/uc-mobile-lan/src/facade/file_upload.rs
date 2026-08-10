@@ -658,6 +658,7 @@ mod tests {
             file_cache_dir: std::path::PathBuf::new(),
             clock: Arc::new(FixedClock),
             host_event_bus: Arc::new(HostEventBus::new()),
+            receive_readiness: Arc::new(uc_application::facade::ReceiveReadinessCoordinator::new()),
         }
     }
 

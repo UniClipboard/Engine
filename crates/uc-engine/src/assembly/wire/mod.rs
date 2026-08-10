@@ -609,6 +609,9 @@ pub fn wire_dependencies_from_inputs(
         Arc::new(uc_application::facade::HostEventBus::new());
     host_event_bus.register("logging", host_event_emitter);
 
+    let receive_readiness: Arc<uc_application::facade::ReceiveReadinessCoordinator> =
+        Arc::new(uc_application::facade::ReceiveReadinessCoordinator::new());
+
     let crate::assembly::file_transfer::FileTransferAssembly {
         facade: file_transfer_facade,
     } = crate::assembly::file_transfer::build_file_transfer_assembly(
@@ -617,6 +620,7 @@ pub fn wire_dependencies_from_inputs(
         deps.storage.file_transfer.clone(),
         deps.storage.directory_receive.clone(),
         deps.system.clock.clone(),
+        Arc::clone(&receive_readiness),
         uc_infra::fs::FsInboundFileTarget::new(deps.settings.clone()),
         paths.file_cache_dir.clone(),
     );
@@ -668,6 +672,7 @@ pub fn wire_dependencies_from_inputs(
                 as Arc<dyn uc_core::ports::mobile_sync::MobileSyncEndpointInfoPort>,
         },
         shared: SharedRuntimeDeps {
+            receive_readiness,
             host_event_bus,
             entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
             clipboard_event_reader_repo: Arc::clone(&infra.clipboard_event_reader_repo),

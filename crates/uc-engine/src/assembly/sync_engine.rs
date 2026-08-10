@@ -1016,9 +1016,7 @@ pub async fn build_sync_engine_assembly(
                     clock: Arc::clone(&deps.system.clock),
                 },
                 receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
-                receive_readiness: Arc::new(
-                    uc_application::facade::ReceiveReadinessCoordinator::new(),
-                ),
+                receive_readiness: Arc::clone(&shared.receive_readiness),
                 host_event_emitter: Arc::clone(&shared.host_event_bus),
                 search_live_index: pull_store_indexer,
                 availability: Arc::clone(&deps.clipboard.entry_ports.availability),
