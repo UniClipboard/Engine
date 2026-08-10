@@ -3,14 +3,14 @@ use uc_engine::{
     EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
     EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
     JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary, LocalDeviceSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MembershipConvergenceStateSummary,
-    MembershipConvergenceSummary, MigrationPhaseSummary, MigrationProgressSummary, Operation,
-    OperationKind, OperationResult, QueryHistoryInput, QueryLegacyBootstrapInput,
-    QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
-    ResendEntryInput, SearchEntriesInput, SearchPageSummary, SearchResultSummary, SecretString,
-    SendFilesInput, SendImageInput, SendTextInput, SetupInvitationSummary, SetupStateSummary,
-    SpaceProtectionModeSummary, SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
-    UpdateMemberSyncPreferencesInput,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MigrationPhaseSummary,
+    MigrationProgressSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
+    QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
+    RemoveMemberInput, ResendEntryInput, SearchEntriesInput, SearchPageSummary,
+    SearchResultSummary, SecretString, SendFilesInput, SendImageInput, SendTextInput,
+    SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary, SpaceProtectionSummary,
+    StorageStatsSummary, UnlockSpaceInput, UpdateMemberSyncPreferencesInput,
+    WorkspaceConvergencePhaseSummary, WorkspaceConvergenceSummary,
 };
 
 #[test]
@@ -106,8 +106,8 @@ fn every_public_operation_has_a_stable_kind() {
         ),
         (Operation::ListDevices, OperationKind::ListDevices),
         (
-            Operation::QueryMembershipConvergence,
-            OperationKind::QueryMembershipConvergence,
+            Operation::QueryWorkspaceConvergence,
+            OperationKind::QueryWorkspaceConvergence,
         ),
         (
             Operation::QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput {
@@ -127,10 +127,6 @@ fn every_public_operation_has_a_stable_kind() {
                 device_id: "member-1".into(),
             }),
             OperationKind::RemoveMember,
-        ),
-        (
-            Operation::QueryMemberRemoval,
-            OperationKind::QueryMemberRemoval,
         ),
         (
             Operation::QueryLegacyBootstrap(QueryLegacyBootstrapInput {
@@ -1292,16 +1288,21 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
     assert!(format!("{preferences:?}").contains("member_sync_preferences"));
     assert!(format!(
         "{:?}",
-        OperationResult::MemberRemoved(uc_engine::MemberRemovalSummary {
-            phase: uc_engine::MemberRemovalPhase::Applied,
-            intent_count: 1,
+        OperationResult::WorkspaceConvergence(uc_engine::WorkspaceConvergenceSummary {
+            phase: uc_engine::WorkspaceConvergencePhaseSummary::LocallyApplied,
+            revision: 1,
+            change_count: 1,
+            removal_intent_count: 0,
             effective_member_count: 2,
+            confirmed_member_count: 0,
+            waiting_member_count: 0,
             convergence_digest: None,
-            updated_at_ms: 123,
             removed: false,
+            updated_at_ms: 123,
+            failure_category: None,
         })
     )
-    .contains("member_removed"));
+    .contains("workspace_convergence"));
     assert!(format!(
         "{:?}",
         OperationResult::LegacyBootstrapStatus(Some(LegacyBootstrapSummary {
@@ -1339,32 +1340,40 @@ fn encryption_operations_expose_only_stable_state_and_outcomes() {
 }
 
 #[test]
-fn membership_convergence_exposes_only_state_and_counts() {
-    let result = OperationResult::MembershipConvergence(MembershipConvergenceSummary {
-        state: MembershipConvergenceStateSummary::WaitingForUpgrade,
-        pending_count: 7,
-        waiting_for_peer_count: 2,
-        waiting_for_update_count: 1,
-        version_incompatible_count: 3,
-        blocked_count: 0,
-        rejected_count: 1,
+fn workspace_convergence_exposes_only_stable_facts() {
+    let result = OperationResult::WorkspaceConvergence(WorkspaceConvergenceSummary {
+        phase: WorkspaceConvergencePhaseSummary::WaitingForOfflineMember,
+        revision: 3,
+        change_count: 2,
+        removal_intent_count: 1,
+        effective_member_count: 3,
+        confirmed_member_count: 1,
+        waiting_member_count: 1,
+        convergence_digest: None,
+        removed: false,
+        updated_at_ms: 7,
+        failure_category: None,
     });
 
     assert_eq!(
         result,
-        OperationResult::MembershipConvergence(MembershipConvergenceSummary {
-            state: MembershipConvergenceStateSummary::WaitingForUpgrade,
-            pending_count: 7,
-            waiting_for_peer_count: 2,
-            waiting_for_update_count: 1,
-            version_incompatible_count: 3,
-            blocked_count: 0,
-            rejected_count: 1,
+        OperationResult::WorkspaceConvergence(WorkspaceConvergenceSummary {
+            phase: WorkspaceConvergencePhaseSummary::WaitingForOfflineMember,
+            revision: 3,
+            change_count: 2,
+            removal_intent_count: 1,
+            effective_member_count: 3,
+            confirmed_member_count: 1,
+            waiting_member_count: 1,
+            convergence_digest: None,
+            removed: false,
+            updated_at_ms: 7,
+            failure_category: None,
         })
     );
     let debug = format!("{result:?}");
-    assert!(debug.contains("membership_convergence"));
-    assert!(debug.contains("pending_count"));
+    assert!(debug.contains("workspace_convergence"));
+    assert!(debug.contains("change_count"));
 }
 
 #[test]
@@ -1600,17 +1609,22 @@ fn lagged_consumers_receive_a_refresh_event() {
 }
 
 #[test]
-fn member_removal_changes_expose_a_full_replacement_snapshot() {
-    let event = EngineEvent::MemberRemovalChanged(uc_engine::MemberRemovalSummary {
-        phase: uc_engine::MemberRemovalPhase::Applied,
-        intent_count: 1,
+fn workspace_convergence_changes_expose_a_full_replacement_snapshot() {
+    let event = EngineEvent::WorkspaceConvergenceChanged(uc_core::membership::WorkspaceSnapshot {
+        phase: uc_core::membership::WorkspacePhase::Converging,
+        revision: 1,
+        change_count: 1,
+        removal_intent_count: 0,
         effective_member_count: 2,
+        confirmed_member_count: 0,
+        waiting_member_count: 0,
         convergence_digest: None,
-        updated_at_ms: 123,
         removed: false,
+        updated_at_ms: 123,
+        failure_category: None,
     });
 
-    assert_eq!(event.kind(), "member_removal_changed");
+    assert_eq!(event.kind(), "workspace_convergence_changed");
 }
 
 #[test]

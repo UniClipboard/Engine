@@ -47,8 +47,8 @@ use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{DeviceId, SessionId, SpaceId};
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::pairing::session_message::{
-    JoinerChallengeResponse, JoinerRequest, PairingRejectReason, PairingSecurityCapability,
-    PairingSessionMessage,
+    JoinerChallengeResponse, JoinerReady, JoinerRequest, PairingRejectReason,
+    PairingSecurityCapability, PairingSessionMessage,
 };
 use uc_core::ports::pairing::{
     DialError, DialOutcome, DiscoveryChannel, PairingSessionId, PairingSessionPort, SessionError,
@@ -93,6 +93,22 @@ pub(crate) struct JoinerHandshakeOutcome {
     /// joiner 端按 Solo 退化，等待下次 sponsor 自己发新设备 pairing 时再
     /// 通过 sponsor 派发统一切换（task_plan §开放问题 2 决策 A）。
     pub sponsor_space_person_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingJoinerHandshake {
+    session: PairingSessionId,
+    outcome: JoinerHandshakeOutcome,
+}
+
+impl PendingJoinerHandshake {
+    pub(crate) fn outcome(&self) -> &JoinerHandshakeOutcome {
+        &self.outcome
+    }
+
+    pub(crate) fn into_outcome(self) -> JoinerHandshakeOutcome {
+        self.outcome
+    }
 }
 
 pub(crate) struct JoinerHandshakeCoordinator {
@@ -142,7 +158,7 @@ impl JoinerHandshakeCoordinator {
         &self,
         code: &InvitationCode,
         passphrase: &Passphrase,
-    ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
+    ) -> Result<PendingJoinerHandshake, RedeemPairingInvitationError> {
         // Dial first so NotFound / Expired / Unreachable short-circuits
         // without spending any crypto work. A successful dial creates
         // a session in the adapter that we must close on every exit
@@ -158,12 +174,7 @@ impl JoinerHandshakeCoordinator {
         info!(session = %session, ?channel, "pairing session dialled");
 
         match self.drive(&session, channel, code, passphrase).await {
-            Ok(outcome) => {
-                self.pairing_session
-                    .close(&session, Some("handshake completed".into()))
-                    .await;
-                Ok(outcome)
-            }
+            Ok(outcome) => Ok(PendingJoinerHandshake { session, outcome }),
             Err(err) => {
                 self.pairing_session
                     .close(&session, Some(format!("handshake aborted: {err}")))
@@ -171,6 +182,38 @@ impl JoinerHandshakeCoordinator {
                 Err(err)
             }
         }
+    }
+
+    pub(crate) async fn complete(
+        &self,
+        pending: PendingJoinerHandshake,
+    ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
+        self.pairing_session
+            .send(&pending.session, PairingSessionMessage::Ready(JoinerReady))
+            .await
+            .map_err(map_session_err)?;
+        self.pairing_session
+            .close(&pending.session, Some("joiner ready".into()))
+            .await;
+        Ok(pending.into_outcome())
+    }
+
+    pub(crate) async fn handshake_and_complete(
+        &self,
+        code: &InvitationCode,
+        passphrase: &Passphrase,
+    ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
+        let pending = self.handshake(code, passphrase).await?;
+        self.complete(pending).await
+    }
+
+    pub(crate) async fn abort(&self, pending: PendingJoinerHandshake, error: &str) {
+        self.pairing_session
+            .close(
+                &pending.session,
+                Some(format!("joiner persistence failed: {error}")),
+            )
+            .await;
     }
 
     async fn drive(
@@ -459,6 +502,7 @@ fn variant_name(message: &PairingSessionMessage) -> &'static str {
         PairingSessionMessage::AdmissionOffer(_) => "AdmissionOffer",
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
         PairingSessionMessage::Confirm(_) => "Confirm",
+        PairingSessionMessage::Ready(_) => "Ready",
         PairingSessionMessage::Reject(_) => "Reject",
     }
 }
@@ -816,12 +860,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(out.sponsor_device_id.as_str(), "sponsor-device");
-        assert_eq!(out.sponsor_device_name, "sponsor's laptop");
-        assert_eq!(out.sponsor_identity_fingerprint, sponsor_fp());
-        assert_eq!(out.space_id.inner(), "space-xyz");
-        assert_eq!(out.self_device_id.as_str(), "joiner-device");
-        assert_eq!(out.self_identity_fingerprint, joiner_fp());
+        assert_eq!(out.outcome().sponsor_device_id.as_str(), "sponsor-device");
+        assert_eq!(out.outcome().sponsor_device_name, "sponsor's laptop");
+        assert_eq!(out.outcome().sponsor_identity_fingerprint, sponsor_fp());
+        assert_eq!(out.outcome().space_id.inner(), "space-xyz");
+        assert_eq!(out.outcome().self_device_id.as_str(), "joiner-device");
+        assert_eq!(out.outcome().self_identity_fingerprint, joiner_fp());
 
         let sent = b.session.sent();
         assert_eq!(sent.len(), 2);
@@ -838,6 +882,12 @@ mod tests {
             sent[1].1,
             PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse { .. })
         ));
+        assert!(b.session.closed().is_empty());
+
+        coord.complete(out).await.unwrap();
+
+        let sent = b.session.sent();
+        assert!(matches!(sent[2].1, PairingSessionMessage::Ready(_)));
         assert_eq!(b.session.closed().len(), 1);
     }
 

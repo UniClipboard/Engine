@@ -52,6 +52,7 @@ use chrono::{DateTime, Utc};
 use tracing::{info, instrument};
 
 use uc_core::ports::pairing::DiscoveryChannel;
+use uc_core::ports::space::ResumeSpaceSessionPort;
 use uc_core::ports::{ClockPort, PeerAddressRecord, PeerAddressRepositoryPort, SetupStatusPort};
 use uc_core::setup::SetupStatus;
 use uc_core::{MemberRepositoryPort, MemberSyncPreferences, TrustedPeerRepositoryPort};
@@ -81,6 +82,7 @@ pub(crate) struct RedeemPairingInvitationUseCase {
     /// Slice 2 Phase 1 · T5：配对完成后 best-effort 把 sponsor 的传输地址
     /// blob 写入仓库。写失败不 fail join（presence 下轮会再拉）。
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    resume_session: Arc<dyn ResumeSpaceSessionPort>,
     clock: Arc<dyn ClockPort>,
     /// Joiner-side analytics: fires `pairing_started` on entry,
     /// `pairing_succeeded` / `pairing_failed` on result. The identity
@@ -98,6 +100,7 @@ impl RedeemPairingInvitationUseCase {
         trust_peer: Arc<TrustPeerUc>,
         setup_status: Arc<dyn SetupStatusPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        resume_session: Arc<dyn ResumeSpaceSessionPort>,
         clock: Arc<dyn ClockPort>,
         analytics: Arc<dyn AnalyticsFacade>,
     ) -> Self {
@@ -107,6 +110,7 @@ impl RedeemPairingInvitationUseCase {
             trust_peer,
             setup_status,
             peer_addr_repo,
+            resume_session,
             clock,
             analytics,
         }
@@ -127,12 +131,35 @@ impl RedeemPairingInvitationUseCase {
         });
         let started_at = Instant::now();
         let result = async {
-            let outcome = self.handshake.handshake(&cmd.code, &cmd.passphrase).await?;
-            // `DiscoveryChannel` is `Copy`; capture it before `persist`
-            // consumes the outcome so `pairing_succeeded` can record which
-            // channel resolved this first pair.
-            let channel = outcome.discovery_channel;
-            self.persist(outcome).await.map(|res| (res, channel))
+            let pending = self.handshake.handshake(&cmd.code, &cmd.passphrase).await?;
+            let channel = pending.outcome().discovery_channel;
+            let persisted = match self.persist(pending.outcome().clone()).await {
+                Ok(persisted) => persisted,
+                Err(error) => {
+                    self.handshake.abort(pending, &error.to_string()).await;
+                    return Err(error);
+                }
+            };
+            if self
+                .resume_session
+                .try_resume_session(&persisted.space_id)
+                .await
+                .map_err(|error| {
+                    RedeemPairingInvitationError::Internal(format!(
+                        "activate paired space: {error}"
+                    ))
+                })?
+                .is_none()
+            {
+                self.handshake
+                    .abort(pending, "paired space could not be activated")
+                    .await;
+                return Err(RedeemPairingInvitationError::Internal(
+                    "activate paired space: persisted session was unavailable".into(),
+                ));
+            }
+            self.handshake.complete(pending).await?;
+            Ok((persisted, channel))
         }
         .await;
         let duration_ms = started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
@@ -363,7 +390,7 @@ mod tests {
     use async_trait::async_trait;
     use uuid::Uuid;
 
-    use uc_core::crypto::domain::Passphrase;
+    use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::pairing::invitation::InvitationCode;
@@ -375,7 +402,8 @@ mod tests {
         SessionError,
     };
     use uc_core::ports::space::{
-        DeriveAdmissionProofKeyPort, GroupAdmissionPort, ProofPort, SpaceAccessError,
+        DeriveAdmissionProofKeyPort, GroupAdmissionPort, ProofPort, ResumeSpaceSessionPort,
+        SpaceAccessError,
     };
     use uc_core::ports::{DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort};
     use uc_core::security::IdentityFingerprint;
@@ -517,6 +545,7 @@ mod tests {
                 group_epoch: u64,
             ) -> Result<(), SpaceAccessError>;
         }
+
     }
 
     fn happy_space_access() -> Arc<MockSpaceAccess> {
@@ -697,6 +726,17 @@ mod tests {
     impl ClockPort for FixedClock {
         fn now_ms(&self) -> i64 {
             self.0
+        }
+    }
+
+    struct ReadyResume;
+    #[async_trait]
+    impl ResumeSpaceSessionPort for ReadyResume {
+        async fn try_resume_session(
+            &self,
+            space_id: &SpaceId,
+        ) -> Result<Option<ActiveSpace>, SpaceAccessError> {
+            Ok(Some(ActiveSpace::new(space_id.clone())))
         }
     }
 
@@ -884,7 +924,7 @@ mod tests {
             let handshake = JoinerHandshakeCoordinator::new(
                 session,
                 space_access.clone(),
-                space_access,
+                space_access.clone(),
                 Arc::new(FixedProof),
                 Arc::new(FixedLocal(joiner_fp())),
                 Arc::new(FixedDevice(DeviceId::new("joiner-device"))),
@@ -911,6 +951,7 @@ mod tests {
                 trust_uc,
                 setup_status.clone(),
                 peer_addr_repo.clone() as Arc<dyn PeerAddressRepositoryPort>,
+                Arc::new(ReadyResume),
                 Arc::new(FixedClock(fixed_now_ms())),
                 facade,
             );
@@ -1219,6 +1260,7 @@ mod tests {
             trust_uc,
             setup_status,
             peer_addr_repo,
+            Arc::new(ReadyResume),
             Arc::new(FixedClock(fixed_now_ms())),
             facade,
         );

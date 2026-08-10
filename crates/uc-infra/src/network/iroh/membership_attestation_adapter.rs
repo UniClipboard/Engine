@@ -168,6 +168,7 @@ pub struct IrohMembershipGossipTransportAdapter {
 }
 
 struct MembershipGossipHandlerState {
+    session: Arc<InMemorySession>,
     member_repo: Arc<dyn MemberRepositoryPort>,
     peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
@@ -176,6 +177,7 @@ struct MembershipGossipHandlerState {
 impl IrohMembershipGossipTransportAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
+        session: Arc<InMemorySession>,
         identity: Arc<dyn CurrentMembershipIdentityPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
@@ -187,6 +189,7 @@ impl IrohMembershipGossipTransportAdapter {
             identity,
             peer_addr_repo,
             handler_state: Arc::new(MembershipGossipHandlerState {
+                session,
                 member_repo,
                 peer_admission,
                 fingerprint_factory,
@@ -748,6 +751,13 @@ impl IrohMembershipAttestationHandler {
                 return Err("invalid_gossip_source");
             }
         };
+        if tokio::time::timeout(IO_TIMEOUT, state.session.wait_until_ready())
+            .await
+            .is_err()
+        {
+            reject(send, WireReject::Persistence).await;
+            return Err("gossip_session_not_ready");
+        }
         let resolved = match state.resolve_device(&remote_key).await {
             Some(resolved) => resolved,
             None => {
@@ -1234,6 +1244,15 @@ mod tests {
         )
     }
 
+    fn ready_session() -> Arc<InMemorySession> {
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(
+            SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[0x61; 32]).unwrap(),
+        );
+        session
+    }
+
     #[tokio::test]
     async fn current_membership_identity_is_unavailable_while_space_is_locked() {
         let endpoint = endpoint([0x41; 32]).await;
@@ -1663,6 +1682,7 @@ mod tests {
         )]))));
         let transport = IrohMembershipGossipTransportAdapter::new(
             Arc::clone(&local_endpoint),
+            ready_session(),
             Arc::new(FixedIdentity(local_identity)),
             addresses,
             Arc::new(StaticMemberRepository(Vec::new())),
@@ -1840,6 +1860,7 @@ mod tests {
         };
         let a_transport = IrohMembershipGossipTransportAdapter::new(
             a_endpoint.clone(),
+            ready_session(),
             Arc::new(FixedIdentity(a_identity.clone())),
             Arc::new(StaticPeerAddressRepository(Mutex::new(HashMap::new()))),
             Arc::new(StaticMemberRepository(vec![member(&b_identity)])),
@@ -1867,6 +1888,7 @@ mod tests {
         )]))));
         let b_transport = IrohMembershipGossipTransportAdapter::new(
             b_endpoint.clone(),
+            ready_session(),
             Arc::new(FixedIdentity(b_identity.clone())),
             b_addresses,
             Arc::new(StaticMemberRepository(Vec::new())),
@@ -1932,6 +1954,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gossip_request_waits_for_the_receiver_session_on_the_same_connection() {
+        let a_seed = [0x51; 32];
+        let b_seed = [0x52; 32];
+        let a_endpoint = endpoint(a_seed).await;
+        let b_endpoint = endpoint(b_seed).await;
+        wait_for_direct_addrs(&a_endpoint).await;
+        wait_for_direct_addrs(&b_endpoint).await;
+
+        let a_identity = identity(a_seed, "device-a");
+        let b_identity = identity(b_seed, "device-b");
+        let secrets = Arc::new(HashMap::from([
+            (a_identity.device_id, [0xa1; 32]),
+            (b_identity.device_id, [0xb1; 32]),
+        ]));
+        let a_session = Arc::new(InMemorySession::new());
+        let a_attestation = Arc::new(IrohMembershipAttestationAdapter::new(
+            a_endpoint.clone(),
+            Arc::new(FixedIdentity(a_identity.clone())),
+            signatures("device-a", secrets.clone()),
+            Arc::new(Sha256IdentityFingerprintFactory),
+        ));
+        let member = |identity: &CurrentMembershipIdentity| SpaceMember {
+            device_id: identity.device_id,
+            device_name: identity.device_name.clone(),
+            identity_fingerprint: identity.identity_fingerprint.clone(),
+            joined_at: chrono::Utc::now(),
+            sync_preferences: uc_core::MemberSyncPreferences::default(),
+        };
+        let a_transport = IrohMembershipGossipTransportAdapter::new(
+            a_endpoint.clone(),
+            Arc::clone(&a_session),
+            Arc::new(FixedIdentity(a_identity.clone())),
+            Arc::new(StaticPeerAddressRepository(Mutex::new(HashMap::new()))),
+            Arc::new(StaticMemberRepository(vec![member(&b_identity)])),
+            Arc::new(AdmitAll),
+            Arc::new(Sha256IdentityFingerprintFactory),
+        );
+        let received = Arc::new(RecordingGossipEndpoint(Mutex::new(Vec::new())));
+        let a_router = iroh::protocol::Router::builder((*a_endpoint).clone())
+            .accept(
+                MEMBERSHIP_ATTESTATION_ALPN,
+                a_attestation.handler_with_gossip(
+                    Arc::new(RecordingEndpoint::default()),
+                    &a_transport,
+                    received.clone(),
+                ),
+            )
+            .spawn();
+        let b_addresses = Arc::new(StaticPeerAddressRepository(Mutex::new(HashMap::from([(
+            a_identity.device_id,
+            PeerAddressRecord {
+                device_id: a_identity.device_id,
+                addr_blob: postcard::to_stdvec(&a_endpoint.addr()).unwrap(),
+                observed_at: chrono::Utc::now(),
+            },
+        )]))));
+        let b_transport = Arc::new(IrohMembershipGossipTransportAdapter::new(
+            b_endpoint.clone(),
+            ready_session(),
+            Arc::new(FixedIdentity(b_identity.clone())),
+            b_addresses,
+            Arc::new(StaticMemberRepository(Vec::new())),
+            Arc::new(AdmitAll),
+            Arc::new(Sha256IdentityFingerprintFactory),
+        ));
+        let batch = MembershipEventBatch {
+            space_id: SpaceId::from("space-a"),
+            batch_id: [9; 32],
+            events: Vec::new(),
+        };
+        let exchange = tokio::spawn({
+            let b_transport = Arc::clone(&b_transport);
+            let recipient = a_identity.device_id;
+            async move {
+                b_transport
+                    .exchange(
+                        &recipient,
+                        MembershipGossipMessage::EventBatch(batch.clone()),
+                    )
+                    .await
+            }
+        });
+        tokio::pin!(exchange);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut exchange)
+                .await
+                .is_err()
+        );
+
+        a_session.set_master_key_for_space(
+            SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[0x51; 32]).unwrap(),
+        );
+
+        let response = tokio::time::timeout(Duration::from_secs(2), exchange)
+            .await
+            .expect("the original gossip request must complete after session readiness")
+            .expect("gossip task must not panic")
+            .expect("the original gossip request must not be rejected");
+        assert!(matches!(response, MembershipGossipMessage::Ack(_)));
+        assert_eq!(received.0.lock().unwrap().len(), 1);
+        a_router.shutdown().await.ok();
+        a_endpoint.close().await;
+        b_endpoint.close().await;
+    }
+
+    #[tokio::test]
     async fn gossip_explicitly_rejects_spoofed_untrusted_wrong_space_and_invalid_messages() {
         let a_seed = [0x41; 32];
         let b_seed = [0x42; 32];
@@ -1957,6 +2087,7 @@ mod tests {
         );
         let a_transport = IrohMembershipGossipTransportAdapter::new(
             a_endpoint.clone(),
+            ready_session(),
             Arc::new(FixedIdentity(a_identity.clone())),
             Arc::new(StaticPeerAddressRepository(Mutex::new(HashMap::new()))),
             Arc::new(StaticMemberRepository(vec![SpaceMember {

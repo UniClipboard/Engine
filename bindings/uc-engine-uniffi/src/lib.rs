@@ -10,11 +10,9 @@ mod runtime;
 
 pub use runtime::{
     ActiveClipboard, Device, EntryNotResendableReason, InvitationAvailability, InvitationIssued,
-    LocalDevice, MemberRemoval, MemberRemovalPhase, MembershipConvergence,
-    MembershipConvergenceState, MobileEngine, PeerConnectionRefresh, RelaySaveResult,
-    ResendEntryOutcome, SendReport, SessionRecovery, SharedDeviceRefresh,
-    SharedDeviceRefreshDevice, SharedDeviceRefreshDeviceState, SharedDeviceRefreshPhase,
-    SharedDeviceRefreshStarted, SpaceCreated, SpaceInvitation, SpaceJoined, SpaceState,
+    LocalDevice, MobileEngine, PeerConnectionRefresh, RelaySaveResult, ResendEntryOutcome,
+    SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceJoined, SpaceState,
+    WorkspaceConvergence, WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();
@@ -360,11 +358,8 @@ pub enum BindingEvent {
         state: String,
         at_ms: i64,
     },
-    MemberRemovalChanged {
-        removal: MemberRemoval,
-    },
-    SharedDeviceRefreshChanged {
-        refresh: SharedDeviceRefresh,
+    WorkspaceConvergenceChanged {
+        convergence: WorkspaceConvergence,
     },
     TransferProgress {
         transfer_id: String,

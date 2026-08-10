@@ -458,12 +458,8 @@ pub enum OperationResult {
         granted: bool,
     },
     Devices(Vec<DeviceSummary>),
-    MembershipConvergence(MembershipConvergenceSummary),
-    SharedDeviceRefreshStarted(SharedDeviceRefreshStartedSummary),
-    SharedDeviceRefresh(Option<SharedDeviceRefreshSummary>),
     MemberSyncPreferences(MemberSyncPreferencesSummary),
-    MemberRemoved(MemberRemovalSummary),
-    MemberRemovalStatus(MemberRemovalSummary),
+    WorkspaceConvergence(WorkspaceConvergenceSummary),
     LegacyBootstrapStatus(Option<LegacyBootstrapSummary>),
     SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
@@ -645,23 +641,11 @@ impl fmt::Debug for OperationResult {
             Self::Devices(devices) => debug
                 .field("kind", &"devices")
                 .field("device_count", &devices.len()),
-            Self::MembershipConvergence(summary) => debug
-                .field("kind", &"membership_convergence")
-                .field("summary", summary),
-            Self::SharedDeviceRefreshStarted(summary) => debug
-                .field("kind", &"shared_device_refresh_started")
-                .field("summary", summary),
-            Self::SharedDeviceRefresh(summary) => debug
-                .field("kind", &"shared_device_refresh")
-                .field("summary", summary),
             Self::MemberSyncPreferences(preferences) => debug
                 .field("kind", &"member_sync_preferences")
                 .field("preferences", preferences),
-            Self::MemberRemoved(summary) => debug
-                .field("kind", &"member_removed")
-                .field("summary", summary),
-            Self::MemberRemovalStatus(summary) => debug
-                .field("kind", &"member_removal_status")
+            Self::WorkspaceConvergence(summary) => debug
+                .field("kind", &"workspace_convergence")
                 .field("summary", summary),
             Self::LegacyBootstrapStatus(summary) => debug
                 .field("kind", &"legacy_bootstrap_status")
@@ -881,129 +865,56 @@ pub struct DeviceSummary {
     pub online: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipConvergenceStateSummary {
-    Complete,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceConvergencePhaseSummary {
+    LocallyApplied,
     Converging,
-    WaitingForUpgrade,
-    Blocked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MembershipConvergenceSummary {
-    pub state: MembershipConvergenceStateSummary,
-    pub pending_count: u64,
-    pub waiting_for_peer_count: u64,
-    pub waiting_for_update_count: u64,
-    pub version_incompatible_count: u64,
-    pub blocked_count: u64,
-    pub rejected_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SharedDeviceRefreshStartedSummary {
-    pub request_id: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SharedDeviceRefreshPhaseSummary {
-    Started,
-    Discovering,
-    Connecting,
-    RoundCompleted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SharedDeviceRefreshDeviceStateSummary {
-    Discovered,
-    Connecting,
-    Connected,
-    AlreadyPresent,
-    WaitingForPeer,
-    WaitingForUpdate,
-    VersionIncompatible,
-    Rejected,
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SharedDeviceRefreshDeviceSummary {
-    pub device_id: String,
-    pub display_name: String,
-    pub state: SharedDeviceRefreshDeviceStateSummary,
-}
-
-impl fmt::Debug for SharedDeviceRefreshDeviceSummary {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SharedDeviceRefreshDeviceSummary")
-            .field("has_device_id", &!self.device_id.is_empty())
-            .field("has_display_name", &!self.display_name.is_empty())
-            .field("state", &self.state)
-            .finish()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SharedDeviceRefreshSummary {
-    pub request_id: String,
-    pub phase: SharedDeviceRefreshPhaseSummary,
-    pub devices: Vec<SharedDeviceRefreshDeviceSummary>,
-    pub total_count: u64,
-    pub discovered_count: u64,
-    pub connecting_count: u64,
-    pub connected_count: u64,
-    pub already_present_count: u64,
-    pub waiting_for_peer_count: u64,
-    pub waiting_for_update_count: u64,
-    pub version_incompatible_count: u64,
-    pub rejected_count: u64,
-    pub unavailable_source_count: u64,
-}
-
-impl fmt::Debug for SharedDeviceRefreshSummary {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SharedDeviceRefreshSummary")
-            .field("request_id", &self.request_id)
-            .field("phase", &self.phase)
-            .field("device_count", &self.devices.len())
-            .field("total_count", &self.total_count)
-            .field("discovered_count", &self.discovered_count)
-            .field("connecting_count", &self.connecting_count)
-            .field("connected_count", &self.connected_count)
-            .field("already_present_count", &self.already_present_count)
-            .field("waiting_for_peer_count", &self.waiting_for_peer_count)
-            .field("waiting_for_update_count", &self.waiting_for_update_count)
-            .field(
-                "version_incompatible_count",
-                &self.version_incompatible_count,
-            )
-            .field("rejected_count", &self.rejected_count)
-            .field("unavailable_source_count", &self.unavailable_source_count)
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemberRemovalPhase {
-    Applied,
-    Converging,
+    WaitingForOfflineMember,
     Complete,
     RecoveryRequired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceConvergenceFailureCategorySummary {
+    SpaceMismatch,
+    ContinuityGap,
+    IdentityMismatch,
+    DigestConflict,
+    Unauthorized,
+    VersionIncompatible,
+    NoEffectiveMembers,
+    Storage,
+}
+
+/// 工作空间收敛的统一完整快照(ADR-016)。
+///
+/// 与 `WorkspaceConvergenceChanged` 事件共享同一结构;不含设备名称、设备
+/// 编号原文、成员实例、地址、签名、密钥、安全变化或内容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemberRemovalSummary {
-    pub phase: MemberRemovalPhase,
-    pub intent_count: u64,
+pub struct WorkspaceConvergenceSummary {
+    pub phase: WorkspaceConvergencePhaseSummary,
+    /// 只随成功持久化状态变化递增的不透明版本。
+    pub revision: u64,
+    /// 已验证工作空间变化数量。
+    pub change_count: u64,
+    /// 已验证、尚用于计算当前目标的移除意图数量。
+    pub removal_intent_count: u64,
+    /// 当前有效成员实例数量。
     pub effective_member_count: u64,
+    /// 已确认当前摘要且关系可用的有效成员数量。
+    pub confirmed_member_count: u64,
+    /// 当前因暂时离线而等待的有效成员数量。
+    pub waiting_member_count: u64,
+    /// 当前工作空间摘要;尚未形成时为空。
     pub convergence_digest: Option<String>,
-    pub updated_at_ms: i64,
-    /// 本机是否已经观察到自身被移出当前空间。
+    /// 本机当前成员实例是否已经观察到自己被移出。
     pub removed: bool,
+    /// 最近一次成功保存状态的时间。
+    pub updated_at_ms: i64,
+    /// 可选的稳定失败类别,不含底层错误原文。
+    pub failure_category: Option<WorkspaceConvergenceFailureCategorySummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

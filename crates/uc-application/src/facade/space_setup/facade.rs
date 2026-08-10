@@ -357,6 +357,7 @@ impl SpaceFacade {
             trust_peer_uc,
             setup_status,
             peer_addr_repo,
+            Arc::clone(&resume_session_for_facade),
             clock,
             analytics,
         ));

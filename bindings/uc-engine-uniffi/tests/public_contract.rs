@@ -10,7 +10,7 @@ use uc_engine_uniffi::{
     BindingClipboardRepresentation, BindingClipboardRestoreMode, BindingClipboardRestoreOutcome,
     BindingClipboardSnapshot, BindingConfig, BindingEngineState, BindingError,
     BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost, BindingOperationTerminal,
-    HostBindingError, InvitationIssued, MembershipConvergenceState, MobileEngine, SendReport,
+    HostBindingError, InvitationIssued, MobileEngine, SendReport,
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -555,11 +555,11 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
 
     let remove = engine.remove_member("missing-device".to_owned());
     assert!(matches!(remove, Err(BindingError::Engine { .. })));
-    let removal = engine
-        .query_member_removal()
-        .expect("binding must query the current member removal");
-    assert_eq!(removal.intent_count, 0);
-    assert_eq!(removal.effective_member_count, 1);
+    let convergence = engine
+        .query_workspace_convergence()
+        .expect("binding must query the current workspace convergence");
+    assert_eq!(convergence.removal_intent_count, 0);
+    assert_eq!(convergence.effective_member_count, 0);
 
     engine
         .leave_space()
@@ -646,16 +646,17 @@ fn mobile_binding_exposes_membership_convergence() {
         .expect("binding must create a space");
 
     let status = engine
-        .query_membership_convergence()
-        .expect("binding must expose membership convergence");
+        .query_workspace_convergence()
+        .expect("binding must expose workspace convergence");
 
-    assert_eq!(status.state, MembershipConvergenceState::Complete);
-    assert_eq!(status.pending_count, 0);
-    assert_eq!(status.waiting_for_peer_count, 0);
-    assert_eq!(status.waiting_for_update_count, 0);
-    assert_eq!(status.version_incompatible_count, 0);
-    assert_eq!(status.blocked_count, 0);
-    assert_eq!(status.rejected_count, 0);
+    assert_eq!(
+        status.phase,
+        uc_engine_uniffi::WorkspaceConvergencePhase::LocallyApplied
+    );
+    assert_eq!(status.change_count, 0);
+    assert_eq!(status.effective_member_count, 0);
+    assert_eq!(status.confirmed_member_count, 0);
+    assert_eq!(status.waiting_member_count, 0);
     engine
         .shutdown(5_000)
         .expect("binding engine must shut down within the deadline");

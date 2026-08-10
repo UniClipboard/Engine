@@ -54,11 +54,11 @@ enum ProbeCommand {
     },
     IssueInvitation,
     ListDevices,
-    QueryMembershipConvergence,
+    QueryWorkspaceConvergence,
     RemoveMember {
         device_id: String,
     },
-    QueryMemberRemoval,
+
     SendText {
         text: String,
     },
@@ -152,7 +152,7 @@ struct EventSummary {
     fatal_errors: u64,
     last_state: Option<String>,
     member_removal_changes: u64,
-    last_member_removal: Option<uc_engine::MemberRemovalSummary>,
+    last_workspace_phase: Option<String>,
     shared_device_refresh_changes: u64,
 }
 
@@ -426,8 +426,8 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         }
         ProbeCommand::IssueInvitation => execute_operation(state, Operation::IssueInvitation).await,
         ProbeCommand::ListDevices => execute_operation(state, Operation::ListDevices).await,
-        ProbeCommand::QueryMembershipConvergence => {
-            execute_operation(state, Operation::QueryMembershipConvergence).await
+        ProbeCommand::QueryWorkspaceConvergence => {
+            execute_operation(state, Operation::QueryWorkspaceConvergence).await
         }
         ProbeCommand::RemoveMember { device_id } => {
             execute_operation(
@@ -435,9 +435,6 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 Operation::RemoveMember(RemoveMemberInput { device_id }),
             )
             .await
-        }
-        ProbeCommand::QueryMemberRemoval => {
-            execute_operation(state, Operation::QueryMemberRemoval).await
         }
         ProbeCommand::SendText { text } => {
             execute_operation(
@@ -546,7 +543,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 "fatal_errors": events.fatal_errors,
                 "last_state": events.last_state,
                 "member_removal_changes": events.member_removal_changes,
-                "last_member_removal": events.last_member_removal,
+                "last_workspace_phase": events.last_workspace_phase,
                 "shared_device_refresh_changes": events.shared_device_refresh_changes,
             })
         }
@@ -1031,49 +1028,26 @@ fn operation_response(result: OperationResult) -> Value {
             "online_count": devices.iter().filter(|device| device.online).count(),
             "device_ids": devices.into_iter().map(|device| device.device_id).collect::<Vec<_>>(),
         }),
-        OperationResult::MembershipConvergence(summary) => json!({
+        OperationResult::WorkspaceConvergence(summary) => json!({
             "ok": true,
-            "kind": "membership_convergence",
-            "state": match summary.state {
-                uc_engine::MembershipConvergenceStateSummary::Complete => "complete",
-                uc_engine::MembershipConvergenceStateSummary::Converging => "converging",
-                uc_engine::MembershipConvergenceStateSummary::WaitingForUpgrade => "waiting_for_upgrade",
-                uc_engine::MembershipConvergenceStateSummary::Blocked => "blocked",
+            "kind": "workspace_convergence",
+            "phase": match summary.phase {
+                uc_engine::WorkspaceConvergencePhaseSummary::LocallyApplied => "locally_applied",
+                uc_engine::WorkspaceConvergencePhaseSummary::Converging => "converging",
+                uc_engine::WorkspaceConvergencePhaseSummary::WaitingForOfflineMember => "waiting_for_offline_member",
+                uc_engine::WorkspaceConvergencePhaseSummary::Complete => "complete",
+                uc_engine::WorkspaceConvergencePhaseSummary::RecoveryRequired => "recovery_required",
             },
-            "pending_count": summary.pending_count,
-            "waiting_for_peer_count": summary.waiting_for_peer_count,
-            "waiting_for_update_count": summary.waiting_for_update_count,
-            "version_incompatible_count": summary.version_incompatible_count,
-            "blocked_count": summary.blocked_count,
-            "rejected_count": summary.rejected_count,
+            "revision": summary.revision,
+            "change_count": summary.change_count,
+            "removal_intent_count": summary.removal_intent_count,
+            "effective_member_count": summary.effective_member_count,
+            "confirmed_member_count": summary.confirmed_member_count,
+            "waiting_member_count": summary.waiting_member_count,
+            "removed": summary.removed,
+            "updated_at_ms": summary.updated_at_ms,
+            "failure_category": summary.failure_category.map(|category| format!("{category:?}")),
         }),
-        OperationResult::SharedDeviceRefreshStarted(summary) => json!({
-            "ok": true,
-            "kind": "shared_device_refresh_started",
-            "request_id": summary.request_id,
-        }),
-        OperationResult::SharedDeviceRefresh(summary) => match summary {
-            Some(summary) => json!({
-                "ok": true,
-                "kind": "shared_device_refresh",
-                "phase": shared_device_refresh_phase(summary.phase),
-                "total_count": summary.total_count,
-                "discovered_count": summary.discovered_count,
-                "connecting_count": summary.connecting_count,
-                "connected_count": summary.connected_count,
-                "already_present_count": summary.already_present_count,
-                "waiting_for_peer_count": summary.waiting_for_peer_count,
-                "waiting_for_update_count": summary.waiting_for_update_count,
-                "version_incompatible_count": summary.version_incompatible_count,
-                "rejected_count": summary.rejected_count,
-                "unavailable_source_count": summary.unavailable_source_count,
-            }),
-            None => json!({
-                "ok": true,
-                "kind": "shared_device_refresh",
-                "has_refresh": false,
-            }),
-        },
         OperationResult::MemberSyncPreferences(preferences) => json!({
             "ok": true,
             "kind": "member_sync_preferences",
@@ -1082,16 +1056,7 @@ fn operation_response(result: OperationResult) -> Value {
             "send_content_types": preferences.send_content_types,
             "receive_content_types": preferences.receive_content_types,
         }),
-        OperationResult::MemberRemoved(summary) => json!({
-            "ok": true,
-            "kind": "member_removed",
-            "removal": summary,
-        }),
-        OperationResult::MemberRemovalStatus(summary) => json!({
-            "ok": true,
-            "kind": "member_removal_status",
-            "removal": summary,
-        }),
+
         OperationResult::LegacyBootstrapStatus(summary) => json!({
             "ok": true,
             "kind": "legacy_bootstrap_status",
@@ -1369,15 +1334,6 @@ fn network_recovery_phase(phase: uc_engine::NetworkRecoveryPhaseSummary) -> &'st
     }
 }
 
-fn shared_device_refresh_phase(phase: uc_engine::SharedDeviceRefreshPhaseSummary) -> &'static str {
-    match phase {
-        uc_engine::SharedDeviceRefreshPhaseSummary::Started => "started",
-        uc_engine::SharedDeviceRefreshPhaseSummary::Discovering => "discovering",
-        uc_engine::SharedDeviceRefreshPhaseSummary::Connecting => "connecting",
-        uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted => "round_completed",
-    }
-}
-
 fn mobile_sync_item_type(item_type: uc_engine::MobileSyncItemType) -> &'static str {
     match item_type {
         uc_engine::MobileSyncItemType::Text => "text",
@@ -1425,11 +1381,21 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
         }
         EngineEvent::PeerPresenceChanged(_) => summary.refresh_requests += 1,
         EngineEvent::PairingCompleted(_) => {}
-        EngineEvent::MemberRemovalChanged(removal) => {
+        EngineEvent::WorkspaceConvergenceChanged(snapshot) => {
             summary.member_removal_changes += 1;
-            summary.last_member_removal = Some(removal);
+            summary.last_workspace_phase = Some(
+                match snapshot.phase {
+                    uc_engine::WorkspacePhase::LocallyApplied => "locally_applied",
+                    uc_engine::WorkspacePhase::Converging => "converging",
+                    uc_engine::WorkspacePhase::WaitingForOfflineMember => {
+                        "waiting_for_offline_member"
+                    }
+                    uc_engine::WorkspacePhase::Complete => "complete",
+                    uc_engine::WorkspacePhase::RecoveryRequired => "recovery_required",
+                }
+                .to_owned(),
+            );
         }
-        EngineEvent::SharedDeviceRefreshChanged(_) => summary.shared_device_refresh_changes += 1,
         EngineEvent::ActiveClipboardChanged(_) => summary.refresh_requests += 1,
         EngineEvent::MobileLanSettingsChanged(_) => summary.refresh_requests += 1,
         EngineEvent::NetworkRecoveryChanged(_) => summary.refresh_requests += 1,
@@ -1544,10 +1510,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_membership_convergence_command_reaches_the_engine_boundary() {
+    async fn query_workspace_convergence_command_reaches_the_engine_boundary() {
         let command: ProbeCommand =
-            serde_json::from_str(r#"{"command":"query_membership_convergence"}"#)
-                .expect("membership convergence command must deserialize");
+            serde_json::from_str(r#"{"command":"query_workspace_convergence"}"#)
+                .expect("workspace convergence command must deserialize");
         let mut state = ProbeState {
             engine: None,
             files: ProbeFiles::default(),
@@ -1560,11 +1526,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn member_removal_commands_reach_the_engine_boundary() {
-        let commands = [
-            r#"{"command":"remove_member","device_id":"device-2"}"#,
-            r#"{"command":"query_member_removal"}"#,
-        ];
+    async fn member_removal_command_reaches_the_engine_boundary() {
+        let commands = [r#"{"command":"remove_member","device_id":"device-2"}"#];
 
         for source in commands {
             let command: ProbeCommand =
@@ -1583,95 +1546,66 @@ mod tests {
     }
 
     #[test]
-    fn member_removal_result_and_event_keep_the_same_complete_snapshot() {
-        let summary = uc_engine::MemberRemovalSummary {
-            phase: uc_engine::MemberRemovalPhase::Converging,
-            intent_count: 2,
-            effective_member_count: 1,
-            convergence_digest: Some("digest-1".into()),
-            updated_at_ms: 42,
+    fn workspace_convergence_result_and_event_keep_the_same_complete_snapshot() {
+        let snapshot = uc_engine::WorkspaceSnapshot {
+            phase: uc_engine::WorkspacePhase::Converging,
+            revision: 1,
+            change_count: 1,
+            removal_intent_count: 1,
+            effective_member_count: 2,
+            confirmed_member_count: 0,
+            waiting_member_count: 0,
+            convergence_digest: None,
             removed: false,
+            updated_at_ms: 42,
+            failure_category: None,
         };
-        let response = operation_response(OperationResult::MemberRemoved(summary.clone()));
+        let response = operation_response(OperationResult::WorkspaceConvergence(
+            uc_engine::WorkspaceConvergenceSummary {
+                phase: uc_engine::WorkspaceConvergencePhaseSummary::Converging,
+                revision: 1,
+                change_count: 1,
+                removal_intent_count: 1,
+                effective_member_count: 2,
+                confirmed_member_count: 0,
+                waiting_member_count: 0,
+                convergence_digest: None,
+                removed: false,
+                updated_at_ms: 42,
+                failure_category: None,
+            },
+        ));
         let events = Arc::new(Mutex::new(EventSummary::default()));
-        record_event(&events, EngineEvent::MemberRemovalChanged(summary.clone()));
+        record_event(&events, EngineEvent::WorkspaceConvergenceChanged(snapshot));
         let events = lock_unpoisoned(&events);
 
-        assert_eq!(response["removal"]["intent_count"], 2);
-        assert_eq!(response["removal"]["effective_member_count"], 1);
-        assert_eq!(response["removal"]["convergence_digest"], "digest-1");
-        assert_eq!(response["removal"]["updated_at_ms"], 42);
+        assert_eq!(response["change_count"], 1);
+        assert_eq!(response["effective_member_count"], 2);
+        assert_eq!(response["removal_intent_count"], 1);
+        assert_eq!(response["updated_at_ms"], 42);
         assert_eq!(events.member_removal_changes, 1);
-        assert_eq!(events.last_member_removal.as_ref(), Some(&summary));
     }
 
     #[test]
-    fn shared_device_refresh_event_is_counted_as_a_refresh_request() {
-        let summary = Arc::new(Mutex::new(EventSummary::default()));
+    fn workspace_convergence_query_is_exposed_on_the_probe() {
+        let response = operation_response(OperationResult::WorkspaceConvergence(
+            uc_engine::WorkspaceConvergenceSummary {
+                phase: uc_engine::WorkspaceConvergencePhaseSummary::LocallyApplied,
+                revision: 0,
+                change_count: 0,
+                removal_intent_count: 0,
+                effective_member_count: 0,
+                confirmed_member_count: 0,
+                waiting_member_count: 0,
+                convergence_digest: None,
+                removed: false,
+                updated_at_ms: 0,
+                failure_category: None,
+            },
+        ));
 
-        record_event(
-            &summary,
-            EngineEvent::SharedDeviceRefreshChanged(uc_engine::SharedDeviceRefreshSummary {
-                request_id: "request-1".into(),
-                phase: uc_engine::SharedDeviceRefreshPhaseSummary::Connecting,
-                devices: Vec::new(),
-                total_count: 0,
-                discovered_count: 0,
-                connecting_count: 0,
-                connected_count: 0,
-                already_present_count: 0,
-                waiting_for_peer_count: 0,
-                waiting_for_update_count: 0,
-                version_incompatible_count: 0,
-                rejected_count: 0,
-                unavailable_source_count: 0,
-            }),
-        );
-
-        assert_eq!(lock_unpoisoned(&summary).shared_device_refresh_changes, 1);
-    }
-
-    #[test]
-    fn shared_device_refresh_query_has_a_stable_empty_response() {
-        let response = operation_response(OperationResult::SharedDeviceRefresh(None));
-
-        assert_eq!(response["ok"], true);
-        assert_eq!(response["kind"], "shared_device_refresh");
-        assert!(response["refresh"].is_null());
-    }
-
-    #[test]
-    fn shared_device_refresh_results_and_events_keep_only_aggregate_state() {
-        let summary = uc_engine::SharedDeviceRefreshSummary {
-            request_id: "request-1".into(),
-            phase: uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted,
-            devices: vec![uc_engine::SharedDeviceRefreshDeviceSummary {
-                device_id: "private-device-id".into(),
-                display_name: "private device name".into(),
-                state: uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected,
-            }],
-            total_count: 1,
-            discovered_count: 0,
-            connecting_count: 0,
-            connected_count: 1,
-            already_present_count: 0,
-            waiting_for_peer_count: 0,
-            waiting_for_update_count: 0,
-            version_incompatible_count: 0,
-            rejected_count: 0,
-            unavailable_source_count: 0,
-        };
-        let response =
-            operation_response(OperationResult::SharedDeviceRefresh(Some(summary.clone())));
-        let events = Arc::new(Mutex::new(EventSummary::default()));
-        record_event(&events, EngineEvent::SharedDeviceRefreshChanged(summary));
-
-        assert_eq!(response["kind"], "shared_device_refresh");
-        assert_eq!(response["phase"], "round_completed");
-        assert_eq!(response["connected_count"], 1);
-        assert!(!response.to_string().contains("private-device-id"));
-        assert!(!response.to_string().contains("private device name"));
-        assert_eq!(lock_unpoisoned(&events).shared_device_refresh_changes, 1);
+        assert_eq!(response["kind"], "workspace_convergence");
+        assert_eq!(response["phase"], "locally_applied");
     }
 
     #[test]

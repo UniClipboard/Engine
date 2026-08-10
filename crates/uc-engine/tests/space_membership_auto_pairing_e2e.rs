@@ -239,7 +239,7 @@ async fn mount_rendezvous() -> MockServer {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-async fn offline_members_learn_about_each_other_and_keep_syncing_after_restart() {
+async fn members_converge_when_sponsor_stays_offline_after_joining_c() {
     let rendezvous = mount_rendezvous().await;
     let device_a = DeviceHarness::new(rendezvous.uri());
     let device_b = DeviceHarness::new(rendezvous.uri());
@@ -338,6 +338,152 @@ async fn offline_members_learn_about_each_other_and_keep_syncing_after_restart()
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("final C shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn restarted_member_pairs_with_a_member_added_while_it_was_offline() {
+    let rendezvous = mount_rendezvous().await;
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let device_b = DeviceHarness::new(rendezvous.uri());
+    let device_c = DeviceHarness::new(rendezvous.uri());
+
+    let engine_a = device_a.start().await;
+    let engine_b = device_b.start().await;
+    let (space_id, a_id) = create_space(&engine_a, "Device A").await;
+    let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
+    wait_for_members(&engine_a, &[&b_id]).await;
+    wait_for_members(&engine_b, &[&a_id]).await;
+
+    engine_b
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down B before C joins");
+
+    let engine_c = device_c.start().await;
+    let c_id = join_through(&engine_a, &engine_c, "Device C", &space_id).await;
+    assert_receive_ready(&engine_c, true).await;
+    wait_for_members(&engine_a, &[&b_id, &c_id]).await;
+    wait_for_members(&engine_c, &[&a_id]).await;
+
+    let engine_b = device_b.start().await;
+    recover(&engine_b).await;
+    wait_for_converged_members(&engine_b, &engine_c, &b_id, &c_id).await;
+
+    send_and_verify(&engine_b, &engine_c, &c_id, "B to C after B restarts").await;
+    send_and_verify(&engine_c, &engine_b, &b_id, "C to B after B restarts").await;
+
+    for engine in [engine_a, engine_b, engine_c] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("final three-device shutdown");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn four_members_converge_through_an_online_relay_after_two_sponsors_leave() {
+    let rendezvous = mount_rendezvous().await;
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let device_b = DeviceHarness::new(rendezvous.uri());
+    let device_c = DeviceHarness::new(rendezvous.uri());
+    let device_d = DeviceHarness::new(rendezvous.uri());
+
+    let engine_a = device_a.start().await;
+    let engine_b = device_b.start().await;
+    let (space_id, a_id) = create_space(&engine_a, "Device A").await;
+    let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
+    wait_for_members(&engine_a, &[&b_id]).await;
+
+    engine_a
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down A");
+    let engine_c = device_c.start().await;
+    let _c_id = join_through(&engine_b, &engine_c, "Device C", &space_id).await;
+    engine_b
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down B");
+
+    let engine_d = device_d.start().await;
+    let d_id = join_through(&engine_c, &engine_d, "Device D", &space_id).await;
+    wait_for_members(&engine_c, &[&a_id, &d_id]).await;
+
+    let engine_a = device_a.start().await;
+    recover(&engine_a).await;
+    wait_for_converged_members(&engine_a, &engine_d, &a_id, &d_id).await;
+    send_and_verify(&engine_a, &engine_d, &d_id, "A to D through C").await;
+    send_and_verify(&engine_d, &engine_a, &a_id, "D to A through C").await;
+
+    for engine in [engine_a, engine_c, engine_d] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("final shutdown");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 10)]
+async fn five_devices_restore_full_sync_after_two_completed_removals_and_rejoins() {
+    let rendezvous = mount_rendezvous().await;
+    let harnesses = (0..5)
+        .map(|_| DeviceHarness::new(rendezvous.uri()))
+        .collect::<Vec<_>>();
+    let engine_a = harnesses[0].start().await;
+    let engine_b = harnesses[1].start().await;
+    let engine_c = harnesses[2].start().await;
+    let engine_d = harnesses[3].start().await;
+    let engine_e = harnesses[4].start().await;
+    let (space_id, a_id) = create_space(&engine_a, "Device A").await;
+    let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
+    let c_id = join_through(&engine_a, &engine_c, "Device C", &space_id).await;
+    let d_id = join_through(&engine_a, &engine_d, "Device D", &space_id).await;
+    let e_id = join_through(&engine_a, &engine_e, "Device E", &space_id).await;
+    wait_for_members(&engine_a, &[&b_id, &c_id, &d_id, &e_id]).await;
+
+    for (device_id, expected_member_count) in [(&b_id, 4), (&d_id, 3)] {
+        engine_a
+            .execute(Operation::RemoveMember(RemoveMemberInput {
+                device_id: device_id.clone(),
+            }))
+            .await
+            .expect("remove member");
+        wait_until(WAIT_TIMEOUT, || async {
+            let summary = member_removal_summary(&engine_a).await;
+            summary.phase == uc_engine::MemberRemovalPhase::Complete
+                && summary.effective_member_count == expected_member_count
+        })
+        .await;
+    }
+
+    let b_rejoin = join_through_with_result(&engine_c, &engine_b, "Device B", &space_id).await;
+    assert_eq!(b_rejoin.self_device_id, b_id);
+    assert_eq!(b_rejoin.migrated_records, Some(0));
+    let d_rejoin = join_through_with_result(&engine_e, &engine_d, "Device D", &space_id).await;
+    assert_eq!(d_rejoin.self_device_id, d_id);
+    assert_eq!(d_rejoin.migrated_records, Some(0));
+    wait_for_full_workspace_sync(
+        [
+            (&engine_a, a_id.as_str()),
+            (&engine_b, b_id.as_str()),
+            (&engine_c, c_id.as_str()),
+            (&engine_d, d_id.as_str()),
+            (&engine_e, e_id.as_str()),
+        ]
+        .as_slice(),
+    )
+    .await;
+    send_and_verify(&engine_b, &engine_d, &d_id, "B to D after rejoin").await;
+    send_and_verify(&engine_d, &engine_b, &b_id, "D to B after rejoin").await;
+    send_and_verify(&engine_a, &engine_e, &e_id, "A to E after rejoin").await;
+    send_and_verify(&engine_e, &engine_c, &c_id, "E to C after rejoin").await;
+
+    for engine in [engine_a, engine_b, engine_c, engine_d, engine_e] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("final shutdown");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
@@ -767,6 +913,20 @@ async fn wait_for_converged_members(engine_a: &Engine, engine_c: &Engine, a_id: 
     wait_until(WAIT_TIMEOUT, || async {
         has_complete_membership(engine_a, c_id).await
             && has_complete_membership(engine_c, a_id).await
+    })
+    .await;
+}
+
+async fn wait_for_full_workspace_sync(devices: &[(&Engine, &str)]) {
+    wait_until(WAIT_TIMEOUT, || async {
+        for (engine, own_id) in devices {
+            for (_, peer_id) in devices {
+                if own_id != peer_id && !has_complete_membership(engine, peer_id).await {
+                    return false;
+                }
+            }
+        }
+        true
     })
     .await;
 }

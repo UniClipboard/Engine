@@ -61,9 +61,10 @@ use uc_infra::db::repositories::{
     DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
     DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselRemovalIntentStore,
     DieselSpaceMemberRepository, DieselSpaceSecurityStore, DieselThumbnailRepository,
-    DieselTrustedPeerRepository, EncryptedMembershipAnnouncementRepository,
-    EncryptedMembershipAppliedSecurityUpdateRepository, EncryptedMembershipCandidateRepository,
-    EncryptedMembershipOutboxRepository, EncryptedRelationshipStore,
+    DieselTrustedPeerRepository, DieselWorkspaceConvergenceStore,
+    EncryptedMembershipAnnouncementRepository, EncryptedMembershipAppliedSecurityUpdateRepository,
+    EncryptedMembershipCandidateRepository, EncryptedMembershipOutboxRepository,
+    EncryptedRelationshipStore,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
@@ -272,6 +273,12 @@ pub fn wire_dependencies_from_inputs(
             Arc::clone(&infra.db_executor),
             platform.session.as_ref().clone(),
         ));
+    let workspace_convergence_repository: Arc<
+        dyn uc_core::membership::WorkspaceConvergenceRepositoryPort,
+    > = Arc::new(DieselWorkspaceConvergenceStore::new(
+        Arc::clone(&infra.db_executor),
+        platform.session.as_ref().clone(),
+    ));
     let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
 
     let relationship_store = Arc::new(EncryptedRelationshipStore::new(
@@ -655,6 +662,7 @@ pub fn wire_dependencies_from_inputs(
             removal_intent_repository,
             removal_pending_join,
             removal_key_epoch_repository,
+            workspace_convergence_repository,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             blob_migration_repo: Arc::clone(&infra.blob_migration_repo),
             migration_state: Arc::clone(&infra.migration_state),

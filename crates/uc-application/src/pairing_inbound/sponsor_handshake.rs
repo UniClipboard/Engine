@@ -125,6 +125,7 @@ pub(crate) struct SponsorHandshakeCoordinator {
     /// case the joiner stays Solo until a future re-pair converges.
     analytics: Arc<dyn AnalyticsFacade>,
     sessions: Mutex<HashMap<PairingSessionId, SessionCtx>>,
+    pending_membership: Mutex<HashMap<PairingSessionId, SponsorSeedBatchContext>>,
     /// handshake TTL (max wait between begin and confirm/reject).
     handshake_ttl: Duration,
     /// Self-referential Weak so the TTL watchdog task can call back
@@ -163,6 +164,7 @@ impl SponsorHandshakeCoordinator {
             setup_status,
             analytics,
             sessions: Mutex::new(HashMap::new()),
+            pending_membership: Mutex::new(HashMap::new()),
             handshake_ttl,
             self_weak: weak.clone(),
         })
@@ -407,8 +409,8 @@ impl SponsorHandshakeCoordinator {
         })
     }
 
-    /// Step 3a (verified branch): build + send `Confirm`, close the
-    /// session, drop ctx. Called by the orchestrator **after** admit
+    /// Step 3a (verified branch): build + send `Confirm` and retain no
+    /// session state. Called by the orchestrator **after** admit
     /// and trust have landed so we never confirm a peer we failed to
     /// persist locally.
     pub(crate) async fn confirm(&self, session: &PairingSessionId) -> Result<(), String> {
@@ -471,28 +473,17 @@ impl SponsorHandshakeCoordinator {
             )
             .await
             .map_err(|error| format!("admit_group_member: {error}"))?;
-        self.membership_gossip
-            .prepare_sponsor_membership(SponsorSeedBatchContext {
-                space_id: ctx.space_id.clone(),
-                sponsor_device_id: sender_device_id,
-                sponsor_transport_address_blob: transport_address_blob.clone(),
-                joiner_device_id: ctx.joiner.device_id,
-                joiner_device_name: ctx.joiner.device_name.clone(),
-                joiner_identity_fingerprint: ctx.joiner.identity_fingerprint.clone(),
-                joiner_transport_address_blob: ctx.joiner.transport_address_blob.clone(),
-                group_epoch: admission.group_epoch,
-                existing_member_updates: admission.existing_member_updates,
-            })
-            .await
-            .map_err(|error| format!("prepare_sponsor_membership: {error}"))?;
-        if let Some(delivery) = &self.group_update_delivery {
-            if let Err(error) = delivery
-                .deliver_pending(chrono::Utc::now().timestamp_millis())
-                .await
-            {
-                warn!(error = %error, "pending group updates could not be delivered after admission");
-            }
-        }
+        let membership = SponsorSeedBatchContext {
+            space_id: ctx.space_id.clone(),
+            sponsor_device_id: sender_device_id,
+            sponsor_transport_address_blob: transport_address_blob.clone(),
+            joiner_device_id: ctx.joiner.device_id,
+            joiner_device_name: ctx.joiner.device_name.clone(),
+            joiner_identity_fingerprint: ctx.joiner.identity_fingerprint.clone(),
+            joiner_transport_address_blob: ctx.joiner.transport_address_blob.clone(),
+            group_epoch: admission.group_epoch,
+            existing_member_updates: admission.existing_member_updates,
+        };
         let confirm = PairingSessionMessage::Confirm(SponsorConfirm {
             space_id: ctx.space_id,
             sender_device_id,
@@ -508,15 +499,40 @@ impl SponsorHandshakeCoordinator {
             .send(session, confirm)
             .await
             .map_err(|e| format!("send Confirm: {e}"))?;
-        self.membership_gossip.notify_pending_delivery();
+        self.pending_membership
+            .lock()
+            .await
+            .insert(session.clone(), membership);
         info!(
             session = %session,
             transport_address_blob_len,
-            membership_delivery_triggered = true,
-            "Confirm sent to joiner; pending membership delivery activated"
+            "Confirm sent to joiner; waiting for joiner readiness"
         );
+        Ok(())
+    }
+
+    pub(crate) async fn complete(&self, session: &PairingSessionId) -> Result<(), String> {
+        let membership = self
+            .pending_membership
+            .lock()
+            .await
+            .remove(session)
+            .ok_or_else(|| "joiner readiness arrived without pending membership".to_string())?;
+        self.membership_gossip
+            .prepare_sponsor_membership(membership)
+            .await
+            .map_err(|error| format!("prepare_sponsor_membership: {error}"))?;
+        if let Some(delivery) = &self.group_update_delivery {
+            if let Err(error) = delivery
+                .deliver_pending(chrono::Utc::now().timestamp_millis())
+                .await
+            {
+                warn!(error = %error, "pending group updates could not be delivered after joiner readiness");
+            }
+        }
+        self.membership_gossip.notify_pending_delivery();
         self.pairing_session
-            .close(session, Some("handshake confirmed".into()))
+            .close(session, Some("joiner ready".into()))
             .await;
         Ok(())
     }
@@ -526,6 +542,7 @@ impl SponsorHandshakeCoordinator {
     /// means calling this after the orchestrator already cleared state
     /// via some other path is a no-op.
     pub(crate) async fn reject(&self, session: &PairingSessionId, reason: PairingRejectReason) {
+        self.pending_membership.lock().await.remove(session);
         if let Some(ctx) = self.sessions.lock().await.remove(session) {
             abort_timer(&ctx);
         }
@@ -1146,7 +1163,7 @@ mod tests {
     // ── confirm ────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn confirm_sends_confirm_wire_closes_drops_ctx() {
+    async fn confirm_waits_for_readiness_before_closing() {
         let (sp, sa, pr, st) = confirm_defaults();
         let coord = happy_coordinator(sp.clone(), sa, pr, st);
         let session = PairingSessionId::new("s7");
@@ -1172,8 +1189,10 @@ mod tests {
             }
             other => panic!("expected Confirm, got {other:?}"),
         }
-        assert_eq!(sp.closed().len(), 1);
+        assert!(sp.closed().is_empty());
         assert_eq!(coord.parked_sessions().await, 0);
+        coord.complete(&session).await.unwrap();
+        assert_eq!(sp.closed().len(), 1);
     }
 
     #[tokio::test]
@@ -1229,6 +1248,7 @@ mod tests {
         coord.begin(&session, joiner_request()).await.unwrap();
 
         coord.confirm(&session).await.unwrap();
+        coord.complete(&session).await.unwrap();
 
         let sent = sp.sent();
         let PairingSessionMessage::Confirm(confirm) = &sent[1].1 else {
@@ -1378,6 +1398,7 @@ mod tests {
             )
             .await;
         coord.confirm(&session).await.unwrap();
+        coord.complete(&session).await.unwrap();
 
         // 时间跨过 TTL，任何没被 abort 的 watchdog 都会在这一步 fire。
         tokio::time::sleep(ttl * 2).await;
