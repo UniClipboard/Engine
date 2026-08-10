@@ -25,6 +25,7 @@ pub mod relay_probe;
 pub mod removal_exchange_adapter;
 pub(crate) mod runtime_consts;
 pub mod transfer_progress_adapter;
+pub mod workspace_recovery_adapter;
 
 #[cfg(test)]
 pub(crate) struct StaticPeerAdmission(pub(crate) bool);
@@ -72,4 +73,7 @@ pub use relay_probe::{
 pub use removal_exchange_adapter::{
     IrohRemovalExchangeAdapter, IrohRemovalExchangeHandler, IrohRemovalLateHandler,
     IrohRemovalNoticeHandler, REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN, REMOVAL_NOTICE_ALPN,
+};
+pub use workspace_recovery_adapter::{
+    IrohWorkspaceRecoveryAdapter, IrohWorkspaceRecoveryHandler, WORKSPACE_RECOVERY_ALPN,
 };

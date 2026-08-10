@@ -15,6 +15,7 @@ pub(crate) mod legacy_upgrade;
 mod membership_security_update_adapter;
 pub(crate) mod mls_group;
 mod peer_admission_adapter;
+pub(crate) mod recovery_seal;
 pub(crate) mod removal_recovery_adapter;
 pub(crate) mod removal_verification_adapter;
 mod scope_identifier;

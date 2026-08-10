@@ -303,6 +303,178 @@ fn retained_offline_member_catches_up_in_epoch_order() {
 }
 
 #[test]
+fn new_member_can_relay_the_sponsors_commit_to_an_offline_existing_member() {
+    let alice_provider = OpenMlsRustCrypto::default();
+    let bob_provider = OpenMlsRustCrypto::default();
+    let charlie_provider = OpenMlsRustCrypto::default();
+
+    let (alice_credential, alice_signer) =
+        credential(b"alice", CIPHERSUITE.signature_algorithm(), &alice_provider);
+    let (bob_credential, bob_signer) =
+        credential(b"bob", CIPHERSUITE.signature_algorithm(), &bob_provider);
+    let (charlie_credential, charlie_signer) = credential(
+        b"charlie",
+        CIPHERSUITE.signature_algorithm(),
+        &charlie_provider,
+    );
+    let create_config = MlsGroupCreateConfig::builder()
+        .ciphersuite(CIPHERSUITE)
+        .use_ratchet_tree_extension(true)
+        .build();
+    let join_config = create_config.join_config();
+    let mut alice_group = MlsGroup::new(
+        &alice_provider,
+        &alice_signer,
+        &create_config,
+        alice_credential,
+    )
+    .unwrap();
+
+    let bob_key_package = key_package(&bob_provider, &bob_signer, bob_credential);
+    let (_, bob_welcome, _) = alice_group
+        .add_members(
+            &alice_provider,
+            &alice_signer,
+            &[bob_key_package.key_package().clone()],
+        )
+        .unwrap();
+    alice_group.merge_pending_commit(&alice_provider).unwrap();
+    let mut bob_group = StagedWelcome::new_from_welcome(
+        &bob_provider,
+        join_config,
+        inbound_welcome(bob_welcome),
+        None,
+    )
+    .unwrap()
+    .into_group(&bob_provider)
+    .unwrap();
+
+    let charlie_key_package = key_package(&charlie_provider, &charlie_signer, charlie_credential);
+    let (charlie_commit, charlie_welcome, _) = bob_group
+        .add_members(
+            &bob_provider,
+            &bob_signer,
+            &[charlie_key_package.key_package().clone()],
+        )
+        .unwrap();
+    bob_group.merge_pending_commit(&bob_provider).unwrap();
+    let charlie_group = StagedWelcome::new_from_welcome(
+        &charlie_provider,
+        join_config,
+        inbound_welcome(charlie_welcome),
+        None,
+    )
+    .unwrap()
+    .into_group(&charlie_provider)
+    .unwrap();
+
+    // Charlie only relays Bob's signed commit; Alice verifies it against
+    // the group state she already trusts.
+    merge_commit(&mut alice_group, &alice_provider, charlie_commit);
+
+    assert_eq!(alice_group.epoch(), charlie_group.epoch());
+    assert_eq!(
+        alice_group
+            .export_secret(alice_provider.crypto(), "content-key", b"", 32)
+            .unwrap(),
+        charlie_group
+            .export_secret(charlie_provider.crypto(), "content-key", b"", 32)
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_gapped_commit_cannot_be_applied_directly() {
+    let alice_provider = OpenMlsRustCrypto::default();
+    let bob_provider = OpenMlsRustCrypto::default();
+    let charlie_provider = OpenMlsRustCrypto::default();
+
+    let (alice_credential, alice_signer) =
+        credential(b"alice", CIPHERSUITE.signature_algorithm(), &alice_provider);
+    let (bob_credential, bob_signer) =
+        credential(b"bob", CIPHERSUITE.signature_algorithm(), &bob_provider);
+    let (charlie_credential, charlie_signer) = credential(
+        b"charlie",
+        CIPHERSUITE.signature_algorithm(),
+        &charlie_provider,
+    );
+    let bob_key_package = key_package(&bob_provider, &bob_signer, bob_credential);
+    let charlie_key_package = key_package(&charlie_provider, &charlie_signer, charlie_credential);
+
+    let create_config = MlsGroupCreateConfig::builder()
+        .ciphersuite(CIPHERSUITE)
+        .use_ratchet_tree_extension(true)
+        .build();
+    let mut alice_group = MlsGroup::new(
+        &alice_provider,
+        &alice_signer,
+        &create_config,
+        alice_credential,
+    )
+    .unwrap();
+
+    let (_, bob_welcome, _) = alice_group
+        .add_members(
+            &alice_provider,
+            &alice_signer,
+            &[bob_key_package.key_package().clone()],
+        )
+        .unwrap();
+    alice_group.merge_pending_commit(&alice_provider).unwrap();
+
+    // Bob goes offline after epoch 1. Alice adds Charlie (epoch 2), then
+    // makes a self update (epoch 3) without delivering either to Bob.
+    let (charlie_commit, _, _) = alice_group
+        .add_members(
+            &alice_provider,
+            &alice_signer,
+            &[charlie_key_package.key_package().clone()],
+        )
+        .unwrap();
+    alice_group.merge_pending_commit(&alice_provider).unwrap();
+    let epoch_two_secret = alice_group
+        .export_secret(alice_provider.crypto(), "content-key", b"", 32)
+        .unwrap();
+    let later_commit = alice_group
+        .self_update(
+            &alice_provider,
+            &alice_signer,
+            LeafNodeParameters::default(),
+        )
+        .unwrap();
+    alice_group.merge_pending_commit(&alice_provider).unwrap();
+    assert_eq!(alice_group.epoch(), GroupEpoch::from(3));
+
+    let mut bob_group = StagedWelcome::new_from_welcome(
+        &bob_provider,
+        create_config.join_config(),
+        inbound_welcome(bob_welcome),
+        None,
+    )
+    .unwrap()
+    .into_group(&bob_provider)
+    .unwrap();
+
+    // The epoch-3 commit alone cannot be applied over epoch 1: the epoch-2
+    // add is missing, so the commit is rejected instead of being merged.
+    let gapped = inbound(later_commit.commit().clone())
+        .try_into_protocol_message()
+        .unwrap();
+    assert!(bob_group.process_message(&bob_provider, gapped).is_err());
+    assert_eq!(bob_group.epoch(), GroupEpoch::from(1));
+
+    // The gapped member must apply the missing epoch-2 commit first.
+    merge_commit(&mut bob_group, &bob_provider, charlie_commit);
+    assert_eq!(bob_group.epoch(), GroupEpoch::from(2));
+    assert_eq!(
+        epoch_two_secret,
+        bob_group
+            .export_secret(bob_provider.crypto(), "content-key", b"", 32)
+            .unwrap()
+    );
+}
+
+#[test]
 fn concurrent_membership_fork_recovers_to_one_group() {
     let alice_provider = OpenMlsRustCrypto::default();
     let bob_provider = OpenMlsRustCrypto::default();
