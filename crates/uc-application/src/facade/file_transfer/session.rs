@@ -8,7 +8,7 @@ use uc_core::{
     FileTransferFailureReason, FileTransferProgress,
 };
 
-use crate::file_transfer::FileTransferApplicationError;
+use crate::transfer::file::FileTransferApplicationError;
 
 use super::BeginReceiverTransfer;
 

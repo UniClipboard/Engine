@@ -613,11 +613,8 @@ pub fn wire_dependencies_from_inputs(
     let host_event_bus: Arc<uc_application::facade::HostEventBus> =
         Arc::new(uc_application::facade::HostEventBus::new());
     host_event_bus.register("logging", host_event_emitter);
-    let receive_readiness =
-        Arc::new(uc_application::receive_reconciliation::ReceiveReadinessCoordinator::new());
 
     let crate::assembly::file_transfer::FileTransferAssembly {
-        lifecycle: file_transfer_lifecycle,
         facade: file_transfer_facade,
     } = crate::assembly::file_transfer::build_file_transfer_assembly(
         Arc::clone(&file_transfer_store_arc),
@@ -625,7 +622,6 @@ pub fn wire_dependencies_from_inputs(
         deps.storage.file_transfer.clone(),
         deps.storage.directory_receive.clone(),
         deps.system.clock.clone(),
-        Arc::clone(&receive_readiness),
         uc_infra::fs::FsInboundFileTarget::new(deps.settings.clone()),
         paths.file_cache_dir.clone(),
     );
@@ -664,7 +660,6 @@ pub fn wire_dependencies_from_inputs(
             mobile_sync_endpoint_info: Arc::clone(&infra.mobile_sync_endpoint_info),
         },
         shared: SharedRuntimeDeps {
-            receive_readiness,
             host_event_bus,
             entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
             clipboard_event_reader_repo: Arc::clone(&infra.clipboard_event_reader_repo),
@@ -683,7 +678,6 @@ pub fn wire_dependencies_from_inputs(
         spool_ttl_days: storage_config.spool_ttl_days,
         worker_retry_max_attempts: storage_config.worker_retry_max_attempts,
         worker_retry_backoff_ms: storage_config.worker_retry_backoff_ms,
-        file_transfer_lifecycle,
     };
     Ok((wired, background))
 }

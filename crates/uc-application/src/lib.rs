@@ -14,6 +14,7 @@ pub mod file_sync;
 pub mod sync_planner;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub(crate) mod transfer;
 
 // D16-2: deps re-exports so composition roots (uc-bootstrap, uc-tauri,
 // uc-daemon) can depend on `uc_application::*` directly and the legacy
@@ -39,8 +40,6 @@ pub use usecases::clipboard_sync::{
 // import them as `uc_application::facade::decode_v3_bytes_to_snapshot`
 // etc. The implementations stay in `usecases::clipboard_sync` but the
 // crate boundary only exposes them via the facade.
-pub mod file_transfer;
-pub mod receive_reconciliation;
 pub mod space;
 pub mod trusted_peer;
 /// `pub(crate)` — migration in progress (ADR-018): remaining use-case

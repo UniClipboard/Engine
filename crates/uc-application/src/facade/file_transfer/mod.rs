@@ -8,7 +8,8 @@
 mod facade;
 mod session;
 
-pub use crate::file_transfer::FileTransferApplicationError;
+pub use crate::transfer::file::lifecycle::FileTransferLifecycleDeps;
+pub use crate::transfer::file::FileTransferApplicationError;
 pub use facade::{
     BeginReceiverTransfer, FileTransferFacade, FileTransferFacadeDeps, ReceiverTransferRegistration,
 };

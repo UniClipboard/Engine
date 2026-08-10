@@ -27,7 +27,7 @@ use uc_core::{SnapshotHash, SystemClipboardSnapshot};
 use crate::clipboard_capture::InboundCaptureCommitContext;
 use crate::clipboard_write::{ClipboardWriteIntent, MobileConsumabilityProbe};
 use crate::entry_identity::EntryIdentityCoordinator;
-use crate::receive_reconciliation::ReceiveReadinessCoordinator;
+use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 
 use crate::facade::active_clipboard::ClipboardSnapshotDeps;
 use crate::facade::blob_transfer::SharedHostEventEmitter;

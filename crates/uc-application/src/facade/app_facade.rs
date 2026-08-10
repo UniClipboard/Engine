@@ -85,6 +85,7 @@ pub struct AppFacade {
     clipboard_capture: Arc<ClipboardCaptureFacade>,
     clipboard_sync: Arc<ClipboardSyncFacade>,
     blob_transfer: Arc<BlobTransferFacade>,
+    file_transfer: Arc<crate::facade::file_transfer::FileTransferFacade>,
     clipboard_outbound: Arc<ClipboardOutboundFacade>,
     clipboard_restore: Arc<ClipboardRestoreFacade>,
     search: Arc<SearchFacade>,
@@ -132,6 +133,7 @@ impl AppFacade {
             clipboard_capture: parts.clipboard_capture,
             clipboard_sync: parts.clipboard_sync,
             blob_transfer: parts.blob_transfer,
+            file_transfer: parts.file_transfer,
             clipboard_outbound: parts.clipboard_outbound,
             clipboard_restore: parts.clipboard_restore,
             search: parts.search,
@@ -147,6 +149,13 @@ impl AppFacade {
 
     pub async fn start_history_maintenance(&self) -> HistoryMaintenanceRuntime {
         HistoryMaintenanceRuntime::start(Arc::clone(&self.clipboard_history)).await
+    }
+
+    /// Current receive-gate status (transfer domain).
+    pub fn receive_readiness_status(
+        &self,
+    ) -> crate::transfer::receive::reconciliation::ReceiveReadinessStatus {
+        self.file_transfer.receive_readiness_status()
     }
 
     pub async fn capture_current_clipboard(
@@ -905,6 +914,7 @@ pub struct AppFacadeParts {
     pub clipboard_capture: Arc<ClipboardCaptureFacade>,
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
     pub blob_transfer: Arc<BlobTransferFacade>,
+    pub file_transfer: Arc<crate::facade::file_transfer::FileTransferFacade>,
     pub clipboard_outbound: Arc<ClipboardOutboundFacade>,
     pub clipboard_restore: Arc<ClipboardRestoreFacade>,
     pub search: Arc<SearchFacade>,

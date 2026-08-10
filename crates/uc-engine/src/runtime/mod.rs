@@ -30,7 +30,6 @@ use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::facade::{
     build_app_facade_from_deps, ClipboardRestoreAssembly, RuntimeAppFacadeAssembly,
 };
-use crate::assembly::file_transfer::FileTransferLifecycle;
 use crate::assembly::host::{
     wire_host_capabilities_with_emitter, EngineHostEventEmitter, HostWiring,
 };
@@ -52,7 +51,6 @@ pub(crate) struct ProductionRuntime {
     session_supervisor: Arc<SessionSupervisor>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     task_registry: Arc<TaskRegistry>,
-    file_transfer_lifecycle: Arc<FileTransferLifecycle>,
     #[cfg(feature = "lan-compat")]
     mobile_lan_endpoint: MobileLanEndpointUpdater,
     clock: Arc<dyn ClockPort>,
@@ -68,7 +66,6 @@ pub(crate) struct ProductionRuntime {
 struct SessionFactory {
     wired: WiredDependencies,
     paths: uc_application::facade::AppPaths,
-    file_transfer_lifecycle: Arc<FileTransferLifecycle>,
     events: EventSender,
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
@@ -263,7 +260,6 @@ impl ProductionRuntime {
         } = wire_host_capabilities_with_emitter(&config, host, emitter)
             .map_err(|error| startup_error("dependency wiring", error))?;
 
-        let file_transfer_lifecycle = Arc::clone(&background.file_transfer_lifecycle);
         let session = Arc::new(Mutex::new(None));
         let session_supervisor = Arc::new(SessionSupervisor::new(
             Arc::clone(&session),
@@ -278,7 +274,6 @@ impl ProductionRuntime {
         let session_factory = Arc::new(SessionFactory {
             wired: wired.clone(),
             paths: paths.clone(),
-            file_transfer_lifecycle: Arc::clone(&file_transfer_lifecycle),
             events: events.clone(),
             rendezvous_base_url: rendezvous_base_url.clone(),
             relay_fallback_override,
@@ -324,7 +319,6 @@ impl ProductionRuntime {
             session_supervisor,
             network_recovery,
             task_registry,
-            file_transfer_lifecycle,
             #[cfg(feature = "lan-compat")]
             mobile_lan_endpoint,
             clock,
@@ -341,7 +335,6 @@ impl ProductionRuntime {
     async fn build_session(factory: &SessionFactory) -> Result<ProductionSession, EngineError> {
         let wired = &factory.wired;
         let paths = &factory.paths;
-        let file_transfer_lifecycle = &factory.file_transfer_lifecycle;
         let events = factory.events.clone();
         let lifecycle = build_daemon_lifecycle(
             &wired.deps,
@@ -395,12 +388,13 @@ impl ProductionRuntime {
             RuntimeAppFacadeAssembly {
                 space: Arc::clone(&sync_engine.facade),
                 space_application: sync_engine.space_application_handle(),
-                space_receive_activity: Arc::clone(file_transfer_lifecycle)
-                    as Arc<dyn uc_application::receive_reconciliation::EnsureReceiveReadyPort>,
+                space_receive_activity: Arc::clone(&wired.shared.file_transfer_facade)
+                    as Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
                 member_roster: Arc::clone(&sync_engine.roster),
                 clipboard_sync: Arc::clone(&sync_engine.clipboard_sync),
                 blob_transfer: Arc::clone(&sync_engine.blob),
                 blob_transfer_port: Arc::clone(&sync_engine.blob_transfer),
+                file_transfer: Arc::clone(&wired.shared.file_transfer_facade),
                 clipboard_restore: ClipboardRestoreAssembly {
                     write_coordinator: Arc::clone(&wired.shared.clipboard_write_coordinator),
                     integration_mode: uc_core::clipboard::ClipboardIntegrationMode::Full,
@@ -428,12 +422,12 @@ impl ProductionRuntime {
         .await;
         let history_maintenance = facade.start_history_maintenance().await;
         spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
-        let lifecycle = Arc::clone(file_transfer_lifecycle);
         let blob_transfer = Arc::clone(&sync_engine.blob);
+        let file_transfer_facade = Arc::clone(&wired.shared.file_transfer_facade);
         tasks
             .spawn("file_transfer_timeout_sweep", move |cancel| async move {
                 let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-                let mut handle = lifecycle.spawn_timeout_sweep(cancel_rx, blob_transfer);
+                let mut handle = file_transfer_facade.spawn_timeout_sweep(cancel_rx, blob_transfer);
                 cancel.cancelled().await;
                 let _ = cancel_tx.send(true);
                 if tokio::time::timeout(Duration::from_secs(1), &mut handle)

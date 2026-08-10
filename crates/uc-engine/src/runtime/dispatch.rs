@@ -67,7 +67,6 @@ use crate::{EngineError, Operation, OperationResult};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use uc_application::receive_reconciliation::EnsureReceiveReadyPort;
 
 #[async_trait]
 impl EngineRuntime for ProductionRuntime {
@@ -283,7 +282,7 @@ impl EngineRuntime for ProductionRuntime {
                     self.execute_lan_compatibility_operation(operation).await
                 }
                 Operation::QueryReceiveReadiness => {
-                    let status = self.file_transfer_lifecycle.receive_readiness_status();
+                    let status = self.current_facade().await?.receive_readiness_status();
                     Ok(OperationResult::ReceiveReadiness(
                         crate::ReceiveReadinessSummary {
                             ready: status.ready,

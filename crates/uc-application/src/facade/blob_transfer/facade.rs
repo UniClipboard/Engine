@@ -23,7 +23,7 @@ use crate::facade::file_transfer::{
     BeginReceiverTransfer, FileTransferFacade, FileTransferSession, ReceiverTransferRegistration,
 };
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
-use crate::usecases::blob_transfer::{
+use crate::transfer::blob::{
     FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput, PublishBlobUseCase,
 };
 

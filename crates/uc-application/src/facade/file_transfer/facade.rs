@@ -12,7 +12,11 @@ use uc_core::ports::{
 };
 use uc_core::FileTransferEvent;
 
-use crate::file_transfer::FileTransferApplicationError;
+use crate::transfer::file::lifecycle::{FileTransferLifecycle, FileTransferLifecycleDeps};
+use crate::transfer::file::FileTransferApplicationError;
+use crate::transfer::receive::reconciliation::{
+    EnsureReceiveReadyPort, ReceiveReadinessError, ReceiveReadinessStatus,
+};
 
 use super::session::{FileTransferSession, FileTransferSessionRegistry};
 
@@ -44,6 +48,10 @@ pub struct FileTransferFacadeDeps {
     pub provisional_path: Arc<dyn UpdateProvisionalReceivePathPort>,
     pub provisional_finalize: Arc<dyn FinalizeProvisionalReceivePort>,
     pub clock: Arc<dyn ClockPort>,
+    /// Receiver-side lifecycle dependencies: receive readiness, startup
+    /// recovery, timeout sweep and privacy maintenance. The facade owns the
+    /// lifecycle and exposes its lifecycle actions (ADR-018 stage 2).
+    pub lifecycle: FileTransferLifecycleDeps,
 }
 
 /// Owns active receiver sessions and closes them as one process-wide lifecycle.
@@ -56,12 +64,14 @@ pub struct FileTransferFacade {
     store: Arc<dyn FileTransferEventStorePort>,
     publisher: Arc<dyn FileTransferEventPublisherPort>,
     sessions: Arc<FileTransferSessionRegistry>,
+    lifecycle: Arc<FileTransferLifecycle>,
 }
 
 impl FileTransferFacade {
     pub fn new(deps: FileTransferFacadeDeps) -> Self {
         let store = Arc::clone(&deps.store);
         let publisher = Arc::clone(&deps.publisher);
+        let lifecycle = Arc::new(FileTransferLifecycle::new(deps.lifecycle));
 
         Self {
             repo: deps.repo,
@@ -72,6 +82,7 @@ impl FileTransferFacade {
             store,
             publisher,
             sessions: Arc::new(FileTransferSessionRegistry::new()),
+            lifecycle,
         }
     }
 
@@ -92,7 +103,7 @@ impl FileTransferFacade {
         }
 
         let timeline =
-            crate::file_transfer::timeline::load_timeline(self.store.as_ref(), &input.transfer_id)
+            crate::transfer::file::timeline::load_timeline(self.store.as_ref(), &input.transfer_id)
                 .await?;
         if timeline.is_finished() {
             return Err(FileTransferApplicationError::TransferAlreadyFinished {
@@ -236,5 +247,54 @@ impl FileTransferFacade {
         self.provisional_path
             .update_provisional_receive_path(transfer_id, cached_path, self.clock.now_ms())
             .await
+    }
+
+    /// Lifecycle action: run receive readiness recovery (privacy
+    /// maintenance, receive-attempt reconciliation, startup recovery and
+    /// staging sweep) and open the receive gate.
+    pub async fn ensure_receive_ready(&self) -> Result<(), ReceiveReadinessError> {
+        self.lifecycle.ensure_receive_ready().await
+    }
+
+    /// Lifecycle action: close the receive gate so inbound transfers are
+    /// rejected until the next `ensure_receive_ready`.
+    pub fn close_receive_gate(&self) {
+        self.lifecycle.close_receive_gate();
+    }
+
+    /// Read the current receive-gate status.
+    pub fn receive_readiness_status(&self) -> ReceiveReadinessStatus {
+        self.lifecycle.receive_readiness_status()
+    }
+
+    /// Lifecycle action: spawn the periodic timeout sweep that fails stalled
+    /// transfers and cleans partial cache artifacts.
+    pub fn spawn_timeout_sweep(
+        &self,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        blob_transfer: Arc<crate::facade::blob_transfer::BlobTransferFacade>,
+    ) -> tokio::task::JoinHandle<()> {
+        self.lifecycle.spawn_timeout_sweep(cancel, blob_transfer)
+    }
+
+    /// Lifecycle action: mark orphaned in-flight transfers as failed after a
+    /// restart and clean their cache artifacts.
+    pub async fn reconcile_on_startup(&self) -> anyhow::Result<()> {
+        self.lifecycle.reconcile_on_startup().await
+    }
+}
+
+#[async_trait::async_trait]
+impl EnsureReceiveReadyPort for FileTransferFacade {
+    async fn ensure_receive_ready(&self) -> Result<(), ReceiveReadinessError> {
+        self.lifecycle.ensure_receive_ready().await
+    }
+
+    fn close_receive_gate(&self) {
+        self.lifecycle.close_receive_gate();
+    }
+
+    fn receive_readiness_status(&self) -> ReceiveReadinessStatus {
+        self.lifecycle.receive_readiness_status()
     }
 }
