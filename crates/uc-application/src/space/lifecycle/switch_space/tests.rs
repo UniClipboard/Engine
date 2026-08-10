@@ -29,7 +29,7 @@ use uc_observability_contract::analytics::{
 };
 use uuid::Uuid;
 
-use crate::space::convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::convergence::WorkspaceConvergenceError;
 
 // ── 端口替身（mockall）──────────────────────────────────────────────────

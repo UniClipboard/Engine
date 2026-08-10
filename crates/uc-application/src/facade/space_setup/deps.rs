@@ -21,7 +21,7 @@ use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard_write::MobileConsumableBackfill;
 use crate::deps::SpaceAccessPorts;
-use crate::space::convergence::WorkspaceConvergence;
+use crate::space::convergence::assembly::SpaceConvergenceAssembly;
 
 pub struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
@@ -46,9 +46,9 @@ pub struct SpaceAdmissionDeps {
     pub presence: Arc<dyn PresencePort>,
     pub analytics: Arc<dyn AnalyticsFacade>,
     pub removal_gate: Arc<dyn RemovalTargetGatePort>,
-    /// The workspace convergence owner behind the admission seam. Always
-    /// present: the assembly layer guarantees the owner exists.
-    pub workspace_convergence: Arc<WorkspaceConvergence>,
+    /// The assembled space convergence owners behind the admission seam.
+    /// Always present: the assembly layer guarantees the owner exists.
+    pub convergence: Arc<SpaceConvergenceAssembly>,
 }
 
 pub struct SpaceTransitionDeps {

@@ -11,7 +11,6 @@ pub(crate) mod entry_identity;
 pub mod facade;
 pub(crate) mod file_set_query;
 pub mod file_sync;
-pub mod group_update_delivery;
 pub mod sync_planner;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -41,14 +40,10 @@ pub use usecases::clipboard_sync::{
 // etc. The implementations stay in `usecases::clipboard_sync` but the
 // crate boundary only exposes them via the facade.
 pub mod file_transfer;
-pub mod proof;
 pub mod receive_reconciliation;
 pub mod space;
 pub mod trusted_peer;
-/// `pub` (not `pub(crate)`) only because Slice 2 Phase 3 · T10 needs a
-/// publicly-reachable path to `usecases::clipboard_sync::payload_codec
-/// ::decode_v3_bytes_to_snapshot` for the CLI `watch` command. Every
-/// sub-module inside `usecases` keeps its own `pub(crate)` visibility
-/// cap, so only explicitly `pub` items inside leak out; the public
-/// surface stays minimal.
-pub mod usecases;
+/// `pub(crate)` — migration in progress (ADR-018): remaining use-case
+/// directories (`clipboard_sync`, `blob_transfer`, ...) move into their
+/// domains; nothing here is part of the stable public surface.
+pub(crate) mod usecases;

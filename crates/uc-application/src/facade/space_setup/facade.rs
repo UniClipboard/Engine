@@ -43,20 +43,22 @@ use crate::facade::space_setup::errors::{
 use crate::facade::space_setup::errors::{
     InitializeSpaceError, IssuePairingInvitationError, TryResumeSessionError, UnlockSpaceError,
 };
-use crate::group_update_delivery::{GroupUpdateDelivery, GroupUpdateDeliveryPort};
-use crate::space::convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
-use crate::space::convergence::admission::invitation::InMemoryPairingInvitationHolder;
-use crate::space::convergence::admission::joiner::joiner_handshake::JoinerHandshakeCoordinator;
-use crate::space::convergence::admission::sponsor::orchestrator::PairingInboundOrchestrator;
-use crate::space::convergence::admission::sponsor::sponsor_handshake::SponsorHandshakeCoordinator;
-use crate::usecases::pairing::issue_invitation::IssuePairingInvitationUseCase;
-use crate::usecases::pairing::redeem_invitation::RedeemPairingInvitationUseCase;
-use crate::usecases::presence::ensure_reachable_all::{
+use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
+use crate::space::admission::issue_invitation::IssuePairingInvitationUseCase;
+use crate::space::admission::joiner::joiner_handshake::JoinerHandshakeCoordinator;
+use crate::space::admission::redeem_invitation::RedeemPairingInvitationUseCase;
+use crate::space::admission::sponsor::orchestrator::PairingInboundOrchestrator;
+use crate::space::admission::sponsor::sponsor_handshake::SponsorHandshakeCoordinator;
+use crate::space::convergence::group_update_delivery::{
+    GroupUpdateDelivery, GroupUpdateDeliveryPort,
+};
+use crate::space::convergence::reachability::{
     EnsureReachableAllError, EnsureReachableAllReport, EnsureReachableAllUseCase,
 };
-use crate::usecases::setup::initialize_space::InitializeSpaceUseCase;
-use crate::usecases::setup::switch_space::{JoinerHandshakeRunner, SwitchSpaceUseCase};
-use crate::usecases::setup::unlock_space::UnlockSpaceUseCase;
+use crate::space::lifecycle::initialize_space::InitializeSpaceUseCase;
+use crate::space::lifecycle::switch_space::{JoinerHandshakeRunner, SwitchSpaceUseCase};
+use crate::space::lifecycle::unlock_space::UnlockSpaceUseCase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort,
@@ -136,24 +138,16 @@ pub struct SpaceFacade {
 impl SpaceFacade {
     /// Wire all use cases from a single [`SpaceFacadeDeps`] bundle and
     /// spawn the sponsor-side inbound pairing orchestrator.
+    ///
+    /// The workspace convergence owner and the group-update delivery are
+    /// taken from `admission.convergence`; callers assemble them through
+    /// [`SpaceConvergenceAssembly::new`] so the application layer stays the
+    /// single construction point (ADR-018).
     pub fn new(deps: SpaceFacadeDeps) -> Self {
-        Self::new_internal(deps, None)
+        Self::new_internal(deps)
     }
 
-    pub fn new_with_group_delivery(
-        deps: SpaceFacadeDeps,
-        outbox: Arc<dyn GroupRevocationPort>,
-        dispatch: Arc<dyn GroupUpdateDispatchPort>,
-    ) -> Self {
-        let delivery: Arc<dyn GroupUpdateDeliveryPort> =
-            Arc::new(GroupUpdateDelivery::new(outbox, dispatch));
-        Self::new_internal(deps, Some(delivery))
-    }
-
-    fn new_internal(
-        deps: SpaceFacadeDeps,
-        group_update_delivery: Option<Arc<dyn GroupUpdateDeliveryPort>>,
-    ) -> Self {
+    fn new_internal(deps: SpaceFacadeDeps) -> Self {
         let SpaceFacadeDeps {
             session,
             admission,
@@ -180,9 +174,13 @@ impl SpaceFacade {
             presence,
             analytics,
             removal_gate,
-            workspace_convergence,
+            convergence,
             ..
         } = admission;
+        let convergence = Arc::clone(&convergence);
+        let workspace_convergence = Arc::clone(&convergence.workspace);
+        let group_update_delivery: Arc<dyn GroupUpdateDeliveryPort> =
+            convergence.group_update_delivery();
         let SpaceTransitionDeps {
             relationship_reset,
             space_security_reset,
@@ -432,7 +430,7 @@ impl SpaceFacade {
 
     /// Switch this device to another sponsor's space while preserving
     /// local clipboard history via 4-phase re-encryption migration. See
-    /// [`crate::usecases::setup::switch_space`] module doc for full
+    /// [`crate::space::lifecycle::switch_space`] module doc for full
     /// semantics, including failure rollback and crash recovery.
     ///
     /// Pre-conditions: setup completed (else `NotSetup`), session
@@ -853,9 +851,14 @@ mod tests {
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
-        MembershipError, RelationshipStateResetError, RelationshipStateResetPort,
-        RemovalAdmissionDecision, RemovalAdmissionGatePort, RemovalTargetGatePort, SpaceMember,
-        SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
+        GroupEpoch, GroupRevocationResult, GroupUpdateDispatchError, KeyEpochError,
+        LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult,
+        LegacyProtectionSnapshot, LegacyRequestInspection, LegacyUpgradeDispatchError,
+        LegacyUpgradeDispatchPort, LegacyUpgradeError, LegacyUpgradeRequest, LegacyUpgradeResponse,
+        MembershipError, PendingGroupUpdate, RelationshipStateResetError,
+        RelationshipStateResetPort, RemovalAdmissionDecision, RemovalAdmissionGatePort,
+        RemovalTargetGatePort, RevocationId, SpaceMember, SpaceSecurityStateResetError,
+        SpaceSecurityStateResetPort,
     };
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::PairingSessionMessage;
@@ -880,8 +883,9 @@ mod tests {
 
     use crate::deps::SpaceAccessPorts;
     use crate::facade::space_setup::UnreadableHistoryPolicy;
+    use crate::space::convergence::assembly::SpaceConvergenceAssembly;
+    use crate::space::convergence::legacy_upgrade::AutomaticLegacyUpgradeDeps;
     use crate::space::convergence::tests::MemoryWorkspaceRepository;
-    use crate::space::convergence::WorkspaceConvergence;
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
     use uc_core::setup::SetupStatus;
@@ -1429,6 +1433,120 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct NoopGroupRevocation;
+    #[async_trait]
+    impl GroupRevocationPort for NoopGroupRevocation {
+        async fn revoke_group_member(
+            &self,
+            _target: &DeviceId,
+            _retained_recipients: &[DeviceId],
+            _now_ms: i64,
+        ) -> Result<uc_core::membership::GroupRevocationResult, KeyEpochError> {
+            unreachable!("smoke tests never revoke")
+        }
+        async fn acknowledge_group_update(
+            &self,
+            _revocation_id: &RevocationId,
+            _recipient: &DeviceId,
+            _now_ms: i64,
+        ) -> Result<uc_core::membership::GroupRevocationResult, KeyEpochError> {
+            unreachable!("smoke tests never acknowledge")
+        }
+        async fn apply_group_epoch_update(
+            &self,
+            _payload: &[u8],
+        ) -> Result<GroupEpoch, KeyEpochError> {
+            unreachable!("smoke tests never apply updates")
+        }
+        async fn pending_group_updates(
+            &self,
+            _revocation_id: &RevocationId,
+        ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+            Ok(vec![])
+        }
+        async fn query_group_revocation(
+            &self,
+            _revocation_id: &RevocationId,
+        ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+            Ok(None)
+        }
+        async fn resume_group_revocations(
+            &self,
+            _now_ms: i64,
+        ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
+            Ok(vec![])
+        }
+        async fn pending_space_group_updates(
+            &self,
+        ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+            Ok(vec![])
+        }
+        async fn acknowledge_space_group_update(
+            &self,
+            _update_id: &str,
+            _now_ms: i64,
+        ) -> Result<bool, KeyEpochError> {
+            Ok(false)
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopGroupUpdateDispatch;
+    #[async_trait]
+    impl GroupUpdateDispatchPort for NoopGroupUpdateDispatch {
+        async fn dispatch_group_update(
+            &self,
+            _update: &PendingGroupUpdate,
+        ) -> Result<(), GroupUpdateDispatchError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopLegacyProtection;
+    #[async_trait]
+    impl LegacyProtectionPort for NoopLegacyProtection {
+        async fn snapshot(
+            &self,
+            _member_ids: &[DeviceId],
+        ) -> Result<LegacyProtectionSnapshot, LegacyUpgradeError> {
+            unreachable!("smoke tests never snapshot legacy protection")
+        }
+        async fn begin_attempt(
+            &self,
+            _source_device_id: &DeviceId,
+            _target_device_id: &DeviceId,
+        ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
+            unreachable!("smoke tests never begin legacy upgrade")
+        }
+        async fn inspect_request(
+            &self,
+            _request: &LegacyUpgradeRequest,
+        ) -> Result<LegacyRequestInspection, LegacyUpgradeError> {
+            unreachable!("smoke tests never inspect legacy upgrade")
+        }
+        async fn execute(
+            &self,
+            _command: LegacyProtectionCommand,
+        ) -> Result<LegacyProtectionResult, LegacyUpgradeError> {
+            unreachable!("smoke tests never execute legacy upgrade")
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopLegacyUpgradeDispatch;
+    #[async_trait]
+    impl LegacyUpgradeDispatchPort for NoopLegacyUpgradeDispatch {
+        async fn exchange_legacy_upgrade(
+            &self,
+            _peer: &DeviceId,
+            _request: &LegacyUpgradeRequest,
+        ) -> Result<LegacyUpgradeResponse, LegacyUpgradeDispatchError> {
+            unreachable!("smoke tests never exchange legacy upgrade")
+        }
+    }
+
     // Slice 2 Phase 1 · T5/T8 note:
     //
     // * T5:pairing 收尾点(orchestrator / redeem_invitation)会对 peer_addr_repo
@@ -1767,13 +1885,26 @@ mod tests {
                 presence: Arc::new(FakePresence),
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
                 removal_gate: Arc::new(AllowRemovalAdmission),
-                workspace_convergence: WorkspaceConvergence::new(
-                    crate::space::convergence::tests::test_deps(
-                        Arc::new(MemoryWorkspaceRepository::default()),
-                        "device-1",
-                        Vec::new(),
-                    ),
-                ),
+                convergence: Arc::new(SpaceConvergenceAssembly::new(
+                    crate::space::convergence::assembly::SpaceConvergenceDeps {
+                        workspace: crate::space::convergence::tests::test_deps(
+                            Arc::new(MemoryWorkspaceRepository::default()),
+                            "device-1",
+                            Vec::new(),
+                        ),
+                        membership: crate::space::convergence::discovery::testing::test_deps(),
+                        group_revocation: Arc::new(NoopGroupRevocation),
+                        group_update_dispatch: Arc::new(NoopGroupUpdateDispatch),
+                        legacy_upgrade: AutomaticLegacyUpgradeDeps {
+                            member_repo: Arc::new(InMemoryMemberRepo::default()),
+                            device_identity: Arc::new(FixedDeviceIdentity {
+                                id: DeviceId::new("device-1"),
+                            }),
+                            protection: Arc::new(NoopLegacyProtection),
+                            dispatch: Arc::new(NoopLegacyUpgradeDispatch),
+                        },
+                    },
+                )),
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::new(NoopRelationshipStateReset),

@@ -253,7 +253,7 @@ fn legacy_space_setup_types_are_removed() {
 fn encryption_facade_does_not_duplicate_space_lifecycle_actions() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let encryption = std::fs::read_to_string(
-        workspace_root.join("crates/uc-application/src/facade/encryption/mod.rs"),
+        workspace_root.join("crates/uc-application/src/space/lifecycle/encryption/mod.rs"),
     )
     .expect("encryption facade source must be readable");
     for forbidden in [

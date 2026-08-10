@@ -31,16 +31,8 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 
 use crate::facade::config_migration::ConfigMigrationFacade;
-use crate::facade::network_recovery::{
-    NetworkRecoveryFacade, NetworkRecoveryRequestError, NetworkRecoveryStatus,
-};
 use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
 use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
-use crate::facade::space_admission::SpaceAdmissionCoordinator;
-use crate::facade::space_session::{
-    build_space_session_coordinator, RecoverSpaceSessionResult, SpaceSessionAccessDeps,
-    SpaceSessionActivityDeps, SpaceSessionCoordinator, SpaceSessionError,
-};
 use crate::facade::space_setup::{EnsureReachableAllError, EnsureReachableAllReport};
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
@@ -62,6 +54,14 @@ use crate::facade::{
     ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
     SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
     SettingsFacadeError, SpaceFacade, StorageFacade,
+};
+use crate::space::admission::coordinator::SpaceAdmissionCoordinator;
+use crate::space::convergence::network_recovery::{
+    NetworkRecoveryFacade, NetworkRecoveryRequestError, NetworkRecoveryStatus,
+};
+use crate::space::lifecycle::session::{
+    build_space_session_coordinator, RecoverSpaceSessionResult, SpaceSessionAccessDeps,
+    SpaceSessionActivityDeps, SpaceSessionCoordinator, SpaceSessionError,
 };
 use crate::usecases::clipboard_sync::V3BlobRef;
 use uc_core::ids::DeviceId;

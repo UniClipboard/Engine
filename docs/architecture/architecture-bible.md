@@ -96,6 +96,18 @@ Rust API       UniFFI 绑定          N-API 绑定
 | `compatibility/` | 用户显式选择的 LAN HTTP 兼容线，独立版本和发布 |
 | `tests/hosts/` | 三个移动平台的接入验收宿主，不承载产品功能 |
 
+### 应用层目录归属（ADR-018）
+
+`uc-application` 先按业务领域组织：剪贴板、空间、传输、搜索和设置各自保有短动作、持续流程和
+测试；跨领域且无业务所有权的小型能力才进入 `support/`，`deps.rs` 只保存组装数据。`use case`
+只是短动作的职责，不是目录归属，因此不保留集中 `usecases/`，领域内部也不嵌套同名目录。
+短动作直接位于所属领域或有明确业务含义的子域，持续工作也留在所属领域的 `runtime/` 或
+`coordinator/` 中。`facade/` 仍是唯一对外业务入口，按领域提供入口而不保存流程实现。运行期、
+协调器、会话、内部适配、事件总线、缓存和投影构建不得留在 `facade/`；它们分别归入所属领域或
+无业务所有权的 `support/`。稳定事件类型可以由门面公开，事件投递实现不在门面目录。
+
+完整的路径迁移表、Engine 收口规则、删除清单和验收矩阵见[规格 018](../specs/018-domain-oriented-application-layout.md)。
+
 ### 领域模块
 
 | 领域 | 核心事实 | 完整流程归属 |
@@ -719,6 +731,9 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 日期 | 修改范围 | 架构结论 |
 | --- | --- | --- |
 | 2026-08-10 | 会话恢复后在线状态刷新改为后台 | 会话恢复不再阻塞在逐端拨号上，presence 刷新移入后台任务，状态经既有 presence 事件到达；仅调整时序，无架构变化。 |
+| 2026-08-10 | ADR-018 阶段 1 实施：空间领域与密码适配收口 | `HmacProofAdapter` 从 `uc-application::proof` 移入 `uc-infra::security::admission_proof`，Engine 从 `uc-infra` 注入 `ProofPort`。空间生命周期、准入（含配对邀请签发/兑换）、成员名单（嵌套 `usecases/` 拍平）、成员连通、网络恢复、旧成员升级和群组更新投递全部收进 `space/{lifecycle,admission,roster,convergence}`；`trusted_peer/`、`usecases/{pairing,presence,setup}`、根 `group_update_delivery.rs` 和 `facade/` 中对应运行期/协调器/会话文件删除。新增 `SpaceConvergenceAssembly` 作为收敛对象唯一构造点，`SpaceApplicationRuntime::start` 统一启动收敛、gossip、连通与升级运行期；Engine 不再直接构造 `WorkspaceConvergence`、`GroupUpdateDelivery`、`MembershipConvergence` 或 `AutomaticLegacyUpgrade`，只经 `SpaceFacade` 与门面级生命周期动作进入空间领域。对外操作、结果、错误和事件语义不变。 |
+| 2026-08-10 | ADR-018 门面目录收口 | `facade/` 只保留 `AppFacade`、领域入口和外部需要理解的输入输出；运行期、协调器、会话、内部适配、事件总线、缓存和投影构建分别移入所属领域或 `support/`。当前仅更新架构决策和文档，无运行行为变化。 |
+| 2026-08-10 | ADR-018 用例目录统一 | 应用层目录按业务领域而非动作类别划分：删除集中 `usecases/` 和领域内同名嵌套目录的目标已写入 ADR。短动作直接归入所属领域或业务子域，持续流程与测试随领域收口；`facade/` 继续是唯一对外入口。本次仅更新架构决策和文档，无运行行为变化。 |
 | 2026-08-10 | ADR-018 空间成员目录收口 | `space` 现在包含 `roster` 与 `convergence`：前者管理当前空间的成员名单和同步偏好，后者统一负责加入、移除、重新加入、资料补齐、确认和重启后的继续；设备发现成为 `convergence` 的内部部分，加入通信成为其私有 `admission`。原顶层 `membership` 与 `workspace_convergence` 目录及其调用路径已删除，不保留兼容入口。业务行为不变。 |
 | 2026-08-10 | ADR-018 应用层按业务领域收口 | 采纳按业务领域组织应用层：短动作、持续流程和测试随领域一起收口，门面是唯一对外业务入口，`AppFacade` 只聚合少量领域入口。迁移时同步改外部调用并删除旧目录、再导出和转发层，不保留兼容路径；本 ADR 不改变当前业务行为。 |
 | 2026-08-10 | `uc-application` 目录与对外入口治理 | 明确应用层按业务领域收口：门面是外部唯一业务入口，短动作由领域内用例完成，持续流程由同一领域的协调器或运行期负责；`AppFacade` 只聚合少量领域入口，不再作为平铺动作清单。组装数据是唯一可公开的非业务例外，实际组装仍由 Engine 负责。迁移必须删除旧目录路径、再导出和直接调用，不保留兼容入口。仅更新维护规则，无运行行为变化。 |

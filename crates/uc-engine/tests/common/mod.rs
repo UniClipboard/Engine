@@ -14,18 +14,36 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use uc_application::clipboard_write::MobileConsumableBackfill;
+use uc_application::facade::AutomaticLegacyUpgradeDeps;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
-use uc_core::ids::{EventId, RepresentationId, SpaceId};
+use uc_core::ids::{DeviceId, EventId, RepresentationId, SpaceId};
 use uc_core::membership::{
-    RelationshipStateResetError, RelationshipStateResetPort, SpaceSecurityStateResetError,
-    SpaceSecurityStateResetPort,
+    DeviceAnnouncement, GroupEpoch, GroupRevocationPort, GroupRevocationResult,
+    GroupUpdateDispatchError, GroupUpdateDispatchPort, KeyEpochError, LegacyProtectionCommand,
+    LegacyProtectionPort, LegacyProtectionResult, LegacyProtectionSnapshot,
+    LegacyRequestInspection, LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort,
+    LegacyUpgradeError, LegacyUpgradeRequest, LegacyUpgradeResponse, MemberRepositoryPort,
+    MembershipAnnouncementRepositoryError, MembershipAnnouncementRepositoryPort,
+    MembershipAppliedSecurityUpdateRepositoryError, MembershipAppliedSecurityUpdateRepositoryPort,
+    MembershipAttestationError, MembershipAttestationPort, MembershipCandidateRepositoryError,
+    MembershipCandidateRepositoryPort, MembershipError, MembershipGossipMessage,
+    MembershipGossipTransportError, MembershipGossipTransportPort, MembershipOutboxRepositoryError,
+    MembershipOutboxRepositoryPort, PendingGroupUpdate, PendingMembershipBatch,
+    RelationshipStateResetError, RelationshipStateResetPort, RelayedSecurityUpdate, RevocationId,
+    SpaceMember, SpaceMembershipCandidate, SpaceSecurityStateResetError,
+    SpaceSecurityStateResetPort, VerifiedMembershipPeer, VerifiedPeerPromotionError,
+    VerifiedPeerPromotionPort,
 };
 use uc_core::ports::clipboard::{BlobMigrationRepoError, BlobMigrationRepoPort, MigrationRecord};
 use uc_core::ports::security::{
-    BlobCipherError, BlobCipherPort, KeyMigrationError, KeyMigrationPort,
+    BlobCipherError, BlobCipherPort, IdentityFingerprintFactoryPort, KeyMigrationError,
+    KeyMigrationPort,
 };
 use uc_core::ports::setup::{MigrationStateError, MigrationStatePort};
+use uc_core::ports::{ContentHashPort, PeerAddressRecord};
+use uc_core::security::IdentityFingerprint;
 use uc_core::setup::{MigrationPhase, MigrationRunId};
+use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
 
 pub struct NoopMobileConsumableBackfill;
 
@@ -218,25 +236,26 @@ pub fn migration_noop_deps() -> (
 
 use std::sync::Mutex;
 
-use uc_application::space::convergence::{WorkspaceConvergence, WorkspaceConvergenceDeps};
-use uc_core::ids::DeviceId;
+use uc_application::facade::{
+    MembershipConvergenceDeps, SpaceConvergenceAssembly, SpaceConvergenceDeps,
+    WorkspaceConvergenceDeps,
+};
 use uc_core::membership::{
     CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityError,
-    CurrentMembershipIdentityPort, MemberInstanceId, MemberRepositoryPort,
-    MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalCausalProof,
-    RemovalCausalProofMember, RemovalExchangeMessage, RemovalIntentVerificationError,
-    RemovalIntentVerificationPort, RemovalLateAcceptance, RemovalLateRejectionReason,
-    RemovalLateSubmission, RemovalLateSubmissionPort, RemovalNotice, RemovalNoticeAcceptance,
-    RemovalNoticePort, RemovalNoticeVerificationError, RemovalNoticeVerificationPort,
-    RemovalRecoveryError, RemovalRecoveryPort, RemovalViewMember, RemovalViewSnapshot,
-    SignedRemovalIntent, WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
+    CurrentMembershipIdentityPort, MemberInstanceId, MembershipSecurityUpdateError,
+    MembershipSecurityUpdatePort, RemovalCausalProof, RemovalCausalProofMember,
+    RemovalExchangeMessage, RemovalIntentVerificationError, RemovalIntentVerificationPort,
+    RemovalLateAcceptance, RemovalLateRejectionReason, RemovalLateSubmission,
+    RemovalLateSubmissionPort, RemovalNotice, RemovalNoticeAcceptance, RemovalNoticePort,
+    RemovalNoticeVerificationError, RemovalNoticeVerificationPort, RemovalRecoveryError,
+    RemovalRecoveryPort, RemovalViewMember, RemovalViewSnapshot, SignedRemovalIntent,
+    WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
     WorkspaceConvergenceState,
 };
 use uc_core::ports::{ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, SettingsPort};
-use uc_core::security::IdentityFingerprint;
 use uc_core::setup::SetupStatus;
-use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError, TrustedPeerRepositoryPort};
+use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
 /// Build a workspace convergence owner whose member/trust/address writes go
 /// through the provided repositories (mirroring production assembly), with
@@ -251,14 +270,14 @@ pub fn test_workspace_convergence(
     pairing_session: Arc<dyn uc_core::ports::pairing::PairingSessionPort>,
     settings: Arc<dyn SettingsPort>,
     clock: Arc<dyn ClockPort>,
-) -> Arc<WorkspaceConvergence> {
+) -> Arc<SpaceConvergenceAssembly> {
     let own_device = device_identity.current_device_id();
-    WorkspaceConvergence::new(WorkspaceConvergenceDeps {
+    let workspace = WorkspaceConvergenceDeps {
         repository: Arc::new(MemoryWorkspaceRepo::default()),
         verification: Arc::new(NoopIntentVerifier),
         recovery: Arc::new(FixedRecovery::new(own_device)),
         member_signatures: Arc::new(FixedSigner),
-        member_repo,
+        member_repo: Arc::clone(&member_repo),
         membership_identity: Arc::new(FixedMembershipIdentity::new(
             own_device,
             Arc::clone(&settings),
@@ -271,16 +290,372 @@ pub fn test_workspace_convergence(
             Arc::clone(&pairing_session),
         )),
         security_updates: Arc::new(NoopSecurityUpdates),
-        clock,
-        device_identity,
+        clock: Arc::clone(&clock),
+        device_identity: Arc::clone(&device_identity),
         exchange: Arc::new(NoopExchange),
         late_submission: Arc::new(NoopLateSubmission),
         notice: Arc::new(NoopNotice),
         notice_verification: Arc::new(NoopNoticeVerification),
-        trusted_peer_repo,
-        peer_addr_repo,
+        trusted_peer_repo: Arc::clone(&trusted_peer_repo),
+        peer_addr_repo: Arc::clone(&peer_addr_repo),
         own_device,
-    })
+    };
+    Arc::new(SpaceConvergenceAssembly::new(SpaceConvergenceDeps {
+        workspace,
+        membership: MembershipConvergenceDeps {
+            candidate_repo: Arc::new(EmptyCandidateRepo),
+            announcement_repo: Arc::new(EmptyAnnouncementRepo),
+            outbox_repo: Arc::new(EmptyOutboxRepo),
+            security_updates: Arc::new(NoopSecurityUpdates),
+            applied_security_updates: Arc::new(EmptyAppliedSecurityUpdates),
+            transport: Arc::new(NoopGossipTransport),
+            clock,
+            device_identity,
+            announcement_material: Arc::new(FixedAnnouncementMaterial::new(
+                own_device,
+                Arc::clone(&settings),
+                Arc::clone(&local_identity),
+                Arc::clone(&pairing_session),
+            )),
+            member_signatures: Arc::new(FixedSigner),
+            fingerprint_factory: Arc::new(NoopFingerprintFactory),
+            attestation: Arc::new(NoopAttestation),
+            verified_peer_promotion: Arc::new(NoopVerifiedPeerPromotion),
+            member_repo,
+            trusted_peer_repo,
+            peer_address_repo: peer_addr_repo,
+            hash: Arc::new(NoopHasher),
+        },
+        group_revocation: Arc::new(NoopGroupRevocation),
+        group_update_dispatch: Arc::new(NoopGroupUpdateDispatch),
+        legacy_upgrade: AutomaticLegacyUpgradeDeps {
+            member_repo: Arc::new(EmptyMemberRepo),
+            device_identity: Arc::new(NoopDeviceIdentity),
+            protection: Arc::new(NoopLegacyProtection),
+            dispatch: Arc::new(NoopLegacyUpgradeDispatch),
+        },
+    }))
+}
+
+#[derive(Default)]
+struct EmptyCandidateRepo;
+#[async_trait]
+impl MembershipCandidateRepositoryPort for EmptyCandidateRepo {
+    async fn get(
+        &self,
+        _space_id: &SpaceId,
+        _device_id: &DeviceId,
+    ) -> Result<Option<SpaceMembershipCandidate>, MembershipCandidateRepositoryError> {
+        Ok(None)
+    }
+    async fn list(
+        &self,
+        _space_id: &SpaceId,
+    ) -> Result<Vec<SpaceMembershipCandidate>, MembershipCandidateRepositoryError> {
+        Ok(vec![])
+    }
+    async fn save(
+        &self,
+        _candidate: &SpaceMembershipCandidate,
+    ) -> Result<(), MembershipCandidateRepositoryError> {
+        Ok(())
+    }
+    async fn remove(
+        &self,
+        _space_id: &SpaceId,
+        _device_id: &DeviceId,
+    ) -> Result<bool, MembershipCandidateRepositoryError> {
+        Ok(false)
+    }
+    async fn purge_expired(
+        &self,
+        _space_id: &SpaceId,
+        _now_ms: i64,
+    ) -> Result<usize, MembershipCandidateRepositoryError> {
+        Ok(0)
+    }
+}
+
+#[derive(Default)]
+struct EmptyAnnouncementRepo;
+#[async_trait]
+impl MembershipAnnouncementRepositoryPort for EmptyAnnouncementRepo {
+    async fn get(
+        &self,
+        _space_id: &SpaceId,
+        _device_id: &DeviceId,
+    ) -> Result<Option<DeviceAnnouncement>, MembershipAnnouncementRepositoryError> {
+        Ok(None)
+    }
+    async fn list(
+        &self,
+        _space_id: &SpaceId,
+    ) -> Result<Vec<DeviceAnnouncement>, MembershipAnnouncementRepositoryError> {
+        Ok(vec![])
+    }
+    async fn save(
+        &self,
+        _announcement: &DeviceAnnouncement,
+    ) -> Result<(), MembershipAnnouncementRepositoryError> {
+        Ok(())
+    }
+    async fn remove(
+        &self,
+        _space_id: &SpaceId,
+        _device_id: &DeviceId,
+    ) -> Result<bool, MembershipAnnouncementRepositoryError> {
+        Ok(false)
+    }
+}
+
+#[derive(Default)]
+struct EmptyOutboxRepo;
+#[async_trait]
+impl MembershipOutboxRepositoryPort for EmptyOutboxRepo {
+    async fn get(
+        &self,
+        _space_id: &SpaceId,
+        _recipient_device_id: &DeviceId,
+        _batch_id: &[u8; 32],
+    ) -> Result<Option<PendingMembershipBatch>, MembershipOutboxRepositoryError> {
+        Ok(None)
+    }
+    async fn list_pending(
+        &self,
+        _space_id: &SpaceId,
+    ) -> Result<Vec<PendingMembershipBatch>, MembershipOutboxRepositoryError> {
+        Ok(vec![])
+    }
+    async fn save(
+        &self,
+        _pending: &PendingMembershipBatch,
+    ) -> Result<(), MembershipOutboxRepositoryError> {
+        Ok(())
+    }
+    async fn remove(
+        &self,
+        _space_id: &SpaceId,
+        _recipient_device_id: &DeviceId,
+        _batch_id: &[u8; 32],
+    ) -> Result<bool, MembershipOutboxRepositoryError> {
+        Ok(false)
+    }
+}
+
+#[derive(Default)]
+struct EmptyAppliedSecurityUpdates;
+#[async_trait]
+impl MembershipAppliedSecurityUpdateRepositoryPort for EmptyAppliedSecurityUpdates {
+    async fn list(
+        &self,
+        _space_id: &SpaceId,
+    ) -> Result<Vec<RelayedSecurityUpdate>, MembershipAppliedSecurityUpdateRepositoryError> {
+        Ok(vec![])
+    }
+    async fn save(
+        &self,
+        _space_id: &SpaceId,
+        _update: &RelayedSecurityUpdate,
+    ) -> Result<(), MembershipAppliedSecurityUpdateRepositoryError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct NoopGossipTransport;
+#[async_trait]
+impl MembershipGossipTransportPort for NoopGossipTransport {
+    async fn exchange(
+        &self,
+        _recipient: &DeviceId,
+        _message: MembershipGossipMessage,
+    ) -> Result<MembershipGossipMessage, MembershipGossipTransportError> {
+        Err(MembershipGossipTransportError::Offline)
+    }
+}
+
+#[derive(Default)]
+struct NoopFingerprintFactory;
+#[async_trait]
+impl IdentityFingerprintFactoryPort for NoopFingerprintFactory {
+    fn from_public_key(&self, _public_key: &[u8]) -> anyhow::Result<IdentityFingerprint> {
+        IdentityFingerprint::from_raw_string("AAAAAAAAAAAAAAAA")
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+}
+
+#[derive(Default)]
+struct NoopAttestation;
+#[async_trait]
+impl MembershipAttestationPort for NoopAttestation {
+    async fn attest_candidate(
+        &self,
+        _candidate: &SpaceMembershipCandidate,
+    ) -> Result<VerifiedMembershipPeer, MembershipAttestationError> {
+        Err(MembershipAttestationError::Offline)
+    }
+}
+
+#[derive(Default)]
+struct NoopVerifiedPeerPromotion;
+#[async_trait]
+impl VerifiedPeerPromotionPort for NoopVerifiedPeerPromotion {
+    async fn promote_verified_peer(
+        &self,
+        _member: &SpaceMember,
+        _trusted_peer: &TrustedPeer,
+        _peer_address: &PeerAddressRecord,
+        _ready_candidate: &SpaceMembershipCandidate,
+    ) -> Result<(), VerifiedPeerPromotionError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct NoopHasher;
+#[async_trait]
+impl ContentHashPort for NoopHasher {
+    fn hash_bytes(&self, _bytes: &[u8]) -> anyhow::Result<uc_core::clipboard::ContentHash> {
+        Ok(uc_core::clipboard::ContentHash {
+            alg: uc_core::clipboard::HashAlgorithm::Blake3V1,
+            bytes: [0; 32],
+        })
+    }
+}
+
+#[derive(Default)]
+struct NoopGroupRevocation;
+#[async_trait]
+impl GroupRevocationPort for NoopGroupRevocation {
+    async fn revoke_group_member(
+        &self,
+        _target: &DeviceId,
+        _retained_recipients: &[DeviceId],
+        _now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        Err(KeyEpochError::Repository("unavailable".into()))
+    }
+    async fn acknowledge_group_update(
+        &self,
+        _revocation_id: &RevocationId,
+        _recipient: &DeviceId,
+        _now_ms: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        Err(KeyEpochError::Repository("unavailable".into()))
+    }
+    async fn apply_group_epoch_update(&self, _payload: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
+        Err(KeyEpochError::Repository("unavailable".into()))
+    }
+    async fn pending_group_updates(
+        &self,
+        _revocation_id: &RevocationId,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        Ok(vec![])
+    }
+    async fn query_group_revocation(
+        &self,
+        _revocation_id: &RevocationId,
+    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+        Ok(None)
+    }
+    async fn resume_group_revocations(
+        &self,
+        _now_ms: i64,
+    ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
+        Ok(vec![])
+    }
+    async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        Ok(vec![])
+    }
+    async fn acknowledge_space_group_update(
+        &self,
+        _update_id: &str,
+        _now_ms: i64,
+    ) -> Result<bool, KeyEpochError> {
+        Ok(false)
+    }
+}
+
+#[derive(Default)]
+struct NoopGroupUpdateDispatch;
+#[async_trait]
+impl GroupUpdateDispatchPort for NoopGroupUpdateDispatch {
+    async fn dispatch_group_update(
+        &self,
+        _update: &PendingGroupUpdate,
+    ) -> Result<(), GroupUpdateDispatchError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct EmptyMemberRepo;
+#[async_trait]
+impl MemberRepositoryPort for EmptyMemberRepo {
+    async fn get(&self, _device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
+        Ok(None)
+    }
+    async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
+        Ok(vec![])
+    }
+    async fn save(&self, _member: &SpaceMember) -> Result<(), MembershipError> {
+        Ok(())
+    }
+    async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
+        Ok(false)
+    }
+}
+
+#[derive(Default)]
+struct NoopDeviceIdentity;
+impl DeviceIdentityPort for NoopDeviceIdentity {
+    fn current_device_id(&self) -> DeviceId {
+        DeviceId::new("noop-device")
+    }
+}
+
+#[derive(Default)]
+struct NoopLegacyProtection;
+#[async_trait]
+impl LegacyProtectionPort for NoopLegacyProtection {
+    async fn snapshot(
+        &self,
+        _member_ids: &[DeviceId],
+    ) -> Result<LegacyProtectionSnapshot, LegacyUpgradeError> {
+        Err(LegacyUpgradeError::Unavailable)
+    }
+    async fn begin_attempt(
+        &self,
+        _source_device_id: &DeviceId,
+        _target_device_id: &DeviceId,
+    ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
+        Err(LegacyUpgradeError::Unavailable)
+    }
+    async fn inspect_request(
+        &self,
+        _request: &LegacyUpgradeRequest,
+    ) -> Result<LegacyRequestInspection, LegacyUpgradeError> {
+        Err(LegacyUpgradeError::Unavailable)
+    }
+    async fn execute(
+        &self,
+        _command: LegacyProtectionCommand,
+    ) -> Result<LegacyProtectionResult, LegacyUpgradeError> {
+        Err(LegacyUpgradeError::Unavailable)
+    }
+}
+
+#[derive(Default)]
+struct NoopLegacyUpgradeDispatch;
+#[async_trait]
+impl LegacyUpgradeDispatchPort for NoopLegacyUpgradeDispatch {
+    async fn exchange_legacy_upgrade(
+        &self,
+        _peer: &DeviceId,
+        _request: &LegacyUpgradeRequest,
+    ) -> Result<LegacyUpgradeResponse, LegacyUpgradeDispatchError> {
+        Err(LegacyUpgradeDispatchError::Offline)
+    }
 }
 
 #[derive(Clone, Default)]

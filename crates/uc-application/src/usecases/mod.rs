@@ -18,8 +18,5 @@ pub(crate) mod clipboard_restore;
 pub mod clipboard_sync;
 #[cfg(feature = "lan-compat")]
 pub(crate) mod mobile_sync;
-pub(crate) mod pairing;
-pub(crate) mod presence;
 pub(crate) mod search;
-pub(crate) mod setup;
 pub(crate) mod upgrade;

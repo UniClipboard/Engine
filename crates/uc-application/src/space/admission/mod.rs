@@ -1,5 +1,5 @@
 //! Workspace admission channel (ADR-017): the private internal communication
-//! implementation of workspace admission.
+//! implementation of workspace admission, plus the pairing use cases.
 //!
 //! This module is **not** a second public entry point. It is the internal
 //! pairing stack that the workspace convergence owner uses inside the join
@@ -7,7 +7,7 @@
 //! restricted session and the transfer of admission security material. It
 //! does not save member state, does not drive convergence, does not announce
 //! success, and does not define restart recovery — all of that belongs to
-//! [`super::WorkspaceConvergence`].
+//! [`crate::space::convergence::WorkspaceConvergence`].
 //!
 //! ## The adapter seam
 //!
@@ -34,8 +34,15 @@
 //! Sessions and invitations exist only in memory here; process interruption
 //! discards them and recovery relies solely on the owner's encrypted saved
 //! member changes and admission records.
+//!
+//! Invitation issuance (B1) and redemption (B2) use cases live in this
+//! subdomain as well; `coordinator` holds the join / switch entry
+//! orchestration.
 
 pub(crate) mod adapter;
+pub(crate) mod coordinator;
 pub(crate) mod invitation;
+pub(crate) mod issue_invitation;
 pub(crate) mod joiner;
+pub(crate) mod redeem_invitation;
 pub(crate) mod sponsor;

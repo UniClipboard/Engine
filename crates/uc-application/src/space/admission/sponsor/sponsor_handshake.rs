@@ -59,7 +59,7 @@ use uc_core::security::IdentityFingerprint;
 use uc_core::space_access::domain::{ProofDerivedKey, SpaceAccessProofArtifact};
 use uc_observability_contract::analytics::AnalyticsFacade;
 
-use crate::group_update_delivery::GroupUpdateDeliveryPort;
+use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
 
 /// Facts about the verified joiner, handed to the orchestrator so it can
 /// drive admit + trust use cases without re-parsing the `JoinerRequest`.
@@ -101,7 +101,7 @@ pub(crate) struct SponsorHandshakeCoordinator {
     pairing_session: Arc<dyn PairingSessionPort>,
     space_access: Arc<dyn PrepareAdmissionOfferPort>,
     group_admission: Arc<dyn GroupAdmissionPort>,
-    group_update_delivery: Option<Arc<dyn GroupUpdateDeliveryPort>>,
+    group_update_delivery: Arc<dyn GroupUpdateDeliveryPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
     proof_port: Arc<dyn ProofPort>,
     local_identity: Arc<dyn LocalIdentityPort>,
@@ -133,7 +133,7 @@ impl SponsorHandshakeCoordinator {
         pairing_session: Arc<dyn PairingSessionPort>,
         space_access: Arc<dyn PrepareAdmissionOfferPort>,
         group_admission: Arc<dyn GroupAdmissionPort>,
-        group_update_delivery: Option<Arc<dyn GroupUpdateDeliveryPort>>,
+        group_update_delivery: Arc<dyn GroupUpdateDeliveryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
         proof_port: Arc<dyn ProofPort>,
         local_identity: Arc<dyn LocalIdentityPort>,
@@ -508,13 +508,12 @@ impl SponsorHandshakeCoordinator {
     /// and confirmed. No member state is saved here; the workspace owner
     /// already did that at its commit point.
     pub(crate) async fn complete(&self, session: &PairingSessionId) {
-        if let Some(delivery) = &self.group_update_delivery {
-            if let Err(error) = delivery
-                .deliver_pending(chrono::Utc::now().timestamp_millis())
-                .await
-            {
-                warn!(error = %error, "pending group updates could not be delivered after joiner readiness");
-            }
+        if let Err(error) = self
+            .group_update_delivery
+            .deliver_pending(chrono::Utc::now().timestamp_millis())
+            .await
+        {
+            warn!(error = %error, "pending group updates could not be delivered after joiner readiness");
         }
         self.pairing_session
             .close(session, Some("joiner ready".into()))
@@ -734,6 +733,12 @@ mod tests {
         Arc::new(delivery)
     }
 
+    fn noop_delivery() -> Arc<MockGroupUpdateDelivery> {
+        let mut delivery = MockGroupUpdateDelivery::new();
+        delivery.expect_deliver_pending().returning(|_| Ok(0));
+        Arc::new(delivery)
+    }
+
     fn space_access(
         expected_existing_members: Option<Vec<DeviceId>>,
         require_admission: bool,
@@ -905,11 +910,12 @@ mod tests {
         settings: Arc<StubSettings>,
         ttl: Duration,
     ) -> Arc<SponsorHandshakeCoordinator> {
+        let delivery = noop_delivery();
         SponsorHandshakeCoordinator::new(
             session_port,
             space_access.clone(),
             space_access,
-            None,
+            delivery,
             empty_member_repo(),
             proof,
             Arc::new(FixedLocal(sponsor_fp())),
@@ -1165,7 +1171,7 @@ mod tests {
             sp.clone(),
             sa.clone(),
             sa.clone(),
-            Some(delivery.clone()),
+            delivery.clone(),
             member_repo_with(vec![
                 member("sponsor-device"),
                 member("bob-device"),

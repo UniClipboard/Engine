@@ -17,8 +17,13 @@
 //! Removed instances keep only the restricted late-submission and
 //! removal-notice entries.
 
-pub(crate) mod admission;
+pub(crate) mod assembly;
 pub mod discovery;
+pub(crate) mod group_update_delivery;
+pub(crate) mod legacy_upgrade;
+pub(crate) mod membership_connectivity;
+pub(crate) mod network_recovery;
+pub(crate) mod reachability;
 mod runtime;
 
 #[cfg(test)]
