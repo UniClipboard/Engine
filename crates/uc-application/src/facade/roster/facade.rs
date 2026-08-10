@@ -30,12 +30,13 @@ use uc_core::DeviceId;
 
 use crate::facade::roster::commands::{
     apply_member_sync_preferences_patch, LegacyBootstrapState, LegacyBootstrapView,
-    MemberProtectionStatusView, MemberProtectionView, MemberRemovalView, MemberSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView, RosterEntry,
-    SpaceProtectionModeView, SpaceProtectionView,
+    MemberProtectionStatusView, MemberProtectionView, MemberSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesView, PeerSnapshotView, RosterEntry, SpaceProtectionModeView,
+    SpaceProtectionView,
 };
 use crate::facade::roster::errors::RosterError;
-use crate::member_removal::RemovalCoordinatorError;
+use crate::workspace_convergence::WorkspaceConvergenceError;
+use uc_core::membership::WorkspaceSnapshot;
 
 /// 构造 `MemberRosterFacade` 时需要的 port 束。对齐 `SpaceFacadeDeps`
 /// 的风格,便于 bootstrap 分步 construct 各 facade。
@@ -57,14 +58,12 @@ pub struct MemberRosterFacade {
     connection_channel: Option<Arc<dyn ConnectionChannelPort>>,
     group_bootstrap: Option<Arc<dyn GroupBootstrapPort>>,
     space_protection: Option<Arc<dyn SpaceProtectionStatusPort>>,
-    member_removal_events: broadcast::Sender<MemberRemovalView>,
-    member_removal: Option<Arc<crate::member_removal::RemovalCoordinator>>,
+    workspace_convergence: Option<Arc<crate::workspace_convergence::WorkspaceConvergence>>,
     removal_gate: Option<Arc<dyn RemovalTargetGatePort>>,
 }
 
 impl MemberRosterFacade {
     pub fn new(deps: MemberRosterDeps) -> Self {
-        let (member_removal_events, _) = broadcast::channel(64);
         Self {
             member_repo: deps.member_repo,
             local_identity: deps.local_identity,
@@ -72,8 +71,7 @@ impl MemberRosterFacade {
             connection_channel: deps.connection_channel,
             group_bootstrap: None,
             space_protection: None,
-            member_removal_events,
-            member_removal: None,
+            workspace_convergence: None,
             removal_gate: None,
         }
     }
@@ -91,12 +89,12 @@ impl MemberRosterFacade {
         self
     }
 
-    pub fn with_member_removal(
+    pub fn with_workspace_convergence(
         mut self,
-        member_removal: Arc<crate::member_removal::RemovalCoordinator>,
+        convergence: Arc<crate::workspace_convergence::WorkspaceConvergence>,
     ) -> Self {
-        self.removal_gate = Some(member_removal.clone());
-        self.member_removal = Some(member_removal);
+        self.removal_gate = Some(convergence.clone());
+        self.workspace_convergence = Some(convergence);
         self
     }
 
@@ -106,22 +104,24 @@ impl MemberRosterFacade {
         self
     }
 
-    pub fn subscribe_member_removal_events(&self) -> broadcast::Receiver<MemberRemovalView> {
-        self.member_removal_events.subscribe()
+    pub fn subscribe_workspace_convergence(&self) -> broadcast::Receiver<WorkspaceSnapshot> {
+        self.workspace_convergence
+            .as_ref()
+            .map(|convergence| convergence.subscribe())
+            .unwrap_or_else(|| {
+                let (sender, _) = broadcast::channel(1);
+                sender.subscribe()
+            })
     }
 
-    pub fn start_member_removal_runtime(
+    pub fn start_workspace_convergence_runtime(
         &self,
-    ) -> Result<crate::member_removal::MemberRemovalRuntime, RosterError> {
-        let coordinator = self
-            .member_removal
+    ) -> Result<crate::workspace_convergence::WorkspaceConvergenceRuntime, RosterError> {
+        let convergence = self
+            .workspace_convergence
             .as_ref()
             .ok_or(RosterError::MemberRemovalUnavailable)?;
-        Ok(crate::member_removal::MemberRemovalRuntime::start(
-            Arc::clone(coordinator),
-            self.presence.subscribe(),
-            self.member_removal_events.clone(),
-        ))
+        Ok(convergence.clone().start(self.presence.subscribe()))
     }
 
     /// 聚合当前所有成员 + 各自 presence 状态 + 本机标记。
@@ -270,39 +270,35 @@ impl MemberRosterFacade {
         Ok(updated.sync_preferences.into())
     }
 
-    /// 提交一次目标成员移除(ADR-015 调用方唯一提交入口)。
+    /// 提交一次目标成员移除(ADR-016 调用方唯一提交入口)。
     ///
-    /// 返回的摘要只表示本机已生效、正在收敛;完成以保留成员实际取得同一
-    /// 安全状态为准。
+    /// 返回的完整工作空间快照只表示本机已生效、正在收敛;完成以保留成员
+    /// 实际取得同一安全状态为准。
     pub async fn submit_member_removal(
         &self,
         target: &str,
-    ) -> Result<MemberRemovalView, RosterError> {
-        let coordinator = self
-            .member_removal
+    ) -> Result<WorkspaceSnapshot, RosterError> {
+        let convergence = self
+            .workspace_convergence
             .as_ref()
             .ok_or(RosterError::MemberRemovalUnavailable)?;
         let target = DeviceId::new(target);
-        let summary = coordinator
-            .submit_removal(&target, chrono::Utc::now().timestamp_millis())
+        convergence
+            .submit_removal(&target)
             .await
-            .map_err(map_member_removal_error)?;
-        let view = MemberRemovalView::from_summary(summary);
-        let _ = self.member_removal_events.send(view.clone());
-        Ok(view)
+            .map_err(map_workspace_convergence_error)
     }
 
-    /// 查询当前完整移除状态(一次查询恢复完整视图,不要求拼接事件)。
-    pub async fn query_member_removal(&self) -> Result<MemberRemovalView, RosterError> {
-        let coordinator = self
-            .member_removal
+    /// 查询当前完整工作空间收敛状态(一次查询恢复完整快照,不要求拼接事件)。
+    pub async fn query_workspace_convergence(&self) -> Result<WorkspaceSnapshot, RosterError> {
+        let convergence = self
+            .workspace_convergence
             .as_ref()
             .ok_or(RosterError::MemberRemovalUnavailable)?;
-        let summary = coordinator
-            .query(chrono::Utc::now().timestamp_millis())
+        convergence
+            .query()
             .await
-            .map_err(|error| RosterError::MemberRemoval(error.to_string()))?;
-        Ok(MemberRemovalView::from_summary(summary))
+            .map_err(map_workspace_convergence_error)
     }
 
     pub async fn query_legacy_bootstrap(
@@ -445,10 +441,10 @@ impl MemberRosterFacade {
     }
 }
 
-fn map_member_removal_error(error: RemovalCoordinatorError) -> RosterError {
+fn map_workspace_convergence_error(error: WorkspaceConvergenceError) -> RosterError {
     match error {
-        RemovalCoordinatorError::SelfTarget => RosterError::MemberRemovalInvalidInput,
-        RemovalCoordinatorError::UnknownTarget => RosterError::MemberRemovalTargetNotFound,
+        WorkspaceConvergenceError::SelfTarget => RosterError::MemberRemovalInvalidInput,
+        WorkspaceConvergenceError::UnknownTarget => RosterError::MemberRemovalTargetNotFound,
         error => RosterError::MemberRemoval(error.to_string()),
     }
 }

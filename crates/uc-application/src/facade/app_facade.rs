@@ -337,10 +337,20 @@ impl AppFacade {
         input: crate::facade::JoinSpaceInput,
     ) -> Result<crate::facade::JoinSpaceResult, crate::facade::JoinSpaceError> {
         let result = self.space_admission.join_space(input).await?;
-        self.space_session
-            .resume_after_space_change()
-            .await
-            .map_err(|error| crate::facade::JoinSpaceError::Activity(error.to_string()))?;
+        match &result {
+            crate::facade::JoinSpaceResult::Fresh(_) => {
+                self.space_session
+                    .recover_session(true)
+                    .await
+                    .map_err(|error| crate::facade::JoinSpaceError::Activity(error.to_string()))?;
+            }
+            crate::facade::JoinSpaceResult::Switched(_) => {
+                self.space_session
+                    .resume_after_space_change()
+                    .await
+                    .map_err(|error| crate::facade::JoinSpaceError::Activity(error.to_string()))?;
+            }
+        }
         Ok(result)
     }
 
@@ -425,7 +435,14 @@ impl AppFacade {
         &self,
         input: RedeemPairingInvitationInput,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
-        self.space_admission.redeem_invitation(input).await
+        let result = self.space_admission.redeem_invitation(input).await?;
+        self.space_session
+            .recover_session(true)
+            .await
+            .map_err(|error| {
+                RedeemPairingInvitationError::Internal(format!("activate paired space: {error}"))
+            })?;
+        Ok(result)
     }
 
     /// 已 setup 设备加入另一个 sponsor 空间，4 阶段重加密迁移。详见
@@ -732,20 +749,20 @@ impl AppFacade {
     pub async fn remove_member(
         &self,
         device_id: &str,
-    ) -> Result<crate::facade::MemberRemovalView, RosterError> {
+    ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
         self.member_roster.submit_member_removal(device_id).await
     }
 
-    pub async fn member_removal_status(
+    pub async fn workspace_convergence(
         &self,
-    ) -> Result<crate::facade::MemberRemovalView, RosterError> {
-        self.member_roster.query_member_removal().await
+    ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
+        self.member_roster.query_workspace_convergence().await
     }
 
-    pub fn subscribe_member_removal_events(
+    pub fn subscribe_workspace_convergence(
         &self,
-    ) -> broadcast::Receiver<crate::facade::MemberRemovalView> {
-        self.member_roster.subscribe_member_removal_events()
+    ) -> broadcast::Receiver<crate::facade::WorkspaceSnapshot> {
+        self.member_roster.subscribe_workspace_convergence()
     }
 
     pub async fn space_protection(
