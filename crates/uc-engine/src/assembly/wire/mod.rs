@@ -431,11 +431,13 @@ pub fn wire_dependencies_from_inputs(
     // `ClipboardPorts.mobile_consumability` instead of re-assembling it from
     // the file-set repository.
     let mobile_consumability =
-        uc_application::clipboard_write::MobileConsumabilityProbe::new(entry_file_set_repo.clone());
+        uc_application::facade::clipboard_write::MobileConsumabilityProbe::new(
+            entry_file_set_repo.clone(),
+        );
     let mobile_consumable_backfill: Arc<
-        dyn uc_application::clipboard_write::MobileConsumableBackfill,
+        dyn uc_application::facade::clipboard_write::MobileConsumableBackfill,
     > = Arc::new(
-        uc_application::clipboard_write::MobileConsumableRefBackfill::new(
+        uc_application::facade::clipboard_write::MobileConsumableRefBackfill::new(
             active_clipboard_register_load.clone(),
             mobile_consumable_backfill_port,
             mobile_consumability.clone(),
@@ -691,9 +693,9 @@ pub fn wire_dependencies_from_inputs(
 fn build_clipboard_write_coordinator(
     system_clipboard: Arc<dyn uc_core::ports::clipboard::SystemClipboardPort>,
     clipboard_change_origin: Arc<dyn SelfWriteLedgerPort>,
-) -> Arc<uc_application::clipboard_write::ClipboardWriteCoordinator> {
+) -> Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator> {
     Arc::new(
-        uc_application::clipboard_write::ClipboardWriteCoordinator::new(
+        uc_application::facade::clipboard_write::ClipboardWriteCoordinator::new(
             system_clipboard,
             clipboard_change_origin,
         ),

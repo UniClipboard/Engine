@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uc_application::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::deps::AppDeps;
+use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::settings::{
     RelayAccessToken, RelayCredentials, RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
 };
@@ -86,12 +86,12 @@ fn map_relay_probe_error(err: IrohRelayProbeError) -> RelayProbeError {
 /// GUI 和 daemon 需要 restore 能力；部分 CLI 查询入口不需要，因此通过
 /// 显式选项传入，避免各入口各自复制 facade 拼装代码。
 pub struct ClipboardRestoreAssembly {
-    pub write_coordinator: Arc<uc_application::clipboard_write::ClipboardWriteCoordinator>,
+    pub write_coordinator: Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator>,
     pub integration_mode: ClipboardIntegrationMode,
     /// Optional restore-broadcast trigger (issue #1017). When present, a
     /// successful restore announces the activation to peers (gated). `None`
     /// for entry points without a network broadcast stack (CLI fallback).
-    pub restore_broadcast: Option<uc_application::clipboard_write::RestoreBroadcastTrigger>,
+    pub restore_broadcast: Option<uc_application::facade::clipboard_write::RestoreBroadcastTrigger>,
 }
 
 /// 构造 [`ClipboardCaptureFacade`] —— "立即捕获当前 OS 剪贴板内容"的入口

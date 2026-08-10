@@ -396,7 +396,7 @@ async fn sweep_inbound_staging(
         }
     }
 
-    crate::usecases::clipboard_sync::sweep_inbound_staging(&scan_dirs).await;
+    crate::clipboard::sync::sweep_inbound_staging(&scan_dirs).await;
 }
 
 /// Best-effort cleanup of a cached file or transfer directory.

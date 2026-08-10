@@ -5,25 +5,20 @@
 //! Use cases live under `crate::usecases::<domain>` and stay `pub(crate)`;
 //! sub-facades expose them through domain-scoped methods.
 
-pub mod active_clipboard;
 pub mod app_facade;
 pub mod app_paths;
 pub mod blob_transfer;
 pub mod clipboard;
 pub mod clipboard_capture;
 pub mod clipboard_history;
-pub mod clipboard_inbound;
-pub mod clipboard_live_index;
-pub mod clipboard_outbound;
 pub mod clipboard_restore;
-pub mod clipboard_sync_runtime;
+pub mod clipboard_write;
 pub mod config_migration;
 pub mod diagnostics;
 pub mod file_transfer;
 pub mod host_event;
 #[cfg(feature = "lan-compat")]
 pub mod mobile_sync;
-pub mod resource;
 pub mod roster;
 pub mod search;
 pub mod settings;
@@ -53,7 +48,7 @@ pub use crate::space::lifecycle::session::{
 pub use crate::space::lifecycle::setup_status::SetupStatusFacade;
 pub use crate::space::runtime::{SpaceApplicationHandle, SpaceApplicationRuntime};
 
-pub use active_clipboard::{
+pub use crate::clipboard::active::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
     ActiveClipboardLifecycle, ActiveClipboardLifecycleError, ActiveClipboardPullServeFacadeDeps,
     ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
@@ -78,15 +73,33 @@ pub use clipboard::{
 // V3 envelope codec helpers — surfaced through the facade per §11.4.3 so
 // external CLI / test consumers don't reach into `crate::usecases::*`
 // directly. Implementations live in `usecases::clipboard_sync::payload_codec`.
+pub use crate::clipboard::inbound::{
+    ClipboardInboundEvent, ClipboardInboundEventAction, ClipboardInboundEventPort,
+    ClipboardInboundRepresentationSummary, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
+    ClipboardInboundRuntimeError, InboundClipboardApplyError, InboundClipboardApplyInput,
+    InboundClipboardApplyOutcome, InboundClipboardApplyPort,
+};
+pub use crate::clipboard::outbound::{
+    ClipboardOutboundDeps, ClipboardOutboundDispatcher, ClipboardOutboundError,
+    ClipboardOutboundFacade, ClipboardOutboundInput, ClipboardOutboundOutcome,
+    ClipboardOutboundPort, NotResendableReason, ResendEntryCommand, ResendEntryError, ResendReport,
+    MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES,
+};
+pub use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
+pub use crate::clipboard::sync::{
+    decode_v3_bytes_to_snapshot, decode_v3_bytes_to_snapshot_and_blob_refs, V3BlobRef,
+};
+pub use crate::search::live_index::{
+    ClipboardLiveIndexDeps, ClipboardLiveIndexError, ClipboardLiveIndexFacade,
+    ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardLiveIndexPort,
+    ClipboardLiveIndexer,
+};
 pub use crate::space::convergence::assembly::{SpaceConvergenceAssembly, SpaceConvergenceDeps};
 pub use crate::space::convergence::discovery::MembershipConvergenceDeps;
 pub use crate::space::convergence::{WorkspaceConvergenceDeps, WorkspaceConvergenceError};
 pub use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
     ReceiveReadinessStatus,
-};
-pub use crate::usecases::clipboard_sync::{
-    decode_v3_bytes_to_snapshot, decode_v3_bytes_to_snapshot_and_blob_refs, V3BlobRef,
 };
 pub use clipboard_capture::{
     CapturedClipboardEntryView, CapturedFileSetLineView, CapturedFileSetView,
@@ -99,27 +112,9 @@ pub use clipboard_history::{
     EntryDetailView, EntryProjectionView, EntryResourceView, HistoryMaintenanceRuntime,
     HistoryMaintenanceRuntimeError, ReconcileResultView as ClipboardReconcileResultView,
 };
-pub use clipboard_inbound::{
-    ClipboardInboundEvent, ClipboardInboundEventAction, ClipboardInboundEventPort,
-    ClipboardInboundRepresentationSummary, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
-    ClipboardInboundRuntimeError, InboundClipboardApplyError, InboundClipboardApplyInput,
-    InboundClipboardApplyOutcome, InboundClipboardApplyPort,
-};
-pub use clipboard_live_index::{
-    ClipboardLiveIndexDeps, ClipboardLiveIndexError, ClipboardLiveIndexFacade,
-    ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardLiveIndexPort,
-    ClipboardLiveIndexer,
-};
-pub use clipboard_outbound::{
-    ClipboardOutboundDeps, ClipboardOutboundDispatcher, ClipboardOutboundError,
-    ClipboardOutboundFacade, ClipboardOutboundInput, ClipboardOutboundOutcome,
-    ClipboardOutboundPort, NotResendableReason, ResendEntryCommand, ResendEntryError, ResendReport,
-    MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES,
-};
 pub use clipboard_restore::{
     ClipboardRestoreError, ClipboardRestoreFacade, ClipboardRestoreFacadeDeps,
 };
-pub use clipboard_sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
 pub use config_migration::{ConfigMigrationDeps, ConfigMigrationFacade};
 pub use diagnostics::{
     DebugStatusView, DiagnosticsFacade, DiagnosticsFacadeDeps, DiagnosticsFacadeError,
@@ -136,6 +131,9 @@ pub use host_event::{
     OutboundEntryIdCache, TransferHostEvent,
 };
 
+pub use crate::clipboard::resource::{
+    BinaryResourceView, FileResourceView, ResourceFacade, ResourceFacadeDeps, ResourceFacadeError,
+};
 pub use crate::space::roster::errors::MembershipApplicationError;
 #[cfg(feature = "lan-compat")]
 pub use mobile_sync::{
@@ -153,9 +151,6 @@ pub use mobile_sync::{
     ShortcutInstallMethod, ShortcutInstallMethodOption, SyncClipboardItemType, SyncClipboardMeta,
     UpdateMobileSyncSettingsError, UpdateMobileSyncSettingsInput, UpdateMobileSyncSettingsOutput,
     SYNC_CLIPBOARD_EX_INSTALL_URL,
-};
-pub use resource::{
-    BinaryResourceView, FileResourceView, ResourceFacade, ResourceFacadeDeps, ResourceFacadeError,
 };
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,

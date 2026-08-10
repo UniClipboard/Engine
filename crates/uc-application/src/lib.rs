@@ -1,17 +1,10 @@
 //! Application-layer workflows for UniClipboard.
 
-pub mod clipboard_capture;
-pub mod clipboard_write;
-pub(crate) mod content_tags;
+pub(crate) mod clipboard;
 pub mod deps;
-// §11.4.3 — internal write-coordination primitive; never exposed at the crate
-// root. The shared `EntryIdentityCoordinator` is reachable only through the
-// `deps` composition panel (`uc_application::deps::EntryIdentityCoordinator`).
-pub(crate) mod entry_identity;
 pub mod facade;
-pub(crate) mod file_set_query;
 pub mod file_sync;
-pub mod sync_planner;
+pub(crate) mod search;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod transfer;
@@ -24,10 +17,10 @@ pub use deps::{
 };
 
 // Slice 2 Phase 3 · T4 — public use case consumed directly by daemon
-// `InboundClipboardSyncWorker` (T8). Lives inside `usecases::clipboard_sync`
-// (which is `pub(crate)`) so Phase 2 internals stay encapsulated; we
-// re-export only the small public surface here.
-pub use usecases::clipboard_sync::{
+// `InboundClipboardSyncWorker` (T8). Lives inside `clipboard::sync`
+// (which is `pub(crate)`) so internals stay encapsulated; we re-export
+// only the small public surface here.
+pub use clipboard::sync::{
     ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
     FileCacheBlobMaterializer, InboundApplyCommonDeps, InboundBlobFetcher, InboundBlobMaterializer,
     InboundCapture, InboundReceiveAttemptDeps, InboundWrite, InteractiveReceiveDeps,
@@ -38,11 +31,11 @@ pub use usecases::clipboard_sync::{
 // decode_v3_bytes_to_snapshot_and_blob_refs, V3BlobRef) used to live
 // here. Per AGENTS.md §11.4.3 they now route through `facade/` —
 // import them as `uc_application::facade::decode_v3_bytes_to_snapshot`
-// etc. The implementations stay in `usecases::clipboard_sync` but the
-// crate boundary only exposes them via the facade.
+// etc. The implementations stay in `clipboard::sync` but the crate
+// boundary only exposes them via the facade.
 pub mod space;
 pub mod trusted_peer;
 /// `pub(crate)` — migration in progress (ADR-018): remaining use-case
-/// directories (`clipboard_sync`, `blob_transfer`, ...) move into their
+/// directories (`mobile_sync`, `search`, `upgrade`) move into their
 /// domains; nothing here is part of the stable public surface.
 pub(crate) mod usecases;

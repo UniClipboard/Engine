@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tracing::{error, warn};
-use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
+use uc_application::facade::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
     ClipboardHostEvent, ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardOriginKind,
     ClipboardOutboundInput, HostEvent, HostEventBus,

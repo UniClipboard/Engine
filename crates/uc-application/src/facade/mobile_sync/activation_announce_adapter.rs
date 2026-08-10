@@ -32,7 +32,7 @@
 //! best-effort 降级。
 //!
 //! [`MobileActivationAnnouncePort`]: crate::usecases::mobile_sync::apply_incoming::MobileActivationAnnouncePort
-//! [`ActiveClipboardFacade`]: crate::facade::active_clipboard::ActiveClipboardFacade
+//! [`ActiveClipboardFacade`]: crate::clipboard::active::ActiveClipboardFacade
 
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::EntryId;
 use uc_core::SystemClipboardSnapshot;
 
-use crate::facade::active_clipboard::ActiveClipboardFacade;
+use crate::clipboard::active::ActiveClipboardFacade;
 use crate::usecases::mobile_sync::apply_incoming::MobileActivationAnnouncePort;
 
 /// Narrow seam over [`ActiveClipboardFacade::announce_local_activation`]: stamp

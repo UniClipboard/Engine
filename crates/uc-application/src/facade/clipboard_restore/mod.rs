@@ -11,13 +11,13 @@ use uc_core::ports::{
 
 use crate::deps::{ClipboardEntryPorts, ClipboardRepresentationPorts};
 
-use crate::clipboard_write::{
-    ClipboardWriteCoordinator, LocalActiveRegisterAdvancer, MobileConsumabilityProbe,
-    RestoreBroadcastTrigger,
-};
-use crate::usecases::clipboard_restore::{
+use crate::clipboard::restore::{
     NoFilePathsAvailable, PlainRestoreOutcome, RestoreClipboardEntryAsPlainTextUseCase,
     RestoreClipboardSelectionUseCase, TouchClipboardEntryUseCase,
+};
+use crate::clipboard::write::{
+    ClipboardWriteCoordinator, LocalActiveRegisterAdvancer, MobileConsumabilityProbe,
+    RestoreBroadcastTrigger,
 };
 
 #[derive(Debug, thiserror::Error)]

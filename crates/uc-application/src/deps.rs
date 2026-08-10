@@ -39,7 +39,7 @@ use uc_core::ports::*;
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsPort;
 
-use crate::clipboard_write::{MobileConsumabilityProbe, MobileConsumableBackfill};
+use crate::clipboard::write::{MobileConsumabilityProbe, MobileConsumableBackfill};
 
 // §11.4.3 — the `entry_identity` module is `pub(crate)`, but its coordinator is
 // held by the `pub` `ClipboardPorts` field below and threaded into `pub` use-case
@@ -48,7 +48,7 @@ use crate::clipboard_write::{MobileConsumabilityProbe, MobileConsumableBackfill}
 // leaking the business submodule at the crate root; this also lifts the type's
 // effective visibility back to crate-external, keeping those `pub` signatures off
 // the `private_interfaces` lint (E0446).
-pub use crate::entry_identity::EntryIdentityCoordinator;
+pub use crate::clipboard::entry_identity::EntryIdentityCoordinator;
 
 /// Clipboard entry intent ports.
 ///

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use uc_application::clipboard_capture::CaptureClipboardUseCase;
+use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::{
     ClipboardCaptureFacade, ClipboardInboundEvent, ClipboardInboundEventAction,
     ClipboardInboundEventPort, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,

@@ -14,7 +14,7 @@ use uc_core::clipboard::{
 use uc_core::ids::{BlobId, EntryId};
 use uc_core::ports::clipboard::{ActiveClipboardRegisterError, EntryFileSetRepositoryPort};
 
-use crate::clipboard_write::MobileConsumableBackfill;
+use crate::clipboard::write::MobileConsumableBackfill;
 
 /// `EntryFileSetRepositoryPort` fake returning a fixed `load` result. `save`
 /// is unreachable because probe-side consumers never write.

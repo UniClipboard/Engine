@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::warn;
 
-use crate::clipboard_write::MobileConsumableBackfill;
+use crate::clipboard::write::MobileConsumableBackfill;
 use crate::facade::search::SearchFacade;
 use crate::facade::space_setup::{
     FactoryResetError, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,

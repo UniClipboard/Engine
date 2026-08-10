@@ -55,9 +55,10 @@ use uc_core::ports::{
 };
 use uc_observability_contract::analytics::AnalyticsPort;
 
+use crate::clipboard::active::ActiveClipboardFacade;
+use crate::clipboard::outbound::ClipboardOutboundFacade;
+use crate::clipboard::sync::apply_inbound::ApplyInboundClipboardUseCase;
 use crate::deps::MobileDevicePorts;
-use crate::facade::active_clipboard::ActiveClipboardFacade;
-use crate::facade::clipboard_outbound::ClipboardOutboundFacade;
 use crate::facade::file_transfer::FileTransferFacade;
 use crate::facade::mobile_sync::activation_announce_adapter::MobileActivationAnnounceAdapter;
 use crate::facade::mobile_sync::file_upload::{
@@ -65,7 +66,6 @@ use crate::facade::mobile_sync::file_upload::{
     MobileFileUploadError, MobileFileUploadHandle,
 };
 use crate::facade::mobile_sync::outbound_adapter::ClipboardOutboundFanOutAdapter;
-use crate::usecases::clipboard_sync::apply_inbound::ApplyInboundClipboardUseCase;
 use crate::usecases::mobile_sync::apply_incoming::{
     MobileActivationAnnouncePort, MobileInboundFanOutPort,
 };
@@ -645,7 +645,7 @@ mod tests {
     //! `snapshot_ports` 用 5 个 unimplemented stub。
 
     use super::*;
-    use crate::clipboard_write::ClipboardWriteIntent;
+    use crate::clipboard::write::ClipboardWriteIntent;
 
     use std::sync::Mutex;
 
@@ -674,7 +674,7 @@ mod tests {
     use uc_core::BlobId;
     use uc_core::DeviceId;
 
-    use crate::usecases::clipboard_sync::apply_inbound::{InboundCapture, InboundWrite};
+    use crate::clipboard::sync::apply_inbound::{InboundCapture, InboundWrite};
     use uc_core::blob::ports::BlobReaderPort;
     use uc_core::SystemClipboardSnapshot;
 

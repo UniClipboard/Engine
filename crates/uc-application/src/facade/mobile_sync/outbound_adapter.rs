@@ -43,7 +43,7 @@
 //! 障不应倒灌成 HTTP 4xx/5xx 让 iPhone 端误判而触发用户重传。
 //!
 //! [`MobileInboundFanOutPort`]: crate::usecases::mobile_sync::apply_incoming::MobileInboundFanOutPort
-//! [`ClipboardOutboundFacade`]: crate::facade::clipboard_outbound::ClipboardOutboundFacade
+//! [`ClipboardOutboundFacade`]: crate::clipboard::outbound::ClipboardOutboundFacade
 
 use std::sync::Arc;
 
@@ -53,7 +53,7 @@ use uc_core::ids::EntryId;
 use uc_core::mobile_sync::MobileDeviceId;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 
-use crate::facade::clipboard_outbound::{
+use crate::clipboard::outbound::{
     ClipboardOutboundFacade, ClipboardOutboundInput, ClipboardOutboundOutcome,
 };
 use crate::usecases::mobile_sync::apply_incoming::MobileInboundFanOutPort;

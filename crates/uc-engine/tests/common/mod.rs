@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use uc_application::clipboard_write::MobileConsumableBackfill;
+use uc_application::facade::clipboard_write::MobileConsumableBackfill;
 use uc_application::facade::AutomaticLegacyUpgradeDeps;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext, Plaintext};
 use uc_core::ids::{DeviceId, EventId, RepresentationId, SpaceId};
