@@ -1,5 +1,3 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,20 +41,7 @@ impl MembershipConvergence {
             let mut presence_open = true;
             let mut announcement_changes_open = true;
             let mut run_now = true;
-            let mut shared_device_refresh: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None;
             loop {
-                if !paused && shared_device_refresh.is_none() {
-                    if self.auto_shared_device_refresh_pending().await {
-                        let _ = self.start_shared_device_refresh().await;
-                    }
-                    if let Some((request_id, space_id)) = self.pending_shared_device_refresh().await
-                    {
-                        let gossip = Arc::clone(&self);
-                        shared_device_refresh = Some(Box::pin(async move {
-                            gossip.run_shared_device_refresh(request_id, space_id).await;
-                        }));
-                    }
-                }
                 let mut pass_failed = false;
                 if run_now && !paused {
                     run_now = false;
@@ -64,23 +49,13 @@ impl MembershipConvergence {
                     let (completed_pass, pause_completed) = loop {
                         tokio::select! {
                             result = &mut pass => break (Some(result), None),
-                            _ = async {
-                                if let Some(refresh) = shared_device_refresh.as_mut() {
-                                    refresh.as_mut().await;
-                                }
-                            }, if shared_device_refresh.is_some() => {
-                                shared_device_refresh = None;
-                            }
                             command = command_rx.recv() => match command {
                                 Some(MembershipConvergenceRuntimeCommand::Pause(completed)) => {
                                     paused = true;
                                     run_now = true;
-                                    shared_device_refresh = None;
-                                    self.reset_auto_shared_device_refresh().await;
                                     break (None, Some(completed));
                                 }
                                 Some(MembershipConvergenceRuntimeCommand::Resume(completed)) => {
-                                    self.schedule_auto_shared_device_refresh().await;
                                     let _ = completed.send(());
                                 }
                                 Some(MembershipConvergenceRuntimeCommand::Shutdown(completed)) => {
@@ -137,14 +112,11 @@ impl MembershipConvergence {
                     command = command_rx.recv() => match command {
                         Some(MembershipConvergenceRuntimeCommand::Pause(completed)) => {
                             paused = true;
-                            shared_device_refresh = None;
-                            self.reset_auto_shared_device_refresh().await;
                             let _ = completed.send(());
                         }
                         Some(MembershipConvergenceRuntimeCommand::Resume(completed)) => {
                             paused = false;
                             run_now = true;
-                            self.schedule_auto_shared_device_refresh().await;
                             let _ = completed.send(());
                         }
                         Some(MembershipConvergenceRuntimeCommand::Shutdown(completed)) => {
@@ -156,18 +128,9 @@ impl MembershipConvergence {
                     _ = self.wake.notified(), if !paused => {
                         run_now = true;
                     }
-                    _ = async {
-                        if let Some(refresh) = shared_device_refresh.as_mut() {
-                            refresh.as_mut().await;
-                        }
-                    }, if shared_device_refresh.is_some() => {
-                        shared_device_refresh = None;
-                    }
                     event = presence_events.recv(), if !paused && presence_open => match event {
                         Ok(event) if event.state == uc_core::ports::ReachabilityState::Online => {
                             run_now = true;
-                            self.promote_auto_shared_device_refresh_to_pending(&event.device_id)
-                                .await;
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => {

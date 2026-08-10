@@ -625,10 +625,10 @@ mod tests {
             wiring
                 .wired
                 .sync_engine
-                .removal_intent_repository
-                .current_space_lineage()
+                .workspace_convergence_repository
+                .load_state()
                 .await,
-            Err(uc_core::membership::RemovalIntentRepositoryError::Locked)
+            Err(uc_core::membership::WorkspaceConvergenceRepositoryError::Locked)
         );
     }
 

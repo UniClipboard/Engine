@@ -8,9 +8,7 @@ pub mod usecases;
 pub use convergence::{
     build_membership_convergence, MembershipConvergence, MembershipConvergenceActivity,
     MembershipConvergenceDeps, MembershipConvergenceError, MembershipConvergenceRuntime,
-    MembershipConvergenceState, MembershipConvergenceStatus, PairingMembershipConvergencePort,
-    SharedDeviceRefreshDevice, SharedDeviceRefreshDeviceState, SharedDeviceRefreshPhase,
-    SharedDeviceRefreshStarted, SharedDeviceRefreshStatus, SponsorSeedBatchContext,
+    PairingMembershipConvergencePort, SponsorSeedBatchContext,
 };
 
 #[async_trait]

@@ -85,3 +85,17 @@
 - Stage 4 (restricted handoff runtime): added `uc-infra/src/security/recovery_seal.rs` (one-use HKDF-derived key from a historical transport key + fresh endpoint contributions, XChaCha20-Poly1305, strong binding AAD) and the `workspace-recovery/1` iroh adapter with size/concurrency bounds; installed in the sync engine assembly.
 - Stage 5 (stable interface + bindings): deleted `RefreshSharedDevices`, `QuerySharedDeviceRefresh`, `QueryMembershipConvergence`, `QueryMemberRemoval`, `MemberRemovalChanged`, `SharedDeviceRefreshChanged` and their summary types from uc-engine and the uniffi/ohos bindings; added `QueryWorkspaceConvergence`, `WorkspaceConvergenceChanged` and the unified `WorkspaceConvergenceSummary`. The engine host-adapter contract and all binding tests pass.
 - Verification: `cargo check --workspace --all-targets --locked`, `cargo test --workspace`, `cargo fmt --check`, engine-repository preflight, and `git diff --check` all pass. Five pre-existing pairing orchestrator tests fail only because of concurrent uncommitted pairing WIP in the working tree (out of ADR-016 scope).
+
+### Old-flow removal and workspace-convergence test repair
+
+- **Status:** implementation and focused tests complete; end-to-end acceptance remains pending.
+- Deleted the remaining independent member-removal, shared-device refresh, forward-recovery and removal-intent persistence paths. The unified workspace owner now sends validated intents to current members, records acknowledgements, sends a separate removal notice to the target, and restricts a removed instance to late historical-intent submission.
+- Repaired the five new workspace-convergence tests. Their shared cause was incomplete asynchronous setup: the seed write was started but not awaited. The target-removal test also seeded the wrong local instance, and the propagation test used only two members, leaving no current peer for intent propagation. The repaired three-member test independently observes one intent acknowledgement and one delivered removal notice. Repeated notices now return the documented idempotent result and persist the accepted notice identifier.
+- Focused verification: `cargo test -p uc-application workspace_convergence::tests --lib --locked` passed 10 tests. Temporary `DEBUG-*` code and the debug-only test were removed.
+- Remaining acceptance boundary: W01-W16 have not been run. The real pairing flow does not yet drive admission-change/local-readiness recording; confirmation flow, recovery-request driving, and use of the recovery sealing helper are not connected. The three ignored removal end-to-end tests remain skipped for these runtime gaps.
+
+### ADR-016 acceptance execution
+
+- **Status:** W12 passed; three existing removal end-to-end scenarios failed; all other matrix entries remain unexecuted.
+- Executed the previously ignored five-device remove/rejoin, three-device removal, and consecutive-removal scenarios with independent engine directories. Each failed at its first `RemoveMember` request with the stable invalid-state result because successful pairing has not yet recorded admission changes into the unified workspace state.
+- This is direct receiver-side execution evidence, not a timeout or sender-side inference. It confirms the missing pairing-to-workspace admission handoff as the first blocking runtime gap.

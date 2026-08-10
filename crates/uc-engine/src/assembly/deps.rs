@@ -92,12 +92,8 @@ pub struct SyncEngineDeps {
     pub current_member_signatures: Arc<dyn uc_core::membership::CurrentMemberSignaturePort>,
     /// The same unlocked session used by space access and encrypted storage.
     pub membership_session: Arc<uc_infra::security::InMemorySession>,
-    /// Encrypted persistence for ADR-015 intents and convergence state.
-    pub removal_intent_repository: Arc<dyn uc_core::membership::RemovalIntentRepositoryPort>,
-    /// Encrypted pending-join material retained while ADR-015 recovery converges.
-    pub removal_pending_join: Arc<dyn uc_core::membership::RemovalPendingJoinStorePort>,
-    /// Current encrypted MLS state used to advance ADR-015 recovery.
-    pub removal_key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort>,
+    /// Current encrypted MLS state used to derive the causal view.
+    pub key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort>,
     /// Encrypted persistence for the unified workspace convergence state.
     pub workspace_convergence_repository:
         Arc<dyn uc_core::membership::WorkspaceConvergenceRepositoryPort>,

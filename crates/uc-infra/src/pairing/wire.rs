@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use uc_core::ids::{DeviceId, SpaceId};
+use uc_core::membership::{AdmissionChangeFacts, MemberInstanceId};
 use uc_core::pairing::{
     InvitationCode, JoinerChallengeResponse, JoinerReady, JoinerRequest, PairingReject,
     PairingRejectReason, PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer,
@@ -67,7 +68,7 @@ enum WireBody {
     AdmissionOffer(WireSponsorAdmissionOffer),
     ChallengeResponse(WireJoinerChallengeResponse),
     Confirm(WireSponsorConfirm),
-    Ready,
+    Ready(WireJoinerReady),
     Reject(WirePairingReject),
 }
 
@@ -131,6 +132,17 @@ struct WireSponsorConfirm {
     welcome: Vec<u8>,
     encrypted_key_catalog: Vec<u8>,
     group_epoch: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct WireJoinerReady {
+    member_instance: [u8; 32],
+    device_id: String,
+    device_name: String,
+    identity_fingerprint: String,
+    transport_public_key: Vec<u8>,
+    transport_address_blob: Vec<u8>,
+    identity_signature: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -253,7 +265,15 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
             encrypted_key_catalog: c.encrypted_key_catalog.clone(),
             group_epoch: c.group_epoch,
         }),
-        PairingSessionMessage::Ready(JoinerReady) => WireBody::Ready,
+        PairingSessionMessage::Ready(ready) => WireBody::Ready(WireJoinerReady {
+            member_instance: *ready.admission.member_instance.as_bytes(),
+            device_id: ready.admission.device_id.as_str().to_owned(),
+            device_name: ready.admission.device_name.clone(),
+            identity_fingerprint: ready.admission.identity_fingerprint.as_display().to_owned(),
+            transport_public_key: ready.admission.transport_public_key.clone(),
+            transport_address_blob: ready.admission.transport_address_blob.clone(),
+            identity_signature: ready.admission.identity_signature.clone(),
+        }),
         PairingSessionMessage::Reject(r) => WireBody::Reject(WirePairingReject {
             reason: match &r.reason {
                 PairingRejectReason::InvitationMismatch => WireRejectReason::InvitationMismatch,
@@ -313,7 +333,17 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
             encrypted_key_catalog: c.encrypted_key_catalog,
             group_epoch: c.group_epoch,
         })),
-        WireBody::Ready => Ok(PairingSessionMessage::Ready(JoinerReady)),
+        WireBody::Ready(ready) => Ok(PairingSessionMessage::Ready(JoinerReady {
+            admission: AdmissionChangeFacts {
+                member_instance: MemberInstanceId::from_bytes(ready.member_instance),
+                device_id: DeviceId::new(ready.device_id),
+                device_name: ready.device_name,
+                identity_fingerprint: parse_fingerprint(&ready.identity_fingerprint)?,
+                transport_public_key: ready.transport_public_key,
+                transport_address_blob: ready.transport_address_blob,
+                identity_signature: ready.identity_signature,
+            },
+        })),
         WireBody::Reject(r) => Ok(PairingSessionMessage::Reject(PairingReject {
             reason: match r.reason {
                 WireRejectReason::InvitationMismatch => PairingRejectReason::InvitationMismatch,

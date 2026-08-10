@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use super::invitation::InvitationCode;
 use crate::ids::{DeviceId, SpaceId};
+use crate::membership::AdmissionChangeFacts;
 use crate::ports::pairing::PairingSessionId;
 use crate::security::IdentityFingerprint;
 
@@ -142,7 +143,11 @@ pub struct SponsorConfirm {
 /// sponsor relationship and activated its local session. The sponsor must not
 /// start delivery of pre-existing member records before this acknowledgement.
 #[derive(Debug, Clone)]
-pub struct JoinerReady;
+pub struct JoinerReady {
+    /// The joiner signs these facts only after its local group session is
+    /// active. The sponsor commits them to the workspace change chain.
+    pub admission: AdmissionChangeFacts,
+}
 
 /// Either side → other. Terminal message with a structured reason so the
 /// orchestrator can pick the right UI error / `PairingError` variant.

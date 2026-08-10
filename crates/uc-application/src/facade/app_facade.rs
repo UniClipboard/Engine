@@ -51,6 +51,7 @@ use crate::facade::space_setup::{
     UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 use crate::facade::upgrade::UpgradeFacade;
+use crate::facade::SpaceApplicationHandle;
 use crate::facade::{
     BlobTransferError, BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade,
     ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade, ClipboardSyncError,
@@ -61,10 +62,6 @@ use crate::facade::{
     ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
     SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
     SettingsFacadeError, SpaceFacade, StorageFacade,
-};
-use crate::facade::{MembershipConvergenceFacadeError, SpaceApplicationHandle};
-use crate::membership::{
-    MembershipConvergenceStatus, SharedDeviceRefreshStarted, SharedDeviceRefreshStatus,
 };
 use crate::usecases::clipboard_sync::V3BlobRef;
 use uc_core::ids::DeviceId;
@@ -297,39 +294,6 @@ impl AppFacade {
 
     pub async fn lock_space_session(&self) -> Result<(), SpaceSessionError> {
         self.space_session.lock_space().await
-    }
-
-    pub async fn membership_convergence(
-        &self,
-    ) -> Result<MembershipConvergenceStatus, MembershipConvergenceFacadeError> {
-        self.space_application
-            .membership_convergence()
-            .await
-            .map_err(MembershipConvergenceFacadeError::from)
-    }
-
-    pub async fn start_shared_device_refresh(
-        &self,
-    ) -> Result<SharedDeviceRefreshStarted, MembershipConvergenceFacadeError> {
-        self.space_application
-            .start_shared_device_refresh()
-            .await
-            .map_err(MembershipConvergenceFacadeError::from)
-    }
-
-    pub async fn shared_device_refresh_status(
-        &self,
-        request_id: &str,
-    ) -> Option<SharedDeviceRefreshStatus> {
-        self.space_application
-            .shared_device_refresh_status(request_id)
-            .await
-    }
-
-    pub fn subscribe_shared_device_refresh(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<SharedDeviceRefreshStatus> {
-        self.space_application.subscribe_shared_device_refresh()
     }
 
     pub async fn join_space(

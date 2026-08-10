@@ -155,9 +155,9 @@ pub use resource::{
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
     LegacyBootstrapState, LegacyBootstrapView, MemberProtectionStatusView, MemberProtectionView,
-    MemberRemovalPhaseView, MemberRemovalView, MemberRosterDeps, MemberRosterFacade, MemberSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView, PresenceEvent,
-    RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
+    MemberRosterDeps, MemberRosterFacade, MemberSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesView, PeerSnapshotView, PresenceEvent, RosterEntry, RosterError,
+    SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{
     map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,
@@ -183,9 +183,7 @@ pub use settings::{
 };
 pub use setup_status::SetupStatusFacade;
 pub use space_admission::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
-pub use space_runtime::{
-    MembershipConvergenceFacadeError, SpaceApplicationHandle, SpaceApplicationRuntime,
-};
+pub use space_runtime::{SpaceApplicationHandle, SpaceApplicationRuntime};
 pub use space_session::{
     RecoverSpaceSessionResult, SpaceActivityError, SpaceSessionAccessDeps,
     SpaceSessionActivityDeps, SpaceSessionError,
