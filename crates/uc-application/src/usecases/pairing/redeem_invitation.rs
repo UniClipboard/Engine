@@ -1,120 +1,82 @@
 //! B2 · `RedeemPairingInvitationUseCase` (joiner side).
 //!
-//! Thin composition layer: delegates wire + crypto to
-//! [`JoinerHandshakeCoordinator`], then persists the sponsor's facts
-//! (`admit_member` → `trust_peer` → `setup_status`) and maps the
-//! outcome to the facade-level result.
+//! Internal communication half of workspace admission (ADR-017): delegates
+//! wire + crypto to [`JoinerHandshakeCoordinator`], then hands every save
+//! boundary to the workspace owner:
 //!
-//! ## Ordering: persist before declaring success
+//! 1. the joiner's local readiness facts are saved by the owner
+//!    (`record_local_readiness`) before the readiness reply is sent;
+//! 2. the sponsor's "admission change saved" confirmation is recorded by
+//!    the owner (`record_admission_committed`) once received, together with
+//!    the sponsor's member facts.
 //!
-//! Mirrors sponsor-side P7f cleanup: `admit` → `trust` →
-//! `setup_status.set_status(completed)` all land **before** `execute`
-//! returns `Ok`. Required pairing-state failures short-circuit the remaining
-//! steps and surface as
-//! [`RedeemPairingInvitationError::Internal`] — the caller never gets
-//! a success result that isn't backed by fully committed local state.
-//! Existing member discovery is delivered after the secure group join through
-//! the sponsor's durable membership outbox. The final pairing confirmation
-//! remains bounded regardless of the number or size of existing members.
+//! ## Ordering: owner saves before declaring success
 //!
-//! `setup_status` is flipped **last**, because `has_completed=true` is
-//! the marker `UnlockSpaceUseCase` keys off on the next launch.
-//! Flipping it before `trust_peer` landed would leave the policy
-//! resolver seeing "setup done" but no trusted peers, blocking every
-//! inbound session.
+//! Mirrors sponsor-side ADR-017 cleanup: `record_local_readiness` →
+//! `setup_status.set_status(completed)` land **before** the readiness
+//! reply, and `record_admission_committed` lands before `execute` returns
+//! `Ok`. The caller never gets a success result that isn't backed by fully
+//! committed local state. Join success is not the result of the pairing
+//! handshake: it is the fact that the workspace has saved the member
+//! change, which the joiner only learns from the admission-saved
+//! confirmation.
+//!
+//! `setup_status` is flipped after the readiness facts landed, because
+//! `has_completed=true` is the marker `UnlockSpaceUseCase` keys off on the
+//! next launch.
 //!
 //! ## Why no FSM
 //!
 //! See F-053: the joiner flow is linear once the passphrase is
-//! collected up front (Slice 1 UX), and `SpaceAccessStateMachine`'s
-//! default action order is inverted from the persist-before-success
-//! ordering this use case wants.
-//!
-//! ## Why a coordinator below
-//!
-//! Extracted in post-P7h cleanup: the original 11-arg use case was
-//! doing dial + identity assembly + crypto + recv/decode + admit +
-//! trust + setup-status in one struct. That broke symmetry with the
-//! sponsor side (which already split wire/crypto into
-//! [`SponsorHandshakeCoordinator`]). The use case is now 5 deps and
-//! one-to-one mirrors `PairingInboundOrchestrator`'s composition
-//! shape.
+//! collected up front (Slice 1 UX).
 //!
 //! [`JoinerHandshakeCoordinator`]:
-//!     crate::pairing_outbound::joiner_handshake::JoinerHandshakeCoordinator
-//! [`SponsorHandshakeCoordinator`]:
-//!     crate::pairing_inbound::sponsor_handshake::SponsorHandshakeCoordinator
+//!     crate::workspace_convergence::admission::joiner::joiner_handshake::JoinerHandshakeCoordinator
 
 use std::sync::Arc;
-use std::time::Instant;
 
-use chrono::{DateTime, Utc};
 use tracing::{info, instrument};
 
-use uc_core::ports::pairing::DiscoveryChannel;
 use uc_core::ports::space::ResumeSpaceSessionPort;
-use uc_core::ports::{ClockPort, PeerAddressRecord, PeerAddressRepositoryPort, SetupStatusPort};
+use uc_core::ports::SetupStatusPort;
 use uc_core::setup::SetupStatus;
-use uc_core::{MemberRepositoryPort, MemberSyncPreferences, TrustedPeerRepositoryPort};
-use uc_observability_contract::analytics::events::{
-    Event, PairingDiscoveryChannel, PairingFailureReason, PairingMethod,
-};
+use uc_observability_contract::analytics::events::{Event, PairingFailureReason, PairingMethod};
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::facade::space_setup::commands::RedeemPairingInvitationCommand;
 use crate::facade::space_setup::{RedeemPairingInvitationError, RedeemPairingInvitationResult};
-use crate::membership::errors::MembershipApplicationError;
-use crate::membership::usecases::{AdmitMember, AdmitMemberUseCase};
-use crate::pairing_outbound::joiner_handshake::{
+use crate::workspace_convergence::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::workspace_convergence::admission::joiner::joiner_handshake::{
     JoinerHandshakeCoordinator, JoinerHandshakeOutcome,
 };
-use crate::trusted_peer::errors::TrustedPeerApplicationError;
-use crate::trusted_peer::usecases::{TrustPeer, TrustPeerUseCase};
-use crate::workspace_convergence::WorkspaceConvergence;
-
-pub(crate) type AdmitMemberUc = AdmitMemberUseCase<dyn MemberRepositoryPort>;
-pub(crate) type TrustPeerUc = TrustPeerUseCase<dyn TrustedPeerRepositoryPort>;
 
 pub(crate) struct RedeemPairingInvitationUseCase {
     handshake: Arc<JoinerHandshakeCoordinator>,
-    admit_member: Arc<AdmitMemberUc>,
-    trust_peer: Arc<TrustPeerUc>,
     setup_status: Arc<dyn SetupStatusPort>,
-    /// Slice 2 Phase 1 · T5：配对完成后 best-effort 把 sponsor 的传输地址
-    /// blob 写入仓库。写失败不 fail join（presence 下轮会再拉）。
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     resume_session: Arc<dyn ResumeSpaceSessionPort>,
-    clock: Arc<dyn ClockPort>,
     /// Joiner-side analytics: fires `pairing_started` on entry,
-    /// `pairing_succeeded` / `pairing_failed` on result. The identity
-    /// switch from anonymous to the sponsor-issued `space_person_id`
-    /// also goes through this facade after setup status is persisted.
+    /// `pairing_failed` on failure. The success funnel no longer exists:
+    /// join results are expressed through the workspace state.
     /// All calls are fire-and-forget; the gate inside the facade
     /// implementation keeps them off the hot path.
     analytics: Arc<dyn AnalyticsFacade>,
-    workspace_convergence: Option<Arc<WorkspaceConvergence>>,
+    /// The workspace owner behind the admission seam. Never `None`: the
+    /// assembly layer guarantees the owner always exists.
+    workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
 }
 
 impl RedeemPairingInvitationUseCase {
     pub(crate) fn new(
         handshake: Arc<JoinerHandshakeCoordinator>,
-        admit_member: Arc<AdmitMemberUc>,
-        trust_peer: Arc<TrustPeerUc>,
         setup_status: Arc<dyn SetupStatusPort>,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         resume_session: Arc<dyn ResumeSpaceSessionPort>,
-        clock: Arc<dyn ClockPort>,
         analytics: Arc<dyn AnalyticsFacade>,
-        workspace_convergence: Option<Arc<WorkspaceConvergence>>,
+        workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
     ) -> Self {
         Self {
             handshake,
-            admit_member,
-            trust_peer,
             setup_status,
-            peer_addr_repo,
             resume_session,
-            clock,
             analytics,
             workspace_convergence,
         }
@@ -127,13 +89,9 @@ impl RedeemPairingInvitationUseCase {
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
         // Slice 8b · pairing_started 在 execute 入口立即 fire,即使 handshake
         // 第一行就拒绝(InvitationNotFound)也保证 funnel 第一步留下信号。
-        // PairingMethod 在 use case 签名里目前不存在区分维度(QR / Code /
-        // Discovery 由 GUI 在更上层处理后都进同一入口),v1 固定 Code 占位;
-        // 后续若 GUI 把 method 维度下推到 use case 输入再细化。
         self.analytics.capture(Event::PairingStarted {
             method: PairingMethod::Code,
         });
-        let started_at = Instant::now();
         let result = async {
             let pending = self.handshake.handshake(&cmd.code, &cmd.passphrase).await?;
             let channel = pending.outcome().discovery_channel;
@@ -162,10 +120,11 @@ impl RedeemPairingInvitationUseCase {
                     "activate paired space: persisted session was unavailable".into(),
                 ));
             }
-            let workspace_convergence = self.workspace_convergence.as_ref().ok_or_else(|| {
-                RedeemPairingInvitationError::Internal("workspace convergence unavailable".into())
-            })?;
-            let admission = workspace_convergence
+            // The joiner's local readiness facts (own member instance and
+            // readiness record) are saved by the owner before the readiness
+            // reply leaves this device.
+            let admission = self
+                .workspace_convergence
                 .local_admission_facts()
                 .await
                 .map_err(|error| {
@@ -173,20 +132,29 @@ impl RedeemPairingInvitationUseCase {
                         "prepare workspace admission: {error}"
                     ))
                 })?;
-            self.handshake.complete(pending, admission).await?;
+            self.workspace_convergence
+                .record_local_readiness(admission.member_instance)
+                .await
+                .map_err(|error| {
+                    RedeemPairingInvitationError::Internal(format!("save local readiness: {error}"))
+                })?;
+            let committed = self.handshake.complete(pending, admission).await?;
+            // The sponsor saved the admission change; the joiner records
+            // the confirmation and the sponsor's member facts with the
+            // owner before reporting success.
+            self.workspace_convergence
+                .record_admission_committed(committed.facts)
+                .await
+                .map_err(|error| {
+                    RedeemPairingInvitationError::Internal(format!(
+                        "record admission committed: {error}"
+                    ))
+                })?;
             Ok((persisted, channel))
         }
         .await;
-        let duration_ms = started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
         match &result {
-            Ok((_, channel)) => self.analytics.capture(Event::PairingSucceeded {
-                method: PairingMethod::Code,
-                // peer_os v1 留空——握手 outcome 里没有对端 OS 字段。后续
-                // 协议加入对端 OS 自报后回填,schema 已用 Option 兼容。
-                peer_os: None,
-                duration_ms,
-                discovery_channel: Some(map_discovery_channel(*channel)),
-            }),
+            Ok(_) => {}
             Err(err) => self.analytics.capture(Event::PairingFailed {
                 method: PairingMethod::Code,
                 failure_reason: map_redeem_error_to_pairing_failure_reason(err),
@@ -195,41 +163,14 @@ impl RedeemPairingInvitationUseCase {
         result.map(|(res, _)| res)
     }
 
+    /// Mark setup complete. Ordering rationale: see module doc — this runs
+    /// after the owner saved the local readiness facts and before the
+    /// readiness reply is sent.
     async fn persist(
         &self,
         outcome: JoinerHandshakeOutcome,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
-        let now = self.now_utc()?;
-
-        // Admit sponsor as member.
-        let admit_input = AdmitMember {
-            device_id: outcome.sponsor_device_id,
-            device_name: outcome.sponsor_device_name.clone(),
-            identity_fingerprint: outcome.sponsor_identity_fingerprint.clone(),
-            joined_at: now,
-            sync_preferences: MemberSyncPreferences::default(),
-        };
-        self.admit_member
-            .execute(admit_input)
-            .await
-            .map_err(map_admit_err)?;
-
-        // Trust sponsor.
-        let trust_input = TrustPeer {
-            local_device_id: outcome.self_device_id,
-            peer_device_id: outcome.sponsor_device_id,
-            peer_fingerprint: outcome.sponsor_identity_fingerprint.clone(),
-            trusted_at: now,
-        };
-        self.trust_peer
-            .execute(trust_input)
-            .await
-            .map_err(map_trust_err)?;
-
         // Mark setup complete (ordering rationale: see module doc).
-        // Adopt the sponsor's `space_id` — without this, future commands
-        // on this joiner would mint a fresh id and the two sides would
-        // diverge on the canonical identifier.
         self.setup_status
             .set_status(&SetupStatus {
                 has_completed: true,
@@ -240,31 +181,10 @@ impl RedeemPairingInvitationUseCase {
                 RedeemPairingInvitationError::Internal(format!("setup_status.set_status: {e}"))
             })?;
 
-        // Slice 2 Phase 1 · T5：best-effort upsert sponsor transport addr。
-        // 位置放在 `setup_status` 之后是刻意的：setup_status=true 才是
-        // 配对 Success 的单点真相来源；peer address 写入是体验优化，
-        // 失败不能回退配对状态。空 blob（旧 sponsor / adapter 未附带）
-        // 跳过；写失败仅 warn，presence `ensure_reachable_all` 下一轮
-        // 兜底。
-        self.persist_sponsor_address(&outcome, now).await;
-
-        // Identity switch runs after setup_status is persisted but
-        // before the outer `execute` emits `pairing_succeeded`, so
-        // pairing_succeeded already reports under the new person.
-        // `None` means the sponsor has no `space_person_id` yet
-        // (v1→v2 first-pair case); joiner stays Solo and waits for
-        // a future sponsor-initiated re-pair to converge.
-        // Adopt failures are warn-logged by the facade and never
-        // block pairing — the ground truth of "paired" is
-        // setup_status=true, not the analytics side effect.
-        if let Some(space_person_id) = outcome.sponsor_space_person_id {
-            self.analytics.adopt_from_sponsor(space_person_id);
-        }
-
         info!(
             sponsor_device_id = %outcome.sponsor_device_id.as_str(),
             space_id = %outcome.space_id,
-            "joiner pairing complete; local space ready"
+            "joiner local setup complete; space ready"
         );
 
         Ok(RedeemPairingInvitationResult {
@@ -275,44 +195,6 @@ impl RedeemPairingInvitationUseCase {
             self_identity_fingerprint: outcome.self_identity_fingerprint,
         })
     }
-
-    fn now_utc(&self) -> Result<DateTime<Utc>, RedeemPairingInvitationError> {
-        DateTime::<Utc>::from_timestamp_millis(self.clock.now_ms()).ok_or_else(|| {
-            RedeemPairingInvitationError::Internal("clock returned invalid timestamp".into())
-        })
-    }
-
-    async fn persist_sponsor_address(
-        &self,
-        outcome: &JoinerHandshakeOutcome,
-        observed_at: DateTime<Utc>,
-    ) {
-        if outcome.sponsor_transport_address_blob.is_empty() {
-            tracing::debug!(
-                sponsor_device_id = %outcome.sponsor_device_id.as_str(),
-                "sponsor did not supply transport_address_blob; skipping peer_addr_repo upsert"
-            );
-            return;
-        }
-        let record = PeerAddressRecord {
-            device_id: outcome.sponsor_device_id,
-            addr_blob: outcome.sponsor_transport_address_blob.clone(),
-            observed_at,
-        };
-        if let Err(err) = self.peer_addr_repo.upsert(&record).await {
-            tracing::warn!(
-                sponsor_device_id = %outcome.sponsor_device_id.as_str(),
-                error = %err,
-                "peer_addr_repo.upsert failed after pairing; presence will recover lazily"
-            );
-        } else {
-            tracing::debug!(
-                sponsor_device_id = %outcome.sponsor_device_id.as_str(),
-                blob_len = outcome.sponsor_transport_address_blob.len(),
-                "peer_addr_repo.upsert landed for paired sponsor"
-            );
-        }
-    }
 }
 
 /// Slice 8b · `RedeemPairingInvitationError` → `PairingFailureReason` 1:1
@@ -320,15 +202,6 @@ impl RedeemPairingInvitationUseCase {
 /// 时丢失"这条 join 是 passphrase 错 vs sponsor 主动拒绝 vs 网络超时"
 /// 的关键区分。`Internal` / `SponsorInternal` 占比是架构债务指标
 /// (schema doc §7.4)。
-/// Map the domain discovery channel onto its telemetry wire enum. Keeps the
-/// analytics layer decoupled from `uc-core` port types.
-fn map_discovery_channel(channel: DiscoveryChannel) -> PairingDiscoveryChannel {
-    match channel {
-        DiscoveryChannel::Cloud => PairingDiscoveryChannel::Cloud,
-        DiscoveryChannel::Lan => PairingDiscoveryChannel::Lan,
-    }
-}
-
 fn map_redeem_error_to_pairing_failure_reason(
     err: &RedeemPairingInvitationError,
 ) -> PairingFailureReason {
@@ -370,47 +243,33 @@ fn map_redeem_error_to_pairing_failure_reason(
     }
 }
 
-fn map_admit_err(err: MembershipApplicationError) -> RedeemPairingInvitationError {
-    // Since #1023 the admit/trust use cases replace stale records instead
-    // of failing with `AlreadyAdmitted` / `AlreadyTrusted`, so only real
-    // persistence failures land here. Fail loudly; recovery path is a
-    // factory_reset followed by a fresh redeem.
-    RedeemPairingInvitationError::Internal(format!("admit_member: {err}"))
-}
-
-fn map_trust_err(err: TrustedPeerApplicationError) -> RedeemPairingInvitationError {
-    RedeemPairingInvitationError::Internal(format!("trust_peer: {err}"))
-}
-
 #[cfg(test)]
 mod tests {
     //! Composition tests only: wire + crypto covered in
-    //! [`crate::pairing_outbound::joiner_handshake::tests`]. Here we
-    //! verify that a coordinator outcome drives admit → trust →
-    //! setup-status in the right order, and that each step's failure
-    //! short-circuits the remaining ones without flipping
-    //! `setup_status`.
-    //!
-    //! To avoid mocking the coordinator behind a trait (symmetric with
-    //! how sponsor-side orchestrator tests use a real
-    //! `SponsorHandshakeCoordinator`), these tests construct a real
-    //! `JoinerHandshakeCoordinator` with scripted session/crypto fakes
-    //! that deliver a happy-path outcome. That's a small amount of
-    //! wire-test overlap with the coordinator's own tests, but keeps
-    //! the use case under the same seams production uses.
+    //! [`crate::workspace_convergence::admission::joiner::joiner_handshake::tests`].
+    //! Here we verify the joiner side of the admission seam (ADR-017):
+    //! the workspace owner saves the local readiness facts before the
+    //! readiness reply leaves the device, and the admission-saved
+    //! confirmation is recorded before `execute` reports success. The
+    //! channel side is verified against a workspace-owner double, so no
+    //! real owner or real network is involved.
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
-    use uuid::Uuid;
+    use tokio::time::Duration;
 
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
-    use uc_core::membership::{MembershipError, SpaceMember};
+    use uc_core::membership::{
+        AdmissionChangeFacts, AdmissionCommittedFacts, MemberInstanceId, RemovalAdmissionDecision,
+        WorkspacePhase, WorkspaceSnapshot,
+    };
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::session_message::{
-        PairingSessionMessage, SponsorAdmissionOffer, SponsorConfirm,
+        PairingReject, PairingRejectReason, PairingSessionMessage, SponsorAdmissionCommitted,
+        SponsorAdmissionOffer, SponsorConfirm,
     };
     use uc_core::ports::pairing::{
         DialError, DialOutcome, DiscoveryChannel, PairingSessionId, PairingSessionPort,
@@ -420,19 +279,20 @@ mod tests {
         DeriveAdmissionProofKeyPort, GroupAdmissionPort, ProofPort, ResumeSpaceSessionPort,
         SpaceAccessError,
     };
-    use uc_core::ports::{DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort};
+    use uc_core::ports::{
+        DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort, SetupStatusPort,
+    };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
+    use uc_core::setup::SetupStatus;
     use uc_core::space_access::domain::{
         AdmissionOffer, GroupAdmission, PreparedGroupJoin, ProofDerivedKey,
         SpaceAccessProofArtifact,
     };
-    use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
 
-    use chrono::DateTime;
-    use tokio::time::Duration;
+    use crate::workspace_convergence::WorkspaceConvergenceError;
 
-    // ── minimal wire fakes (for producing a happy-path outcome) ──────────
+    // ── wire fakes (produce a happy-path outcome) ─────────────────────────
 
     #[derive(Default)]
     struct HappySession {
@@ -443,7 +303,20 @@ mod tests {
     impl HappySession {
         fn primed() -> Self {
             let me = Self::default();
+            me.push_offer_and_confirm();
             me.recv
+                .lock()
+                .unwrap()
+                .push_back(PairingSessionMessage::AdmissionCommitted(
+                    SponsorAdmissionCommitted {
+                        facts: committed_facts(),
+                    },
+                ));
+            me
+        }
+
+        fn push_offer_and_confirm(&self) {
+            self.recv
                 .lock()
                 .unwrap()
                 .push_back(PairingSessionMessage::AdmissionOffer(
@@ -454,7 +327,7 @@ mod tests {
                         pairing_session_id: PairingSessionId::new("session-1"),
                     },
                 ));
-            me.recv
+            self.recv
                 .lock()
                 .unwrap()
                 .push_back(PairingSessionMessage::Confirm(SponsorConfirm {
@@ -468,7 +341,6 @@ mod tests {
                     encrypted_key_catalog: vec![2],
                     group_epoch: 2,
                 }));
-            me
         }
     }
     #[async_trait]
@@ -495,30 +367,6 @@ mod tests {
         }
         async fn close(&self, _: &PairingSessionId, _: Option<String>) {
             *self.closed.lock().unwrap() += 1;
-        }
-    }
-
-    struct UnreachableSession;
-    #[async_trait]
-    impl PairingSessionPort for UnreachableSession {
-        async fn dial_by_invitation(&self, _: &InvitationCode) -> Result<DialOutcome, DialError> {
-            Err(DialError::InvitationNotFound)
-        }
-        async fn send(
-            &self,
-            _: &PairingSessionId,
-            _: PairingSessionMessage,
-        ) -> Result<(), SessionError> {
-            unreachable!("dial fails before send")
-        }
-        async fn recv_next(
-            &self,
-            _: &PairingSessionId,
-        ) -> Result<Option<PairingSessionMessage>, SessionError> {
-            unreachable!("dial fails before recv")
-        }
-        async fn close(&self, _: &PairingSessionId, _: Option<String>) {
-            unreachable!("no session to close")
         }
     }
 
@@ -560,7 +408,6 @@ mod tests {
                 group_epoch: u64,
             ) -> Result<(), SpaceAccessError>;
         }
-
     }
 
     fn happy_space_access() -> Arc<MockSpaceAccess> {
@@ -636,75 +483,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingMemberRepo {
-        saved: StdMutex<Vec<SpaceMember>>,
-        fail_next: StdMutex<Option<MembershipError>>,
-    }
-    #[async_trait]
-    impl MemberRepositoryPort for RecordingMemberRepo {
-        async fn get(&self, id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
-            // Last write wins, mirroring the port's upsert semantics — the
-            // re-pair regression test pre-seeds a stale row and expects the
-            // use case to observe it.
-            Ok(self
-                .saved
-                .lock()
-                .unwrap()
-                .iter()
-                .rev()
-                .find(|m| &m.device_id == id)
-                .cloned())
-        }
-        async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
-            Ok(self.saved.lock().unwrap().clone())
-        }
-        async fn save(&self, m: &SpaceMember) -> Result<(), MembershipError> {
-            if let Some(err) = self.fail_next.lock().unwrap().take() {
-                return Err(err);
-            }
-            self.saved.lock().unwrap().push(m.clone());
-            Ok(())
-        }
-        async fn remove(&self, _: &DeviceId) -> Result<bool, MembershipError> {
-            Ok(false)
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingTrustRepo {
-        saved: StdMutex<Vec<TrustedPeer>>,
-        fail_next: StdMutex<Option<TrustedPeerError>>,
-    }
-    #[async_trait]
-    impl TrustedPeerRepositoryPort for RecordingTrustRepo {
-        async fn get(&self, id: &DeviceId) -> Result<Option<TrustedPeer>, TrustedPeerError> {
-            // Last write wins, mirroring the port's upsert semantics (see
-            // `RecordingMemberRepo::get`).
-            Ok(self
-                .saved
-                .lock()
-                .unwrap()
-                .iter()
-                .rev()
-                .find(|p| &p.peer_device_id == id)
-                .cloned())
-        }
-        async fn list(&self) -> Result<Vec<TrustedPeer>, TrustedPeerError> {
-            Ok(self.saved.lock().unwrap().clone())
-        }
-        async fn save(&self, p: &TrustedPeer) -> Result<(), TrustedPeerError> {
-            if let Some(err) = self.fail_next.lock().unwrap().take() {
-                return Err(err);
-            }
-            self.saved.lock().unwrap().push(p.clone());
-            Ok(())
-        }
-        async fn remove(&self, _: &DeviceId) -> Result<bool, TrustedPeerError> {
-            Ok(false)
-        }
-    }
-
     struct RecordingSetupStatus {
         fail_next: StdMutex<bool>,
         set_calls: StdMutex<Vec<bool>>,
@@ -737,13 +515,6 @@ mod tests {
         }
     }
 
-    struct FixedClock(i64);
-    impl ClockPort for FixedClock {
-        fn now_ms(&self) -> i64 {
-            self.0
-        }
-    }
-
     struct ReadyResume;
     #[async_trait]
     impl ResumeSpaceSessionPort for ReadyResume {
@@ -752,6 +523,112 @@ mod tests {
             space_id: &SpaceId,
         ) -> Result<Option<ActiveSpace>, SpaceAccessError> {
             Ok(Some(ActiveSpace::new(space_id.clone())))
+        }
+    }
+
+    // ── workspace-owner double (the admission seam's channel-side test) ──
+
+    #[derive(Default)]
+    struct RecordingOwner {
+        calls: StdMutex<Vec<&'static str>>,
+        fail_readiness: StdMutex<bool>,
+        fail_committed: StdMutex<bool>,
+        committed_facts: StdMutex<Option<AdmissionCommittedFacts>>,
+    }
+    #[async_trait]
+    impl WorkspaceAdmissionOwnerPort for RecordingOwner {
+        async fn admission_decision(&self, _: u64) -> RemovalAdmissionDecision {
+            RemovalAdmissionDecision::Allowed
+        }
+        async fn begin_admission(
+            &self,
+            _: &PairingSessionId,
+            _: &DeviceId,
+            _: u64,
+        ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+            unimplemented!("sponsor-side method not exercised in joiner tests")
+        }
+        async fn commit_joiner_admission(
+            &self,
+            _: &PairingSessionId,
+            _: AdmissionChangeFacts,
+        ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
+            unimplemented!("sponsor-side method not exercised in joiner tests")
+        }
+        async fn local_admission_facts(
+            &self,
+        ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError> {
+            self.calls.lock().unwrap().push("local_admission_facts");
+            Ok(joiner_facts())
+        }
+        async fn record_local_readiness(
+            &self,
+            own_instance: MemberInstanceId,
+        ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+            self.calls.lock().unwrap().push("record_local_readiness");
+            if *self.fail_readiness.lock().unwrap() {
+                return Err(WorkspaceConvergenceError::Unavailable);
+            }
+            assert_eq!(own_instance, MemberInstanceId::from_bytes([7; 32]));
+            Ok(snapshot())
+        }
+        async fn record_admission_committed(
+            &self,
+            confirmation: AdmissionCommittedFacts,
+        ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("record_admission_committed");
+            if *self.fail_committed.lock().unwrap() {
+                return Err(WorkspaceConvergenceError::Unavailable);
+            }
+            *self.committed_facts.lock().unwrap() = Some(confirmation);
+            Ok(snapshot())
+        }
+    }
+
+    fn committed_facts() -> AdmissionCommittedFacts {
+        AdmissionCommittedFacts {
+            change_digest: [0x11; 32],
+            change_count: 2,
+            sponsor_facts: AdmissionChangeFacts {
+                member_instance: MemberInstanceId::from_bytes([9; 32]),
+                device_id: DeviceId::new("sponsor-device"),
+                device_name: "sponsor's laptop".into(),
+                identity_fingerprint: sponsor_fp(),
+                transport_public_key: vec![3; 32],
+                transport_address_blob: Vec::new(),
+                identity_signature: vec![4; 64],
+            },
+        }
+    }
+
+    fn joiner_facts() -> AdmissionChangeFacts {
+        AdmissionChangeFacts {
+            member_instance: MemberInstanceId::from_bytes([7; 32]),
+            device_id: DeviceId::new("joiner-device"),
+            device_name: "joiner-laptop".into(),
+            identity_fingerprint: joiner_fp(),
+            transport_public_key: vec![5; 32],
+            transport_address_blob: Vec::new(),
+            identity_signature: vec![6; 64],
+        }
+    }
+
+    fn snapshot() -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            phase: WorkspacePhase::LocallyApplied,
+            revision: 1,
+            change_count: 0,
+            removal_intent_count: 0,
+            effective_member_count: 1,
+            confirmed_member_count: 0,
+            waiting_member_count: 0,
+            convergence_digest: None,
+            removed: false,
+            updated_at_ms: fixed_now_ms(),
+            failure_category: None,
         }
     }
 
@@ -764,9 +641,7 @@ mod tests {
         IdentityFingerprint::from_raw_string("AAAAAAAAAAAAAAAA").unwrap()
     }
     fn fixed_now_ms() -> i64 {
-        DateTime::parse_from_rfc3339("2026-04-20T10:00:00Z")
-            .unwrap()
-            .timestamp_millis()
+        1775119200000
     }
     fn cmd(code: &str) -> RedeemPairingInvitationCommand {
         RedeemPairingInvitationCommand {
@@ -775,183 +650,45 @@ mod tests {
         }
     }
 
-    // Slice 2 Phase 1 · T5：用 mockall 定义 `PeerAddressRepositoryPort`
-    // 的测试替身。好处：`.expect_upsert().times(N).withf(...).returning(...)`
-    // 把"是否调用、调用几次、参数匹配、返回值"打包成一条契约，drop
-    // mock 时自动校验；比手写 Recording fake 的 `saved: Vec<_>` +
-    // `fail_next: Option<Err>` 更直观。跨 module 不复用宏生成的类型：
-    // orchestrator tests 里有另一份独立声明，因为 mockall 生成的符号只在
-    // 各自模块内可见。
-    mockall::mock! {
-        pub PeerAddrRepo {}
-
-        #[async_trait]
-        impl PeerAddressRepositoryPort for PeerAddrRepo {
-            async fn get(
-                &self,
-                device: &DeviceId,
-            ) -> Result<Option<PeerAddressRecord>, uc_core::ports::PeerAddressError>;
-            async fn upsert(
-                &self,
-                record: &PeerAddressRecord,
-            ) -> Result<(), uc_core::ports::PeerAddressError>;
-            async fn list(
-                &self,
-            ) -> Result<Vec<PeerAddressRecord>, uc_core::ports::PeerAddressError>;
-            async fn remove(
-                &self,
-                device: &DeviceId,
-            ) -> Result<(), uc_core::ports::PeerAddressError>;
-        }
-    }
-
-    /// Slice 8b · 单元测试用 capturing sink。生产代码不需要、不暴露——
-    /// `AnalyticsPort` 实现里只有 noop / stdout / gated wrapper / posthog;
-    /// "把所有 capture 收进 Vec 给断言用"是测试基础设施职责。
-    /// 用 `StdMutex` 而非 `parking_lot`,与 module 内既有 fake repo
-    /// (`RecordingMemberRepo` / `RecordingTrustRepo`) 同款。
-    ///
-    /// PR 6 起在同一 timeline 上记录 capture 与 identify，便于断言"identify
-    /// 必须在 pairing_succeeded 之前发出"。
     #[derive(Default)]
     struct CapturingAnalyticsSink {
         events: StdMutex<Vec<Event>>,
-        ordered: StdMutex<Vec<CapturedAnalytics>>,
     }
-
-    #[derive(Debug, Clone)]
-    enum CapturedAnalytics {
-        Capture(Event),
-        Identify(uc_observability_contract::analytics::IdentifyPayload),
+    impl uc_observability_contract::analytics::AnalyticsPort for CapturingAnalyticsSink {
+        fn capture(&self, event: Event) {
+            self.events.lock().unwrap().push(event);
+        }
     }
-
     impl CapturingAnalyticsSink {
         fn snapshot(&self) -> Vec<Event> {
             self.events.lock().unwrap().clone()
-        }
-        fn ordered(&self) -> Vec<CapturedAnalytics> {
-            self.ordered.lock().unwrap().clone()
-        }
-        fn identify_calls(&self) -> Vec<uc_observability_contract::analytics::IdentifyPayload> {
-            self.ordered
-                .lock()
-                .unwrap()
-                .iter()
-                .filter_map(|c| match c {
-                    CapturedAnalytics::Identify(p) => Some(p.clone()),
-                    _ => None,
-                })
-                .collect()
-        }
-    }
-
-    impl uc_observability_contract::analytics::AnalyticsPort for CapturingAnalyticsSink {
-        fn capture(&self, event: Event) {
-            self.events.lock().unwrap().push(event.clone());
-            self.ordered
-                .lock()
-                .unwrap()
-                .push(CapturedAnalytics::Capture(event));
-        }
-        fn identify(&self, payload: uc_observability_contract::analytics::IdentifyPayload) {
-            self.ordered
-                .lock()
-                .unwrap()
-                .push(CapturedAnalytics::Identify(payload));
-        }
-    }
-
-    fn assert_started_then_succeeded(events: &[Event]) {
-        assert_eq!(
-            events.len(),
-            2,
-            "expected exactly [PairingStarted, PairingSucceeded], got {events:?}"
-        );
-        assert!(
-            matches!(
-                events[0],
-                Event::PairingStarted {
-                    method: PairingMethod::Code
-                }
-            ),
-            "first event should be PairingStarted{{method: Code}}, got {:?}",
-            events[0]
-        );
-        assert!(
-            matches!(
-                events[1],
-                Event::PairingSucceeded {
-                    method: PairingMethod::Code,
-                    peer_os: None,
-                    discovery_channel: Some(PairingDiscoveryChannel::Cloud),
-                    ..
-                }
-            ),
-            "second event should be PairingSucceeded{{method: Code, peer_os: None, \
-             discovery_channel: cloud}}, got {:?}",
-            events[1]
-        );
-    }
-
-    fn assert_started_then_failed(events: &[Event], expected: PairingFailureReason) {
-        assert_eq!(
-            events.len(),
-            2,
-            "expected exactly [PairingStarted, PairingFailed], got {events:?}"
-        );
-        assert!(
-            matches!(
-                events[0],
-                Event::PairingStarted {
-                    method: PairingMethod::Code
-                }
-            ),
-            "first event should be PairingStarted{{method: Code}}, got {:?}",
-            events[0]
-        );
-        match &events[1] {
-            Event::PairingFailed {
-                method: PairingMethod::Code,
-                failure_reason,
-            } => assert_eq!(*failure_reason, expected, "failure_reason mismatch"),
-            other => panic!("second event should be PairingFailed, got {other:?}"),
         }
     }
 
     struct Harness {
         session: Arc<HappySession>,
-        member_repo: Arc<RecordingMemberRepo>,
-        trust_repo: Arc<RecordingTrustRepo>,
+        owner: Arc<RecordingOwner>,
         setup_status: Arc<RecordingSetupStatus>,
         analytics: Arc<CapturingAnalyticsSink>,
     }
 
     impl Harness {
         fn build(
-            session: Arc<dyn PairingSessionPort>,
-            session_handle: Arc<HappySession>,
-            member_repo: Arc<RecordingMemberRepo>,
-            trust_repo: Arc<RecordingTrustRepo>,
+            session: Arc<HappySession>,
+            owner: Arc<RecordingOwner>,
             setup_status: Arc<RecordingSetupStatus>,
-            peer_addr_repo: Arc<MockPeerAddrRepo>,
         ) -> (RedeemPairingInvitationUseCase, Self) {
             let space_access = happy_space_access();
             let handshake = JoinerHandshakeCoordinator::new(
-                session,
+                session.clone(),
                 space_access.clone(),
-                space_access.clone(),
+                space_access,
                 Arc::new(FixedProof),
                 Arc::new(FixedLocal(joiner_fp())),
                 Arc::new(FixedDevice(DeviceId::new("joiner-device"))),
                 Arc::new(NamedSettings("joiner-laptop".into())),
                 Duration::from_secs(30),
             );
-            let admit_uc = Arc::new(AdmitMemberUseCase::new(
-                member_repo.clone() as Arc<dyn MemberRepositoryPort>
-            ));
-            let trust_uc = Arc::new(TrustPeerUseCase::new(
-                trust_repo.clone() as Arc<dyn TrustedPeerRepositoryPort>
-            ));
             let analytics = Arc::new(CapturingAnalyticsSink::default());
             let facade: Arc<dyn AnalyticsFacade> = Arc::new(
                 uc_observability_contract::analytics::DefaultAnalyticsFacade::new(
@@ -962,21 +699,16 @@ mod tests {
             );
             let uc = RedeemPairingInvitationUseCase::new(
                 handshake,
-                admit_uc,
-                trust_uc,
                 setup_status.clone(),
-                peer_addr_repo.clone() as Arc<dyn PeerAddressRepositoryPort>,
                 Arc::new(ReadyResume),
-                Arc::new(FixedClock(fixed_now_ms())),
                 facade,
-                None,
+                owner.clone() as Arc<dyn WorkspaceAdmissionOwnerPort>,
             );
             (
                 uc,
                 Self {
-                    session: session_handle,
-                    member_repo,
-                    trust_repo,
+                    session,
+                    owner,
                     setup_status,
                     analytics,
                 },
@@ -984,20 +716,10 @@ mod tests {
         }
 
         fn happy() -> (RedeemPairingInvitationUseCase, Self) {
-            let session = Arc::new(HappySession::primed());
             Self::build(
-                session.clone(),
-                session,
-                Arc::new(RecordingMemberRepo::default()),
-                Arc::new(RecordingTrustRepo::default()),
+                Arc::new(HappySession::primed()),
+                Arc::new(RecordingOwner::default()),
                 Arc::new(RecordingSetupStatus::ok()),
-                // 默认场景（sponsor blob == empty 走 skip 分支）：
-                // mock 不期望任何 upsert 调用，发生了会 drop 时 panic。
-                {
-                    let mut mock = MockPeerAddrRepo::new();
-                    mock.expect_upsert().times(0);
-                    Arc::new(mock)
-                },
             )
         }
     }
@@ -1005,7 +727,7 @@ mod tests {
     // ── tests ────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn happy_path_admit_trust_mark_setup_and_return_facts() {
+    async fn happy_path_saves_readiness_before_ready_and_committed_before_return() {
         let (uc, h) = Harness::happy();
         let out = uc.execute(cmd("CODE-1")).await.unwrap();
         assert_eq!(out.sponsor_device_id.as_str(), "sponsor-device");
@@ -1014,519 +736,120 @@ mod tests {
         assert_eq!(out.self_device_id.as_str(), "joiner-device");
         assert_eq!(out.self_identity_fingerprint, joiner_fp());
 
-        assert_eq!(h.member_repo.saved.lock().unwrap().len(), 1);
-        let trusted = &h.trust_repo.saved.lock().unwrap()[0];
-        assert_eq!(trusted.local_device_id.as_str(), "joiner-device");
-        assert_eq!(trusted.peer_device_id.as_str(), "sponsor-device");
+        // 顺序：本机就绪事实由负责人保存 → 就绪回复发出 → 确认由负责人记录。
+        let calls = h.owner.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                "local_admission_facts",
+                "record_local_readiness",
+                "record_admission_committed",
+            ]
+        );
+        let sent = h.session.sent.lock().unwrap().clone();
+        let ready_index = sent
+            .iter()
+            .position(|m| matches!(m, PairingSessionMessage::Ready(_)))
+            .expect("readiness reply must be sent");
+        assert_eq!(
+            calls.iter().position(|c| *c == "record_local_readiness"),
+            Some(0).and(Some(1)),
+            "readiness saved before the reply leaves"
+        );
+        assert!(
+            calls
+                .iter()
+                .position(|c| *c == "record_local_readiness")
+                .unwrap()
+                < ready_index,
+            "record_local_readiness must precede the Ready frame"
+        );
         assert_eq!(
             *h.setup_status.set_calls.lock().unwrap(),
             vec![true],
             "setup_status flipped exactly once to has_completed=true"
         );
-        assert_eq!(*h.session.closed.lock().unwrap(), 1);
-        // Slice 8b · pairing 三事件埋点:happy path 应产生
-        // [PairingStarted, PairingSucceeded] 两条 capture,中间 fire-and-forget
-        // 不阻塞主路径。
-        assert_started_then_succeeded(&h.analytics.snapshot());
-        // T5：HappySession::primed() 给的 Confirm.transport_address_blob
-        // 是空 Vec，所以 upsert 应跳过。Harness::happy 的 mock 用
-        // `.expect_upsert().times(0)`——若分支失误（对空 blob 也 upsert），
-        // drop mock 时 mockall 会 panic。
-    }
-
-    /// Issue #1023 regression (joiner side): the sponsor was unpaired
-    /// locally on the other end, so this joiner still holds stale member +
-    /// trust rows for it. A fresh redeem must replace those rows instead of
-    /// failing with `AlreadyAdmitted` / `AlreadyTrusted`.
-    #[tokio::test]
-    async fn re_redeem_with_stale_sponsor_records_replaces_and_succeeds() {
-        let (uc, h) = Harness::happy();
-
-        let stale_fp = IdentityFingerprint::from_raw_string("CCCCCCCCCCCCCCCC").unwrap();
-        let stale_joined_at = chrono::Utc::now() - chrono::Duration::days(7);
-        h.member_repo.saved.lock().unwrap().push(SpaceMember {
-            device_id: DeviceId::new("sponsor-device"),
-            device_name: "sponsor's old name".into(),
-            identity_fingerprint: stale_fp.clone(),
-            joined_at: stale_joined_at,
-            sync_preferences: MemberSyncPreferences::default(),
-        });
-        h.trust_repo.saved.lock().unwrap().push(TrustedPeer {
-            local_device_id: DeviceId::new("joiner-device"),
-            peer_device_id: DeviceId::new("sponsor-device"),
-            peer_fingerprint: stale_fp,
-            trusted_at: stale_joined_at,
-        });
-
-        let out = uc.execute(cmd("CODE-1")).await.unwrap();
-        assert_eq!(out.sponsor_device_id.as_str(), "sponsor-device");
-
-        // Replacement landed: latest rows carry the fresh handshake facts.
-        let members = h.member_repo.saved.lock().unwrap();
-        let latest = members.last().unwrap();
-        assert_eq!(latest.device_name, "sponsor's laptop");
-        assert_eq!(latest.identity_fingerprint, sponsor_fp());
-        drop(members);
-
-        let trusted = h.trust_repo.saved.lock().unwrap();
-        assert_eq!(trusted.last().unwrap().peer_fingerprint, sponsor_fp());
-        drop(trusted);
-
-        assert_eq!(*h.setup_status.set_calls.lock().unwrap(), vec![true]);
-    }
-
-    /// Session variant that primes a `SponsorConfirm` with a specific
-    /// transport blob; used by T5 tests that need to exercise the
-    /// non-empty-blob branch.
-    fn session_with_sponsor_blob(blob: Vec<u8>) -> Arc<HappySession> {
-        let me = Arc::new(HappySession::default());
-        me.recv
-            .lock()
-            .unwrap()
-            .push_back(PairingSessionMessage::AdmissionOffer(
-                SponsorAdmissionOffer {
-                    space_id: SpaceId::from_str("space-xyz"),
-                    kdf_parameters_blob: vec![0xAA; 16],
-                    challenge: vec![0x42; 32],
-                    pairing_session_id: PairingSessionId::new("session-1"),
-                },
-            ));
-        me.recv
-            .lock()
-            .unwrap()
-            .push_back(PairingSessionMessage::Confirm(SponsorConfirm {
-                space_id: SpaceId::from_str("space-xyz"),
-                sender_device_id: DeviceId::new("sponsor-device"),
-                sender_device_name: "sponsor's laptop".into(),
-                sender_identity_fingerprint: sponsor_fp(),
-                transport_address_blob: blob,
-                sponsor_space_person_id: None,
-                welcome: vec![1],
-                encrypted_key_catalog: vec![2],
-                group_epoch: 2,
-            }));
-        me
+        // 成功不再产生配对成功分析事件；只有开始事件。
+        let events = h.analytics.snapshot();
+        assert_eq!(events.len(), 1, "expected [PairingStarted], got {events:?}");
+        assert!(matches!(events[0], Event::PairingStarted { .. }));
     }
 
     #[tokio::test]
-    async fn t5_sponsor_blob_non_empty_upserts_peer_addr_repo() {
-        // 契约：收到非空 sponsor blob 后，恰好一次 upsert，参数匹配。
-        let expected_blob: Vec<u8> = vec![0xab, 0xcd, 0xef];
-        let expected_blob_matcher = expected_blob.clone();
-        let peer_mock = {
-            let mut m = MockPeerAddrRepo::new();
-            m.expect_upsert()
-                .times(1)
-                .withf(move |record| {
-                    record.device_id.as_str() == "sponsor-device"
-                        && record.addr_blob == expected_blob_matcher
-                })
-                .returning(|_| Ok(()));
-            Arc::new(m)
-        };
-        let session = session_with_sponsor_blob(expected_blob);
+    async fn readiness_save_failure_aborts_without_sending_ready() {
+        let owner = Arc::new(RecordingOwner::default());
+        *owner.fail_readiness.lock().unwrap() = true;
+        let (uc, h) = Harness::build(
+            Arc::new(HappySession::primed()),
+            owner,
+            Arc::new(RecordingSetupStatus::ok()),
+        );
+        let err = uc.execute(cmd("X")).await.unwrap_err();
+        match err {
+            RedeemPairingInvitationError::Internal(m) => {
+                assert!(m.contains("save local readiness"), "msg = {m}")
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        let sent = h.session.sent.lock().unwrap().clone();
+        assert!(
+            !sent
+                .iter()
+                .any(|m| matches!(m, PairingSessionMessage::Ready(_))),
+            "no readiness reply after a failed readiness save"
+        );
+        let events = h.analytics.snapshot();
+        assert_eq!(events.len(), 2, "expected [PairingStarted, PairingFailed]");
+        assert!(matches!(events[1], Event::PairingFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn committed_record_failure_surfaces_internal() {
+        let owner = Arc::new(RecordingOwner::default());
+        *owner.fail_committed.lock().unwrap() = true;
         let (uc, _h) = Harness::build(
-            session.clone(),
-            session,
-            Arc::new(RecordingMemberRepo::default()),
-            Arc::new(RecordingTrustRepo::default()),
+            Arc::new(HappySession::primed()),
+            owner,
             Arc::new(RecordingSetupStatus::ok()),
-            peer_mock,
         );
-        uc.execute(cmd("CODE-ADDR")).await.expect("ok");
-        // drop-time mockall 校验：少调 / 多调 / 参数不匹配 都会 panic。
+        let err = uc.execute(cmd("X")).await.unwrap_err();
+        match err {
+            RedeemPairingInvitationError::Internal(m) => {
+                assert!(m.contains("record admission committed"), "msg = {m}")
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
     }
 
-    // —— Phase 098 / PR 6 · v2 跨设备 person 聚合 joiner 端 ——————————
-
-    /// 携带 sponsor_space_person_id=Some 的 sponsor confirm。
-    fn session_with_sponsor_person(space_person_id: Uuid) -> Arc<HappySession> {
-        let me = Arc::new(HappySession::default());
-        me.recv
+    #[tokio::test]
+    async fn sponsor_reject_after_ready_surfaces_reject() {
+        let session = Arc::new(HappySession::default());
+        session.push_offer_and_confirm();
+        session
+            .recv
             .lock()
             .unwrap()
-            .push_back(PairingSessionMessage::AdmissionOffer(
-                SponsorAdmissionOffer {
-                    space_id: SpaceId::from_str("space-xyz"),
-                    kdf_parameters_blob: vec![0xAA; 16],
-                    challenge: vec![0x42; 32],
-                    pairing_session_id: PairingSessionId::new("session-1"),
-                },
-            ));
-        me.recv
-            .lock()
-            .unwrap()
-            .push_back(PairingSessionMessage::Confirm(SponsorConfirm {
-                space_id: SpaceId::from_str("space-xyz"),
-                sender_device_id: DeviceId::new("sponsor-device"),
-                sender_device_name: "sponsor's laptop".into(),
-                sender_identity_fingerprint: sponsor_fp(),
-                transport_address_blob: Vec::new(),
-                sponsor_space_person_id: Some(space_person_id),
-                welcome: vec![1],
-                encrypted_key_catalog: vec![2],
-                group_epoch: 2,
+            .push_back(PairingSessionMessage::Reject(PairingReject {
+                reason: PairingRejectReason::AdmissionUnavailable,
             }));
-        me
-    }
-
-    /// Test-only `AnalyticsIdentityPort` 跟踪 adopt 调用 + 允许注入失败。
-    /// `previous_anon` 模拟本机原 anonymous_user_id，A2 会作为
-    /// IdentifyPayload.old_distinct_id 发出。
-    struct FakeJoinerAnalyticsIdentity {
-        previous_anon: Uuid,
-        adopted: StdMutex<Vec<Uuid>>,
-        adopt_err: StdMutex<Option<String>>,
-    }
-    impl FakeJoinerAnalyticsIdentity {
-        fn new(previous_anon: Uuid) -> Self {
-            Self {
-                previous_anon,
-                adopted: StdMutex::new(Vec::new()),
-                adopt_err: StdMutex::new(None),
-            }
-        }
-    }
-    impl uc_observability_contract::analytics::AnalyticsIdentityPort for FakeJoinerAnalyticsIdentity {
-        fn adopt_space_person(
-            &self,
-            space_person_id: Uuid,
-        ) -> Result<
-            uc_observability_contract::analytics::AdoptOutcome,
-            uc_observability_contract::analytics::AnalyticsIdentityError,
-        > {
-            if let Some(msg) = self.adopt_err.lock().unwrap().take() {
-                return Err(
-                    uc_observability_contract::analytics::AnalyticsIdentityError::PersistFailed(
-                        anyhow::anyhow!(msg),
-                    ),
-                );
-            }
-            self.adopted.lock().unwrap().push(space_person_id);
-            Ok(uc_observability_contract::analytics::AdoptOutcome {
-                previous_distinct_id: self.previous_anon,
-                new_distinct_id: space_person_id,
-            })
-        }
-        fn release_space_person(
-            &self,
-        ) -> Result<
-            uc_observability_contract::analytics::ReleaseOutcome,
-            uc_observability_contract::analytics::AnalyticsIdentityError,
-        > {
-            Ok(uc_observability_contract::analytics::ReleaseOutcome {
-                previous_distinct_id: self.previous_anon,
-                new_distinct_id: self.previous_anon,
-            })
-        }
-        fn current_space_person_id(&self) -> Option<Uuid> {
-            self.adopted.lock().unwrap().last().copied()
-        }
-        fn reset_telemetry_identity(
-            &self,
-        ) -> Result<
-            uc_observability_contract::analytics::ReleaseOutcome,
-            uc_observability_contract::analytics::AnalyticsIdentityError,
-        > {
-            Ok(uc_observability_contract::analytics::ReleaseOutcome {
-                previous_distinct_id: self.previous_anon,
-                new_distinct_id: self.previous_anon,
-            })
-        }
-    }
-
-    fn build_uc_with_identity(
-        session: Arc<HappySession>,
-        identity: Arc<FakeJoinerAnalyticsIdentity>,
-    ) -> (RedeemPairingInvitationUseCase, Arc<CapturingAnalyticsSink>) {
-        let space_access = happy_space_access();
-        let handshake = JoinerHandshakeCoordinator::new(
-            session.clone() as Arc<dyn PairingSessionPort>,
-            space_access.clone(),
-            space_access,
-            Arc::new(FixedProof),
-            Arc::new(FixedLocal(joiner_fp())),
-            Arc::new(FixedDevice(DeviceId::new("joiner-device"))),
-            Arc::new(NamedSettings("joiner-laptop".into())),
-            Duration::from_secs(30),
-        );
-        let admit_uc = Arc::new(AdmitMemberUseCase::new(
-            Arc::new(RecordingMemberRepo::default()) as Arc<dyn MemberRepositoryPort>,
-        ));
-        let trust_uc = Arc::new(TrustPeerUseCase::new(
-            Arc::new(RecordingTrustRepo::default()) as Arc<dyn TrustedPeerRepositoryPort>,
-        ));
-        let analytics = Arc::new(CapturingAnalyticsSink::default());
-        let setup_status: Arc<dyn SetupStatusPort> = Arc::new(RecordingSetupStatus::ok());
-        let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = {
-            let mut m = MockPeerAddrRepo::new();
-            m.expect_upsert().times(0);
-            Arc::new(m)
-        };
-        let facade: Arc<dyn AnalyticsFacade> = Arc::new(
-            uc_observability_contract::analytics::DefaultAnalyticsFacade::new(
-                Arc::clone(&analytics)
-                    as Arc<dyn uc_observability_contract::analytics::AnalyticsPort>,
-                identity as Arc<dyn uc_observability_contract::analytics::AnalyticsIdentityPort>,
-            ),
-        );
-        let uc = RedeemPairingInvitationUseCase::new(
-            handshake,
-            admit_uc,
-            trust_uc,
-            setup_status,
-            peer_addr_repo,
-            Arc::new(ReadyResume),
-            Arc::new(FixedClock(fixed_now_ms())),
-            facade,
-            None,
-        );
-        (uc, analytics)
-    }
-
-    /// Happy path：sponsor 派发了 space_person_id → joiner 必须先 adopt、再
-    /// 发 `$identify`、最后 emit pairing_succeeded。三步顺序是 dashboard 的
-    /// person 合并归属是否生效的硬约束。
-    #[tokio::test]
-    async fn a2_emits_identify_before_pairing_succeeded() {
-        let space_person = Uuid::parse_str("018f0000-0000-7000-8000-00000000000a").unwrap();
-        let session = session_with_sponsor_person(space_person);
-        let identity = Arc::new(FakeJoinerAnalyticsIdentity::new(Uuid::now_v7()));
-        let (uc, analytics) = build_uc_with_identity(session, identity.clone());
-
-        uc.execute(cmd("CODE-1")).await.unwrap();
-
-        // adopt 必须正好一次，参数等于 sponsor 派发的 ID。
-        let adopted = identity.adopted.lock().unwrap().clone();
-        assert_eq!(
-            adopted,
-            vec![space_person],
-            "adopt 必须正好一次且参数等于 sponsor 派发"
-        );
-
-        // identify 必须出现在 pairing_succeeded 之前。
-        let ordered = analytics.ordered();
-        let identify_pos = ordered
-            .iter()
-            .position(|c| matches!(c, CapturedAnalytics::Identify(_)))
-            .expect("expected $identify");
-        let succeeded_pos = ordered
-            .iter()
-            .position(|c| {
-                matches!(
-                    c,
-                    CapturedAnalytics::Capture(Event::PairingSucceeded { .. })
-                )
-            })
-            .expect("expected pairing_succeeded");
-        assert!(
-            identify_pos < succeeded_pos,
-            "identify 必须在 pairing_succeeded 之前：{ordered:?}"
-        );
-
-        // identify payload 端点：old=本机 anon, new=sponsor 派发。
-        let calls = analytics.identify_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].old_distinct_id, identity.previous_anon);
-        assert_eq!(calls[0].new_distinct_id, space_person);
-    }
-
-    /// sponsor 派发 None（v1→v2 升级 sponsor 未持久化场景）→ joiner 端不
-    /// adopt、不发 identify，但仍 emit pairing_succeeded（pairing 真的成功
-    /// 了）。task_plan §开放问题 2 决策 A 的退化路径。
-    #[tokio::test]
-    async fn a2_skips_identify_when_sponsor_did_not_dispatch_person_id() {
-        let session = Arc::new(HappySession::primed()); // confirm.sponsor_space_person_id = None
-        let identity = Arc::new(FakeJoinerAnalyticsIdentity::new(Uuid::now_v7()));
-        let (uc, analytics) = build_uc_with_identity(session, identity.clone());
-
-        uc.execute(cmd("CODE-1")).await.unwrap();
-
-        assert!(
-            identity.adopted.lock().unwrap().is_empty(),
-            "sponsor 派发 None 时 joiner 不应 adopt"
-        );
-        assert!(
-            analytics.identify_calls().is_empty(),
-            "sponsor 派发 None 时 joiner 不应发 identify"
-        );
-        // pairing_succeeded 仍 emit。
-        assert_started_then_succeeded(&analytics.snapshot());
-    }
-
-    /// adopt 失败时 identify 不发出，但 pairing_succeeded 仍 emit ——
-    /// 与 A1 sponsor 端对称。本机 telemetry 维持 Solo 等下次 pairing。
-    #[tokio::test]
-    async fn a2_skips_identify_when_adopt_space_person_fails() {
-        let space_person = Uuid::now_v7();
-        let session = session_with_sponsor_person(space_person);
-        let identity = Arc::new(FakeJoinerAnalyticsIdentity::new(Uuid::now_v7()));
-        *identity.adopt_err.lock().unwrap() = Some("simulated persist failure".into());
-        let (uc, analytics) = build_uc_with_identity(session, identity.clone());
-
-        uc.execute(cmd("CODE-1")).await.unwrap();
-
-        assert!(
-            identity.adopted.lock().unwrap().is_empty(),
-            "adopt 失败时不记录成功 adopt"
-        );
-        assert!(
-            analytics.identify_calls().is_empty(),
-            "adopt 失败时不应发 identify"
-        );
-        assert_started_then_succeeded(&analytics.snapshot());
-    }
-
-    #[tokio::test]
-    async fn t5_sponsor_blob_upsert_failure_does_not_fail_join() {
-        // 预设 upsert 返 Err；T5 best-effort 语义下，execute 仍必须 Ok。
-        let peer_mock = {
-            let mut m = MockPeerAddrRepo::new();
-            m.expect_upsert().times(1).returning(|_| {
-                Err(uc_core::ports::PeerAddressError::Internal(
-                    "sqlite down".into(),
-                ))
-            });
-            Arc::new(m)
-        };
-        let session = session_with_sponsor_blob(vec![0x01]);
-        let (uc, h) = Harness::build(
-            session.clone(),
+        let (uc, _h) = Harness::build(
             session,
-            Arc::new(RecordingMemberRepo::default()),
-            Arc::new(RecordingTrustRepo::default()),
+            Arc::new(RecordingOwner::default()),
             Arc::new(RecordingSetupStatus::ok()),
-            peer_mock,
-        );
-        uc.execute(cmd("CODE-FAIL"))
-            .await
-            .expect("T5 upsert failure does not fail the join");
-        assert_eq!(*h.setup_status.set_calls.lock().unwrap(), vec![true]);
-    }
-
-    #[tokio::test]
-    async fn coordinator_error_passes_through_without_touching_persistence() {
-        let session = Arc::new(HappySession::default()); // not primed — won't be used
-        let unreachable: Arc<dyn PairingSessionPort> = Arc::new(UnreachableSession);
-        // 错误路径 mock：coordinator 提前失败，upsert 绝不应被调到；
-        // 若被调，drop mock 时 `.expect_upsert().times(0)` 会 panic。
-        let peer_mock = {
-            let mut m = MockPeerAddrRepo::new();
-            m.expect_upsert().times(0);
-            Arc::new(m)
-        };
-        let (uc, h) = Harness::build(
-            unreachable,
-            session, // handle kept around so the Harness's `session.closed` stays consistent with the "no close" assertion
-            Arc::new(RecordingMemberRepo::default()),
-            Arc::new(RecordingTrustRepo::default()),
-            Arc::new(RecordingSetupStatus::ok()),
-            peer_mock,
         );
         let err = uc.execute(cmd("X")).await.unwrap_err();
         assert!(matches!(
             err,
-            RedeemPairingInvitationError::InvitationNotFound
+            RedeemPairingInvitationError::SponsorAdmissionUnavailable
         ));
-        // Persistence untouched.
-        assert!(h.member_repo.saved.lock().unwrap().is_empty());
-        assert!(h.trust_repo.saved.lock().unwrap().is_empty());
-        assert!(h.setup_status.set_calls.lock().unwrap().is_empty());
-        // Slice 8b · 早期 dial 失败仍应 fire [Started, Failed{InvitationNotFound}]
-        // —— funnel 第一步必须留下信号。
-        assert_started_then_failed(
-            &h.analytics.snapshot(),
-            PairingFailureReason::InvitationNotFound,
-        );
     }
 
     #[tokio::test]
-    async fn admit_failure_aborts_before_trust_and_setup_status() {
-        let member_repo = Arc::new(RecordingMemberRepo::default());
-        *member_repo.fail_next.lock().unwrap() =
-            Some(MembershipError::Repository("db down".into()));
-        let session = Arc::new(HappySession::primed());
-        let peer_mock = {
-            let mut m = MockPeerAddrRepo::new();
-            m.expect_upsert().times(0);
-            Arc::new(m)
-        };
+    async fn setup_status_failure_surfaces_internal() {
         let (uc, h) = Harness::build(
-            session.clone(),
-            session,
-            member_repo,
-            Arc::new(RecordingTrustRepo::default()),
-            Arc::new(RecordingSetupStatus::ok()),
-            peer_mock,
-        );
-        let err = uc.execute(cmd("X")).await.unwrap_err();
-        match err {
-            RedeemPairingInvitationError::Internal(m) => {
-                assert!(m.contains("admit_member"), "msg = {m}")
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
-        assert!(h.member_repo.saved.lock().unwrap().is_empty());
-        assert!(h.trust_repo.saved.lock().unwrap().is_empty());
-        assert!(h.setup_status.set_calls.lock().unwrap().is_empty());
-        // Slice 8b · admit 持久化失败 → Internal 桶。
-        assert_started_then_failed(&h.analytics.snapshot(), PairingFailureReason::Internal);
-    }
-
-    #[tokio::test]
-    async fn trust_failure_lands_admit_but_does_not_mark_setup() {
-        let trust_repo = Arc::new(RecordingTrustRepo::default());
-        *trust_repo.fail_next.lock().unwrap() =
-            Some(TrustedPeerError::Repository("trust boom".into()));
-        let session = Arc::new(HappySession::primed());
-        let peer_mock = {
-            let mut m = MockPeerAddrRepo::new();
-            m.expect_upsert().times(0);
-            Arc::new(m)
-        };
-        let (uc, h) = Harness::build(
-            session.clone(),
-            session,
-            Arc::new(RecordingMemberRepo::default()),
-            trust_repo,
-            Arc::new(RecordingSetupStatus::ok()),
-            peer_mock,
-        );
-        let err = uc.execute(cmd("X")).await.unwrap_err();
-        match err {
-            RedeemPairingInvitationError::Internal(m) => {
-                assert!(m.contains("trust_peer"), "msg = {m}")
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
-        // admit landed (Slice 1 "strict" ordering — no admit-rollback
-        // compensation; the user-visible surface is the Internal error,
-        // and recovery path is factory_reset + fresh redeem).
-        assert_eq!(h.member_repo.saved.lock().unwrap().len(), 1);
-        assert!(h.trust_repo.saved.lock().unwrap().is_empty());
-        assert!(h.setup_status.set_calls.lock().unwrap().is_empty());
-        // Slice 8b · trust 持久化失败 → Internal 桶。
-        assert_started_then_failed(&h.analytics.snapshot(), PairingFailureReason::Internal);
-    }
-
-    #[tokio::test]
-    async fn setup_status_failure_lands_admit_and_trust_but_surfaces_internal() {
-        let session = Arc::new(HappySession::primed());
-        let peer_mock = {
-            let mut m = MockPeerAddrRepo::new();
-            // Peer addr upsert is gated on setup_status success (it's
-            // lifecycle-sequenced after mark-complete), so setup_status
-            // failure short-circuits it — mock enforces via times(0).
-            m.expect_upsert().times(0);
-            Arc::new(m)
-        };
-        let (uc, h) = Harness::build(
-            session.clone(),
-            session,
-            Arc::new(RecordingMemberRepo::default()),
-            Arc::new(RecordingTrustRepo::default()),
+            Arc::new(HappySession::primed()),
+            Arc::new(RecordingOwner::default()),
             Arc::new(RecordingSetupStatus::failing()),
-            peer_mock,
         );
         let err = uc.execute(cmd("X")).await.unwrap_err();
         match err {
@@ -1535,20 +858,13 @@ mod tests {
             }
             other => panic!("expected Internal, got {other:?}"),
         }
-        // admit + trust both landed; setup_status call was attempted
-        // (and failed), so set_calls stays empty.
-        assert_eq!(h.member_repo.saved.lock().unwrap().len(), 1);
-        assert_eq!(h.trust_repo.saved.lock().unwrap().len(), 1);
         assert!(h.setup_status.set_calls.lock().unwrap().is_empty());
-        // Slice 8b · setup_status persist 失败 → Internal 桶。
-        assert_started_then_failed(&h.analytics.snapshot(), PairingFailureReason::Internal);
+        let events = h.analytics.snapshot();
+        assert_eq!(events.len(), 2, "expected [PairingStarted, PairingFailed]");
     }
 
-    /// Slice 8b · 锁死 `RedeemPairingInvitationError` → `PairingFailureReason`
-    /// 全 14 变体的 1:1 映射。新增 RedeemPairingInvitationError 变体而忘了
-    /// 加 PairingFailureReason 时,这条会编译失败 (match 不穷尽);改了 wire
-    /// 字符串忘了 schema doc 同步时,events.rs 的 `pairing_failure_reason_wire_format`
-    /// 钉死会捕获。
+    /// 锁死 `RedeemPairingInvitationError` → `PairingFailureReason`
+    /// 全变体的 1:1 映射。新增错误变体而忘了加映射时，这条会编译失败。
     #[test]
     fn map_redeem_error_covers_all_variants() {
         use super::map_redeem_error_to_pairing_failure_reason as map;

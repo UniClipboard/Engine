@@ -129,16 +129,6 @@ pub enum MembershipConvergenceError {
     CurrentIdentity(#[from] CurrentMembershipIdentityError),
 }
 
-#[async_trait]
-pub trait PairingMembershipConvergencePort: Send + Sync {
-    async fn prepare_sponsor_membership(
-        &self,
-        context: SponsorSeedBatchContext,
-    ) -> Result<(), MembershipConvergenceError>;
-
-    fn notify_pending_delivery(&self);
-}
-
 impl MembershipConvergence {
     fn new(deps: MembershipConvergenceDeps) -> Self {
         Self {

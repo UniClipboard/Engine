@@ -97,17 +97,13 @@ pub(crate) struct JoinerHandshakeOutcome {
 
 #[derive(Debug)]
 pub(crate) struct PendingJoinerHandshake {
-    session: PairingSessionId,
-    outcome: JoinerHandshakeOutcome,
+    pub(crate) session: PairingSessionId,
+    pub(crate) outcome: JoinerHandshakeOutcome,
 }
 
 impl PendingJoinerHandshake {
     pub(crate) fn outcome(&self) -> &JoinerHandshakeOutcome {
         &self.outcome
-    }
-
-    pub(crate) fn into_outcome(self) -> JoinerHandshakeOutcome {
-        self.outcome
     }
 }
 
@@ -184,11 +180,16 @@ impl JoinerHandshakeCoordinator {
         }
     }
 
+    /// Send the joiner's readiness reply and await the sponsor's
+    /// "admission change saved" confirmation. Until that confirmation
+    /// arrives the joiner stays locally ready: it must not take part in
+    /// ordinary content exchange. The sponsor closes the session after
+    /// sending the confirmation.
     pub(crate) async fn complete(
         &self,
         pending: PendingJoinerHandshake,
         admission: uc_core::membership::AdmissionChangeFacts,
-    ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
+    ) -> Result<uc_core::pairing::SponsorAdmissionCommitted, RedeemPairingInvitationError> {
         self.pairing_session
             .send(
                 &pending.session,
@@ -196,26 +197,23 @@ impl JoinerHandshakeCoordinator {
             )
             .await
             .map_err(map_session_err)?;
-        Ok(pending.into_outcome())
-    }
-
-    pub(crate) async fn handshake_and_complete(
-        &self,
-        code: &InvitationCode,
-        passphrase: &Passphrase,
-    ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
-        let pending = self.handshake(code, passphrase).await?;
-        // This convenience entry has no persisted workspace session, so it
-        // cannot produce verified admission facts.
-        self.pairing_session
-            .close(
-                &pending.session,
-                Some("workspace admission required".into()),
-            )
-            .await;
-        Err(RedeemPairingInvitationError::Internal(
-            "workspace admission required".into(),
-        ))
+        loop {
+            match self.recv_with_ttl(&pending.session).await? {
+                PairingSessionMessage::AdmissionCommitted(committed) => {
+                    return Ok(committed);
+                }
+                PairingSessionMessage::Reject(r) => {
+                    return Err(map_sponsor_reject(r.reason));
+                }
+                other => {
+                    warn!(
+                        session = %pending.session,
+                        variant = variant_name(&other),
+                        "unexpected message while awaiting admission-saved confirmation"
+                    );
+                }
+            }
+        }
     }
 
     pub(crate) async fn abort(&self, pending: PendingJoinerHandshake, error: &str) {
@@ -514,6 +512,7 @@ fn variant_name(message: &PairingSessionMessage) -> &'static str {
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
         PairingSessionMessage::Confirm(_) => "Confirm",
         PairingSessionMessage::Ready(_) => "Ready",
+        PairingSessionMessage::AdmissionCommitted(_) => "AdmissionCommitted",
         PairingSessionMessage::Reject(_) => "Reject",
     }
 }
@@ -864,6 +863,26 @@ mod tests {
             .push_recv(RecvStep::Msg(PairingSessionMessage::Confirm(
                 sponsor_confirm(),
             )));
+        b.session
+            .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionCommitted(
+                uc_core::pairing::SponsorAdmissionCommitted {
+                    facts: uc_core::membership::AdmissionCommittedFacts {
+                        change_digest: [0x11; 32],
+                        change_count: 2,
+                        sponsor_facts: uc_core::membership::AdmissionChangeFacts {
+                            member_instance: uc_core::membership::MemberInstanceId::from_bytes(
+                                [9; 32],
+                            ),
+                            device_id: DeviceId::new("sponsor-device"),
+                            device_name: "sponsor's laptop".into(),
+                            identity_fingerprint: sponsor_fp(),
+                            transport_public_key: vec![3; 32],
+                            transport_address_blob: Vec::new(),
+                            identity_signature: vec![4; 64],
+                        },
+                    },
+                },
+            )));
         let coord = b.build();
 
         let out = coord
@@ -895,7 +914,7 @@ mod tests {
         ));
         assert!(b.session.closed().is_empty());
 
-        coord
+        let committed = coord
             .complete(
                 out,
                 uc_core::membership::AdmissionChangeFacts {
@@ -913,7 +932,8 @@ mod tests {
 
         let sent = b.session.sent();
         assert!(matches!(sent[2].1, PairingSessionMessage::Ready(_)));
-        assert_eq!(b.session.closed().len(), 1);
+        assert_eq!(committed.facts.change_count, 2);
+        assert_eq!(b.session.closed().len(), 0, "sponsor closes the session");
     }
 
     // ── dial errors ──────────────────────────────────────────────────────

@@ -83,9 +83,10 @@ pub use upgrade::{
     LegacyUpgradeResponse, LegacyUpgradeResponseKind, ProtectionGroupAdmission, ProtectionGroupId,
 };
 pub use workspace_convergence::{
-    compute_change_digest, validate_change, AdmissionChangeFacts, PendingHandoff,
-    RemovalChangeFacts, WorkspaceChange, WorkspaceChangeId, WorkspaceChangeKind,
-    WorkspaceChangeRejection, WorkspaceConfirmation, WorkspaceConvergenceError,
-    WorkspaceConvergenceEvent, WorkspaceConvergenceState, WorkspaceDigest, WorkspaceEffect,
-    WorkspaceFailureCategory, WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
+    compute_change_digest, validate_change, AdmissionChangeFacts, AdmissionCommittedFacts,
+    PendingAdmissionRecord, PendingHandoff, RemovalChangeFacts, WorkspaceChange, WorkspaceChangeId,
+    WorkspaceChangeKind, WorkspaceChangeRejection, WorkspaceConfirmation,
+    WorkspaceConvergenceError, WorkspaceConvergenceEvent, WorkspaceConvergenceState,
+    WorkspaceDigest, WorkspaceEffect, WorkspaceFailureCategory, WorkspaceMergeOutcome,
+    WorkspacePhase, WorkspaceSnapshot,
 };

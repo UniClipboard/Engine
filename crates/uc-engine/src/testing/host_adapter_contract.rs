@@ -186,13 +186,17 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         crate::OperationResult::SpaceJoined { self_device_id, .. } => self_device_id,
         other => panic!("expected joined space, got {other:?}"),
     };
+    // ADR-017: join success is expressed by the workspace state, not by a
+    // pairing terminal. The sponsor must observe the saved admission change
+    // through the workspace convergence event.
     assert!(matches!(
         next_engine_event_matching(&mut sponsor_events, |event| matches!(
             event,
-            EngineEvent::PairingCompleted(crate::PairingCompletion::Success { .. })
+            EngineEvent::WorkspaceConvergenceChanged(snapshot)
+                if snapshot.change_count > 0
         ))
         .await,
-        EngineEvent::PairingCompleted(crate::PairingCompletion::Success { .. })
+        EngineEvent::WorkspaceConvergenceChanged(_)
     ));
 
     let text = "engine inbound behavior baseline";

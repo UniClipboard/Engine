@@ -12,7 +12,6 @@
 pub(crate) mod commands;
 mod deps;
 mod errors;
-mod events;
 mod facade;
 
 pub use commands::{
@@ -28,8 +27,8 @@ pub use errors::{
     QueryMigrationProgressError, QuerySetupStateError, RedeemPairingInvitationError,
     ResetSpaceError, SwitchSpaceError, TryResumeSessionError, UnlockSpaceError,
 };
-pub use events::{PairingFailureReason, PairingOutcome};
 pub use facade::SpaceFacade;
+pub use uc_observability_contract::analytics::PairingFailureReason;
 
 pub(crate) const LEGACY_SPACE_ID: &str = "space";
 

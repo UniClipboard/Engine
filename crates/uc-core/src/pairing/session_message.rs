@@ -37,6 +37,7 @@ pub enum PairingSessionMessage {
     ChallengeResponse(JoinerChallengeResponse),
     Confirm(SponsorConfirm),
     Ready(JoinerReady),
+    AdmissionCommitted(SponsorAdmissionCommitted),
     Reject(PairingReject),
 }
 
@@ -147,6 +148,19 @@ pub struct JoinerReady {
     /// The joiner signs these facts only after its local group session is
     /// active. The sponsor commits them to the workspace change chain.
     pub admission: AdmissionChangeFacts,
+}
+
+/// Sponsor → joiner. Sent only after the sponsor durably saved the joiner's
+/// admission change and the pending handoff facts in one commit. Until the
+/// joiner receives this confirmation it stays locally ready: it must not
+/// take part in ordinary content exchange, must not announce relationships
+/// to other members, and must not count itself into completion confirmations.
+#[derive(Debug, Clone)]
+pub struct SponsorAdmissionCommitted {
+    /// The admission-saved facts: the workspace change digest after the
+    /// joiner's admission change was saved, the resulting change count and
+    /// the sponsor's own member facts generated at the same commit point.
+    pub facts: crate::membership::AdmissionCommittedFacts,
 }
 
 /// Either side → other. Terminal message with a structured reason so the

@@ -56,16 +56,6 @@ pub enum Event {
     /// 用户点击配对。
     PairingStarted { method: PairingMethod },
 
-    /// 双端握手完成。
-    PairingSucceeded {
-        method: PairingMethod,
-        peer_os: Option<Os>,
-        duration_ms: u32,
-        /// 加入方解析邀请码命中的发现通道（cloud 目录 vs LAN/mDNS）。
-        /// 发起方侧无从得知对端走哪条通道，故恒为 `None`。
-        discovery_channel: Option<PairingDiscoveryChannel>,
-    },
-
     /// 配对中断或超时。
     PairingFailed {
         method: PairingMethod,
@@ -283,7 +273,6 @@ impl Event {
             Event::SetupStarted { .. } => "setup_started",
             Event::DeviceNameSet { .. } => "device_name_set",
             Event::PairingStarted { .. } => "pairing_started",
-            Event::PairingSucceeded { .. } => "pairing_succeeded",
             Event::PairingFailed { .. } => "pairing_failed",
             Event::PairingInvitationIssued { .. } => "pairing_invitation_issued",
             Event::FirstClipboardSyncAttempted { .. } => "first_clipboard_sync_attempted",
@@ -325,17 +314,6 @@ impl Event {
                 to_map(json!({ "name_length_bucket": name_length_bucket }))
             }
             Event::PairingStarted { method } => to_map(json!({ "method": method })),
-            Event::PairingSucceeded {
-                method,
-                peer_os,
-                duration_ms,
-                discovery_channel,
-            } => to_map(json!({
-                "method": method,
-                "peer_os": peer_os,
-                "duration_ms": duration_ms,
-                "discovery_channel": discovery_channel,
-            })),
             Event::PairingFailed {
                 method,
                 failure_reason,
@@ -1050,15 +1028,6 @@ mod tests {
                 "pairing_started",
             ),
             (
-                Event::PairingSucceeded {
-                    method: PairingMethod::Qr,
-                    peer_os: None,
-                    duration_ms: 0,
-                    discovery_channel: None,
-                },
-                "pairing_succeeded",
-            ),
-            (
                 Event::PairingFailed {
                     method: PairingMethod::Qr,
                     failure_reason: PairingFailureReason::Internal,
@@ -1660,23 +1629,6 @@ mod tests {
         assert!(!props.contains_key("sync_latency_ms"));
         // deferred 没有实际发送，不应携带 transport_type，避免 dashboard 误读。
         assert!(!props.contains_key("transport_type"));
-    }
-
-    #[test]
-    fn properties_are_pure_event_fields_only() {
-        // EventContext 字段一律不出现在 properties 里——是 sink 的职责。
-        let event = Event::PairingSucceeded {
-            method: PairingMethod::Qr,
-            peer_os: Some(Os::Windows),
-            duration_ms: 1200,
-            discovery_channel: Some(PairingDiscoveryChannel::Lan),
-        };
-        let props = event.properties();
-        assert!(!props.contains_key("anonymous_user_id"));
-        assert!(!props.contains_key("analytics_device_id"));
-        assert!(!props.contains_key("session_id"));
-        assert!(!props.contains_key("app_version"));
-        assert!(!props.contains_key("os"));
     }
 
     // —— Update Lifecycle wire 形态 ————————————————————————————————

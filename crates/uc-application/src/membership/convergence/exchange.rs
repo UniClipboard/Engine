@@ -1058,19 +1058,6 @@ impl MembershipConvergence {
 }
 
 #[async_trait]
-impl PairingMembershipConvergencePort for MembershipConvergence {
-    async fn prepare_sponsor_membership(
-        &self,
-        context: SponsorSeedBatchContext,
-    ) -> Result<(), MembershipConvergenceError> {
-        MembershipConvergence::prepare_sponsor_membership(self, context).await
-    }
-
-    fn notify_pending_delivery(&self) {
-        MembershipConvergence::notify_pending_delivery(self);
-    }
-}
-
 #[async_trait]
 impl MembershipGossipEndpointPort for MembershipConvergence {
     async fn handle_message(

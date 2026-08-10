@@ -8,7 +8,6 @@ pub mod usecases;
 pub use convergence::{
     build_membership_convergence, MembershipConvergence, MembershipConvergenceActivity,
     MembershipConvergenceDeps, MembershipConvergenceError, MembershipConvergenceRuntime,
-    PairingMembershipConvergencePort, SponsorSeedBatchContext,
 };
 
 #[async_trait]

@@ -45,10 +45,10 @@ use crate::facade::space_setup::{EnsureReachableAllError, EnsureReachableAllRepo
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
     IssuePairingInvitationResult, MigrationProgress, PairingInvitationAddressCandidate,
-    PairingOutcome, QueryMigrationProgressError, QuerySetupStateError,
-    RedeemPairingInvitationError, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
-    SetupStateView, SwitchSpaceError, SwitchSpaceInput, SwitchSpaceResult, TryResumeSessionError,
-    UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    QueryMigrationProgressError, QuerySetupStateError, RedeemPairingInvitationError,
+    RedeemPairingInvitationInput, RedeemPairingInvitationResult, SetupStateView, SwitchSpaceError,
+    SwitchSpaceInput, SwitchSpaceResult, TryResumeSessionError, UnlockSpaceError, UnlockSpaceInput,
+    UnlockSpaceResult,
 };
 use crate::facade::upgrade::UpgradeFacade;
 use crate::facade::SpaceApplicationHandle;
@@ -423,13 +423,6 @@ impl AppFacade {
         &self,
     ) -> Result<MigrationProgress, QueryMigrationProgressError> {
         self.space.query_migration_progress().await
-    }
-
-    /// 订阅配对完成事件。
-    pub fn subscribe_pairing_completion(
-        &self,
-    ) -> Result<broadcast::Receiver<PairingOutcome>, IssuePairingInvitationError> {
-        Ok(self.space_admission.subscribe_pairing_completion())
     }
 
     pub async fn cancel_invitation(&self) -> Result<(), crate::facade::CancelInvitationError> {

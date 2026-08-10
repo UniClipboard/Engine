@@ -1,12 +1,10 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use tokio::sync::broadcast;
-
 use super::space_setup::{
     CancelInvitationError, IssuePairingInvitationError, IssuePairingInvitationResult,
-    PairingInvitationAddressCandidate, PairingOutcome, SwitchSpaceError, SwitchSpaceInput,
-    SwitchSpaceResult, UnreadableHistoryPolicy,
+    PairingInvitationAddressCandidate, SwitchSpaceError, SwitchSpaceInput, SwitchSpaceResult,
+    UnreadableHistoryPolicy,
 };
 use super::{
     GeneralSettingsPatch, RedeemPairingInvitationError, RedeemPairingInvitationInput,
@@ -158,10 +156,6 @@ impl SpaceAdmissionCoordinator {
         input: SwitchSpaceInput,
     ) -> Result<SwitchSpaceResult, SwitchSpaceError> {
         self.setup.switch_space(input).await
-    }
-
-    pub(crate) fn subscribe_pairing_completion(&self) -> broadcast::Receiver<PairingOutcome> {
-        self.setup.subscribe_pairing_completion()
     }
 
     async fn save_device_name(&self, device_name: String) -> Result<(), JoinSpaceError> {

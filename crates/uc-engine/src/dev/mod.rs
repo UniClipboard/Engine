@@ -3,7 +3,6 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 use tokio::sync::broadcast;
-use uc_application::facade::space_setup::PairingOutcome;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum DevOperation {
@@ -162,71 +161,6 @@ impl fmt::Debug for DevOperationResult {
             .debug_struct("DevOperationResult")
             .field("kind", &kind)
             .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub enum DevPairingOutcome {
-    Success {
-        peer_device_id: String,
-        peer_device_name: String,
-        peer_fingerprint: String,
-    },
-    Failure {
-        reason: String,
-    },
-}
-
-impl fmt::Debug for DevPairingOutcome {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Success { .. } => formatter.write_str("DevPairingOutcome::Success([REDACTED])"),
-            Self::Failure { .. } => formatter.write_str("DevPairingOutcome::Failure([REDACTED])"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DevPairingStreamError {
-    Lagged,
-    Closed,
-}
-
-impl fmt::Display for DevPairingStreamError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Lagged => formatter.write_str("pairing outcome stream lagged"),
-            Self::Closed => formatter.write_str("pairing outcome stream closed"),
-        }
-    }
-}
-
-pub struct DevPairingOutcomeStream {
-    receiver: broadcast::Receiver<PairingOutcome>,
-}
-
-impl DevPairingOutcomeStream {
-    pub(crate) fn new(receiver: broadcast::Receiver<PairingOutcome>) -> Self {
-        Self { receiver }
-    }
-
-    pub async fn recv(&mut self) -> Result<DevPairingOutcome, DevPairingStreamError> {
-        match self.receiver.recv().await {
-            Ok(PairingOutcome::Success {
-                peer_device_id,
-                peer_device_name,
-                peer_fingerprint,
-            }) => Ok(DevPairingOutcome::Success {
-                peer_device_id: peer_device_id.to_string(),
-                peer_device_name,
-                peer_fingerprint: peer_fingerprint.to_string(),
-            }),
-            Ok(PairingOutcome::Failure { reason }) => Ok(DevPairingOutcome::Failure {
-                reason: reason.to_string(),
-            }),
-            Err(broadcast::error::RecvError::Lagged(_)) => Err(DevPairingStreamError::Lagged),
-            Err(broadcast::error::RecvError::Closed) => Err(DevPairingStreamError::Closed),
-        }
     }
 }
 

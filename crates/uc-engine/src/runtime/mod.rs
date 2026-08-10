@@ -17,9 +17,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{error, warn};
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
-use uc_application::facade::{
-    AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent, PairingOutcome,
-};
+use uc_application::facade::{AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent};
 use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
@@ -123,45 +121,8 @@ fn engine_event_for_active_clipboard(
     })
 }
 
-fn engine_event_for_pairing_completion(outcome: PairingOutcome) -> crate::EngineEvent {
-    let completion = match outcome {
-        PairingOutcome::Success { peer_device_id, .. } => crate::PairingCompletion::Success {
-            peer_device_id: peer_device_id.to_string(),
-        },
-        PairingOutcome::Failure { reason } => crate::PairingCompletion::Failure {
-            reason: reason.to_string(),
-        },
-    };
-    crate::EngineEvent::PairingCompleted(completion)
-}
-
 fn engine_event_for_workspace_convergence(snapshot: WorkspaceSnapshot) -> crate::EngineEvent {
     crate::EngineEvent::WorkspaceConvergenceChanged(snapshot)
-}
-
-async fn spawn_pairing_completion_events(
-    mut outcomes: tokio::sync::broadcast::Receiver<PairingOutcome>,
-    tasks: &Arc<TaskRegistry>,
-    events: EventSender,
-) {
-    tasks
-        .spawn("pairing_completion_events", move |cancel| async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    outcome = outcomes.recv() => match outcome {
-                        Ok(outcome) => events.send(engine_event_for_pairing_completion(outcome)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            events.send(crate::EngineEvent::RefreshRequired {
-                                reason: crate::RefreshReason::ConsumerLagged,
-                            });
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                }
-            }
-        })
-        .await;
 }
 
 async fn spawn_workspace_convergence_events(
@@ -459,10 +420,6 @@ impl ProductionRuntime {
             &tasks,
         )
         .await;
-        let pairing_outcomes = facade
-            .subscribe_pairing_completion()
-            .map_err(|error| startup_error("pairing completion subscription", error))?;
-        spawn_pairing_completion_events(pairing_outcomes, &tasks, events.clone()).await;
         spawn_workspace_convergence_events(
             facade.subscribe_workspace_convergence(),
             &tasks,
@@ -571,8 +528,8 @@ fn operation_error_with_code(
 #[cfg(test)]
 mod tests {
     use uc_application::facade::{
-        ClipboardOutboundOutcome, PairingOutcome, SearchFacadeError, SearchPageView,
-        SearchResultView, StorageFacadeError, StorageStatsView,
+        ClipboardOutboundOutcome, SearchFacadeError, SearchPageView, SearchResultView,
+        StorageFacadeError, StorageStatsView,
     };
     use uc_core::ids::DeviceId;
     use uc_core::security::IdentityFingerprint;
@@ -686,59 +643,6 @@ mod tests {
             Some(crate::EngineEvent::RefreshRequired {
                 reason: crate::RefreshReason::ConsumerLagged,
             })
-        );
-
-        tasks.shutdown(Duration::from_secs(1)).await;
-    }
-
-    #[tokio::test]
-    async fn pairing_success_is_published_on_the_engine_event_stream() {
-        let (outcome_tx, outcome_rx) = tokio::sync::broadcast::channel(8);
-        let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
-        let tasks = Arc::new(TaskRegistry::new());
-
-        spawn_pairing_completion_events(outcome_rx, &tasks, events).await;
-        outcome_tx
-            .send(PairingOutcome::Success {
-                peer_device_id: DeviceId::new("joiner-1"),
-                peer_device_name: "Joiner".into(),
-                peer_fingerprint: IdentityFingerprint::from_raw_string("ABCDEFGHIJKLMNOP")
-                    .expect("valid fingerprint"),
-            })
-            .expect("pairing outcome receiver must remain active");
-
-        assert_eq!(
-            event_stream.next().await,
-            Some(crate::EngineEvent::PairingCompleted(
-                crate::PairingCompletion::Success {
-                    peer_device_id: "joiner-1".into(),
-                },
-            ))
-        );
-
-        tasks.shutdown(Duration::from_secs(1)).await;
-    }
-
-    #[tokio::test]
-    async fn pairing_failure_is_published_on_the_engine_event_stream() {
-        let (outcome_tx, outcome_rx) = tokio::sync::broadcast::channel(8);
-        let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
-        let tasks = Arc::new(TaskRegistry::new());
-
-        spawn_pairing_completion_events(outcome_rx, &tasks, events).await;
-        outcome_tx
-            .send(PairingOutcome::Failure {
-                reason: uc_application::facade::PairingFailureReason::PassphraseMismatch,
-            })
-            .expect("pairing outcome receiver must remain active");
-
-        assert_eq!(
-            event_stream.next().await,
-            Some(crate::EngineEvent::PairingCompleted(
-                crate::PairingCompletion::Failure {
-                    reason: "passphrase_mismatch".into(),
-                },
-            ))
         );
 
         tasks.shutdown(Duration::from_secs(1)).await;

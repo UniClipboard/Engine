@@ -552,18 +552,6 @@ impl EngineRuntime for ProductionRuntime {
         }
     }
 
-    #[cfg(feature = "dev-tools")]
-    async fn dev_pairing_outcomes(&self) -> Result<crate::DevPairingOutcomeStream, EngineError> {
-        let receiver = self
-            .current_facade()
-            .await?
-            .subscribe_pairing_completion()
-            .map_err(|error| {
-                operation_error_with_code(1911, "subscribe pairing outcomes", error)
-            })?;
-        Ok(crate::DevPairingOutcomeStream::new(receiver))
-    }
-
     async fn suspend(&self) -> Result<(), EngineError> {
         self.session_supervisor.suspend().await
     }
