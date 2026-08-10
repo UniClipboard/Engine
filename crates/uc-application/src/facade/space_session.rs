@@ -9,8 +9,8 @@ use crate::facade::space_setup::{
     FactoryResetError, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
     SpaceFacade, TryResumeSessionError, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
-use crate::membership::MembershipConvergenceActivityPort;
 use crate::receive_reconciliation::EnsureReceiveReadyPort;
+use crate::space::convergence::discovery::MembershipConvergenceActivityPort;
 use uc_core::ids::SpaceId;
 use uc_core::ports::setup::SetupStatusPort;
 use uc_core::ports::space::{LockSpacePort, ResumeSpaceSessionPort};
@@ -147,7 +147,7 @@ pub(crate) struct SpaceSessionCoordinator {
 }
 
 pub struct SpaceSessionActivityDeps {
-    pub membership: crate::membership::MembershipConvergenceActivity,
+    pub membership: crate::space::convergence::discovery::MembershipConvergenceActivity,
     pub receive: Arc<dyn EnsureReceiveReadyPort>,
 }
 
@@ -390,7 +390,7 @@ mod tests {
         FactoryResetError, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
         UnlockSpaceInput, UnlockSpaceResult,
     };
-    use crate::membership::MembershipConvergenceActivityPort;
+    use crate::space::convergence::discovery::MembershipConvergenceActivityPort;
     use uc_core::ids::SpaceId;
 
     #[derive(Clone)]

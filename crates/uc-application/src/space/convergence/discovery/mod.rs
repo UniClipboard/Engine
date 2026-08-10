@@ -31,6 +31,12 @@ mod runtime;
 
 pub use runtime::{MembershipConvergenceActivity, MembershipConvergenceRuntime};
 
+#[async_trait]
+pub(crate) trait MembershipConvergenceActivityPort: Send + Sync {
+    async fn pause(&self) -> Result<(), String>;
+    async fn resume(&self) -> Result<(), String>;
+}
+
 const INITIAL_RETRY_DELAY_MS: i64 = 30_000;
 const MAX_RETRY_DELAY_MS: i64 = 5 * 60 * 1_000;
 const DIRECT_ATTESTATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1_000;

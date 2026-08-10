@@ -18,6 +18,7 @@
 //! removal-notice entries.
 
 pub(crate) mod admission;
+pub mod discovery;
 mod runtime;
 
 #[cfg(test)]

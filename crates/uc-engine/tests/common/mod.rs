@@ -218,7 +218,7 @@ pub fn migration_noop_deps() -> (
 
 use std::sync::Mutex;
 
-use uc_application::workspace_convergence::{WorkspaceConvergence, WorkspaceConvergenceDeps};
+use uc_application::space::convergence::{WorkspaceConvergence, WorkspaceConvergenceDeps};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use uc_core::{DeviceId, MemberRepositoryPort, MemberSyncPreferences, SpaceMember};
 
-use crate::membership::errors::MembershipApplicationError;
+use crate::space::roster::errors::MembershipApplicationError;
 
 /// Input for resetting a member's sync preferences back to defaults.
 #[derive(Debug, Clone)]

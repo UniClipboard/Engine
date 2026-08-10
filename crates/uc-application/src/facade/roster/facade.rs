@@ -35,7 +35,7 @@ use crate::facade::roster::commands::{
     SpaceProtectionView,
 };
 use crate::facade::roster::errors::RosterError;
-use crate::workspace_convergence::WorkspaceConvergenceError;
+use crate::space::convergence::WorkspaceConvergenceError;
 use uc_core::membership::WorkspaceSnapshot;
 
 /// 构造 `MemberRosterFacade` 时需要的 port 束。对齐 `SpaceFacadeDeps`
@@ -58,7 +58,7 @@ pub struct MemberRosterFacade {
     connection_channel: Option<Arc<dyn ConnectionChannelPort>>,
     group_bootstrap: Option<Arc<dyn GroupBootstrapPort>>,
     space_protection: Option<Arc<dyn SpaceProtectionStatusPort>>,
-    workspace_convergence: Option<Arc<crate::workspace_convergence::WorkspaceConvergence>>,
+    workspace_convergence: Option<Arc<crate::space::convergence::WorkspaceConvergence>>,
     removal_gate: Option<Arc<dyn RemovalTargetGatePort>>,
 }
 
@@ -91,7 +91,7 @@ impl MemberRosterFacade {
 
     pub fn with_workspace_convergence(
         mut self,
-        convergence: Arc<crate::workspace_convergence::WorkspaceConvergence>,
+        convergence: Arc<crate::space::convergence::WorkspaceConvergence>,
     ) -> Self {
         self.removal_gate = Some(convergence.clone());
         self.workspace_convergence = Some(convergence);
@@ -116,7 +116,7 @@ impl MemberRosterFacade {
 
     pub fn start_workspace_convergence_runtime(
         &self,
-    ) -> Result<crate::workspace_convergence::WorkspaceConvergenceRuntime, RosterError> {
+    ) -> Result<crate::space::convergence::WorkspaceConvergenceRuntime, RosterError> {
         let convergence = self
             .workspace_convergence
             .as_ref()

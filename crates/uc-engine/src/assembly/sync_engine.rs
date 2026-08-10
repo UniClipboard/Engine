@@ -54,9 +54,11 @@ use uc_application::facade::{
     SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, TransferHostEvent,
 };
 use uc_application::group_update_delivery::GroupUpdateDelivery;
-use uc_application::membership::{build_membership_convergence, MembershipConvergenceDeps};
 use uc_application::proof::HmacProofAdapter;
-use uc_application::workspace_convergence::{WorkspaceConvergence, WorkspaceConvergenceDeps};
+use uc_application::space::convergence::discovery::{
+    build_membership_convergence, MembershipConvergenceDeps,
+};
+use uc_application::space::convergence::{WorkspaceConvergence, WorkspaceConvergenceDeps};
 use uc_application::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
     InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps, StoreOnlyPullDeps,
@@ -165,8 +167,7 @@ pub struct SyncEngineAssembly {
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
     /// 与 sync assembly 同生命周期。
     outbound_progress_translator: OutboundProgressRuntime,
-    workspace_convergence_runtime:
-        uc_application::workspace_convergence::WorkspaceConvergenceRuntime,
+    workspace_convergence_runtime: uc_application::space::convergence::WorkspaceConvergenceRuntime,
     automatic_legacy_upgrade: AutomaticLegacyUpgradeRuntime,
     space_application_runtime: SpaceApplicationRuntime,
 }

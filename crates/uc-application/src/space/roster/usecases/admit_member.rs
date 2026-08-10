@@ -5,7 +5,7 @@ use tracing::info;
 use uc_core::security::IdentityFingerprint;
 use uc_core::{DeviceId, MemberRepositoryPort, MemberSyncPreferences, SpaceMember};
 
-use crate::membership::errors::MembershipApplicationError;
+use crate::space::roster::errors::MembershipApplicationError;
 
 /// Input for admitting a new member.
 ///

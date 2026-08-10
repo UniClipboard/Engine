@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::membership::{
+use crate::space::convergence::discovery::{
     MembershipConvergence, MembershipConvergenceActivity, MembershipConvergenceRuntime,
 };
 
