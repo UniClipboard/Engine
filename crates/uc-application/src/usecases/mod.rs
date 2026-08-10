@@ -8,7 +8,6 @@
 //! here stays `pub(crate)`: external crates reach them exclusively through
 //! `AppFacade`.
 
-pub(crate) mod blob_transfer;
 pub(crate) mod clipboard_history;
 pub(crate) mod clipboard_restore;
 /// `pub` (not `pub(crate)`) only because Slice 2 Phase 3 · T10 needs a

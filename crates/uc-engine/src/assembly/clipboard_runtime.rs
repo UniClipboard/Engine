@@ -120,7 +120,9 @@ pub(crate) fn build_clipboard_runtime(
                     clock: deps.system.clock.clone(),
                 },
                 receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
-                receive_readiness: wired.shared.receive_readiness.clone(),
+                receive_readiness: Arc::new(
+                    uc_application::facade::ReceiveReadinessCoordinator::new(),
+                ),
                 host_event_emitter: wired.shared.host_event_bus.clone(),
                 search_live_index: Arc::clone(&search_live_indexer),
                 availability: deps.clipboard.entry_ports.availability.clone(),

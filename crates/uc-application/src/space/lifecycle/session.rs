@@ -9,8 +9,8 @@ use crate::facade::space_setup::{
     FactoryResetError, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
     SpaceFacade, TryResumeSessionError, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
-use crate::receive_reconciliation::EnsureReceiveReadyPort;
 use crate::space::convergence::discovery::MembershipConvergenceActivityPort;
+use crate::transfer::receive::reconciliation::EnsureReceiveReadyPort;
 use uc_core::ids::SpaceId;
 use uc_core::ports::setup::SetupStatusPort;
 use uc_core::ports::space::{LockSpacePort, ResumeSpaceSessionPort};
@@ -378,7 +378,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::receive_reconciliation::{
+    use crate::transfer::receive::reconciliation::{
         EnsureReceiveReadyPort, ReceiveReadinessError, ReceiveReadinessStatus,
     };
 

@@ -49,12 +49,6 @@ pub struct BackgroundRuntimeDeps {
     pub spool_ttl_days: u64,
     pub worker_retry_max_attempts: u32,
     pub worker_retry_backoff_ms: u64,
-    /// Event-sourced file transfer lifecycle: receiver-side projection
-    /// plumbing + sweep/reconcile runtime tasks. Holds a clone of the shared
-    /// `host_event_bus` so it automatically picks up emitters registered
-    /// later (Tauri webview, daemon WS). Active transfer sessions live inside
-    /// the `file_transfer_facade` carried on [`WiredDependencies`].
-    pub file_transfer_lifecycle: Arc<crate::assembly::file_transfer::FileTransferLifecycle>,
 }
 
 /// P2P / iroh sync-engine assembly inputs. Sole consumer:
@@ -132,7 +126,6 @@ pub struct DaemonRuntimeDeps {
 /// meaningful boundary; mirrors the [`BackgroundRuntimeDeps`] precedent.
 #[derive(Clone)]
 pub struct SharedRuntimeDeps {
-    pub receive_readiness: Arc<uc_application::receive_reconciliation::ReceiveReadinessCoordinator>,
     /// Shared host-event bus created at wire time with the "logging" emitter
     /// already registered (event type names → `tracing::debug`), so non-GUI /
     /// CLI processes have a sensible default transport. Callers register their

@@ -1,7 +1,7 @@
 use uc_core::file_transfer::FileTransferEventStorePort;
 use uc_core::FileTransferEvent;
 
-use crate::file_transfer::errors::FileTransferApplicationError;
+use crate::transfer::file::errors::FileTransferApplicationError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalState {

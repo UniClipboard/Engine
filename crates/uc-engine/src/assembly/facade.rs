@@ -205,11 +205,11 @@ pub fn build_mobile_sync_facade(
 pub struct RuntimeAppFacadeAssembly {
     pub space: Arc<SpaceFacade>,
     pub space_application: uc_application::facade::SpaceApplicationHandle,
-    pub space_receive_activity:
-        Arc<dyn uc_application::receive_reconciliation::EnsureReceiveReadyPort>,
+    pub space_receive_activity: Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
     pub member_roster: Arc<MemberRosterFacade>,
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
     pub blob_transfer: Arc<BlobTransferFacade>,
+    pub file_transfer: Arc<uc_application::facade::FileTransferFacade>,
     pub clipboard_outbound: Arc<ClipboardOutboundFacade>,
     /// 底层 `BlobTransferPort`(`IrohBlobTransferAdapter`)直连引用,供
     /// `ClipboardHistoryFacade` 在 `delete_entry` / `clear_history` 时
@@ -301,6 +301,7 @@ pub fn build_app_facade_from_deps(
         clipboard_capture: build_clipboard_capture_facade(deps),
         clipboard_sync: runtime.clipboard_sync,
         blob_transfer: runtime.blob_transfer,
+        file_transfer: runtime.file_transfer,
         clipboard_outbound: runtime.clipboard_outbound,
         clipboard_restore,
         search: runtime.search,

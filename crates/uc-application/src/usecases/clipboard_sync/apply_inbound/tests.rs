@@ -676,7 +676,8 @@ async fn store_only_pull_persists_without_a_clipboard_write_dependency() {
         .returning(|_, _, _| Ok(Some(EntryId::from("store-only-entry"))));
     let materializer = MockBlobMaterializer::new();
     let attempts = AttemptGate::empty();
-    let readiness = Arc::new(crate::receive_reconciliation::ReceiveReadinessCoordinator::new());
+    let readiness =
+        Arc::new(crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator::new());
     readiness.mark_ready();
     let live_index = Arc::new(RecordingLiveIndex {
         calls: AtomicUsize::new(0),

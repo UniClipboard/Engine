@@ -81,6 +81,10 @@ pub use clipboard::{
 pub use crate::space::convergence::assembly::{SpaceConvergenceAssembly, SpaceConvergenceDeps};
 pub use crate::space::convergence::discovery::MembershipConvergenceDeps;
 pub use crate::space::convergence::{WorkspaceConvergenceDeps, WorkspaceConvergenceError};
+pub use crate::transfer::receive::reconciliation::{
+    EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
+    ReceiveReadinessStatus,
+};
 pub use crate::usecases::clipboard_sync::{
     decode_v3_bytes_to_snapshot, decode_v3_bytes_to_snapshot_and_blob_refs, V3BlobRef,
 };
@@ -123,7 +127,8 @@ pub use diagnostics::{
 };
 pub use file_transfer::{
     BeginReceiverTransfer, FileTransferApplicationError, FileTransferFacade,
-    FileTransferFacadeDeps, FileTransferSession, ReceiverTransferRegistration,
+    FileTransferFacadeDeps, FileTransferLifecycleDeps, FileTransferSession,
+    ReceiverTransferRegistration,
 };
 pub use host_event::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError,
