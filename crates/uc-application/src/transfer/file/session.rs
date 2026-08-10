@@ -10,7 +10,7 @@ use uc_core::{
 
 use crate::transfer::file::FileTransferApplicationError;
 
-use super::BeginReceiverTransfer;
+use crate::transfer::file::facade::BeginReceiverTransfer;
 
 #[derive(Default)]
 pub(crate) struct FileTransferSessionRegistry {

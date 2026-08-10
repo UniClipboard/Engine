@@ -85,7 +85,9 @@ pub use crate::clipboard::outbound::{
 };
 pub use crate::clipboard::sync::apply_inbound::{
     ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
-    InboundCapture, InboundSnapshotRebuild, InboundWrite,
+    FileCacheBlobMaterializer, InboundApplyCommonDeps, InboundBlobFetcher, InboundCapture,
+    InboundReceiveAttemptDeps, InboundSnapshotRebuild, InboundWrite, InteractiveReceiveDeps,
+    StoreOnlyPullDeps,
 };
 pub use crate::clipboard::sync::payload_codec::{self, encode_snapshot_to_v3_bytes};
 pub use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};

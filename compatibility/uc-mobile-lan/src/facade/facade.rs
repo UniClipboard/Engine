@@ -74,8 +74,8 @@ use crate::usecases::{
 };
 use uc_application::facade::file_transfer::FileTransferFacade;
 use uc_application::facade::ActiveClipboardFacade;
+use uc_application::facade::ApplyInboundClipboardUseCase;
 use uc_application::facade::ClipboardOutboundFacade;
-use uc_application::ApplyInboundClipboardUseCase;
 
 // ── 对外类型 re-export ─────────────────────────────────────────────────
 

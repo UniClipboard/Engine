@@ -272,7 +272,7 @@ impl FileTransferFacade {
     pub fn spawn_timeout_sweep(
         &self,
         cancel: tokio::sync::watch::Receiver<bool>,
-        blob_transfer: Arc<crate::facade::blob_transfer::BlobTransferFacade>,
+        blob_transfer: Arc<crate::transfer::blob::facade::BlobTransferFacade>,
     ) -> tokio::task::JoinHandle<()> {
         self.lifecycle.spawn_timeout_sweep(cancel, blob_transfer)
     }

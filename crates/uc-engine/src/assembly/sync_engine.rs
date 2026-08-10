@@ -55,7 +55,7 @@ use uc_application::facade::{
     SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, TransferHostEvent,
     WorkspaceConvergenceDeps,
 };
-use uc_application::{
+use uc_application::facade::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
     InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps, StoreOnlyPullDeps,
 };
@@ -973,7 +973,7 @@ pub async fn build_sync_engine_assembly(
     );
     let pull_store_materializer = Arc::new(
         FileCacheBlobMaterializer::new(
-            blob.clone() as Arc<dyn uc_application::InboundBlobFetcher>,
+            blob.clone() as Arc<dyn uc_application::facade::InboundBlobFetcher>,
             shared.file_cache_dir.clone(),
             FsAtomicPublisher::new(),
         )

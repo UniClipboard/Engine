@@ -4,8 +4,10 @@ use thiserror::Error;
 use uc_core::ids::DeviceId;
 use uc_observability_contract::FlowId;
 
+use crate::clipboard::sync::apply_inbound::{
+    ApplyInboundClipboardUseCase, ApplyInboundInput, ApplyOutcome,
+};
 use crate::clipboard::write::ClipboardWriteIntent;
-use crate::{ApplyInboundClipboardUseCase, ApplyInboundInput, ApplyOutcome};
 
 mod runtime;
 

@@ -7,6 +7,7 @@
 //!
 //! External callers enter through the facade.
 
+pub(crate) mod facade;
 mod fetch_blob;
 mod publish_blob;
 
