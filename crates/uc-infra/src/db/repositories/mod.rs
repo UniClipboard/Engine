@@ -32,6 +32,7 @@ mod space_member_repo;
 mod space_security_store;
 mod thumbnail_repo;
 mod trusted_peer_repo;
+mod workspace_convergence_store;
 
 pub use active_clipboard_register_repo::*;
 pub use blob_reference_repo::*;
@@ -63,3 +64,4 @@ pub use space_member_repo::*;
 pub use space_security_store::*;
 pub use thumbnail_repo::*;
 pub use trusted_peer_repo::*;
+pub use workspace_convergence_store::DieselWorkspaceConvergenceStore;

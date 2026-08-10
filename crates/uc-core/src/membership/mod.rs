@@ -6,9 +6,11 @@ mod member;
 mod ports;
 mod preferences;
 mod protection;
+mod recovery_exchange;
 mod removal_intent;
 mod revocation;
 mod upgrade;
+mod workspace_convergence;
 
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
 pub use bootstrap::{
@@ -49,11 +51,19 @@ pub use ports::{
     RemovalPendingJoinStorePort, RemovalRecoveryError, RemovalRecoveryPort, RemovalTargetGatePort,
     RemovalViewMember, RemovalViewSnapshot, RevocationRepositoryPort, SpaceSecurityStateResetError,
     SpaceSecurityStateResetPort, VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
+    WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
+    WorkspaceRecoveryTransportError, WorkspaceRecoveryTransportPort,
 };
 pub use preferences::MemberSyncPreferences;
 pub use protection::{
     LegacyBootstrapProgress, MemberProtection, MemberProtectionStatus, SpaceProtectionError,
     SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
+};
+pub use recovery_exchange::{
+    recovery_lineage_fingerprint, RecoveryAck, RecoveryChannelMessage, RecoveryOffer,
+    RecoveryReject, RecoveryRejection, RecoveryRequest, RecoveryTransportEndpointPort,
+    RecoveryTransportError, RecoveryTransportPort, MIN_HISTORY_KEY_NUMBER,
+    WORKSPACE_RECOVERY_CHANNEL_VERSION,
 };
 pub use removal_intent::{
     MemberInstanceId, MemberRemovalSummary, RemovalCausalCheckpoint, RemovalCausalProof,
@@ -74,4 +84,11 @@ pub use upgrade::{
     LegacyUpgradeDescriptor, LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort,
     LegacyUpgradeEndpointPort, LegacyUpgradeError, LegacyUpgradeId, LegacyUpgradeRequest,
     LegacyUpgradeResponse, LegacyUpgradeResponseKind, ProtectionGroupAdmission, ProtectionGroupId,
+};
+pub use workspace_convergence::{
+    compute_change_digest, validate_change, AdmissionChangeFacts, PendingHandoff,
+    RemovalChangeFacts, WorkspaceChange, WorkspaceChangeId, WorkspaceChangeKind,
+    WorkspaceChangeRejection, WorkspaceConfirmation, WorkspaceConvergenceError,
+    WorkspaceConvergenceEvent, WorkspaceConvergenceState, WorkspaceDigest, WorkspaceEffect,
+    WorkspaceFailureCategory, WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
 };

@@ -319,6 +319,59 @@ pub trait MembershipAttestationEndpointPort: Send + Sync {
     ) -> Result<(), MembershipAttestationEndpointError>;
 }
 
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum WorkspaceRecoveryTransportError {
+    #[error("workspace recovery recipient is offline")]
+    Offline,
+    #[error("workspace recovery was rejected")]
+    Rejected,
+    #[error("workspace recovery transport failed")]
+    Transport,
+}
+
+/// Delivers a verified, contiguous security-update chain to a member that
+/// may not yet recognize the device carrying the chain.
+#[async_trait]
+pub trait WorkspaceRecoveryTransportPort: Send + Sync {
+    async fn deliver_recovery(
+        &self,
+        recipient: &DeviceId,
+        updates: &[RelayedSecurityUpdate],
+    ) -> Result<(), WorkspaceRecoveryTransportError>;
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum WorkspaceConvergenceRepositoryError {
+    #[error("workspace convergence storage is locked")]
+    Locked,
+    #[error("workspace convergence storage is corrupt")]
+    Corrupt,
+    #[error("workspace convergence repository failed: {0}")]
+    Repository(String),
+}
+
+/// 工作空间收敛状态的加密持久化。
+///
+/// 保存语义:工作空间变化、确认、待交接记录与本机安全效果必须在同一提交
+/// 点保存;加载后必须校验状态属于请求的空间,不允许跨空间复用。任何已保存
+/// 变化在崩溃恢复后必须仍然可见且顺序不变。
+#[async_trait]
+pub trait WorkspaceConvergenceRepositoryPort: Send + Sync {
+    /// 保存完整收敛状态(变化链、确认、待交接记录、等待成员、阶段)。
+    async fn save_state(
+        &self,
+        state: &super::workspace_convergence::WorkspaceConvergenceState,
+    ) -> Result<(), WorkspaceConvergenceRepositoryError>;
+
+    /// 加载当前空间的收敛状态。
+    async fn load_state(
+        &self,
+    ) -> Result<
+        Option<super::workspace_convergence::WorkspaceConvergenceState>,
+        WorkspaceConvergenceRepositoryError,
+    >;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentMembershipIdentity {
     pub space_id: SpaceId,

@@ -38,8 +38,8 @@ use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
     CurrentMemberSignaturePort, CurrentMembershipIdentityPort, GroupRevocationPort,
     GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
-    MembershipAttestationEndpointPort, PeerAdmissionPort, RemovalExchangeEndpointPort,
-    RemovalLateSubmissionEndpointPort, RemovalNoticeEndpointPort,
+    MembershipAttestationEndpointPort, PeerAdmissionPort, RecoveryTransportEndpointPort,
+    RemovalExchangeEndpointPort, RemovalLateSubmissionEndpointPort, RemovalNoticeEndpointPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
@@ -86,6 +86,7 @@ use super::removal_exchange_adapter::{
 use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
 };
+use super::workspace_recovery_adapter::{IrohWorkspaceRecoveryAdapter, WORKSPACE_RECOVERY_ALPN};
 
 /// The pairing ports produced by [`IrohNodeBuilder::install_pairing`].
 ///
@@ -1076,6 +1077,35 @@ impl IrohNodeBuilder {
         ))
     }
 
+    pub fn install_workspace_recovery(
+        &mut self,
+        adapter: &IrohWorkspaceRecoveryAdapter,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        recovery_endpoint: Arc<dyn RecoveryTransportEndpointPort>,
+    ) -> Result<(), IrohNodeError> {
+        let handlers = adapter.handlers(
+            member_repo,
+            peer_admission,
+            fingerprint_factory,
+            recovery_endpoint,
+        );
+        let builder = self.take_router_builder()?;
+        self.router_builder = Some(builder.accept(WORKSPACE_RECOVERY_ALPN, handlers.recovery));
+        Ok(())
+    }
+
+    pub fn build_workspace_recovery_adapter(
+        &self,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    ) -> Arc<IrohWorkspaceRecoveryAdapter> {
+        Arc::new(IrohWorkspaceRecoveryAdapter::new(
+            Arc::clone(&self.endpoint),
+            peer_addr_repo,
+        ))
+    }
+
     pub fn build_member_removal_exchange_adapter(
         &self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
@@ -1098,13 +1128,14 @@ impl IrohNodeBuilder {
     ) -> Arc<IrohMembershipGossipTransportAdapter> {
         let identity = Arc::new(IrohMembershipIdentityAdapter::new(
             Arc::clone(&self.endpoint),
-            session,
+            Arc::clone(&session),
             device_identity,
             settings,
             Arc::clone(&fingerprint_factory),
         ));
         Arc::new(IrohMembershipGossipTransportAdapter::new(
             Arc::clone(&self.endpoint),
+            Arc::clone(&session),
             identity,
             peer_addr_repo,
             member_repo,
