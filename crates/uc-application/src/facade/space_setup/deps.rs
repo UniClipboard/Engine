@@ -19,7 +19,7 @@ use uc_core::ports::{
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsFacade;
 
-use crate::clipboard_write::MobileConsumableBackfill;
+use crate::clipboard::write::MobileConsumableBackfill;
 use crate::deps::SpaceAccessPorts;
 use crate::space::convergence::assembly::SpaceConvergenceAssembly;
 

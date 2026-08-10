@@ -43,7 +43,7 @@ use tracing::debug;
 /// 最终状态,不会因为正好落在 cooldown 窗口里被丢掉。
 const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
-use uc_application::clipboard_capture::CaptureClipboardUseCase;
+use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
     ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, AutomaticLegacyUpgradeDeps,
@@ -202,7 +202,7 @@ impl SyncEngineAssembly {
     pub fn attach_restore_broadcast(
         &self,
         rx: tokio::sync::mpsc::UnboundedReceiver<
-            uc_application::clipboard_write::RestoreBroadcastRequest,
+            uc_application::facade::clipboard_write::RestoreBroadcastRequest,
         >,
     ) {
         if let Err(error) = self.active_clipboard_lifecycle.attach_restore_broadcast(rx) {

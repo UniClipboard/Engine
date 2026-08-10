@@ -11,7 +11,10 @@ use uc_core::{
     ClipboardChangeOrigin, MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot,
 };
 
-use crate::clipboard_capture::CaptureClipboardUseCase;
+pub use crate::clipboard::capture::{
+    CaptureClipboardUseCase, CaptureOutcome, CommitMode, DirectoryCaptureCommitContext,
+    InboundCaptureCommitContext,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedClipboardEntryView {
@@ -82,7 +85,7 @@ impl ClipboardCapturePort for CaptureClipboardUseCase {
                 origin,
                 preset_entry_id,
                 None,
-                crate::clipboard_capture::CommitMode::Create,
+                crate::clipboard::capture::CommitMode::Create,
             )
             .await
             .map_err(|err| ClipboardCaptureFacadeError::Internal(err.to_string()))?;

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 use tracing::{error, warn};
-use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
+use uc_application::facade::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent};
 use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ClockPort;
@@ -399,7 +399,9 @@ impl ProductionRuntime {
                     write_coordinator: Arc::clone(&wired.shared.clipboard_write_coordinator),
                     integration_mode: uc_core::clipboard::ClipboardIntegrationMode::Full,
                     restore_broadcast: Some(
-                        uc_application::clipboard_write::RestoreBroadcastTrigger::new(restore_tx),
+                        uc_application::facade::clipboard_write::RestoreBroadcastTrigger::new(
+                            restore_tx,
+                        ),
                     ),
                 },
                 search: search_runtime.facade(),

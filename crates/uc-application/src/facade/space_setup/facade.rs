@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
 
-use crate::clipboard_write::MobileConsumableBackfill;
+use crate::clipboard::write::MobileConsumableBackfill;
 use crate::facade::space_setup::commands::{
     CurrentInvitation, InitializeSpaceCommand, InitializeSpaceInput, InitializeSpaceResult,
     IssuePairingInvitationResult, MigrationPhaseKind, MigrationProgress,

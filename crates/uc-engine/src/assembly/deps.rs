@@ -148,7 +148,7 @@ pub struct SharedRuntimeDeps {
     /// inbound worker and the restore/capture path keep one circuit-breaker +
     /// origin-guard state.
     pub clipboard_write_coordinator:
-        Arc<uc_application::clipboard_write::ClipboardWriteCoordinator>,
+        Arc<uc_application::facade::clipboard_write::ClipboardWriteCoordinator>,
     /// Local cache dir for inbound blob materialization
     /// (`<file_cache_dir>/iroh-blobs/<entry_id>/`).
     pub file_cache_dir: PathBuf,

@@ -30,6 +30,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+use crate::clipboard::sync::V3BlobRef;
 use crate::facade::config_migration::ConfigMigrationFacade;
 use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
 use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
@@ -63,7 +64,6 @@ use crate::space::lifecycle::session::{
     build_space_session_coordinator, RecoverSpaceSessionResult, SpaceSessionAccessDeps,
     SpaceSessionActivityDeps, SpaceSessionCoordinator, SpaceSessionError,
 };
-use crate::usecases::clipboard_sync::V3BlobRef;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{PresenceError, PresenceEvent, ReachabilityState};
 use uc_core::ClipboardChangeOrigin;

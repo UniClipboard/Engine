@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 
-use crate::clipboard_write::ClipboardWriteIntent;
+use crate::clipboard::write::ClipboardWriteIntent;
 use uc_core::file_transfer::FileTransferFailureReason;
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::mobile_sync::{MobileDeviceId, StagedFile};
@@ -52,11 +52,11 @@ use uc_core::ports::{ClockPort, ReceiveItemRole};
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uc_observability_contract::analytics::{AnalyticsPort, Direction, Event, PayloadSizeBucket};
 
-use crate::facade::file_transfer::{FileTransferFacade, FileTransferSession};
-use crate::usecases::clipboard_sync::apply_inbound::{
+use crate::clipboard::sync::apply_inbound::{
     ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
 };
-use crate::usecases::clipboard_sync::payload_codec::encode_snapshot_to_v3_bytes;
+use crate::clipboard::sync::payload_codec::encode_snapshot_to_v3_bytes;
+use crate::facade::file_transfer::{FileTransferFacade, FileTransferSession};
 use crate::usecases::mobile_sync::clipboard_doc::SyncClipboardItemType;
 
 // ─── Fan-out port (use-case-local) ───────────────────────────────────────
@@ -1029,8 +1029,8 @@ mod tests {
 
     use uc_core::ports::clipboard::FindEntryIdBySnapshotHashPort;
 
-    use crate::usecases::clipboard_sync::apply_inbound::ports::InboundSnapshotRebuild;
-    use crate::usecases::clipboard_sync::apply_inbound::{InboundCapture, InboundWrite};
+    use crate::clipboard::sync::apply_inbound::ports::InboundSnapshotRebuild;
+    use crate::clipboard::sync::apply_inbound::{InboundCapture, InboundWrite};
 
     use uc_core::mobile_sync::{StagedFile, StagedFileUri};
     use uc_observability_contract::analytics::NoopAnalyticsSink;

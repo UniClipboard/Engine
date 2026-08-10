@@ -23,20 +23,20 @@ use uc_core::MemberRepositoryPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 use uc_observability_contract::analytics::AnalyticsPort;
 
+use crate::clipboard::sync::dispatch_entry::DispatchEntryRunner;
+use crate::clipboard::sync::get_entry_delivery_view::{
+    EntryDeliveryView, GetEntryDeliveryViewError, GetEntryDeliveryViewUseCase,
+};
+use crate::clipboard::sync::payload_codec::{
+    encode_snapshot_with_blob_refs_to_v3_bytes, V3BlobRef,
+};
+use crate::clipboard::sync::{
+    encode_snapshot_to_v3_bytes, DispatchClipboardEntryInput, DispatchClipboardEntryUseCase,
+    DispatchOutcome, DispatchPerTarget, DispatchSyncError,
+};
 use crate::facade::blob_transfer::{BlobTransferFacade, SharedHostEventEmitter};
 use crate::facade::clipboard::cancel_entry_receive::{
     CancelEntryReceiveError, CancelEntryReceiveOutcome, CancelEntryReceiveUseCase,
-};
-use crate::usecases::clipboard_sync::dispatch_entry::DispatchEntryRunner;
-use crate::usecases::clipboard_sync::get_entry_delivery_view::{
-    EntryDeliveryView, GetEntryDeliveryViewError, GetEntryDeliveryViewUseCase,
-};
-use crate::usecases::clipboard_sync::payload_codec::{
-    encode_snapshot_with_blob_refs_to_v3_bytes, V3BlobRef,
-};
-use crate::usecases::clipboard_sync::{
-    encode_snapshot_to_v3_bytes, DispatchClipboardEntryInput, DispatchClipboardEntryUseCase,
-    DispatchOutcome, DispatchPerTarget, DispatchSyncError,
 };
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ports::clipboard::GetClipboardEntryPort;
@@ -189,7 +189,7 @@ impl ClipboardSyncFacade {
     /// Governance only: nothing here is fatal. A leftover area costs disk
     /// space, not correctness, since no entry refers to it.
     pub async fn sweep_orphaned_inbound_staging(dirs: &[std::path::PathBuf]) -> usize {
-        crate::usecases::clipboard_sync::sweep_inbound_staging(dirs).await
+        crate::clipboard::sync::sweep_inbound_staging(dirs).await
     }
 
     pub fn new(deps: ClipboardSyncDeps) -> Self {
@@ -441,7 +441,7 @@ impl ClipboardSyncFacade {
         &self,
         snapshot: SystemClipboardSnapshot,
         blob_refs: Vec<V3BlobRef>,
-        manifest: crate::usecases::clipboard_sync::apply_inbound::InboundFileSetManifest,
+        manifest: crate::clipboard::sync::apply_inbound::InboundFileSetManifest,
         origin: ClipboardChangeOrigin,
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
@@ -531,7 +531,7 @@ impl ClipboardSyncDispatch<'_> {
         &self,
         snapshot: SystemClipboardSnapshot,
         blob_refs: Vec<V3BlobRef>,
-        manifest: crate::usecases::clipboard_sync::apply_inbound::InboundFileSetManifest,
+        manifest: crate::clipboard::sync::apply_inbound::InboundFileSetManifest,
         origin: ClipboardChangeOrigin,
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
@@ -539,7 +539,7 @@ impl ClipboardSyncDispatch<'_> {
         let _ = origin; // span metadata only (see sibling dispatch methods)
         let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
         let (plaintext, snapshot_hash) =
-            crate::usecases::clipboard_sync::payload_codec::encode_snapshot_with_blob_refs_and_file_set_to_v3_bytes(
+            crate::clipboard::sync::payload_codec::encode_snapshot_with_blob_refs_and_file_set_to_v3_bytes(
                 &snapshot,
                 &blob_refs,
                 &manifest,
@@ -947,9 +947,7 @@ mod tests {
         ClipboardSyncFacade::new(ClipboardSyncDeps {
             peer_addr_repo: Arc::new(peer_addr_repo),
             member_repo: Arc::new(make_member_repo_all_enabled()),
-            removal_gate: Arc::new(
-                crate::usecases::clipboard_sync::dispatch_entry::AllowAllRemovalTargets,
-            ),
+            removal_gate: Arc::new(crate::clipboard::sync::dispatch_entry::AllowAllRemovalTargets),
             presence: Arc::new(presence),
             transfer_cipher: Arc::new(cipher),
             clipboard_dispatch: Arc::new(dispatch),
