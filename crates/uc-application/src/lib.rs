@@ -11,7 +11,7 @@ pub(crate) mod entry_identity;
 pub mod facade;
 pub(crate) mod file_set_query;
 pub mod file_sync;
-pub(crate) mod group_update_delivery;
+pub mod group_update_delivery;
 pub mod sync_planner;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -56,3 +56,4 @@ pub mod trusted_peer;
 /// cap, so only explicitly `pub` items inside leak out; the public
 /// surface stays minimal.
 pub mod usecases;
+pub mod workspace_convergence;

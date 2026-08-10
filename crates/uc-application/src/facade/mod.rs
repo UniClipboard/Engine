@@ -68,6 +68,10 @@ pub use clipboard::{
 pub use crate::usecases::clipboard_sync::{
     decode_v3_bytes_to_snapshot, decode_v3_bytes_to_snapshot_and_blob_refs, V3BlobRef,
 };
+pub use crate::workspace_convergence::{
+    WorkspaceConvergence, WorkspaceConvergenceDeps, WorkspaceConvergenceError,
+    WorkspaceConvergenceRuntime,
+};
 pub use clipboard_capture::{
     CapturedClipboardEntryView, CapturedFileSetLineView, CapturedFileSetView,
     ClipboardCaptureFacade, ClipboardCaptureFacadeError, ClipboardCapturePort,
@@ -160,6 +164,9 @@ pub use search::{
     SearchQueryInput, SearchRebuildAcceptedView, SearchRebuildProgressView, SearchResultView,
     SearchRuntime, SearchRuntimeDeps, SearchRuntimeError, SearchStatusSnapshot, SearchStatusView,
     SearchTagView,
+};
+pub use uc_core::membership::{
+    WorkspaceDigest, WorkspaceFailureCategory, WorkspacePhase, WorkspaceSnapshot,
 };
 // Note: `RelayDiagnosticPort` is intentionally NOT re-exported here. The port
 // trait stays under `crate::facade::settings::relay_diagnostic` and is reached
