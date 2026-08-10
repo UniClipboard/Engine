@@ -11,10 +11,10 @@
 //!
 //! | 路由 | use case |
 //! |---|---|
-//! | GET `/SyncClipboard.json` | [`crate::usecases::mobile_sync::get_latest_doc::GetLatestMobileSyncDocUseCase`] |
-//! | PUT `/SyncClipboard.json` | [`crate::usecases::mobile_sync::apply_incoming::ApplyIncomingMobileClipUseCase`] (`SyncDoc` 分支) |
-//! | GET `/file/{name}` | [`crate::usecases::mobile_sync::get_file::GetMobileSyncFileUseCase`] |
-//! | PUT `/file/{name}` | [`crate::usecases::mobile_sync::apply_incoming::ApplyIncomingMobileClipUseCase`] (`BufferFile` 分支) |
+//! | GET `/SyncClipboard.json` | [`crate::usecases::get_latest_doc::GetLatestMobileSyncDocUseCase`] |
+//! | PUT `/SyncClipboard.json` | [`crate::usecases::apply_incoming::ApplyIncomingMobileClipUseCase`] (`SyncDoc` 分支) |
+//! | GET `/file/{name}` | [`crate::usecases::get_file::GetMobileSyncFileUseCase`] |
+//! | PUT `/file/{name}` | [`crate::usecases::apply_incoming::ApplyIncomingMobileClipUseCase`] (`BufferFile` 分支) |
 //!
 //! stub 类型 / Mutex 状态全部删除;本文件只剩 [`SyncClipboardItemType`] +
 //! [`SyncClipboardMeta`] 两个 wire-shape 类型,以及它们与协议字段的对照

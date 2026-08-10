@@ -15,11 +15,13 @@ use thiserror::Error;
 
 use uc_core::ports::{AppVersionStatePort, SetupStatusPort};
 
-use crate::usecases::upgrade::{
+use crate::settings::upgrade::acknowledge::{
     AcknowledgeError as InnerAcknowledgeError, AcknowledgeUseCase,
-    DetectUpgradeError as InnerDetectUpgradeError, DetectUpgradeUseCase,
-    UpgradeStatus as InnerUpgradeStatus,
 };
+use crate::settings::upgrade::detect::{
+    DetectUpgradeError as InnerDetectUpgradeError, DetectUpgradeUseCase,
+};
+use crate::settings::upgrade::status::UpgradeStatus as InnerUpgradeStatus;
 
 /// 对外 re-export：升级状态判定结果。
 pub type UpgradeStatus = InnerUpgradeStatus;

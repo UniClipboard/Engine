@@ -1,0 +1,40 @@
+[package]
+name = "uc-mobile-lan"
+version.workspace = true
+license.workspace = true
+edition = "2021"
+publish = false
+description = "User-opted LAN compatibility workflows for mobile sync (SyncClipboard Clipboard EX)"
+
+[features]
+default = []
+lan-compat = []
+
+[dependencies]
+uc-application = { path = "../../crates/uc-application" }
+uc-core = { path = "../../crates/uc-core" }
+uc-observability-contract = { path = "../../crates/uc-observability-contract" }
+uc-mobile-proto = { path = "../uc-mobile-proto" }
+anyhow = "1.0"
+async-trait = "0.1"
+base64 = "0.22"
+hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+url = "2"
+uuid = { version = "1.10.0", features = ["v4"] }
+
+[dev-dependencies]
+mockall = "0.13"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uc-infra = { path = "../../crates/uc-infra" }
+
+[lints]
+workspace = true

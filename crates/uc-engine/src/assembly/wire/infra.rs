@@ -386,7 +386,7 @@ pub(super) fn create_infra_layer(
         MobileDeviceRowMapper,
     ));
     #[cfg(feature = "lan-compat")]
-    let mobile_device_ports = MobileDevicePorts {
+    let mobile_device_ports = uc_mobile_lan::MobileDevicePorts {
         find_by_username: mobile_device_repo_arc.clone(),
         find_by_id: mobile_device_repo_arc.clone(),
         list: mobile_device_repo_arc.clone(),

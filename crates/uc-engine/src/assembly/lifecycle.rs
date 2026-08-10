@@ -45,6 +45,7 @@ pub async fn build_daemon_lifecycle(
     deps: &AppDeps,
     space_setup: &SyncEngineDeps,
     shared: &SharedRuntimeDeps,
+    #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
 ) -> anyhow::Result<DaemonLifecycle> {
@@ -133,9 +134,16 @@ pub async fn build_daemon_lifecycle(
         iroh_config.congestion_controller,
     );
 
-    let sync_engine_assembly = build_sync_engine_assembly(deps, space_setup, shared, iroh_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("Slice 1+ assembly build failed: {e}"))?;
+    let sync_engine_assembly = build_sync_engine_assembly(
+        deps,
+        space_setup,
+        shared,
+        #[cfg(feature = "lan-compat")]
+        mobile_sync_ports,
+        iroh_config,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Slice 1+ assembly build failed: {e}"))?;
 
     Ok(DaemonLifecycle {
         sync_engine_assembly,

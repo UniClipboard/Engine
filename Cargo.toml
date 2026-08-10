@@ -10,6 +10,7 @@ members = [
   "bindings/uc-ohos-napi",
   "compatibility/uc-mobile-proto",
   "compatibility/uc-mobile",
+  "compatibility/uc-mobile-lan",
   "tests/hosts/uc-mobile-probe-core",
   "tests/openmls-validation",
 ]

@@ -103,6 +103,7 @@ fn engine_default_dependency_contract_excludes_lan_compat_dependencies() {
     let engine = package(&metadata, "uc-engine");
     let application = package(&metadata, "uc-application");
     let infra = package(&metadata, "uc-infra");
+    let mobile_lan = package(&metadata, "uc-mobile-lan");
 
     assert_default_does_not_enable(engine, "lan-compat");
     assert_default_does_not_enable(application, "lan-compat");
@@ -110,17 +111,27 @@ fn engine_default_dependency_contract_excludes_lan_compat_dependencies() {
 
     let application_dependency = normal_dependency(engine, "uc-application");
     let infra_dependency = normal_dependency(engine, "uc-infra");
+    let mobile_lan_dependency = normal_dependency(engine, "uc-mobile-lan");
     assert!(!application_dependency
         .features
         .contains(&"lan-compat".to_string()));
     assert!(!infra_dependency
         .features
         .contains(&"lan-compat".to_string()));
-
-    let mobile_proto = normal_dependency(application, "uc-mobile-proto");
     assert!(
-        mobile_proto.optional,
-        "uc-mobile-proto must remain optional in uc-application"
+        mobile_lan_dependency.optional,
+        "uc-mobile-lan must remain optional in uc-engine"
+    );
+
+    // ADR-018 stage 4: the LAN workflows live in the dedicated
+    // `uc-mobile-lan` crate; `uc-application` no longer carries any
+    // LAN-only dependency.
+    let application_has_mobile_proto = application.dependencies.iter().any(|dependency| {
+        dependency.name == "uc-mobile-proto" && dependency.kind == DependencyKind::Normal
+    });
+    assert!(
+        !application_has_mobile_proto,
+        "uc-application must not depend on uc-mobile-proto (moved to uc-mobile-lan)"
     );
     let network_interface = normal_dependency(infra, "network-interface");
     assert!(
@@ -128,11 +139,11 @@ fn engine_default_dependency_contract_excludes_lan_compat_dependencies() {
         "network-interface must remain optional in uc-infra"
     );
 
-    assert_feature_enables(application, "lan-compat", "dep:uc-mobile-proto");
     assert_feature_enables(infra, "lan-compat", "dep:network-interface");
+    assert_feature_enables(engine, "lan-compat", "dep:uc-mobile-lan");
     assert_feature_enables(engine, "lan-compat", "dep:uc-mobile-proto");
-    assert_feature_enables(engine, "lan-compat", "uc-application/lan-compat");
     assert_feature_enables(engine, "lan-compat", "uc-infra/lan-compat");
+    assert_default_does_not_enable(mobile_lan, "lan-compat");
 }
 
 #[test]

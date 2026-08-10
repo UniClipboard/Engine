@@ -70,6 +70,8 @@ use crate::clipboard::write::ClipboardWriteIntent;
 
 mod materializer;
 pub(crate) mod ports;
+
+pub use ports::InboundSnapshotRebuild;
 mod timing;
 mod usecase;
 

@@ -1,6 +1,7 @@
 use crate::error_codes::*;
 
-use uc_application::facade::mobile_sync::{
+use uc_core::mobile_sync::{MobileClientType, MobileDeviceId};
+use uc_mobile_lan::{
     AuthenticateBasicAuthError, AuthenticateBasicAuthInput, GetMobileSyncSettingsError,
     IsDeviceCredentialCurrentError, ListMobileDevicesError, MobileDevicePasswordEdit,
     MobileSyncFacade, MobileSyncSettingsView, RegisterMobileShortcutDeviceError,
@@ -10,7 +11,6 @@ use uc_application::facade::mobile_sync::{
     UpdateMobileSyncSettingsInput as ApplicationUpdateMobileSyncSettingsInput,
     UpdateMobileSyncSettingsOutput,
 };
-use uc_core::mobile_sync::{MobileClientType, MobileDeviceId};
 
 use crate::{
     AuthenticateMobileRequestInput, EngineError, EngineErrorCategory, MobileAuthenticatedSession,

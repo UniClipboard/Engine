@@ -1,8 +1,8 @@
-use uc_application::facade::{
+use uc_core::mobile_sync::MobileDeviceId;
+use uc_mobile_lan::{
     BeginMobileFileUpload, MobileFileUploadError,
     MobileFileUploadHandle as ApplicationMobileFileUploadHandle,
 };
-use uc_core::mobile_sync::MobileDeviceId;
 
 use super::ProductionRuntime;
 use crate::compatibility::mobile_lan::content_operations::{map_apply_error, map_apply_outcome};

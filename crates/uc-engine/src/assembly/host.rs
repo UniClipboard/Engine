@@ -655,6 +655,8 @@ mod tests {
             &wiring.wired.deps,
             &wiring.wired.sync_engine,
             &wiring.wired.shared,
+            #[cfg(feature = "lan-compat")]
+            wiring.wired.mobile_sync_ports.clone(),
             None,
             None,
         )

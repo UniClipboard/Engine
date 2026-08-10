@@ -44,7 +44,7 @@ use uc_core::ports::mobile_sync::{
     MobileFileStagingPort,
 };
 
-use crate::usecases::mobile_sync::clipboard_doc::SyncClipboardItemType;
+use crate::usecases::clipboard_doc::SyncClipboardItemType;
 
 use super::sync_clipboard_mapping::{
     classify_for_sync, derive_data_name, effective_image_mime_for_sync,

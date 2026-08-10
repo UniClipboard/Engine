@@ -17,8 +17,6 @@ pub mod config_migration;
 pub mod diagnostics;
 pub mod file_transfer;
 pub mod host_event;
-#[cfg(feature = "lan-compat")]
-pub mod mobile_sync;
 pub mod roster;
 pub mod search;
 pub mod settings;
@@ -85,6 +83,11 @@ pub use crate::clipboard::outbound::{
     ClipboardOutboundPort, NotResendableReason, ResendEntryCommand, ResendEntryError, ResendReport,
     MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES,
 };
+pub use crate::clipboard::sync::apply_inbound::{
+    ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
+    InboundCapture, InboundSnapshotRebuild, InboundWrite,
+};
+pub use crate::clipboard::sync::payload_codec::{self, encode_snapshot_to_v3_bytes};
 pub use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
 pub use crate::clipboard::sync::{
     decode_v3_bytes_to_snapshot, decode_v3_bytes_to_snapshot_and_blob_refs, V3BlobRef,
@@ -135,23 +138,6 @@ pub use crate::clipboard::resource::{
     BinaryResourceView, FileResourceView, ResourceFacade, ResourceFacadeDeps, ResourceFacadeError,
 };
 pub use crate::space::roster::errors::MembershipApplicationError;
-#[cfg(feature = "lan-compat")]
-pub use mobile_sync::{
-    ApplyIncomingMobileClipError, ApplyIncomingMobileClipInput, ApplyIncomingMobileClipOutcome,
-    AuthenticateBasicAuthError, AuthenticateBasicAuthInput, AuthenticatedDevice,
-    BeginMobileFileUpload, CheckContentAvailableError, GetLatestMobileSyncDocError,
-    GetMobileSyncFileError, GetMobileSyncFileOutput, GetMobileSyncSettingsError,
-    IncomingMobileBuffer, IncomingMobileClipEvent,
-    LanInterfaceOption as MobileSyncLanInterfaceOption,
-    ListLanInterfacesError as MobileSyncListLanInterfacesError, ListMobileDevicesError,
-    MobileDeviceSummary, MobileFileUploadError, MobileFileUploadHandle, MobileSyncFacade,
-    MobileSyncFacadeDeps, MobileSyncSettingsView, MobileSyncSnapshotPorts,
-    RegisterMobileShortcutDeviceError, RegisterMobileShortcutDeviceInput,
-    RegisterMobileShortcutDeviceOutput, RevokeMobileDeviceError, RevokeMobileDeviceInput,
-    ShortcutInstallMethod, ShortcutInstallMethodOption, SyncClipboardItemType, SyncClipboardMeta,
-    UpdateMobileSyncSettingsError, UpdateMobileSyncSettingsInput, UpdateMobileSyncSettingsOutput,
-    SYNC_CLIPBOARD_EX_INSTALL_URL,
-};
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
     LegacyBootstrapState, LegacyBootstrapView, MemberProtectionStatusView, MemberProtectionView,

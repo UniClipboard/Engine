@@ -25,8 +25,6 @@ use uc_application::deps::{
     DirectoryReceivePorts, FileTransferPorts, SearchPorts, SecurityPorts, SpaceAccessPorts,
     StoragePorts, SystemPorts,
 };
-#[cfg(feature = "lan-compat")]
-use uc_application::deps::{MobileDevicePorts, MobileSyncPorts};
 use uc_application::facade::{ConfigMigrationDeps, ConfigMigrationFacade, HostEventEmitterPort};
 use uc_core::app_dirs::AppPaths;
 use uc_core::clipboard::SelectRepresentationPolicyV1;
@@ -147,7 +145,7 @@ struct InfraLayer {
     // by one `DieselMobileDeviceRepository` (cross-restart / cross-process
     // stable; coerced per ports.md §8.3).
     #[cfg(feature = "lan-compat")]
-    mobile_device_ports: MobileDevicePorts,
+    mobile_device_ports: uc_mobile_lan::MobileDevicePorts,
 
     // Mobile sync LAN 端点状态(单例) — daemon listener 启停时调 inherent
     // `set` / `clear` 写它,facade 通过 `MobileSyncEndpointInfoPort` 只读。
@@ -598,11 +596,6 @@ pub fn wire_dependencies_from_inputs(
             search_key_derivation,
             search_pipeline,
         },
-        #[cfg(feature = "lan-compat")]
-        mobile_sync: MobileSyncPorts {
-            devices: infra.mobile_device_ports,
-            endpoint_info: infra.mobile_sync_endpoint_info.clone(),
-        },
         analytics: analytics_sink,
     };
 
@@ -660,6 +653,19 @@ pub fn wire_dependencies_from_inputs(
         #[cfg(feature = "lan-compat")]
         daemon_runtime: DaemonRuntimeDeps {
             mobile_sync_endpoint_info: Arc::clone(&infra.mobile_sync_endpoint_info),
+        },
+        #[cfg(feature = "lan-compat")]
+        mobile_sync_ports: uc_mobile_lan::MobileSyncPorts {
+            devices: uc_mobile_lan::MobileDevicePorts {
+                find_by_username: infra.mobile_device_ports.find_by_username,
+                find_by_id: infra.mobile_device_ports.find_by_id,
+                list: infra.mobile_device_ports.list,
+                save: infra.mobile_device_ports.save,
+                delete: infra.mobile_device_ports.delete,
+                update: infra.mobile_device_ports.update,
+            },
+            endpoint_info: Arc::clone(&infra.mobile_sync_endpoint_info)
+                as Arc<dyn uc_core::ports::mobile_sync::MobileSyncEndpointInfoPort>,
         },
         shared: SharedRuntimeDeps {
             host_event_bus,

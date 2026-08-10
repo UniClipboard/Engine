@@ -28,6 +28,7 @@ const EXPECTED_PACKAGES = [
   'uc-engine-uniffi',
   'uc-infra',
   'uc-mobile',
+  'uc-mobile-lan',
   'uc-mobile-proto',
   'uc-mobile-probe-core',
   'uc-observability-contract',
@@ -40,6 +41,7 @@ const INTERNAL_PACKAGES = new Set([
   'uc-core',
   'uc-infra',
   'uc-mobile',
+  'uc-mobile-lan',
   'uc-mobile-proto',
   'uc-observability-contract',
 ])
@@ -304,16 +306,16 @@ function checkLanIsolation(metadata, sources) {
     }
   }
   for (const required of [
+    'dep:uc-mobile-lan',
     'dep:uc-mobile-proto',
-    'uc-application/lan-compat',
     'uc-infra/lan-compat',
   ]) {
     if (!featureItems(engine, 'lan-compat').includes(required)) {
       addProblem(problems, 'compatibility gate', `uc-engine/lan-compat is missing ${required}`)
     }
   }
-  if (!normalDependency(application, 'uc-mobile-proto')?.optional) {
-    addProblem(problems, 'compatibility gate', 'uc-application must keep uc-mobile-proto optional')
+  if (normalDependency(application, 'uc-mobile-proto')) {
+    addProblem(problems, 'compatibility gate', 'uc-application must not depend on uc-mobile-proto (moved to uc-mobile-lan)')
   }
   if (!normalDependency(infra, 'network-interface')?.optional) {
     addProblem(problems, 'compatibility gate', 'uc-infra must keep network-interface optional')

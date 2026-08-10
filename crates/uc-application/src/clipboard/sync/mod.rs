@@ -30,7 +30,7 @@ pub(crate) use outbound_plan::OutboundSyncPlanner;
 pub(crate) use outbound_plan_types::{
     ClipboardSyncIntent, FileCandidate, FileSyncIntent, OutboundSyncPlan,
 };
-pub(crate) use payload_codec::encode_snapshot_to_v3_bytes;
+pub use payload_codec::encode_snapshot_to_v3_bytes;
 
 // `ApplyInboundClipboardUseCase` is consumed by daemon (Phase 3 · T8)
 // directly, so it gets re-exported at lib.rs root rather than staying

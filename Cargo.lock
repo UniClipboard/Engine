@@ -7092,7 +7092,6 @@ dependencies = [
  "libc",
  "mockall 0.13.1",
  "moka",
- "qrcode",
  "semver",
  "serde",
  "serde_json",
@@ -7105,7 +7104,6 @@ dependencies = [
  "tracing-subscriber",
  "uc-core",
  "uc-infra",
- "uc-mobile-proto",
  "uc-observability-contract",
  "unicode-normalization",
  "url",
@@ -7173,6 +7171,7 @@ dependencies = [
  "uc-application",
  "uc-core",
  "uc-infra",
+ "uc-mobile-lan",
  "uc-mobile-proto",
  "uc-observability-contract",
  "url",
@@ -7286,6 +7285,33 @@ dependencies = [
  "uc-mobile-proto",
  "uniffi",
  "url",
+]
+
+[[package]]
+name = "uc-mobile-lan"
+version = "1.0.0-rc.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "hex",
+ "image",
+ "mockall 0.13.1",
+ "qrcode",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uc-application",
+ "uc-core",
+ "uc-infra",
+ "uc-mobile-proto",
+ "uc-observability-contract",
+ "url",
+ "uuid",
 ]
 
 [[package]]
