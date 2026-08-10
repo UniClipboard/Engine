@@ -17,12 +17,14 @@ use uc_core::membership::{
     MembershipOutboxRepositoryError, MembershipOutboxRepositoryPort, MembershipSecurityUpdateError,
     MembershipSecurityUpdatePort, MembershipSharedDevicePage, MembershipSharedDevicePageRequest,
     PendingGroupUpdate, PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate,
-    SponsorCandidateSeed, VerifiedPeerPromotionPort,
+    SponsorCandidateSeed, VerifiedPeerPromotionPort, WorkspaceRecoveryTransportPort,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ClockPort, ContentHashPort, DeviceIdentityPort, PeerAddressRepositoryPort};
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uuid::Uuid;
+
+use crate::group_update_delivery::GroupUpdateDeliveryPort;
 
 mod candidates;
 mod exchange;
@@ -67,10 +69,28 @@ pub struct MembershipConvergence {
     shared_device_refresh: tokio::sync::Mutex<Option<ActiveSharedDeviceRefresh>>,
     shared_device_refresh_events: broadcast::Sender<SharedDeviceRefreshStatus>,
     auto_shared_device_refresh: tokio::sync::Mutex<AutoSharedDeviceRefreshState>,
+    group_update_delivery: std::sync::Mutex<Option<Arc<dyn GroupUpdateDeliveryPort>>>,
+    workspace_recovery: std::sync::Mutex<Option<Arc<dyn WorkspaceRecoveryTransportPort>>>,
 }
 
 pub fn build_membership_convergence(deps: MembershipConvergenceDeps) -> Arc<MembershipConvergence> {
     Arc::new(MembershipConvergence::new(deps))
+}
+
+impl MembershipConvergence {
+    pub fn install_group_update_delivery(&self, delivery: Arc<dyn GroupUpdateDeliveryPort>) {
+        *self
+            .group_update_delivery
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(delivery);
+    }
+
+    pub fn install_workspace_recovery(&self, transport: Arc<dyn WorkspaceRecoveryTransportPort>) {
+        *self
+            .workspace_recovery
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(transport);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -301,13 +321,26 @@ impl MembershipConvergence {
                 mode: AutoSharedDeviceRefreshMode::Idle,
                 last_completed_at_ms: None,
             }),
+            group_update_delivery: std::sync::Mutex::new(None),
+            workspace_recovery: std::sync::Mutex::new(None),
         }
     }
 
     async fn reconcile_once(
         &self,
     ) -> Result<MembershipGossipPassOutcome, MembershipConvergenceError> {
+        let group_update_delivery = self
+            .group_update_delivery
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(delivery) = group_update_delivery {
+            if let Err(error) = delivery.deliver_pending(self.deps.clock.now_ms()).await {
+                tracing::warn!(error = %error, "pending group updates could not be delivered during membership reconciliation");
+            }
+        }
         let state = self.deps.security_updates.current_state().await?;
+        self.deliver_workspace_recovery(&state.space_id).await?;
         let now_ms = self.deps.clock.now_ms();
         let delivered_batches = self.deliver_pending(&state.space_id, now_ms).await?;
         let mut outcome = MembershipGossipPassOutcome {

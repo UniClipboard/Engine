@@ -136,7 +136,7 @@ impl JoinerHandshakeRunner for JoinerHandshakeCoordinator {
         code: &InvitationCode,
         passphrase: &Passphrase,
     ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
-        self.handshake(code, passphrase).await
+        self.handshake_and_complete(code, passphrase).await
     }
 }
 

@@ -15,6 +15,7 @@
 
 - [本地加密搜索](specs/001-local-encrypted-search.md)
 - [离线优先成员移除](specs/015-offline-first-member-removal.md)
+- [工作空间全局收敛](specs/016-workspace-wide-convergence.md)
 - [Engine 仓库检查](specs/engine-repository-checks.md)
 - [Port 定义](specs/ports.md)
 - [uc-engine 跨平台核心接口](specs/uc-engine-interface.md)
@@ -32,3 +33,4 @@
 - [ADR-013：本地加密索引](adr/013-local-encrypted-search-index.md)
 - [ADR-014：应用层使用动态 Port](adr/014-dynamic-ports-in-use-cases.md)
 - [ADR-015：离线优先成员移除](adr/015-offline-first-member-removal.md)
+- [ADR-016：工作空间全局收敛](adr/016-workspace-wide-convergence.md)

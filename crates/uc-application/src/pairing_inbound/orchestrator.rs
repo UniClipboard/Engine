@@ -97,6 +97,7 @@ pub(crate) struct PairingInboundOrchestrator {
     /// is guaranteed because every entry is removed at terminal (success
     /// or any post-match failure).
     handshake_started_at: Arc<StdMutex<HashMap<PairingSessionId, Instant>>>,
+    pending_joiner_ready: Arc<StdMutex<HashMap<PairingSessionId, JoinerFacts>>>,
 }
 
 impl PairingInboundOrchestrator {
@@ -129,12 +130,16 @@ impl PairingInboundOrchestrator {
             outcome_tx,
             analytics,
             handshake_started_at: Arc::new(StdMutex::new(HashMap::new())),
+            pending_joiner_ready: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
     /// Drop the per-session start time (success or failure terminal).
     fn take_started_at(&self, session: &PairingSessionId) -> Option<Instant> {
-        self.handshake_started_at.lock().unwrap().remove(session)
+        self.handshake_started_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session)
     }
 
     /// Fire `pairing_failed` with structured reason and broadcast the
@@ -386,6 +391,10 @@ impl PairingInboundOrchestrator {
             message_kind = message_variant,
             "inbound pairing follow-up message received"
         );
+        if matches!(message, PairingSessionMessage::Ready(_)) {
+            self.complete_after_joiner_ready(&session).await;
+            return;
+        }
         let PairingSessionMessage::ChallengeResponse(response) = message else {
             // Anything else on a mid-handshake session is a joiner-side
             // protocol violation. Log without closing — the session
@@ -501,37 +510,63 @@ impl PairingInboundOrchestrator {
             // already advanced; let the natural timeout take care of it.
             self.emit_failure(session, PairingFailureReason::ConnectionLost);
         } else {
-            info!(
-                session = %session,
-                joiner_device_id = %facts.device_id.as_str(),
-                "pairing handshake completed"
-            );
-            // Slice 8b' · fire `pairing_succeeded` before the broadcast so
-            // a slow/dead subscriber can't drop the analytics signal.
-            // duration_ms is "actual handshake time" measured from the
-            // first valid `Request` (on_incoming) to here — does not
-            // include the human-time gap between sponsor issuing the code
-            // and the joiner typing it in (which the funnel itself can
-            // derive from `pairing_started` → `pairing_succeeded` user
-            // timestamps in PostHog).
-            let duration_ms = self
-                .take_started_at(session)
-                .map(|i| i.elapsed().as_millis().min(u32::MAX as u128) as u32)
-                .unwrap_or(0);
-            self.analytics.capture(Event::PairingSucceeded {
-                method: PairingMethod::Code,
-                peer_os: None,
-                duration_ms,
-                // Sponsor side accepts an inbound connection and cannot
-                // observe which discovery channel the joiner resolved through.
-                discovery_channel: None,
-            });
-            let _ = self.outcome_tx.send(PairingOutcome::Success {
-                peer_device_id: facts.device_id,
-                peer_device_name: facts.device_name.clone(),
-                peer_fingerprint: facts.identity_fingerprint.clone(),
-            });
+            self.pending_joiner_ready
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(session.clone(), facts);
         }
+    }
+
+    async fn complete_after_joiner_ready(&self, session: &PairingSessionId) {
+        let Some(facts) = self
+            .pending_joiner_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session)
+        else {
+            self.handshake
+                .reject(
+                    session,
+                    PairingRejectReason::Internal("unexpected joiner readiness".into()),
+                )
+                .await;
+            return;
+        };
+        if let Err(error) = self.handshake.complete(session).await {
+            warn!(session = %session, error = %error, "could not start membership delivery after joiner readiness");
+            self.emit_failure(session, PairingFailureReason::Internal);
+            return;
+        }
+        info!(
+            session = %session,
+            joiner_device_id = %facts.device_id.as_str(),
+            "pairing handshake completed"
+        );
+        // Slice 8b' · fire `pairing_succeeded` before the broadcast so
+        // a slow/dead subscriber can't drop the analytics signal.
+        // duration_ms is "actual handshake time" measured from the
+        // first valid `Request` (on_incoming) to here — does not
+        // include the human-time gap between sponsor issuing the code
+        // and the joiner typing it in (which the funnel itself can
+        // derive from `pairing_started` → `pairing_succeeded` user
+        // timestamps in PostHog).
+        let duration_ms = self
+            .take_started_at(session)
+            .map(|i| i.elapsed().as_millis().min(u32::MAX as u128) as u32)
+            .unwrap_or(0);
+        self.analytics.capture(Event::PairingSucceeded {
+            method: PairingMethod::Code,
+            peer_os: None,
+            duration_ms,
+            // Sponsor side accepts an inbound connection and cannot
+            // observe which discovery channel the joiner resolved through.
+            discovery_channel: None,
+        });
+        let _ = self.outcome_tx.send(PairingOutcome::Success {
+            peer_device_id: facts.device_id,
+            peer_device_name: facts.device_name.clone(),
+            peer_fingerprint: facts.identity_fingerprint.clone(),
+        });
     }
 
     /// Best-effort persistence of the verified joiner's transport address.
@@ -606,6 +641,7 @@ fn variant_name(message: &PairingSessionMessage) -> &'static str {
         PairingSessionMessage::AdmissionOffer(_) => "AdmissionOffer",
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
         PairingSessionMessage::Confirm(_) => "Confirm",
+        PairingSessionMessage::Ready(_) => "Ready",
         PairingSessionMessage::Reject(_) => "Reject",
     }
 }

@@ -7,25 +7,19 @@ use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, LegacyBootstrapState,
     LegacyBootstrapView, MemberProtectionStatusView,
     MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    MembershipConvergenceFacadeError, RosterError, SpaceProtectionModeView, SpaceProtectionView,
+    RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
-use uc_application::membership::{
-    MembershipConvergenceError, MembershipConvergenceState,
-    SharedDeviceRefreshDeviceState as AppSharedDeviceRefreshDeviceState,
-    SharedDeviceRefreshPhase as AppSharedDeviceRefreshPhase, SharedDeviceRefreshStatus,
-};
+use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ReachabilityState;
 
 use crate::{
     ContentTypesPatch, ContentTypesSummary, DeviceSummary, EngineError, EngineErrorCategory,
     LegacyBootstrapOutcome, LegacyBootstrapSummary, MemberProtectionStatusSummary,
-    MemberProtectionSummary, MemberRemovalPhase, MemberRemovalSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesSummary, MembershipConvergenceStateSummary, MembershipConvergenceSummary,
-    OperationResult, QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput,
-    QuerySharedDeviceRefreshInput, RemoveMemberInput, SharedDeviceRefreshDeviceStateSummary,
-    SharedDeviceRefreshDeviceSummary, SharedDeviceRefreshPhaseSummary,
-    SharedDeviceRefreshStartedSummary, SharedDeviceRefreshSummary, SpaceProtectionModeSummary,
-    SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
+    MemberProtectionSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
+    OperationResult, QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RemoveMemberInput,
+    SpaceProtectionModeSummary, SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
+    WorkspaceConvergenceFailureCategorySummary, WorkspaceConvergencePhaseSummary,
+    WorkspaceConvergenceSummary,
 };
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
@@ -75,170 +69,16 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
     Ok(OperationResult::Devices(devices))
 }
 
-pub async fn execute_query_membership_convergence(
+pub async fn execute_query_workspace_convergence(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let status = facade
-        .membership_convergence()
+    let snapshot = facade
+        .workspace_convergence()
         .await
-        .map_err(|error| match error {
-            MembershipConvergenceFacadeError::Unavailable => {
-                EngineError::new(1103, EngineErrorCategory::Unavailable, false)
-            }
-            MembershipConvergenceFacadeError::Query(error) => {
-                map_membership_convergence_error(error)
-            }
-        })?;
-    Ok(OperationResult::MembershipConvergence(
-        MembershipConvergenceSummary {
-            state: match status.state {
-                MembershipConvergenceState::Complete => MembershipConvergenceStateSummary::Complete,
-                MembershipConvergenceState::Converging => {
-                    MembershipConvergenceStateSummary::Converging
-                }
-                MembershipConvergenceState::WaitingForUpgrade => {
-                    MembershipConvergenceStateSummary::WaitingForUpgrade
-                }
-                MembershipConvergenceState::Blocked => MembershipConvergenceStateSummary::Blocked,
-            },
-            pending_count: usize_to_u64(status.pending_count),
-            waiting_for_peer_count: usize_to_u64(status.waiting_for_peer_count),
-            waiting_for_update_count: usize_to_u64(status.waiting_for_update_count),
-            version_incompatible_count: usize_to_u64(status.version_incompatible_count),
-            blocked_count: usize_to_u64(status.blocked_count),
-            rejected_count: usize_to_u64(status.rejected_count),
-        },
+        .map_err(map_roster_error)?;
+    Ok(OperationResult::WorkspaceConvergence(
+        workspace_convergence_summary(snapshot),
     ))
-}
-
-pub async fn execute_refresh_shared_devices(
-    facade: &AppFacade,
-) -> Result<OperationResult, EngineError> {
-    let started = facade
-        .start_shared_device_refresh()
-        .await
-        .map_err(|error| match error {
-            MembershipConvergenceFacadeError::Unavailable => {
-                EngineError::new(1103, EngineErrorCategory::Unavailable, false)
-            }
-            MembershipConvergenceFacadeError::Query(error) => {
-                map_membership_convergence_error(error)
-            }
-        })?;
-    Ok(OperationResult::SharedDeviceRefreshStarted(
-        SharedDeviceRefreshStartedSummary {
-            request_id: started.request_id,
-        },
-    ))
-}
-
-pub async fn execute_query_shared_device_refresh(
-    facade: &AppFacade,
-    input: QuerySharedDeviceRefreshInput,
-) -> Result<OperationResult, EngineError> {
-    Ok(OperationResult::SharedDeviceRefresh(
-        facade
-            .shared_device_refresh_status(&input.request_id)
-            .await
-            .map(shared_device_refresh_summary),
-    ))
-}
-
-pub(crate) fn shared_device_refresh_summary(
-    status: SharedDeviceRefreshStatus,
-) -> SharedDeviceRefreshSummary {
-    SharedDeviceRefreshSummary {
-        request_id: status.request_id,
-        phase: match status.phase {
-            AppSharedDeviceRefreshPhase::Started => SharedDeviceRefreshPhaseSummary::Started,
-            AppSharedDeviceRefreshPhase::Discovering => {
-                SharedDeviceRefreshPhaseSummary::Discovering
-            }
-            AppSharedDeviceRefreshPhase::Connecting => SharedDeviceRefreshPhaseSummary::Connecting,
-            AppSharedDeviceRefreshPhase::RoundCompleted => {
-                SharedDeviceRefreshPhaseSummary::RoundCompleted
-            }
-        },
-        devices: status
-            .devices
-            .into_iter()
-            .map(|device| SharedDeviceRefreshDeviceSummary {
-                device_id: device.device_id.as_str().to_owned(),
-                display_name: device.device_name,
-                state: match device.state {
-                    AppSharedDeviceRefreshDeviceState::Discovered => {
-                        SharedDeviceRefreshDeviceStateSummary::Discovered
-                    }
-                    AppSharedDeviceRefreshDeviceState::Connecting => {
-                        SharedDeviceRefreshDeviceStateSummary::Connecting
-                    }
-                    AppSharedDeviceRefreshDeviceState::Connected => {
-                        SharedDeviceRefreshDeviceStateSummary::Connected
-                    }
-                    AppSharedDeviceRefreshDeviceState::AlreadyPresent => {
-                        SharedDeviceRefreshDeviceStateSummary::AlreadyPresent
-                    }
-                    AppSharedDeviceRefreshDeviceState::WaitingForPeer => {
-                        SharedDeviceRefreshDeviceStateSummary::WaitingForPeer
-                    }
-                    AppSharedDeviceRefreshDeviceState::WaitingForUpdate => {
-                        SharedDeviceRefreshDeviceStateSummary::WaitingForUpdate
-                    }
-                    AppSharedDeviceRefreshDeviceState::VersionIncompatible => {
-                        SharedDeviceRefreshDeviceStateSummary::VersionIncompatible
-                    }
-                    AppSharedDeviceRefreshDeviceState::Rejected => {
-                        SharedDeviceRefreshDeviceStateSummary::Rejected
-                    }
-                },
-            })
-            .collect(),
-        total_count: usize_to_u64(status.total_count),
-        discovered_count: usize_to_u64(status.discovered_count),
-        connecting_count: usize_to_u64(status.connecting_count),
-        connected_count: usize_to_u64(status.connected_count),
-        already_present_count: usize_to_u64(status.already_present_count),
-        waiting_for_peer_count: usize_to_u64(status.waiting_for_peer_count),
-        waiting_for_update_count: usize_to_u64(status.waiting_for_update_count),
-        version_incompatible_count: usize_to_u64(status.version_incompatible_count),
-        rejected_count: usize_to_u64(status.rejected_count),
-        unavailable_source_count: usize_to_u64(status.unavailable_source_count),
-    }
-}
-
-fn usize_to_u64(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
-}
-
-fn map_membership_convergence_error(error: MembershipConvergenceError) -> EngineError {
-    let (code, category, retryable, variant) = match error {
-        MembershipConvergenceError::CurrentIdentity(
-            uc_core::membership::CurrentMembershipIdentityError::Unavailable,
-        ) => (
-            QUERY_MEMBERSHIP_CONVERGENCE_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-            "current_identity_unavailable",
-        ),
-        MembershipConvergenceError::CurrentIdentity(
-            uc_core::membership::CurrentMembershipIdentityError::LoadFailed,
-        ) => (
-            QUERY_MEMBERSHIP_CONVERGENCE_FAILED_CODE,
-            EngineErrorCategory::Internal,
-            true,
-            "current_identity_load",
-        ),
-        _ => (
-            QUERY_MEMBERSHIP_CONVERGENCE_FAILED_CODE,
-            EngineErrorCategory::Internal,
-            true,
-            "membership_state",
-        ),
-    };
-    if category == EngineErrorCategory::Internal {
-        error!(variant, "membership convergence query failed");
-    }
-    EngineError::new(code, category, retryable)
 }
 
 pub async fn execute_query_member_sync_preferences(
@@ -270,27 +110,12 @@ pub async fn execute_remove_member(
     input: RemoveMemberInput,
 ) -> Result<OperationResult, EngineError> {
     validate_device_id(&input.device_id)?;
-    let view = facade
+    let snapshot = facade
         .remove_member(&input.device_id)
         .await
         .map_err(map_roster_error)?;
-    Ok(OperationResult::MemberRemoved(member_removal_summary(view)))
-}
-
-pub async fn execute_query_member_removal(
-    facade: &AppFacade,
-) -> Result<OperationResult, EngineError> {
-    let view = facade
-        .member_removal_status()
-        .await
-        .map_err(map_roster_error)?;
-    info!(
-        operation = "query_member_removal",
-        phase = ?view.phase,
-        "member removal status query completed"
-    );
-    Ok(OperationResult::MemberRemovalStatus(
-        member_removal_summary(view),
+    Ok(OperationResult::WorkspaceConvergence(
+        workspace_convergence_summary(snapshot),
     ))
 }
 
@@ -365,26 +190,62 @@ fn legacy_bootstrap_summary(result: LegacyBootstrapView) -> LegacyBootstrapSumma
     }
 }
 
-pub(crate) fn member_removal_summary(
-    view: uc_application::facade::MemberRemovalView,
-) -> MemberRemovalSummary {
-    let phase = match view.phase {
-        uc_application::facade::MemberRemovalPhaseView::Applied => MemberRemovalPhase::Applied,
-        uc_application::facade::MemberRemovalPhaseView::Converging => {
-            MemberRemovalPhase::Converging
-        }
-        uc_application::facade::MemberRemovalPhaseView::Complete => MemberRemovalPhase::Complete,
-        uc_application::facade::MemberRemovalPhaseView::RecoveryRequired => {
-            MemberRemovalPhase::RecoveryRequired
-        }
-    };
-    MemberRemovalSummary {
-        phase,
-        intent_count: u64::try_from(view.intent_count).unwrap_or(u64::MAX),
-        effective_member_count: u64::try_from(view.effective_member_count).unwrap_or(u64::MAX),
-        convergence_digest: view.convergence_digest,
-        updated_at_ms: view.updated_at_ms,
-        removed: view.removed,
+pub(crate) fn workspace_convergence_summary(
+    snapshot: WorkspaceSnapshot,
+) -> WorkspaceConvergenceSummary {
+    WorkspaceConvergenceSummary {
+        phase: match snapshot.phase {
+            uc_core::membership::WorkspacePhase::LocallyApplied => {
+                WorkspaceConvergencePhaseSummary::LocallyApplied
+            }
+            uc_core::membership::WorkspacePhase::Converging => {
+                WorkspaceConvergencePhaseSummary::Converging
+            }
+            uc_core::membership::WorkspacePhase::WaitingForOfflineMember => {
+                WorkspaceConvergencePhaseSummary::WaitingForOfflineMember
+            }
+            uc_core::membership::WorkspacePhase::Complete => {
+                WorkspaceConvergencePhaseSummary::Complete
+            }
+            uc_core::membership::WorkspacePhase::RecoveryRequired => {
+                WorkspaceConvergencePhaseSummary::RecoveryRequired
+            }
+        },
+        revision: snapshot.revision,
+        change_count: u64::try_from(snapshot.change_count).unwrap_or(u64::MAX),
+        removal_intent_count: u64::try_from(snapshot.removal_intent_count).unwrap_or(u64::MAX),
+        effective_member_count: u64::try_from(snapshot.effective_member_count).unwrap_or(u64::MAX),
+        confirmed_member_count: u64::try_from(snapshot.confirmed_member_count).unwrap_or(u64::MAX),
+        waiting_member_count: u64::try_from(snapshot.waiting_member_count).unwrap_or(u64::MAX),
+        convergence_digest: snapshot.convergence_digest.map(|digest| digest.to_string()),
+        removed: snapshot.removed,
+        updated_at_ms: snapshot.updated_at_ms,
+        failure_category: snapshot.failure_category.map(|category| match category {
+            uc_core::membership::WorkspaceFailureCategory::SpaceMismatch => {
+                WorkspaceConvergenceFailureCategorySummary::SpaceMismatch
+            }
+            uc_core::membership::WorkspaceFailureCategory::ContinuityGap => {
+                WorkspaceConvergenceFailureCategorySummary::ContinuityGap
+            }
+            uc_core::membership::WorkspaceFailureCategory::IdentityMismatch => {
+                WorkspaceConvergenceFailureCategorySummary::IdentityMismatch
+            }
+            uc_core::membership::WorkspaceFailureCategory::DigestConflict => {
+                WorkspaceConvergenceFailureCategorySummary::DigestConflict
+            }
+            uc_core::membership::WorkspaceFailureCategory::Unauthorized => {
+                WorkspaceConvergenceFailureCategorySummary::Unauthorized
+            }
+            uc_core::membership::WorkspaceFailureCategory::VersionIncompatible => {
+                WorkspaceConvergenceFailureCategorySummary::VersionIncompatible
+            }
+            uc_core::membership::WorkspaceFailureCategory::NoEffectiveMembers => {
+                WorkspaceConvergenceFailureCategorySummary::NoEffectiveMembers
+            }
+            uc_core::membership::WorkspaceFailureCategory::Storage => {
+                WorkspaceConvergenceFailureCategorySummary::Storage
+            }
+        }),
     }
 }
 
@@ -458,16 +319,16 @@ fn member_preferences_result(preferences: MemberSyncPreferencesView) -> Operatio
 fn map_roster_error(error: RosterError) -> EngineError {
     let (code, category, retryable, variant) = match error {
         RosterError::MemberRemovalUnavailable => (
-            1394,
+            QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             false,
-            "member_removal_unavailable",
+            "workspace_convergence_unavailable",
         ),
         RosterError::MemberRemoval(_) => (
-            1397,
+            QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             false,
-            "member_removal_failed",
+            "workspace_convergence_failed",
         ),
         RosterError::MemberRemovalInvalidInput => (
             MEMBER_INVALID_INPUT_CODE,
@@ -532,7 +393,7 @@ fn map_roster_error(error: RosterError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uc_application::facade::{MemberRemovalPhaseView, MemberRemovalView};
+    use uc_core::membership::{WorkspaceFailureCategory, WorkspacePhase};
 
     #[test]
     fn roster_failures_keep_stable_categories_and_distinct_codes() {
@@ -548,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_member_removal_errors_have_a_stable_public_mapping() {
+    fn workspace_convergence_errors_have_a_stable_public_mapping() {
         let unavailable = map_roster_error(RosterError::MemberRemovalUnavailable);
         let failed = map_roster_error(RosterError::MemberRemoval("internal detail".into()));
         let invalid_input = map_roster_error(RosterError::MemberRemovalInvalidInput);
@@ -563,26 +424,36 @@ mod tests {
     }
 
     #[test]
-    fn member_removal_progress_is_preserved_in_the_stable_result() {
-        let result = OperationResult::MemberRemoved(member_removal_summary(MemberRemovalView {
-            phase: MemberRemovalPhaseView::Applied,
-            intent_count: 1,
+    fn workspace_convergence_snapshot_is_preserved_in_the_stable_result() {
+        let summary = workspace_convergence_summary(WorkspaceSnapshot {
+            phase: WorkspacePhase::LocallyApplied,
+            revision: 3,
+            change_count: 1,
+            removal_intent_count: 0,
             effective_member_count: 2,
+            confirmed_member_count: 0,
+            waiting_member_count: 1,
             convergence_digest: None,
-            updated_at_ms: 123,
             removed: false,
-        }));
+            updated_at_ms: 123,
+            failure_category: Some(WorkspaceFailureCategory::Storage),
+        });
 
         assert_eq!(
-            result,
-            OperationResult::MemberRemoved(MemberRemovalSummary {
-                phase: MemberRemovalPhase::Applied,
-                intent_count: 1,
+            summary,
+            WorkspaceConvergenceSummary {
+                phase: WorkspaceConvergencePhaseSummary::LocallyApplied,
+                revision: 3,
+                change_count: 1,
+                removal_intent_count: 0,
                 effective_member_count: 2,
+                confirmed_member_count: 0,
+                waiting_member_count: 1,
                 convergence_digest: None,
-                updated_at_ms: 123,
                 removed: false,
-            })
+                updated_at_ms: 123,
+                failure_category: Some(WorkspaceConvergenceFailureCategorySummary::Storage),
+            }
         );
     }
 }

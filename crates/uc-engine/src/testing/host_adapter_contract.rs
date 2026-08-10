@@ -577,21 +577,26 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
         .unwrap();
 
     let status = engine
-        .execute(crate::Operation::QueryMembershipConvergence)
+        .execute(crate::Operation::QueryWorkspaceConvergence)
         .await
         .unwrap();
 
-    assert_eq!(
-        status,
-        crate::OperationResult::MembershipConvergence(crate::MembershipConvergenceSummary {
-            state: crate::MembershipConvergenceStateSummary::Complete,
-            pending_count: 0,
-            waiting_for_peer_count: 0,
-            waiting_for_update_count: 0,
-            version_incompatible_count: 0,
-            blocked_count: 0,
-            rejected_count: 0,
-        })
+    assert!(
+        matches!(
+            &status,
+            crate::OperationResult::WorkspaceConvergence(summary)
+                if summary.phase == crate::WorkspaceConvergencePhaseSummary::LocallyApplied
+                    && summary.revision == 0
+                    && summary.change_count == 0
+                    && summary.removal_intent_count == 0
+                    && summary.effective_member_count == 0
+                    && summary.confirmed_member_count == 0
+                    && summary.waiting_member_count == 0
+                    && summary.convergence_digest.is_none()
+                    && !summary.removed
+                    && summary.failure_category.is_none()
+        ),
+        "unexpected workspace convergence snapshot: {status:?}"
     );
     engine
         .shutdown(std::time::Duration::from_secs(15))

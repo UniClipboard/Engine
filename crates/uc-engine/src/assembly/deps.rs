@@ -98,6 +98,9 @@ pub struct SyncEngineDeps {
     pub removal_pending_join: Arc<dyn uc_core::membership::RemovalPendingJoinStorePort>,
     /// Current encrypted MLS state used to advance ADR-015 recovery.
     pub removal_key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort>,
+    /// Encrypted persistence for the unified workspace convergence state.
+    pub workspace_convergence_repository:
+        Arc<dyn uc_core::membership::WorkspaceConvergenceRepositoryPort>,
     /// plaintext-hash → ciphertext-digest dedupe cache (Slice 3 Phase 1).
     pub blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,
     /// switch-space backup table + main-table inline_data batch IO.

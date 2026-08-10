@@ -10,7 +10,8 @@
 //!   Joiner → Sponsor : Request
 //!   Sponsor → Joiner : KeyslotOffer
 //!   Joiner → Sponsor : ChallengeResponse
-//!   Sponsor → Joiner : Confirm      (or Reject at any step, either side)
+//!   Sponsor → Joiner : Confirm
+//!   Joiner → Sponsor : Ready        (or Reject at any step, either side)
 //! ```
 //!
 //! Legacy libp2p-era equivalents live in [`crate::network::protocol::pairing`]
@@ -34,6 +35,7 @@ pub enum PairingSessionMessage {
     AdmissionOffer(SponsorAdmissionOffer),
     ChallengeResponse(JoinerChallengeResponse),
     Confirm(SponsorConfirm),
+    Ready(JoinerReady),
     Reject(PairingReject),
 }
 
@@ -135,6 +137,12 @@ pub struct SponsorConfirm {
     pub encrypted_key_catalog: Vec<u8>,
     pub group_epoch: u64,
 }
+
+/// Joiner → sponsor. Sent only after the joiner has durably recorded the
+/// sponsor relationship and activated its local session. The sponsor must not
+/// start delivery of pre-existing member records before this acknowledgement.
+#[derive(Debug, Clone)]
+pub struct JoinerReady;
 
 /// Either side → other. Terminal message with a structured reason so the
 /// orchestrator can pick the right UI error / `PairingError` variant.

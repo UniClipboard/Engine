@@ -111,6 +111,55 @@ fn split_sponsor_seed_events(
 }
 
 impl MembershipConvergence {
+    pub(super) async fn deliver_workspace_recovery(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<(), MembershipConvergenceError> {
+        let transport = self
+            .workspace_recovery
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(transport) = transport else {
+            return Ok(());
+        };
+        let mut updates = self
+            .deps
+            .applied_security_updates
+            .list(space_id)
+            .await
+            .map_err(MembershipConvergenceError::from)?;
+        updates.extend(
+            self.deps
+                .candidate_repo
+                .list(space_id)
+                .await?
+                .into_iter()
+                .flat_map(|candidate| candidate.security_updates().to_vec()),
+        );
+        updates.sort_by_key(|update| update.previous_epoch);
+        updates.dedup_by_key(|update| update.digest);
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let local_device_id = self.deps.device_identity.current_device_id();
+        let members = self
+            .deps
+            .member_repo
+            .list()
+            .await
+            .map_err(|error| MembershipConvergenceError::Relationship(error.to_string()))?;
+        for member in members {
+            if member.device_id == local_device_id {
+                continue;
+            }
+            let _ = transport
+                .deliver_recovery(&member.device_id, &updates)
+                .await;
+        }
+        Ok(())
+    }
+
     pub(super) async fn refresh_local_announcement(
         &self,
     ) -> Result<DeviceAnnouncement, MembershipConvergenceError> {

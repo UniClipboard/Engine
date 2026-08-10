@@ -7,6 +7,6 @@ pub use invitation::{
 };
 pub use role::PairingRole;
 pub use session_message::{
-    JoinerChallengeResponse, JoinerRequest, PairingReject, PairingRejectReason,
+    JoinerChallengeResponse, JoinerReady, JoinerRequest, PairingReject, PairingRejectReason,
     PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer, SponsorConfirm,
 };

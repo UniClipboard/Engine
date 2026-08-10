@@ -53,9 +53,11 @@ use uc_application::facade::{
     MemberRosterFacade, MembershipConnectivityDeps, SpaceAdmissionDeps, SpaceApplicationRuntime,
     SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, TransferHostEvent,
 };
+use uc_application::group_update_delivery::GroupUpdateDelivery;
 use uc_application::member_removal::{RemovalCoordinator, RemovalCoordinatorDeps};
 use uc_application::membership::{build_membership_convergence, MembershipConvergenceDeps};
 use uc_application::proof::HmacProofAdapter;
+use uc_application::workspace_convergence::{WorkspaceConvergence, WorkspaceConvergenceDeps};
 use uc_application::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
     InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps, StoreOnlyPullDeps,
@@ -73,7 +75,7 @@ use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
 use uc_infra::network::iroh::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     GroupUpdateHandlers, IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohNodeError,
-    TransferProgressHandlers,
+    IrohWorkspaceRecoveryAdapter, TransferProgressHandlers, WORKSPACE_RECOVERY_ALPN,
 };
 // Re-exported so external callers can parametrise the assembly without
 // having to `use uc_infra` themselves.
@@ -165,7 +167,8 @@ pub struct SyncEngineAssembly {
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
     /// 与 sync assembly 同生命周期。
     outbound_progress_translator: OutboundProgressRuntime,
-    member_removal_runtime: uc_application::member_removal::MemberRemovalRuntime,
+    workspace_convergence_runtime:
+        uc_application::workspace_convergence::WorkspaceConvergenceRuntime,
     automatic_legacy_upgrade: AutomaticLegacyUpgradeRuntime,
     space_application_runtime: SpaceApplicationRuntime,
 }
@@ -237,7 +240,7 @@ impl SyncEngineAssembly {
         self.outbound_progress_translator
             .shutdown(transfer_reason)
             .await;
-        self.member_removal_runtime.shutdown().await;
+        self.workspace_convergence_runtime.shutdown().await;
         self.space_application_runtime.shutdown().await;
         self.automatic_legacy_upgrade.shutdown().await;
         self.iroh_node.shutdown().await;
@@ -580,7 +583,7 @@ pub async fn build_sync_engine_assembly(
         recovery: Arc::new(RemovalRecoveryAdapter::new(
             space_setup.membership_session.as_ref().clone(),
             Arc::clone(&space_setup.removal_key_epoch_repository),
-            removal_identity,
+            removal_identity.clone(),
             Arc::clone(&space_setup.removal_pending_join),
         )),
         member_signatures: Arc::clone(&space_setup.current_member_signatures),
@@ -595,6 +598,37 @@ pub async fn build_sync_engine_assembly(
         removal_coordinator.clone(),
         removal_coordinator.clone(),
         removal_coordinator.clone(),
+    )?;
+    let workspace_convergence = WorkspaceConvergence::new(WorkspaceConvergenceDeps {
+        repository: Arc::clone(&space_setup.workspace_convergence_repository),
+        verification: Arc::new(RemovalIntentVerificationAdapter),
+        recovery: Arc::new(RemovalRecoveryAdapter::new(
+            space_setup.membership_session.as_ref().clone(),
+            Arc::clone(&space_setup.removal_key_epoch_repository),
+            removal_identity.clone(),
+            Arc::clone(&space_setup.removal_pending_join),
+        )),
+        member_signatures: Arc::clone(&space_setup.current_member_signatures),
+        member_repo: Arc::clone(&deps.device.member_repo),
+        membership_identity: removal_identity,
+        security_updates: Arc::new(DefaultMembershipSecurityUpdateAdapter::new(
+            Arc::clone(&space_setup.membership_session),
+            Arc::clone(&space_setup.current_member_signatures),
+            Arc::clone(&deps.security.space_access_ports.group_revocation),
+        )),
+        clock: Arc::clone(&deps.system.clock),
+        device_identity: Arc::clone(&deps.device.device_identity),
+        own_device: deps.device.device_identity.current_device_id(),
+    });
+    let workspace_recovery_adapter =
+        builder.build_workspace_recovery_adapter(Arc::clone(&space_setup.peer_addr_repo));
+    builder.install_workspace_recovery(
+        &workspace_recovery_adapter,
+        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&deps.security.fingerprint),
+        Arc::clone(&workspace_convergence)
+            as Arc<dyn uc_core::membership::RecoveryTransportEndpointPort>,
     )?;
     let membership_transport = builder.build_membership_gossip_transport(
         Arc::clone(&space_setup.membership_session),
@@ -674,6 +708,10 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.security.fingerprint),
         Arc::clone(&deps.security.space_access_ports.group_revocation),
     )?;
+    membership_gossip.install_group_update_delivery(Arc::new(GroupUpdateDelivery::new(
+        Arc::clone(&deps.security.space_access_ports.group_revocation),
+        Arc::clone(&group_update_dispatch),
+    )));
     let automatic_legacy_upgrade = install_automatic_legacy_upgrade(
         &mut builder,
         Arc::clone(&space_setup.peer_addr_repo),
@@ -852,13 +890,13 @@ pub async fn build_sync_engine_assembly(
         .with_space_protection(Arc::clone(
             &deps.security.space_access_ports.space_protection,
         ))
-        .with_member_removal(Arc::clone(&removal_coordinator)),
+        .with_workspace_convergence(Arc::clone(&workspace_convergence)),
     );
     if let Err(error) = roster.resume_legacy_bootstraps().await {
         warn!(error = %error, "legacy bootstrap recovery could not resume during startup");
     }
-    let member_removal_runtime = roster
-        .start_member_removal_runtime()
+    let workspace_convergence_runtime = roster
+        .start_workspace_convergence_runtime()
         .map_err(|error| SyncEngineAssemblyError::MemberRemovalRuntime(error.to_string()))?;
     let membership_gossip_runtime = membership_gossip
         .clone()
@@ -1067,7 +1105,7 @@ pub async fn build_sync_engine_assembly(
         clipboard_receiver,
         active_clipboard_lifecycle,
         outbound_progress_translator,
-        member_removal_runtime,
+        workspace_convergence_runtime,
         automatic_legacy_upgrade,
         space_application_runtime,
     })

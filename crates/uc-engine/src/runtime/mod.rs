@@ -18,9 +18,9 @@ use tokio::sync::Mutex;
 use tracing::{error, warn};
 use uc_application::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
-    AppFacade, HistoryMaintenanceRuntime, MemberRemovalView, NetworkRecoveryEvent, PairingOutcome,
+    AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent, PairingOutcome,
 };
-use uc_application::membership::SharedDeviceRefreshStatus;
+use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
@@ -135,16 +135,8 @@ fn engine_event_for_pairing_completion(outcome: PairingOutcome) -> crate::Engine
     crate::EngineEvent::PairingCompleted(completion)
 }
 
-fn engine_event_for_member_removal(removal: MemberRemovalView) -> crate::EngineEvent {
-    crate::EngineEvent::MemberRemovalChanged(
-        crate::operations::device::member::member_removal_summary(removal),
-    )
-}
-
-fn engine_event_for_shared_device_refresh(status: SharedDeviceRefreshStatus) -> crate::EngineEvent {
-    crate::EngineEvent::SharedDeviceRefreshChanged(
-        crate::operations::device::member::shared_device_refresh_summary(status),
-    )
+fn engine_event_for_workspace_convergence(snapshot: WorkspaceSnapshot) -> crate::EngineEvent {
+    crate::EngineEvent::WorkspaceConvergenceChanged(snapshot)
 }
 
 async fn spawn_pairing_completion_events(
@@ -172,43 +164,18 @@ async fn spawn_pairing_completion_events(
         .await;
 }
 
-async fn spawn_member_removal_events(
-    mut changes: tokio::sync::broadcast::Receiver<MemberRemovalView>,
+async fn spawn_workspace_convergence_events(
+    mut changes: tokio::sync::broadcast::Receiver<WorkspaceSnapshot>,
     tasks: &Arc<TaskRegistry>,
     events: EventSender,
 ) {
     tasks
-        .spawn("member_removal_events", move |cancel| async move {
+        .spawn("workspace_convergence_events", move |cancel| async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     change = changes.recv() => match change {
-                        Ok(change) => events.send(engine_event_for_member_removal(change)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            events.send(crate::EngineEvent::RefreshRequired {
-                                reason: crate::RefreshReason::ConsumerLagged,
-                            });
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                }
-            }
-        })
-        .await;
-}
-
-async fn spawn_shared_device_refresh_events(
-    mut changes: tokio::sync::broadcast::Receiver<SharedDeviceRefreshStatus>,
-    tasks: &Arc<TaskRegistry>,
-    events: EventSender,
-) {
-    tasks
-        .spawn("shared_device_refresh_events", move |cancel| async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    change = changes.recv() => match change {
-                        Ok(change) => events.send(engine_event_for_shared_device_refresh(change)),
+                        Ok(change) => events.send(engine_event_for_workspace_convergence(change)),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             events.send(crate::EngineEvent::RefreshRequired {
                                 reason: crate::RefreshReason::ConsumerLagged,
@@ -496,14 +463,8 @@ impl ProductionRuntime {
             .subscribe_pairing_completion()
             .map_err(|error| startup_error("pairing completion subscription", error))?;
         spawn_pairing_completion_events(pairing_outcomes, &tasks, events.clone()).await;
-        spawn_member_removal_events(
-            facade.subscribe_member_removal_events(),
-            &tasks,
-            events.clone(),
-        )
-        .await;
-        spawn_shared_device_refresh_events(
-            facade.subscribe_shared_device_refresh(),
+        spawn_workspace_convergence_events(
+            facade.subscribe_workspace_convergence(),
             &tasks,
             events.clone(),
         )
@@ -610,12 +571,8 @@ fn operation_error_with_code(
 #[cfg(test)]
 mod tests {
     use uc_application::facade::{
-        ClipboardOutboundOutcome, MemberRemovalPhaseView, MemberRemovalView, PairingOutcome,
-        SearchFacadeError, SearchPageView, SearchResultView, StorageFacadeError, StorageStatsView,
-    };
-    use uc_application::membership::{
-        SharedDeviceRefreshDevice, SharedDeviceRefreshDeviceState, SharedDeviceRefreshPhase,
-        SharedDeviceRefreshStatus,
+        ClipboardOutboundOutcome, PairingOutcome, SearchFacadeError, SearchPageView,
+        SearchResultView, StorageFacadeError, StorageStatsView,
     };
     use uc_core::ids::DeviceId;
     use uc_core::security::IdentityFingerprint;
@@ -672,91 +629,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_device_refresh_changes_are_published_on_the_engine_event_stream() {
+    async fn workspace_convergence_changes_are_published_on_the_engine_event_stream() {
         let (changes, change_stream) = tokio::sync::broadcast::channel(8);
         let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
         let tasks = Arc::new(TaskRegistry::new());
+        let snapshot = uc_core::membership::WorkspaceSnapshot {
+            phase: uc_core::membership::WorkspacePhase::Converging,
+            revision: 1,
+            change_count: 1,
+            removal_intent_count: 1,
+            effective_member_count: 2,
+            confirmed_member_count: 0,
+            waiting_member_count: 0,
+            convergence_digest: None,
+            removed: false,
+            updated_at_ms: 42,
+            failure_category: None,
+        };
 
-        spawn_shared_device_refresh_events(change_stream, &tasks, events).await;
-        changes
-            .send(SharedDeviceRefreshStatus {
-                request_id: "request-1".into(),
-                phase: SharedDeviceRefreshPhase::Connecting,
-                devices: vec![SharedDeviceRefreshDevice {
-                    device_id: DeviceId::new("device-c"),
-                    device_name: "Device C".into(),
-                    state: SharedDeviceRefreshDeviceState::Connecting,
-                }],
-                total_count: 1,
-                discovered_count: 0,
-                connecting_count: 1,
-                connected_count: 0,
-                already_present_count: 0,
-                waiting_for_peer_count: 0,
-                waiting_for_update_count: 0,
-                version_incompatible_count: 0,
-                rejected_count: 0,
-                unavailable_source_count: 0,
-            })
-            .unwrap();
+        spawn_workspace_convergence_events(change_stream, &tasks, events).await;
+        changes.send(snapshot.clone()).unwrap();
 
         assert_eq!(
             event_stream.next().await,
-            Some(crate::EngineEvent::SharedDeviceRefreshChanged(
-                crate::SharedDeviceRefreshSummary {
-                    request_id: "request-1".into(),
-                    phase: crate::SharedDeviceRefreshPhaseSummary::Connecting,
-                    devices: vec![crate::SharedDeviceRefreshDeviceSummary {
-                        device_id: "device-c".into(),
-                        display_name: "Device C".into(),
-                        state: crate::SharedDeviceRefreshDeviceStateSummary::Connecting,
-                    }],
-                    total_count: 1,
-                    discovered_count: 0,
-                    connecting_count: 1,
-                    connected_count: 0,
-                    already_present_count: 0,
-                    waiting_for_peer_count: 0,
-                    waiting_for_update_count: 0,
-                    version_incompatible_count: 0,
-                    rejected_count: 0,
-                    unavailable_source_count: 0,
-                }
-            ))
+            Some(crate::EngineEvent::WorkspaceConvergenceChanged(snapshot))
         );
 
         tasks.shutdown(Duration::from_secs(1)).await;
     }
 
     #[tokio::test]
-    async fn shared_device_refresh_lag_requests_a_snapshot_refresh() {
+    async fn workspace_convergence_lag_requests_a_snapshot_refresh() {
         let (changes, change_stream) = tokio::sync::broadcast::channel(1);
         let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
         let tasks = Arc::new(TaskRegistry::new());
+        let snapshot = uc_core::membership::WorkspaceSnapshot {
+            phase: uc_core::membership::WorkspacePhase::LocallyApplied,
+            revision: 1,
+            change_count: 0,
+            removal_intent_count: 0,
+            effective_member_count: 1,
+            confirmed_member_count: 0,
+            waiting_member_count: 0,
+            convergence_digest: None,
+            removed: false,
+            updated_at_ms: 42,
+            failure_category: None,
+        };
 
-        spawn_shared_device_refresh_events(change_stream, &tasks, events).await;
-        for phase in [
-            SharedDeviceRefreshPhase::Started,
-            SharedDeviceRefreshPhase::Discovering,
-        ] {
-            changes
-                .send(SharedDeviceRefreshStatus {
-                    request_id: "request-1".into(),
-                    phase,
-                    devices: Vec::new(),
-                    total_count: 0,
-                    discovered_count: 0,
-                    connecting_count: 0,
-                    connected_count: 0,
-                    already_present_count: 0,
-                    waiting_for_peer_count: 0,
-                    waiting_for_update_count: 0,
-                    version_incompatible_count: 0,
-                    rejected_count: 0,
-                    unavailable_source_count: 0,
-                })
-                .unwrap();
-        }
+        spawn_workspace_convergence_events(change_stream, &tasks, events).await;
+        changes.send(snapshot.clone()).unwrap();
+        changes.send(snapshot).unwrap();
 
         assert_eq!(
             event_stream.next().await,
@@ -815,41 +738,6 @@ mod tests {
                 crate::PairingCompletion::Failure {
                     reason: "passphrase_mismatch".into(),
                 },
-            ))
-        );
-
-        tasks.shutdown(Duration::from_secs(1)).await;
-    }
-
-    #[tokio::test]
-    async fn member_removal_changes_are_published_on_the_engine_event_stream() {
-        let (changes, change_stream) = tokio::sync::broadcast::channel(8);
-        let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
-        let tasks = Arc::new(TaskRegistry::new());
-
-        spawn_member_removal_events(change_stream, &tasks, events).await;
-        changes
-            .send(MemberRemovalView {
-                phase: MemberRemovalPhaseView::Applied,
-                intent_count: 1,
-                effective_member_count: 2,
-                convergence_digest: None,
-                updated_at_ms: 42,
-                removed: false,
-            })
-            .unwrap();
-
-        assert_eq!(
-            event_stream.next().await,
-            Some(crate::EngineEvent::MemberRemovalChanged(
-                crate::MemberRemovalSummary {
-                    phase: crate::MemberRemovalPhase::Applied,
-                    intent_count: 1,
-                    effective_member_count: 2,
-                    convergence_digest: None,
-                    updated_at_ms: 42,
-                    removed: false,
-                }
             ))
         );
 

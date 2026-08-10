@@ -4,17 +4,17 @@ use async_trait::async_trait;
 use uc_core::membership::{GroupRevocationPort, GroupUpdateDispatchPort, KeyEpochError};
 
 #[async_trait]
-pub(crate) trait GroupUpdateDeliveryPort: Send + Sync {
+pub trait GroupUpdateDeliveryPort: Send + Sync {
     async fn deliver_pending(&self, now_ms: i64) -> Result<usize, KeyEpochError>;
 }
 
-pub(crate) struct GroupUpdateDelivery {
+pub struct GroupUpdateDelivery {
     outbox: Arc<dyn GroupRevocationPort>,
     dispatch: Arc<dyn GroupUpdateDispatchPort>,
 }
 
 impl GroupUpdateDelivery {
-    pub(crate) fn new(
+    pub fn new(
         outbox: Arc<dyn GroupRevocationPort>,
         dispatch: Arc<dyn GroupUpdateDispatchPort>,
     ) -> Self {

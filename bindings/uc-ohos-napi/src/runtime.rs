@@ -8,17 +8,16 @@ use uc_engine::{
     ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
     EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
     InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    QuerySharedDeviceRefreshInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
-    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
-    SendTextInput,
+    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
+    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
 };
+use uc_engine::{WorkspacePhase, WorkspaceSnapshot};
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhLocalDevice, OhMemberRemoval, OhMembershipConvergence, OhNetworkRecoveryStatus, OhSendReport,
-    OhSessionRecovery, OhSharedDeviceRefresh, OhSharedDeviceRefreshDevice,
-    OhSharedDeviceRefreshStarted, OhSpaceCreated, OhSpaceJoined,
+    OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport, OhSessionRecovery, OhSpaceCreated,
+    OhSpaceJoined, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -140,77 +139,27 @@ impl OhEngine {
     }
 
     #[napi]
-    pub async fn query_membership_convergence(&self) -> napi::Result<OhMembershipConvergence> {
+    pub async fn query_workspace_convergence(&self) -> napi::Result<OhWorkspaceConvergence> {
         let result = self
             .engine
-            .execute(Operation::QueryMembershipConvergence)
+            .execute(Operation::QueryWorkspaceConvergence)
             .await
             .map_err(engine_error)?;
         match result {
-            OperationResult::MembershipConvergence(summary) => membership_convergence(summary),
+            OperationResult::WorkspaceConvergence(summary) => workspace_convergence(summary),
             _ => Err(unexpected_result()),
         }
     }
 
     #[napi]
-    pub async fn refresh_shared_devices(&self) -> napi::Result<OhSharedDeviceRefreshStarted> {
-        let result = self
-            .engine
-            .execute(Operation::RefreshSharedDevices)
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::SharedDeviceRefreshStarted(summary) => {
-                Ok(OhSharedDeviceRefreshStarted {
-                    request_id: summary.request_id,
-                })
-            }
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn query_shared_device_refresh(
-        &self,
-        request_id: String,
-    ) -> napi::Result<Option<OhSharedDeviceRefresh>> {
-        let result = self
-            .engine
-            .execute(Operation::QuerySharedDeviceRefresh(
-                QuerySharedDeviceRefreshInput { request_id },
-            ))
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::SharedDeviceRefresh(summary) => {
-                summary.map(shared_device_refresh).transpose()
-            }
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn remove_member(&self, device_id: String) -> napi::Result<OhMemberRemoval> {
+    pub async fn remove_member(&self, device_id: String) -> napi::Result<OhWorkspaceConvergence> {
         let result = self
             .engine
             .execute(Operation::RemoveMember(RemoveMemberInput { device_id }))
             .await
             .map_err(engine_error)?;
         match result {
-            OperationResult::MemberRemoved(summary) => member_removal(summary),
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn query_member_removal(&self) -> napi::Result<OhMemberRemoval> {
-        let result = self
-            .engine
-            .execute(Operation::QueryMemberRemoval)
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::MemberRemovalStatus(summary) => member_removal(summary),
+            OperationResult::WorkspaceConvergence(summary) => workspace_convergence(summary),
             _ => Err(unexpected_result()),
         }
     }
@@ -465,19 +414,53 @@ impl OhEngine {
     }
 }
 
-fn member_removal(summary: uc_engine::MemberRemovalSummary) -> napi::Result<OhMemberRemoval> {
-    Ok(OhMemberRemoval {
+fn workspace_convergence(
+    summary: uc_engine::WorkspaceConvergenceSummary,
+) -> napi::Result<OhWorkspaceConvergence> {
+    Ok(OhWorkspaceConvergence {
         phase: match summary.phase {
-            uc_engine::MemberRemovalPhase::Applied => "applied",
-            uc_engine::MemberRemovalPhase::Converging => "converging",
-            uc_engine::MemberRemovalPhase::Complete => "complete",
-            uc_engine::MemberRemovalPhase::RecoveryRequired => "recovery_required",
+            uc_engine::WorkspaceConvergencePhaseSummary::LocallyApplied => "locally_applied",
+            uc_engine::WorkspaceConvergencePhaseSummary::Converging => "converging",
+            uc_engine::WorkspaceConvergencePhaseSummary::WaitingForOfflineMember => {
+                "waiting_for_offline_member"
+            }
+            uc_engine::WorkspaceConvergencePhaseSummary::Complete => "complete",
+            uc_engine::WorkspaceConvergencePhaseSummary::RecoveryRequired => "recovery_required",
         }
         .to_owned(),
-        intent_count: count_u64(summary.intent_count)?,
+        revision: summary.revision as f64,
+        change_count: count_u64(summary.change_count)?,
+        removal_intent_count: count_u64(summary.removal_intent_count)?,
         effective_member_count: count_u64(summary.effective_member_count)?,
+        confirmed_member_count: count_u64(summary.confirmed_member_count)?,
+        waiting_member_count: count_u64(summary.waiting_member_count)?,
         convergence_digest: summary.convergence_digest,
+        removed: summary.removed,
         updated_at_ms: summary.updated_at_ms as f64,
+        failure_category: summary.failure_category.map(|category| match category {
+            uc_engine::WorkspaceConvergenceFailureCategorySummary::SpaceMismatch => {
+                "space_mismatch".to_owned()
+            }
+            uc_engine::WorkspaceConvergenceFailureCategorySummary::ContinuityGap => {
+                "continuity_gap".to_owned()
+            }
+            uc_engine::WorkspaceConvergenceFailureCategorySummary::IdentityMismatch => {
+                "identity_mismatch".to_owned()
+            }
+            uc_engine::WorkspaceConvergenceFailureCategorySummary::DigestConflict => {
+                "digest_conflict".to_owned()
+            }
+            uc_engine::WorkspaceConvergenceFailureCategorySummary::Unauthorized => {
+                "unauthorized".to_owned()
+            }
+            uc_engine::WorkspaceConvergenceFailureCategorySummary::VersionIncompatible => {
+                "version_incompatible".to_owned()
+            }
+            uc_engine::WorkspaceConvergenceFailureCategorySummary::NoEffectiveMembers => {
+                "no_effective_members".to_owned()
+            }
+            uc_engine::WorkspaceConvergenceFailureCategorySummary::Storage => "storage".to_owned(),
+        }),
     })
 }
 
@@ -516,86 +499,6 @@ fn count(value: usize) -> napi::Result<u32> {
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 
-fn membership_convergence(
-    summary: uc_engine::MembershipConvergenceSummary,
-) -> napi::Result<OhMembershipConvergence> {
-    Ok(OhMembershipConvergence {
-        state: match summary.state {
-            uc_engine::MembershipConvergenceStateSummary::Complete => "complete",
-            uc_engine::MembershipConvergenceStateSummary::Converging => "converging",
-            uc_engine::MembershipConvergenceStateSummary::WaitingForUpgrade => {
-                "waiting_for_upgrade"
-            }
-            uc_engine::MembershipConvergenceStateSummary::Blocked => "blocked",
-        }
-        .to_owned(),
-        pending_count: count_u64(summary.pending_count)?,
-        waiting_for_peer_count: count_u64(summary.waiting_for_peer_count)?,
-        waiting_for_update_count: count_u64(summary.waiting_for_update_count)?,
-        version_incompatible_count: count_u64(summary.version_incompatible_count)?,
-        blocked_count: count_u64(summary.blocked_count)?,
-        rejected_count: count_u64(summary.rejected_count)?,
-    })
-}
-
-fn shared_device_refresh(
-    summary: uc_engine::SharedDeviceRefreshSummary,
-) -> napi::Result<OhSharedDeviceRefresh> {
-    Ok(OhSharedDeviceRefresh {
-        request_id: summary.request_id,
-        phase: match summary.phase {
-            uc_engine::SharedDeviceRefreshPhaseSummary::Started => "started",
-            uc_engine::SharedDeviceRefreshPhaseSummary::Discovering => "discovering",
-            uc_engine::SharedDeviceRefreshPhaseSummary::Connecting => "connecting",
-            uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted => "round_completed",
-        }
-        .to_owned(),
-        devices: summary
-            .devices
-            .into_iter()
-            .map(|device| {
-                Ok(OhSharedDeviceRefreshDevice {
-                    device_id: device.device_id,
-                    display_name: device.display_name,
-                    state: match device.state {
-                        uc_engine::SharedDeviceRefreshDeviceStateSummary::Discovered => {
-                            "discovered"
-                        }
-                        uc_engine::SharedDeviceRefreshDeviceStateSummary::Connecting => {
-                            "connecting"
-                        }
-                        uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected => "connected",
-                        uc_engine::SharedDeviceRefreshDeviceStateSummary::AlreadyPresent => {
-                            "already_present"
-                        }
-                        uc_engine::SharedDeviceRefreshDeviceStateSummary::WaitingForPeer => {
-                            "waiting_for_peer"
-                        }
-                        uc_engine::SharedDeviceRefreshDeviceStateSummary::WaitingForUpdate => {
-                            "waiting_for_update"
-                        }
-                        uc_engine::SharedDeviceRefreshDeviceStateSummary::VersionIncompatible => {
-                            "version_incompatible"
-                        }
-                        uc_engine::SharedDeviceRefreshDeviceStateSummary::Rejected => "rejected",
-                    }
-                    .to_owned(),
-                })
-            })
-            .collect::<napi::Result<Vec<_>>>()?,
-        total_count: count_u64(summary.total_count)?,
-        discovered_count: count_u64(summary.discovered_count)?,
-        connecting_count: count_u64(summary.connecting_count)?,
-        connected_count: count_u64(summary.connected_count)?,
-        already_present_count: count_u64(summary.already_present_count)?,
-        waiting_for_peer_count: count_u64(summary.waiting_for_peer_count)?,
-        waiting_for_update_count: count_u64(summary.waiting_for_update_count)?,
-        version_incompatible_count: count_u64(summary.version_incompatible_count)?,
-        rejected_count: count_u64(summary.rejected_count)?,
-        unavailable_source_count: count_u64(summary.unavailable_source_count)?,
-    })
-}
-
 fn count_u64(value: u64) -> napi::Result<u32> {
     u32::try_from(value).map_err(|_| unexpected_result())
 }
@@ -612,8 +515,7 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         error_code: None,
         error_category: None,
         retryable: None,
-        member_removal: None,
-        shared_device_refresh: None,
+        workspace_convergence: None,
         network_recovery_phase: None,
         next_retry_in_ms: None,
     };
@@ -640,11 +542,29 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
             map_event_error(error, &mut mapped);
         }
         EngineEvent::Fatal { error } => map_event_error(error, &mut mapped),
-        EngineEvent::MemberRemovalChanged(summary) => {
-            mapped.member_removal = member_removal(summary).ok();
-        }
-        EngineEvent::SharedDeviceRefreshChanged(summary) => {
-            mapped.shared_device_refresh = shared_device_refresh(summary).ok();
+        EngineEvent::WorkspaceConvergenceChanged(snapshot) => {
+            mapped.workspace_convergence = Some(OhWorkspaceConvergence {
+                phase: match snapshot.phase {
+                    WorkspacePhase::LocallyApplied => "locally_applied",
+                    WorkspacePhase::Converging => "converging",
+                    WorkspacePhase::WaitingForOfflineMember => "waiting_for_offline_member",
+                    WorkspacePhase::Complete => "complete",
+                    WorkspacePhase::RecoveryRequired => "recovery_required",
+                }
+                .to_owned(),
+                revision: snapshot.revision as f64,
+                change_count: snapshot.change_count.min(u32::MAX as usize) as u32,
+                removal_intent_count: snapshot.removal_intent_count.min(u32::MAX as usize) as u32,
+                effective_member_count: snapshot.effective_member_count.min(u32::MAX as usize)
+                    as u32,
+                confirmed_member_count: snapshot.confirmed_member_count.min(u32::MAX as usize)
+                    as u32,
+                waiting_member_count: snapshot.waiting_member_count.min(u32::MAX as usize) as u32,
+                convergence_digest: snapshot.convergence_digest.map(|digest| digest.to_string()),
+                removed: snapshot.removed,
+                updated_at_ms: snapshot.updated_at_ms as f64,
+                failure_category: None,
+            });
         }
         EngineEvent::NetworkRecoveryChanged(status) => {
             mapped.network_recovery_phase = Some(recovery_phase(status.phase).to_owned());
@@ -713,70 +633,37 @@ mod tests {
     use uc_engine::{
         EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
     };
+    use uc_engine::{WorkspacePhase, WorkspaceSnapshot};
 
-    use super::{count, map_event, membership_convergence};
+    use super::{count, map_event, workspace_convergence};
 
     #[test]
-    fn member_removal_event_keeps_the_complete_snapshot() {
-        let event = map_event(EngineEvent::MemberRemovalChanged(
-            uc_engine::MemberRemovalSummary {
-                phase: uc_engine::MemberRemovalPhase::Converging,
-                intent_count: 2,
-                effective_member_count: 1,
-                convergence_digest: Some("digest-1".into()),
-                updated_at_ms: 42,
+    fn workspace_convergence_event_keeps_the_complete_snapshot() {
+        let event = map_event(EngineEvent::WorkspaceConvergenceChanged(
+            WorkspaceSnapshot {
+                phase: WorkspacePhase::Converging,
+                revision: 2,
+                change_count: 1,
+                removal_intent_count: 1,
+                effective_member_count: 2,
+                confirmed_member_count: 0,
+                waiting_member_count: 1,
+                convergence_digest: None,
                 removed: true,
+                updated_at_ms: 42,
+                failure_category: None,
             },
         ));
 
-        assert_eq!(event.kind, "member_removal_changed");
-        let removal = event.member_removal.unwrap();
-        assert_eq!(removal.phase, "converging");
-        assert_eq!(removal.intent_count, 2);
-        assert_eq!(removal.effective_member_count, 1);
-        assert_eq!(removal.convergence_digest.as_deref(), Some("digest-1"));
-        assert_eq!(removal.updated_at_ms, 42.0);
-    }
-
-    #[test]
-    fn shared_device_refresh_event_keeps_the_complete_snapshot() {
-        let event = map_event(EngineEvent::SharedDeviceRefreshChanged(
-            uc_engine::SharedDeviceRefreshSummary {
-                request_id: "refresh-1".into(),
-                phase: uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted,
-                devices: vec![uc_engine::SharedDeviceRefreshDeviceSummary {
-                    device_id: "device-c".into(),
-                    display_name: "Device C".into(),
-                    state: uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected,
-                }],
-                total_count: 1,
-                discovered_count: 0,
-                connecting_count: 0,
-                connected_count: 1,
-                already_present_count: 0,
-                waiting_for_peer_count: 0,
-                waiting_for_update_count: 0,
-                version_incompatible_count: 0,
-                rejected_count: 0,
-                unavailable_source_count: 2,
-            },
-        ));
-
-        assert_eq!(event.kind, "shared_device_refresh_changed");
-        let refresh = event.shared_device_refresh.unwrap();
-        assert_eq!(refresh.request_id, "refresh-1");
-        assert_eq!(refresh.phase, "round_completed");
-        assert_eq!(
-            refresh
-                .devices
-                .into_iter()
-                .map(|device| (device.device_id, device.display_name, device.state))
-                .collect::<Vec<_>>(),
-            vec![("device-c".into(), "Device C".into(), "connected".into(),)]
-        );
-        assert_eq!(refresh.total_count, 1);
-        assert_eq!(refresh.connected_count, 1);
-        assert_eq!(refresh.unavailable_source_count, 2);
+        assert_eq!(event.kind, "workspace_convergence_changed");
+        let convergence = event.workspace_convergence.unwrap();
+        assert_eq!(convergence.phase, "converging");
+        assert_eq!(convergence.revision, 2.0);
+        assert_eq!(convergence.change_count, 1);
+        assert_eq!(convergence.effective_member_count, 2);
+        assert_eq!(convergence.waiting_member_count, 1);
+        assert_eq!(convergence.removed, true);
+        assert_eq!(convergence.updated_at_ms, 42.0);
     }
 
     #[test]
@@ -849,20 +736,25 @@ mod tests {
     }
 
     #[test]
-    fn membership_convergence_maps_state_and_counts() {
-        let status = membership_convergence(uc_engine::MembershipConvergenceSummary {
-            state: uc_engine::MembershipConvergenceStateSummary::WaitingForUpgrade,
-            pending_count: 7,
-            waiting_for_peer_count: 2,
-            waiting_for_update_count: 1,
-            version_incompatible_count: 3,
-            blocked_count: 0,
-            rejected_count: 1,
+    fn workspace_convergence_maps_phase_and_counts() {
+        let status = workspace_convergence(uc_engine::WorkspaceConvergenceSummary {
+            phase: uc_engine::WorkspaceConvergencePhaseSummary::WaitingForOfflineMember,
+            revision: 4,
+            change_count: 2,
+            removal_intent_count: 1,
+            effective_member_count: 2,
+            confirmed_member_count: 1,
+            waiting_member_count: 1,
+            convergence_digest: None,
+            removed: false,
+            updated_at_ms: 7,
+            failure_category: None,
         })
-        .expect("membership convergence must map");
+        .expect("workspace convergence must map");
 
-        assert_eq!(status.state, "waiting_for_upgrade");
-        assert_eq!(status.pending_count, 7);
-        assert_eq!(status.version_incompatible_count, 3);
+        assert_eq!(status.phase, "waiting_for_offline_member");
+        assert_eq!(status.revision, 4.0);
+        assert_eq!(status.change_count, 2);
+        assert_eq!(status.removal_intent_count, 1);
     }
 }

@@ -27,8 +27,9 @@ use thiserror::Error;
 
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::pairing::{
-    InvitationCode, JoinerChallengeResponse, JoinerRequest, PairingReject, PairingRejectReason,
-    PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer, SponsorConfirm,
+    InvitationCode, JoinerChallengeResponse, JoinerReady, JoinerRequest, PairingReject,
+    PairingRejectReason, PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer,
+    SponsorConfirm,
 };
 use uc_core::ports::pairing::PairingSessionId;
 use uc_core::security::IdentityFingerprint;
@@ -48,7 +49,7 @@ use uc_core::security::IdentityFingerprint;
 ///
 /// postcard 非 schema-兼容，每次新增字段都升版本号；旧 peer 发来的低版本帧会走
 /// [`WireDecodeError::UnsupportedVersion`] 分支显式拒连，让排障信号明确。
-const WIRE_VERSION: u8 = 7;
+const WIRE_VERSION: u8 = 8;
 
 // ============================================================================
 // Wire types (infra-local)
@@ -66,6 +67,7 @@ enum WireBody {
     AdmissionOffer(WireSponsorAdmissionOffer),
     ChallengeResponse(WireJoinerChallengeResponse),
     Confirm(WireSponsorConfirm),
+    Ready,
     Reject(WirePairingReject),
 }
 
@@ -251,6 +253,7 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
             encrypted_key_catalog: c.encrypted_key_catalog.clone(),
             group_epoch: c.group_epoch,
         }),
+        PairingSessionMessage::Ready(JoinerReady) => WireBody::Ready,
         PairingSessionMessage::Reject(r) => WireBody::Reject(WirePairingReject {
             reason: match &r.reason {
                 PairingRejectReason::InvitationMismatch => WireRejectReason::InvitationMismatch,
@@ -310,6 +313,7 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
             encrypted_key_catalog: c.encrypted_key_catalog,
             group_epoch: c.group_epoch,
         })),
+        WireBody::Ready => Ok(PairingSessionMessage::Ready(JoinerReady)),
         WireBody::Reject(r) => Ok(PairingSessionMessage::Reject(PairingReject {
             reason: match r.reason {
                 WireRejectReason::InvitationMismatch => PairingRejectReason::InvitationMismatch,

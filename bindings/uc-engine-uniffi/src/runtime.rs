@@ -17,9 +17,9 @@ use uc_engine::{
     HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
     HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
     NetworkSettingsPatch, ObserveClipboardChangeInput, Operation, OperationResult,
-    QuerySharedDeviceRefreshInput, RecoverSessionInput, RelayCredentialEdit, RemoveMemberInput,
-    ResendEntryInput, RestoreClipboardInput, SaveRelayInput, SaveRelayOutcome, SecretString,
-    SendFilesInput, SendImageInput, SendTextInput, SettingsPatch,
+    RecoverSessionInput, RelayCredentialEdit, RemoveMemberInput, ResendEntryInput,
+    RestoreClipboardInput, SaveRelayInput, SaveRelayOutcome, SecretString, SendFilesInput,
+    SendImageInput, SendTextInput, SettingsPatch,
 };
 use zeroize::Zeroizing;
 
@@ -203,90 +203,39 @@ pub struct Device {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum MembershipConvergenceState {
-    Complete,
+pub enum WorkspaceConvergencePhase {
+    LocallyApplied,
     Converging,
-    WaitingForUpgrade,
-    Blocked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct MembershipConvergence {
-    pub state: MembershipConvergenceState,
-    pub pending_count: u64,
-    pub waiting_for_peer_count: u64,
-    pub waiting_for_update_count: u64,
-    pub version_incompatible_count: u64,
-    pub blocked_count: u64,
-    pub rejected_count: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum SharedDeviceRefreshPhase {
-    Started,
-    Discovering,
-    Connecting,
-    RoundCompleted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum SharedDeviceRefreshDeviceState {
-    Discovered,
-    Connecting,
-    Connected,
-    AlreadyPresent,
-    WaitingForPeer,
-    WaitingForUpdate,
-    VersionIncompatible,
-    Rejected,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct SharedDeviceRefreshDevice {
-    pub device_id: String,
-    pub display_name: String,
-    pub state: SharedDeviceRefreshDeviceState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct SharedDeviceRefreshStarted {
-    pub request_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct SharedDeviceRefresh {
-    pub request_id: String,
-    pub phase: SharedDeviceRefreshPhase,
-    pub devices: Vec<SharedDeviceRefreshDevice>,
-    pub total_count: u64,
-    pub discovered_count: u64,
-    pub connecting_count: u64,
-    pub connected_count: u64,
-    pub already_present_count: u64,
-    pub waiting_for_peer_count: u64,
-    pub waiting_for_update_count: u64,
-    pub version_incompatible_count: u64,
-    pub rejected_count: u64,
-    pub unavailable_source_count: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum MemberRemovalPhase {
-    Applied,
-    Converging,
+    WaitingForOfflineMember,
     Complete,
     RecoveryRequired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum WorkspaceConvergenceFailureCategory {
+    SpaceMismatch,
+    ContinuityGap,
+    IdentityMismatch,
+    DigestConflict,
+    Unauthorized,
+    VersionIncompatible,
+    NoEffectiveMembers,
+    Storage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct MemberRemoval {
-    pub phase: MemberRemovalPhase,
-    pub intent_count: u64,
+pub struct WorkspaceConvergence {
+    pub phase: WorkspaceConvergencePhase,
+    pub revision: u64,
+    pub change_count: u64,
+    pub removal_intent_count: u64,
     pub effective_member_count: u64,
+    pub confirmed_member_count: u64,
+    pub waiting_member_count: u64,
     pub convergence_digest: Option<String>,
-    pub updated_at_ms: i64,
-    /// 本机是否已经观察到自身被移出当前空间。
     pub removed: bool,
+    pub updated_at_ms: i64,
+    pub failure_category: Option<WorkspaceConvergenceFailureCategory>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -351,22 +300,12 @@ enum WorkerCommand {
     ListDevices {
         response: mpsc::Sender<Result<Vec<Device>, BindingError>>,
     },
-    QueryMembershipConvergence {
-        response: mpsc::Sender<Result<MembershipConvergence, BindingError>>,
-    },
-    RefreshSharedDevices {
-        response: mpsc::Sender<Result<SharedDeviceRefreshStarted, BindingError>>,
-    },
-    QuerySharedDeviceRefresh {
-        request_id: String,
-        response: mpsc::Sender<Result<Option<SharedDeviceRefresh>, BindingError>>,
+    QueryWorkspaceConvergence {
+        response: mpsc::Sender<Result<WorkspaceConvergence, BindingError>>,
     },
     RemoveMember {
         device_id: String,
-        response: mpsc::Sender<Result<MemberRemoval, BindingError>>,
-    },
-    QueryMemberRemoval {
-        response: mpsc::Sender<Result<MemberRemoval, BindingError>>,
+        response: mpsc::Sender<Result<WorkspaceConvergence, BindingError>>,
     },
     ResendEntry {
         entry_id: String,
@@ -815,33 +754,15 @@ impl MobileEngine {
         self.request(|response| WorkerCommand::ListDevices { response })
     }
 
-    pub fn query_membership_convergence(&self) -> Result<MembershipConvergence, BindingError> {
-        self.request(|response| WorkerCommand::QueryMembershipConvergence { response })
+    pub fn query_workspace_convergence(&self) -> Result<WorkspaceConvergence, BindingError> {
+        self.request(|response| WorkerCommand::QueryWorkspaceConvergence { response })
     }
 
-    pub fn refresh_shared_devices(&self) -> Result<SharedDeviceRefreshStarted, BindingError> {
-        self.request(|response| WorkerCommand::RefreshSharedDevices { response })
-    }
-
-    pub fn query_shared_device_refresh(
-        &self,
-        request_id: String,
-    ) -> Result<Option<SharedDeviceRefresh>, BindingError> {
-        self.request(|response| WorkerCommand::QuerySharedDeviceRefresh {
-            request_id,
-            response,
-        })
-    }
-
-    pub fn remove_member(&self, device_id: String) -> Result<MemberRemoval, BindingError> {
+    pub fn remove_member(&self, device_id: String) -> Result<WorkspaceConvergence, BindingError> {
         self.request(|response| WorkerCommand::RemoveMember {
             device_id,
             response,
         })
-    }
-
-    pub fn query_member_removal(&self) -> Result<MemberRemoval, BindingError> {
-        self.request(|response| WorkerCommand::QueryMemberRemoval { response })
     }
 
     pub fn resend_entry(
@@ -1406,33 +1327,12 @@ async fn run_worker_loop(
                 }
                 let _ = response.send(result);
             }
-            WorkerCommand::QueryMembershipConvergence { response } => {
+            WorkerCommand::QueryWorkspaceConvergence { response } => {
                 let result = engine
-                    .execute(Operation::QueryMembershipConvergence)
+                    .execute(Operation::QueryWorkspaceConvergence)
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_membership_convergence);
-                let _ = response.send(result);
-            }
-            WorkerCommand::RefreshSharedDevices { response } => {
-                let result = engine
-                    .execute(Operation::RefreshSharedDevices)
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_shared_device_refresh_started);
-                let _ = response.send(result);
-            }
-            WorkerCommand::QuerySharedDeviceRefresh {
-                request_id,
-                response,
-            } => {
-                let result = engine
-                    .execute(Operation::QuerySharedDeviceRefresh(
-                        QuerySharedDeviceRefreshInput { request_id },
-                    ))
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_shared_device_refresh);
+                    .and_then(map_workspace_convergence);
                 let _ = response.send(result);
             }
             WorkerCommand::RemoveMember {
@@ -1443,15 +1343,7 @@ async fn run_worker_loop(
                     .execute(Operation::RemoveMember(RemoveMemberInput { device_id }))
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_member_removed);
-                let _ = response.send(result);
-            }
-            WorkerCommand::QueryMemberRemoval { response } => {
-                let result = engine
-                    .execute(Operation::QueryMemberRemoval)
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_member_removal_status);
+                    .and_then(map_workspace_convergence);
                 let _ = response.send(result);
             }
             WorkerCommand::ResendEntry {
@@ -1763,14 +1655,9 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
             state: event.state,
             at_ms: event.at_ms,
         },
-        uc_engine::EngineEvent::MemberRemovalChanged(summary) => {
-            BindingEvent::MemberRemovalChanged {
-                removal: map_member_removal_summary(summary),
-            }
-        }
-        uc_engine::EngineEvent::SharedDeviceRefreshChanged(summary) => {
-            BindingEvent::SharedDeviceRefreshChanged {
-                refresh: map_shared_device_refresh_summary(summary),
+        uc_engine::EngineEvent::WorkspaceConvergenceChanged(snapshot) => {
+            BindingEvent::WorkspaceConvergenceChanged {
+                convergence: map_workspace_snapshot(snapshot),
             }
         }
         uc_engine::EngineEvent::TransferProgress(event) => BindingEvent::TransferProgress {
@@ -1820,16 +1707,12 @@ map_enum!(map_invitation_availability, uc_engine::InvitationAvailability => Invi
     CrossNetwork, SameLocalNetwork,
 );
 
-map_enum!(map_membership_convergence_state, uc_engine::MembershipConvergenceStateSummary => MembershipConvergenceState,
-    Complete, Converging, WaitingForUpgrade, Blocked,
+map_enum!(map_workspace_convergence_phase, uc_engine::WorkspaceConvergencePhaseSummary => WorkspaceConvergencePhase,
+    LocallyApplied, Converging, WaitingForOfflineMember, Complete, RecoveryRequired,
 );
 
-map_enum!(map_shared_device_refresh_phase, uc_engine::SharedDeviceRefreshPhaseSummary => SharedDeviceRefreshPhase,
-    Started, Discovering, Connecting, RoundCompleted,
-);
-
-map_enum!(map_shared_device_refresh_device_state, uc_engine::SharedDeviceRefreshDeviceStateSummary => SharedDeviceRefreshDeviceState,
-    Discovered, Connecting, Connected, AlreadyPresent, WaitingForPeer, WaitingForUpdate, VersionIncompatible, Rejected,
+map_enum!(map_workspace_convergence_failure_category, uc_engine::WorkspaceConvergenceFailureCategorySummary => WorkspaceConvergenceFailureCategory,
+    SpaceMismatch, ContinuityGap, IdentityMismatch, DigestConflict, Unauthorized, VersionIncompatible, NoEffectiveMembers, Storage,
 );
 
 map_enum!(map_clipboard_origin, uc_engine::ClipboardOriginSummary => BindingClipboardOrigin,
@@ -1892,90 +1775,74 @@ fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
         .collect())
 }
 
-fn map_membership_convergence(
+fn map_workspace_convergence(
     result: OperationResult,
-) -> Result<MembershipConvergence, BindingError> {
-    unpack_operation!(result, OperationResult::MembershipConvergence(summary) => MembershipConvergence {
-        state: map_membership_convergence_state(summary.state),
-        pending_count: summary.pending_count,
-        waiting_for_peer_count: summary.waiting_for_peer_count,
-        waiting_for_update_count: summary.waiting_for_update_count,
-        version_incompatible_count: summary.version_incompatible_count,
-        blocked_count: summary.blocked_count,
-        rejected_count: summary.rejected_count,
-    })
-}
-
-fn map_shared_device_refresh_started(
-    result: OperationResult,
-) -> Result<SharedDeviceRefreshStarted, BindingError> {
-    unpack_operation!(result, OperationResult::SharedDeviceRefreshStarted(summary) => SharedDeviceRefreshStarted {
-        request_id: summary.request_id,
-    })
-}
-
-fn map_shared_device_refresh(
-    result: OperationResult,
-) -> Result<Option<SharedDeviceRefresh>, BindingError> {
-    unpack_operation!(result, OperationResult::SharedDeviceRefresh(summary) => summary
-        .map(map_shared_device_refresh_summary))
-}
-
-fn map_shared_device_refresh_summary(
-    summary: uc_engine::SharedDeviceRefreshSummary,
-) -> SharedDeviceRefresh {
-    SharedDeviceRefresh {
-        request_id: summary.request_id,
-        phase: map_shared_device_refresh_phase(summary.phase),
-        devices: summary
-            .devices
-            .into_iter()
-            .map(|device| SharedDeviceRefreshDevice {
-                device_id: device.device_id,
-                display_name: device.display_name,
-                state: map_shared_device_refresh_device_state(device.state),
-            })
-            .collect(),
-        total_count: summary.total_count,
-        discovered_count: summary.discovered_count,
-        connecting_count: summary.connecting_count,
-        connected_count: summary.connected_count,
-        already_present_count: summary.already_present_count,
-        waiting_for_peer_count: summary.waiting_for_peer_count,
-        waiting_for_update_count: summary.waiting_for_update_count,
-        version_incompatible_count: summary.version_incompatible_count,
-        rejected_count: summary.rejected_count,
-        unavailable_source_count: summary.unavailable_source_count,
-    }
-}
-
-fn map_member_removed(result: OperationResult) -> Result<MemberRemoval, BindingError> {
-    match result {
-        OperationResult::MemberRemoved(summary) => Ok(map_member_removal_summary(summary)),
-        _ => Err(BindingError::UnexpectedResult),
-    }
-}
-
-fn map_member_removal_status(result: OperationResult) -> Result<MemberRemoval, BindingError> {
-    match result {
-        OperationResult::MemberRemovalStatus(summary) => Ok(map_member_removal_summary(summary)),
-        _ => Err(BindingError::UnexpectedResult),
-    }
-}
-
-fn map_member_removal_summary(summary: uc_engine::MemberRemovalSummary) -> MemberRemoval {
-    MemberRemoval {
-        phase: match summary.phase {
-            uc_engine::MemberRemovalPhase::Applied => MemberRemovalPhase::Applied,
-            uc_engine::MemberRemovalPhase::Converging => MemberRemovalPhase::Converging,
-            uc_engine::MemberRemovalPhase::Complete => MemberRemovalPhase::Complete,
-            uc_engine::MemberRemovalPhase::RecoveryRequired => MemberRemovalPhase::RecoveryRequired,
-        },
-        intent_count: summary.intent_count,
+) -> Result<WorkspaceConvergence, BindingError> {
+    unpack_operation!(result, OperationResult::WorkspaceConvergence(summary) => WorkspaceConvergence {
+        phase: map_workspace_convergence_phase(summary.phase),
+        revision: summary.revision,
+        change_count: summary.change_count,
+        removal_intent_count: summary.removal_intent_count,
         effective_member_count: summary.effective_member_count,
+        confirmed_member_count: summary.confirmed_member_count,
+        waiting_member_count: summary.waiting_member_count,
         convergence_digest: summary.convergence_digest,
-        updated_at_ms: summary.updated_at_ms,
         removed: summary.removed,
+        updated_at_ms: summary.updated_at_ms,
+        failure_category: summary
+            .failure_category
+            .map(map_workspace_convergence_failure_category),
+    })
+}
+
+fn map_workspace_snapshot(snapshot: uc_engine::WorkspaceSnapshot) -> WorkspaceConvergence {
+    WorkspaceConvergence {
+        phase: match snapshot.phase {
+            uc_engine::WorkspacePhase::LocallyApplied => WorkspaceConvergencePhase::LocallyApplied,
+            uc_engine::WorkspacePhase::Converging => WorkspaceConvergencePhase::Converging,
+            uc_engine::WorkspacePhase::WaitingForOfflineMember => {
+                WorkspaceConvergencePhase::WaitingForOfflineMember
+            }
+            uc_engine::WorkspacePhase::Complete => WorkspaceConvergencePhase::Complete,
+            uc_engine::WorkspacePhase::RecoveryRequired => {
+                WorkspaceConvergencePhase::RecoveryRequired
+            }
+        },
+        revision: snapshot.revision,
+        change_count: count_to_u64(snapshot.change_count).unwrap_or(u64::MAX),
+        removal_intent_count: count_to_u64(snapshot.removal_intent_count).unwrap_or(u64::MAX),
+        effective_member_count: count_to_u64(snapshot.effective_member_count).unwrap_or(u64::MAX),
+        confirmed_member_count: count_to_u64(snapshot.confirmed_member_count).unwrap_or(u64::MAX),
+        waiting_member_count: count_to_u64(snapshot.waiting_member_count).unwrap_or(u64::MAX),
+        convergence_digest: snapshot.convergence_digest.map(|digest| digest.to_string()),
+        removed: snapshot.removed,
+        updated_at_ms: snapshot.updated_at_ms,
+        failure_category: snapshot.failure_category.map(|category| match category {
+            uc_engine::WorkspaceFailureCategory::SpaceMismatch => {
+                WorkspaceConvergenceFailureCategory::SpaceMismatch
+            }
+            uc_engine::WorkspaceFailureCategory::ContinuityGap => {
+                WorkspaceConvergenceFailureCategory::ContinuityGap
+            }
+            uc_engine::WorkspaceFailureCategory::IdentityMismatch => {
+                WorkspaceConvergenceFailureCategory::IdentityMismatch
+            }
+            uc_engine::WorkspaceFailureCategory::DigestConflict => {
+                WorkspaceConvergenceFailureCategory::DigestConflict
+            }
+            uc_engine::WorkspaceFailureCategory::Unauthorized => {
+                WorkspaceConvergenceFailureCategory::Unauthorized
+            }
+            uc_engine::WorkspaceFailureCategory::VersionIncompatible => {
+                WorkspaceConvergenceFailureCategory::VersionIncompatible
+            }
+            uc_engine::WorkspaceFailureCategory::NoEffectiveMembers => {
+                WorkspaceConvergenceFailureCategory::NoEffectiveMembers
+            }
+            uc_engine::WorkspaceFailureCategory::Storage => {
+                WorkspaceConvergenceFailureCategory::Storage
+            }
+        }),
     }
 }
 
@@ -2421,82 +2288,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn member_removal_methods_and_events_share_the_complete_snapshot() {
-        let _query: fn(&MobileEngine) -> Result<MemberRemoval, BindingError> =
-            MobileEngine::query_member_removal;
-        let event = map_engine_event(uc_engine::EngineEvent::MemberRemovalChanged(
-            uc_engine::MemberRemovalSummary {
-                phase: uc_engine::MemberRemovalPhase::Converging,
-                intent_count: 2,
-                effective_member_count: 1,
-                convergence_digest: Some("digest-1".into()),
+    fn workspace_convergence_methods_and_events_share_the_complete_snapshot() {
+        let _query: fn(&MobileEngine) -> Result<WorkspaceConvergence, BindingError> =
+            MobileEngine::query_workspace_convergence;
+        let event = map_engine_event(uc_engine::EngineEvent::WorkspaceConvergenceChanged(
+            uc_engine::WorkspaceSnapshot {
+                phase: uc_engine::WorkspacePhase::Converging,
+                revision: 2,
+                change_count: 1,
+                removal_intent_count: 1,
+                effective_member_count: 2,
+                confirmed_member_count: 0,
+                waiting_member_count: 1,
+                convergence_digest: None,
+                removed: false,
                 updated_at_ms: 42,
-                removed: true,
+                failure_category: None,
             },
         ));
 
         assert_eq!(
             event,
-            BindingEvent::MemberRemovalChanged {
-                removal: MemberRemoval {
-                    phase: MemberRemovalPhase::Converging,
-                    intent_count: 2,
-                    effective_member_count: 1,
-                    convergence_digest: Some("digest-1".into()),
+            BindingEvent::WorkspaceConvergenceChanged {
+                convergence: WorkspaceConvergence {
+                    phase: WorkspaceConvergencePhase::Converging,
+                    revision: 2,
+                    change_count: 1,
+                    removal_intent_count: 1,
+                    effective_member_count: 2,
+                    confirmed_member_count: 0,
+                    waiting_member_count: 1,
+                    convergence_digest: None,
+                    removed: false,
                     updated_at_ms: 42,
-                    removed: true,
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn shared_device_refresh_methods_and_event_keep_the_complete_snapshot() {
-        let _refresh: fn(&MobileEngine) -> Result<SharedDeviceRefreshStarted, BindingError> =
-            MobileEngine::refresh_shared_devices;
-        let _query: fn(&MobileEngine, String) -> Result<Option<SharedDeviceRefresh>, BindingError> =
-            MobileEngine::query_shared_device_refresh;
-        let summary = uc_engine::SharedDeviceRefreshSummary {
-            request_id: "refresh-1".into(),
-            phase: uc_engine::SharedDeviceRefreshPhaseSummary::RoundCompleted,
-            devices: vec![uc_engine::SharedDeviceRefreshDeviceSummary {
-                device_id: "device-c".into(),
-                display_name: "Device C".into(),
-                state: uc_engine::SharedDeviceRefreshDeviceStateSummary::Connected,
-            }],
-            total_count: 1,
-            discovered_count: 0,
-            connecting_count: 0,
-            connected_count: 1,
-            already_present_count: 0,
-            waiting_for_peer_count: 0,
-            waiting_for_update_count: 0,
-            version_incompatible_count: 0,
-            rejected_count: 0,
-            unavailable_source_count: 2,
-        };
-
-        assert_eq!(
-            map_engine_event(uc_engine::EngineEvent::SharedDeviceRefreshChanged(summary)),
-            BindingEvent::SharedDeviceRefreshChanged {
-                refresh: SharedDeviceRefresh {
-                    request_id: "refresh-1".into(),
-                    phase: SharedDeviceRefreshPhase::RoundCompleted,
-                    devices: vec![SharedDeviceRefreshDevice {
-                        device_id: "device-c".into(),
-                        display_name: "Device C".into(),
-                        state: SharedDeviceRefreshDeviceState::Connected,
-                    }],
-                    total_count: 1,
-                    discovered_count: 0,
-                    connecting_count: 0,
-                    connected_count: 1,
-                    already_present_count: 0,
-                    waiting_for_peer_count: 0,
-                    waiting_for_update_count: 0,
-                    version_incompatible_count: 0,
-                    rejected_count: 0,
-                    unavailable_source_count: 2,
+                    failure_category: None,
                 },
             }
         );

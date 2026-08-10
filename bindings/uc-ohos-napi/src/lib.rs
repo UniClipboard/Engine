@@ -76,52 +76,18 @@ pub struct OhLocalDevice {
 }
 
 #[napi(object)]
-pub struct OhMembershipConvergence {
-    pub state: String,
-    pub pending_count: u32,
-    pub waiting_for_peer_count: u32,
-    pub waiting_for_update_count: u32,
-    pub version_incompatible_count: u32,
-    pub blocked_count: u32,
-    pub rejected_count: u32,
-}
-
-#[napi(object)]
-pub struct OhSharedDeviceRefreshStarted {
-    pub request_id: String,
-}
-
-#[napi(object)]
-pub struct OhSharedDeviceRefreshDevice {
-    pub device_id: String,
-    pub display_name: String,
-    pub state: String,
-}
-
-#[napi(object)]
-pub struct OhSharedDeviceRefresh {
-    pub request_id: String,
+pub struct OhWorkspaceConvergence {
     pub phase: String,
-    pub devices: Vec<OhSharedDeviceRefreshDevice>,
-    pub total_count: u32,
-    pub discovered_count: u32,
-    pub connecting_count: u32,
-    pub connected_count: u32,
-    pub already_present_count: u32,
-    pub waiting_for_peer_count: u32,
-    pub waiting_for_update_count: u32,
-    pub version_incompatible_count: u32,
-    pub rejected_count: u32,
-    pub unavailable_source_count: u32,
-}
-
-#[napi(object)]
-pub struct OhMemberRemoval {
-    pub phase: String,
-    pub intent_count: u32,
+    pub revision: f64,
+    pub change_count: u32,
+    pub removal_intent_count: u32,
     pub effective_member_count: u32,
+    pub confirmed_member_count: u32,
+    pub waiting_member_count: u32,
     pub convergence_digest: Option<String>,
+    pub removed: bool,
     pub updated_at_ms: f64,
+    pub failure_category: Option<String>,
 }
 
 #[napi(object)]
@@ -170,8 +136,7 @@ pub struct OhEngineEvent {
     pub error_code: Option<u32>,
     pub error_category: Option<String>,
     pub retryable: Option<bool>,
-    pub member_removal: Option<OhMemberRemoval>,
-    pub shared_device_refresh: Option<OhSharedDeviceRefresh>,
+    pub workspace_convergence: Option<OhWorkspaceConvergence>,
     pub network_recovery_phase: Option<String>,
     pub next_retry_in_ms: Option<f64>,
 }

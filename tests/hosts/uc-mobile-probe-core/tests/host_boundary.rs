@@ -136,20 +136,24 @@ fn ios_and_android_probe_member_removal_through_the_shared_contract() {
     let ios_model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
     let ios_view = read(root.join("tests/hosts/ios/EngineProbe/ProbeView.swift"));
 
-    for command in ["RemoveMember", "QueryMemberRemoval"] {
+    for command in ["RemoveMember", "QueryWorkspaceConvergence"] {
         assert!(source.contains(command), "missing command: {command}");
     }
     for field in [
         "phase",
-        "intent_count",
+        "revision",
+        "change_count",
+        "removal_intent_count",
         "effective_member_count",
+        "confirmed_member_count",
+        "waiting_member_count",
         "convergence_digest",
         "updated_at_ms",
-        "last_member_removal",
+        "last_workspace_phase",
     ] {
         assert!(source.contains(field), "missing field: {field}");
     }
-    assert!(ios_model.contains("query_member_removal"));
+    assert!(ios_model.contains("query_workspace_convergence"));
     assert!(ios_view.contains("Member removal"));
 }
 

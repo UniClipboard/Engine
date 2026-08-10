@@ -13,6 +13,7 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use tokio::sync::Notify;
 use tracing::{debug, debug_span};
 use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::SpaceId;
@@ -80,6 +81,7 @@ impl ResolvedContentKey {
 #[derive(Clone)]
 pub struct InMemorySession {
     state: Arc<Mutex<State>>,
+    ready: Arc<Notify>,
 }
 
 pub(crate) struct SessionSnapshot(State);
@@ -94,6 +96,7 @@ impl InMemorySession {
                 current_epoch: None,
                 content_keys: HashMap::new(),
             })),
+            ready: Arc::new(Notify::new()),
         }
     }
 
@@ -101,6 +104,16 @@ impl InMemorySession {
         match self.state.lock() {
             Ok(state) => state.master_key.is_some(),
             Err(poisoned) => poisoned.into_inner().master_key.is_some(),
+        }
+    }
+
+    pub async fn wait_until_ready(&self) {
+        loop {
+            let notified = self.ready.notified();
+            if self.is_ready() {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -123,6 +136,7 @@ impl InMemorySession {
             state.content_keys.clear();
             debug!("master key set");
         });
+        self.ready.notify_waiters();
     }
 
     pub(crate) fn set_master_key_for_space(&self, space_id: SpaceId, master_key: MasterKey) {
@@ -139,6 +153,8 @@ impl InMemorySession {
                 key: master_key,
             },
         );
+        drop(state);
+        self.ready.notify_waiters();
     }
 
     fn create_ready_space_material(
@@ -557,10 +573,31 @@ impl Default for InMemorySession {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use uc_core::ids::SpaceId;
     use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch, ProtectionGroupId};
 
     use super::*;
+
+    #[tokio::test]
+    async fn wait_until_ready_unblocks_when_space_material_is_installed() {
+        let session = InMemorySession::new();
+        let waiting = session.wait_until_ready();
+        tokio::pin!(waiting);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+
+        session.set_master_key_for_space(SpaceId::from_str("space-a"), key(1));
+
+        tokio::time::timeout(Duration::from_millis(10), waiting)
+            .await
+            .expect("waiting session must unblock when it becomes ready");
+    }
 
     fn key(seed: u8) -> MasterKey {
         MasterKey::from_bytes(&[seed; 32]).unwrap()
