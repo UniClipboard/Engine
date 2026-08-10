@@ -2,16 +2,16 @@ use std::sync::Arc;
 
 use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::{
+    ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
+    InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps,
+    InboundWrite as ApplyInboundWrite, InteractiveReceiveDeps,
+};
+use uc_application::facade::{
     ClipboardCaptureFacade, ClipboardInboundEvent, ClipboardInboundEventAction,
     ClipboardInboundEventPort, ClipboardInboundRuntime, ClipboardInboundRuntimeDeps,
     ClipboardLiveIndexDeps, ClipboardLiveIndexFacade, ClipboardLiveIndexPort, ClipboardLiveIndexer,
     ClipboardOutboundDeps, ClipboardOutboundFacade, ClipboardSyncRuntime, ClipboardSyncRuntimeDeps,
     InboundClipboardApplyPort,
-};
-use uc_application::{
-    ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
-    InboundCapture as ApplyInboundCapture, InboundReceiveAttemptDeps,
-    InboundWrite as ApplyInboundWrite, InteractiveReceiveDeps,
 };
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 

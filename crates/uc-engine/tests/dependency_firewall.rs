@@ -457,6 +457,58 @@ fn engine_does_not_restore_unrelated_search_or_membership_activity_steps() {
     }
 }
 
+#[test]
+fn engine_only_imports_application_facade_and_deps() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = read_rs_sources(&workspace_root.join("crates/uc-engine/src"));
+    let mobile_lan = read_rs_sources(&workspace_root.join("compatibility/uc-mobile-lan/src"));
+
+    for source in [&engine, &mobile_lan] {
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("use uc_application::") {
+                continue;
+            }
+            assert!(
+                trimmed.starts_with("use uc_application::facade::")
+                    || trimmed.starts_with("use uc_application::deps::"),
+                "external crate must only import uc_application::facade or ::deps: {line}"
+            );
+        }
+    }
+}
+
+#[test]
+fn application_root_only_exposes_facade_and_deps() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let lib = std::fs::read_to_string(workspace_root.join("crates/uc-application/src/lib.rs"))
+        .expect("application lib.rs must be readable");
+
+    for line in lib.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("pub mod ") || trimmed.starts_with("pub use ") {
+            assert!(
+                trimmed.starts_with("pub mod deps;")
+                    || trimmed.starts_with("pub mod facade;")
+                    || trimmed.starts_with("pub use deps::"),
+                "crate root must only expose facade and deps: {line}"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_central_or_nested_usecases_directories_remain() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let application = workspace_root.join("crates/uc-application/src");
+    for forbidden in ["usecases", "space/roster/usecases", "runtime", "membership"] {
+        assert!(
+            !application.join(forbidden).exists(),
+            "forbidden legacy directory must be removed: {forbidden}"
+        );
+    }
+}
+
 fn read_rs_sources(root: &Path) -> String {
     let mut pending = vec![root.to_path_buf()];
     let mut source = String::new();

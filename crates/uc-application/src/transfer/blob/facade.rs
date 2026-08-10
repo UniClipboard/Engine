@@ -19,13 +19,14 @@ use uc_core::ports::blob::{
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::ContentHashPort;
 
-use crate::facade::file_transfer::{
-    BeginReceiverTransfer, FileTransferFacade, FileTransferSession, ReceiverTransferRegistration,
-};
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::transfer::blob::{
     FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput, PublishBlobUseCase,
 };
+use crate::transfer::file::facade::{
+    BeginReceiverTransfer, FileTransferFacade, ReceiverTransferRegistration,
+};
+use crate::transfer::file::session::FileTransferSession;
 
 /// 共享的 host event 总线。
 ///

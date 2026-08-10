@@ -13,6 +13,8 @@ use uc_application::facade::settings::{
 };
 use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
+use uc_application::facade::ApplyInboundClipboardUseCase;
+#[cfg(feature = "lan-compat")]
 use uc_application::facade::{ActiveClipboardFacade, FileTransferFacade};
 use uc_application::facade::{
     AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardCaptureFacade,
@@ -22,8 +24,6 @@ use uc_application::facade::{
     MemberRosterFacade, ResourceFacade, ResourceFacadeDeps, SearchFacade, SettingsFacade,
     StorageFacade, StorageFacadeDeps, UpgradeFacade, UpgradeFacadeDeps,
 };
-#[cfg(feature = "lan-compat")]
-use uc_application::ApplyInboundClipboardUseCase;
 use uc_core::clipboard::ClipboardIntegrationMode;
 #[cfg(feature = "lan-compat")]
 use uc_infra::fs::FsInboundFileTarget;
