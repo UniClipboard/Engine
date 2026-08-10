@@ -49,6 +49,10 @@ pub struct FileTransferLifecycleDeps {
     pub file_cache_dir: PathBuf,
     pub clock: Arc<dyn ClockPort>,
     pub host_event_bus: Arc<HostEventBus>,
+    /// Shared receive-readiness gate. One instance is injected into every
+    /// receiver (file-transfer lifecycle and clipboard inbound apply), so
+    /// opening the gate unblocks all inbound paths.
+    pub receive_readiness: Arc<ReceiveReadinessCoordinator>,
 }
 
 /// Wraps receiver-side projection and the periodic health tasks.
@@ -110,6 +114,7 @@ impl FileTransferLifecycle {
             file_cache_dir,
             clock,
             host_event_bus,
+            receive_readiness,
         } = deps;
         Self {
             host_event_bus,
@@ -127,7 +132,7 @@ impl FileTransferLifecycle {
                 commit_inbound,
                 Arc::clone(&clock),
             )),
-            receive_readiness: Arc::new(ReceiveReadinessCoordinator::new()),
+            receive_readiness,
             privacy_maintenance,
             save_dir_resolver,
             file_cache_dir,
