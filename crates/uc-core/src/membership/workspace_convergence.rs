@@ -74,6 +74,20 @@ pub struct AdmissionChangeFacts {
     pub identity_signature: Vec<u8>,
 }
 
+impl AdmissionChangeFacts {
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"uniclipboard-workspace-admission/v1\\0");
+        bytes.extend_from_slice(self.member_instance.as_bytes());
+        bytes.extend_from_slice(self.device_id.as_str().as_bytes());
+        bytes.extend_from_slice(self.device_name.as_bytes());
+        bytes.extend_from_slice(self.identity_fingerprint.as_display().as_bytes());
+        bytes.extend_from_slice(&self.transport_public_key);
+        bytes.extend_from_slice(&self.transport_address_blob);
+        bytes
+    }
+}
+
 /// Facts needed to verify and apply a removal change: the verifiable facts
 /// for the removed member instances. The removed instances are derived from
 /// the validated removal intent set and are listed explicitly so that a
@@ -216,6 +230,17 @@ pub enum WorkspaceConvergenceEvent {
         target_digest: [u8; 32],
         has_more: bool,
     },
+    /// A peer durably acknowledged a validated removal intent on the
+    /// ordinary member channel.
+    IntentAcknowledged {
+        peer: DeviceId,
+        intent_id: RemovalIntentId,
+    },
+    /// A validated removal notice announced the local instance's removal.
+    RemovalNoticeAccepted(RemovalIntentId),
+    /// A removal notice was durably delivered to the removed target device
+    /// (best-effort delivery progress, not a completion condition).
+    RemovalNoticeDelivered(RemovalIntentId),
     /// A pending handoff record was saved for a recipient that has not yet
     /// confirmed the current target digest. Creating or replacing the
     /// record for the same recipient is idempotent for the same target
@@ -316,8 +341,19 @@ pub struct WorkspaceConvergenceState {
     /// Validated removal intents, used to compute the unified target when a
     /// new removal change is formed.
     pub removal_intent_records: Vec<SignedRemovalIntent>,
+    /// Intent propagation progress on the ordinary member channel:
+    /// (recipient device, intent id) → acknowledgement time.
+    pub peer_intent_acks: BTreeMap<(DeviceId, RemovalIntentId), i64>,
+    /// Removal intents whose notice was durably delivered to the removed
+    /// target device. Best-effort progress, not a completion condition.
+    pub notified_removals: BTreeSet<RemovalIntentId>,
+    /// Removal notices already accepted by this local instance. This is kept
+    /// separately from the sender's delivery progress so a repeated notice
+    /// can return a stable idempotent result.
+    pub accepted_removal_notices: BTreeSet<RemovalIntentId>,
     /// Stable member instance to device mapping, derived from admission
-    /// changes.
+    /// changes. Removed instances stay in the mapping so the content-send
+    /// gate and the removal-notice planner can resolve historical targets.
     pub member_devices: BTreeMap<MemberInstanceId, DeviceId>,
     pub phase: WorkspacePhase,
     pub failure_category: Option<WorkspaceFailureCategory>,
@@ -339,6 +375,9 @@ impl Default for WorkspaceConvergenceState {
             waiting_members: BTreeSet::new(),
             removal_intents: BTreeSet::new(),
             removal_intent_records: Vec::new(),
+            peer_intent_acks: BTreeMap::new(),
+            notified_removals: BTreeSet::new(),
+            accepted_removal_notices: BTreeSet::new(),
             member_devices: BTreeMap::new(),
             phase: WorkspacePhase::LocallyApplied,
             failure_category: None,
@@ -452,6 +491,28 @@ impl WorkspaceConvergenceState {
         members
     }
 
+    /// The most recent member instance of a device, derived from the ordered
+    /// change chain. `None` when the device never appears in any admission
+    /// change.
+    pub fn latest_instance_for_device(&self, device_id: &DeviceId) -> Option<MemberInstanceId> {
+        self.changes.iter().rev().find_map(|change| {
+            change
+                .admission
+                .as_ref()
+                .filter(|facts| facts.device_id == *device_id)
+                .map(|facts| facts.member_instance)
+        })
+    }
+
+    /// Whether a device's most recent known instance is no longer an
+    /// effective member. Unknown devices are not considered removed.
+    pub fn is_device_removed(&self, device_id: &DeviceId) -> bool {
+        let Some(latest) = self.latest_instance_for_device(device_id) else {
+            return false;
+        };
+        !self.effective_members().contains(&latest)
+    }
+
     /// Members that confirmed the current digest.
     pub fn confirmed_members(&self) -> BTreeSet<MemberInstanceId> {
         let Some(digest) = self.current_digest() else {
@@ -556,8 +617,11 @@ impl WorkspaceConvergenceState {
                 .insert(facts.member_instance, facts.device_id);
         }
         if let Some(facts) = self.changes.last().and_then(|last| last.removal.clone()) {
-            for instance in &facts.removed_instances {
-                self.member_devices.remove(instance);
+            if self
+                .own_instance
+                .is_some_and(|own| facts.removed_instances.contains(&own))
+            {
+                self.removed = true;
             }
         }
         self.advance(now_ms);
@@ -699,6 +763,14 @@ impl WorkspaceConvergenceState {
             self.removal_intent_records.push(intent.clone());
             self.removal_intents.insert(intent.intent_id);
         }
+        if self
+            .own_instance
+            .is_some_and(|own| intent.content.target == own)
+        {
+            // The local instance observed its own removal: the same stable
+            // fact the removal notice carries, set idempotently.
+            self.removed = true;
+        }
         let mut convergence = super::removal_intent::RemovalConvergence::new();
         for known in &self.removal_intent_records {
             convergence.insert(known);
@@ -728,6 +800,7 @@ impl WorkspaceConvergenceState {
                 event,
                 WorkspaceConvergenceEvent::CommittedChange(_)
                     | WorkspaceConvergenceEvent::LocalAdmissionReady { .. }
+                    | WorkspaceConvergenceEvent::RemovalNoticeAccepted(_)
             ) {
                 self.phase = WorkspacePhase::Converging;
             } else {
@@ -814,8 +887,58 @@ impl WorkspaceConvergenceState {
                     },
                 ))
             }
+            WorkspaceConvergenceEvent::IntentAcknowledged { peer, intent_id } => {
+                let changed = self
+                    .peer_intent_acks
+                    .insert((peer, intent_id), now_ms)
+                    .is_none();
+                self.advance(now_ms);
+                Ok((
+                    if changed {
+                        WorkspaceMergeOutcome::Updated
+                    } else {
+                        WorkspaceMergeOutcome::Unchanged
+                    },
+                    if changed {
+                        WorkspaceEffect::PERSIST
+                    } else {
+                        WorkspaceEffect::NONE
+                    },
+                ))
+            }
+            WorkspaceConvergenceEvent::RemovalNoticeAccepted(intent_id) => {
+                self.accepted_removal_notices.insert(intent_id);
+                self.removed = true;
+                self.advance(now_ms);
+                Ok((WorkspaceMergeOutcome::Updated, WorkspaceEffect::PERSIST))
+            }
+            WorkspaceConvergenceEvent::RemovalNoticeDelivered(intent_id) => {
+                let changed = self.notified_removals.insert(intent_id);
+                self.advance(now_ms);
+                Ok((
+                    if changed {
+                        WorkspaceMergeOutcome::Updated
+                    } else {
+                        WorkspaceMergeOutcome::Unchanged
+                    },
+                    if changed {
+                        WorkspaceEffect::PERSIST
+                    } else {
+                        WorkspaceEffect::NONE
+                    },
+                ))
+            }
             WorkspaceConvergenceEvent::LocalAdmissionReady { own_instance } => {
+                let instance_changed = self.own_instance != Some(own_instance);
                 self.own_instance = Some(own_instance);
+                if instance_changed {
+                    // A re-admission creates a new member instance; old
+                    // instance facts (own removal, confirmations, pending
+                    // handoffs) must not leak into the new instance.
+                    self.removed = false;
+                    self.confirmed.clear();
+                    self.pending_handoffs.clear();
+                }
                 self.phase = WorkspacePhase::LocallyApplied;
                 self.advance(now_ms);
                 Ok((WorkspaceMergeOutcome::Updated, WorkspaceEffect::PERSIST))

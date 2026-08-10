@@ -42,17 +42,16 @@ pub use ports::{
     MembershipSecurityUpdatePort, RelationshipStateResetError, RelationshipStateResetPort,
     RemovalAdmissionDecision, RemovalAdmissionGatePort, RemovalExchangeEndpointPort,
     RemovalExchangeError, RemovalExchangeMessage, RemovalExchangePort,
-    RemovalIntentRepositoryError, RemovalIntentRepositoryPort, RemovalIntentVerificationError,
-    RemovalIntentVerificationPort, RemovalLateAcceptance, RemovalLateRejectionReason,
-    RemovalLateSubmission, RemovalLateSubmissionEndpointPort, RemovalLateSubmissionError,
-    RemovalLateSubmissionPort, RemovalLateSubmissionTransportError, RemovalNoticeAcceptance,
-    RemovalNoticeEndpointPort, RemovalNoticeError, RemovalNoticePort, RemovalNoticeRejectionReason,
-    RemovalNoticeTransportError, RemovalNoticeVerificationError, RemovalNoticeVerificationPort,
-    RemovalPendingJoinStorePort, RemovalRecoveryError, RemovalRecoveryPort, RemovalTargetGatePort,
-    RemovalViewMember, RemovalViewSnapshot, RevocationRepositoryPort, SpaceSecurityStateResetError,
-    SpaceSecurityStateResetPort, VerifiedPeerPromotionError, VerifiedPeerPromotionPort,
-    WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
-    WorkspaceRecoveryTransportError, WorkspaceRecoveryTransportPort,
+    RemovalIntentVerificationError, RemovalIntentVerificationPort, RemovalLateAcceptance,
+    RemovalLateRejectionReason, RemovalLateSubmission, RemovalLateSubmissionEndpointPort,
+    RemovalLateSubmissionError, RemovalLateSubmissionPort, RemovalLateSubmissionTransportError,
+    RemovalNoticeAcceptance, RemovalNoticeEndpointPort, RemovalNoticeError, RemovalNoticePort,
+    RemovalNoticeRejectionReason, RemovalNoticeTransportError, RemovalNoticeVerificationError,
+    RemovalNoticeVerificationPort, RemovalRecoveryError, RemovalRecoveryPort,
+    RemovalTargetGatePort, RemovalViewMember, RemovalViewSnapshot, RevocationRepositoryPort,
+    SpaceSecurityStateResetError, SpaceSecurityStateResetPort, VerifiedPeerPromotionError,
+    VerifiedPeerPromotionPort, WorkspaceConvergenceRepositoryError,
+    WorkspaceConvergenceRepositoryPort,
 };
 pub use preferences::MemberSyncPreferences;
 pub use protection::{
@@ -66,10 +65,8 @@ pub use recovery_exchange::{
     WORKSPACE_RECOVERY_CHANNEL_VERSION,
 };
 pub use removal_intent::{
-    MemberInstanceId, MemberRemovalSummary, RemovalCausalCheckpoint, RemovalCausalProof,
-    RemovalCausalProofMember, RemovalCompletionReceipt, RemovalConvergence, RemovalIntentContent,
-    RemovalIntentId, RemovalIntentRejection, RemovalNotice, RemovalPersistedState, RemovalPhase,
-    RemovalPreparedRecovery, RemovalRecoveryMaterial, RemovalRecoveryPersisted,
+    MemberInstanceId, RemovalCausalProof, RemovalCausalProofMember, RemovalConvergence,
+    RemovalIntentContent, RemovalIntentId, RemovalIntentRejection, RemovalNotice,
     SignedRemovalIntent, MAX_VIEW_MEMBERS,
 };
 pub use revocation::{

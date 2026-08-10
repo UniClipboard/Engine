@@ -153,7 +153,6 @@ struct EventSummary {
     last_state: Option<String>,
     member_removal_changes: u64,
     last_workspace_phase: Option<String>,
-    shared_device_refresh_changes: u64,
 }
 
 #[derive(Clone)]
@@ -544,7 +543,6 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 "last_state": events.last_state,
                 "member_removal_changes": events.member_removal_changes,
                 "last_workspace_phase": events.last_workspace_phase,
-                "shared_device_refresh_changes": events.shared_device_refresh_changes,
             })
         }
         ProbeCommand::Shutdown => match state.engine.take() {

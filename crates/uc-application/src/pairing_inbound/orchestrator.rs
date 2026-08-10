@@ -40,7 +40,7 @@ use uc_observability_contract::FlowId;
 use uc_core::membership::{RemovalAdmissionDecision, RemovalAdmissionGatePort};
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::pairing::session_message::{
-    JoinerRequest, PairingRejectReason, PairingSessionMessage,
+    JoinerReady, JoinerRequest, PairingRejectReason, PairingSessionMessage,
 };
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionEvent, PairingSessionId};
 use uc_core::ports::{
@@ -80,6 +80,7 @@ pub(crate) struct PairingInboundOrchestrator {
     /// delivery; a later presence pass remains the fallback after a failure.
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     local_device_id: uc_core::DeviceId,
+    workspace_convergence: Option<Arc<crate::workspace_convergence::WorkspaceConvergence>>,
     /// Broadcast channel: fires exactly one [`PairingOutcome`] per matched
     /// invitation. `send` is `let _`-ignored because no subscribers is a
     /// legitimate state (e.g., GUI tauri runtime without a live listener);
@@ -113,6 +114,7 @@ impl PairingInboundOrchestrator {
         trust_peer: Arc<TrustPeerUc>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         local_device_id: uc_core::DeviceId,
+        workspace_convergence: Option<Arc<crate::workspace_convergence::WorkspaceConvergence>>,
         outcome_tx: broadcast::Sender<PairingOutcome>,
         analytics: Arc<dyn AnalyticsFacade>,
     ) -> Self {
@@ -127,6 +129,7 @@ impl PairingInboundOrchestrator {
             trust_peer,
             peer_addr_repo,
             local_device_id,
+            workspace_convergence,
             outcome_tx,
             analytics,
             handshake_started_at: Arc::new(StdMutex::new(HashMap::new())),
@@ -391,8 +394,8 @@ impl PairingInboundOrchestrator {
             message_kind = message_variant,
             "inbound pairing follow-up message received"
         );
-        if matches!(message, PairingSessionMessage::Ready(_)) {
-            self.complete_after_joiner_ready(&session).await;
+        if let PairingSessionMessage::Ready(ready) = message {
+            self.complete_after_joiner_ready(&session, ready).await;
             return;
         }
         let PairingSessionMessage::ChallengeResponse(response) = message else {
@@ -517,7 +520,7 @@ impl PairingInboundOrchestrator {
         }
     }
 
-    async fn complete_after_joiner_ready(&self, session: &PairingSessionId) {
+    async fn complete_after_joiner_ready(&self, session: &PairingSessionId, ready: JoinerReady) {
         let Some(facts) = self
             .pending_joiner_ready
             .lock()
@@ -532,6 +535,31 @@ impl PairingInboundOrchestrator {
                 .await;
             return;
         };
+        if ready.admission.device_id != facts.device_id
+            || ready.admission.device_name != facts.device_name
+            || ready.admission.identity_fingerprint != facts.identity_fingerprint
+        {
+            self.handshake
+                .reject(
+                    session,
+                    PairingRejectReason::Internal("joiner readiness facts mismatch".into()),
+                )
+                .await;
+            self.emit_failure(session, PairingFailureReason::Internal);
+            return;
+        }
+        let Some(workspace_convergence) = &self.workspace_convergence else {
+            self.emit_failure(session, PairingFailureReason::Internal);
+            return;
+        };
+        if let Err(error) = workspace_convergence
+            .record_pairing_admission(ready.admission)
+            .await
+        {
+            warn!(session = %session, error = %error, "could not save pairing admission in workspace convergence");
+            self.emit_failure(session, PairingFailureReason::Internal);
+            return;
+        }
         if let Err(error) = self.handshake.complete(session).await {
             warn!(session = %session, error = %error, "could not start membership delivery after joiner readiness");
             self.emit_failure(session, PairingFailureReason::Internal);
@@ -1115,6 +1143,20 @@ mod tests {
         }
     }
 
+    fn joiner_ready() -> JoinerReady {
+        JoinerReady {
+            admission: uc_core::membership::AdmissionChangeFacts {
+                member_instance: uc_core::membership::MemberInstanceId::from_bytes([7; 32]),
+                device_id: DeviceId::new("joiner-device"),
+                device_name: "joiner's laptop".into(),
+                identity_fingerprint: joiner_fp(),
+                transport_public_key: vec![1; 32],
+                transport_address_blob: vec![],
+                identity_signature: vec![2; 64],
+            },
+        }
+    }
+
     /// Build a `MockPeerAddrRepo` that accepts any `upsert` / `get` /
     /// `list` / `remove` call and returns a neutral success. Used by
     /// tests that don't care about T5 peer-address behaviour (the
@@ -1204,6 +1246,7 @@ mod tests {
                 )),
                 self.peer_addr_repo.clone() as Arc<dyn PeerAddressRepositoryPort>,
                 DeviceId::new("sponsor-device"),
+                None,
                 outcome_tx,
                 Arc::new(DefaultAnalyticsFacade::new(
                     self.analytics.clone(),
@@ -1378,7 +1421,8 @@ mod tests {
         assert_eq!(trusted[0].peer_device_id.as_str(), "joiner-device");
         drop(trusted);
 
-        // Wire: AdmissionOffer + Confirm in order; no Reject.
+        // Wire: AdmissionOffer + Confirm in order; no Reject. The session
+        // stays open until the joiner's readiness confirmation arrives.
         let sent = sp.sent();
         assert_eq!(sent.len(), 2);
         assert!(matches!(
@@ -1386,6 +1430,13 @@ mod tests {
             PairingSessionMessage::AdmissionOffer(_)
         ));
         assert!(matches!(sent[1].1, PairingSessionMessage::Confirm(_)));
+        assert!(sp.closed().is_empty());
+
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session: session.clone(),
+            message: PairingSessionMessage::Ready(joiner_ready()),
+        })
+        .await;
         assert_eq!(sp.closed().len(), 1);
         // Completion outcome fires with joiner facts so the CLI/GUI
         // listener can display "paired with X".
@@ -1439,7 +1490,7 @@ mod tests {
         })
         .await;
         orch.handle_event(PairingSessionEvent::MessageReceived {
-            session,
+            session: session.clone(),
             message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
                 encrypted_challenge: vec![0x11],
             }),
@@ -1467,6 +1518,11 @@ mod tests {
         assert_eq!(latest_trust.peer_fingerprint, joiner_fp());
         drop(trusted);
 
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session: session.clone(),
+            message: PairingSessionMessage::Ready(joiner_ready()),
+        })
+        .await;
         assert!(matches!(
             outcomes.try_recv(),
             Ok(PairingOutcome::Success { .. })
@@ -1520,7 +1576,7 @@ mod tests {
         })
         .await;
         orch.handle_event(PairingSessionEvent::MessageReceived {
-            session,
+            session: session.clone(),
             message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
                 encrypted_challenge: vec![0x11],
             }),
@@ -1556,7 +1612,7 @@ mod tests {
         })
         .await;
         orch.handle_event(PairingSessionEvent::MessageReceived {
-            session,
+            session: session.clone(),
             message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
                 encrypted_challenge: vec![0x11],
             }),
@@ -1583,10 +1639,16 @@ mod tests {
         })
         .await;
         orch.handle_event(PairingSessionEvent::MessageReceived {
-            session,
+            session: session.clone(),
             message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
                 encrypted_challenge: vec![0x11],
             }),
+        })
+        .await;
+
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session: session.clone(),
+            message: PairingSessionMessage::Ready(joiner_ready()),
         })
         .await;
 
@@ -1623,10 +1685,16 @@ mod tests {
         })
         .await;
         orch.handle_event(PairingSessionEvent::MessageReceived {
-            session,
+            session: session.clone(),
             message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
                 encrypted_challenge: vec![0x11],
             }),
+        })
+        .await;
+
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session: session.clone(),
+            message: PairingSessionMessage::Ready(joiner_ready()),
         })
         .await;
 
@@ -1897,10 +1965,16 @@ mod tests {
         })
         .await;
         orch.handle_event(PairingSessionEvent::MessageReceived {
-            session,
+            session: session.clone(),
             message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
                 encrypted_challenge: vec![0x11],
             }),
+        })
+        .await;
+
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session: session.clone(),
+            message: PairingSessionMessage::Ready(joiner_ready()),
         })
         .await;
 
@@ -1940,7 +2014,7 @@ mod tests {
         })
         .await;
         orch.handle_event(PairingSessionEvent::MessageReceived {
-            session,
+            session: session.clone(),
             message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
                 encrypted_challenge: vec![],
             }),

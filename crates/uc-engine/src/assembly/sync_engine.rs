@@ -54,7 +54,6 @@ use uc_application::facade::{
     SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, TransferHostEvent,
 };
 use uc_application::group_update_delivery::GroupUpdateDelivery;
-use uc_application::member_removal::{RemovalCoordinator, RemovalCoordinatorDeps};
 use uc_application::membership::{build_membership_convergence, MembershipConvergenceDeps};
 use uc_application::proof::HmacProofAdapter;
 use uc_application::workspace_convergence::{WorkspaceConvergence, WorkspaceConvergenceDeps};
@@ -79,6 +78,9 @@ use uc_infra::network::iroh::{
 };
 // Re-exported so external callers can parametrise the assembly without
 // having to `use uc_infra` themselves.
+use crate::assembly::deps::{SharedRuntimeDeps, SyncEngineDeps};
+use crate::assembly::legacy_upgrade::install_automatic_legacy_upgrade;
+use uc_application::deps::AppDeps;
 use uc_infra::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
@@ -88,10 +90,6 @@ use uc_infra::security::{
     DefaultMembershipSecurityUpdateAdapter, RemovalIntentVerificationAdapter,
     RemovalNoticeVerificationAdapter, RemovalRecoveryAdapter,
 };
-
-use crate::assembly::deps::{SharedRuntimeDeps, SyncEngineDeps};
-use crate::assembly::legacy_upgrade::install_automatic_legacy_upgrade;
-use uc_application::deps::AppDeps;
 
 #[cfg(not(feature = "lan-compat"))]
 struct UnavailableMobileDeviceLookup;
@@ -573,63 +571,6 @@ pub async fn build_sync_engine_assembly(
     );
     let removal_exchange_adapter =
         builder.build_member_removal_exchange_adapter(Arc::clone(&space_setup.peer_addr_repo));
-    let removal_coordinator = Arc::new(RemovalCoordinator::new(RemovalCoordinatorDeps {
-        repository: Arc::clone(&space_setup.removal_intent_repository),
-        verification: Arc::new(RemovalIntentVerificationAdapter),
-        exchange: removal_exchange_adapter.clone(),
-        late_submission: removal_exchange_adapter.clone(),
-        notice: removal_exchange_adapter.clone(),
-        notice_verification: Arc::new(RemovalNoticeVerificationAdapter),
-        recovery: Arc::new(RemovalRecoveryAdapter::new(
-            space_setup.membership_session.as_ref().clone(),
-            Arc::clone(&space_setup.removal_key_epoch_repository),
-            removal_identity.clone(),
-            Arc::clone(&space_setup.removal_pending_join),
-        )),
-        member_signatures: Arc::clone(&space_setup.current_member_signatures),
-        member_repo: Arc::clone(&deps.device.member_repo),
-        own_device: deps.device.device_identity.current_device_id(),
-    }));
-    builder.install_member_removal(
-        &removal_exchange_adapter,
-        Arc::clone(&deps.device.member_repo),
-        Arc::clone(&space_setup.peer_admission),
-        Arc::clone(&deps.security.fingerprint),
-        removal_coordinator.clone(),
-        removal_coordinator.clone(),
-        removal_coordinator.clone(),
-    )?;
-    let workspace_convergence = WorkspaceConvergence::new(WorkspaceConvergenceDeps {
-        repository: Arc::clone(&space_setup.workspace_convergence_repository),
-        verification: Arc::new(RemovalIntentVerificationAdapter),
-        recovery: Arc::new(RemovalRecoveryAdapter::new(
-            space_setup.membership_session.as_ref().clone(),
-            Arc::clone(&space_setup.removal_key_epoch_repository),
-            removal_identity.clone(),
-            Arc::clone(&space_setup.removal_pending_join),
-        )),
-        member_signatures: Arc::clone(&space_setup.current_member_signatures),
-        member_repo: Arc::clone(&deps.device.member_repo),
-        membership_identity: removal_identity,
-        security_updates: Arc::new(DefaultMembershipSecurityUpdateAdapter::new(
-            Arc::clone(&space_setup.membership_session),
-            Arc::clone(&space_setup.current_member_signatures),
-            Arc::clone(&deps.security.space_access_ports.group_revocation),
-        )),
-        clock: Arc::clone(&deps.system.clock),
-        device_identity: Arc::clone(&deps.device.device_identity),
-        own_device: deps.device.device_identity.current_device_id(),
-    });
-    let workspace_recovery_adapter =
-        builder.build_workspace_recovery_adapter(Arc::clone(&space_setup.peer_addr_repo));
-    builder.install_workspace_recovery(
-        &workspace_recovery_adapter,
-        Arc::clone(&deps.device.member_repo),
-        Arc::clone(&space_setup.peer_admission),
-        Arc::clone(&deps.security.fingerprint),
-        Arc::clone(&workspace_convergence)
-            as Arc<dyn uc_core::membership::RecoveryTransportEndpointPort>,
-    )?;
     let membership_transport = builder.build_membership_gossip_transport(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&deps.device.device_identity),
@@ -667,6 +608,53 @@ pub async fn build_sync_engine_assembly(
         membership_gossip.clone(),
         &membership_transport,
         membership_gossip.clone(),
+    )?;
+    let workspace_convergence = WorkspaceConvergence::new(WorkspaceConvergenceDeps {
+        repository: Arc::clone(&space_setup.workspace_convergence_repository),
+        verification: Arc::new(RemovalIntentVerificationAdapter),
+        recovery: Arc::new(RemovalRecoveryAdapter::new(
+            space_setup.membership_session.as_ref().clone(),
+            Arc::clone(&space_setup.key_epoch_repository),
+            removal_identity.clone(),
+        )),
+        member_signatures: Arc::clone(&space_setup.current_member_signatures),
+        member_repo: Arc::clone(&deps.device.member_repo),
+        membership_identity: removal_identity,
+        announcement_material: membership_transport.clone(),
+        security_updates: Arc::new(DefaultMembershipSecurityUpdateAdapter::new(
+            Arc::clone(&space_setup.membership_session),
+            Arc::clone(&space_setup.current_member_signatures),
+            Arc::clone(&deps.security.space_access_ports.group_revocation),
+        )),
+        clock: Arc::clone(&deps.system.clock),
+        device_identity: Arc::clone(&deps.device.device_identity),
+        exchange: removal_exchange_adapter.clone(),
+        late_submission: removal_exchange_adapter.clone(),
+        notice: removal_exchange_adapter.clone(),
+        notice_verification: Arc::new(RemovalNoticeVerificationAdapter),
+        own_device: deps.device.device_identity.current_device_id(),
+    });
+    builder.install_member_removal(
+        &removal_exchange_adapter,
+        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&deps.security.fingerprint),
+        Arc::clone(&workspace_convergence)
+            as Arc<dyn uc_core::membership::RemovalExchangeEndpointPort>,
+        Arc::clone(&workspace_convergence)
+            as Arc<dyn uc_core::membership::RemovalLateSubmissionEndpointPort>,
+        Arc::clone(&workspace_convergence)
+            as Arc<dyn uc_core::membership::RemovalNoticeEndpointPort>,
+    )?;
+    let workspace_recovery_adapter =
+        builder.build_workspace_recovery_adapter(Arc::clone(&space_setup.peer_addr_repo));
+    builder.install_workspace_recovery(
+        &workspace_recovery_adapter,
+        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&deps.security.fingerprint),
+        Arc::clone(&workspace_convergence)
+            as Arc<dyn uc_core::membership::RecoveryTransportEndpointPort>,
     )?;
     // Slice 2 Phase 1 · T8:在同一 iroh 节点上装 presence handler。must
     // be before `builder.spawn()`(install_* 要求 router 未 spawn)。
@@ -857,8 +845,11 @@ pub async fn build_sync_engine_assembly(
                 peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
                 presence: Arc::clone(&presence),
                 analytics: Arc::clone(&space_setup.analytics_facade),
-                removal_admission: removal_coordinator.clone(),
-                removal_gate: removal_coordinator.clone(),
+                removal_admission: Arc::clone(&workspace_convergence)
+                    as Arc<dyn uc_core::membership::RemovalAdmissionGatePort>,
+                removal_gate: Arc::clone(&workspace_convergence)
+                    as Arc<dyn uc_core::membership::RemovalTargetGatePort>,
+                workspace_convergence: Some(Arc::clone(&workspace_convergence)),
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::clone(&space_setup.relationship_reset),
@@ -931,7 +922,7 @@ pub async fn build_sync_engine_assembly(
         ClipboardSyncFacade::new(ClipboardSyncDeps {
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             member_repo: Arc::clone(&deps.device.member_repo),
-            removal_gate: Arc::clone(&removal_coordinator)
+            removal_gate: Arc::clone(&workspace_convergence)
                 as Arc<dyn uc_core::membership::RemovalTargetGatePort>,
             presence: Arc::clone(&presence),
             transfer_cipher: Arc::clone(&deps.security.transfer_cipher),

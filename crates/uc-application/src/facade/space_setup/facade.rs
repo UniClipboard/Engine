@@ -189,6 +189,7 @@ impl SpaceFacade {
             analytics,
             removal_admission,
             removal_gate,
+            workspace_convergence,
         } = admission;
         let SpaceTransitionDeps {
             relationship_reset,
@@ -314,6 +315,7 @@ impl SpaceFacade {
             Arc::clone(&trust_peer_uc),
             Arc::clone(&peer_addr_repo),
             local_device_id,
+            workspace_convergence.clone(),
             pairing_outcome_tx.clone(),
             Arc::clone(&analytics),
         ));
@@ -360,6 +362,7 @@ impl SpaceFacade {
             Arc::clone(&resume_session_for_facade),
             clock,
             analytics,
+            workspace_convergence,
         ));
 
         Self {
@@ -1822,6 +1825,7 @@ mod tests {
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
                 removal_admission: Arc::new(AllowRemovalAdmission),
                 removal_gate: Arc::new(AllowRemovalAdmission),
+                workspace_convergence: None,
             },
             transition: SpaceTransitionDeps {
                 relationship_reset: Arc::new(NoopRelationshipStateReset),

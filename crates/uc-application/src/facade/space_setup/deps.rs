@@ -22,6 +22,7 @@ use uc_observability_contract::analytics::AnalyticsFacade;
 use crate::clipboard_write::MobileConsumableBackfill;
 use crate::deps::SpaceAccessPorts;
 use crate::membership::PairingMembershipConvergencePort;
+use crate::workspace_convergence::WorkspaceConvergence;
 
 pub struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
@@ -48,6 +49,7 @@ pub struct SpaceAdmissionDeps {
     pub analytics: Arc<dyn AnalyticsFacade>,
     pub removal_admission: Arc<dyn RemovalAdmissionGatePort>,
     pub removal_gate: Arc<dyn RemovalTargetGatePort>,
+    pub workspace_convergence: Option<Arc<WorkspaceConvergence>>,
 }
 
 pub struct SpaceTransitionDeps {

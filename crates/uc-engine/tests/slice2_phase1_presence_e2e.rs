@@ -464,6 +464,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
             analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
             removal_admission: Arc::new(AllowRemovalAdmission),
             removal_gate: Arc::new(AllowRemovalAdmission),
+            workspace_convergence: None,
         },
         transition: SpaceTransitionDeps {
             relationship_reset: common::relationship_state_reset_noop(),

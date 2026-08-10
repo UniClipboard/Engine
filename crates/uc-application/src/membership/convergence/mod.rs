@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::Notify;
 use tracing::info;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
@@ -17,19 +17,17 @@ use uc_core::membership::{
     MembershipOutboxRepositoryError, MembershipOutboxRepositoryPort, MembershipSecurityUpdateError,
     MembershipSecurityUpdatePort, MembershipSharedDevicePage, MembershipSharedDevicePageRequest,
     PendingGroupUpdate, PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate,
-    SponsorCandidateSeed, VerifiedPeerPromotionPort, WorkspaceRecoveryTransportPort,
+    SponsorCandidateSeed, VerifiedPeerPromotionPort,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ClockPort, ContentHashPort, DeviceIdentityPort, PeerAddressRepositoryPort};
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
-use uuid::Uuid;
 
 use crate::group_update_delivery::GroupUpdateDeliveryPort;
 
 mod candidates;
 mod exchange;
 mod runtime;
-mod shared_devices;
 
 pub use runtime::{MembershipConvergenceActivity, MembershipConvergenceRuntime};
 
@@ -40,7 +38,6 @@ const ANNOUNCEMENT_REFRESH_LEAD_MS: i64 = 24 * 60 * 60 * 1_000;
 const GOSSIP_RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const GOSSIP_RECONCILE_JITTER_WINDOW: Duration = Duration::from_secs(60);
 const MIN_SCHEDULED_RECONCILE_DELAY: Duration = Duration::from_millis(100);
-const AUTO_SHARED_DEVICE_REFRESH_COOLDOWN_MS: i64 = 60_000;
 
 pub struct MembershipConvergenceDeps {
     pub candidate_repo: Arc<dyn MembershipCandidateRepositoryPort>,
@@ -66,11 +63,7 @@ pub struct MembershipConvergence {
     deps: MembershipConvergenceDeps,
     candidate_attempt_lock: tokio::sync::Mutex<()>,
     wake: Arc<Notify>,
-    shared_device_refresh: tokio::sync::Mutex<Option<ActiveSharedDeviceRefresh>>,
-    shared_device_refresh_events: broadcast::Sender<SharedDeviceRefreshStatus>,
-    auto_shared_device_refresh: tokio::sync::Mutex<AutoSharedDeviceRefreshState>,
     group_update_delivery: std::sync::Mutex<Option<Arc<dyn GroupUpdateDeliveryPort>>>,
-    workspace_recovery: std::sync::Mutex<Option<Arc<dyn WorkspaceRecoveryTransportPort>>>,
 }
 
 pub fn build_membership_convergence(deps: MembershipConvergenceDeps) -> Arc<MembershipConvergence> {
@@ -84,13 +77,6 @@ impl MembershipConvergence {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(delivery);
     }
-
-    pub fn install_workspace_recovery(&self, transport: Arc<dyn WorkspaceRecoveryTransportPort>) {
-        *self
-            .workspace_recovery
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(transport);
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -99,161 +85,6 @@ pub(crate) struct MembershipGossipPassOutcome {
     pub confirmed_candidates: usize,
     pub synchronized_members: usize,
     pub deferred_items: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipConvergenceState {
-    Complete,
-    Converging,
-    WaitingForUpgrade,
-    Blocked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MembershipConvergenceStatus {
-    pub state: MembershipConvergenceState,
-    pub pending_count: usize,
-    pub waiting_for_peer_count: usize,
-    pub waiting_for_update_count: usize,
-    pub version_incompatible_count: usize,
-    pub blocked_count: usize,
-    pub rejected_count: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SharedDeviceRefreshPhase {
-    Started,
-    Discovering,
-    Connecting,
-    RoundCompleted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SharedDeviceRefreshDeviceState {
-    Discovered,
-    Connecting,
-    Connected,
-    AlreadyPresent,
-    WaitingForPeer,
-    WaitingForUpdate,
-    VersionIncompatible,
-    Rejected,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SharedDeviceRefreshDevice {
-    pub device_id: uc_core::ids::DeviceId,
-    pub device_name: String,
-    pub state: SharedDeviceRefreshDeviceState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SharedDeviceRefreshStarted {
-    pub request_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SharedDeviceRefreshStatus {
-    pub request_id: String,
-    pub phase: SharedDeviceRefreshPhase,
-    pub devices: Vec<SharedDeviceRefreshDevice>,
-    pub total_count: usize,
-    pub discovered_count: usize,
-    pub connecting_count: usize,
-    pub connected_count: usize,
-    pub already_present_count: usize,
-    pub waiting_for_peer_count: usize,
-    pub waiting_for_update_count: usize,
-    pub version_incompatible_count: usize,
-    pub rejected_count: usize,
-    pub unavailable_source_count: usize,
-}
-
-struct ActiveSharedDeviceRefresh {
-    space_id: SpaceId,
-    initial_round_active: bool,
-    status: SharedDeviceRefreshStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AutoSharedDeviceRefreshMode {
-    Idle,
-    Pending {
-        space_id: SpaceId,
-    },
-    WaitingForSourceOnline {
-        space_id: SpaceId,
-        /// `None` means the failed sources could not be determined; any
-        /// device coming online then re-triggers the round.
-        unavailable_sources: Option<Vec<uc_core::ids::DeviceId>>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AutoSharedDeviceRefreshState {
-    mode: AutoSharedDeviceRefreshMode,
-    last_completed_at_ms: Option<i64>,
-}
-
-impl SharedDeviceRefreshStatus {
-    fn new(request_id: String) -> Self {
-        Self {
-            request_id,
-            phase: SharedDeviceRefreshPhase::Started,
-            devices: Vec::new(),
-            total_count: 0,
-            discovered_count: 0,
-            connecting_count: 0,
-            connected_count: 0,
-            already_present_count: 0,
-            waiting_for_peer_count: 0,
-            waiting_for_update_count: 0,
-            version_incompatible_count: 0,
-            rejected_count: 0,
-            unavailable_source_count: 0,
-        }
-    }
-
-    fn recount(&mut self) {
-        self.total_count = self.devices.len();
-        self.discovered_count = 0;
-        self.connecting_count = 0;
-        self.connected_count = 0;
-        self.already_present_count = 0;
-        self.waiting_for_peer_count = 0;
-        self.waiting_for_update_count = 0;
-        self.version_incompatible_count = 0;
-        self.rejected_count = 0;
-        for device in &self.devices {
-            match device.state {
-                SharedDeviceRefreshDeviceState::Discovered => {
-                    self.discovered_count = self.discovered_count.saturating_add(1)
-                }
-                SharedDeviceRefreshDeviceState::Connecting => {
-                    self.connecting_count = self.connecting_count.saturating_add(1)
-                }
-                SharedDeviceRefreshDeviceState::Connected => {
-                    self.connected_count = self.connected_count.saturating_add(1)
-                }
-                SharedDeviceRefreshDeviceState::AlreadyPresent => {
-                    self.already_present_count = self.already_present_count.saturating_add(1)
-                }
-                SharedDeviceRefreshDeviceState::WaitingForPeer => {
-                    self.waiting_for_peer_count = self.waiting_for_peer_count.saturating_add(1)
-                }
-                SharedDeviceRefreshDeviceState::WaitingForUpdate => {
-                    self.waiting_for_update_count = self.waiting_for_update_count.saturating_add(1)
-                }
-                SharedDeviceRefreshDeviceState::VersionIncompatible => {
-                    self.version_incompatible_count =
-                        self.version_incompatible_count.saturating_add(1)
-                }
-                SharedDeviceRefreshDeviceState::Rejected => {
-                    self.rejected_count = self.rejected_count.saturating_add(1)
-                }
-            }
-        }
-    }
 }
 
 pub struct SponsorSeedBatchContext {
@@ -310,19 +141,11 @@ pub trait PairingMembershipConvergencePort: Send + Sync {
 
 impl MembershipConvergence {
     fn new(deps: MembershipConvergenceDeps) -> Self {
-        let (shared_device_refresh_events, _) = broadcast::channel(64);
         Self {
             deps,
             candidate_attempt_lock: tokio::sync::Mutex::new(()),
             wake: Arc::new(Notify::new()),
-            shared_device_refresh: tokio::sync::Mutex::new(None),
-            shared_device_refresh_events,
-            auto_shared_device_refresh: tokio::sync::Mutex::new(AutoSharedDeviceRefreshState {
-                mode: AutoSharedDeviceRefreshMode::Idle,
-                last_completed_at_ms: None,
-            }),
             group_update_delivery: std::sync::Mutex::new(None),
-            workspace_recovery: std::sync::Mutex::new(None),
         }
     }
 
@@ -340,7 +163,6 @@ impl MembershipConvergence {
             }
         }
         let state = self.deps.security_updates.current_state().await?;
-        self.deliver_workspace_recovery(&state.space_id).await?;
         let now_ms = self.deps.clock.now_ms();
         let delivered_batches = self.deliver_pending(&state.space_id, now_ms).await?;
         let mut outcome = MembershipGossipPassOutcome {
@@ -373,11 +195,6 @@ impl MembershipConvergence {
             {
                 Ok(()) => {
                     outcome.confirmed_candidates = outcome.confirmed_candidates.saturating_add(1);
-                    self.mark_shared_device_refresh_candidate_connected(
-                        &state.space_id,
-                        candidate.device_id(),
-                    )
-                    .await;
                 }
                 Err(
                     MembershipConvergenceError::PeerUnavailable
@@ -456,82 +273,6 @@ impl MembershipConvergence {
             }
         }
         Ok(())
-    }
-
-    async fn convergence_status(
-        &self,
-        space_id: &SpaceId,
-    ) -> Result<MembershipConvergenceStatus, MembershipConvergenceError> {
-        let candidates = self.deps.candidate_repo.list(space_id).await?;
-        let outbox = self.deps.outbox_repo.list_pending(space_id).await?;
-        let outbox_count = outbox.len();
-        let waiting_for_peer_count = candidates
-            .iter()
-            .filter(|candidate| candidate.status() == CandidateStatus::WaitingForPeer)
-            .count();
-        let waiting_for_update_count = candidates
-            .iter()
-            .filter(|candidate| candidate.status() == CandidateStatus::WaitingForUpdate)
-            .count();
-        let version_incompatible_count = candidates
-            .iter()
-            .filter(|candidate| {
-                candidate.last_failure() == Some(CandidateFailure::VersionIncompatible)
-            })
-            .count()
-            .saturating_add(
-                outbox
-                    .iter()
-                    .filter(|pending| {
-                        pending.last_failure() == Some(CandidateFailure::VersionIncompatible)
-                    })
-                    .count(),
-            );
-        let rejected_count = candidates
-            .iter()
-            .filter(|candidate| candidate.status() == CandidateStatus::Rejected)
-            .count();
-        let blocked_count = candidates
-            .iter()
-            .filter(|candidate| {
-                candidate.status() == CandidateStatus::Blocked
-                    && candidate.last_failure() != Some(CandidateFailure::VersionIncompatible)
-            })
-            .count();
-        let pending_candidates = candidates
-            .iter()
-            .filter(|candidate| candidate.status() != CandidateStatus::Ready)
-            .count();
-        let pending_count = pending_candidates.saturating_add(outbox_count);
-        let state = if blocked_count > 0 || rejected_count > 0 {
-            MembershipConvergenceState::Blocked
-        } else if version_incompatible_count > 0 {
-            MembershipConvergenceState::WaitingForUpgrade
-        } else if pending_count > 0 {
-            MembershipConvergenceState::Converging
-        } else {
-            MembershipConvergenceState::Complete
-        };
-        Ok(MembershipConvergenceStatus {
-            state,
-            pending_count,
-            waiting_for_peer_count,
-            waiting_for_update_count,
-            version_incompatible_count,
-            blocked_count,
-            rejected_count,
-        })
-    }
-
-    pub(crate) async fn current_convergence_status(
-        &self,
-    ) -> Result<MembershipConvergenceStatus, MembershipConvergenceError> {
-        let material = self
-            .deps
-            .announcement_material
-            .current_announcement_material()
-            .await?;
-        self.convergence_status(&material.space_id).await
     }
 
     async fn next_reconcile_delay(&self) -> Duration {

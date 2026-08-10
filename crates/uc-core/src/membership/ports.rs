@@ -9,8 +9,7 @@ use super::gossip::{
 };
 use super::member::SpaceMember;
 use super::removal_intent::{
-    MemberInstanceId, RemovalCausalProof, RemovalCompletionReceipt, RemovalIntentId, RemovalNotice,
-    RemovalPersistedState, RemovalPreparedRecovery, RemovalRecoveryMaterial, SignedRemovalIntent,
+    MemberInstanceId, RemovalCausalProof, RemovalIntentId, RemovalNotice, SignedRemovalIntent,
 };
 use super::revocation::{
     GroupEpoch, GroupRevocationResult, KeyEpochError, PendingGroupUpdate,
@@ -320,27 +319,6 @@ pub trait MembershipAttestationEndpointPort: Send + Sync {
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
-pub enum WorkspaceRecoveryTransportError {
-    #[error("workspace recovery recipient is offline")]
-    Offline,
-    #[error("workspace recovery was rejected")]
-    Rejected,
-    #[error("workspace recovery transport failed")]
-    Transport,
-}
-
-/// Delivers a verified, contiguous security-update chain to a member that
-/// may not yet recognize the device carrying the chain.
-#[async_trait]
-pub trait WorkspaceRecoveryTransportPort: Send + Sync {
-    async fn deliver_recovery(
-        &self,
-        recipient: &DeviceId,
-        updates: &[RelayedSecurityUpdate],
-    ) -> Result<(), WorkspaceRecoveryTransportError>;
-}
-
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum WorkspaceConvergenceRepositoryError {
     #[error("workspace convergence storage is locked")]
     Locked,
@@ -629,29 +607,14 @@ pub trait GroupUpdateDispatchPort: Send + Sync {
 
 /// 普通成员通道上的意图交换消息。
 ///
-/// 意图、恢复资料与确认都经同一通道幂等交换;接收方按稳定标识去重。
+/// 已验证移除意图及其有界确认经同一通道幂等交换;接收方按稳定标识去重。
+/// 恢复资料交接已由受限恢复通道承担,不再经过普通成员通道。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RemovalExchangeMessage {
     /// 一条已验证意图(含因果证明)。
     Intent(Box<SignedRemovalIntent>),
     /// 意图已验收(有界确认,不含业务内容)。
     IntentAck(RemovalIntentId),
-    /// 执行者向有效成员请求一个新的备用 key package(恢复所需)。
-    KeyPackageRequest { convergence_digest: [u8; 32] },
-    /// 有效成员向执行者提交备用 key package。
-    KeyPackageOffer {
-        convergence_digest: [u8; 32],
-        key_package: Vec<u8>,
-    },
-    /// 执行者分发的恢复资料(目标集合与收敛摘要完全匹配才被接受)。
-    RecoveryMaterial(RemovalRecoveryMaterial),
-    /// 有效成员已实际应用恢复资料。
-    RecoveryAck { receipt: RemovalCompletionReceipt },
-    /// 执行者宣布本轮收敛完成(所有有效成员均已确认)。
-    Complete {
-        convergence_digest: [u8; 32],
-        receipts: Vec<RemovalCompletionReceipt>,
-    },
 }
 
 /// 受限迟交入口的提交消息。
@@ -722,47 +685,6 @@ pub trait RemovalIntentVerificationPort: Send + Sync {
         &self,
         intent: &SignedRemovalIntent,
     ) -> Result<(), RemovalIntentVerificationError>;
-}
-
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
-pub enum RemovalIntentRepositoryError {
-    #[error("removal intent storage is locked")]
-    Locked,
-    #[error("removal intent storage is corrupt")]
-    Corrupt,
-    #[error("removal intent repository failed: {0}")]
-    Repository(String),
-}
-
-/// 移除意图与收敛状态的加密持久化。
-///
-/// 保存语义:任何已保存意图在崩溃恢复后必须仍然可见,且本机安全限制
-/// 与意图一起保存,不允许出现"意图存在但重新信任目标"的状态。
-#[async_trait]
-pub trait RemovalIntentRepositoryPort: Send + Sync {
-    /// 当前空间的沿革标识(创建与验证意图的基准)。
-    async fn current_space_lineage(&self) -> Result<String, RemovalIntentRepositoryError>;
-
-    /// 原子保存一条此前未知的意图及其完整收敛状态。
-    ///
-    /// `state` 必须包含 `intent`，且已经记录意图目标的本机安全限制。返回
-    /// `true` 表示此前未知；返回 `false` 时不改变已保存状态。
-    async fn save_new_intent_state(
-        &self,
-        intent: &SignedRemovalIntent,
-        state: &RemovalPersistedState,
-    ) -> Result<bool, RemovalIntentRepositoryError>;
-
-    /// 保存收敛状态(已知意图集合、交换进度、本机安全限制、恢复执行状态)。
-    async fn save_state(
-        &self,
-        state: &RemovalPersistedState,
-    ) -> Result<(), RemovalIntentRepositoryError>;
-
-    /// 加载收敛状态。
-    async fn load_state(
-        &self,
-    ) -> Result<Option<RemovalPersistedState>, RemovalIntentRepositoryError>;
 }
 
 /// 本机成员移除对内容发送的最小限制查询。
@@ -975,58 +897,6 @@ pub trait RemovalRecoveryPort: Send + Sync {
 
     /// 本机在空间中的成员实例。`None` 表示本机不在当前成员集合中。
     async fn own_instance(&self) -> Result<Option<MemberInstanceId>, RemovalRecoveryError>;
-
-    /// 生成一个新的备用 key package(恢复时重新加入所需)。
-    async fn prepare_key_package(&self) -> Result<Vec<u8>, RemovalRecoveryError>;
-
-    /// 执行者从自己的分叉成员集合生成恢复资料。
-    ///
-    /// `key_packages` 为有效成员(除执行者外)提供的备用 key package;
-    /// 缺失的成员无法被重新加入,因此调用方必须收集齐后再调用。
-    async fn prepare_forward_recovery(
-        &self,
-        convergence_digest: &[u8; 32],
-        effective_members: &[MemberInstanceId],
-        key_packages: &[(MemberInstanceId, Vec<u8>)],
-    ) -> Result<RemovalPreparedRecovery, RemovalRecoveryError>;
-
-    /// 安装此前已持久化的执行者本机恢复检查点。
-    ///
-    /// 调用可重复；同一检查点在重启后再次安装不得生成新的安全状态。
-    async fn install_prepared_forward_recovery(
-        &self,
-        local_checkpoint: &[u8],
-    ) -> Result<(), RemovalRecoveryError>;
-
-    /// 非执行者应用恢复资料。
-    ///
-    /// 只有当资料的目标成员集合与收敛摘要和本机计算完全匹配时才接受。
-    async fn apply_forward_recovery(
-        &self,
-        material: &RemovalRecoveryMaterial,
-        expected_convergence_digest: &[u8; 32],
-        expected_effective_members: &[MemberInstanceId],
-    ) -> Result<(), RemovalRecoveryError>;
-}
-
-/// 备用 key package 的私钥状态存储(恢复时重新加入所需)。
-///
-/// 成员生成备用 key package 后必须持久化其私钥状态,直到恢复完成;
-/// 崩溃恢复后仍能用自己的备用 key package 加入执行者分发的恢复资料。
-#[async_trait]
-pub trait RemovalPendingJoinStorePort: Send + Sync {
-    async fn save(
-        &self,
-        space_lineage: &str,
-        pending: Vec<u8>,
-    ) -> Result<(), RemovalIntentRepositoryError>;
-
-    async fn load(
-        &self,
-        space_lineage: &str,
-    ) -> Result<Option<Vec<u8>>, RemovalIntentRepositoryError>;
-
-    async fn clear(&self, space_lineage: &str) -> Result<(), RemovalIntentRepositoryError>;
 }
 
 /// 移除交换的接收端(服务端 handler 侧)。

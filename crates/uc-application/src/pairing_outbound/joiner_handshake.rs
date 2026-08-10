@@ -187,14 +187,15 @@ impl JoinerHandshakeCoordinator {
     pub(crate) async fn complete(
         &self,
         pending: PendingJoinerHandshake,
+        admission: uc_core::membership::AdmissionChangeFacts,
     ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
         self.pairing_session
-            .send(&pending.session, PairingSessionMessage::Ready(JoinerReady))
+            .send(
+                &pending.session,
+                PairingSessionMessage::Ready(JoinerReady { admission }),
+            )
             .await
             .map_err(map_session_err)?;
-        self.pairing_session
-            .close(&pending.session, Some("joiner ready".into()))
-            .await;
         Ok(pending.into_outcome())
     }
 
@@ -204,7 +205,17 @@ impl JoinerHandshakeCoordinator {
         passphrase: &Passphrase,
     ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
         let pending = self.handshake(code, passphrase).await?;
-        self.complete(pending).await
+        // This convenience entry has no persisted workspace session, so it
+        // cannot produce verified admission facts.
+        self.pairing_session
+            .close(
+                &pending.session,
+                Some("workspace admission required".into()),
+            )
+            .await;
+        Err(RedeemPairingInvitationError::Internal(
+            "workspace admission required".into(),
+        ))
     }
 
     pub(crate) async fn abort(&self, pending: PendingJoinerHandshake, error: &str) {
@@ -884,7 +895,21 @@ mod tests {
         ));
         assert!(b.session.closed().is_empty());
 
-        coord.complete(out).await.unwrap();
+        coord
+            .complete(
+                out,
+                uc_core::membership::AdmissionChangeFacts {
+                    member_instance: uc_core::membership::MemberInstanceId::from_bytes([1; 32]),
+                    device_id: DeviceId::new("joiner-device"),
+                    device_name: "joiner".into(),
+                    identity_fingerprint: joiner_fp(),
+                    transport_public_key: vec![1],
+                    transport_address_blob: vec![],
+                    identity_signature: vec![2],
+                },
+            )
+            .await
+            .unwrap();
 
         let sent = b.session.sent();
         assert!(matches!(sent[2].1, PairingSessionMessage::Ready(_)));

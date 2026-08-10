@@ -25,9 +25,9 @@ mod facade;
 
 pub use commands::{
     ContentTypesPatch, ContentTypesView, LegacyBootstrapState, LegacyBootstrapView,
-    MemberProtectionStatusView, MemberProtectionView, MemberRemovalPhaseView, MemberRemovalView,
-    MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
-    RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
+    MemberProtectionStatusView, MemberProtectionView, MemberSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesView, PeerSnapshotView, RosterEntry, SpaceProtectionModeView,
+    SpaceProtectionView,
 };
 pub use errors::RosterError;
 pub use facade::{MemberRosterDeps, MemberRosterFacade};

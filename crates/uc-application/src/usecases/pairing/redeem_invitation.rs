@@ -70,6 +70,7 @@ use crate::pairing_outbound::joiner_handshake::{
 };
 use crate::trusted_peer::errors::TrustedPeerApplicationError;
 use crate::trusted_peer::usecases::{TrustPeer, TrustPeerUseCase};
+use crate::workspace_convergence::WorkspaceConvergence;
 
 pub(crate) type AdmitMemberUc = AdmitMemberUseCase<dyn MemberRepositoryPort>;
 pub(crate) type TrustPeerUc = TrustPeerUseCase<dyn TrustedPeerRepositoryPort>;
@@ -91,6 +92,7 @@ pub(crate) struct RedeemPairingInvitationUseCase {
     /// All calls are fire-and-forget; the gate inside the facade
     /// implementation keeps them off the hot path.
     analytics: Arc<dyn AnalyticsFacade>,
+    workspace_convergence: Option<Arc<WorkspaceConvergence>>,
 }
 
 impl RedeemPairingInvitationUseCase {
@@ -103,6 +105,7 @@ impl RedeemPairingInvitationUseCase {
         resume_session: Arc<dyn ResumeSpaceSessionPort>,
         clock: Arc<dyn ClockPort>,
         analytics: Arc<dyn AnalyticsFacade>,
+        workspace_convergence: Option<Arc<WorkspaceConvergence>>,
     ) -> Self {
         Self {
             handshake,
@@ -113,6 +116,7 @@ impl RedeemPairingInvitationUseCase {
             resume_session,
             clock,
             analytics,
+            workspace_convergence,
         }
     }
 
@@ -158,7 +162,18 @@ impl RedeemPairingInvitationUseCase {
                     "activate paired space: persisted session was unavailable".into(),
                 ));
             }
-            self.handshake.complete(pending).await?;
+            let workspace_convergence = self.workspace_convergence.as_ref().ok_or_else(|| {
+                RedeemPairingInvitationError::Internal("workspace convergence unavailable".into())
+            })?;
+            let admission = workspace_convergence
+                .local_admission_facts()
+                .await
+                .map_err(|error| {
+                    RedeemPairingInvitationError::Internal(format!(
+                        "prepare workspace admission: {error}"
+                    ))
+                })?;
+            self.handshake.complete(pending, admission).await?;
             Ok((persisted, channel))
         }
         .await;
@@ -954,6 +969,7 @@ mod tests {
                 Arc::new(ReadyResume),
                 Arc::new(FixedClock(fixed_now_ms())),
                 facade,
+                None,
             );
             (
                 uc,
@@ -1263,6 +1279,7 @@ mod tests {
             Arc::new(ReadyResume),
             Arc::new(FixedClock(fixed_now_ms())),
             facade,
+            None,
         );
         (uc, analytics)
     }
