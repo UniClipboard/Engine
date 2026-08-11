@@ -841,15 +841,20 @@ impl WorkspaceConvergenceState {
             // fact the removal notice carries, set idempotently.
             self.removed = true;
         }
-        let mut convergence = super::removal_intent::RemovalConvergence::new();
-        for known in &self.removal_intent_records {
-            convergence.insert(known);
-        }
-        let targeted = convergence.effective_members();
+        // The removal target set is exactly the set of currently effective
+        // member instances that validated intents point to. Intent views are
+        // causal snapshots taken at intent creation: a member admitted after
+        // the intent was created is not part of any view and must never be
+        // derived as a removal target (the new instance rule). Only the
+        // exact targets may be removed; every other current member stays.
         let current = self.effective_members();
         let to_remove = current
             .iter()
-            .filter(|member| !targeted.contains(member))
+            .filter(|member| {
+                self.removal_intent_records
+                    .iter()
+                    .any(|known| known.content.target == **member)
+            })
             .copied()
             .collect::<BTreeSet<_>>();
         self.advance(now_ms);
@@ -1219,6 +1224,7 @@ pub fn compute_change_digest(change: &WorkspaceChange) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::membership::removal_intent::{RemovalCausalProof, RemovalIntentContent};
 
     fn admission_change(
         lineage: &str,
@@ -1275,6 +1281,30 @@ mod tests {
 
     fn instance(byte: u8) -> MemberInstanceId {
         MemberInstanceId::from_bytes([byte; 32])
+    }
+
+    fn removal_intent(
+        lineage: &str,
+        epoch: u64,
+        members: &[MemberInstanceId],
+        initiator: MemberInstanceId,
+        target: MemberInstanceId,
+    ) -> SignedRemovalIntent {
+        let mut sorted = members.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let content = RemovalIntentContent {
+            space_lineage: lineage.to_owned(),
+            view_epoch: epoch,
+            view_members: sorted,
+            initiator,
+            target,
+        };
+        SignedRemovalIntent::new(
+            content,
+            vec![1, 2, 3],
+            RemovalCausalProof::new(epoch, Vec::new()),
+        )
     }
 
     #[test]
@@ -1591,5 +1621,143 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, WorkspaceMergeOutcome::Unchanged);
         assert_eq!(effect, WorkspaceEffect::NONE);
+    }
+
+    #[test]
+    fn historical_removal_intent_does_not_remove_a_later_admitted_member() {
+        // A removal intent created before member D joined names only the old
+        // members in its causal view. Recording that intent on D must not
+        // derive D as a removal target: only the exact intent target may be
+        // removed, and a member admitted after the intent never appears in
+        // its view (the new instance rule).
+        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let initial = WorkspaceDigest(Sha256::digest(b"uniclipboard-workspace-initial/v1").into());
+        let c = instance(0x0c);
+        let x = instance(0x0e);
+        let d = instance(0x0d);
+        state
+            .apply(
+                WorkspaceConvergenceEvent::CommittedChange(admission_change(
+                    "lineage",
+                    0,
+                    c,
+                    *initial.as_bytes(),
+                )),
+                2,
+            )
+            .unwrap();
+        let first_digest = compute_change_digest(&state.changes[0]);
+        state
+            .apply(
+                WorkspaceConvergenceEvent::CommittedChange(admission_change(
+                    "lineage",
+                    1,
+                    d,
+                    first_digest,
+                )),
+                3,
+            )
+            .unwrap();
+        let historical = removal_intent("lineage", 1, &[c, x], c, x);
+        let to_remove = state.record_removal_intent(&historical, 4).unwrap();
+        assert!(
+            to_remove.is_empty(),
+            "a fresh member outside every historical intent view must not be removed"
+        );
+        assert!(
+            !state.removed,
+            "the fresh member must not observe its own removal"
+        );
+        assert!(state.effective_members().contains(&d));
+        assert!(
+            state.removal_intent_records.len() == 1,
+            "the intent stays recorded"
+        );
+    }
+
+    #[test]
+    fn historical_removal_intent_still_removes_its_exact_current_target() {
+        // When the intent's exact target is still a current member, recording
+        // the intent still derives that target for the next removal change.
+        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let initial = WorkspaceDigest(Sha256::digest(b"uniclipboard-workspace-initial/v1").into());
+        let c = instance(0x0c);
+        let x = instance(0x0e);
+        let d = instance(0x0d);
+        for (epoch, member) in [(0, c), (1, x), (2, d)].into_iter() {
+            let previous = if epoch == 0 {
+                *initial.as_bytes()
+            } else {
+                compute_change_digest(&state.changes[epoch - 1])
+            };
+            state
+                .apply(
+                    WorkspaceConvergenceEvent::CommittedChange(admission_change(
+                        "lineage",
+                        epoch as u64,
+                        member,
+                        previous,
+                    )),
+                    3,
+                )
+                .unwrap();
+        }
+        let historical = removal_intent("lineage", 2, &[c, x], c, x);
+        let to_remove = state.record_removal_intent(&historical, 4).unwrap();
+        assert_eq!(
+            to_remove,
+            BTreeSet::from([x]),
+            "the exact target that is still current must be removed"
+        );
+        assert!(!state.removed, "the local instance is not the target");
+    }
+
+    #[test]
+    fn old_removal_intent_does_not_match_a_rejoined_member_instance() {
+        // A device removed as instance X rejoins as a new instance D. The
+        // old intent naming X must not mark the new instance removed nor
+        // derive it for removal.
+        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let initial = WorkspaceDigest(Sha256::digest(b"uniclipboard-workspace-initial/v1").into());
+        let c = instance(0x0c);
+        let old = instance(0x0e);
+        let rejoined = instance(0x0f);
+        let first = admission_change("lineage", 0, c, *initial.as_bytes());
+        state
+            .apply(WorkspaceConvergenceEvent::CommittedChange(first.clone()), 2)
+            .unwrap();
+        let second = admission_change("lineage", 1, old, compute_change_digest(&state.changes[0]));
+        state
+            .apply(WorkspaceConvergenceEvent::CommittedChange(second), 3)
+            .unwrap();
+        let removal = removal_change(
+            "lineage",
+            2,
+            &[old],
+            compute_change_digest(&state.changes[1]),
+        );
+        state
+            .apply(WorkspaceConvergenceEvent::CommittedChange(removal), 4)
+            .unwrap();
+        let rejoin = admission_change(
+            "lineage",
+            3,
+            rejoined,
+            compute_change_digest(&state.changes[2]),
+        );
+        state
+            .apply(WorkspaceConvergenceEvent::CommittedChange(rejoin), 5)
+            .unwrap();
+        let historical = removal_intent("lineage", 2, &[c, old], c, old);
+        let to_remove = state.record_removal_intent(&historical, 6).unwrap();
+        assert!(
+            to_remove.is_empty(),
+            "the removed old instance is not current; the new instance must be untouched"
+        );
+        assert!(
+            !state.removed,
+            "the rejoined member must not observe a stale removal"
+        );
+        assert_eq!(state.effective_members(), BTreeSet::from([c, rejoined]));
     }
 }

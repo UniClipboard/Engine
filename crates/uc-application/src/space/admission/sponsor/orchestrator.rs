@@ -798,6 +798,7 @@ mod tests {
         }
         async fn local_admission_facts(
             &self,
+            _member_instance: Option<MemberInstanceId>,
         ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError> {
             unimplemented!("joiner-side method not exercised in sponsor tests")
         }

@@ -504,7 +504,7 @@ impl SwitchSpaceUseCase {
             .map_err(|error| SwitchSpaceError::Storage(error.to_string()))?;
         let admission = self
             .workspace_convergence
-            .local_admission_facts()
+            .local_admission_facts(outcome.member_instance)
             .await
             .map_err(|error| {
                 SwitchSpaceError::Internal(format!("prepare workspace admission: {error}"))

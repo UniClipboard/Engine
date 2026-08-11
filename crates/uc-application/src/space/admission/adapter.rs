@@ -70,9 +70,12 @@ pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
     ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError>;
 
     /// Locally signed facts the joiner returns after its group session is
-    /// active.
+    /// active. `member_instance` overrides the security-view resolution:
+    /// a rejoining device must identify itself by the instance derived from
+    /// this admission's fresh credential, not by a possibly stale view.
     async fn local_admission_facts(
         &self,
+        member_instance: Option<MemberInstanceId>,
     ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError>;
 
     /// Save the joiner's local readiness facts before it sends its
@@ -144,8 +147,9 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
 
     async fn local_admission_facts(
         &self,
+        member_instance: Option<MemberInstanceId>,
     ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError> {
-        WorkspaceConvergence::local_admission_facts(self).await
+        WorkspaceConvergence::local_admission_facts(self, member_instance).await
     }
 
     async fn record_local_readiness(

@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tracing::debug;
 
 use super::mls_group::{MlsClientState, MlsGroupEngine};
 use super::session::InMemorySession;
@@ -114,10 +115,17 @@ impl RemovalRecoveryPort for RemovalRecoveryAdapter {
     async fn own_instance(&self) -> Result<Option<MemberInstanceId>, RemovalRecoveryError> {
         let own_device_id = self.own_device_id().await?;
         let view = self.current_view().await?;
-        Ok(view
+        let instance = view
             .members
-            .into_iter()
+            .iter()
             .find(|member| member.device_id == own_device_id)
-            .map(|member| member.instance))
+            .map(|member| member.instance);
+        debug!(
+            view_epoch = view.epoch,
+            view_member_count = view.members.len(),
+            instance = %instance.map_or_else(|| "none".to_owned(), |own| own.to_string()),
+            "current member instance resolved from the security view"
+        );
+        Ok(instance)
     }
 }

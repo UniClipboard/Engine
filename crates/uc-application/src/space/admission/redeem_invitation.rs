@@ -122,10 +122,12 @@ impl RedeemPairingInvitationUseCase {
             }
             // The joiner's local readiness facts (own member instance and
             // readiness record) are saved by the owner before the readiness
-            // reply leaves this device.
+            // reply leaves this device. The member instance is the one
+            // derived from this admission's fresh credential so a rejoining
+            // device is never identified by a stale instance.
             let admission = self
                 .workspace_convergence
-                .local_admission_facts()
+                .local_admission_facts(pending.outcome().member_instance)
                 .await
                 .map_err(|error| {
                     RedeemPairingInvitationError::Internal(format!(
@@ -562,6 +564,7 @@ mod tests {
         }
         async fn local_admission_facts(
             &self,
+            _member_instance: Option<MemberInstanceId>,
         ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError> {
             self.calls.lock().unwrap().push("local_admission_facts");
             Ok(joiner_facts())
