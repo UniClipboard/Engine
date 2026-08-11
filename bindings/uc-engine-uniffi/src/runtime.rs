@@ -1253,10 +1253,16 @@ async fn run_worker_loop(
                 response,
             } => {
                 let url = std::mem::take(&mut *url);
-                let result =
-                    if url.is_empty() && previous_url.as_deref().unwrap_or_default().is_empty() {
-                        Ok(RelaySaveResult { configured: false })
-                    } else {
+                let result = engine
+                    .execute(Operation::QuerySettings)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_custom_relay_urls)
+                    .and_then(|current_urls| {
+                        next_custom_relay_urls(&current_urls, &url, previous_url.as_deref())
+                    });
+                let result = match result {
+                    Ok(custom_relay_urls) => {
                         let credential = if url.is_empty() {
                             RelayCredentialEdit::Delete {
                                 url: previous_url.unwrap_or_default(),
@@ -1273,11 +1279,7 @@ async fn run_worker_loop(
                             .execute(Operation::SaveRelay(Box::new(SaveRelayInput {
                                 settings: SettingsPatch {
                                     network: Some(NetworkSettingsPatch {
-                                        custom_relay_urls: Some(if url.is_empty() {
-                                            Vec::new()
-                                        } else {
-                                            vec![url]
-                                        }),
+                                        custom_relay_urls: Some(custom_relay_urls),
                                         ..Default::default()
                                     }),
                                     ..Default::default()
@@ -1287,7 +1289,9 @@ async fn run_worker_loop(
                             .await
                             .map_err(BindingError::from)
                             .and_then(map_relay_save_result)
-                    };
+                    }
+                    Err(error) => Err(error),
+                };
                 let _ = response.send(result);
             }
             WorkerCommand::RecoverNetwork { response } => {
@@ -1921,6 +1925,58 @@ fn map_relay_save_result(result: OperationResult) -> Result<RelaySaveResult, Bin
     }
 }
 
+fn map_custom_relay_urls(result: OperationResult) -> Result<Vec<String>, BindingError> {
+    match result {
+        OperationResult::Settings(settings) => Ok(settings.network.custom_relay_urls),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn next_custom_relay_urls(
+    current_urls: &[String],
+    url: &str,
+    previous_url: Option<&str>,
+) -> Result<Vec<String>, BindingError> {
+    let mut next_urls = current_urls.to_vec();
+    match previous_url.filter(|previous_url| !previous_url.is_empty()) {
+        None if url.is_empty() => Ok(next_urls),
+        None => {
+            if next_urls.iter().any(|configured| configured == url) {
+                return Err(BindingError::Engine {
+                    code: 0,
+                    category: BindingErrorCategory::InvalidInput,
+                    retryable: false,
+                });
+            }
+            next_urls.push(url.to_owned());
+            Ok(next_urls)
+        }
+        Some(previous_url) => {
+            let index = next_urls
+                .iter()
+                .position(|configured| configured == previous_url)
+                .ok_or(BindingError::Engine {
+                    code: 0,
+                    category: BindingErrorCategory::InvalidInput,
+                    retryable: false,
+                })?;
+            if url.is_empty() {
+                next_urls.remove(index);
+            } else {
+                if url != previous_url && next_urls.iter().any(|configured| configured == url) {
+                    return Err(BindingError::Engine {
+                        code: 0,
+                        category: BindingErrorCategory::InvalidInput,
+                        retryable: false,
+                    });
+                }
+                next_urls[index] = url.to_owned();
+            }
+            Ok(next_urls)
+        }
+    }
+}
+
 fn map_network_recovered(result: OperationResult) -> Result<(), BindingError> {
     unpack_operation!(result, OperationResult::NetworkRecovered => ())
 }
@@ -2245,6 +2301,39 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_node_changes_preserve_other_configured_nodes() {
+        let initial = vec!["https://relay-a.example.com".to_owned()];
+
+        let with_second = next_custom_relay_urls(&initial, "https://relay-b.example.com", None)
+            .expect("adding a relay node must keep existing nodes");
+        assert_eq!(
+            with_second,
+            vec![
+                "https://relay-a.example.com".to_owned(),
+                "https://relay-b.example.com".to_owned(),
+            ]
+        );
+
+        let updated = next_custom_relay_urls(
+            &with_second,
+            "https://relay-c.example.com",
+            Some("https://relay-a.example.com"),
+        )
+        .expect("editing a relay node must keep the other nodes");
+        assert_eq!(
+            updated,
+            vec![
+                "https://relay-c.example.com".to_owned(),
+                "https://relay-b.example.com".to_owned(),
+            ]
+        );
+
+        let removed = next_custom_relay_urls(&updated, "", Some("https://relay-c.example.com"))
+            .expect("removing a relay node must keep the other nodes");
+        assert_eq!(removed, vec!["https://relay-b.example.com".to_owned()]);
+    }
 
     #[test]
     fn workspace_convergence_methods_and_events_share_the_complete_snapshot() {
