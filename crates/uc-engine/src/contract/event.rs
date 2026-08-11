@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     EngineError, EngineState, LifecycleAction, NetworkRecoveryStatusSummary, OperationTerminal,
+    WorkspaceConvergenceSummary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +27,7 @@ pub enum EngineEvent {
     TransferStatusChanged(TransferStatusChanged),
     DeliveryStatusChanged(DeliveryStatusChanged),
     PeerPresenceChanged(PeerPresenceChanged),
-    WorkspaceConvergenceChanged(uc_core::membership::WorkspaceSnapshot),
+    WorkspaceConvergenceChanged(WorkspaceConvergenceSummary),
     ActiveClipboardChanged(ActiveClipboardChanged),
     MobileLanSettingsChanged(MobileLanSettingsChanged),
     NetworkRecoveryChanged(NetworkRecoveryStatusSummary),

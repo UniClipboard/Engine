@@ -18,6 +18,3 @@ pub use contract::*;
 #[cfg(feature = "dev-tools")]
 pub use dev::*;
 pub use engine::{Engine, EventStream};
-pub use uc_core::membership::{
-    WorkspaceDigest, WorkspaceFailureCategory, WorkspacePhase, WorkspaceSnapshot,
-};

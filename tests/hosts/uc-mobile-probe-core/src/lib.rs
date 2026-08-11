@@ -1382,13 +1382,17 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
             summary.member_removal_changes += 1;
             summary.last_workspace_phase = Some(
                 match snapshot.phase {
-                    uc_engine::WorkspacePhase::LocallyApplied => "locally_applied",
-                    uc_engine::WorkspacePhase::Converging => "converging",
-                    uc_engine::WorkspacePhase::WaitingForOfflineMember => {
+                    uc_engine::WorkspaceConvergencePhaseSummary::LocallyApplied => {
+                        "locally_applied"
+                    }
+                    uc_engine::WorkspaceConvergencePhaseSummary::Converging => "converging",
+                    uc_engine::WorkspaceConvergencePhaseSummary::WaitingForOfflineMember => {
                         "waiting_for_offline_member"
                     }
-                    uc_engine::WorkspacePhase::Complete => "complete",
-                    uc_engine::WorkspacePhase::RecoveryRequired => "recovery_required",
+                    uc_engine::WorkspaceConvergencePhaseSummary::Complete => "complete",
+                    uc_engine::WorkspaceConvergencePhaseSummary::RecoveryRequired => {
+                        "recovery_required"
+                    }
                 }
                 .to_owned(),
             );
@@ -1544,8 +1548,8 @@ mod tests {
 
     #[test]
     fn workspace_convergence_result_and_event_keep_the_same_complete_snapshot() {
-        let snapshot = uc_engine::WorkspaceSnapshot {
-            phase: uc_engine::WorkspacePhase::Converging,
+        let snapshot = uc_engine::WorkspaceConvergenceSummary {
+            phase: uc_engine::WorkspaceConvergencePhaseSummary::Converging,
             revision: 1,
             change_count: 1,
             removal_intent_count: 1,

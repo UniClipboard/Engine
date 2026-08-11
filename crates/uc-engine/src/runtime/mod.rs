@@ -39,6 +39,7 @@ use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
 use crate::assembly::search::build_search_runtime;
 use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
+use crate::operations::device::member::workspace_convergence_summary;
 use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
@@ -119,7 +120,7 @@ fn engine_event_for_active_clipboard(
 }
 
 fn engine_event_for_workspace_convergence(snapshot: WorkspaceSnapshot) -> crate::EngineEvent {
-    crate::EngineEvent::WorkspaceConvergenceChanged(snapshot)
+    crate::EngineEvent::WorkspaceConvergenceChanged(workspace_convergence_summary(snapshot))
 }
 
 async fn spawn_workspace_convergence_events(
@@ -607,7 +608,9 @@ mod tests {
 
         assert_eq!(
             event_stream.next().await,
-            Some(crate::EngineEvent::WorkspaceConvergenceChanged(snapshot))
+            Some(crate::EngineEvent::WorkspaceConvergenceChanged(
+                workspace_convergence_summary(snapshot),
+            ))
         );
 
         tasks.shutdown(Duration::from_secs(1)).await;
