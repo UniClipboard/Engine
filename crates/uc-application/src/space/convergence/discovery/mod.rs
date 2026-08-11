@@ -16,8 +16,8 @@ use uc_core::membership::{
     MembershipGossipEndpointPort, MembershipGossipMessage, MembershipGossipTransportPort,
     MembershipOutboxRepositoryError, MembershipOutboxRepositoryPort, MembershipSecurityUpdateError,
     MembershipSecurityUpdatePort, MembershipSharedDevicePage, MembershipSharedDevicePageRequest,
-    PendingGroupUpdate, PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate,
-    SponsorCandidateSeed, VerifiedPeerPromotionPort,
+    PendingMembershipBatch, SpaceMembershipCandidate, SponsorCandidateSeed,
+    VerifiedPeerPromotionPort,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ClockPort, ContentHashPort, DeviceIdentityPort, PeerAddressRepositoryPort};
@@ -91,18 +91,6 @@ pub(crate) struct MembershipGossipPassOutcome {
     pub confirmed_candidates: usize,
     pub synchronized_members: usize,
     pub deferred_items: usize,
-}
-
-pub struct SponsorSeedBatchContext {
-    pub space_id: SpaceId,
-    pub sponsor_device_id: uc_core::ids::DeviceId,
-    pub sponsor_transport_address_blob: Vec<u8>,
-    pub joiner_device_id: uc_core::ids::DeviceId,
-    pub joiner_device_name: String,
-    pub joiner_identity_fingerprint: uc_core::security::IdentityFingerprint,
-    pub joiner_transport_address_blob: Vec<u8>,
-    pub group_epoch: u64,
-    pub existing_member_updates: Vec<PendingGroupUpdate>,
 }
 
 #[derive(Debug, thiserror::Error)]
