@@ -82,6 +82,13 @@ impl OutboundSyncPlanner {
             }
         };
 
+        if !settings.sync.sync_enabled {
+            return OutboundSyncPlan {
+                clipboard: None,
+                files: vec![],
+            };
+        }
+
         // File sync is only applicable for outbound, user-initiated origins
         // (LocalCapture + Resend). RemotePush is already guarded above;
         // LocalRestore writes the snapshot back to the local clipboard with no
@@ -190,6 +197,18 @@ mod tests {
         // hostile zero so a future regression that flips the gate accidentally
         // can't sneak past on a "default cap is huge" technicality.
         settings.file_sync.max_file_size = 0;
+        OutboundSyncPlanner::new(Arc::new(InMemorySettings(Mutex::new(settings))))
+    }
+
+    fn planner_with_global_sync_disabled() -> OutboundSyncPlanner {
+        let mut settings = Settings::default();
+        settings.sync.sync_enabled = false;
+        OutboundSyncPlanner::new(Arc::new(InMemorySettings(Mutex::new(settings))))
+    }
+
+    fn planner_with_automatic_sync_disabled() -> OutboundSyncPlanner {
+        let mut settings = Settings::default();
+        settings.sync.auto_sync_enabled = false;
         OutboundSyncPlanner::new(Arc::new(InMemorySettings(Mutex::new(settings))))
     }
 
@@ -326,6 +345,42 @@ mod tests {
             "Resend must honour file_sync_enabled = false (stronger user intent \
              than max_file_size); got {} files",
             plan.files.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn resend_origin_is_rejected_when_global_sync_is_disabled() {
+        let plan = planner_with_global_sync_disabled()
+            .plan(
+                text_snapshot(),
+                ClipboardChangeOrigin::Resend,
+                vec![candidate("blocked.bin", 1)],
+                1,
+            )
+            .await;
+
+        assert!(plan.clipboard.is_none());
+        assert!(plan.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resend_origin_keeps_file_sync_when_automatic_sync_is_disabled() {
+        let plan = planner_with_automatic_sync_disabled()
+            .plan(
+                text_snapshot(),
+                ClipboardChangeOrigin::Resend,
+                vec![candidate("manual.bin", 1)],
+                1,
+            )
+            .await;
+
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(
+            plan.clipboard
+                .expect("manual resend remains enabled")
+                .file_transfers
+                .len(),
+            1
         );
     }
 }

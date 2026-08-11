@@ -151,6 +151,7 @@ pub(crate) fn build_clipboard_runtime(
         receiver: sync_engine.clipboard_receiver(),
         member_repo: deps.device.member_repo.clone(),
         transfer_cipher: deps.security.transfer_cipher.clone(),
+        settings: deps.settings.clone(),
         clock: deps.system.clock.clone(),
         apply: apply_inbound.clone() as Arc<dyn InboundClipboardApplyPort>,
         events: Arc::new(EngineClipboardInboundEvents { events }),

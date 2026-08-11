@@ -146,10 +146,32 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
     let sponsor_root = tempfile::tempdir().unwrap();
     let joiner_root = tempfile::tempdir().unwrap();
     let config = EngineConfig::new("1.2.3").with_rendezvous_base_url(rendezvous.uri());
-    let (sponsor, mut sponsor_events) =
-        Engine::start(config.clone(), empty_engine_host(sponsor_root.path()))
-            .await
-            .unwrap();
+    let file_bytes = b"manual file resend reaches the second engine".to_vec();
+    let file_display_name = "manual-resend.txt";
+    let sponsor_file_state = Arc::new(RecordingHostFilesState::default());
+    let sponsor_host = HostCapabilities::new(
+        HostDirectories::new(
+            sponsor_root.path().join("private"),
+            sponsor_root.path().join("cache"),
+            sponsor_root.path().join("temporary"),
+            sponsor_root.path().join("logs"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(ReadableHostFiles {
+            handle: "manual-resend-file".into(),
+            display_name: file_display_name.into(),
+            mime_type: Some("text/plain".into()),
+            bytes: file_bytes.clone(),
+            state: sponsor_file_state,
+        }),
+    );
+    let (sponsor, mut sponsor_events) = Engine::start(config.clone(), sponsor_host).await.unwrap();
     let (joiner, mut joiner_events) = Engine::start(config, empty_engine_host(joiner_root.path()))
         .await
         .unwrap();
@@ -199,6 +221,15 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         EngineEvent::WorkspaceConvergenceChanged(_)
     ));
 
+    assert!(matches!(
+        sponsor
+            .execute(crate::Operation::QuerySettings)
+            .await
+            .unwrap(),
+        crate::OperationResult::Settings(settings)
+            if settings.sync.sync_enabled && settings.sync.auto_sync_enabled
+    ));
+
     let text = "engine inbound behavior baseline";
     let first_send = sponsor
         .execute(crate::Operation::SendText(crate::SendTextInput {
@@ -244,7 +275,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
     let resend = sponsor
         .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
             entry_id: first_entry_id,
-            target_devices: vec![joiner_device_id],
+            target_devices: vec![joiner_device_id.clone()],
         }))
         .await
         .unwrap();
@@ -273,6 +304,132 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         crate::OperationResult::HistoryPage { ref entries, next_cursor: None }
             if entries.len() == 1 && entries[0].preview.as_deref() == Some(text)
     ));
+
+    sponsor
+        .execute(crate::Operation::UpdateMemberSyncPreferences(
+            crate::UpdateMemberSyncPreferencesInput {
+                device_id: joiner_device_id.clone(),
+                patch: crate::MemberSyncPreferencesPatch {
+                    send_enabled: Some(false),
+                    ..Default::default()
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    let file_entry_id = match sponsor
+        .execute(crate::Operation::SendFiles(crate::SendFilesInput {
+            files: vec![HostFileHandle::new("manual-resend-file")],
+            target_devices: vec![joiner_device_id.clone()],
+        }))
+        .await
+        .unwrap()
+    {
+        crate::OperationResult::EntrySent(report) => {
+            assert_eq!(report.total_accepted, 0);
+            report.entry_id
+        }
+        other => panic!("expected locally saved file entry, got {other:?}"),
+    };
+    sponsor
+        .execute(crate::Operation::UpdateMemberSyncPreferences(
+            crate::UpdateMemberSyncPreferencesInput {
+                device_id: joiner_device_id.clone(),
+                patch: crate::MemberSyncPreferencesPatch {
+                    send_enabled: Some(true),
+                    ..Default::default()
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    let automatic_sync_disabled = sponsor
+        .execute(crate::Operation::UpdateSettings(Box::new(
+            crate::SettingsPatch {
+                sync: Some(crate::SyncSettingsPatch {
+                    auto_sync_enabled: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )))
+        .await
+        .unwrap();
+    assert!(matches!(
+        automatic_sync_disabled,
+        crate::OperationResult::SettingsUpdated(
+            crate::SettingsUpdateOutcome::Updated(settings)
+        ) if settings.sync.sync_enabled && !settings.sync.auto_sync_enabled
+    ));
+    let file_resend = sponsor
+        .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
+            entry_id: file_entry_id.clone(),
+            target_devices: vec![joiner_device_id],
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        file_resend,
+        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(report))
+            if report.accepted == 1 && report.duplicate == 0 && report.errored == 0
+    ));
+    let received_file_entry_id = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let result = joiner
+                .execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
+                    cursor: None,
+                    limit: 10,
+                    query: None,
+                }))
+                .await
+                .unwrap();
+            let crate::OperationResult::HistoryPage { entries, .. } = result else {
+                panic!("expected joiner history page");
+            };
+            if let Some(entry) = entries
+                .into_iter()
+                .find(|entry| entry.preview.as_deref() == Some(file_display_name))
+            {
+                break entry.entry_id;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("joiner must retain the manually resent file");
+    let received_file = joiner
+        .execute(crate::Operation::ReadEntryFile(crate::HistoryEntryInput {
+            entry_id: received_file_entry_id,
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        received_file,
+        crate::OperationResult::EntryFileRead(resource) if resource.bytes == file_bytes
+    ));
+
+    sponsor
+        .execute(crate::Operation::UpdateSettings(Box::new(
+            crate::SettingsPatch {
+                sync: Some(crate::SyncSettingsPatch {
+                    sync_enabled: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        sponsor
+            .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
+                entry_id: file_entry_id,
+                target_devices: Vec::new(),
+            }))
+            .await
+            .unwrap(),
+        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::SynchronizationDisabled)
+    );
 
     sponsor
         .shutdown(std::time::Duration::from_secs(15))

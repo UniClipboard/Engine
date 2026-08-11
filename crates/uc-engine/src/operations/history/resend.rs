@@ -43,6 +43,9 @@ fn map_resend_result(
             errored: report.errored,
             pending: report.pending,
         }),
+        Err(ResendEntryError::SynchronizationDisabled) => {
+            ResendEntryOutcome::SynchronizationDisabled
+        }
         Err(ResendEntryError::EntryNotFound(entry_id)) => ResendEntryOutcome::EntryNotFound {
             entry_id: entry_id.as_str().to_string(),
         },

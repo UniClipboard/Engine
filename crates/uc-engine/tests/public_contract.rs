@@ -1076,6 +1076,7 @@ fn resend_contract_preserves_report_and_structured_business_outcomes() {
             errored: 4,
             pending: 5,
         }),
+        uc_engine::ResendEntryOutcome::SynchronizationDisabled,
         uc_engine::ResendEntryOutcome::EntryNotFound {
             entry_id: "entry-1".into(),
         },
@@ -1092,7 +1093,7 @@ fn resend_contract_preserves_report_and_structured_business_outcomes() {
         },
         uc_engine::ResendEntryOutcome::NoEligibleTargets,
     ];
-    assert_eq!(outcomes.len(), 6);
+    assert_eq!(outcomes.len(), 7);
     assert_eq!(
         uc_engine::OperationResult::EntryResent(outcomes[0].clone()),
         uc_engine::OperationResult::EntryResent(uc_engine::ResendEntryOutcome::Completed(

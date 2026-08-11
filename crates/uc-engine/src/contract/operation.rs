@@ -760,6 +760,7 @@ pub struct ResendReportSummary {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ResendEntryOutcome {
     Completed(ResendReportSummary),
+    SynchronizationDisabled,
     EntryNotFound {
         entry_id: String,
     },
