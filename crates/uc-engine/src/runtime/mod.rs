@@ -531,7 +531,6 @@ mod tests {
         StorageFacadeError, StorageStatsView,
     };
     use uc_core::ids::DeviceId;
-    use uc_core::security::IdentityFingerprint;
 
     use super::*;
     use crate::error_codes::{CLEAR_STORAGE_CACHE_FAILED_CODE, QUERY_STORAGE_STATS_FAILED_CODE};
