@@ -3,11 +3,7 @@
 use std::sync::Arc;
 
 use tracing::warn;
-use uc_core::{
-    network::protocol::FileTransferMapping, ports::SettingsPort, ClipboardChangeOrigin,
-    SystemClipboardSnapshot,
-};
-use uuid::Uuid;
+use uc_core::{ports::SettingsPort, ClipboardChangeOrigin, SystemClipboardSnapshot};
 
 use super::outbound_plan_types::{
     ClipboardSyncIntent, FileCandidate, FileSyncIntent, OutboundSyncPlan,
@@ -80,10 +76,7 @@ impl OutboundSyncPlanner {
                 );
                 // Safe default: allow clipboard sync, skip file sync.
                 return OutboundSyncPlan {
-                    clipboard: Some(ClipboardSyncIntent {
-                        snapshot,
-                        file_transfers: vec![],
-                    }),
+                    clipboard: Some(ClipboardSyncIntent { snapshot }),
                     files: vec![],
                 };
             }
@@ -97,56 +90,44 @@ impl OutboundSyncPlanner {
             origin,
             ClipboardChangeOrigin::LocalCapture | ClipboardChangeOrigin::Resend
         );
-        let (eligible_files, file_transfers) =
-            if user_initiated_outbound && settings.file_sync.file_sync_enabled {
-                let max_file_size = settings.file_sync.max_file_size;
-                // Resend is an explicit user action — the user already saw the
-                // entry and chose to retry. `max_file_size` exists to keep the
-                // automatic LocalCapture lane from spending bandwidth on huge
-                // files behind the user's back, and that rationale does not
-                // apply when the user clicks "resend". Bypassing here also
-                // tightens `PayloadLost` semantics to "we no longer hold it"
-                // instead of conflating with "we hold it but it's bigger than
-                // your cap". `file_sync_enabled` is *not* bypassed — turning
-                // file sync off entirely is a different intent ("I never want
-                // to send files") that resend must still respect.
-                let bypass_size_limit = matches!(origin, ClipboardChangeOrigin::Resend);
+        let eligible_files = if user_initiated_outbound && settings.file_sync.file_sync_enabled {
+            let max_file_size = settings.file_sync.max_file_size;
+            // Resend is an explicit user action — the user already saw the
+            // entry and chose to retry. `max_file_size` exists to keep the
+            // automatic LocalCapture lane from spending bandwidth on huge
+            // files behind the user's back, and that rationale does not
+            // apply when the user clicks "resend". Bypassing here also
+            // tightens `PayloadLost` semantics to "we no longer hold it"
+            // instead of conflating with "we hold it but it's bigger than
+            // your cap". `file_sync_enabled` is *not* bypassed — turning
+            // file sync off entirely is a different intent ("I never want
+            // to send files") that resend must still respect.
+            let bypass_size_limit = matches!(origin, ClipboardChangeOrigin::Resend);
 
-                let mut eligible: Vec<FileSyncIntent> = Vec::new();
-                let mut mappings: Vec<FileTransferMapping> = Vec::new();
+            let mut eligible: Vec<FileSyncIntent> = Vec::new();
 
-                for candidate in file_candidates {
-                    if bypass_size_limit || candidate.size <= max_file_size {
-                        let transfer_id = Uuid::new_v4().to_string();
-                        let filename = candidate.display_name.unwrap_or_else(|| {
-                            candidate
-                                .path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default()
-                        });
+            for candidate in file_candidates {
+                if bypass_size_limit || candidate.size <= max_file_size {
+                    let filename = candidate.display_name.unwrap_or_else(|| {
+                        candidate
+                            .path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    });
 
-                        mappings.push(FileTransferMapping {
-                            transfer_id: transfer_id.clone(),
-                            filename: filename.clone(),
-                        });
-
-                        eligible.push(FileSyncIntent {
-                            path: candidate.path,
-                            transfer_id,
-                            filename,
-                            size: candidate.size,
-                        });
-                    }
+                    eligible.push(FileSyncIntent {
+                        path: candidate.path,
+                        filename,
+                        size: candidate.size,
+                    });
                 }
+            }
 
-                (eligible, mappings)
-            } else {
-                (
-                    Vec::<FileSyncIntent>::new(),
-                    Vec::<FileTransferMapping>::new(),
-                )
-            };
+            eligible
+        } else {
+            Vec::<FileSyncIntent>::new()
+        };
 
         // all_files_excluded guard: only applies when we actually attempted file sync
         // (LocalCapture | Resend + file_sync_enabled). If file sync was not attempted,
@@ -163,10 +144,7 @@ impl OutboundSyncPlanner {
         }
 
         OutboundSyncPlan {
-            clipboard: Some(ClipboardSyncIntent {
-                snapshot,
-                file_transfers,
-            }),
+            clipboard: Some(ClipboardSyncIntent { snapshot }),
             files: eligible_files,
         }
     }
@@ -254,10 +232,7 @@ mod tests {
 
         assert_eq!(plan.files.len(), 1);
         assert_eq!(plan.files[0].filename, "private report.txt");
-        assert_eq!(
-            plan.clipboard.unwrap().file_transfers[0].filename,
-            "private report.txt"
-        );
+        assert!(plan.clipboard.is_some());
     }
 
     /// Resend origin must bypass `settings.file_sync.max_file_size` while
@@ -294,10 +269,7 @@ mod tests {
                 1,
             )
             .await;
-        let intent = plan
-            .clipboard
-            .expect("Resend bypasses max_file_size → clipboard intent emitted");
-        assert_eq!(intent.file_transfers.len(), 1);
+        assert!(plan.clipboard.is_some());
         assert_eq!(plan.files.len(), 1);
         assert_eq!(plan.files[0].size, 2048);
 
@@ -343,15 +315,11 @@ mod tests {
             )
             .await;
 
-        let intent = plan.clipboard.expect(
+        assert!(
+            plan.clipboard.is_some(),
             "file_sync_enabled = false must NOT suppress the clipboard intent — \
              the all_files_excluded guard only fires when file sync was \
-             actually attempted (user_initiated_outbound && file_sync_enabled)",
-        );
-        assert!(
-            intent.file_transfers.is_empty(),
-            "no file transfers when file sync is disabled; got {:?}",
-            intent.file_transfers
+             actually attempted (user_initiated_outbound && file_sync_enabled)"
         );
         assert!(
             plan.files.is_empty(),

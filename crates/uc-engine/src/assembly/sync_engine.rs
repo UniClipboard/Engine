@@ -511,8 +511,6 @@ mod outbound_progress_tests {
 pub enum SyncEngineAssemblyError {
     #[error(transparent)]
     IrohNode(#[from] IrohNodeError),
-    #[error("member removal runtime could not start: {0}")]
-    MemberRemovalRuntime(String),
 }
 
 /// Assemble the Slice 1 `SpaceFacade` from an already-wired dependency

@@ -30,16 +30,6 @@ pub(crate) use outbound_plan::OutboundSyncPlanner;
 pub(crate) use outbound_plan_types::{FileCandidate, FileSyncIntent};
 pub use payload_codec::encode_snapshot_to_v3_bytes;
 
-// `ApplyInboundClipboardUseCase` is consumed by daemon (Phase 3 · T8)
-// directly, so it gets re-exported at lib.rs root rather than staying
-// behind `pub(crate)`.
-pub use apply_inbound::{
-    ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
-    FileCacheBlobMaterializer, InboundApplyCommonDeps, InboundBlobFetcher, InboundBlobMaterializer,
-    InboundCapture, InboundReceiveAttemptDeps, InboundWrite, InteractiveReceiveDeps,
-    StoreOnlyPullDeps,
-};
-
 // Startup governance, reached only through `ClipboardSyncFacade` — the sweep
 // and the areas it removes are the same module's business.
 pub(crate) use apply_inbound::sweep_inbound_staging;

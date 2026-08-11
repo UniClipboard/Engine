@@ -59,8 +59,7 @@ use crate::space::lifecycle::switch_space::{JoinerHandshakeRunner, SwitchSpaceUs
 use crate::space::lifecycle::unlock_space::UnlockSpaceUseCase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchPort, RelationshipStateResetPort,
-    RemovalAdmissionGatePort, RemovalTargetGatePort,
+    RelationshipStateResetPort, RemovalAdmissionGatePort, RemovalTargetGatePort,
 };
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::setup::MigrationStatePort;
@@ -849,14 +848,14 @@ mod tests {
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
-        GroupEpoch, GroupRevocationResult, GroupUpdateDispatchError, KeyEpochError,
-        LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult,
-        LegacyProtectionSnapshot, LegacyRequestInspection, LegacyUpgradeDispatchError,
-        LegacyUpgradeDispatchPort, LegacyUpgradeError, LegacyUpgradeRequest, LegacyUpgradeResponse,
-        MembershipError, PendingGroupUpdate, RelationshipStateResetError,
-        RelationshipStateResetPort, RemovalAdmissionDecision, RemovalAdmissionGatePort,
-        RemovalTargetGatePort, RevocationId, SpaceMember, SpaceSecurityStateResetError,
-        SpaceSecurityStateResetPort,
+        GroupEpoch, GroupRevocationPort, GroupRevocationResult, GroupUpdateDispatchError,
+        GroupUpdateDispatchPort, KeyEpochError, LegacyProtectionCommand, LegacyProtectionPort,
+        LegacyProtectionResult, LegacyProtectionSnapshot, LegacyRequestInspection,
+        LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort, LegacyUpgradeError,
+        LegacyUpgradeRequest, LegacyUpgradeResponse, MembershipError, PendingGroupUpdate,
+        RelationshipStateResetError, RelationshipStateResetPort, RemovalAdmissionDecision,
+        RemovalAdmissionGatePort, RemovalTargetGatePort, RevocationId, SpaceMember,
+        SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
     };
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::PairingSessionMessage;

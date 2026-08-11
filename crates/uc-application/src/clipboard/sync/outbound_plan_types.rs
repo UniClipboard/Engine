@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use uc_core::{network::protocol::FileTransferMapping, SystemClipboardSnapshot};
+use uc_core::SystemClipboardSnapshot;
 
 /// A file candidate pre-computed by the runtime.
 ///
@@ -21,14 +21,11 @@ pub struct FileCandidate {
 
 /// Intent to sync clipboard content to peers.
 ///
-/// Includes the snapshot to broadcast and any associated file transfer mappings
-/// so the receiver can pre-compute local cache paths before files arrive.
+/// Includes the snapshot to broadcast.
 #[derive(Debug, Clone)]
 pub struct ClipboardSyncIntent {
     /// The clipboard snapshot to broadcast.
     pub snapshot: SystemClipboardSnapshot,
-    /// File transfer mappings carried inside the clipboard message.
-    pub file_transfers: Vec<FileTransferMapping>,
 }
 
 /// Intent to sync a single file to peers.
@@ -36,8 +33,6 @@ pub struct ClipboardSyncIntent {
 pub struct FileSyncIntent {
     /// Resolved absolute path to the file to transfer.
     pub path: PathBuf,
-    /// Unique identifier for this file transfer.
-    pub transfer_id: String,
     /// The original filename (used for naming the local cache entry on the receiver).
     pub filename: String,
     /// File size in bytes, taken from `FileCandidate.size` (already queried

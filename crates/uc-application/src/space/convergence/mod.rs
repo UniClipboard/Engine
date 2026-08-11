@@ -251,11 +251,6 @@ impl WorkspaceConvergence {
         state.is_device_removed(device_id)
     }
 
-    /// Whether the local member instance has observed its own removal.
-    pub async fn own_instance_removed(&self) -> bool {
-        self.load_state().await.map_or(true, |state| state.removed)
-    }
-
     /// Load the current workspace snapshot without changing any state.
     pub async fn query(&self) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
         let state = self.load_state().await?;
@@ -409,24 +404,6 @@ impl WorkspaceConvergence {
             "workspace removal change recorded"
         );
         Ok(intent.intent_id)
-    }
-
-    /// Record the sponsor's admission change after the joiner's readiness
-    /// was confirmed, in one save commit with the pending handoff facts.
-    pub async fn record_admission_change(
-        &self,
-        change: WorkspaceChange,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        if state.removed {
-            return Err(WorkspaceConvergenceError::OwnInstanceRemoved);
-        }
-        self.apply_and_publish_change(&mut state, change, now_ms)
-            .await?;
-        self.notify();
-        Ok(state.snapshot())
     }
 
     /// Build the locally signed facts that a joiner returns after its group
@@ -807,20 +784,6 @@ impl WorkspaceConvergence {
         Ok(change)
     }
 
-    /// Apply a verified continuous change delivered by a handoff device.
-    pub async fn ingest_handoff_change(
-        &self,
-        change: WorkspaceChange,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        self.apply_and_publish_change(&mut state, change, now_ms)
-            .await?;
-        self.notify();
-        Ok(state.snapshot())
-    }
-
     /// Record the local member instance and its readiness record after a
     /// successful admission (the joiner's local readiness; the sponsor
     /// records the admission change only after this readiness).
@@ -856,96 +819,6 @@ impl WorkspaceConvergence {
         if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
             self.persist(&state).await?;
         }
-        Ok(state.snapshot())
-    }
-
-    /// Record a member's confirmation of the current digest.
-    pub async fn record_confirmation(
-        &self,
-        confirmation: WorkspaceConfirmation,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        let device = state
-            .member_devices
-            .get(&confirmation.member_instance)
-            .cloned()
-            .ok_or(WorkspaceConvergenceError::InvalidConfirmation)?;
-        let valid = self
-            .deps
-            .member_signatures
-            .verify_current_member_payload(
-                &device,
-                &confirmation.signing_payload(),
-                &confirmation.signature,
-            )
-            .await
-            .map_err(|_| WorkspaceConvergenceError::InvalidConfirmation)?;
-        if !valid {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let (outcome, effect) = state
-            .apply(
-                WorkspaceConvergenceEvent::ConfirmationReceived(confirmation),
-                now_ms,
-            )
-            .map_err(|_| WorkspaceConvergenceError::InvalidConfirmation)?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state).await?;
-        }
-        if effect.publish {
-            self.publish(&state);
-        }
-        if state.phase == WorkspacePhase::Complete {
-            info!("workspace convergence complete");
-        }
-        self.notify();
-        Ok(state.snapshot())
-    }
-
-    /// Mark a known effective member temporarily unreachable.
-    pub async fn mark_member_unreachable(
-        &self,
-        member: uc_core::membership::MemberInstanceId,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        let (outcome, effect) = state
-            .apply(WorkspaceConvergenceEvent::MemberUnreachable(member), now_ms)
-            .map_err(|_| {
-                WorkspaceConvergenceError::Inconsistent("member state rejected".to_owned())
-            })?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state).await?;
-        }
-        if effect.publish {
-            self.publish(&state);
-        }
-        Ok(state.snapshot())
-    }
-
-    /// Mark a previously unreachable known effective member back online.
-    pub async fn mark_member_reachable(
-        &self,
-        member: uc_core::membership::MemberInstanceId,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        let (outcome, effect) = state
-            .apply(WorkspaceConvergenceEvent::MemberReachable(member), now_ms)
-            .map_err(|_| {
-                WorkspaceConvergenceError::Inconsistent("member state rejected".to_owned())
-            })?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state).await?;
-        }
-        if effect.publish {
-            self.publish(&state);
-        }
-        self.notify();
         Ok(state.snapshot())
     }
 
@@ -1067,65 +940,6 @@ impl WorkspaceConvergence {
         }
         self.notify();
         Ok(state.snapshot())
-    }
-
-    /// Create a pending handoff record for a recipient.
-    pub async fn create_pending_handoff(
-        &self,
-        recipient: uc_core::membership::MemberInstanceId,
-        recipient_device: &DeviceId,
-        confirmed_epoch: u64,
-        target_digest: [u8; 32],
-        has_more: bool,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        let (outcome, effect) = state
-            .apply(
-                WorkspaceConvergenceEvent::PendingHandoffCreated {
-                    recipient,
-                    recipient_device: *recipient_device,
-                    confirmed_epoch,
-                    target_digest,
-                    has_more,
-                },
-                now_ms,
-            )
-            .map_err(|_| WorkspaceConvergenceError::InvalidHandoff)?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state).await?;
-        }
-        if effect.publish {
-            self.publish(&state);
-        }
-        Ok(state.snapshot())
-    }
-
-    /// Effective members that have not yet confirmed the current digest,
-    /// with their confirmed handoff epochs.
-    pub async fn pending_confirmations(
-        &self,
-    ) -> Result<
-        Vec<(uc_core::membership::MemberInstanceId, DeviceId, u64)>,
-        WorkspaceConvergenceError,
-    > {
-        let state = self.load_state().await?;
-        let confirmed = state.confirmed_members();
-        let mut pending = Vec::new();
-        for member in state.effective_members() {
-            if confirmed.contains(&member) {
-                continue;
-            }
-            if let Some(device) = state.member_devices.get(&member) {
-                let epoch = state
-                    .pending_handoffs
-                    .get(&member)
-                    .map_or(0, |record| record.confirmed_epoch);
-                pending.push((member, *device, epoch));
-            }
-        }
-        Ok(pending)
     }
 
     /// One reconcile pass: propagate validated intents, notify removed
@@ -2605,7 +2419,7 @@ impl WorkspaceConvergence {
             ));
         }
         for change in &offer.changes {
-            if let Err(error) = self
+            if let Err(_) = self
                 .apply_and_publish_change(&mut state, change.clone(), now_ms)
                 .await
             {
@@ -2614,7 +2428,7 @@ impl WorkspaceConvergence {
                 ));
             }
             for update in &change.security_updates {
-                if let Err(error) = self
+                if let Err(_) = self
                     .deps
                     .security_updates
                     .apply_group_epoch_update(&update.payload)

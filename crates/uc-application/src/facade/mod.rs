@@ -139,7 +139,6 @@ pub use host_event::{
 pub use crate::clipboard::resource::{
     BinaryResourceView, FileResourceView, ResourceFacade, ResourceFacadeDeps, ResourceFacadeError,
 };
-pub use crate::space::roster::errors::MembershipApplicationError;
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
     LegacyBootstrapState, LegacyBootstrapView, MemberProtectionStatusView, MemberProtectionView,

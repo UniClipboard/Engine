@@ -81,8 +81,7 @@ mod tests;
 pub(crate) use materializer::compute_file_set_component;
 pub(crate) use materializer::sweep_inbound_staging;
 pub use materializer::{
-    FileCacheBlobMaterializer, InboundBlobFetcher, InboundBlobMaterializer, InboundFileSetManifest,
-    InboundFileSetMember,
+    FileCacheBlobMaterializer, InboundBlobFetcher, InboundFileSetManifest, InboundFileSetMember,
 };
 pub use ports::{InboundCapture, InboundWrite};
 pub use usecase::{

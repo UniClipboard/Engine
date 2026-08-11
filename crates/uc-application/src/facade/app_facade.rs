@@ -44,7 +44,6 @@ use crate::facade::space_setup::{
     UnlockSpaceResult,
 };
 use crate::facade::upgrade::UpgradeFacade;
-use crate::facade::SpaceApplicationHandle;
 use crate::facade::{
     BlobTransferError, BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade,
     ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade, ClipboardSyncError,
@@ -76,7 +75,6 @@ use uc_core::SystemClipboardSnapshot;
 pub struct AppFacade {
     space: Arc<SpaceFacade>,
     space_session: Arc<SpaceSessionCoordinator>,
-    space_application: SpaceApplicationHandle,
     space_admission: Arc<SpaceAdmissionCoordinator>,
     member_roster: Arc<MemberRosterFacade>,
     encryption: Arc<EncryptionFacade>,
@@ -124,7 +122,6 @@ impl AppFacade {
         Self {
             space: parts.space,
             space_session,
-            space_application: parts.space_application,
             space_admission,
             member_roster: parts.member_roster,
             encryption: parts.encryption,
@@ -906,7 +903,6 @@ pub struct AppFacadeParts {
     pub space: Arc<SpaceFacade>,
     pub space_session_activity: SpaceSessionActivityDeps,
     pub space_session_access: SpaceSessionAccessDeps,
-    pub space_application: SpaceApplicationHandle,
     pub member_roster: Arc<MemberRosterFacade>,
     pub encryption: Arc<EncryptionFacade>,
     pub resource: Arc<ResourceFacade>,

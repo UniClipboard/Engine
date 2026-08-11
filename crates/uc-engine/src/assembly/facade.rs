@@ -264,7 +264,6 @@ pub fn build_app_facade_from_deps(
             lock: Arc::clone(&deps.security.space_access_ports.lock),
             mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
         },
-        space_application: runtime.space_application,
         member_roster: runtime.member_roster,
         encryption: Arc::new(EncryptionFacade::new(EncryptionFacadeDeps {
             setup_status: deps.setup_status.clone(),
