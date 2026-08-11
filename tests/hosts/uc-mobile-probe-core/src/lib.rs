@@ -1041,6 +1041,7 @@ fn operation_response(result: OperationResult) -> Value {
             "removal_intent_count": summary.removal_intent_count,
             "effective_member_count": summary.effective_member_count,
             "confirmed_member_count": summary.confirmed_member_count,
+            "waiting_member_device_ids": summary.waiting_member_device_ids,
             "waiting_member_count": summary.waiting_member_count,
             "removed": summary.removed,
             "updated_at_ms": summary.updated_at_ms,
@@ -1555,6 +1556,7 @@ mod tests {
             removal_intent_count: 1,
             effective_member_count: 2,
             confirmed_member_count: 0,
+            waiting_member_device_ids: Vec::new(),
             waiting_member_count: 0,
             convergence_digest: None,
             removed: false,
@@ -1569,6 +1571,7 @@ mod tests {
                 removal_intent_count: 1,
                 effective_member_count: 2,
                 confirmed_member_count: 0,
+                waiting_member_device_ids: Vec::new(),
                 waiting_member_count: 0,
                 convergence_digest: None,
                 removed: false,
@@ -1583,6 +1586,7 @@ mod tests {
         assert_eq!(response["change_count"], 1);
         assert_eq!(response["effective_member_count"], 2);
         assert_eq!(response["removal_intent_count"], 1);
+        assert_eq!(response["waiting_member_device_ids"], json!([]));
         assert_eq!(response["updated_at_ms"], 42);
         assert_eq!(events.member_removal_changes, 1);
     }
@@ -1597,6 +1601,7 @@ mod tests {
                 removal_intent_count: 0,
                 effective_member_count: 0,
                 confirmed_member_count: 0,
+                waiting_member_device_ids: Vec::new(),
                 waiting_member_count: 0,
                 convergence_digest: None,
                 removed: false,

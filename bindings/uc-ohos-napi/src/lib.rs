@@ -83,6 +83,7 @@ pub struct OhWorkspaceConvergence {
     pub removal_intent_count: u32,
     pub effective_member_count: u32,
     pub confirmed_member_count: u32,
+    pub waiting_member_device_ids: Vec<String>,
     pub waiting_member_count: u32,
     pub convergence_digest: Option<String>,
     pub removed: bool,

@@ -220,6 +220,10 @@ impl WorkspaceConvergence {
         if state.space_lineage.is_empty() {
             state.space_lineage = lineage;
         }
+        if state.ensure_waiting_members_are_resolvable(self.deps.clock.now_ms()) {
+            self.persist(&state).await?;
+            self.publish(&state);
+        }
         Ok(state)
     }
 

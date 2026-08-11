@@ -231,6 +231,7 @@ pub struct WorkspaceConvergence {
     pub removal_intent_count: u64,
     pub effective_member_count: u64,
     pub confirmed_member_count: u64,
+    pub waiting_member_device_ids: Vec<String>,
     pub waiting_member_count: u64,
     pub convergence_digest: Option<String>,
     pub removed: bool,
@@ -1793,6 +1794,7 @@ fn map_workspace_convergence_summary(
         removal_intent_count: summary.removal_intent_count,
         effective_member_count: summary.effective_member_count,
         confirmed_member_count: summary.confirmed_member_count,
+        waiting_member_device_ids: summary.waiting_member_device_ids,
         waiting_member_count: summary.waiting_member_count,
         convergence_digest: summary.convergence_digest,
         removed: summary.removed,
@@ -2256,6 +2258,7 @@ mod tests {
                 removal_intent_count: 1,
                 effective_member_count: 2,
                 confirmed_member_count: 0,
+                waiting_member_device_ids: vec!["device-b".to_owned()],
                 waiting_member_count: 1,
                 convergence_digest: None,
                 removed: false,
@@ -2274,6 +2277,7 @@ mod tests {
                     removal_intent_count: 1,
                     effective_member_count: 2,
                     confirmed_member_count: 0,
+                    waiting_member_device_ids: vec!["device-b".to_owned()],
                     waiting_member_count: 1,
                     convergence_digest: None,
                     removed: false,
@@ -2281,6 +2285,13 @@ mod tests {
                     failure_category: None,
                 },
             }
+        );
+        let BindingEvent::WorkspaceConvergenceChanged { convergence } = event else {
+            panic!("workspace convergence event must map");
+        };
+        assert_eq!(
+            convergence.waiting_member_device_ids,
+            vec!["device-b".to_owned()]
         );
     }
 

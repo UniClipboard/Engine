@@ -432,6 +432,7 @@ fn workspace_convergence(
         removal_intent_count: count_u64(summary.removal_intent_count)?,
         effective_member_count: count_u64(summary.effective_member_count)?,
         confirmed_member_count: count_u64(summary.confirmed_member_count)?,
+        waiting_member_device_ids: summary.waiting_member_device_ids,
         waiting_member_count: count_u64(summary.waiting_member_count)?,
         convergence_digest: summary.convergence_digest,
         removed: summary.removed,
@@ -625,6 +626,7 @@ mod tests {
                 removal_intent_count: 1,
                 effective_member_count: 2,
                 confirmed_member_count: 0,
+                waiting_member_device_ids: vec!["device-b".to_owned()],
                 waiting_member_count: 1,
                 convergence_digest: None,
                 removed: true,
@@ -639,6 +641,10 @@ mod tests {
         assert_eq!(convergence.revision, 2.0);
         assert_eq!(convergence.change_count, 1);
         assert_eq!(convergence.effective_member_count, 2);
+        assert_eq!(
+            convergence.waiting_member_device_ids,
+            vec!["device-b".to_owned()]
+        );
         assert_eq!(convergence.waiting_member_count, 1);
         assert_eq!(convergence.removed, true);
         assert_eq!(convergence.updated_at_ms, 42.0);
@@ -722,6 +728,7 @@ mod tests {
             removal_intent_count: 1,
             effective_member_count: 2,
             confirmed_member_count: 1,
+            waiting_member_device_ids: vec!["device-b".to_owned()],
             waiting_member_count: 1,
             convergence_digest: None,
             removed: false,
@@ -732,6 +739,10 @@ mod tests {
 
         assert_eq!(status.phase, "waiting_for_offline_member");
         assert_eq!(status.revision, 4.0);
+        assert_eq!(
+            status.waiting_member_device_ids,
+            vec!["device-b".to_owned()]
+        );
         assert_eq!(status.change_count, 2);
         assert_eq!(status.removal_intent_count, 1);
     }
