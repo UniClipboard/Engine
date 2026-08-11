@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use thiserror::Error;
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::clipboard::link_utils::extract_domain;
 use uc_core::ids::{EntryId, EventId, FormatId, RepresentationId};

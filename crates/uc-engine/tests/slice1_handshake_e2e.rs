@@ -480,10 +480,6 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sponsor_joiner_end_to_end_pairing_persists_both_sides() {
-    // Best-effort: initialise a test-local tracing subscriber so
-    // `RUST_LOG=...` surfaces adapter / orchestrator logs during
-    // diagnosis. `try_init` is a no-op if another test in the same
-    // process already installed one.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),

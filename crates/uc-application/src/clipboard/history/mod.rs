@@ -17,12 +17,6 @@ pub(crate) mod retention_policy;
 pub(crate) mod toggle_favorite;
 pub(crate) mod views;
 
-pub use views::{
-    CleanupResultView, ClearHistoryResultView, ClipboardHistoryError, ClipboardListInput,
-    ClipboardStatsView, EntryDetailView, EntryProjectionView, EntryResourceView,
-    ReconcileResultView, RetentionEnforcementResultView,
-};
-
 pub(crate) use cleanup::{CleanupExpiredFilesUseCase, CleanupResult};
 pub(crate) use clear_history::ClearClipboardHistoryUseCase;
 pub(crate) use delete_entry::DeleteClipboardEntryUseCase;

@@ -741,6 +741,13 @@ async fn joiner_shutdown_flips_sponsor_roster_to_offline_within_10s() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn joiner_reconnect_flips_sponsor_roster_back_to_online() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        )
+        .with_test_writer()
+        .try_init();
+
     let server = MockServer::start().await;
     let vault: TicketVault = Arc::new(StdMutex::new(None));
     const CODE: &str = "E2EP-ONL1";
