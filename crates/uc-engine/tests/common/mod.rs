@@ -296,6 +296,7 @@ pub fn test_workspace_convergence(
         late_submission: Arc::new(NoopLateSubmission),
         notice: Arc::new(NoopNotice),
         notice_verification: Arc::new(NoopNoticeVerification),
+        recovery_transport: Arc::new(NoopRecoveryTransport),
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         peer_addr_repo: Arc::clone(&peer_addr_repo),
         own_device,
@@ -907,6 +908,23 @@ impl RemovalLateSubmissionPort for NoopLateSubmission {
 }
 
 #[derive(Clone, Default)]
+struct NoopRecoveryTransport;
+
+#[async_trait::async_trait]
+impl uc_core::membership::RecoveryTransportPort for NoopRecoveryTransport {
+    async fn exchange_recovery(
+        &self,
+        _recipient: &uc_core::ids::DeviceId,
+        _binding: &uc_core::membership::RecoveryBinding,
+        _message: uc_core::membership::RecoveryChannelMessage,
+    ) -> Result<
+        uc_core::membership::RecoveryChannelMessage,
+        uc_core::membership::RecoveryTransportError,
+    > {
+        Err(uc_core::membership::RecoveryTransportError::Offline)
+    }
+}
+
 struct NoopNotice;
 #[async_trait]
 impl RemovalNoticePort for NoopNotice {

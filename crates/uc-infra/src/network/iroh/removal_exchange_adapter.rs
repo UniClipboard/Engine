@@ -733,11 +733,14 @@ impl ProtocolHandler for IrohRemovalExchangeHandler {
             let _ = connection.closed().await;
             return Ok(());
         };
+        // Known members whose MLS admission lags (e.g. members learned from
+        // a verified handoff chain) may still exchange; the endpoint
+        // re-verifies membership from its own saved facts on every message.
         if !self.state.is_admitted(&peer_device_id).await {
-            warn!("removal exchange: peer is not admitted");
-            emit_exchange_reply(&mut send, ACK_REJECTED, None).await;
-            let _ = connection.closed().await;
-            return Ok(());
+            debug!(
+                device_id = %peer_device_id.as_str(),
+                "removal exchange: peer not admitted, deferring to endpoint verification"
+            );
         }
         let Some(message) = read_length_prefixed(&mut recv, MAX_EXCHANGE_MESSAGE_SIZE).await else {
             emit_exchange_reply(&mut send, ACK_REJECTED, None).await;

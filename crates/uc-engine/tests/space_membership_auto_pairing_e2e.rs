@@ -251,7 +251,13 @@ async fn members_converge_when_sponsor_stays_offline_after_joining_c() {
     let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
     wait_for_members(&engine_a, &[&b_id]).await;
     wait_for_members(&engine_b, &[&a_id]).await;
-
+    // The joiner must have received the continuous chain before the sponsor
+    // goes offline (ADR-016: joining produces only local readiness until
+    // the chain is handed over).
+    wait_until(WAIT_TIMEOUT, || async {
+        workspace_convergence_summary(&engine_b).await.change_count >= 2
+    })
+    .await;
     engine_a
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
@@ -260,6 +266,10 @@ async fn members_converge_when_sponsor_stays_offline_after_joining_c() {
     let engine_c = device_c.start().await;
     let c_id = join_through(&engine_b, &engine_c, "Device C", &space_id).await;
     wait_for_members(&engine_b, &[&a_id, &c_id]).await;
+    wait_until(WAIT_TIMEOUT, || async {
+        workspace_convergence_summary(&engine_c).await.change_count >= 3
+    })
+    .await;
     engine_b
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
@@ -274,16 +284,15 @@ async fn members_converge_when_sponsor_stays_offline_after_joining_c() {
         OperationResult::EncryptionLocked
     );
     assert_receive_ready(&engine_a, false).await;
+    let locked_query = engine_a.execute(Operation::QueryWorkspaceConvergence).await;
     assert!(
-        engine_a
-            .execute(Operation::QueryWorkspaceConvergence)
-            .await
-            .is_err(),
+        locked_query.is_err(),
         "locked membership state must not be decrypted"
     );
     recover(&engine_a).await;
     assert_receive_ready(&engine_a, true).await;
     wait_for_converged_members(&engine_a, &engine_c, &a_id, &c_id).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
 
     send_and_verify(
         &engine_a,
@@ -424,7 +433,7 @@ async fn four_members_converge_through_an_online_relay_after_two_sponsors_leave(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-#[ignore = "ADR-016 runtime: the pairing flow does not yet record admission changes into the workspace chain, so removal cannot run on an empty chain"]
+#[ignore = "ADR-016 gap: concurrent rejoins from different retained sponsors fork the change chain (each sponsor appends its own rejoin to its local head); the unified-target merge for concurrent admissions is not implemented yet"]
 async fn five_devices_restore_full_sync_after_two_completed_removals_and_rejoins() {
     let rendezvous = mount_rendezvous().await;
     let harnesses = (0..5)
@@ -551,7 +560,6 @@ async fn member_removal_converges_across_three_independent_engine_directories() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-#[ignore = "ADR-016 runtime: the pairing flow does not yet record admission changes into the workspace chain, so removal cannot run on an empty chain"]
 async fn completed_removal_can_continue_from_the_recovered_member_state() {
     init_test_tracing();
     let rendezvous = mount_rendezvous().await;

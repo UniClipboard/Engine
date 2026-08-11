@@ -591,6 +591,10 @@ pub async fn build_sync_engine_assembly(
     );
     let legacy_upgrade_dispatch: Arc<dyn LegacyUpgradeDispatchPort> =
         legacy_upgrade_adapter.clone();
+    let workspace_recovery_adapter = builder.build_workspace_recovery_adapter(
+        Arc::clone(&space_setup.peer_addr_repo),
+        Arc::clone(&space_setup.membership_session),
+    );
     let convergence_assembly = SpaceConvergenceAssembly::new(SpaceConvergenceDeps {
         workspace: WorkspaceConvergenceDeps {
             repository: Arc::clone(&space_setup.workspace_convergence_repository),
@@ -615,6 +619,7 @@ pub async fn build_sync_engine_assembly(
             late_submission: removal_exchange_adapter.clone(),
             notice: removal_exchange_adapter.clone(),
             notice_verification: Arc::new(RemovalNoticeVerificationAdapter),
+            recovery_transport: workspace_recovery_adapter.clone(),
             trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             own_device: deps.device.device_identity.current_device_id(),
@@ -668,12 +673,9 @@ pub async fn build_sync_engine_assembly(
         convergence_assembly.removal_late_submission(),
         convergence_assembly.removal_notice(),
     )?;
-    let workspace_recovery_adapter =
-        builder.build_workspace_recovery_adapter(Arc::clone(&space_setup.peer_addr_repo));
     builder.install_workspace_recovery(
         &workspace_recovery_adapter,
         Arc::clone(&deps.device.member_repo),
-        Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
         convergence_assembly.recovery_transport(),
     )?;

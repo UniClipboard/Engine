@@ -171,6 +171,188 @@ pub const WORKSPACE_RECOVERY_CHANNEL_VERSION: &str = "uniclipboard/workspace-rec
 /// for purpose-separated historical keys.
 pub const MIN_HISTORY_KEY_NUMBER: u64 = 1;
 
+/// The sealed envelope version written in the clear header.
+pub const RECOVERY_ENVELOPE_VERSION: u8 = 1;
+
+/// The binding facts of one recovery handoff. Both endpoints must agree on
+/// every field or the seal cannot be opened.
+///
+/// The transport public key fields are filled by the transport
+/// implementation from the authenticated connection; callers provide every
+/// other field. The space lineage is carried only as its domain-separated
+/// fingerprint, never as the lineage text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryBinding {
+    pub space_lineage_fingerprint: [u8; 32],
+    /// Number of the shared historical transport key.
+    pub history_key_number: u64,
+    /// The requester's saved predecessor security generation.
+    pub from_epoch: u64,
+    /// Sender member instance.
+    pub sender_instance: [u8; 32],
+    /// Receiver member instance.
+    pub receiver_instance: [u8; 32],
+    pub sender_transport_public_key: Vec<u8>,
+    pub receiver_transport_public_key: Vec<u8>,
+    pub from_range_epoch: u64,
+    pub to_range_epoch: u64,
+    pub target_digest: [u8; 32],
+    pub request_number: u64,
+    pub reply_number: u64,
+}
+
+impl RecoveryBinding {
+    /// Deterministic authenticated data for this handoff.
+    pub fn authenticated_data(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(256);
+        push_field(&mut bytes, WORKSPACE_RECOVERY_CHANNEL_VERSION.as_bytes());
+        push_field(&mut bytes, &self.space_lineage_fingerprint);
+        push_field(&mut bytes, &self.history_key_number.to_be_bytes());
+        push_field(&mut bytes, &self.from_epoch.to_be_bytes());
+        push_field(&mut bytes, &self.sender_instance);
+        push_field(&mut bytes, &self.receiver_instance);
+        push_field(&mut bytes, &self.sender_transport_public_key);
+        push_field(&mut bytes, &self.receiver_transport_public_key);
+        push_field(&mut bytes, &self.from_range_epoch.to_be_bytes());
+        push_field(&mut bytes, &self.to_range_epoch.to_be_bytes());
+        push_field(&mut bytes, &self.target_digest);
+        push_field(&mut bytes, &self.request_number.to_be_bytes());
+        push_field(&mut bytes, &self.reply_number.to_be_bytes());
+        bytes
+    }
+}
+
+fn push_field(buffer: &mut Vec<u8>, value: &[u8]) {
+    buffer.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    buffer.extend_from_slice(value);
+}
+
+/// Fixed-length clear header of one sealed recovery envelope.
+///
+/// Carries only the version, the lineage fingerprint, the selected history
+/// key number, the request/reply numbers, the fixed-length change range,
+/// the target digest and both member instances. These fields are required
+/// to rebuild the AEAD binding on the receiving side before decryption;
+/// they reveal no device material, addresses, signatures, keys or content.
+/// The outer iroh connection is itself authenticated and encrypted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryEnvelopeHeader {
+    pub space_lineage_fingerprint: [u8; 32],
+    pub history_key_number: u64,
+    pub request_number: u64,
+    pub reply_number: u64,
+    pub from_epoch: u64,
+    pub to_epoch: u64,
+    pub target_digest: [u8; 32],
+    pub sender_instance: [u8; 32],
+    pub receiver_instance: [u8; 32],
+}
+
+/// Size of the fixed-length clear envelope header in bytes.
+pub const RECOVERY_ENVELOPE_HEADER_BYTES: usize = 1 + 32 + 8 + 8 + 8 + 8 + 8 + 32 + 32 + 32;
+
+impl RecoveryEnvelopeHeader {
+    pub fn from_binding(binding: &RecoveryBinding) -> Self {
+        Self {
+            space_lineage_fingerprint: binding.space_lineage_fingerprint,
+            history_key_number: binding.history_key_number,
+            request_number: binding.request_number,
+            reply_number: binding.reply_number,
+            from_epoch: binding.from_epoch,
+            to_epoch: binding.to_range_epoch,
+            target_digest: binding.target_digest,
+            sender_instance: binding.sender_instance,
+            receiver_instance: binding.receiver_instance,
+        }
+    }
+
+    /// Rebuild a binding from this header and the two authenticated
+    /// connection public keys.
+    pub fn to_binding(
+        &self,
+        sender_transport_public_key: Vec<u8>,
+        receiver_transport_public_key: Vec<u8>,
+    ) -> RecoveryBinding {
+        RecoveryBinding {
+            space_lineage_fingerprint: self.space_lineage_fingerprint,
+            history_key_number: self.history_key_number,
+            from_epoch: self.from_epoch,
+            sender_instance: self.sender_instance,
+            receiver_instance: self.receiver_instance,
+            sender_transport_public_key,
+            receiver_transport_public_key,
+            from_range_epoch: self.from_epoch,
+            to_range_epoch: self.to_epoch,
+            target_digest: self.target_digest,
+            request_number: self.request_number,
+            reply_number: self.reply_number,
+        }
+    }
+
+    pub fn encode(&self) -> [u8; RECOVERY_ENVELOPE_HEADER_BYTES] {
+        let mut bytes = [0u8; RECOVERY_ENVELOPE_HEADER_BYTES];
+        let mut offset = 0;
+        bytes[offset] = RECOVERY_ENVELOPE_VERSION;
+        offset += 1;
+        bytes[offset..offset + 32].copy_from_slice(&self.space_lineage_fingerprint);
+        offset += 32;
+        bytes[offset..offset + 8].copy_from_slice(&self.history_key_number.to_be_bytes());
+        offset += 8;
+        bytes[offset..offset + 8].copy_from_slice(&self.request_number.to_be_bytes());
+        offset += 8;
+        bytes[offset..offset + 8].copy_from_slice(&self.reply_number.to_be_bytes());
+        offset += 8;
+        bytes[offset..offset + 8].copy_from_slice(&self.from_epoch.to_be_bytes());
+        offset += 8;
+        bytes[offset..offset + 8].copy_from_slice(&self.to_epoch.to_be_bytes());
+        offset += 8;
+        bytes[offset..offset + 32].copy_from_slice(&self.target_digest);
+        offset += 32;
+        bytes[offset..offset + 32].copy_from_slice(&self.sender_instance);
+        offset += 32;
+        bytes[offset..offset + 32].copy_from_slice(&self.receiver_instance);
+        debug_assert_eq!(offset + 32, RECOVERY_ENVELOPE_HEADER_BYTES);
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, RecoveryRejection> {
+        if bytes.len() != RECOVERY_ENVELOPE_HEADER_BYTES || bytes[0] != RECOVERY_ENVELOPE_VERSION {
+            return Err(RecoveryRejection::VersionIncompatible);
+        }
+        let mut offset = 1;
+        let read_u64 = |offset: &mut usize| {
+            let value = u64::from_be_bytes(bytes[*offset..*offset + 8].try_into().unwrap());
+            *offset += 8;
+            value
+        };
+        let read_array = |offset: &mut usize| {
+            let value: [u8; 32] = bytes[*offset..*offset + 32].try_into().unwrap();
+            *offset += 32;
+            value
+        };
+        let space_lineage_fingerprint = read_array(&mut offset);
+        let history_key_number = read_u64(&mut offset);
+        let request_number = read_u64(&mut offset);
+        let reply_number = read_u64(&mut offset);
+        let from_epoch = read_u64(&mut offset);
+        let to_epoch = read_u64(&mut offset);
+        let target_digest = read_array(&mut offset);
+        let sender_instance = read_array(&mut offset);
+        let receiver_instance = read_array(&mut offset);
+        Ok(Self {
+            space_lineage_fingerprint,
+            history_key_number,
+            request_number,
+            reply_number,
+            from_epoch,
+            to_epoch,
+            target_digest,
+            sender_instance,
+            receiver_instance,
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum RecoveryTransportError {
     #[error("recovery recipient is offline")]
@@ -186,11 +368,15 @@ pub enum RecoveryTransportError {
 #[async_trait::async_trait]
 pub trait RecoveryTransportPort: Send + Sync {
     /// Deliver one recovery message to a member device and return the
-    /// bounded reply. The implementation seals the message with the
-    /// application-layer AEAD before sending.
+    /// bounded reply.
+    ///
+    /// `binding` carries every handoff fact except the two transport public
+    /// keys; the implementation fills them from the authenticated connection
+    /// and seals the message with the application-layer AEAD before sending.
     async fn exchange_recovery(
         &self,
         recipient: &DeviceId,
+        binding: &RecoveryBinding,
         message: RecoveryChannelMessage,
     ) -> Result<RecoveryChannelMessage, RecoveryTransportError>;
 }

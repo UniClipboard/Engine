@@ -18,13 +18,19 @@ use iroh::{Endpoint, EndpointAddr};
 use tracing::{debug, warn};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    MemberRepositoryPort, PeerAdmissionPort, RecoveryChannelMessage, RecoveryTransportEndpointPort,
-    RecoveryTransportError, RecoveryTransportPort,
+    ContentKeyId, MemberRepositoryPort, RecoveryBinding, RecoveryChannelMessage,
+    RecoveryEnvelopeHeader, RecoveryTransportEndpointPort, RecoveryTransportError,
+    RecoveryTransportPort, MIN_HISTORY_KEY_NUMBER,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 
 use super::connect_with_staggered_retry;
+use crate::security::{open_recovery_message, seal_recovery_message, InMemorySession};
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 pub const WORKSPACE_RECOVERY_ALPN: &[u8] = b"uniclipboard/workspace-recovery/1";
 
@@ -37,6 +43,7 @@ const ACK_REJECTED: u8 = 2;
 pub struct IrohWorkspaceRecoveryAdapter {
     endpoint: Arc<Endpoint>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    session: Arc<InMemorySession>,
 }
 
 pub(crate) struct IrohWorkspaceRecoveryHandlers {
@@ -45,27 +52,29 @@ pub(crate) struct IrohWorkspaceRecoveryHandlers {
 
 struct RecoveryHandlerState {
     member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     recovery_endpoint: Arc<dyn RecoveryTransportEndpointPort>,
     recovery_concurrency: Arc<tokio::sync::Semaphore>,
+    session: Arc<InMemorySession>,
+    local_public_key: Vec<u8>,
 }
 
 impl IrohWorkspaceRecoveryAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        session: Arc<InMemorySession>,
     ) -> Self {
         Self {
             endpoint,
             peer_addr_repo,
+            session,
         }
     }
 
     pub(crate) fn handlers(
         &self,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         recovery_endpoint: Arc<dyn RecoveryTransportEndpointPort>,
     ) -> IrohWorkspaceRecoveryHandlers {
@@ -73,12 +82,13 @@ impl IrohWorkspaceRecoveryAdapter {
             recovery: IrohWorkspaceRecoveryHandler {
                 state: Arc::new(RecoveryHandlerState {
                     member_repo,
-                    peer_admission,
                     fingerprint_factory,
                     recovery_endpoint,
                     recovery_concurrency: Arc::new(tokio::sync::Semaphore::new(
                         MAX_RECOVERY_CONCURRENCY,
                     )),
+                    session: Arc::clone(&self.session),
+                    local_public_key: self.endpoint.secret_key().public().as_bytes().to_vec(),
                 }),
             },
         }
@@ -99,18 +109,119 @@ impl IrohWorkspaceRecoveryAdapter {
     }
 }
 
+/// Map a declared history key number to the local session content key id.
+/// The legacy transport key is the only historical key today.
+fn history_key_id(history_key_number: u64) -> Option<ContentKeyId> {
+    (history_key_number == MIN_HISTORY_KEY_NUMBER).then(ContentKeyId::legacy_v1)
+}
+
+/// Seal a message for `binding` with the shared historical transport key.
+/// `history_key_number` must resolve to a key the local session holds.
+fn seal_for(
+    session: &InMemorySession,
+    binding: &RecoveryBinding,
+    message: &RecoveryChannelMessage,
+) -> Result<Vec<u8>, RecoveryTransportError> {
+    let key_id =
+        history_key_id(binding.history_key_number).ok_or(RecoveryTransportError::Rejected(
+            uc_core::membership::RecoveryRejection::VersionIncompatible,
+        ))?;
+    let space_id = session
+        .current_space_id()
+        .map_err(|_| RecoveryTransportError::Offline)?;
+    seal_recovery_message(session, &space_id, &key_id, binding, message).map_err(
+        |error| match error {
+            crate::security::RecoverySealError::Unavailable => RecoveryTransportError::Offline,
+            _ => RecoveryTransportError::Transport,
+        },
+    )
+}
+
+/// Open a sealed envelope from the authenticated peer. `peer_public_key` is
+/// the sender on this connection.
+fn open_from(
+    session: &InMemorySession,
+    local_public_key: &[u8],
+    peer_public_key: &[u8],
+    envelope: &[u8],
+) -> Result<RecoveryChannelMessage, RecoveryTransportError> {
+    let header = RecoveryEnvelopeHeader::decode(
+        &envelope[..envelope
+            .len()
+            .min(uc_core::membership::RECOVERY_ENVELOPE_HEADER_BYTES)],
+    )
+    .map_err(|_| RecoveryTransportError::Transport)?;
+    let key_id =
+        history_key_id(header.history_key_number).ok_or(RecoveryTransportError::Rejected(
+            uc_core::membership::RecoveryRejection::VersionIncompatible,
+        ))?;
+    let space_id = session
+        .current_space_id()
+        .map_err(|_| RecoveryTransportError::Offline)?;
+    let binding = header.to_binding(peer_public_key.to_vec(), local_public_key.to_vec());
+    open_recovery_message(session, &space_id, &key_id, &binding, envelope).map_err(|error| {
+        match error {
+            crate::security::RecoverySealError::Unavailable => RecoveryTransportError::Offline,
+            _ => RecoveryTransportError::Rejected(
+                uc_core::membership::RecoveryRejection::IdentityMismatch,
+            ),
+        }
+    })
+}
+
+/// Build the reply envelope header for `response` to an inbound request
+/// whose clear header is `request`. Instances are swapped (the local side
+/// now sends); numbers, range and target digest are taken from the reply.
+fn reply_header(
+    request: &RecoveryEnvelopeHeader,
+    response: &RecoveryChannelMessage,
+) -> RecoveryEnvelopeHeader {
+    match response {
+        RecoveryChannelMessage::Offer(offer) => RecoveryEnvelopeHeader {
+            space_lineage_fingerprint: request.space_lineage_fingerprint,
+            history_key_number: request.history_key_number,
+            request_number: offer.request_number,
+            reply_number: offer.reply_number,
+            from_epoch: offer.from_epoch,
+            to_epoch: offer.to_epoch,
+            target_digest: offer.target_digest,
+            sender_instance: request.receiver_instance,
+            receiver_instance: request.sender_instance,
+        },
+        RecoveryChannelMessage::Ack(ack) => RecoveryEnvelopeHeader {
+            space_lineage_fingerprint: request.space_lineage_fingerprint,
+            history_key_number: request.history_key_number,
+            request_number: ack.request_number,
+            reply_number: ack.reply_number,
+            from_epoch: 0,
+            to_epoch: ack.confirmed_epoch,
+            target_digest: ack.target_digest,
+            sender_instance: request.receiver_instance,
+            receiver_instance: request.sender_instance,
+        },
+        RecoveryChannelMessage::Reject(reject) => RecoveryEnvelopeHeader {
+            space_lineage_fingerprint: request.space_lineage_fingerprint,
+            history_key_number: request.history_key_number,
+            request_number: reject.request_number,
+            reply_number: reject.reply_number,
+            from_epoch: request.from_epoch,
+            to_epoch: request.to_epoch,
+            target_digest: [0; 32],
+            sender_instance: request.receiver_instance,
+            receiver_instance: request.sender_instance,
+        },
+        RecoveryChannelMessage::Request(_) => request.clone(),
+    }
+}
+
 #[async_trait]
 impl RecoveryTransportPort for IrohWorkspaceRecoveryAdapter {
     async fn exchange_recovery(
         &self,
         recipient: &DeviceId,
+        binding: &RecoveryBinding,
         message: RecoveryChannelMessage,
     ) -> Result<RecoveryChannelMessage, RecoveryTransportError> {
-        let payload =
-            postcard::to_stdvec(&message).map_err(|_| RecoveryTransportError::Transport)?;
-        if payload.len() > MAX_RECOVERY_MESSAGE_SIZE {
-            return Err(RecoveryTransportError::Transport);
-        }
         let addr = self
             .resolve_addr(recipient)
             .await
@@ -123,6 +234,15 @@ impl RecoveryTransportPort for IrohWorkspaceRecoveryAdapter {
         )
         .await
         .map_err(|_| RecoveryTransportError::Offline)?;
+        let local_public_key = self.endpoint.secret_key().public().as_bytes().to_vec();
+        let remote_public_key = connection.remote_id().as_bytes().to_vec();
+        let mut sealed_binding = binding.clone();
+        sealed_binding.sender_transport_public_key = local_public_key.clone();
+        sealed_binding.receiver_transport_public_key = remote_public_key.clone();
+        let payload = seal_for(&self.session, &sealed_binding, &message)?;
+        if payload.len() > MAX_RECOVERY_MESSAGE_SIZE {
+            return Err(RecoveryTransportError::Transport);
+        }
         let (mut send, mut recv) = tokio::time::timeout(RECOVERY_IO_TIMEOUT, connection.open_bi())
             .await
             .map_err(|_| RecoveryTransportError::Transport)?
@@ -160,7 +280,12 @@ impl RecoveryTransportPort for IrohWorkspaceRecoveryAdapter {
             .await
             .map_err(|_| RecoveryTransportError::Transport)?
             .map_err(|_| RecoveryTransportError::Transport)?;
-        postcard::from_bytes(&response).map_err(|_| RecoveryTransportError::Transport)
+        open_from(
+            &self.session,
+            &local_public_key,
+            &remote_public_key,
+            &response,
+        )
     }
 }
 
@@ -196,10 +321,18 @@ async fn handle_recovery_connection(
     connection: Connection,
 ) -> Result<(), String> {
     let remote_key = connection.remote_id();
+    let local_public_key = state.local_public_key.clone();
+    let remote_public_key = remote_key.as_bytes().to_vec();
     let fingerprint = state
         .fingerprint_factory
-        .from_public_key(remote_key.as_bytes())
+        .from_public_key(&remote_public_key)
         .map_err(|_| "invalid_remote_identity".to_owned())?;
+    // The recovery channel deliberately accepts sources that are not yet
+    // known or not admitted: the application-layer seal, the space lineage
+    // and the change-chain verification decide what such a source may
+    // obtain. Known members resolve to their device id; unknown sources get
+    // a stable derived id so the endpoint can reject requests and replay
+    // keys consistently without ever disclosing anything.
     let resolved = state
         .member_repo
         .list()
@@ -207,17 +340,14 @@ async fn handle_recovery_connection(
         .map_err(|_| "member_lookup_failed".to_owned())?
         .into_iter()
         .find(|member| member.identity_fingerprint == fingerprint);
-    let Some(member) = resolved else {
-        return Err("unknown_source_member".to_owned());
+    let source_device = match resolved {
+        Some(member) => member.device_id,
+        None => {
+            let mut derived = [0u8; 16];
+            derived.copy_from_slice(&fingerprint.as_display().as_bytes()[..16]);
+            DeviceId::new(&format!("recovery-unknown-{}", hex_encode(&derived)))
+        }
     };
-    if !state
-        .peer_admission
-        .is_admitted(&member.device_id)
-        .await
-        .unwrap_or(false)
-    {
-        return Err("unadmitted_source".to_owned());
-    }
     let (mut send, mut recv) = connection
         .accept_bi()
         .await
@@ -239,23 +369,67 @@ async fn handle_recovery_connection(
         .await
         .map_err(|_| "read_timeout".to_owned())?
         .map_err(|_| "read_failed".to_owned())?;
-    let message: RecoveryChannelMessage = match postcard::from_bytes(&payload) {
-        Ok(message) => message,
+    let header = match RecoveryEnvelopeHeader::decode(
+        &payload[..payload
+            .len()
+            .min(uc_core::membership::RECOVERY_ENVELOPE_HEADER_BYTES)],
+    ) {
+        Ok(header) => header,
         Err(_) => {
             send.write_all(&[ACK_REJECTED])
                 .await
                 .map_err(|_| "reject_failed".to_owned())?;
-            return Err("invalid_request".to_owned());
+            return Err("invalid_envelope_header".to_owned());
         }
     };
+    let key_id = match history_key_id(header.history_key_number) {
+        Some(key_id) => key_id,
+        None => {
+            send.write_all(&[ACK_REJECTED])
+                .await
+                .map_err(|_| "reject_failed".to_owned())?;
+            return Err("unknown_history_key".to_owned());
+        }
+    };
+    let space_id = match state.session.current_space_id() {
+        Ok(space_id) => space_id,
+        Err(_) => {
+            send.write_all(&[ACK_REJECTED])
+                .await
+                .map_err(|_| "reject_failed".to_owned())?;
+            return Err("session_locked".to_owned());
+        }
+    };
+    let binding = header.to_binding(remote_public_key.clone(), local_public_key.clone());
+    let message =
+        match open_recovery_message(&state.session, &space_id, &key_id, &binding, &payload) {
+            Ok(message) => message,
+            Err(_) => {
+                send.write_all(&[ACK_REJECTED])
+                    .await
+                    .map_err(|_| "reject_failed".to_owned())?;
+                return Err("seal_open_failed".to_owned());
+            }
+        };
     let response = state
         .recovery_endpoint
-        .handle_recovery(&member.device_id, message)
+        .handle_recovery(&source_device, message)
         .await;
     match response {
         Ok(response) => {
-            let response_payload =
-                postcard::to_stdvec(&response).map_err(|_| "encode_failed".to_owned())?;
+            let response_header = reply_header(&header, &response);
+            let mut response_binding =
+                response_header.to_binding(local_public_key.clone(), remote_public_key.clone());
+            response_binding.space_lineage_fingerprint = header.space_lineage_fingerprint;
+            let response_payload = match seal_for(&state.session, &response_binding, &response) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    send.write_all(&[ACK_REJECTED])
+                        .await
+                        .map_err(|_| "reject_failed".to_owned())?;
+                    return Err("response_seal_failed".to_owned());
+                }
+            };
             if response_payload.len() > MAX_RECOVERY_MESSAGE_SIZE {
                 send.write_all(&[ACK_REJECTED])
                     .await

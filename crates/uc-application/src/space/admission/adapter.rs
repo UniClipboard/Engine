@@ -44,13 +44,24 @@ pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
         invitation_generation: u64,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError>;
 
+    /// The sponsor's saved in-flight admission record for a pairing
+    /// session. Used after a restart to re-await the same joiner's
+    /// readiness instead of saving a second member instance.
+    async fn pending_admission(
+        &self,
+        session: &PairingSessionId,
+    ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>;
+
     /// Commit the readiness-confirmed joiner facts in one save commit and
     /// return the confirmation material for the "admission change saved"
-    /// reply.
+    /// reply. `security_update_payload` is the group-epoch update produced
+    /// by the admission; it is carried by the admission change so lagging
+    /// members recover the security state together with the chain.
     async fn commit_joiner_admission(
         &self,
         session: &PairingSessionId,
         joiner: AdmissionChangeFacts,
+        security_update_payload: Vec<u8>,
     ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError>;
 
     /// Locally signed facts the joiner returns after its group session is
@@ -99,12 +110,27 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         .await
     }
 
+    async fn pending_admission(
+        &self,
+        session: &PairingSessionId,
+    ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>
+    {
+        WorkspaceConvergence::pending_admission(self, session).await
+    }
+
     async fn commit_joiner_admission(
         &self,
         session: &PairingSessionId,
         joiner: AdmissionChangeFacts,
+        security_update_payload: Vec<u8>,
     ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
-        WorkspaceConvergence::commit_joiner_admission(self, session, joiner).await
+        WorkspaceConvergence::commit_joiner_admission(
+            self,
+            session,
+            joiner,
+            security_update_payload,
+        )
+        .await
     }
 
     async fn local_admission_facts(

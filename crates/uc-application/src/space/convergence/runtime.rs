@@ -87,7 +87,19 @@ impl WorkspaceConvergence {
                     event = presence_events.recv(), if !paused && presence_open => match event {
                         Ok(event) if event.state == uc_core::ports::ReachabilityState::Online => {
                             debug!(device_id = %event.device_id.as_str(), "workspace convergence: member online");
+                            if let Err(error) = owner.mark_device_reachable(&event.device_id).await
+                            {
+                                warn!(error = %error, "workspace convergence: reachable marking failed");
+                            }
                             run_now = true;
+                        }
+                        Ok(event) if event.state == uc_core::ports::ReachabilityState::Offline => {
+                            debug!(device_id = %event.device_id.as_str(), "workspace convergence: member offline");
+                            if let Err(error) =
+                                owner.mark_device_unreachable(&event.device_id).await
+                            {
+                                warn!(error = %error, "workspace convergence: unreachable marking failed");
+                            }
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -116,6 +128,9 @@ impl WorkspaceConvergenceRuntime {
     }
 
     pub async fn shutdown(mut self) {
+        // The runtime may be mid-reconcile inside a bounded network
+        // exchange; never block the engine's shutdown on it. Send the
+        // command, wait briefly, then abort the task.
         let (completed, response) = oneshot::channel();
         if self
             .activity
@@ -123,9 +138,12 @@ impl WorkspaceConvergenceRuntime {
             .send(WorkspaceConvergenceRuntimeCommand::Shutdown(completed))
             .is_ok()
         {
-            let _ = response.await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), response).await;
         }
         if let Some(task) = self.task.take() {
+            if !task.is_finished() {
+                task.abort();
+            }
             if let Err(error) = task.await {
                 if !error.is_cancelled() {
                     warn!(

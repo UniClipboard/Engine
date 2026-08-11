@@ -180,6 +180,7 @@ impl WorkspaceAdmissionOwnerPort for RecordingOwner {
         &self,
         _: &PairingSessionId,
         _: AdmissionChangeFacts,
+        _security_update_payload: Vec<u8>,
     ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
         unimplemented!("sponsor-side method not exercised in switch-space tests")
     }
@@ -213,6 +214,13 @@ impl WorkspaceAdmissionOwnerPort for RecordingOwner {
             return Err(WorkspaceConvergenceError::Unavailable);
         }
         Ok(switch_snapshot())
+    }
+    async fn pending_admission(
+        &self,
+        _session: &uc_core::ports::pairing::PairingSessionId,
+    ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>
+    {
+        Ok(None)
     }
 }
 

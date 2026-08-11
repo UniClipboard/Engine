@@ -714,6 +714,9 @@ impl WorkspaceConvergenceState {
     }
 
     /// Apply a recipient's durable acknowledgement of a continuous range.
+    /// When the acknowledgement reaches the current target, the recipient
+    /// is recorded as confirmed for that digest (the ack is the evidence;
+    /// no separate signed confirmation is needed from that member).
     pub fn apply_handoff_advanced(
         &mut self,
         recipient: MemberInstanceId,
@@ -733,6 +736,22 @@ impl WorkspaceConvergenceState {
         let cleared = !has_more && confirmed_epoch >= self.current_epoch();
         if cleared {
             self.pending_handoffs.remove(&recipient);
+            if let Some(digest) = self.current_digest() {
+                let changed = self
+                    .confirmed
+                    .get(&recipient)
+                    .is_none_or(|existing| existing.digest != *digest.as_bytes());
+                if changed {
+                    self.confirmed.insert(
+                        recipient,
+                        WorkspaceConfirmation {
+                            member_instance: recipient,
+                            digest: *digest.as_bytes(),
+                            signature: Vec::new(),
+                        },
+                    );
+                }
+            }
         }
         self.advance(now_ms);
         Ok(if cleared {
@@ -918,6 +937,12 @@ impl WorkspaceConvergenceState {
             WorkspaceConvergenceEvent::LocalAdmissionCommitted(facts) => {
                 let changed = self.local_admission_committed.as_ref() != Some(&facts);
                 if changed {
+                    // The sponsor's member facts are persisted with the
+                    // confirmation so the joiner can reach its sponsor.
+                    self.member_devices.insert(
+                        facts.sponsor_facts.member_instance,
+                        facts.sponsor_facts.device_id.clone(),
+                    );
                     self.local_admission_committed = Some(facts);
                 }
                 self.advance(now_ms);
