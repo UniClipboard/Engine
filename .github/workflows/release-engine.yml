@@ -328,10 +328,36 @@ jobs:
           echo "tag=$previous_tag" >> "$GITHUB_OUTPUT"
           echo "commit=$previous_commit" >> "$GITHUB_OUTPUT"
 
+      - id: previous-desktop
+        name: Resolve the previous Engine-compatible desktop consumer
+        env:
+          PREVIOUS_COMMIT: ${{ steps.previous.outputs.commit }}
+        shell: bash
+        run: |
+          engine_dependency="uc-engine = { git = \"https://github.com/UniClipboard/Engine.git\", rev = \"$PREVIOUS_COMMIT\" }"
+          observability_dependency="uc-observability-contract = { git = \"https://github.com/UniClipboard/Engine.git\", rev = \"$PREVIOUS_COMMIT\" }"
+          previous_desktop_commit=""
+          while IFS= read -r candidate; do
+            cargo_toml=$(git -C desktop show "$candidate:Cargo.toml" 2>/dev/null || true)
+            if grep -Fqx "$engine_dependency" <<<"$cargo_toml" \
+              && grep -Fqx "$observability_dependency" <<<"$cargo_toml"; then
+              previous_desktop_commit="$candidate"
+              break
+            fi
+          done < <(git -C desktop log --format='%H' -- Cargo.toml)
+          if [[ -z "$previous_desktop_commit" ]]; then
+            echo "No desktop consumer on main is pinned to previous Engine commit: $PREVIOUS_COMMIT" >&2
+            exit 1
+          fi
+          echo "commit=$previous_desktop_commit" >> "$GITHUB_OUTPUT"
+
       - name: Create isolated desktop consumers
+        env:
+          PREVIOUS_DESKTOP_COMMIT: ${{ steps.previous-desktop.outputs.commit }}
         run: |
           git clone --local desktop old-desktop
           git clone --local desktop new-desktop
+          git -C old-desktop checkout --detach "$PREVIOUS_DESKTOP_COMMIT"
 
       - name: Build the previous Engine consumer
         env:
