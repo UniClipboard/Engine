@@ -393,10 +393,12 @@ impl DefaultSpaceAccessAdapter {
     ) -> Result<PreparedGroupJoin, SpaceAccessError> {
         let pending = MlsGroupEngine::prepare_join(device_id.as_str().as_bytes())
             .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
-        Ok(PreparedGroupJoin::new(
-            pending.key_package,
-            pending.client_state.into_bytes(),
-        ))
+        let mut prepared =
+            PreparedGroupJoin::new(pending.key_package, pending.client_state.into_bytes());
+        if let Some(instance) = pending.member_instance {
+            prepared = prepared.with_member_instance(instance);
+        }
+        Ok(prepared)
     }
 
     async fn acknowledge_bootstrap_readmission_after_admission(
@@ -596,10 +598,7 @@ impl DefaultSpaceAccessAdapter {
             .ok_or_else(|| SpaceAccessError::Internal("key epoch repository unavailable".into()))?;
         let (key_package, private_state) = pending.into_parts();
         let completed = MlsGroupEngine::complete_join(
-            PendingMlsJoin {
-                key_package,
-                client_state: MlsClientState::from_bytes(private_state),
-            },
+            PendingMlsJoin::new(key_package, MlsClientState::from_bytes(private_state)),
             space_id.as_ref().as_bytes(),
             welcome,
         )
@@ -691,10 +690,7 @@ impl DefaultSpaceAccessAdapter {
     ) -> Result<SpaceKeyMaterial, SpaceAccessError> {
         let (key_package, private_state) = pending.into_parts();
         let completed = MlsGroupEngine::complete_join(
-            PendingMlsJoin {
-                key_package,
-                client_state: MlsClientState::from_bytes(private_state),
-            },
+            PendingMlsJoin::new(key_package, MlsClientState::from_bytes(private_state)),
             space_id.as_ref().as_bytes(),
             welcome,
         )

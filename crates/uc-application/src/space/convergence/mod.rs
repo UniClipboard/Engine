@@ -272,12 +272,18 @@ impl WorkspaceConvergence {
             return Err(WorkspaceConvergenceError::OwnInstanceRemoved);
         }
         let view = self.deps.recovery.current_view().await?;
-        let own = self
-            .deps
-            .recovery
-            .own_instance()
-            .await?
-            .ok_or(WorkspaceConvergenceError::NotAMember)?;
+        // The initiator is the local current instance recorded by the last
+        // admission; the security view can carry stale instances of this
+        // device from earlier admissions.
+        let own = match state.own_instance {
+            Some(own) => own,
+            None => self
+                .deps
+                .recovery
+                .own_instance()
+                .await?
+                .ok_or(WorkspaceConvergenceError::NotAMember)?,
+        };
         let target_member = view
             .members
             .iter()
@@ -332,17 +338,54 @@ impl WorkspaceConvergence {
         now_ms: i64,
     ) -> Result<uc_core::membership::RemovalIntentId, WorkspaceConvergenceError> {
         if intent.content.space_lineage != state.space_lineage {
+            warn!(
+                intent_id = %intent.intent_id,
+                target_instance = %intent.content.target,
+                reason = "space_mismatch",
+                "workspace removal intent rejected"
+            );
             return Err(WorkspaceConvergenceError::Inconsistent(
                 "intent space mismatch".to_owned(),
             ));
         }
-        self.deps.verification.verify_intent(&intent).await?;
+        self.deps
+            .verification
+            .verify_intent(&intent)
+            .await
+            .map_err(|error| {
+                warn!(
+                    intent_id = %intent.intent_id,
+                    target_instance = %intent.content.target,
+                    reason = "verification_failed",
+                    "workspace removal intent rejected"
+                );
+                WorkspaceConvergenceError::IntentVerification(error)
+            })?;
         let to_remove = state
             .record_removal_intent(&intent, now_ms)
-            .map_err(|_| WorkspaceConvergenceError::Inconsistent("intent rejected".to_owned()))?;
+            .map_err(|error| {
+                warn!(
+                    intent_id = %intent.intent_id,
+                    target_instance = %intent.content.target,
+                    reason = ?error,
+                    "workspace removal intent rejected"
+                );
+                WorkspaceConvergenceError::Inconsistent("intent rejected".to_owned())
+            })?;
         if to_remove.is_empty() {
-            // The intent did not change the effective membership (target
-            // already covered by an earlier intent); keep the saved state.
+            // The intent did not change the effective membership: its exact
+            // target is no longer current, or the local instance was not
+            // affected. The intent stays recorded as historical material.
+            debug!(
+                intent_id = %intent.intent_id,
+                target_instance = %intent.content.target,
+                own_instance = %state
+                    .own_instance
+                    .map_or_else(|| "none".to_owned(), |own| own.to_string()),
+                epoch = state.current_epoch(),
+                outcome = "recorded_without_membership_change",
+                "workspace removal intent recorded without membership change"
+            );
             self.persist(state).await?;
             self.notify();
             return Ok(intent.intent_id);
@@ -352,6 +395,12 @@ impl WorkspaceConvergence {
         self.apply_and_publish_change(state, change, now_ms).await?;
         self.notify();
         info!(
+            intent_id = %intent.intent_id,
+            target_instance = %intent.content.target,
+            own_instance = %state
+                .own_instance
+                .map_or_else(|| "none".to_owned(), |own| own.to_string()),
+            epoch = state.current_epoch(),
             removed_count = removed_instances.len(),
             "workspace removal change recorded"
         );
@@ -379,8 +428,16 @@ impl WorkspaceConvergence {
     /// Build the locally signed facts that a joiner returns after its group
     /// session is active. The facts remain inside the pairing exchange until
     /// the sponsor commits the admission chain.
+    ///
+    /// `member_instance` overrides the security-view resolution: a joining
+    /// device must identify itself by the instance derived from this
+    /// admission's freshly generated credential. The security view can still
+    /// carry a stale instance of the same device from an earlier admission
+    /// (a removed device cannot receive group updates), so the view must not
+    /// be the source of truth for a fresh admission.
     pub async fn local_admission_facts(
         &self,
+        member_instance: Option<uc_core::membership::MemberInstanceId>,
     ) -> Result<uc_core::membership::AdmissionChangeFacts, WorkspaceConvergenceError> {
         let material = self
             .deps
@@ -388,12 +445,15 @@ impl WorkspaceConvergence {
             .current_announcement_material()
             .await
             .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-        let member_instance = self
-            .deps
-            .recovery
-            .own_instance()
-            .await?
-            .ok_or(WorkspaceConvergenceError::NotAMember)?;
+        let member_instance = match member_instance {
+            Some(instance) => instance,
+            None => self
+                .deps
+                .recovery
+                .own_instance()
+                .await?
+                .ok_or(WorkspaceConvergenceError::NotAMember)?,
+        };
         let mut facts = uc_core::membership::AdmissionChangeFacts {
             member_instance,
             device_id: material.device_id,
@@ -489,7 +549,7 @@ impl WorkspaceConvergence {
                 ));
             }
         }
-        let own = self.local_admission_facts().await?;
+        let own = self.local_admission_facts(None).await?;
         let mut additions = Vec::new();
         if !state.effective_members().contains(&own.member_instance) {
             additions.push(own.clone());
@@ -1233,10 +1293,9 @@ impl WorkspaceConvergence {
             if target_device == own_device {
                 continue;
             }
-            let Ok(own) = self.deps.recovery.own_instance().await else {
-                continue;
-            };
-            let Some(own) = own else {
+            // The notice issuer is the local current instance; the security
+            // view may carry stale instances of this device.
+            let Some(own) = state.own_instance else {
                 continue;
             };
             let mut notice = RemovalNotice {
@@ -2014,6 +2073,12 @@ impl RemovalExchangeEndpointPort for WorkspaceConvergence {
                     .await
                     .map_err(|_| RemovalExchangeError::Rejected)?;
                 if state.removed {
+                    debug!(
+                        source_device = %source_device_id.as_str(),
+                        intent_id = %intent.intent_id,
+                        reason = "locally_removed",
+                        "workspace removal intent exchange rejected"
+                    );
                     return Err(RemovalExchangeError::Rejected);
                 }
                 let source_effective = state
@@ -2023,12 +2088,25 @@ impl RemovalExchangeEndpointPort for WorkspaceConvergence {
                 if !source_effective {
                     // Only current effective members may submit new intents;
                     // a removed instance keeps only the restricted entries.
+                    debug!(
+                        source_device = %source_device_id.as_str(),
+                        intent_id = %intent.intent_id,
+                        reason = "source_not_effective",
+                        "workspace removal intent exchange rejected"
+                    );
                     return Err(RemovalExchangeError::Rejected);
                 }
                 let latest = self
                     .accept_intent(&mut state, *intent, now_ms)
                     .await
-                    .map_err(|_| RemovalExchangeError::Rejected)?;
+                    .map_err(|error| {
+                        debug!(
+                            source_device = %source_device_id.as_str(),
+                            reason = ?error,
+                            "workspace removal intent exchange rejected"
+                        );
+                        RemovalExchangeError::Rejected
+                    })?;
                 Ok(RemovalExchangeMessage::IntentAck(latest))
             }
             RemovalExchangeMessage::IntentAck(intent_id) => {

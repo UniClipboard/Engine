@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::ids::{SessionId, SpaceId};
-use crate::membership::PendingGroupUpdate;
+use crate::membership::{MemberInstanceId, PendingGroupUpdate};
 
 #[derive(Clone, Debug)]
 pub struct SpaceAccessProofArtifact {
@@ -46,9 +46,15 @@ pub struct PreparedAdmissionOffer {
 
 /// Joiner-side opaque MLS preparation. Only `key_package` is sent to the
 /// sponsor; `private_state` must remain local until the Welcome is installed.
+///
+/// `member_instance` is the member identity derived from this admission's
+/// freshly generated credential (device id + admission credential signature
+/// key). A rejoining device must identify itself by this instance, not by
+/// resolving a possibly stale view.
 pub struct PreparedGroupJoin {
     pub key_package: Vec<u8>,
     private_state: Zeroizing<Vec<u8>>,
+    member_instance: Option<MemberInstanceId>,
 }
 
 impl PreparedGroupJoin {
@@ -56,7 +62,20 @@ impl PreparedGroupJoin {
         Self {
             key_package,
             private_state: Zeroizing::new(private_state),
+            member_instance: None,
         }
+    }
+
+    /// Bind the member instance derived from this admission's credential.
+    pub fn with_member_instance(mut self, instance: MemberInstanceId) -> Self {
+        self.member_instance = Some(instance);
+        self
+    }
+
+    /// The member instance of this admission, when the credential was
+    /// generated before this preparation completed.
+    pub fn member_instance(&self) -> Option<MemberInstanceId> {
+        self.member_instance
     }
 
     pub fn private_state(&self) -> &[u8] {

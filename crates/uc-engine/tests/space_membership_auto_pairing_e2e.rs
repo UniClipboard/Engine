@@ -589,6 +589,145 @@ async fn member_removal_converges_across_three_independent_engine_directories() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn historical_removal_does_not_remove_a_fresh_joiner() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let device_c = DeviceHarness::new(rendezvous.uri());
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let device_d = DeviceHarness::new(rendezvous.uri());
+    let engine_c = device_c.start_local_only().await;
+    let engine_a = device_a.start_local_only().await;
+    let engine_d = device_d.start_local_only().await;
+    let (space_id, c_id) = create_space(&engine_c, "Device C").await;
+    let a_id = join_through(&engine_c, &engine_a, "Device A", &space_id).await;
+    wait_for_members(&engine_c, &[&a_id]).await;
+    wait_for_members(&engine_a, &[&c_id]).await;
+
+    // C removes A: the historical removal intent and removal change are
+    // persisted before any later admission.
+    engine_c
+        .execute(Operation::RemoveMember(RemoveMemberInput {
+            device_id: a_id.clone(),
+        }))
+        .await
+        .expect("submit the historical member removal");
+    wait_until(WAIT_TIMEOUT, || async {
+        let c = workspace_convergence_summary(&engine_c).await;
+        c.effective_member_count == 1 && c.removal_intent_count == 1
+    })
+    .await;
+
+    // A fresh device D joins the space that already carries a historical
+    // removal record. The record must only affect its exact old target and
+    // must never mark the new joiner removed.
+    let d_id = join_through(&engine_c, &engine_d, "Device D", &space_id).await;
+    wait_until(WAIT_TIMEOUT, || async {
+        let c = workspace_convergence_summary(&engine_c).await;
+        let d = workspace_convergence_summary(&engine_d).await;
+        c.effective_member_count == 2
+            && d.effective_member_count == 2
+            && !d.removed
+            && d.phase != WorkspaceConvergencePhaseSummary::RecoveryRequired
+            && c.convergence_digest.is_some()
+            && c.convergence_digest == d.convergence_digest
+    })
+    .await;
+
+    // The joiner must stay usable: the historical removal record arrives as
+    // a recorded fact, not as a local removal, and content sync keeps
+    // working in both directions.
+    send_and_verify(
+        &engine_c,
+        &engine_d,
+        &d_id,
+        "C to D with a historical removal in the chain",
+    )
+    .await;
+    send_and_verify(
+        &engine_d,
+        &engine_c,
+        &c_id,
+        "D to C with a historical removal in the chain",
+    )
+    .await;
+
+    for engine in [engine_c, engine_a, engine_d] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down historical removal joiner engine");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn removed_device_rejoins_under_a_new_instance_without_stale_removal() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let device_c = DeviceHarness::new(rendezvous.uri());
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let engine_c = device_c.start_local_only().await;
+    let engine_a = device_a.start_local_only().await;
+    let (space_id, c_id) = create_space(&engine_c, "Device C").await;
+    let a_id = join_through(&engine_c, &engine_a, "Device A", &space_id).await;
+    wait_for_members(&engine_c, &[&a_id]).await;
+    wait_for_members(&engine_a, &[&c_id]).await;
+
+    engine_c
+        .execute(Operation::RemoveMember(RemoveMemberInput {
+            device_id: a_id.clone(),
+        }))
+        .await
+        .expect("submit the member removal");
+    wait_until(WAIT_TIMEOUT, || async {
+        workspace_convergence_summary(&engine_c)
+            .await
+            .effective_member_count
+            == 1
+    })
+    .await;
+
+    // The same device rejoins: the admission creates a new member instance
+    // and the old removal record must not mark the new instance removed.
+    let rejoin = join_through_with_result(&engine_c, &engine_a, "Device A", &space_id).await;
+    assert_eq!(rejoin.self_device_id, a_id);
+    assert_eq!(rejoin.migrated_records, Some(0));
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        let c = workspace_convergence_summary(&engine_c).await;
+        let a = workspace_convergence_summary(&engine_a).await;
+        if c.effective_member_count == 2
+            && a.effective_member_count == 2
+            && !a.removed
+            && a.phase != WorkspaceConvergencePhaseSummary::RecoveryRequired
+            && c.convergence_digest.is_some()
+            && c.convergence_digest == a.convergence_digest
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "rejoin did not converge; C={c:?}; A={a:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    send_and_verify(
+        &engine_c,
+        &engine_a,
+        &a_id,
+        "C to A after A rejoined under a new instance",
+    )
+    .await;
+
+    for engine in [engine_c, engine_a] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down rejoin engine");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn completed_removal_can_continue_from_the_recovered_member_state() {
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;

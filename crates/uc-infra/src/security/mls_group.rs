@@ -99,6 +99,27 @@ impl std::fmt::Debug for MlsClientState {
 pub(crate) struct PendingMlsJoin {
     pub(crate) key_package: Vec<u8>,
     pub(crate) client_state: MlsClientState,
+    /// Member instance derived from this admission's fresh credential,
+    /// when the credential was generated during preparation.
+    pub(crate) member_instance: Option<uc_core::membership::MemberInstanceId>,
+}
+
+impl PendingMlsJoin {
+    pub(crate) fn new(key_package: Vec<u8>, client_state: MlsClientState) -> Self {
+        Self {
+            key_package,
+            client_state,
+            member_instance: None,
+        }
+    }
+
+    pub(crate) fn with_member_instance(
+        mut self,
+        instance: uc_core::membership::MemberInstanceId,
+    ) -> Self {
+        self.member_instance = Some(instance);
+        self
+    }
 }
 
 impl std::fmt::Debug for PendingMlsJoin {
@@ -107,6 +128,12 @@ impl std::fmt::Debug for PendingMlsJoin {
             .debug_struct("PendingMlsJoin")
             .field("key_package_len", &self.key_package.len())
             .field("client_state", &self.client_state)
+            .field(
+                "member_instance",
+                &self
+                    .member_instance
+                    .map_or_else(|| "none".to_owned(), |own| own.to_string()),
+            )
             .finish()
     }
 }
@@ -239,10 +266,11 @@ impl MlsGroupEngine {
             .tls_serialize_detached()
             .map_err(|_| MlsGroupError::Protocol)?;
         let client_state = snapshot(&provider, &signer, None)?;
-        Ok(PendingMlsJoin {
-            key_package,
-            client_state,
-        })
+        let member_instance = uc_core::membership::MemberInstanceId::derive(
+            std::str::from_utf8(device_identity).unwrap_or_default(),
+            &signer.to_public_vec(),
+        );
+        Ok(PendingMlsJoin::new(key_package, client_state).with_member_instance(member_instance))
     }
 
     pub(crate) fn admit_member(

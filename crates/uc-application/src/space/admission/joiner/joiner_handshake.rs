@@ -45,6 +45,7 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{DeviceId, SessionId, SpaceId};
+use uc_core::membership::MemberInstanceId;
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::pairing::session_message::{
     JoinerChallengeResponse, JoinerReady, JoinerRequest, PairingRejectReason,
@@ -93,6 +94,11 @@ pub(crate) struct JoinerHandshakeOutcome {
     /// joiner 端按 Solo 退化，等待下次 sponsor 自己发新设备 pairing 时再
     /// 通过 sponsor 派发统一切换（task_plan §开放问题 2 决策 A）。
     pub sponsor_space_person_id: Option<uuid::Uuid>,
+    /// The member instance derived from this admission's freshly generated
+    /// credential. The joiner must identify itself by this instance even
+    /// when its security view still carries a stale instance from an
+    /// earlier admission of the same device.
+    pub member_instance: Option<MemberInstanceId>,
 }
 
 #[derive(Debug)]
@@ -378,6 +384,7 @@ impl JoinerHandshakeCoordinator {
         if confirm.space_id != join_offer.space_id {
             return Err(RedeemPairingInvitationError::CorruptedKeyMaterial);
         }
+        let member_instance = pending_group_join.member_instance();
         self.group_admission
             .install_group_join(
                 &confirm.space_id,
@@ -406,6 +413,7 @@ impl JoinerHandshakeCoordinator {
             self_identity_fingerprint: local_fp,
             sponsor_transport_address_blob: confirm.transport_address_blob,
             sponsor_space_person_id: confirm.sponsor_space_person_id,
+            member_instance,
         })
     }
 
