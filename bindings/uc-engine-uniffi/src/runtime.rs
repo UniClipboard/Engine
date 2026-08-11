@@ -1657,7 +1657,7 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
         },
         uc_engine::EngineEvent::WorkspaceConvergenceChanged(snapshot) => {
             BindingEvent::WorkspaceConvergenceChanged {
-                convergence: map_workspace_snapshot(snapshot),
+                convergence: map_workspace_convergence_summary(snapshot),
             }
         }
         uc_engine::EngineEvent::TransferProgress(event) => BindingEvent::TransferProgress {
@@ -1778,7 +1778,15 @@ fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
 fn map_workspace_convergence(
     result: OperationResult,
 ) -> Result<WorkspaceConvergence, BindingError> {
-    unpack_operation!(result, OperationResult::WorkspaceConvergence(summary) => WorkspaceConvergence {
+    unpack_operation!(result, OperationResult::WorkspaceConvergence(summary) => {
+        map_workspace_convergence_summary(summary)
+    })
+}
+
+fn map_workspace_convergence_summary(
+    summary: uc_engine::WorkspaceConvergenceSummary,
+) -> WorkspaceConvergence {
+    WorkspaceConvergence {
         phase: map_workspace_convergence_phase(summary.phase),
         revision: summary.revision,
         change_count: summary.change_count,
@@ -1792,57 +1800,6 @@ fn map_workspace_convergence(
         failure_category: summary
             .failure_category
             .map(map_workspace_convergence_failure_category),
-    })
-}
-
-fn map_workspace_snapshot(snapshot: uc_engine::WorkspaceSnapshot) -> WorkspaceConvergence {
-    WorkspaceConvergence {
-        phase: match snapshot.phase {
-            uc_engine::WorkspacePhase::LocallyApplied => WorkspaceConvergencePhase::LocallyApplied,
-            uc_engine::WorkspacePhase::Converging => WorkspaceConvergencePhase::Converging,
-            uc_engine::WorkspacePhase::WaitingForOfflineMember => {
-                WorkspaceConvergencePhase::WaitingForOfflineMember
-            }
-            uc_engine::WorkspacePhase::Complete => WorkspaceConvergencePhase::Complete,
-            uc_engine::WorkspacePhase::RecoveryRequired => {
-                WorkspaceConvergencePhase::RecoveryRequired
-            }
-        },
-        revision: snapshot.revision,
-        change_count: count_to_u64(snapshot.change_count).unwrap_or(u64::MAX),
-        removal_intent_count: count_to_u64(snapshot.removal_intent_count).unwrap_or(u64::MAX),
-        effective_member_count: count_to_u64(snapshot.effective_member_count).unwrap_or(u64::MAX),
-        confirmed_member_count: count_to_u64(snapshot.confirmed_member_count).unwrap_or(u64::MAX),
-        waiting_member_count: count_to_u64(snapshot.waiting_member_count).unwrap_or(u64::MAX),
-        convergence_digest: snapshot.convergence_digest.map(|digest| digest.to_string()),
-        removed: snapshot.removed,
-        updated_at_ms: snapshot.updated_at_ms,
-        failure_category: snapshot.failure_category.map(|category| match category {
-            uc_engine::WorkspaceFailureCategory::SpaceMismatch => {
-                WorkspaceConvergenceFailureCategory::SpaceMismatch
-            }
-            uc_engine::WorkspaceFailureCategory::ContinuityGap => {
-                WorkspaceConvergenceFailureCategory::ContinuityGap
-            }
-            uc_engine::WorkspaceFailureCategory::IdentityMismatch => {
-                WorkspaceConvergenceFailureCategory::IdentityMismatch
-            }
-            uc_engine::WorkspaceFailureCategory::DigestConflict => {
-                WorkspaceConvergenceFailureCategory::DigestConflict
-            }
-            uc_engine::WorkspaceFailureCategory::Unauthorized => {
-                WorkspaceConvergenceFailureCategory::Unauthorized
-            }
-            uc_engine::WorkspaceFailureCategory::VersionIncompatible => {
-                WorkspaceConvergenceFailureCategory::VersionIncompatible
-            }
-            uc_engine::WorkspaceFailureCategory::NoEffectiveMembers => {
-                WorkspaceConvergenceFailureCategory::NoEffectiveMembers
-            }
-            uc_engine::WorkspaceFailureCategory::Storage => {
-                WorkspaceConvergenceFailureCategory::Storage
-            }
-        }),
     }
 }
 
@@ -2292,8 +2249,8 @@ mod tests {
         let _query: fn(&MobileEngine) -> Result<WorkspaceConvergence, BindingError> =
             MobileEngine::query_workspace_convergence;
         let event = map_engine_event(uc_engine::EngineEvent::WorkspaceConvergenceChanged(
-            uc_engine::WorkspaceSnapshot {
-                phase: uc_engine::WorkspacePhase::Converging,
+            uc_engine::WorkspaceConvergenceSummary {
+                phase: uc_engine::WorkspaceConvergencePhaseSummary::Converging,
                 revision: 2,
                 change_count: 1,
                 removal_intent_count: 1,

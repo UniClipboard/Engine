@@ -11,7 +11,6 @@ use uc_engine::{
     RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
     SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
 };
-use uc_engine::{WorkspacePhase, WorkspaceSnapshot};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -542,29 +541,8 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
             map_event_error(error, &mut mapped);
         }
         EngineEvent::Fatal { error } => map_event_error(error, &mut mapped),
-        EngineEvent::WorkspaceConvergenceChanged(snapshot) => {
-            mapped.workspace_convergence = Some(OhWorkspaceConvergence {
-                phase: match snapshot.phase {
-                    WorkspacePhase::LocallyApplied => "locally_applied",
-                    WorkspacePhase::Converging => "converging",
-                    WorkspacePhase::WaitingForOfflineMember => "waiting_for_offline_member",
-                    WorkspacePhase::Complete => "complete",
-                    WorkspacePhase::RecoveryRequired => "recovery_required",
-                }
-                .to_owned(),
-                revision: snapshot.revision as f64,
-                change_count: snapshot.change_count.min(u32::MAX as usize) as u32,
-                removal_intent_count: snapshot.removal_intent_count.min(u32::MAX as usize) as u32,
-                effective_member_count: snapshot.effective_member_count.min(u32::MAX as usize)
-                    as u32,
-                confirmed_member_count: snapshot.confirmed_member_count.min(u32::MAX as usize)
-                    as u32,
-                waiting_member_count: snapshot.waiting_member_count.min(u32::MAX as usize) as u32,
-                convergence_digest: snapshot.convergence_digest.map(|digest| digest.to_string()),
-                removed: snapshot.removed,
-                updated_at_ms: snapshot.updated_at_ms as f64,
-                failure_category: None,
-            });
+        EngineEvent::WorkspaceConvergenceChanged(summary) => {
+            mapped.workspace_convergence = workspace_convergence(summary).ok();
         }
         EngineEvent::NetworkRecoveryChanged(status) => {
             mapped.network_recovery_phase = Some(recovery_phase(status.phase).to_owned());
@@ -633,15 +611,15 @@ mod tests {
     use uc_engine::{
         EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
     };
-    use uc_engine::{WorkspacePhase, WorkspaceSnapshot};
+    use uc_engine::{WorkspaceConvergencePhaseSummary, WorkspaceConvergenceSummary};
 
     use super::{count, map_event, workspace_convergence};
 
     #[test]
     fn workspace_convergence_event_keeps_the_complete_snapshot() {
         let event = map_event(EngineEvent::WorkspaceConvergenceChanged(
-            WorkspaceSnapshot {
-                phase: WorkspacePhase::Converging,
+            WorkspaceConvergenceSummary {
+                phase: WorkspaceConvergencePhaseSummary::Converging,
                 revision: 2,
                 change_count: 1,
                 removal_intent_count: 1,

@@ -1610,8 +1610,8 @@ fn lagged_consumers_receive_a_refresh_event() {
 
 #[test]
 fn workspace_convergence_changes_expose_a_full_replacement_snapshot() {
-    let event = EngineEvent::WorkspaceConvergenceChanged(uc_core::membership::WorkspaceSnapshot {
-        phase: uc_core::membership::WorkspacePhase::Converging,
+    let event = EngineEvent::WorkspaceConvergenceChanged(WorkspaceConvergenceSummary {
+        phase: WorkspaceConvergencePhaseSummary::Converging,
         revision: 1,
         change_count: 1,
         removal_intent_count: 0,
