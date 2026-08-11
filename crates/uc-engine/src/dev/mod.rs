@@ -1,8 +1,35 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Once;
 
 use tokio::sync::broadcast;
+
+/// Initialize the tracing subscriber for integration tests.
+///
+/// Honors the `RUST_LOG` environment filter (default `warn`) and writes
+/// through the test writer. Idempotent per process: parallel tests share
+/// one subscriber, so the first test that calls this wins and every later
+/// test logs through it. Call this at the start of every test that needs
+/// engine or adapter logs during diagnosis.
+pub fn init_test_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let result = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "warn".into()),
+            )
+            .with_test_writer()
+            .try_init();
+        if result.is_err() {
+            eprintln!(
+                "init_test_tracing: a subscriber was already installed; \
+                 RUST_LOG may not apply to this test process"
+            );
+        }
+    });
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum DevOperation {

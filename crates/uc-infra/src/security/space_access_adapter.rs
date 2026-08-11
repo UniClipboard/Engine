@@ -1003,7 +1003,11 @@ impl DefaultSpaceAccessAdapter {
             .await?
             .ok_or_else(|| KeyEpochError::Repository("space key material unavailable".into()))?;
         let update_epoch = GroupEpoch::new(update.group_epoch);
-        if current.state().epoch() == update_epoch {
+        if current.state().epoch() >= update_epoch {
+            // Already at or beyond the update: a member that joined later
+            // (or already applied the commit) skips older updates from the
+            // continuous change chain. Idempotent and safe: applying an old
+            // commit to a newer group state would be out of order.
             return Ok(update_epoch);
         }
         if current.state().epoch().next()? != update_epoch || current.group_state().is_empty() {

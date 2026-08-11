@@ -540,6 +540,10 @@ mod tests {
         async fn admission_decision(&self, _: u64) -> RemovalAdmissionDecision {
             RemovalAdmissionDecision::Allowed
         }
+        async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
+            Ok(())
+        }
+
         async fn begin_admission(
             &self,
             _: &PairingSessionId,

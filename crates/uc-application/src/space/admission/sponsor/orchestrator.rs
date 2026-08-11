@@ -416,6 +416,18 @@ impl PairingInboundOrchestrator {
     /// then the channel sends `Confirm`. Any owner error short-circuits to
     /// `Reject(Internal)` so the joiner never sees a false Confirm.
     async fn finalise_verified(&self, session: &PairingSessionId, facts: JoinerFacts) {
+        // Pre-admission chain synchronization: pull the local chain head up
+        // to the newest known member so the admission change is appended to
+        // a current head instead of forking the chain on a stale one.
+        // Best effort: a failed or timed-out sync does not block the join
+        // (receivers still reject forked changes on digest mismatch).
+        if let Err(error) = self.workspace_convergence.synchronize_chain().await {
+            warn!(
+                session = %session,
+                error = %error,
+                "pre-admission chain synchronization incomplete; proceeding best-effort"
+            );
+        }
         let generation = self
             .pending_generation
             .lock()
@@ -747,6 +759,10 @@ mod tests {
             self.calls.lock().unwrap().push("admission_decision");
             self.decision
         }
+        async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
+            Ok(())
+        }
+
         async fn begin_admission(
             &self,
             session: &PairingSessionId,

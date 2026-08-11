@@ -138,7 +138,15 @@ impl WorkspaceConvergenceRuntime {
             .send(WorkspaceConvergenceRuntimeCommand::Shutdown(completed))
             .is_ok()
         {
-            let _ = tokio::time::timeout(Duration::from_secs(5), response).await;
+            if tokio::time::timeout(Duration::from_secs(5), response)
+                .await
+                .is_err()
+            {
+                warn!(
+                    reason = "shutdown_wait_timeout",
+                    "workspace convergence runtime did not stop in time; aborting"
+                );
+            }
         }
         if let Some(task) = self.task.take() {
             if !task.is_finished() {

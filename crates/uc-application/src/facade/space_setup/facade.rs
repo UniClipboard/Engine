@@ -50,9 +50,7 @@ use crate::space::admission::joiner::joiner_handshake::JoinerHandshakeCoordinato
 use crate::space::admission::redeem_invitation::RedeemPairingInvitationUseCase;
 use crate::space::admission::sponsor::orchestrator::PairingInboundOrchestrator;
 use crate::space::admission::sponsor::sponsor_handshake::SponsorHandshakeCoordinator;
-use crate::space::convergence::group_update_delivery::{
-    GroupUpdateDelivery, GroupUpdateDeliveryPort,
-};
+use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
 use crate::space::convergence::reachability::{
     EnsureReachableAllError, EnsureReachableAllReport, EnsureReachableAllUseCase,
 };

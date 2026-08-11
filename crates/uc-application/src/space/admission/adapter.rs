@@ -35,6 +35,11 @@ pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
     /// given invitation generation.
     async fn admission_decision(&self, invitation_generation: u64) -> RemovalAdmissionDecision;
 
+    /// Pull the local chain head up to the newest known member before an
+    /// admission is committed. Best effort and bounded; the admission may
+    /// continue on the local head when the sync cannot complete.
+    async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError>;
+
     /// Save the in-flight sponsor admission record before waiting for the
     /// joiner's readiness.
     async fn begin_admission(
@@ -93,6 +98,10 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
             invitation_generation,
         )
         .await
+    }
+
+    async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
+        WorkspaceConvergence::synchronize_chain(self).await
     }
 
     async fn begin_admission(
