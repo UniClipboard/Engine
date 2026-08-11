@@ -51,7 +51,6 @@ use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::admission::invitation::holder::{
     InMemoryPairingInvitationHolder, TakeMatchingError,
 };
-use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
 
 use super::sponsor_handshake::{JoinerFacts, SponsorHandshakeCoordinator, Verdict};
 
@@ -443,48 +442,81 @@ impl PairingInboundOrchestrator {
             return;
         }
 
-        if let Err(err) = self.handshake.confirm(session).await {
-            warn!(
-                session = %session,
-                error = %err,
-                "Confirm wire send failed after the admission record was saved"
-            );
-            // The in-flight admission record already landed — the owner
-            // will re-await the same joiner's readiness after a restart.
-            // `handshake.confirm` has already removed ctx + closed on the
-            // happy path; on this Err path the coordinator did not close
-            // (it short-circuited on the settings/send failure). We
-            // deliberately do not send a Reject here because the joiner's
-            // local store may have already advanced; let the natural
-            // timeout take care of it.
-            self.emit_failure(session, PairingFailureReason::ConnectionLost);
-        } else {
-            self.pending_joiner_ready
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(session.clone(), facts);
-        }
+        let security_update_payload = match self.handshake.confirm(session).await {
+            Ok(payload) => payload,
+            Err(err) => {
+                warn!(
+                    session = %session,
+                    error = %err,
+                    "Confirm wire send failed after the admission record was saved"
+                );
+                // The in-flight admission record already landed — the owner
+                // will re-await the same joiner's readiness after a restart.
+                // `handshake.confirm` has already removed ctx + closed on the
+                // happy path; on this Err path the coordinator did not close
+                // (it short-circuited on the settings/send failure). We
+                // deliberately do not send a Reject here because the joiner's
+                // local store may have already advanced; let the natural
+                // timeout take care of it.
+                self.emit_failure(session, PairingFailureReason::ConnectionLost);
+                return;
+            }
+        };
+        let mut facts = facts;
+        facts.security_update_payload = security_update_payload;
+        self.pending_joiner_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session.clone(), facts);
     }
 
     async fn complete_after_joiner_ready(&self, session: &PairingSessionId, ready: JoinerReady) {
-        let Some(facts) = self
+        let joiner_device_id = ready.admission.device_id.clone();
+        let facts = self
             .pending_joiner_ready
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(session)
-        else {
-            self.handshake
-                .reject(
-                    session,
-                    PairingRejectReason::Internal("unexpected joiner readiness".into()),
-                )
-                .await;
-            return;
+            .remove(session);
+        let facts_valid = match &facts {
+            Some(facts) => {
+                ready.admission.device_id == facts.device_id
+                    && ready.admission.device_name == facts.device_name
+                    && ready.admission.identity_fingerprint == facts.identity_fingerprint
+            }
+            None => {
+                // The sponsor restarted after `begin_admission` saved the
+                // in-flight record: re-await the same joiner's readiness
+                // from the persisted record instead of rejecting it. Only
+                // the device id can be re-verified from that record.
+                let Ok(Some(record)) = self.workspace_convergence.pending_admission(session).await
+                else {
+                    self.handshake
+                        .reject(
+                            session,
+                            PairingRejectReason::Internal("unexpected joiner readiness".into()),
+                        )
+                        .await;
+                    return;
+                };
+                if record.joiner_device_id != ready.admission.device_id {
+                    self.handshake
+                        .reject(
+                            session,
+                            PairingRejectReason::Internal("joiner readiness facts mismatch".into()),
+                        )
+                        .await;
+                    self.emit_failure(session, PairingFailureReason::Internal);
+                    return;
+                }
+                debug!(
+                    session = %session,
+                    joiner_device_id = %ready.admission.device_id.as_str(),
+                    "restored in-flight admission record after sponsor restart"
+                );
+                true
+            }
         };
-        if ready.admission.device_id != facts.device_id
-            || ready.admission.device_name != facts.device_name
-            || ready.admission.identity_fingerprint != facts.identity_fingerprint
-        {
+        if !facts_valid {
             self.handshake
                 .reject(
                     session,
@@ -494,9 +526,12 @@ impl PairingInboundOrchestrator {
             self.emit_failure(session, PairingFailureReason::Internal);
             return;
         }
+        let security_update_payload = facts
+            .as_ref()
+            .map_or_else(Vec::new, |facts| facts.security_update_payload.clone());
         let committed = match self
             .workspace_convergence
-            .commit_joiner_admission(session, ready.admission)
+            .commit_joiner_admission(session, ready.admission, security_update_payload)
             .await
         {
             Ok(committed) => committed,
@@ -533,7 +568,7 @@ impl PairingInboundOrchestrator {
         self.handshake.complete(session).await;
         info!(
             session = %session,
-            joiner_device_id = %facts.device_id.as_str(),
+            joiner_device_id = %joiner_device_id.as_str(),
             "joiner admission change saved and confirmed"
         );
     }
@@ -641,6 +676,8 @@ mod tests {
     use crate::space::admission::invitation::holder::InMemoryPairingInvitationHolder;
     use crate::space::convergence::WorkspaceConvergenceError;
 
+    use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
+
     // ── fakes ────────────────────────────────────────────────────────────
 
     #[derive(Default)]
@@ -729,6 +766,7 @@ mod tests {
             &self,
             session: &PairingSessionId,
             joiner: AdmissionChangeFacts,
+            _security_update_payload: Vec<u8>,
         ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
             self.calls.lock().unwrap().push("commit_joiner_admission");
             assert_eq!(session.as_str(), "session-1");
@@ -746,6 +784,13 @@ mod tests {
             &self,
         ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError> {
             unimplemented!("joiner-side method not exercised in sponsor tests")
+        }
+        async fn pending_admission(
+            &self,
+            _session: &uc_core::ports::pairing::PairingSessionId,
+        ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>
+        {
+            Ok(None)
         }
         async fn record_local_readiness(
             &self,

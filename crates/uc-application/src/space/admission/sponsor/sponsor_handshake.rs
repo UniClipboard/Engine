@@ -68,6 +68,11 @@ pub(crate) struct JoinerFacts {
     pub device_id: DeviceId,
     pub device_name: String,
     pub identity_fingerprint: IdentityFingerprint,
+    /// The group-epoch update produced by the admission for existing
+    /// members. Carried by the admission change so lagging members recover
+    /// the security state with the chain; empty when there are no existing
+    /// members.
+    pub security_update_payload: Vec<u8>,
 }
 
 /// Outcome of the joiner's `ChallengeResponse`.
@@ -249,6 +254,7 @@ impl SponsorHandshakeCoordinator {
                 device_id: request.device_id,
                 device_name: request.device_name,
                 identity_fingerprint: request.identity_fingerprint,
+                security_update_payload: Vec::new(),
             },
             key_package: request.key_package,
             timer_abort: None,
@@ -402,8 +408,9 @@ impl SponsorHandshakeCoordinator {
     /// Step 3a (verified branch): build + send `Confirm` and retain no
     /// session state. Called by the orchestrator **after** the workspace
     /// owner saved the in-flight admission record so we never confirm a
-    /// peer the owner has not recorded.
-    pub(crate) async fn confirm(&self, session: &PairingSessionId) -> Result<(), String> {
+    /// peer the owner has not recorded. Returns the group-epoch update
+    /// payload produced for existing members (empty when there are none).
+    pub(crate) async fn confirm(&self, session: &PairingSessionId) -> Result<Vec<u8>, String> {
         let ctx = self
             .sessions
             .lock()
@@ -483,7 +490,10 @@ impl SponsorHandshakeCoordinator {
             transport_address_blob_len,
             "Confirm sent to joiner; waiting for joiner readiness"
         );
-        Ok(())
+        Ok(admission
+            .existing_member_updates
+            .first()
+            .map_or_else(Vec::new, |update| update.payload().to_vec()))
     }
 
     /// Step 4b: send the sponsor's "admission change saved" confirmation

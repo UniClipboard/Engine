@@ -552,6 +552,7 @@ mod tests {
             &self,
             _: &PairingSessionId,
             _: AdmissionChangeFacts,
+            _security_update_payload: Vec<u8>,
         ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
             unimplemented!("sponsor-side method not exercised in joiner tests")
         }
@@ -585,6 +586,13 @@ mod tests {
             }
             *self.committed_facts.lock().unwrap() = Some(confirmation);
             Ok(snapshot())
+        }
+        async fn pending_admission(
+            &self,
+            _session: &uc_core::ports::pairing::PairingSessionId,
+        ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>
+        {
+            Ok(None)
         }
     }
 

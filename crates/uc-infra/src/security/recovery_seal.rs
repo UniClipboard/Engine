@@ -10,8 +10,11 @@
 //! keys, the change range, the target digest, the request number and the
 //! monotonic reply number.
 //!
-//! The current workspace key is never used as a fallback, and no plaintext
-//! business material is ever emitted.
+//! The sealed envelope starts with a fixed-length clear header (version,
+//! lineage fingerprint, history key number, request/reply numbers, change
+//! range, target digest and both member instances) so the receiving side
+//! can rebuild the binding before decryption. The current workspace key is
+//! never used as a fallback, and no plaintext business material is emitted.
 
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
@@ -20,8 +23,8 @@ use rand::RngCore;
 use sha2::Sha256;
 
 use uc_core::membership::{
-    recovery_lineage_fingerprint, ContentKeyId, RecoveryChannelMessage,
-    WORKSPACE_RECOVERY_CHANNEL_VERSION,
+    ContentKeyId, RecoveryBinding, RecoveryChannelMessage, RecoveryEnvelopeHeader,
+    RECOVERY_ENVELOPE_HEADER_BYTES,
 };
 
 use super::session::InMemorySession;
@@ -41,63 +44,13 @@ pub enum RecoverySealError {
     Rejected,
 }
 
-/// The binding facts of one recovery handoff. Both endpoints must agree on
-/// every field or the seal cannot be opened.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecoveryBinding {
-    pub space_lineage: String,
-    /// Number of the shared historical transport key.
-    pub history_key_number: u64,
-    /// The requester's saved predecessor security generation.
-    pub from_epoch: u64,
-    /// Sender member instance.
-    pub sender_instance: [u8; 32],
-    /// Receiver member instance.
-    pub receiver_instance: [u8; 32],
-    pub sender_transport_public_key: Vec<u8>,
-    pub receiver_transport_public_key: Vec<u8>,
-    pub from_range_epoch: u64,
-    pub to_range_epoch: u64,
-    pub target_digest: [u8; 32],
-    pub request_number: u64,
-    pub reply_number: u64,
-}
-
-impl RecoveryBinding {
-    /// Deterministic authenticated data for this handoff.
-    pub fn authenticated_data(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(256);
-        push_field(&mut bytes, WORKSPACE_RECOVERY_CHANNEL_VERSION.as_bytes());
-        push_field(
-            &mut bytes,
-            &recovery_lineage_fingerprint(&self.space_lineage),
-        );
-        push_field(&mut bytes, &self.history_key_number.to_be_bytes());
-        push_field(&mut bytes, &self.from_epoch.to_be_bytes());
-        push_field(&mut bytes, &self.sender_instance);
-        push_field(&mut bytes, &self.receiver_instance);
-        push_field(&mut bytes, &self.sender_transport_public_key);
-        push_field(&mut bytes, &self.receiver_transport_public_key);
-        push_field(&mut bytes, &self.from_range_epoch.to_be_bytes());
-        push_field(&mut bytes, &self.to_range_epoch.to_be_bytes());
-        push_field(&mut bytes, &self.target_digest);
-        push_field(&mut bytes, &self.request_number.to_be_bytes());
-        push_field(&mut bytes, &self.reply_number.to_be_bytes());
-        bytes
-    }
-}
-
-fn push_field(buffer: &mut Vec<u8>, value: &[u8]) {
-    buffer.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    buffer.extend_from_slice(value);
-}
-
 /// Seals one recovery message with the one-use handoff key.
 ///
-/// `history_key_id` identifies the shared historical transport key in the
-/// local session catalog; both endpoints must hold the same key for the
-/// same space or the seal cannot be opened. Fresh random nonces are used
-/// for every call.
+/// `binding` must carry every handoff fact; the transport public key fields
+/// are provided by the transport implementation. `history_key_id`
+/// identifies the shared historical transport key in the local session
+/// catalog; both endpoints must hold the same key for the same space or the
+/// seal cannot be opened. Fresh random nonces are used for every call.
 pub fn seal_recovery_message(
     session: &InMemorySession,
     space_id: &uc_core::ids::SpaceId,
@@ -131,16 +84,21 @@ pub fn seal_recovery_message(
             },
         )
         .map_err(|_| RecoverySealError::Failed)?;
-    let mut envelope = Vec::with_capacity(4 + 24 + ciphertext.len());
-    envelope.extend_from_slice(&(binding.request_number.to_be_bytes()));
+    let header = RecoveryEnvelopeHeader::from_binding(binding);
+    let mut envelope = Vec::with_capacity(RECOVERY_ENVELOPE_HEADER_BYTES + 24 + ciphertext.len());
+    envelope.extend_from_slice(&header.encode());
     envelope.extend_from_slice(&nonce);
     envelope.extend_from_slice(&ciphertext);
     Ok(envelope)
 }
 
-/// Opens a recovery envelope. Returns the message only when the envelope
-/// binds exactly to `binding` and was sealed with the same historical
-/// transport key.
+/// Opens a recovery envelope. Returns the message only when the clear
+/// header binds exactly to `binding` and the envelope was sealed with the
+/// same historical transport key.
+///
+/// `binding` must carry the same facts the sealer used; the transport
+/// public key fields are provided by the transport implementation from the
+/// authenticated connection.
 pub fn open_recovery_message(
     session: &InMemorySession,
     space_id: &uc_core::ids::SpaceId,
@@ -148,11 +106,16 @@ pub fn open_recovery_message(
     binding: &RecoveryBinding,
     envelope: &[u8],
 ) -> Result<RecoveryChannelMessage, RecoverySealError> {
-    if envelope.len() < 4 + 24 {
+    if envelope.len() < RECOVERY_ENVELOPE_HEADER_BYTES + 24 {
         return Err(RecoverySealError::Rejected);
     }
-    let request_number = u64::from_be_bytes(envelope[..8].try_into().unwrap());
-    if request_number != binding.request_number {
+    let header = RecoveryEnvelopeHeader::decode(&envelope[..RECOVERY_ENVELOPE_HEADER_BYTES])
+        .map_err(|_| RecoverySealError::Rejected)?;
+    if header.to_binding(
+        binding.sender_transport_public_key.clone(),
+        binding.receiver_transport_public_key.clone(),
+    ) != *binding
+    {
         return Err(RecoverySealError::Rejected);
     }
     let resolved = session
@@ -168,9 +131,11 @@ pub fn open_recovery_message(
         XChaCha20Poly1305::new_from_slice(&handoff_key).map_err(|_| RecoverySealError::Failed)?;
     let plaintext = cipher
         .decrypt(
-            XNonce::from_slice(&envelope[8..8 + 24]),
+            XNonce::from_slice(
+                &envelope[RECOVERY_ENVELOPE_HEADER_BYTES..RECOVERY_ENVELOPE_HEADER_BYTES + 24],
+            ),
             chacha20poly1305::aead::Payload {
-                msg: &envelope[8 + 24..],
+                msg: &envelope[RECOVERY_ENVELOPE_HEADER_BYTES + 24..],
                 aad: &aad,
             },
         )
@@ -200,8 +165,8 @@ fn derive_handoff_key(
 mod tests {
     use uc_core::ids::SpaceId;
     use uc_core::membership::{
-        AdmissionChangeFacts, ContentKeyId, ContentKeyPurpose, RecoveryOffer, RecoveryRequest,
-        WorkspaceChange, WorkspaceChangeKind,
+        recovery_lineage_fingerprint, AdmissionChangeFacts, ContentKeyId, ContentKeyPurpose,
+        RecoveryOffer, RecoveryRequest, WorkspaceChange, WorkspaceChangeKind,
     };
 
     use super::*;
@@ -218,7 +183,7 @@ mod tests {
 
     fn binding(seed: u8) -> RecoveryBinding {
         RecoveryBinding {
-            space_lineage: "space-a".to_owned(),
+            space_lineage_fingerprint: recovery_lineage_fingerprint("space-a"),
             history_key_number: 1,
             from_epoch: 0,
             sender_instance: [0x01; 32],
@@ -368,6 +333,58 @@ mod tests {
             &SpaceId::from_str("space-a"),
             &key_id,
             &binding,
+            &envelope,
+        );
+        assert!(matches!(result, Err(RecoverySealError::Rejected)));
+    }
+
+    #[test]
+    fn tampered_clear_header_is_rejected() {
+        let sponsor = session(0x51);
+        let key_id = ContentKeyId::legacy_v1();
+        let binding = binding(0x0e);
+        let message = RecoveryChannelMessage::Offer(offer());
+        let mut envelope = seal_recovery_message(
+            &sponsor,
+            &SpaceId::from_str("space-a"),
+            &key_id,
+            &binding,
+            &message,
+        )
+        .unwrap();
+        envelope[32] ^= 0x01;
+        let result = open_recovery_message(
+            &sponsor,
+            &SpaceId::from_str("space-a"),
+            &key_id,
+            &binding,
+            &envelope,
+        );
+        assert!(matches!(result, Err(RecoverySealError::Rejected)));
+    }
+
+    #[test]
+    fn cross_space_replay_is_rejected() {
+        let sponsor = session(0x51);
+        let key_id = ContentKeyId::legacy_v1();
+        let binding = binding(0x0f);
+        let message = RecoveryChannelMessage::Offer(offer());
+        let envelope = seal_recovery_message(
+            &sponsor,
+            &SpaceId::from_str("space-a"),
+            &key_id,
+            &binding,
+            &message,
+        )
+        .unwrap();
+
+        let mut wrong_space = binding.clone();
+        wrong_space.space_lineage_fingerprint = recovery_lineage_fingerprint("space-b");
+        let result = open_recovery_message(
+            &sponsor,
+            &SpaceId::from_str("space-a"),
+            &key_id,
+            &wrong_space,
             &envelope,
         );
         assert!(matches!(result, Err(RecoverySealError::Rejected)));

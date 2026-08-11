@@ -1081,16 +1081,10 @@ impl IrohNodeBuilder {
         &mut self,
         adapter: &IrohWorkspaceRecoveryAdapter,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         recovery_endpoint: Arc<dyn RecoveryTransportEndpointPort>,
     ) -> Result<(), IrohNodeError> {
-        let handlers = adapter.handlers(
-            member_repo,
-            peer_admission,
-            fingerprint_factory,
-            recovery_endpoint,
-        );
+        let handlers = adapter.handlers(member_repo, fingerprint_factory, recovery_endpoint);
         let builder = self.take_router_builder()?;
         self.router_builder = Some(builder.accept(WORKSPACE_RECOVERY_ALPN, handlers.recovery));
         Ok(())
@@ -1099,10 +1093,12 @@ impl IrohNodeBuilder {
     pub fn build_workspace_recovery_adapter(
         &self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        session: Arc<InMemorySession>,
     ) -> Arc<IrohWorkspaceRecoveryAdapter> {
         Arc::new(IrohWorkspaceRecoveryAdapter::new(
             Arc::clone(&self.endpoint),
             peer_addr_repo,
+            session,
         ))
     }
 

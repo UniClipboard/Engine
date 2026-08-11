@@ -59,9 +59,10 @@ pub use protection::{
     SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
 };
 pub use recovery_exchange::{
-    recovery_lineage_fingerprint, RecoveryAck, RecoveryChannelMessage, RecoveryOffer,
-    RecoveryReject, RecoveryRejection, RecoveryRequest, RecoveryTransportEndpointPort,
-    RecoveryTransportError, RecoveryTransportPort, MIN_HISTORY_KEY_NUMBER,
+    recovery_lineage_fingerprint, RecoveryAck, RecoveryBinding, RecoveryChannelMessage,
+    RecoveryEnvelopeHeader, RecoveryOffer, RecoveryReject, RecoveryRejection, RecoveryRequest,
+    RecoveryTransportEndpointPort, RecoveryTransportError, RecoveryTransportPort,
+    MIN_HISTORY_KEY_NUMBER, RECOVERY_ENVELOPE_HEADER_BYTES, RECOVERY_ENVELOPE_VERSION,
     WORKSPACE_RECOVERY_CHANNEL_VERSION,
 };
 pub use removal_intent::{

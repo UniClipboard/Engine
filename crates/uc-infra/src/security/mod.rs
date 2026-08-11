@@ -17,6 +17,8 @@ mod membership_security_update_adapter;
 pub(crate) mod mls_group;
 mod peer_admission_adapter;
 pub(crate) mod recovery_seal;
+pub(crate) use recovery_seal::RecoverySealError;
+pub use recovery_seal::{open_recovery_message, seal_recovery_message};
 pub(crate) mod removal_recovery_adapter;
 pub(crate) mod removal_verification_adapter;
 mod scope_identifier;

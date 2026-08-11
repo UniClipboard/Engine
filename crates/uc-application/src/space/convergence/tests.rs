@@ -353,9 +353,28 @@ pub(crate) fn test_deps(
         late_submission: Arc::new(UnusedLate),
         notice: Arc::new(UnusedNotice),
         notice_verification: Arc::new(RejectingNoticeVerification),
+        recovery_transport: Arc::new(UnusedRecoveryTransport),
         trusted_peer_repo: Arc::new(TestTrustedPeerRepo),
         peer_addr_repo: Arc::new(TestPeerAddrRepo),
         own_device: DeviceId::new(own_device),
+    }
+}
+
+#[derive(Clone, Default)]
+struct UnusedRecoveryTransport;
+
+#[async_trait]
+impl uc_core::membership::RecoveryTransportPort for UnusedRecoveryTransport {
+    async fn exchange_recovery(
+        &self,
+        _recipient: &DeviceId,
+        _binding: &uc_core::membership::RecoveryBinding,
+        _message: uc_core::membership::RecoveryChannelMessage,
+    ) -> Result<
+        uc_core::membership::RecoveryChannelMessage,
+        uc_core::membership::RecoveryTransportError,
+    > {
+        Err(uc_core::membership::RecoveryTransportError::Offline)
     }
 }
 
@@ -921,6 +940,7 @@ async fn reconcile_propagates_intents_and_removal_notices() {
         late_submission: Arc::new(UnusedLate),
         notice: Arc::new(UnusedNotice),
         notice_verification: Arc::new(RejectingNoticeVerification),
+        recovery_transport: Arc::new(UnusedRecoveryTransport),
         trusted_peer_repo: Arc::new(TestTrustedPeerRepo),
         peer_addr_repo: Arc::new(TestPeerAddrRepo),
         own_device: DeviceId::new("device-a"),
@@ -944,11 +964,13 @@ async fn reconcile_propagates_intents_and_removal_notices() {
     owner.reconcile().await.unwrap();
 
     let sent = exchange.sent.lock().unwrap();
-    assert_eq!(sent.len(), 1);
-    assert!(matches!(
-        &sent[0],
-        uc_core::membership::RemovalExchangeMessage::Intent(_)
-    ));
+    assert!(sent
+        .iter()
+        .any(|m| matches!(m, uc_core::membership::RemovalExchangeMessage::Intent(_))));
+    assert!(sent.iter().any(|m| matches!(
+        m,
+        uc_core::membership::RemovalExchangeMessage::Confirmation(_)
+    )));
     let state = repository.load_state().await.unwrap().unwrap();
     assert_eq!(state.peer_intent_acks.len(), 1);
     assert_eq!(state.notified_removals.len(), 1);

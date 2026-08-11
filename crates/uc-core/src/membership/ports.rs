@@ -16,6 +16,7 @@ use super::revocation::{
     PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
     SpaceKeyMaterial,
 };
+use super::workspace_convergence::WorkspaceConfirmation;
 use crate::ids::SpaceId;
 use crate::ports::PeerAddressRecord;
 use crate::security::IdentityFingerprint;
@@ -615,6 +616,9 @@ pub enum RemovalExchangeMessage {
     Intent(Box<SignedRemovalIntent>),
     /// 意图已验收(有界确认,不含业务内容)。
     IntentAck(RemovalIntentId),
+    /// 一个有效成员对当前摘要的签名确认。接收方验签后记录,
+    /// 重复确认幂等。
+    Confirmation(WorkspaceConfirmation),
 }
 
 /// 受限迟交入口的提交消息。
