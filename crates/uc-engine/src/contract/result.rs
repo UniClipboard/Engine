@@ -890,8 +890,8 @@ pub enum WorkspaceConvergenceFailureCategorySummary {
 
 /// 工作空间收敛的统一完整快照(ADR-016)。
 ///
-/// 与 `WorkspaceConvergenceChanged` 事件共享同一结构;不含设备名称、设备
-/// 编号原文、成员实例、地址、签名、密钥、安全变化或内容。
+/// 与 `WorkspaceConvergenceChanged` 事件共享同一结构;不含设备名称、成员实例、
+/// 地址、签名、密钥、安全变化或内容。仅在等待阶段公开阻塞设备的稳定标识。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceConvergenceSummary {
     pub phase: WorkspaceConvergencePhaseSummary,
@@ -905,7 +905,9 @@ pub struct WorkspaceConvergenceSummary {
     pub effective_member_count: u64,
     /// 已确认当前摘要且关系可用的有效成员数量。
     pub confirmed_member_count: u64,
-    /// 当前因暂时离线而等待的有效成员数量。
+    /// 当前阻塞收敛、需要重新上线的设备稳定标识，按字典序排列。
+    pub waiting_member_device_ids: Vec<String>,
+    /// 当前阻塞收敛、需要重新上线的设备数量。
     pub waiting_member_count: u64,
     /// 当前工作空间摘要;尚未形成时为空。
     pub convergence_digest: Option<String>,

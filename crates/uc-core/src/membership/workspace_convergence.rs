@@ -464,9 +464,9 @@ impl std::fmt::Display for WorkspaceDigest {
 }
 
 /// Stable summary published to callers by `QueryWorkspaceConvergence` and
-/// `WorkspaceConvergenceChanged`. Contains no device names, device
-/// identifiers, member instances, addresses, keys, security material or
-/// content.
+/// `WorkspaceConvergenceChanged`. Contains no device names, member instances,
+/// addresses, keys, security material or content. Device identifiers appear
+/// only for members that currently block convergence while offline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     pub phase: WorkspacePhase,
@@ -475,6 +475,7 @@ pub struct WorkspaceSnapshot {
     pub removal_intent_count: usize,
     pub effective_member_count: usize,
     pub confirmed_member_count: usize,
+    pub waiting_member_device_ids: Vec<DeviceId>,
     pub waiting_member_count: usize,
     pub convergence_digest: Option<WorkspaceDigest>,
     pub removed: bool,
@@ -613,10 +614,58 @@ impl WorkspaceConvergenceState {
         }
     }
 
+    fn waiting_member_device_ids_for(
+        &self,
+        phase: WorkspacePhase,
+    ) -> Result<Vec<DeviceId>, WorkspaceFailureCategory> {
+        if phase != WorkspacePhase::WaitingForOfflineMember {
+            return Ok(Vec::new());
+        }
+
+        let effective = self.effective_members();
+        let confirmed = self.confirmed_members();
+        let mut devices = BTreeSet::new();
+        for member in effective {
+            if confirmed.contains(&member)
+                || !self.waiting_members.contains(&member)
+                || self.own_instance == Some(member)
+            {
+                continue;
+            }
+            let device_id = self
+                .member_devices
+                .get(&member)
+                .ok_or(WorkspaceFailureCategory::IdentityMismatch)?;
+            devices.insert(device_id.clone());
+        }
+        Ok(devices.into_iter().collect())
+    }
+
     fn advance(&mut self, now_ms: i64) {
-        self.phase = self.recompute_phase();
+        let phase = self.recompute_phase();
+        self.phase = match self.waiting_member_device_ids_for(phase) {
+            Ok(_) => phase,
+            Err(category) => {
+                self.failure_category = Some(category);
+                WorkspacePhase::RecoveryRequired
+            }
+        };
         self.updated_at_ms = now_ms;
         self.revision = self.revision.saturating_add(1);
+    }
+
+    /// Validate that every member in the published waiting set has a stable
+    /// device identifier. This protects persisted state written before the
+    /// current process loaded it.
+    pub fn ensure_waiting_members_are_resolvable(&mut self, now_ms: i64) -> bool {
+        if self.phase != WorkspacePhase::WaitingForOfflineMember
+            || self.waiting_member_device_ids_for(self.phase).is_ok()
+        {
+            return false;
+        }
+        self.failure_category = Some(WorkspaceFailureCategory::IdentityMismatch);
+        self.advance(now_ms);
+        true
     }
 
     /// Apply a committed workspace change: validate continuity, append to
@@ -1001,6 +1050,9 @@ impl WorkspaceConvergenceState {
                 Ok((WorkspaceMergeOutcome::Updated, effect))
             }
             WorkspaceConvergenceEvent::MemberUnreachable(member) => {
+                if !self.effective_members().contains(&member) {
+                    return Ok((WorkspaceMergeOutcome::Unchanged, WorkspaceEffect::NONE));
+                }
                 let changed = self.waiting_members.insert(member);
                 self.advance(now_ms);
                 Ok((
@@ -1106,18 +1158,24 @@ impl WorkspaceConvergenceState {
     /// Compute the current published snapshot.
     pub fn snapshot(&self) -> WorkspaceSnapshot {
         let effective = self.effective_members();
+        let (phase, waiting_member_device_ids, failure_category) =
+            match self.waiting_member_device_ids_for(self.phase) {
+                Ok(device_ids) => (self.phase, device_ids, self.failure_category),
+                Err(category) => (WorkspacePhase::RecoveryRequired, Vec::new(), Some(category)),
+            };
         WorkspaceSnapshot {
-            phase: self.phase,
+            phase,
             revision: self.revision,
             change_count: self.changes.len(),
             removal_intent_count: self.removal_intents.len(),
             effective_member_count: effective.len(),
             confirmed_member_count: self.confirmed_members().len(),
-            waiting_member_count: self.waiting_members.len(),
+            waiting_member_count: waiting_member_device_ids.len(),
+            waiting_member_device_ids,
             convergence_digest: self.current_digest(),
             removed: self.removed,
             updated_at_ms: self.updated_at_ms,
-            failure_category: self.failure_category,
+            failure_category,
         }
     }
 }
@@ -1255,6 +1313,18 @@ mod tests {
             removal: None,
             created_at_ms: 1,
         }
+    }
+
+    fn admission_change_for_device(
+        lineage: &str,
+        previous_epoch: u64,
+        instance: MemberInstanceId,
+        device_id: &str,
+        previous_digest: [u8; 32],
+    ) -> WorkspaceChange {
+        let mut change = admission_change(lineage, previous_epoch, instance, previous_digest);
+        change.admission.as_mut().unwrap().device_id = DeviceId::new(device_id);
+        change
     }
 
     fn removal_change(
@@ -1524,6 +1594,233 @@ mod tests {
             .apply(WorkspaceConvergenceEvent::MemberReachable(b), 8)
             .unwrap();
         assert_eq!(state.phase, WorkspacePhase::Converging);
+    }
+
+    #[test]
+    fn non_waiting_phase_does_not_publish_unreachable_members_as_waiting() {
+        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let initial = WorkspaceDigest(Sha256::digest(b"uniclipboard-workspace-initial/v1").into());
+        let a = instance(0x0a);
+        let b = instance(0x0b);
+        let c = instance(0x0c);
+
+        state
+            .apply(
+                WorkspaceConvergenceEvent::CommittedChange(admission_change(
+                    "lineage",
+                    0,
+                    a,
+                    *initial.as_bytes(),
+                )),
+                2,
+            )
+            .unwrap();
+        let first_digest = compute_change_digest(&state.changes[0]);
+        state
+            .apply(
+                WorkspaceConvergenceEvent::CommittedChange(admission_change(
+                    "lineage",
+                    1,
+                    b,
+                    first_digest,
+                )),
+                3,
+            )
+            .unwrap();
+        let second_digest = compute_change_digest(&state.changes[1]);
+        state
+            .apply(
+                WorkspaceConvergenceEvent::CommittedChange(admission_change(
+                    "lineage",
+                    2,
+                    c,
+                    second_digest,
+                )),
+                4,
+            )
+            .unwrap();
+
+        let digest = *state.current_digest().unwrap().as_bytes();
+        state
+            .apply(
+                WorkspaceConvergenceEvent::ConfirmationReceived(WorkspaceConfirmation {
+                    member_instance: a,
+                    digest,
+                    signature: vec![1],
+                }),
+                5,
+            )
+            .unwrap();
+        state
+            .apply(
+                WorkspaceConvergenceEvent::PendingHandoffCreated {
+                    recipient: b,
+                    recipient_device: DeviceId::new("device-b"),
+                    confirmed_epoch: 1,
+                    target_digest: digest,
+                    has_more: true,
+                },
+                6,
+            )
+            .unwrap();
+        state
+            .apply(WorkspaceConvergenceEvent::MemberUnreachable(b), 7)
+            .unwrap();
+
+        assert_eq!(state.phase, WorkspacePhase::Converging);
+        assert_eq!(state.snapshot().waiting_member_count, 0);
+    }
+
+    #[test]
+    fn waiting_snapshot_lists_only_current_offline_devices_in_stable_order() {
+        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let initial = WorkspaceDigest(Sha256::digest(b"uniclipboard-workspace-initial/v1").into());
+        let a = instance(0x0a);
+        let b = instance(0x0b);
+        let c = instance(0x0c);
+
+        state
+            .apply(
+                WorkspaceConvergenceEvent::CommittedChange(admission_change_for_device(
+                    "lineage",
+                    0,
+                    a,
+                    "device-a",
+                    *initial.as_bytes(),
+                )),
+                2,
+            )
+            .unwrap();
+        let first_digest = compute_change_digest(&state.changes[0]);
+        state
+            .apply(
+                WorkspaceConvergenceEvent::CommittedChange(admission_change_for_device(
+                    "lineage",
+                    1,
+                    b,
+                    "device-b",
+                    first_digest,
+                )),
+                3,
+            )
+            .unwrap();
+        let second_digest = compute_change_digest(&state.changes[1]);
+        state
+            .apply(
+                WorkspaceConvergenceEvent::CommittedChange(admission_change_for_device(
+                    "lineage",
+                    2,
+                    c,
+                    "device-c",
+                    second_digest,
+                )),
+                4,
+            )
+            .unwrap();
+
+        let digest = *state.current_digest().unwrap().as_bytes();
+        state
+            .apply(
+                WorkspaceConvergenceEvent::ConfirmationReceived(WorkspaceConfirmation {
+                    member_instance: a,
+                    digest,
+                    signature: vec![1],
+                }),
+                5,
+            )
+            .unwrap();
+        for (member, device_id) in [(c, "device-c"), (b, "device-b")] {
+            state
+                .apply(
+                    WorkspaceConvergenceEvent::PendingHandoffCreated {
+                        recipient: member,
+                        recipient_device: DeviceId::new(device_id),
+                        confirmed_epoch: 1,
+                        target_digest: digest,
+                        has_more: true,
+                    },
+                    6,
+                )
+                .unwrap();
+            state
+                .apply(WorkspaceConvergenceEvent::MemberUnreachable(member), 7)
+                .unwrap();
+        }
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, WorkspacePhase::WaitingForOfflineMember);
+        assert_eq!(
+            snapshot.waiting_member_device_ids,
+            vec![DeviceId::new("device-b"), DeviceId::new("device-c")]
+        );
+        assert_eq!(snapshot.waiting_member_count, 2);
+    }
+
+    #[test]
+    fn missing_waiting_member_device_id_requires_recovery_without_a_partial_snapshot() {
+        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let initial = WorkspaceDigest(Sha256::digest(b"uniclipboard-workspace-initial/v1").into());
+        let a = instance(0x0a);
+        let b = instance(0x0b);
+        for (epoch, member) in [(0, a), (1, b)] {
+            let previous = if epoch == 0 {
+                *initial.as_bytes()
+            } else {
+                compute_change_digest(&state.changes[epoch - 1])
+            };
+            state
+                .apply(
+                    WorkspaceConvergenceEvent::CommittedChange(admission_change_for_device(
+                        "lineage",
+                        epoch as u64,
+                        member,
+                        if member == a { "device-a" } else { "device-b" },
+                        previous,
+                    )),
+                    2,
+                )
+                .unwrap();
+        }
+        let digest = *state.current_digest().unwrap().as_bytes();
+        state
+            .apply(
+                WorkspaceConvergenceEvent::ConfirmationReceived(WorkspaceConfirmation {
+                    member_instance: a,
+                    digest,
+                    signature: vec![1],
+                }),
+                3,
+            )
+            .unwrap();
+        state
+            .apply(
+                WorkspaceConvergenceEvent::PendingHandoffCreated {
+                    recipient: b,
+                    recipient_device: DeviceId::new("device-b"),
+                    confirmed_epoch: 1,
+                    target_digest: digest,
+                    has_more: true,
+                },
+                4,
+            )
+            .unwrap();
+        state
+            .apply(WorkspaceConvergenceEvent::MemberUnreachable(b), 5)
+            .unwrap();
+        assert_eq!(state.phase, WorkspacePhase::WaitingForOfflineMember);
+
+        // This models an incomplete encrypted record loaded from storage.
+        state.member_devices.remove(&b);
+        assert!(state.ensure_waiting_members_are_resolvable(6));
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, WorkspacePhase::RecoveryRequired);
+        assert!(snapshot.waiting_member_device_ids.is_empty());
+        assert_eq!(snapshot.waiting_member_count, 0);
+        assert_eq!(
+            snapshot.failure_category,
+            Some(WorkspaceFailureCategory::IdentityMismatch)
+        );
     }
 
     #[test]

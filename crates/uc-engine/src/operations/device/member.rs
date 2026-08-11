@@ -216,6 +216,11 @@ pub(crate) fn workspace_convergence_summary(
         removal_intent_count: u64::try_from(snapshot.removal_intent_count).unwrap_or(u64::MAX),
         effective_member_count: u64::try_from(snapshot.effective_member_count).unwrap_or(u64::MAX),
         confirmed_member_count: u64::try_from(snapshot.confirmed_member_count).unwrap_or(u64::MAX),
+        waiting_member_device_ids: snapshot
+            .waiting_member_device_ids
+            .into_iter()
+            .map(|device_id| device_id.to_string())
+            .collect(),
         waiting_member_count: u64::try_from(snapshot.waiting_member_count).unwrap_or(u64::MAX),
         convergence_digest: snapshot.convergence_digest.map(|digest| digest.to_string()),
         removed: snapshot.removed,
@@ -432,6 +437,7 @@ mod tests {
             removal_intent_count: 0,
             effective_member_count: 2,
             confirmed_member_count: 0,
+            waiting_member_device_ids: vec![uc_core::ids::DeviceId::new("device-b")],
             waiting_member_count: 1,
             convergence_digest: None,
             removed: false,
@@ -448,12 +454,17 @@ mod tests {
                 removal_intent_count: 0,
                 effective_member_count: 2,
                 confirmed_member_count: 0,
+                waiting_member_device_ids: vec!["device-b".to_owned()],
                 waiting_member_count: 1,
                 convergence_digest: None,
                 removed: false,
                 updated_at_ms: 123,
                 failure_category: Some(WorkspaceConvergenceFailureCategorySummary::Storage),
             }
+        );
+        assert_eq!(
+            summary.waiting_member_device_ids,
+            vec!["device-b".to_owned()]
         );
     }
 }

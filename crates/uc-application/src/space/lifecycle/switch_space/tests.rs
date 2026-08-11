@@ -237,6 +237,7 @@ fn switch_snapshot() -> WorkspaceSnapshot {
         removal_intent_count: 0,
         effective_member_count: 1,
         confirmed_member_count: 0,
+        waiting_member_device_ids: Vec::new(),
         waiting_member_count: 0,
         convergence_digest: None,
         removed: false,
