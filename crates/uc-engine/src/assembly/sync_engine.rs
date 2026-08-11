@@ -73,7 +73,7 @@ use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
 use uc_infra::network::iroh::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     GroupUpdateHandlers, IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohNodeError,
-    IrohWorkspaceRecoveryAdapter, TransferProgressHandlers, WORKSPACE_RECOVERY_ALPN,
+    TransferProgressHandlers,
 };
 use uc_infra::security::HmacProofAdapter;
 // Re-exported so external callers can parametrise the assembly without

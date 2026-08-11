@@ -11,13 +11,12 @@ use std::sync::Arc;
 
 use uc_application::deps::{DirectoryReceivePorts, FileTransferPorts};
 use uc_application::facade::{
-    BlobTransferFacade, FileTransferFacade, FileTransferFacadeDeps, FileTransferHostEventPublisher,
+    FileTransferFacade, FileTransferFacadeDeps, FileTransferHostEventPublisher,
     FileTransferLifecycleDeps, HostEventBus, OutboundEntryIdCache,
 };
 use uc_core::file_transfer::{FileTransferEventPublisherPort, FileTransferEventStorePort};
 use uc_core::ports::inbound_file_target::ResolveInboundSaveDirPort;
-use uc_core::ports::EnsureFileTransferPrivacyMaintenancePort;
-use uc_core::ports::{ClockPort, FailInflightTransfersPort, ListExpiredInflightTransfersPort};
+use uc_core::ports::ClockPort;
 use uc_infra::db::executor::DieselSqliteExecutor;
 use uc_infra::file_transfer::SqliteReceiverFileTransferStore;
 
