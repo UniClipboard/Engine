@@ -13,7 +13,7 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClipboardReceiverPort, ClockPort, ConnectionChannel, InboundClipboard,
-    InboundClipboardDisposition, InboundClipboardReceipt,
+    InboundClipboardDisposition, InboundClipboardReceipt, SettingsPort,
 };
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::{
@@ -61,6 +61,7 @@ pub struct ClipboardInboundRuntimeDeps {
     pub receiver: Arc<dyn ClipboardReceiverPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
+    pub settings: Arc<dyn SettingsPort>,
     pub clock: Arc<dyn ClockPort>,
     pub apply: Arc<dyn InboundClipboardApplyPort>,
     pub events: Arc<dyn ClipboardInboundEventPort>,
@@ -79,6 +80,7 @@ pub struct ClipboardInboundRuntime {
 
 struct InboundProcessor {
     receive_gate: MemberReceiveGate,
+    settings: Arc<dyn SettingsPort>,
     transfer_cipher: Arc<dyn TransferCipherPort>,
     clock: Arc<dyn ClockPort>,
     apply: Arc<dyn InboundClipboardApplyPort>,
@@ -117,6 +119,7 @@ impl ClipboardInboundRuntime {
         let mut receiver = deps.receiver.subscribe();
         let processor = InboundProcessor {
             receive_gate: MemberReceiveGate::new(deps.member_repo),
+            settings: deps.settings,
             transfer_cipher: deps.transfer_cipher,
             clock: deps.clock,
             apply: deps.apply,
@@ -278,6 +281,10 @@ impl InboundProcessor {
             ..InboundTiming::default()
         };
         let receiver_policy_started_at = Instant::now();
+        if !inbound_sync_enabled(self.settings.as_ref()).await {
+            receipt.finish(InboundClipboardDisposition::Rejected);
+            return None;
+        }
         if !self
             .receive_gate
             .is_receive_allowed(&inbound.peer_device_id)
@@ -376,6 +383,19 @@ impl InboundProcessor {
             prepared.timing.receiver_preflight_decode_ms,
         );
         log(ClipboardSyncStage::ReceiverApply, receiver_apply_ms);
+    }
+}
+
+async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
+    match settings.load().await {
+        Ok(settings) => settings.sync.sync_enabled,
+        Err(_) => {
+            warn!(
+                error_kind = "settings_load",
+                "clipboard inbound: delivery rejected"
+            );
+            false
+        }
     }
 }
 
@@ -494,7 +514,7 @@ mod tests {
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
     use uc_core::ports::{
         ClipboardHeader, ClipboardReceiverPort, ClockPort, ConnectionChannel, InboundClipboard,
-        InboundClipboardDisposition, InboundClipboardReceipt, InboundClipboardResult,
+        InboundClipboardDisposition, InboundClipboardReceipt, InboundClipboardResult, SettingsPort,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::{
@@ -512,6 +532,23 @@ mod tests {
 
     struct FakeReceiver {
         tx: broadcast::Sender<InboundClipboard>,
+    }
+
+    struct FixedSettings {
+        sync_enabled: bool,
+    }
+
+    #[async_trait]
+    impl SettingsPort for FixedSettings {
+        async fn load(&self) -> anyhow::Result<uc_core::settings::model::Settings> {
+            let mut settings = uc_core::settings::model::Settings::default();
+            settings.sync.sync_enabled = self.sync_enabled;
+            Ok(settings)
+        }
+
+        async fn save(&self, _settings: &uc_core::settings::model::Settings) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     impl FakeReceiver {
@@ -831,6 +868,7 @@ mod tests {
             receiver,
             member_repo: Arc::new(AllowAllMembers),
             transfer_cipher: Arc::new(EchoCipher),
+            settings: Arc::new(FixedSettings { sync_enabled: true }),
             clock: Arc::new(FixedClock),
             apply,
             events,
@@ -848,6 +886,7 @@ mod tests {
             receiver,
             member_repo,
             transfer_cipher,
+            settings: Arc::new(FixedSettings { sync_enabled: true }),
             clock: Arc::new(FixedClock),
             apply,
             events,
@@ -1079,6 +1118,32 @@ mod tests {
             Arc::new(NeverApply),
             Arc::new(RecordingEvents::default()),
         ));
+        let (inbound, result) = fixture("peer-disabled", "hash-disabled");
+
+        receiver.publish(inbound);
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), result.wait())
+                .await
+                .expect("receipt settled"),
+            Some(InboundClipboardDisposition::Rejected)
+        );
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn global_sync_disabled_rejects_before_decrypt_or_apply() {
+        let receiver = Arc::new(FakeReceiver::new());
+        let mut runtime_deps = deps(
+            Arc::clone(&receiver),
+            Arc::new(NeverApply),
+            Arc::new(RecordingEvents::default()),
+        );
+        runtime_deps.settings = Arc::new(FixedSettings {
+            sync_enabled: false,
+        });
+        runtime_deps.transfer_cipher = Arc::new(NeverCipher);
+        let runtime = ClipboardInboundRuntime::start(runtime_deps);
         let (inbound, result) = fixture("peer-disabled", "hash-disabled");
 
         receiver.publish(inbound);

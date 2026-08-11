@@ -209,7 +209,8 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
             debug_mode: settings.general.debug_mode,
         },
         sync: SyncSettingsSummary {
-            auto_sync: settings.sync.auto_sync,
+            sync_enabled: settings.sync.sync_enabled,
+            auto_sync_enabled: settings.sync.auto_sync_enabled,
             sync_frequency: map_sync_frequency(settings.sync.sync_frequency),
             content_types: map_content_types(settings.sync.content_types),
             sync_on_restore: settings.sync.sync_on_restore,
@@ -293,7 +294,8 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
             debug_mode: value.debug_mode,
         }),
         sync: patch.sync.map(|value| app::SyncSettingsPatch {
-            auto_sync: value.auto_sync,
+            sync_enabled: value.sync_enabled,
+            auto_sync_enabled: value.auto_sync_enabled,
             sync_frequency: value.sync_frequency.map(unmap_sync_frequency),
             content_types: value.content_types.map(unmap_content_types_patch),
             sync_on_restore: value.sync_on_restore,

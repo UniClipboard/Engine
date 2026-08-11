@@ -115,7 +115,7 @@ impl RestoreBroadcastWorker {
         // Re-read the toggle at emit time so a setting change between the
         // restore and this debounced emit is respected.
         let sync_on_restore = match self.settings.load().await {
-            Ok(settings) => settings.sync.sync_on_restore,
+            Ok(settings) => settings.sync.sync_enabled && settings.sync.sync_on_restore,
             Err(err) => {
                 // Fail closed: if we can't confirm the user opted in, don't
                 // announce. A restore that should have broadcast is recovered

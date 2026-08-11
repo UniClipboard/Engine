@@ -171,7 +171,8 @@ pub struct ContentTypes {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SyncSettings {
-    pub auto_sync: bool,
+    pub sync_enabled: bool,
+    pub auto_sync_enabled: bool,
     pub sync_frequency: SyncFrequency,
     pub content_types: ContentTypes,
     /// Whether restoring a historical entry makes its content the active

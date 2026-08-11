@@ -666,7 +666,8 @@ fn operation_response(result: OperationResult) -> Value {
             "ok": true,
             "kind": "settings",
             "schema_version": settings.schema_version,
-            "auto_sync": settings.sync.auto_sync,
+            "sync_enabled": settings.sync.sync_enabled,
+            "auto_sync_enabled": settings.sync.auto_sync_enabled,
             "retention_enabled": settings.retention_policy.enabled,
             "retention_rule_count": settings.retention_policy.rules.len(),
             "shortcut_count": settings.keyboard_shortcuts.len(),
@@ -1299,6 +1300,11 @@ fn operation_response(result: OperationResult) -> Value {
                 "errored": report.errored,
                 "pending": report.pending,
             }),
+            uc_engine::ResendEntryOutcome::SynchronizationDisabled => json!({
+                "ok": true,
+                "kind": "entry_resent",
+                "outcome": "synchronization_disabled",
+            }),
             uc_engine::ResendEntryOutcome::EntryNotFound { .. } => json!({
                 "ok": true,
                 "kind": "entry_resent",
@@ -1657,6 +1663,18 @@ mod tests {
         ));
         assert_eq!(resend["accepted"], 1);
         assert_eq!(resend["pending"], 5);
+
+        let synchronization_disabled = operation_response(OperationResult::EntryResent(
+            uc_engine::ResendEntryOutcome::SynchronizationDisabled,
+        ));
+        assert_eq!(
+            synchronization_disabled,
+            json!({
+                "ok": true,
+                "kind": "entry_resent",
+                "outcome": "synchronization_disabled",
+            })
+        );
 
         let upgrade = operation_response(OperationResult::UpgradeStatus(
             uc_engine::UpgradeStatusSummary::Upgraded {

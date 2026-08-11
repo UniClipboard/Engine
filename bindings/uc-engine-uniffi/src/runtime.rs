@@ -254,6 +254,7 @@ pub enum ResendEntryOutcome {
         errored: u64,
         pending: u64,
     },
+    SynchronizationDisabled,
     EntryNotFound {
         entry_id: String,
     },
@@ -1818,6 +1819,9 @@ fn map_resend_outcome(result: OperationResult) -> Result<ResendEntryOutcome, Bin
             errored: count_to_u64(report.errored)?,
             pending: count_to_u64(report.pending)?,
         },
+        uc_engine::ResendEntryOutcome::SynchronizationDisabled => {
+            ResendEntryOutcome::SynchronizationDisabled
+        }
         uc_engine::ResendEntryOutcome::EntryNotFound { entry_id } => {
             ResendEntryOutcome::EntryNotFound { entry_id }
         }

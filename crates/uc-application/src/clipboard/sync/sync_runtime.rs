@@ -87,9 +87,9 @@ impl ClipboardSyncRuntime {
         target_filter: Option<Vec<DeviceId>>,
     ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
         let _gate = self.delivery_gate.lock().await;
-        if !auto_sync_enabled(self.settings.as_ref()).await {
+        if !automatic_sync_enabled(self.settings.as_ref()).await {
             return Ok(ClipboardOutboundOutcome::Skipped {
-                reason: "auto_sync_disabled".to_string(),
+                reason: "automatic_sync_disabled".to_string(),
             });
         }
         let entry_id = EntryId::from(input.entry_id.as_str());
@@ -113,12 +113,15 @@ impl ClipboardSyncRuntime {
         Ok(outcome)
     }
 
-    /// Manual resend remains explicit and is intentionally independent of the
-    /// automatic-sync toggle.
+    /// Manual resend remains independent of the automatic-sync toggle, but it
+    /// still requires the global synchronization permission.
     pub async fn resend_entry(
         &self,
         command: ResendEntryCommand,
     ) -> Result<ResendReport, ResendEntryError> {
+        if !sync_enabled(self.settings.as_ref()).await {
+            return Err(ResendEntryError::SynchronizationDisabled);
+        }
         self.outbound.resend_entry(command).await
     }
 
@@ -135,9 +138,22 @@ impl ClipboardSyncRuntime {
     }
 }
 
-async fn auto_sync_enabled(settings: &dyn SettingsPort) -> bool {
+async fn sync_enabled(settings: &dyn SettingsPort) -> bool {
     match settings.load().await {
-        Ok(settings) => settings.sync.auto_sync,
+        Ok(settings) => settings.sync.sync_enabled,
+        Err(_) => {
+            warn!(
+                error_kind = "settings_load",
+                "clipboard sync: delivery skipped"
+            );
+            false
+        }
+    }
+}
+
+async fn automatic_sync_enabled(settings: &dyn SettingsPort) -> bool {
+    match settings.load().await {
+        Ok(settings) => settings.sync.sync_enabled && settings.sync.auto_sync_enabled,
         Err(_) => {
             warn!(
                 error_kind = "settings_load",
@@ -271,7 +287,7 @@ async fn recover_currently_online(deps: &OfflineDeliveryRecoveryDeps) {
 }
 
 async fn recover_for_target(deps: &OfflineDeliveryRecoveryDeps, target: DeviceId) {
-    if !auto_sync_enabled(deps.settings.as_ref()).await {
+    if !automatic_sync_enabled(deps.settings.as_ref()).await {
         return;
     }
 
@@ -336,7 +352,7 @@ async fn recover_for_target(deps: &OfflineDeliveryRecoveryDeps, target: DeviceId
             if !matches!(record.status, EntryDeliveryStatus::Unreachable) {
                 return;
             }
-            if !auto_sync_enabled(deps.settings.as_ref()).await {
+            if !automatic_sync_enabled(deps.settings.as_ref()).await {
                 return;
             }
             match deps
@@ -475,14 +491,16 @@ mod tests {
     use uc_core::settings::model::Settings;
 
     struct FixedSettings {
-        auto_sync: bool,
+        sync_enabled: bool,
+        auto_sync_enabled: bool,
     }
 
     #[async_trait]
     impl SettingsPort for FixedSettings {
         async fn load(&self) -> anyhow::Result<Settings> {
             let mut settings = Settings::default();
-            settings.sync.auto_sync = self.auto_sync;
+            settings.sync.sync_enabled = self.sync_enabled;
+            settings.sync.auto_sync_enabled = self.auto_sync_enabled;
             Ok(settings)
         }
 
@@ -662,7 +680,7 @@ mod tests {
     }
 
     fn recovery_deps(
-        auto_sync: bool,
+        auto_sync_enabled: bool,
         entries: Vec<ClipboardEntry>,
         sources: HashMap<EventId, DeviceId>,
         deliveries: Arc<Deliveries>,
@@ -672,7 +690,10 @@ mod tests {
         OfflineDeliveryRecoveryDeps {
             presence: Arc::new(IdlePresence { tx }),
             known_peers: Arc::new(NoPeers),
-            settings: Arc::new(FixedSettings { auto_sync }),
+            settings: Arc::new(FixedSettings {
+                sync_enabled: true,
+                auto_sync_enabled,
+            }),
             entries: Arc::new(Entries(entries)),
             events: Arc::new(Sources { sources }),
             deliveries,
@@ -893,6 +914,43 @@ mod tests {
             deliveries,
             Arc::clone(&delivery),
         );
+
+        recover_for_target(&deps, target).await;
+
+        assert!(delivery.commands.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabled_global_sync_never_dispatches_a_saved_offline_delivery() {
+        let pending_entry = entry("offline-entry", "local-event");
+        let target = DeviceId::new("recovered");
+        let deliveries = Arc::new(Deliveries {
+            records: Mutex::new(HashMap::from([(
+                pending_entry.entry_id.clone(),
+                vec![EntryDeliveryRecord {
+                    entry_id: pending_entry.entry_id.clone(),
+                    target_device_id: target.clone(),
+                    status: EntryDeliveryStatus::Unreachable,
+                    reason_detail: None,
+                    updated_at_ms: 1,
+                }],
+            )])),
+        });
+        let delivery = Arc::new(RecordingDispatch {
+            commands: Mutex::new(Vec::new()),
+            result: DispatchResult::Delivered,
+        });
+        let mut deps = recovery_deps(
+            true,
+            vec![pending_entry.clone()],
+            HashMap::from([(pending_entry.event_id.clone(), DeviceId::new("local"))]),
+            deliveries,
+            Arc::clone(&delivery),
+        );
+        deps.settings = Arc::new(FixedSettings {
+            sync_enabled: false,
+            auto_sync_enabled: true,
+        });
 
         recover_for_target(&deps, target).await;
 

@@ -171,7 +171,8 @@ pub struct GeneralSettingsPatch {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncSettingsSummary {
-    pub auto_sync: bool,
+    pub sync_enabled: bool,
+    pub auto_sync_enabled: bool,
     pub sync_frequency: SyncFrequencySummary,
     pub content_types: SettingsContentTypes,
     pub sync_on_restore: bool,
@@ -179,7 +180,8 @@ pub struct SyncSettingsSummary {
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncSettingsPatch {
-    pub auto_sync: Option<bool>,
+    pub sync_enabled: Option<bool>,
+    pub auto_sync_enabled: Option<bool>,
     pub sync_frequency: Option<SyncFrequencySummary>,
     pub content_types: Option<SettingsContentTypesPatch>,
     pub sync_on_restore: Option<bool>,

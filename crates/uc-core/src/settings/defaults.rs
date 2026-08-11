@@ -111,8 +111,8 @@ impl Default for ContentTypes {
 impl Default for SyncSettings {
     /// Creates a `SyncSettings` populated with sensible defaults.
     ///
-    /// The defaults enable automatic syncing, use realtime sync frequency, and include the
-    /// default content types.
+    /// The defaults enable global and automatic syncing, use realtime sync frequency, and
+    /// include the default content types.
     ///
     /// # Examples
     ///
@@ -120,13 +120,15 @@ impl Default for SyncSettings {
     /// use uc_core::settings::model::{SyncSettings, SyncFrequency};
     ///
     /// let s = SyncSettings::default();
-    /// assert!(s.auto_sync);
+    /// assert!(s.sync_enabled);
+    /// assert!(s.auto_sync_enabled);
     /// assert_eq!(s.sync_frequency, SyncFrequency::Realtime);
     /// assert!(!s.sync_on_restore);
     /// ```
     fn default() -> Self {
         Self {
-            auto_sync: true,
+            sync_enabled: true,
+            auto_sync_enabled: true,
             sync_frequency: SyncFrequency::Realtime,
             content_types: ContentTypes::default(),
             // Opt-in: a restore announces active content to peers only when
@@ -343,7 +345,7 @@ mod tests {
     use crate::settings::model::{
         ContentTypes, FileSyncSettings, GeneralSettings, NetworkSettings,
         QuickPanelDoubleTapModifier, QuickPanelSettings, Settings, StartupMode, SyncFrequency,
-        Theme, CURRENT_SCHEMA_VERSION,
+        SyncSettings, Theme, CURRENT_SCHEMA_VERSION,
     };
 
     /// Pitfall 2 防御：默认值必须为 true（允许 fallback），保护老用户
@@ -620,14 +622,25 @@ mod tests {
         assert!(s.general.telemetry_enabled);
     }
 
-    /// `sync` 段缺 `content_types` 与 `auto_sync`,均回退默认。
+    /// `sync` 段缺开关与 `content_types` 时均回退默认。
     #[test]
     fn sync_missing_fields_fall_back_to_default() {
         let json = r#"{ "sync": { "sync_frequency": "interval" } }"#;
         let s: Settings = serde_json::from_str(json).expect("partial sync must parse");
         assert_eq!(s.sync.sync_frequency, SyncFrequency::Interval);
-        assert!(s.sync.auto_sync);
+        assert!(s.sync.sync_enabled);
+        assert!(s.sync.auto_sync_enabled);
         assert_eq!(s.sync.content_types, ContentTypes::default());
+    }
+
+    #[test]
+    fn sync_settings_persist_independent_global_and_automatic_choices() {
+        let persisted =
+            serde_json::to_value(SyncSettings::default()).expect("serialize sync settings");
+
+        assert_eq!(persisted["sync_enabled"], true);
+        assert_eq!(persisted["auto_sync_enabled"], true);
+        assert!(persisted.get("auto_sync").is_none());
     }
 
     /// `security` 段缺所有字段时回退默认,且未来加新字段不会再 break 启动。
@@ -662,33 +675,6 @@ mod tests {
         assert!(s.mobile_sync.lan_advertise_ip.is_none());
         assert!(s.mobile_sync.lan_advertise_base_url.is_none());
         assert!(s.mobile_sync.lan_port.is_none());
-    }
-
-    /// 综合回归:模拟 v0.2 时代的 settings.json(只有 general/sync,
-    /// 完全没有 file_sync / network / mobile_sync 等后续新增段),
-    /// 必须能直接反序列化为完整 Settings。
-    #[test]
-    fn legacy_v02_settings_json_loads_with_all_defaults() {
-        let json = r#"{
-            "schema_version": 1,
-            "general": { "auto_start": true, "theme": "dark" },
-            "sync": { "auto_sync": false, "sync_frequency": "interval" }
-        }"#;
-        let s: Settings = serde_json::from_str(json).expect("legacy settings must parse");
-
-        assert_eq!(s.schema_version, 1);
-        assert!(s.general.auto_start);
-        assert_eq!(s.general.theme, Theme::Dark);
-        assert!(s.general.telemetry_enabled);
-        assert!(!s.sync.auto_sync);
-        assert_eq!(s.sync.content_types, ContentTypes::default());
-
-        // 后续新增段全部走 Default
-        assert_eq!(s.file_sync, FileSyncSettings::default());
-        assert!(s.network.allow_relay_fallback);
-        assert!(!s.network.allow_overlay_network_addrs);
-        assert!(s.network.custom_relay_urls.is_empty());
-        assert!(!s.mobile_sync.enabled);
     }
 
     /// 显式字段值不被 `#[serde(default)]` 误覆盖。

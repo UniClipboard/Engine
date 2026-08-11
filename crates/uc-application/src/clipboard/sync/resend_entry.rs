@@ -67,6 +67,9 @@ pub struct ResendReport {
 /// 错误集合,不向上漏出底层仓储 / dispatch 错误。
 #[derive(Debug, Error)]
 pub enum ResendEntryError {
+    #[error("synchronization is disabled")]
+    SynchronizationDisabled,
+
     /// `entry_repo.get_entry` 返回 `None`。可能是 entry 已被用户删除,
     /// 也可能是 UI 拿到一份过期视图后才点击重发。
     #[error("entry not found: {0}")]

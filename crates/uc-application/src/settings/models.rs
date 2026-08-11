@@ -110,7 +110,8 @@ pub struct GeneralSettingsView {
 
 #[derive(Debug, Clone)]
 pub struct SyncSettingsView {
-    pub auto_sync: bool,
+    pub sync_enabled: bool,
+    pub auto_sync_enabled: bool,
     pub sync_frequency: SyncFrequencyView,
     pub content_types: ContentTypesView,
     pub sync_on_restore: bool,
@@ -240,7 +241,8 @@ pub struct GeneralSettingsPatch {
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncSettingsPatch {
-    pub auto_sync: Option<bool>,
+    pub sync_enabled: Option<bool>,
+    pub auto_sync_enabled: Option<bool>,
     pub sync_frequency: Option<SyncFrequencyView>,
     pub content_types: Option<ContentTypesPatch>,
     pub sync_on_restore: Option<bool>,
@@ -579,7 +581,8 @@ impl From<core::Settings> for SettingsView {
                 debug_mode: value.general.debug_mode,
             },
             sync: SyncSettingsView {
-                auto_sync: value.sync.auto_sync,
+                sync_enabled: value.sync.sync_enabled,
+                auto_sync_enabled: value.sync.auto_sync_enabled,
                 sync_frequency: value.sync.sync_frequency.into(),
                 content_types: value.sync.content_types.into(),
                 sync_on_restore: value.sync.sync_on_restore,
@@ -693,8 +696,11 @@ pub(crate) fn apply_settings_patch(
     }
 
     if let Some(sync) = patch.sync {
-        if let Some(v) = sync.auto_sync {
-            existing.sync.auto_sync = v;
+        if let Some(v) = sync.sync_enabled {
+            existing.sync.sync_enabled = v;
+        }
+        if let Some(v) = sync.auto_sync_enabled {
+            existing.sync.auto_sync_enabled = v;
         }
         if let Some(v) = sync.sync_frequency {
             existing.sync.sync_frequency = v.into();
@@ -1140,6 +1146,35 @@ mod file_sync_auto_save_dir_apply_patch_tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn sync_patch_preserves_global_and_automatic_choices_independently() {
+        let global_disabled = apply_settings_patch(
+            Settings::default(),
+            SettingsPatch {
+                sync: Some(SyncSettingsPatch {
+                    sync_enabled: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(!global_disabled.sync.sync_enabled);
+        assert!(global_disabled.sync.auto_sync_enabled);
+
+        let automatic_disabled = apply_settings_patch(
+            Settings::default(),
+            SettingsPatch {
+                sync: Some(SyncSettingsPatch {
+                    auto_sync_enabled: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(automatic_disabled.sync.sync_enabled);
+        assert!(!automatic_disabled.sync.auto_sync_enabled);
     }
 
     /// Absent field (patch = None) leaves an existing directory untouched.
