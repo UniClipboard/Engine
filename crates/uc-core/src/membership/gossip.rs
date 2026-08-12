@@ -222,13 +222,13 @@ impl MembershipSharedDevicePageRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MembershipEvent {
+pub enum MembershipGossipEvent {
     SponsorSeed(SponsorCandidateSeed),
     Announcement(DeviceAnnouncement),
     SecurityUpdate(RelayedSecurityUpdate),
 }
 
-impl MembershipEvent {
+impl MembershipGossipEvent {
     fn validate_transfer_bounds(&self) -> Result<(), MembershipGossipBoundsError> {
         match self {
             Self::SponsorSeed(seed) => seed
@@ -263,7 +263,7 @@ impl MembershipEvent {
 pub struct MembershipEventBatch {
     pub space_id: SpaceId,
     pub batch_id: [u8; 32],
-    pub events: Vec<MembershipEvent>,
+    pub events: Vec<MembershipGossipEvent>,
 }
 
 impl MembershipEventBatch {
@@ -279,7 +279,7 @@ impl MembershipEventBatch {
             .saturating_add(
                 self.events
                     .iter()
-                    .map(MembershipEvent::estimated_transfer_bytes)
+                    .map(MembershipGossipEvent::estimated_transfer_bytes)
                     .sum::<usize>(),
             )
     }
@@ -329,7 +329,7 @@ impl MembershipSharedDevicePage {
                 .seeds
                 .iter()
                 .cloned()
-                .map(MembershipEvent::SponsorSeed)
+                .map(MembershipGossipEvent::SponsorSeed)
                 .collect(),
         }
         .validate_transfer_bounds()
@@ -1092,11 +1092,11 @@ mod tests {
     use super::{
         CandidateEffect, CandidateEvent, CandidateFailure, CandidateMergeError,
         CandidateMergeOutcome, CandidateSource, CandidateStatus, DeviceAnnouncement,
-        MembershipAnnouncementVersion, MembershipDigest, MembershipEvent, MembershipEventBatch,
-        MembershipGossipBoundsError, MembershipGossipMessage, MembershipRequestMissing,
-        MembershipSharedDevicePage, MembershipSharedDevicePageRequest, PendingMembershipBatch,
-        RelayedSecurityUpdate, SpaceMembershipCandidate, SponsorCandidateSeed,
-        VerifiedMembershipPeer, MAX_GOSSIP_MESSAGE_BYTES,
+        MembershipAnnouncementVersion, MembershipDigest, MembershipEventBatch,
+        MembershipGossipBoundsError, MembershipGossipEvent, MembershipGossipMessage,
+        MembershipRequestMissing, MembershipSharedDevicePage, MembershipSharedDevicePageRequest,
+        PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate,
+        SponsorCandidateSeed, VerifiedMembershipPeer, MAX_GOSSIP_MESSAGE_BYTES,
     };
 
     fn fingerprint(raw: &str) -> IdentityFingerprint {
@@ -1222,7 +1222,7 @@ mod tests {
     #[test]
     fn gossip_event_batch_rejects_total_payload_over_message_limit() {
         let update = |byte| {
-            MembershipEvent::SecurityUpdate(RelayedSecurityUpdate {
+            MembershipGossipEvent::SecurityUpdate(RelayedSecurityUpdate {
                 previous_epoch: u64::from(byte),
                 next_epoch: u64::from(byte) + 1,
                 payload: vec![byte; 140 * 1024],
@@ -1254,7 +1254,7 @@ mod tests {
         let batch = MembershipEventBatch {
             space_id: SpaceId::from("space-a"),
             batch_id: [9; 32],
-            events: vec![MembershipEvent::SponsorSeed(seed(100))],
+            events: vec![MembershipGossipEvent::SponsorSeed(seed(100))],
         };
         let mut pending =
             PendingMembershipBatch::new(DeviceId::new("device-b"), batch, 1_000).unwrap();

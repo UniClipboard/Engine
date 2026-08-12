@@ -9,7 +9,7 @@ use bytes::Bytes;
 use tracing::instrument;
 
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::RemovalTargetGatePort;
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     CancelDirectoryAttemptTransfersPort, CleanupDirectoryStagingPort, ClipboardDispatchPort,
@@ -49,7 +49,7 @@ pub struct ClipboardSyncDeps {
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     /// 已保存成员移除意图对发送路径的硬限制。
-    pub removal_gate: Arc<dyn RemovalTargetGatePort>,
+    pub removal_gate: Arc<dyn ContentExchangeGatePort>,
     pub presence: Arc<dyn PresencePort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
     pub clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,

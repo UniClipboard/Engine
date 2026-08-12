@@ -45,7 +45,7 @@ use uc_core::ports::{
 
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
 use super::conn_path::{path_for, OnMissing};
-use super::connect::connect_with_staggered_retry_and_alpns;
+use super::connect::connect_with_staggered_retry;
 
 /// ALPN identifier for the Slice 2 clipboard sync protocol. Independent of
 /// the presence / pairing ALPNs so the Router can multiplex all three
@@ -135,11 +135,10 @@ impl IrohClipboardDispatchAdapter {
 
         match role {
             Role::Leader(tx) => {
-                let result = connect_with_staggered_retry_and_alpns(
+                let result = connect_with_staggered_retry(
                     Arc::clone(&self.endpoint),
                     addr,
                     CLIPBOARD_ALPN,
-                    vec![LEGACY_CLIPBOARD_ALPN.to_vec()],
                     "clipboard",
                 )
                 .await;
@@ -335,18 +334,6 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
                 };
             }
         };
-
-        if connection.alpn() == LEGACY_CLIPBOARD_ALPN {
-            let transport = path_for(&self.endpoint, addr_id, OnMissing::Unknown)
-                .await
-                .channel;
-            drop(connection);
-            return DispatchReport {
-                transport,
-                timing,
-                outcome: Err(ClipboardDispatchError::PeerIncompatible),
-            };
-        }
 
         // 4. Write the frame + read the ack on a fresh bi-stream.
         let outcome = self
@@ -670,8 +657,9 @@ mod tests {
         peer_router.shutdown().await.expect("router shutdown");
     }
 
+    // 流程：B 只监听 0.19 的旧内容入口；A 发送内容时只尝试 1.1 当前入口，不回退或发送旧请求。
     #[tokio::test]
-    async fn dispatch_reports_online_legacy_peer_as_incompatible_without_sending() {
+    async fn dispatch_does_not_fall_back_to_the_v019_clipboard_endpoint() {
         let peer_endpoint = bind_endpoint().await;
         wait_for_direct_addrs(&peer_endpoint).await;
         let peer_router = Router::builder((*peer_endpoint).clone())
@@ -702,10 +690,7 @@ mod tests {
             .await
             .outcome;
 
-        assert!(matches!(
-            result,
-            Err(ClipboardDispatchError::PeerIncompatible)
-        ));
+        assert!(matches!(result, Err(ClipboardDispatchError::Offline)));
         peer_router.shutdown().await.expect("router shutdown");
     }
 

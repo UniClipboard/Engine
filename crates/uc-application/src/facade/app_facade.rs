@@ -716,6 +716,16 @@ impl AppFacade {
         self.member_roster.submit_member_removal(device_id).await
     }
 
+    pub async fn decide_membership_removal(
+        &self,
+        removal_event_id: uc_core::membership::MembershipEventId,
+        decision: uc_core::membership::RemovalDecision,
+    ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
+        self.member_roster
+            .decide_membership_removal(removal_event_id, decision)
+            .await
+    }
+
     pub async fn workspace_convergence(
         &self,
     ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {

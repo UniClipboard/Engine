@@ -215,7 +215,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         next_engine_event_matching(&mut sponsor_events, |event| matches!(
             event,
             EngineEvent::WorkspaceConvergenceChanged(snapshot)
-                if snapshot.change_count > 0
+                if snapshot.history_event_count > 0
         ))
         .await,
         EngineEvent::WorkspaceConvergenceChanged(_)
@@ -748,11 +748,8 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
             crate::OperationResult::WorkspaceConvergence(summary)
                 if summary.phase == crate::WorkspaceConvergencePhaseSummary::LocallyApplied
                     && summary.revision == 0
-                    && summary.change_count == 0
-                    && summary.removal_intent_count == 0
+                    && summary.history_event_count == 0
                     && summary.effective_member_count == 0
-                    && summary.confirmed_member_count == 0
-                    && summary.waiting_member_count == 0
                     && summary.convergence_digest.is_none()
                     && !summary.removed
                     && summary.failure_category.is_none()
@@ -3601,16 +3598,20 @@ async fn recovering_a_locked_restart_from_secure_storage_restores_keyword_search
 }
 
 #[tokio::test]
-async fn production_engine_restarts_ten_times_with_the_same_network_identity() {
+async fn production_engine_reuses_v019_file_network_identity() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let private = temp.path().join("private");
     let cache = temp.path().join("cache");
     let temporary = temp.path().join("temporary");
     let secure_storage = MemoryHostSecureStorage::default();
-    let mut expected_identity = None;
+    let identity_dir = private.join("iroh-identity");
+    let identity_file = identity_dir.join("69726f682d6964656e746974793a7631.bin");
+    let expected_identity = [7u8; 32];
+    std::fs::create_dir_all(&identity_dir).unwrap();
+    std::fs::write(&identity_file, expected_identity).unwrap();
 
-    for cycle in 0..10 {
+    for cycle in 0..2 {
         let host = HostCapabilities::new(
             HostDirectories::new(
                 private.clone(),
@@ -3649,15 +3650,18 @@ async fn production_engine_restarts_ten_times_with_the_same_network_identity() {
                 .unwrap();
         }
 
-        let identity = secure_storage
-            .values()
-            .get(uc_infra::network::iroh::IDENTITY_STORE_KEY)
-            .cloned()
-            .expect("network identity must be persisted in secure storage");
-        match &expected_identity {
-            Some(expected) => assert_eq!(identity, *expected, "identity changed on cycle {cycle}"),
-            None => expected_identity = Some(identity),
-        }
+        assert_eq!(
+            std::fs::read(&identity_file).unwrap(),
+            expected_identity,
+            "v0.19 network identity changed on cycle {cycle}"
+        );
+        assert!(
+            secure_storage
+                .values()
+                .get(uc_infra::network::iroh::IDENTITY_STORE_KEY)
+                .is_none(),
+            "network identity leaked into primary secure storage on cycle {cycle}"
+        );
 
         engine
             .shutdown(std::time::Duration::from_secs(15))

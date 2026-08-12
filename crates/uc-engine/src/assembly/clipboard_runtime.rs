@@ -150,6 +150,7 @@ pub(crate) fn build_clipboard_runtime(
     let inbound_runtime = ClipboardInboundRuntime::start(ClipboardInboundRuntimeDeps {
         receiver: sync_engine.clipboard_receiver(),
         member_repo: deps.device.member_repo.clone(),
+        content_gate: sync_engine.convergence_content_gate(),
         transfer_cipher: deps.security.transfer_cipher.clone(),
         settings: deps.settings.clone(),
         clock: deps.system.clock.clone(),

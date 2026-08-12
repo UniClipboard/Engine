@@ -26,11 +26,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use uc_core::ids::{DeviceId, SpaceId};
-use uc_core::membership::{AdmissionChangeFacts, AdmissionCommittedFacts, MemberInstanceId};
+use uc_core::membership::{AdmissionChangeFacts, AdmissionSavedFacts, MemberInstanceId};
 use uc_core::pairing::{
     InvitationCode, JoinerChallengeResponse, JoinerReady, JoinerRequest, PairingReject,
-    PairingRejectReason, PairingSecurityCapability, PairingSessionMessage,
-    SponsorAdmissionCommitted, SponsorAdmissionOffer, SponsorConfirm,
+    PairingRejectReason, PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer,
+    SponsorAdmissionSaved, SponsorConfirm,
 };
 use uc_core::ports::pairing::PairingSessionId;
 use uc_core::security::IdentityFingerprint;
@@ -47,7 +47,7 @@ use uc_core::security::IdentityFingerprint;
 ///
 /// - v5 → v6：移除 `SponsorConfirm` 上的候选通讯录种子。已有设备资料改走
 ///   可确认、可重试的成员收敛通道，避免最终确认承担无界资料。
-/// - v8 → v9（ADR-017）：新增 `AdmissionCommitted` 消息——sponsor 在保存
+/// - v8 → v9（ADR-017）：新增 `AdmissionSaved` 消息——sponsor 在保存
 ///   joiner 的准入变化后回送的"准入变化已保存"确认，携带变化摘要与
 ///   sponsor 本机成员事实。
 ///
@@ -72,7 +72,7 @@ enum WireBody {
     ChallengeResponse(WireJoinerChallengeResponse),
     Confirm(WireSponsorConfirm),
     Ready(WireJoinerReady),
-    AdmissionCommitted(WireSponsorAdmissionCommitted),
+    AdmissionSaved(WireSponsorAdmissionSaved),
     Reject(WirePairingReject),
 }
 
@@ -136,6 +136,7 @@ struct WireSponsorConfirm {
     welcome: Vec<u8>,
     encrypted_key_catalog: Vec<u8>,
     group_epoch: u64,
+    membership_history_event_count: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -150,7 +151,7 @@ struct WireJoinerReady {
 }
 
 /// `AdmissionChangeFacts` 的 wire 形态，与 `WireJoinerReady` 的字段布局一致。
-/// 由 `AdmissionCommitted` 复用，避免重复定义成员事实的字段集。
+/// 由 `AdmissionSaved` 复用，避免重复定义成员事实的字段集。
 #[derive(Serialize, Deserialize, Debug)]
 struct WireAdmissionFacts {
     member_instance: [u8; 32],
@@ -163,9 +164,9 @@ struct WireAdmissionFacts {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct WireSponsorAdmissionCommitted {
-    change_digest: [u8; 32],
-    change_count: u64,
+struct WireSponsorAdmissionSaved {
+    history_digest: [u8; 32],
+    history_event_count: u64,
     sponsor_facts: WireAdmissionFacts,
 }
 
@@ -288,6 +289,7 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
             welcome: c.welcome.clone(),
             encrypted_key_catalog: c.encrypted_key_catalog.clone(),
             group_epoch: c.group_epoch,
+            membership_history_event_count: c.membership_history_event_count,
         }),
         PairingSessionMessage::Ready(ready) => WireBody::Ready(WireJoinerReady {
             member_instance: *ready.admission.member_instance.as_bytes(),
@@ -298,31 +300,27 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
             transport_address_blob: ready.admission.transport_address_blob.clone(),
             identity_signature: ready.admission.identity_signature.clone(),
         }),
-        PairingSessionMessage::AdmissionCommitted(committed) => {
-            WireBody::AdmissionCommitted(WireSponsorAdmissionCommitted {
-                change_digest: committed.facts.change_digest,
-                change_count: committed.facts.change_count,
+        PairingSessionMessage::AdmissionSaved(saved) => {
+            WireBody::AdmissionSaved(WireSponsorAdmissionSaved {
+                history_digest: saved.facts.history_digest,
+                history_event_count: saved.facts.history_event_count,
                 sponsor_facts: WireAdmissionFacts {
-                    member_instance: *committed.facts.sponsor_facts.member_instance.as_bytes(),
-                    device_id: committed.facts.sponsor_facts.device_id.as_str().to_owned(),
-                    device_name: committed.facts.sponsor_facts.device_name.clone(),
-                    identity_fingerprint: committed
+                    member_instance: *saved.facts.sponsor_facts.member_instance.as_bytes(),
+                    device_id: saved.facts.sponsor_facts.device_id.as_str().to_owned(),
+                    device_name: saved.facts.sponsor_facts.device_name.clone(),
+                    identity_fingerprint: saved
                         .facts
                         .sponsor_facts
                         .identity_fingerprint
                         .as_display()
                         .to_owned(),
-                    transport_public_key: committed
-                        .facts
-                        .sponsor_facts
-                        .transport_public_key
-                        .clone(),
-                    transport_address_blob: committed
+                    transport_public_key: saved.facts.sponsor_facts.transport_public_key.clone(),
+                    transport_address_blob: saved
                         .facts
                         .sponsor_facts
                         .transport_address_blob
                         .clone(),
-                    identity_signature: committed.facts.sponsor_facts.identity_signature.clone(),
+                    identity_signature: saved.facts.sponsor_facts.identity_signature.clone(),
                 },
             })
         }
@@ -384,6 +382,7 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
             welcome: c.welcome,
             encrypted_key_catalog: c.encrypted_key_catalog,
             group_epoch: c.group_epoch,
+            membership_history_event_count: c.membership_history_event_count,
         })),
         WireBody::Ready(ready) => Ok(PairingSessionMessage::Ready(JoinerReady {
             admission: AdmissionChangeFacts {
@@ -396,23 +395,23 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
                 identity_signature: ready.identity_signature,
             },
         })),
-        WireBody::AdmissionCommitted(committed) => Ok(PairingSessionMessage::AdmissionCommitted(
-            SponsorAdmissionCommitted {
-                facts: AdmissionCommittedFacts {
-                    change_digest: committed.change_digest,
-                    change_count: committed.change_count,
+        WireBody::AdmissionSaved(saved) => Ok(PairingSessionMessage::AdmissionSaved(
+            SponsorAdmissionSaved {
+                facts: AdmissionSavedFacts {
+                    history_digest: saved.history_digest,
+                    history_event_count: saved.history_event_count,
                     sponsor_facts: AdmissionChangeFacts {
                         member_instance: MemberInstanceId::from_bytes(
-                            committed.sponsor_facts.member_instance,
+                            saved.sponsor_facts.member_instance,
                         ),
-                        device_id: DeviceId::new(committed.sponsor_facts.device_id),
-                        device_name: committed.sponsor_facts.device_name,
+                        device_id: DeviceId::new(saved.sponsor_facts.device_id),
+                        device_name: saved.sponsor_facts.device_name,
                         identity_fingerprint: parse_fingerprint(
-                            &committed.sponsor_facts.identity_fingerprint,
+                            &saved.sponsor_facts.identity_fingerprint,
                         )?,
-                        transport_public_key: committed.sponsor_facts.transport_public_key,
-                        transport_address_blob: committed.sponsor_facts.transport_address_blob,
-                        identity_signature: committed.sponsor_facts.identity_signature,
+                        transport_public_key: saved.sponsor_facts.transport_public_key,
+                        transport_address_blob: saved.sponsor_facts.transport_address_blob,
+                        identity_signature: saved.sponsor_facts.identity_signature,
                     },
                 },
             },
@@ -532,6 +531,7 @@ mod tests {
             welcome: vec![1, 2, 3],
             encrypted_key_catalog: vec![4, 5, 6],
             group_epoch: 7,
+            membership_history_event_count: 3,
         });
         let decoded = round_trip(original);
         match decoded {
@@ -545,6 +545,7 @@ mod tests {
                 assert_eq!(c.welcome, vec![1, 2, 3]);
                 assert_eq!(c.encrypted_key_catalog, vec![4, 5, 6]);
                 assert_eq!(c.group_epoch, 7);
+                assert_eq!(c.membership_history_event_count, 3);
             }
             other => panic!("expected Confirm, got {other:?}"),
         }
@@ -565,6 +566,7 @@ mod tests {
             welcome: vec![1],
             encrypted_key_catalog: vec![2],
             group_epoch: 2,
+            membership_history_event_count: 0,
         });
         let decoded = round_trip(original);
         match decoded {

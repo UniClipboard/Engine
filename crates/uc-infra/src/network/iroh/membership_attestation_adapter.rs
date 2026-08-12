@@ -1113,6 +1113,20 @@ mod tests {
             Ok(self.epoch.load(Ordering::SeqCst))
         }
 
+        async fn current_member_instance(
+            &self,
+            device_id: &DeviceId,
+        ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
+            let secret = self
+                .secrets
+                .get(device_id)
+                .ok_or(CurrentMemberSignatureError::Unavailable)?;
+            Ok(uc_core::membership::MemberInstanceId::derive(
+                device_id.as_str(),
+                secret,
+            ))
+        }
+
         async fn sign_current_member_payload(
             &self,
             payload: &[u8],

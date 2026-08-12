@@ -16,11 +16,6 @@ pub(crate) mod legacy_upgrade;
 mod membership_security_update_adapter;
 pub(crate) mod mls_group;
 mod peer_admission_adapter;
-pub(crate) mod recovery_seal;
-pub(crate) use recovery_seal::RecoverySealError;
-pub use recovery_seal::{open_recovery_message, seal_recovery_message};
-pub(crate) mod removal_recovery_adapter;
-pub(crate) mod removal_verification_adapter;
 mod scope_identifier;
 mod secrets;
 mod session;
@@ -51,10 +46,6 @@ pub use key_migration_adapter::DefaultKeyMigrationAdapter;
 pub use legacy_upgrade::DefaultLegacyProtection;
 pub use membership_security_update_adapter::DefaultMembershipSecurityUpdateAdapter;
 pub use peer_admission_adapter::MlsPeerAdmissionAdapter;
-pub use removal_recovery_adapter::RemovalRecoveryAdapter;
-pub use removal_verification_adapter::{
-    RemovalIntentVerificationAdapter, RemovalNoticeVerificationAdapter,
-};
 pub(crate) use secrets::MasterKey;
 pub use session::InMemorySession;
 pub use space_access_adapter::DefaultSpaceAccessAdapter;

@@ -9,8 +9,9 @@ use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
-    execute_list_devices, execute_query_legacy_bootstrap, execute_query_member_sync_preferences,
-    execute_query_space_protection, execute_query_workspace_convergence, execute_remove_member,
+    execute_decide_membership_removal, execute_list_devices, execute_query_legacy_bootstrap,
+    execute_query_member_sync_preferences, execute_query_space_protection,
+    execute_query_workspace_convergence, execute_remove_member,
     execute_update_member_sync_preferences,
 };
 use crate::operations::device::peer_connections::{
@@ -322,6 +323,10 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::RemoveMember(input) => {
                     execute_remove_member(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::DecideMembershipRemoval(input) => {
+                    execute_decide_membership_removal(self.current_facade().await?.as_ref(), input)
+                        .await
                 }
                 Operation::QueryLegacyBootstrap(input) => {
                     execute_query_legacy_bootstrap(self.current_facade().await?.as_ref(), input)

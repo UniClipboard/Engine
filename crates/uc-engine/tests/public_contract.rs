@@ -1,16 +1,17 @@
 use uc_engine::{
-    ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
-    EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
-    EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
-    JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary, LocalDeviceSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MigrationPhaseSummary,
-    MigrationProgressSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
-    QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, ResendEntryInput, SearchEntriesInput, SearchPageSummary,
-    SearchResultSummary, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary, SpaceProtectionSummary,
-    StorageStatsSummary, UnlockSpaceInput, UpdateMemberSyncPreferencesInput,
-    WorkspaceConvergencePhaseSummary, WorkspaceConvergenceSummary,
+    ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DecideMembershipRemovalInput,
+    DeviceSummary, EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory,
+    EngineEvent, EngineState, EntrySummary, ExportEntryInput, HostFileHandle,
+    InvitationAvailability, JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary,
+    LocalDeviceSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
+    MembershipRemovalDecision, MigrationPhaseSummary, MigrationProgressSummary, Operation,
+    OperationKind, OperationResult, QueryHistoryInput, QueryLegacyBootstrapInput,
+    QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    ResendEntryInput, SearchEntriesInput, SearchPageSummary, SearchResultSummary, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput, SetupInvitationSummary, SetupStateSummary,
+    SpaceProtectionModeSummary, SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
+    UpdateMemberSyncPreferencesInput, WorkspaceConvergencePhaseSummary,
+    WorkspaceConvergenceSummary,
 };
 
 #[test]
@@ -127,6 +128,14 @@ fn every_public_operation_has_a_stable_kind() {
                 device_id: "member-1".into(),
             }),
             OperationKind::RemoveMember,
+        ),
+        (
+            Operation::DecideMembershipRemoval(DecideMembershipRemovalInput {
+                removal_event_id:
+                    "0101010101010101010101010101010101010101010101010101010101010101".into(),
+                decision: MembershipRemovalDecision::Reject,
+            }),
+            OperationKind::DecideMembershipRemoval,
         ),
         (
             Operation::QueryLegacyBootstrap(QueryLegacyBootstrapInput {
@@ -1292,12 +1301,12 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
         OperationResult::WorkspaceConvergence(uc_engine::WorkspaceConvergenceSummary {
             phase: uc_engine::WorkspaceConvergencePhaseSummary::LocallyApplied,
             revision: 1,
-            change_count: 1,
-            removal_intent_count: 0,
+            history_event_count: 1,
             effective_member_count: 2,
-            confirmed_member_count: 0,
-            waiting_member_device_ids: Vec::new(),
-            waiting_member_count: 0,
+            pending_removal_decision_device_ids: Vec::new(),
+            pending_removal_decision_event_id: None,
+            diverged_peer_device_ids: Vec::new(),
+            upgrade_required_peer_device_ids: Vec::new(),
             convergence_digest: None,
             removed: false,
             updated_at_ms: 123,
@@ -1344,14 +1353,14 @@ fn encryption_operations_expose_only_stable_state_and_outcomes() {
 #[test]
 fn workspace_convergence_exposes_only_stable_facts() {
     let result = OperationResult::WorkspaceConvergence(WorkspaceConvergenceSummary {
-        phase: WorkspaceConvergencePhaseSummary::WaitingForOfflineMember,
+        phase: WorkspaceConvergencePhaseSummary::Converging,
         revision: 3,
-        change_count: 2,
-        removal_intent_count: 1,
+        history_event_count: 2,
         effective_member_count: 3,
-        confirmed_member_count: 1,
-        waiting_member_device_ids: vec!["device-b".to_owned()],
-        waiting_member_count: 1,
+        pending_removal_decision_device_ids: Vec::new(),
+        pending_removal_decision_event_id: None,
+        diverged_peer_device_ids: Vec::new(),
+        upgrade_required_peer_device_ids: Vec::new(),
         convergence_digest: None,
         removed: false,
         updated_at_ms: 7,
@@ -1361,14 +1370,14 @@ fn workspace_convergence_exposes_only_stable_facts() {
     assert_eq!(
         result,
         OperationResult::WorkspaceConvergence(WorkspaceConvergenceSummary {
-            phase: WorkspaceConvergencePhaseSummary::WaitingForOfflineMember,
+            phase: WorkspaceConvergencePhaseSummary::Converging,
             revision: 3,
-            change_count: 2,
-            removal_intent_count: 1,
+            history_event_count: 2,
             effective_member_count: 3,
-            confirmed_member_count: 1,
-            waiting_member_device_ids: vec!["device-b".to_owned()],
-            waiting_member_count: 1,
+            pending_removal_decision_device_ids: Vec::new(),
+            pending_removal_decision_event_id: None,
+            diverged_peer_device_ids: Vec::new(),
+            upgrade_required_peer_device_ids: Vec::new(),
             convergence_digest: None,
             removed: false,
             updated_at_ms: 7,
@@ -1377,7 +1386,7 @@ fn workspace_convergence_exposes_only_stable_facts() {
     );
     let debug = format!("{result:?}");
     assert!(debug.contains("workspace_convergence"));
-    assert!(debug.contains("change_count"));
+    assert!(debug.contains("history_event_count"));
 }
 
 #[test]
@@ -1617,12 +1626,12 @@ fn workspace_convergence_changes_expose_a_full_replacement_snapshot() {
     let event = EngineEvent::WorkspaceConvergenceChanged(WorkspaceConvergenceSummary {
         phase: WorkspaceConvergencePhaseSummary::Converging,
         revision: 1,
-        change_count: 1,
-        removal_intent_count: 0,
+        history_event_count: 1,
         effective_member_count: 2,
-        confirmed_member_count: 0,
-        waiting_member_device_ids: Vec::new(),
-        waiting_member_count: 0,
+        pending_removal_decision_device_ids: Vec::new(),
+        pending_removal_decision_event_id: None,
+        diverged_peer_device_ids: Vec::new(),
+        upgrade_required_peer_device_ids: Vec::new(),
         convergence_digest: None,
         removed: false,
         updated_at_ms: 123,

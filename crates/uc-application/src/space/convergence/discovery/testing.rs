@@ -13,8 +13,8 @@ use uc_core::membership::{
     MembershipAnnouncementRepositoryPort, MembershipAnnouncementVersion,
     MembershipAppliedSecurityUpdateRepositoryError, MembershipAppliedSecurityUpdateRepositoryPort,
     MembershipAttestationError, MembershipAttestationPort, MembershipCandidateRepositoryError,
-    MembershipCandidateRepositoryPort, MembershipDigest, MembershipError, MembershipEvent,
-    MembershipEventBatch, MembershipGossipEndpointPort, MembershipGossipMessage,
+    MembershipCandidateRepositoryPort, MembershipDigest, MembershipError, MembershipEventBatch,
+    MembershipGossipEndpointPort, MembershipGossipEvent, MembershipGossipMessage,
     MembershipGossipTransportError, MembershipGossipTransportPort, MembershipOutboxRepositoryError,
     MembershipOutboxRepositoryPort, MembershipRequestMissing, MembershipSecurityState,
     MembershipSecurityUpdateError, MembershipSecurityUpdatePort, MembershipSharedDevicePage,
@@ -107,6 +107,13 @@ struct AcceptingMemberSignatures;
 impl CurrentMemberSignaturePort for AcceptingMemberSignatures {
     async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
         Ok(4)
+    }
+
+    async fn current_member_instance(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
+        Ok(uc_core::membership::MemberInstanceId::from_bytes([1; 32]))
     }
 
     async fn sign_current_member_payload(
@@ -410,6 +417,13 @@ struct RejectingMemberSignatures;
 impl CurrentMemberSignaturePort for RejectingMemberSignatures {
     async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
         Ok(4)
+    }
+
+    async fn current_member_instance(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
+        Ok(uc_core::membership::MemberInstanceId::from_bytes([1; 32]))
     }
 
     async fn sign_current_member_payload(
@@ -1146,7 +1160,7 @@ async fn lost_response_keeps_membership_batch_until_a_matching_ack_arrives() {
         uc_core::membership::MembershipEventBatch {
             space_id: SpaceId::from("space-a"),
             batch_id: [3; 32],
-            events: vec![MembershipEvent::SponsorSeed(seed(100))],
+            events: vec![MembershipGossipEvent::SponsorSeed(seed(100))],
         },
         1_000,
     )
@@ -1307,7 +1321,7 @@ async fn inbound_event_batch_persists_candidate_and_returns_matching_ack() {
     let batch = uc_core::membership::MembershipEventBatch {
         space_id: SpaceId::from("space-a"),
         batch_id: [5; 32],
-        events: vec![MembershipEvent::SponsorSeed(seed(100))],
+        events: vec![MembershipGossipEvent::SponsorSeed(seed(100))],
     };
 
     let response = MembershipGossipEndpointPort::handle_message(
@@ -1916,7 +1930,7 @@ async fn digest_requests_newer_announcement_and_missing_request_returns_stored_e
     };
     assert_eq!(
         batch.events,
-        vec![MembershipEvent::Announcement(local_announcement)]
+        vec![MembershipGossipEvent::Announcement(local_announcement)]
     );
 }
 
@@ -2743,7 +2757,7 @@ async fn applied_security_updates_are_saved_and_served_to_missing_peers() {
     };
     assert!(batch
         .events
-        .contains(&MembershipEvent::SecurityUpdate(update)));
+        .contains(&MembershipGossipEvent::SecurityUpdate(update)));
 }
 
 #[tokio::test]
@@ -2770,7 +2784,7 @@ async fn waiting_for_update_candidate_pulls_updates_from_connected_members() {
             MembershipEventBatch {
                 space_id: SpaceId::from("space-a"),
                 batch_id: [3; 32],
-                events: vec![MembershipEvent::SecurityUpdate(update.clone())],
+                events: vec![MembershipGossipEvent::SecurityUpdate(update.clone())],
             },
         ))])),
         sent: Mutex::new(Vec::new()),

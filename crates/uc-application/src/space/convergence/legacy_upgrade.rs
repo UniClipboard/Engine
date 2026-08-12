@@ -15,6 +15,8 @@ use uc_core::membership::{
 };
 use uc_core::ports::{DeviceIdentityPort, PresenceEvent, ReachabilityState};
 
+use super::WorkspaceConvergence;
+
 const DISCOVERY_GRACE: Duration = Duration::from_secs(15);
 const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 const STEADY_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -28,6 +30,7 @@ pub struct AutomaticLegacyUpgradeDeps {
 
 pub struct AutomaticLegacyUpgrade {
     deps: AutomaticLegacyUpgradeDeps,
+    convergence: Option<Arc<WorkspaceConvergence>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +69,26 @@ enum LegacyDiscoveryPhase {
 
 impl AutomaticLegacyUpgrade {
     pub fn new(deps: AutomaticLegacyUpgradeDeps) -> Self {
-        Self { deps }
+        Self {
+            deps,
+            convergence: None,
+        }
+    }
+
+    pub fn with_convergence(mut self, convergence: Arc<WorkspaceConvergence>) -> Self {
+        self.convergence = Some(convergence);
+        self
+    }
+
+    async fn initialize_current_history(&self) -> Result<(), LegacyUpgradeError> {
+        let Some(convergence) = &self.convergence else {
+            return Ok(());
+        };
+        convergence
+            .initialize_upgraded_legacy_space()
+            .await
+            .map(|_| ())
+            .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))
     }
 
     #[instrument(name = "legacy_upgrade.run_once", level = "info", skip_all)]
@@ -137,6 +159,7 @@ impl AutomaticLegacyUpgrade {
                             admission,
                         })
                         .await?;
+                    self.initialize_current_history().await?;
                     info!(device_id = %member.device_id, "legacy upgrade joined a peer protection group");
                     return Ok(LegacyUpgradePassOutcome::ready(true));
                 }
@@ -159,6 +182,7 @@ impl AutomaticLegacyUpgrade {
 
         let descriptor = self.deps.protection.snapshot(&member_ids).await?.descriptor;
         if descriptor.is_ready() {
+            self.initialize_current_history().await?;
             debug!("legacy upgrade protection group is ready");
             return Ok(LegacyUpgradePassOutcome::ready(false));
         }
@@ -166,6 +190,7 @@ impl AutomaticLegacyUpgrade {
             || (discovery_phase == LegacyDiscoveryPhase::Complete && successful_exchanges == 0)
         {
             self.bootstrap_local_group().await?;
+            self.initialize_current_history().await?;
             return Ok(LegacyUpgradePassOutcome::ready(true));
         }
         debug!("legacy upgrade is waiting for a selected peer");

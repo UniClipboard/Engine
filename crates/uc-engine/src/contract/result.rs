@@ -870,7 +870,6 @@ pub struct DeviceSummary {
 pub enum WorkspaceConvergencePhaseSummary {
     LocallyApplied,
     Converging,
-    WaitingForOfflineMember,
     Complete,
     RecoveryRequired,
 }
@@ -891,24 +890,24 @@ pub enum WorkspaceConvergenceFailureCategorySummary {
 /// 工作空间收敛的统一完整快照(ADR-016)。
 ///
 /// 与 `WorkspaceConvergenceChanged` 事件共享同一结构;不含设备名称、成员实例、
-/// 地址、签名、密钥、安全变化或内容。仅在等待阶段公开阻塞设备的稳定标识。
+/// 地址、签名、密钥、安全变化或内容。仅公开需要用户处理或阻塞进度的设备稳定标识。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceConvergenceSummary {
     pub phase: WorkspaceConvergencePhaseSummary,
     /// 只随成功持久化状态变化递增的不透明版本。
     pub revision: u64,
-    /// 已验证工作空间变化数量。
-    pub change_count: u64,
-    /// 已验证、尚用于计算当前目标的移除意图数量。
-    pub removal_intent_count: u64,
+    /// 已保存的签名成员历史条目数量。
+    pub history_event_count: u64,
     /// 当前有效成员实例数量。
     pub effective_member_count: u64,
-    /// 已确认当前摘要且关系可用的有效成员数量。
-    pub confirmed_member_count: u64,
-    /// 当前阻塞收敛、需要重新上线的设备稳定标识，按字典序排列。
-    pub waiting_member_device_ids: Vec<String>,
-    /// 当前阻塞收敛、需要重新上线的设备数量。
-    pub waiting_member_count: u64,
+    /// 已收到成员历史但仍等待本机决定移除的设备稳定标识，按字典序排列。
+    pub pending_removal_decision_device_ids: Vec<String>,
+    /// 提交接受或拒绝时使用的稳定待决定标识；没有待决定项时为空。
+    pub pending_removal_decision_event_id: Option<String>,
+    /// 已确认成员历史分叉、因此不再进行普通交换的设备稳定标识，按字典序排列。
+    pub diverged_peer_device_ids: Vec<String>,
+    /// 已确认仍低于 1.1、需要升级后才能继续同步的设备稳定标识，按字典序排列。
+    pub upgrade_required_peer_device_ids: Vec<String>,
     /// 当前工作空间摘要;尚未形成时为空。
     pub convergence_digest: Option<String>,
     /// 本机当前成员实例是否已经观察到自己被移出。

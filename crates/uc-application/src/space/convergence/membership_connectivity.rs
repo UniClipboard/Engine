@@ -115,7 +115,11 @@ impl MembershipConnectivity {
                             .entry(event.device_id.as_str().to_string())
                             .or_insert_with(|| BackoffState::ready_now(now))
                             .on_success(now);
-                        let _ = self.deps.presence.ensure_reachable(&event.device_id).await;
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break,
+                            _ = self.deps.presence.ensure_reachable(&event.device_id) => {}
+                        }
                     }
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -243,6 +247,63 @@ impl MembershipConnectivityRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use tokio::sync::Notify;
+
+    struct EmptyPeerAddresses;
+
+    #[async_trait::async_trait]
+    impl PeerAddressRepositoryPort for EmptyPeerAddresses {
+        async fn get(
+            &self,
+            _device: &DeviceId,
+        ) -> Result<Option<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError>
+        {
+            Ok(None)
+        }
+
+        async fn upsert(
+            &self,
+            _record: &uc_core::ports::PeerAddressRecord,
+        ) -> Result<(), uc_core::ports::PeerAddressError> {
+            Ok(())
+        }
+
+        async fn list(
+            &self,
+        ) -> Result<Vec<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _device: &DeviceId) -> Result<(), uc_core::ports::PeerAddressError> {
+            Ok(())
+        }
+    }
+
+    struct BlockingPresence {
+        started: Notify,
+        events: broadcast::Sender<PresenceEvent>,
+    }
+
+    #[async_trait::async_trait]
+    impl PresencePort for BlockingPresence {
+        async fn ensure_reachable(
+            &self,
+            _device: &DeviceId,
+        ) -> Result<ReachabilityState, PresenceError> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+
+        async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
+            ReachabilityState::Unknown
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+            self.events.subscribe()
+        }
+    }
 
     #[test]
     fn failures_walk_the_ladder_then_sleep() {
@@ -262,5 +323,37 @@ mod tests {
         let mut state = BackoffState::Sleeping;
         state.on_failure(Instant::now());
         assert!(state.is_sleeping());
+    }
+
+    // 流程：B 上线触发 A 拨号，但拨号永久不返回；A 关闭时必须打断拨号并及时退出。
+    #[tokio::test]
+    async fn shutdown_interrupts_an_online_event_dial() {
+        let (events, presence_events) = broadcast::channel(4);
+        let presence = Arc::new(BlockingPresence {
+            started: Notify::new(),
+            events: events.clone(),
+        });
+        let runtime = start_membership_connectivity(
+            MembershipConnectivityDeps {
+                peer_addresses: Arc::new(EmptyPeerAddresses),
+                presence: presence.clone(),
+                local_device_id: DeviceId::new("device-a"),
+            },
+            presence_events,
+        );
+        events
+            .send(PresenceEvent {
+                device_id: DeviceId::new("device-b"),
+                state: ReachabilityState::Online,
+                at: Utc::now(),
+            })
+            .expect("presence event has a receiver");
+        tokio::time::timeout(Duration::from_secs(1), presence.started.notified())
+            .await
+            .expect("online event starts a dial");
+
+        tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+            .await
+            .expect("shutdown interrupts the in-flight online event dial");
     }
 }

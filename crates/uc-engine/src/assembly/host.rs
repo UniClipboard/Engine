@@ -275,6 +275,54 @@ pub fn derive_app_paths(directories: &HostDirectories) -> AppPaths {
     })
 }
 
+fn adopt_v019_profile_directories(app_data_root: &Path) -> WiringResult<()> {
+    let directories = [("iroh-identity", "identity"), ("iroh-blobs", "blob store")];
+    let mut moves = Vec::new();
+    let entries = match std::fs::read_dir(app_data_root) {
+        Ok(entries) => entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| WiringError::SettingsInit("failed to inspect v0.19 data".to_owned()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {
+            return Err(WiringError::SettingsInit(
+                "failed to inspect v0.19 data".to_owned(),
+            ))
+        }
+    };
+
+    for (name, description) in directories {
+        let current = app_data_root.join(name);
+        let mut legacy_directories = entries.iter().map(|entry| entry.path()).filter(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.starts_with(&format!("{name}_")))
+        });
+        let legacy = legacy_directories.next();
+        if legacy_directories.next().is_some() {
+            return Err(WiringError::SettingsInit(format!(
+                "multiple v0.19 {description} directories found"
+            )));
+        }
+        let Some(legacy) = legacy else {
+            continue;
+        };
+        if current.exists() {
+            return Err(WiringError::SettingsInit(format!(
+                "v0.19 {description} directory conflict"
+            )));
+        }
+        moves.push((legacy, current, description));
+    }
+
+    for (legacy, current, description) in moves {
+        std::fs::rename(&legacy, &current).map_err(|_| {
+            WiringError::SettingsInit(format!("failed to adopt v0.19 {description} directory"))
+        })?;
+    }
+
+    Ok(())
+}
+
 fn adapt_system_clipboard_layer(
     host: Box<dyn HostClipboard>,
     files: Arc<dyn HostFileAccess>,
@@ -429,6 +477,7 @@ pub(crate) fn wire_host_capabilities_with_emitter(
     let paths = derive_app_paths(&directories);
     let secure_storage = adapt_secure_storage(secure_storage);
     let app_data_root = paths.app_data_root_dir.clone();
+    adopt_v019_profile_directories(&app_data_root)?;
     uc_infra::config_migration::staging::apply_pending_import(
         &app_data_root,
         &paths.db_path,
@@ -461,7 +510,7 @@ pub(crate) fn wire_host_capabilities_with_emitter(
         } else {
             uc_core::ports::ConfigSourceMode::Installed
         },
-        legacy_iroh_identity_dir: app_data_root.join("iroh-identity"),
+        iroh_identity_dir: app_data_root.join("iroh-identity"),
         iroh_blob_store_dir: app_data_root.join("iroh-blobs"),
         system_clipboard: adapt_system_clipboard_layer(
             clipboard,
@@ -509,8 +558,67 @@ mod tests {
         TransferStatusChanged,
     };
 
-    use super::{wire_host_capabilities, EngineHostEventEmitter};
+    use super::{adopt_v019_profile_directories, wire_host_capabilities, EngineHostEventEmitter};
     use crate::assembly::lifecycle::build_daemon_lifecycle;
+
+    #[test]
+    fn v019_profile_directories_are_adopted_before_engine_wiring() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path();
+        let legacy_identity = data_root.join("iroh-identity_mobile_primary");
+        let legacy_blobs = data_root.join("iroh-blobs_mobile_primary");
+        std::fs::create_dir_all(&legacy_identity).unwrap();
+        std::fs::create_dir_all(&legacy_blobs).unwrap();
+        std::fs::write(legacy_identity.join("identity.bin"), b"identity").unwrap();
+        std::fs::write(legacy_blobs.join("blobs.db"), b"blobs").unwrap();
+
+        adopt_v019_profile_directories(data_root).unwrap();
+
+        assert_eq!(
+            std::fs::read(data_root.join("iroh-identity/identity.bin")).unwrap(),
+            b"identity"
+        );
+        assert_eq!(
+            std::fs::read(data_root.join("iroh-blobs/blobs.db")).unwrap(),
+            b"blobs"
+        );
+        assert!(!legacy_identity.exists());
+        assert!(!legacy_blobs.exists());
+    }
+
+    #[test]
+    fn absent_v019_profile_directories_leave_current_layout_untouched() {
+        let root = tempfile::tempdir().unwrap();
+
+        adopt_v019_profile_directories(root.path()).unwrap();
+
+        assert!(!root.path().join("iroh-identity").exists());
+        assert!(!root.path().join("iroh-blobs").exists());
+    }
+
+    #[test]
+    fn missing_app_data_root_is_treated_as_a_fresh_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("private");
+
+        adopt_v019_profile_directories(&data_root).unwrap();
+
+        assert!(!data_root.exists());
+    }
+
+    #[test]
+    fn conflicting_v019_and_current_identity_directories_stop_startup() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("iroh-identity_a")).unwrap();
+        std::fs::create_dir_all(root.path().join("iroh-blobs_a")).unwrap();
+        std::fs::create_dir_all(root.path().join("iroh-blobs")).unwrap();
+
+        let error = adopt_v019_profile_directories(root.path()).unwrap_err();
+
+        assert!(error.to_string().contains("blob store directory conflict"));
+        assert!(root.path().join("iroh-identity_a").exists());
+        assert!(!root.path().join("iroh-identity").exists());
+    }
 
     #[derive(Default)]
     struct TestSecureStorage(Mutex<HashMap<String, Vec<u8>>>);
@@ -632,9 +740,12 @@ mod tests {
         );
     }
 
+    // 流程：启动真实生产组装，确认 1.1 成员核对与旧空间升级入口同时存在，
+    // 再确认已经废弃的成员移除入口没有被重新带回。
     #[tokio::test]
     async fn production_engine_assembly_registers_membership_attestation_protocol() {
         let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("private")).unwrap();
         let host = HostCapabilities::new(
             HostDirectories::new(
                 root.path().join("private"),
@@ -659,6 +770,7 @@ mod tests {
             wiring.wired.mobile_sync_ports.clone(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -666,13 +778,17 @@ mod tests {
             .sync_engine_assembly
             .membership_attestation_is_reachable_for_test()
             .await;
-        let removal_exchange_reachable = lifecycle
+        let membership_history_reachable = lifecycle
             .sync_engine_assembly
-            .member_removal_exchange_is_reachable_for_test()
+            .membership_history_exchange_is_reachable_for_test()
             .await;
-        let removal_late_reachable = lifecycle
+        let legacy_upgrade_reachable = lifecycle
             .sync_engine_assembly
-            .member_removal_late_is_reachable_for_test()
+            .legacy_upgrade_is_reachable_for_test()
+            .await;
+        let deprecated_removal_protocols_reachable = lifecycle
+            .sync_engine_assembly
+            .deprecated_removal_protocols_are_reachable_for_test()
             .await;
         lifecycle
             .sync_engine_assembly
@@ -684,12 +800,16 @@ mod tests {
             "membership attestation protocol was not installed"
         );
         assert!(
-            removal_exchange_reachable,
-            "member removal exchange was not installed"
+            membership_history_reachable,
+            "membership history exchange was not installed"
         );
         assert!(
-            removal_late_reachable,
-            "member removal late entry was not installed"
+            legacy_upgrade_reachable,
+            "legacy space upgrade protocol was not installed"
+        );
+        assert!(
+            !deprecated_removal_protocols_reachable,
+            "superseded member-removal protocols were installed"
         );
     }
 

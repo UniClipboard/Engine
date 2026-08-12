@@ -45,6 +45,7 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::clipboard::{ActiveClipboardDispatchPort, LoadActiveClipboardPort};
 use uc_core::ports::presence::{PresenceEvent, ReachabilityState};
 use uc_core::ports::PresencePort;
@@ -76,13 +77,14 @@ impl PeerOnlineResyncWorker {
         reconstructor: SnapshotReconstructor,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Self {
         Self {
             presence,
             load_register,
             reconstructor,
             dispatch,
-            send_gate: MemberSendGate::new(member_repo),
+            send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
         }
     }
 
@@ -230,6 +232,7 @@ mod tests {
         PersistedClipboardRepresentation, SelectionPolicyVersion,
     };
     use uc_core::ids::{DeviceId, EntryId, EventId, FormatId, RepresentationId};
+    use uc_core::membership::ContentExchangeGatePort;
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::clipboard::{
         ActiveClipboardDispatchError, ActiveClipboardRegisterError, ClipboardPayloadResolverPort,
@@ -334,6 +337,24 @@ mod tests {
         }
         async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
             Ok(false)
+        }
+    }
+
+    struct BlockedUpgradePeer;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for BlockedUpgradePeer {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            true
+        }
+    }
+
+    struct AllowAllContent;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for AllowAllContent {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            false
         }
     }
 
@@ -476,6 +497,7 @@ mod tests {
             reconstructor(),
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
             Arc::new(AllowAllMembers),
+            Arc::new(AllowAllContent),
         );
         (worker, presence_tx, dispatch)
     }
@@ -515,6 +537,31 @@ mod tests {
         assert_eq!(sent.len(), 1, "the online peer gets exactly one resync");
         assert_eq!(sent[0], ("peer-1".to_string(), "blake3v1:aa".to_string()));
         drop(sent);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn upgrade_required_peer_does_not_receive_resync() {
+        let (presence, presence_tx) = FakePresence::new();
+        let dispatch = Arc::new(DispatchSpy::default());
+        let worker = PeerOnlineResyncWorker::new(
+            presence,
+            Arc::new(FixedRegister(Some(state("blake3v1:aa", "self")))),
+            reconstructor(),
+            Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
+            Arc::new(AllowAllMembers),
+            Arc::new(BlockedUpgradePeer),
+        );
+        let handle = worker.spawn();
+        tokio::task::yield_now().await;
+
+        presence_tx.send(online("peer-1")).unwrap();
+        tokio::time::sleep(past_window()).await;
+
+        assert!(
+            dispatch.sent.lock().unwrap().is_empty(),
+            "a peer that must upgrade must not receive current clipboard resync"
+        );
         handle.abort();
     }
 

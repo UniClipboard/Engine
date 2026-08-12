@@ -172,21 +172,6 @@ pub(crate) struct MlsRemoval {
     pub(crate) wrapping_key: MasterKey,
 }
 
-pub(crate) struct MlsMemberIdentity {
-    pub(crate) device_identity: Vec<u8>,
-    pub(crate) signature_key: Vec<u8>,
-}
-
-impl std::fmt::Debug for MlsMemberIdentity {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("MlsMemberIdentity")
-            .field("device_identity", &self.device_identity)
-            .field("signature_key_len", &self.signature_key.len())
-            .finish()
-    }
-}
-
 impl std::fmt::Debug for MlsRemoval {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -410,31 +395,6 @@ impl MlsGroupEngine {
         })
     }
 
-    /// 当前因果视图的成员身份列表(设备标识 + 签名公钥)。
-    pub(crate) fn view_members(
-        client_state: &MlsClientState,
-    ) -> Result<Vec<MlsMemberIdentity>, MlsGroupError> {
-        let (provider, stored) = restore(client_state)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
-        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
-        if !group.is_active() {
-            return Err(MlsGroupError::InvalidState);
-        }
-        let mut members = Vec::new();
-        for member in group.members() {
-            let Ok(credential) = BasicCredential::try_from(member.credential) else {
-                continue;
-            };
-            members.push(MlsMemberIdentity {
-                device_identity: credential.identity().to_vec(),
-                signature_key: member.signature_key.as_slice().to_vec(),
-            });
-        }
-        Ok(members)
-    }
-
     pub(crate) fn contains_active_member(
         client_state: &MlsClientState,
         expected_device_identity: &[u8],
@@ -482,6 +442,27 @@ impl MlsGroupEngine {
         Ok(group.epoch().as_u64())
     }
 
+    pub(crate) fn current_member_instance(
+        client_state: &MlsClientState,
+        device_identity: &[u8],
+    ) -> Result<uc_core::membership::MemberInstanceId, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored
+            .group_id
+            .as_ref()
+            .ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        Ok(uc_core::membership::MemberInstanceId::derive(
+            std::str::from_utf8(device_identity).map_err(|_| MlsGroupError::IdentityMismatch)?,
+            &stored.signer_public,
+        ))
+    }
+
     pub(crate) fn verify_member_payload(
         client_state: &MlsClientState,
         expected_device_identity: &[u8],
@@ -499,6 +480,47 @@ impl MlsGroupEngine {
         let signature_key = group.members().find_map(|member| {
             let credential = BasicCredential::try_from(member.credential).ok()?;
             (credential.identity() == expected_device_identity).then_some(member.signature_key)
+        });
+        let Some(signature_key) = signature_key else {
+            return Ok(false);
+        };
+        Ok(provider
+            .crypto()
+            .verify_signature(
+                CIPHERSUITE.signature_algorithm(),
+                payload,
+                &signature_key,
+                signature,
+            )
+            .is_ok())
+    }
+
+    pub(crate) fn verify_member_instance_payload(
+        client_state: &MlsClientState,
+        expected_device_identity: &[u8],
+        expected_member_instance: uc_core::membership::MemberInstanceId,
+        payload: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Ok(false);
+        }
+        let device_id = std::str::from_utf8(expected_device_identity)
+            .map_err(|_| MlsGroupError::IdentityMismatch)?;
+        let signature_key = group.members().find_map(|member| {
+            let credential = BasicCredential::try_from(member.credential).ok()?;
+            let instance = uc_core::membership::MemberInstanceId::derive(
+                device_id,
+                member.signature_key.as_slice(),
+            );
+            (credential.identity() == expected_device_identity
+                && instance == expected_member_instance)
+                .then_some(member.signature_key)
         });
         let Some(signature_key) = signature_key else {
             return Ok(false);

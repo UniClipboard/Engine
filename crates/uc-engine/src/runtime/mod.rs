@@ -70,6 +70,7 @@ struct SessionFactory {
     events: EventSender,
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
+    iroh_bind_port_override: Option<u16>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     recovery_generation: Arc<AtomicU64>,
 }
@@ -249,6 +250,7 @@ impl ProductionRuntime {
         let app_version = config.app_version().to_string();
         let rendezvous_base_url = config.rendezvous_base_url_override();
         let relay_fallback_override = config.test_relay_fallback_override();
+        let iroh_bind_port_override = config.test_iroh_bind_port_override();
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
         let HostWiring {
             wired,
@@ -278,6 +280,7 @@ impl ProductionRuntime {
             events: events.clone(),
             rendezvous_base_url: rendezvous_base_url.clone(),
             relay_fallback_override,
+            iroh_bind_port_override,
             network_recovery: Arc::clone(&network_recovery),
             recovery_generation: Arc::new(AtomicU64::new(0)),
         });
@@ -345,6 +348,7 @@ impl ProductionRuntime {
             wired.mobile_sync_ports.clone(),
             factory.rendezvous_base_url.clone(),
             factory.relay_fallback_override,
+            factory.iroh_bind_port_override,
         )
         .await
         .map_err(|error| startup_error("p2p session", error))?;
@@ -592,12 +596,12 @@ mod tests {
         let snapshot = uc_core::membership::WorkspaceSnapshot {
             phase: uc_core::membership::WorkspacePhase::Converging,
             revision: 1,
-            change_count: 1,
-            removal_intent_count: 1,
+            history_event_count: 1,
             effective_member_count: 2,
-            confirmed_member_count: 0,
-            waiting_member_device_ids: Vec::new(),
-            waiting_member_count: 0,
+            pending_removal_decision_device_ids: Vec::new(),
+            pending_removal_decision_event_id: None,
+            diverged_peer_device_ids: Vec::new(),
+            upgrade_required_peer_device_ids: Vec::new(),
             convergence_digest: None,
             removed: false,
             updated_at_ms: 42,
@@ -625,12 +629,12 @@ mod tests {
         let snapshot = uc_core::membership::WorkspaceSnapshot {
             phase: uc_core::membership::WorkspacePhase::LocallyApplied,
             revision: 1,
-            change_count: 0,
-            removal_intent_count: 0,
+            history_event_count: 0,
             effective_member_count: 1,
-            confirmed_member_count: 0,
-            waiting_member_device_ids: Vec::new(),
-            waiting_member_count: 0,
+            pending_removal_decision_device_ids: Vec::new(),
+            pending_removal_decision_event_id: None,
+            diverged_peer_device_ids: Vec::new(),
+            upgrade_required_peer_device_ids: Vec::new(),
             convergence_digest: None,
             removed: false,
             updated_at_ms: 42,

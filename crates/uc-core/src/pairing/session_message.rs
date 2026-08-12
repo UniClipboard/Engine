@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use super::invitation::InvitationCode;
 use crate::ids::{DeviceId, SpaceId};
-use crate::membership::AdmissionChangeFacts;
+use crate::membership::{AdmissionChangeFacts, AdmissionSavedFacts};
 use crate::ports::pairing::PairingSessionId;
 use crate::security::IdentityFingerprint;
 
@@ -37,7 +37,7 @@ pub enum PairingSessionMessage {
     ChallengeResponse(JoinerChallengeResponse),
     Confirm(SponsorConfirm),
     Ready(JoinerReady),
-    AdmissionCommitted(SponsorAdmissionCommitted),
+    AdmissionSaved(SponsorAdmissionSaved),
     Reject(PairingReject),
 }
 
@@ -138,6 +138,10 @@ pub struct SponsorConfirm {
     pub welcome: Vec<u8>,
     pub encrypted_key_catalog: Vec<u8>,
     pub group_epoch: u64,
+    /// Number of member-history events held by the sponsor before admitting
+    /// this joiner. A configured same-Space joiner uses it to reject a
+    /// sponsor that is behind its current branch.
+    pub membership_history_event_count: u64,
 }
 
 /// Joiner → sponsor. Sent only after the joiner has durably recorded the
@@ -151,16 +155,13 @@ pub struct JoinerReady {
 }
 
 /// Sponsor → joiner. Sent only after the sponsor durably saved the joiner's
-/// admission change and the pending handoff facts in one commit. Until the
-/// joiner receives this confirmation it stays locally ready: it must not
-/// take part in ordinary content exchange, must not announce relationships
-/// to other members, and must not count itself into completion confirmations.
+/// signed member-history event. The joiner saves the sponsor's member facts
+/// before it reports that admission completed locally.
 #[derive(Debug, Clone)]
-pub struct SponsorAdmissionCommitted {
-    /// The admission-saved facts: the workspace change digest after the
-    /// joiner's admission change was saved, the resulting change count and
-    /// the sponsor's own member facts generated at the same commit point.
-    pub facts: crate::membership::AdmissionCommittedFacts,
+pub struct SponsorAdmissionSaved {
+    /// The admission-saved history progress and the sponsor's own member
+    /// facts generated at the same save point.
+    pub facts: AdmissionSavedFacts,
 }
 
 /// Either side → other. Terminal message with a structured reason so the

@@ -5,11 +5,12 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
-    EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
-    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
-    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, DecideMembershipRemovalInput,
+    Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput,
+    HostFileHandle, InvitationAvailability, JoinSpaceInput, MembershipRemovalDecision, Operation,
+    OperationResult, OperationTerminal, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
+    SendTextInput,
 };
 use zeroize::Zeroizing;
 
@@ -155,6 +156,38 @@ impl OhEngine {
         let result = self
             .engine
             .execute(Operation::RemoveMember(RemoveMemberInput { device_id }))
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::WorkspaceConvergence(summary) => workspace_convergence(summary),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn decide_membership_removal(
+        &self,
+        removal_event_id: String,
+        decision: String,
+    ) -> napi::Result<OhWorkspaceConvergence> {
+        let decision = match decision.as_str() {
+            "accept" => MembershipRemovalDecision::Accept,
+            "reject" => MembershipRemovalDecision::Reject,
+            _ => {
+                return Err(napi::Error::new(
+                    Status::InvalidArg,
+                    "invalid removal decision",
+                ))
+            }
+        };
+        let result = self
+            .engine
+            .execute(Operation::DecideMembershipRemoval(
+                DecideMembershipRemovalInput {
+                    removal_event_id,
+                    decision,
+                },
+            ))
             .await
             .map_err(engine_error)?;
         match result {
@@ -420,20 +453,17 @@ fn workspace_convergence(
         phase: match summary.phase {
             uc_engine::WorkspaceConvergencePhaseSummary::LocallyApplied => "locally_applied",
             uc_engine::WorkspaceConvergencePhaseSummary::Converging => "converging",
-            uc_engine::WorkspaceConvergencePhaseSummary::WaitingForOfflineMember => {
-                "waiting_for_offline_member"
-            }
             uc_engine::WorkspaceConvergencePhaseSummary::Complete => "complete",
             uc_engine::WorkspaceConvergencePhaseSummary::RecoveryRequired => "recovery_required",
         }
         .to_owned(),
         revision: summary.revision as f64,
-        change_count: count_u64(summary.change_count)?,
-        removal_intent_count: count_u64(summary.removal_intent_count)?,
+        history_event_count: count_u64(summary.history_event_count)?,
         effective_member_count: count_u64(summary.effective_member_count)?,
-        confirmed_member_count: count_u64(summary.confirmed_member_count)?,
-        waiting_member_device_ids: summary.waiting_member_device_ids,
-        waiting_member_count: count_u64(summary.waiting_member_count)?,
+        pending_removal_decision_device_ids: summary.pending_removal_decision_device_ids,
+        pending_removal_decision_event_id: summary.pending_removal_decision_event_id,
+        diverged_peer_device_ids: summary.diverged_peer_device_ids,
+        upgrade_required_peer_device_ids: summary.upgrade_required_peer_device_ids,
         convergence_digest: summary.convergence_digest,
         removed: summary.removed,
         updated_at_ms: summary.updated_at_ms as f64,
@@ -622,12 +652,12 @@ mod tests {
             WorkspaceConvergenceSummary {
                 phase: WorkspaceConvergencePhaseSummary::Converging,
                 revision: 2,
-                change_count: 1,
-                removal_intent_count: 1,
+                history_event_count: 1,
                 effective_member_count: 2,
-                confirmed_member_count: 0,
-                waiting_member_device_ids: vec!["device-b".to_owned()],
-                waiting_member_count: 1,
+                pending_removal_decision_device_ids: vec!["device-c".to_owned()],
+                pending_removal_decision_event_id: Some("event-c".to_owned()),
+                diverged_peer_device_ids: vec!["device-d".to_owned()],
+                upgrade_required_peer_device_ids: vec!["device-e".to_owned()],
                 convergence_digest: None,
                 removed: true,
                 updated_at_ms: 42,
@@ -639,13 +669,24 @@ mod tests {
         let convergence = event.workspace_convergence.unwrap();
         assert_eq!(convergence.phase, "converging");
         assert_eq!(convergence.revision, 2.0);
-        assert_eq!(convergence.change_count, 1);
+        assert_eq!(convergence.history_event_count, 1);
         assert_eq!(convergence.effective_member_count, 2);
         assert_eq!(
-            convergence.waiting_member_device_ids,
-            vec!["device-b".to_owned()]
+            convergence.pending_removal_decision_device_ids,
+            vec!["device-c".to_owned()]
         );
-        assert_eq!(convergence.waiting_member_count, 1);
+        assert_eq!(
+            convergence.pending_removal_decision_event_id.as_deref(),
+            Some("event-c")
+        );
+        assert_eq!(
+            convergence.diverged_peer_device_ids,
+            vec!["device-d".to_owned()]
+        );
+        assert_eq!(
+            convergence.upgrade_required_peer_device_ids,
+            vec!["device-e".to_owned()]
+        );
         assert_eq!(convergence.removed, true);
         assert_eq!(convergence.updated_at_ms, 42.0);
     }
@@ -722,14 +763,14 @@ mod tests {
     #[test]
     fn workspace_convergence_maps_phase_and_counts() {
         let status = workspace_convergence(uc_engine::WorkspaceConvergenceSummary {
-            phase: uc_engine::WorkspaceConvergencePhaseSummary::WaitingForOfflineMember,
+            phase: uc_engine::WorkspaceConvergencePhaseSummary::Converging,
             revision: 4,
-            change_count: 2,
-            removal_intent_count: 1,
+            history_event_count: 2,
             effective_member_count: 2,
-            confirmed_member_count: 1,
-            waiting_member_device_ids: vec!["device-b".to_owned()],
-            waiting_member_count: 1,
+            pending_removal_decision_device_ids: vec!["device-c".to_owned()],
+            pending_removal_decision_event_id: Some("event-c".to_owned()),
+            diverged_peer_device_ids: vec!["device-d".to_owned()],
+            upgrade_required_peer_device_ids: vec!["device-e".to_owned()],
             convergence_digest: None,
             removed: false,
             updated_at_ms: 7,
@@ -737,13 +778,21 @@ mod tests {
         })
         .expect("workspace convergence must map");
 
-        assert_eq!(status.phase, "waiting_for_offline_member");
+        assert_eq!(status.phase, "converging");
         assert_eq!(status.revision, 4.0);
+        assert_eq!(status.history_event_count, 2);
         assert_eq!(
-            status.waiting_member_device_ids,
-            vec!["device-b".to_owned()]
+            status.pending_removal_decision_device_ids,
+            vec!["device-c".to_owned()]
         );
-        assert_eq!(status.change_count, 2);
-        assert_eq!(status.removal_intent_count, 1);
+        assert_eq!(
+            status.pending_removal_decision_event_id.as_deref(),
+            Some("event-c")
+        );
+        assert_eq!(status.diverged_peer_device_ids, vec!["device-d".to_owned()]);
+        assert_eq!(
+            status.upgrade_required_peer_device_ids,
+            vec!["device-e".to_owned()]
+        );
     }
 }

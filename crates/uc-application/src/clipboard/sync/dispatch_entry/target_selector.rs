@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
-use uc_core::membership::RemovalTargetGatePort;
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_core::MemberRepositoryPort;
 
@@ -30,7 +30,7 @@ use super::{DispatchClipboardEntryInput, DispatchSyncError};
 pub(crate) struct TargetSelector {
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
-    removal_gate: Arc<dyn RemovalTargetGatePort>,
+    removal_gate: Arc<dyn ContentExchangeGatePort>,
 }
 
 impl TargetSelector {
@@ -49,7 +49,7 @@ impl TargetSelector {
     pub(crate) fn new_with_removal_gate(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        removal_gate: Arc<dyn RemovalTargetGatePort>,
+        removal_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Self {
         Self {
             peer_addr_repo,
@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl uc_core::membership::RemovalTargetGatePort for RemovedTarget {
+    impl uc_core::membership::ContentExchangeGatePort for RemovedTarget {
         async fn is_locally_removed(&self, device_id: &DeviceId) -> bool {
             *device_id == self.device_id
         }

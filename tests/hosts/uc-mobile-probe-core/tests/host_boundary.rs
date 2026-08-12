@@ -142,11 +142,8 @@ fn ios_and_android_probe_member_removal_through_the_shared_contract() {
     for field in [
         "phase",
         "revision",
-        "change_count",
-        "removal_intent_count",
+        "history_event_count",
         "effective_member_count",
-        "confirmed_member_count",
-        "waiting_member_count",
         "convergence_digest",
         "updated_at_ms",
         "last_workspace_phase",

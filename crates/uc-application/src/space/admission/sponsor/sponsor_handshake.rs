@@ -49,8 +49,8 @@ use uc_core::ids::{DeviceId, SessionId, SpaceId};
 use uc_core::membership::MemberRepositoryPort;
 use uc_core::pairing::session_message::{
     JoinerChallengeResponse, JoinerRequest, PairingReject, PairingRejectReason,
-    PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionCommitted,
-    SponsorAdmissionOffer, SponsorConfirm,
+    PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer, SponsorAdmissionSaved,
+    SponsorConfirm,
 };
 use uc_core::ports::pairing::{PairingSessionId, PairingSessionPort};
 use uc_core::ports::space::{GroupAdmissionPort, PrepareAdmissionOfferPort, ProofPort};
@@ -410,7 +410,11 @@ impl SponsorHandshakeCoordinator {
     /// owner saved the in-flight admission record so we never confirm a
     /// peer the owner has not recorded. Returns the group-epoch update
     /// payload produced for existing members (empty when there are none).
-    pub(crate) async fn confirm(&self, session: &PairingSessionId) -> Result<Vec<u8>, String> {
+    pub(crate) async fn confirm(
+        &self,
+        session: &PairingSessionId,
+        membership_history_event_count: u64,
+    ) -> Result<Vec<u8>, String> {
         let ctx = self
             .sessions
             .lock()
@@ -480,6 +484,7 @@ impl SponsorHandshakeCoordinator {
             welcome: admission.welcome,
             encrypted_key_catalog: admission.encrypted_key_catalog,
             group_epoch: admission.group_epoch,
+            membership_history_event_count,
         });
         self.pairing_session
             .send(session, confirm)
@@ -501,15 +506,12 @@ impl SponsorHandshakeCoordinator {
     pub(crate) async fn send_committed(
         &self,
         session: &PairingSessionId,
-        committed: SponsorAdmissionCommitted,
+        saved: SponsorAdmissionSaved,
     ) -> Result<(), String> {
         self.pairing_session
-            .send(
-                session,
-                PairingSessionMessage::AdmissionCommitted(committed),
-            )
+            .send(session, PairingSessionMessage::AdmissionSaved(saved))
             .await
-            .map_err(|e| format!("send AdmissionCommitted: {e}"))?;
+            .map_err(|e| format!("send AdmissionSaved: {e}"))?;
         info!(session = %session, "admission-saved confirmation sent to joiner");
         Ok(())
     }
@@ -1144,7 +1146,7 @@ mod tests {
                 },
             )
             .await;
-        coord.confirm(&session).await.unwrap();
+        coord.confirm(&session, 0).await.unwrap();
 
         let sent = sp.sent();
         assert_eq!(sent.len(), 2, "AdmissionOffer + Confirm");
@@ -1198,7 +1200,7 @@ mod tests {
         let session = PairingSessionId::new("existing-members");
         coord.begin(&session, joiner_request()).await.unwrap();
 
-        coord.confirm(&session).await.unwrap();
+        coord.confirm(&session, 0).await.unwrap();
         coord.complete(&session).await;
 
         let sent = sp.sent();
@@ -1216,7 +1218,7 @@ mod tests {
         let (sp, sa, pr, st) = happy_defaults();
         let coord = happy_coordinator(sp, sa, pr, st);
         let err = coord
-            .confirm(&PairingSessionId::new("ghost"))
+            .confirm(&PairingSessionId::new("ghost"), 0)
             .await
             .unwrap_err();
         assert!(err.contains("without parked ctx"), "err = {err}");
@@ -1229,7 +1231,7 @@ mod tests {
         let coord = happy_coordinator(sp.clone(), sa, pr, st);
         let session = PairingSessionId::new("s8");
         coord.begin(&session, joiner_request()).await.unwrap();
-        let err = coord.confirm(&session).await.unwrap_err();
+        let err = coord.confirm(&session, 0).await.unwrap_err();
         assert!(err.contains("device_name"), "err = {err}");
         // Only AdmissionOffer went out — Confirm was never attempted.
         assert_eq!(sp.sent().len(), 1);
@@ -1351,7 +1353,7 @@ mod tests {
                 },
             )
             .await;
-        coord.confirm(&session).await.unwrap();
+        coord.confirm(&session, 0).await.unwrap();
         coord.complete(&session).await;
 
         // 时间跨过 TTL，任何没被 abort 的 watchdog 都会在这一步 fire。

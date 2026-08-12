@@ -58,14 +58,14 @@ pub enum InitializeSpaceError {
 /// having to import the infra-port enum.
 #[derive(Debug, Error)]
 pub enum IssuePairingInvitationError {
-    #[error("member removal is still converging")]
-    MemberRemovalInProgress,
+    #[error("membership reconciliation is still converging")]
+    MembershipReconciliationInProgress,
 
-    #[error("member removal requires recovery before admitting a device")]
-    MemberRemovalRecoveryRequired,
+    #[error("membership reconciliation requires recovery before admitting a device")]
+    MembershipReconciliationRequired,
 
-    #[error("member removal state is unavailable")]
-    MemberRemovalUnavailable,
+    #[error("membership reconciliation state is unavailable")]
+    MembershipReconciliationUnavailable,
 
     /// Underlying network runtime has not been started. UI should surface
     /// "start network first" (A1/A2 completing auto-starts it, so this
@@ -282,6 +282,8 @@ pub enum QuerySetupStateError {
 /// * `Storage` / `Internal` — 持久化 / adapter 兜底。
 #[derive(Debug, Error)]
 pub enum SwitchSpaceError {
+    #[error("device is already an active member of the target space")]
+    AlreadyActiveMember,
     #[error("device has not completed first-time setup yet")]
     NotSetup,
     #[error("a previous switch-space migration is still in flight")]

@@ -29,35 +29,32 @@ mod runtime;
 #[cfg(test)]
 pub(crate) mod tests;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use sha2::Digest;
 use tokio::sync::broadcast;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    recovery_lineage_fingerprint, CurrentMemberSignaturePort, CurrentMembershipAnnouncementPort,
-    CurrentMembershipIdentityPort, MemberRepositoryPort, MembershipSecurityUpdateError,
-    MembershipSecurityUpdatePort, RecoveryBinding, RecoveryChannelMessage,
-    RemovalExchangeEndpointPort, RemovalExchangeError, RemovalExchangeMessage, RemovalExchangePort,
-    RemovalIntentContent, RemovalIntentVerificationError, RemovalIntentVerificationPort,
-    RemovalLateAcceptance, RemovalLateRejectionReason, RemovalLateSubmission,
-    RemovalLateSubmissionEndpointPort, RemovalLateSubmissionError, RemovalLateSubmissionPort,
-    RemovalNotice, RemovalNoticeAcceptance, RemovalNoticeEndpointPort, RemovalNoticeError,
-    RemovalNoticePort, RemovalNoticeRejectionReason, RemovalNoticeVerificationPort,
-    RemovalRecoveryError, RemovalRecoveryPort, SignedRemovalIntent, WorkspaceChange,
-    WorkspaceChangeKind, WorkspaceConfirmation, WorkspaceConvergenceEvent,
-    WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
-    WorkspaceConvergenceState, WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
+    CurrentMemberSignaturePort, CurrentMembershipAnnouncementPort, CurrentMembershipIdentityPort,
+    LegacyPeerProbePort, MemberRepositoryPort, MembershipDecision, MembershipEvent,
+    MembershipEventId, MembershipEventsRequest, MembershipEventsResponse, MembershipHistoryAck,
+    MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
+    MembershipHistoryExchangePort, MembershipHistoryHello, MembershipHistoryMessage,
+    MembershipHistoryRelationship, MembershipOperation, MembershipReconciliationOutcome,
+    MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalDecision,
+    WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
+    WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState, WorkspaceMergeOutcome,
+    WorkspacePhase, WorkspaceSnapshot,
 };
 use uc_core::ports::{ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort};
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
+pub(crate) use runtime::WorkspaceConvergenceActivity;
 pub use runtime::WorkspaceConvergenceRuntime;
-
-const MAX_HANDOFF_BATCH_CHANGES: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceConvergenceError {
@@ -67,10 +64,6 @@ pub enum WorkspaceConvergenceError {
     Repository(#[from] WorkspaceConvergenceRepositoryError),
     #[error("workspace convergence security update failed: {0}")]
     SecurityUpdate(#[from] MembershipSecurityUpdateError),
-    #[error("workspace convergence recovery state is unavailable: {0}")]
-    Recovery(#[from] RemovalRecoveryError),
-    #[error("workspace convergence intent verification failed: {0}")]
-    IntentVerification(#[from] RemovalIntentVerificationError),
     #[error("current membership identity is unavailable")]
     NotAMember,
     #[error("the target member does not exist in the current workspace")]
@@ -89,14 +82,14 @@ pub enum WorkspaceConvergenceError {
     Inconsistent(String),
     #[error("workspace convergence admission storage failed: {0}")]
     AdmissionStorage(String),
+    #[error("workspace convergence admission generation advanced")]
+    AdmissionGenerationAdvanced,
     #[error("workspace convergence is unavailable")]
     Unavailable,
 }
 
 pub struct WorkspaceConvergenceDeps {
     pub repository: Arc<dyn WorkspaceConvergenceRepositoryPort>,
-    pub verification: Arc<dyn RemovalIntentVerificationPort>,
-    pub recovery: Arc<dyn RemovalRecoveryPort>,
     pub member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub membership_identity: Arc<dyn CurrentMembershipIdentityPort>,
@@ -104,18 +97,12 @@ pub struct WorkspaceConvergenceDeps {
     pub security_updates: Arc<dyn MembershipSecurityUpdatePort>,
     pub clock: Arc<dyn ClockPort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
-    /// Ordinary member channel: validated intent exchange and workspace
-    /// confirmation delivery.
-    pub exchange: Arc<dyn RemovalExchangePort>,
-    /// Restricted entry used by a removed instance to submit historical
-    /// intents to current members.
-    pub late_submission: Arc<dyn RemovalLateSubmissionPort>,
-    /// Restricted entry used to notify a removed target device.
-    pub notice: Arc<dyn RemovalNoticePort>,
-    pub notice_verification: Arc<dyn RemovalNoticeVerificationPort>,
-    /// Restricted recovery handoff transport: seals every message with the
-    /// application-layer AEAD bound to the handoff facts.
-    pub recovery_transport: Arc<dyn uc_core::membership::RecoveryTransportPort>,
+    /// The sole authenticated peer channel for bounded member-history
+    /// reconciliation.
+    pub membership_history_exchange: Arc<dyn MembershipHistoryExchangePort>,
+    /// Positive-only legacy endpoint probe. It is used only after the current
+    /// member-history endpoint failed to confirm the peer.
+    pub legacy_peer_probe: Arc<dyn LegacyPeerProbePort>,
     /// Member roster persistence: admission commits write the admitted
     /// member facts here in the same save boundary.
     pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
@@ -123,60 +110,19 @@ pub struct WorkspaceConvergenceDeps {
     pub own_device: DeviceId,
 }
 
-/// In-memory requester-side recovery session for one handoff round. The
-/// progress facts themselves are the local change chain (persisted); the
-/// numbers only guard against replays and are recreated after a restart.
-#[derive(Debug, Clone)]
-struct RecoverySession {
-    responder_device: DeviceId,
-    responder_instance: [u8; 32],
-    lineage_fingerprint: [u8; 32],
-    history_key_number: u64,
-    request_number: u64,
-    reply_number: u64,
-    target_digest: [u8; 32],
-    from_epoch: u64,
-    has_more: bool,
-    ack_pending: bool,
-}
-
 /// The unified workspace convergence owner.
 pub struct WorkspaceConvergence {
     deps: WorkspaceConvergenceDeps,
     state_lock: tokio::sync::Mutex<()>,
+    peer_reconciliation_locks: tokio::sync::Mutex<BTreeMap<DeviceId, Arc<tokio::sync::Mutex<()>>>>,
     wake: Arc<tokio::sync::Notify>,
     events: broadcast::Sender<WorkspaceSnapshot>,
-    next_request_number: AtomicU64,
-    recovery_session: tokio::sync::Mutex<Option<RecoverySession>>,
-    request_candidate: AtomicU64,
-    consumed_recovery_requests: tokio::sync::Mutex<std::collections::HashSet<(DeviceId, u64)>>,
 }
 
-/// One network action planned under the state lock, sent outside it.
-enum Outgoing {
-    Exchange {
-        recipient: DeviceId,
-        message: RemovalExchangeMessage,
-    },
-    Late {
-        recipient: DeviceId,
-        intent: SignedRemovalIntent,
-    },
-    Notice {
-        recipient: DeviceId,
-        notice: RemovalNotice,
-    },
-    Recovery {
-        recipient: DeviceId,
-        binding: RecoveryBinding,
-        message: RecoveryChannelMessage,
-    },
-}
-
-/// The bounded reply of one planned network action.
-enum ExchangeOutcome {
-    Exchange(Result<RemovalExchangeMessage, RemovalExchangeError>),
-    Recovery(Result<RecoveryChannelMessage, uc_core::membership::RecoveryTransportError>),
+#[derive(Clone, Copy)]
+enum ReconciliationPeerRole {
+    AuthenticatedSponsor,
+    RuntimePeer,
 }
 
 impl WorkspaceConvergence {
@@ -185,13 +131,52 @@ impl WorkspaceConvergence {
         Arc::new(Self {
             deps,
             state_lock: tokio::sync::Mutex::new(()),
+            peer_reconciliation_locks: tokio::sync::Mutex::new(BTreeMap::new()),
             wake: Arc::new(tokio::sync::Notify::new()),
             events,
-            next_request_number: AtomicU64::new(1),
-            recovery_session: tokio::sync::Mutex::new(None),
-            request_candidate: AtomicU64::new(0),
-            consumed_recovery_requests: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         })
+    }
+
+    fn admission_generation(state: &WorkspaceConvergenceState) -> u64 {
+        state
+            .membership_reconciliation
+            .as_ref()
+            .map_or(0, |history| history.known_event_count() as u64)
+    }
+
+    pub(crate) async fn admission_decision_for_joiner(
+        &self,
+        invitation_generation: u64,
+        joiner_device_id: &DeviceId,
+    ) -> uc_core::membership::MembershipAdmissionDecision {
+        let state = match self.load_state().await {
+            Ok(state) => state,
+            Err(_) => return uc_core::membership::MembershipAdmissionDecision::Unavailable,
+        };
+        let decision = Self::admission_decision_for_state(&state, invitation_generation);
+        if decision != uc_core::membership::MembershipAdmissionDecision::Allowed {
+            return decision;
+        }
+        if state.latest_instance_for_device(joiner_device_id).is_some() {
+            return uc_core::membership::MembershipAdmissionDecision::Unavailable;
+        }
+        uc_core::membership::MembershipAdmissionDecision::Allowed
+    }
+
+    fn admission_decision_for_state(
+        state: &WorkspaceConvergenceState,
+        invitation_generation: u64,
+    ) -> uc_core::membership::MembershipAdmissionDecision {
+        if state.phase == WorkspacePhase::RecoveryRequired {
+            return uc_core::membership::MembershipAdmissionDecision::RecoveryRequired;
+        }
+        if state.removed {
+            return uc_core::membership::MembershipAdmissionDecision::Unavailable;
+        }
+        if invitation_generation < Self::admission_generation(state) {
+            return uc_core::membership::MembershipAdmissionDecision::SupersededInvitation;
+        }
+        uc_core::membership::MembershipAdmissionDecision::Allowed
     }
 
     pub fn wake_handle(&self) -> Arc<tokio::sync::Notify> {
@@ -220,10 +205,6 @@ impl WorkspaceConvergence {
         if state.space_lineage.is_empty() {
             state.space_lineage = lineage;
         }
-        if state.ensure_waiting_members_are_resolvable(self.deps.clock.now_ms()) {
-            self.persist(&state).await?;
-            self.publish(&state);
-        }
         Ok(state)
     }
 
@@ -248,7 +229,12 @@ impl WorkspaceConvergence {
         if state.removed {
             return true;
         }
-        state.is_device_removed(device_id)
+        state.is_device_removed(device_id) || !state.allows_normal_exchange(device_id)
+    }
+
+    /// Whether the local member instance has observed its own removal.
+    pub async fn own_instance_removed(&self) -> bool {
+        self.load_state().await.map_or(true, |state| state.removed)
     }
 
     /// Load the current workspace snapshot without changing any state.
@@ -257,153 +243,811 @@ impl WorkspaceConvergence {
         Ok(state.snapshot())
     }
 
-    /// Submit a member removal: create and verify the removal intent, merge
-    /// it into the validated intent set, form the next continuous workspace
-    /// change, and save intent + change + local restriction in one commit.
+    /// Receive one bounded membership-history message from an already
+    /// authenticated member connection. This owner persists the verified
+    /// result before returning an acknowledgement, so callers never compose
+    /// history application with a separate persistence step.
+    pub async fn handle_membership_history(
+        &self,
+        source_device_id: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, WorkspaceConvergenceError> {
+        let _guard = self.state_lock.lock().await;
+        let now_ms = self.deps.clock.now_ms();
+        let mut state = self.load_state().await?;
+        if matches!(
+            state.peer_history_relationships.get(source_device_id),
+            Some(MembershipHistoryRelationship::Diverged)
+        ) && matches!(
+            message,
+            MembershipHistoryMessage::Hello(_)
+                | MembershipHistoryMessage::EventsRequest(_)
+                | MembershipHistoryMessage::EventsResponse(_)
+        ) {
+            return Ok(MembershipHistoryMessage::Ack(
+                MembershipHistoryAck::Diverged,
+            ));
+        }
+        let response = match message {
+            MembershipHistoryMessage::EventsResponse(response) => {
+                self.receive_membership_history_events(
+                    &mut state,
+                    source_device_id,
+                    response,
+                    now_ms,
+                )
+                .await?
+            }
+            MembershipHistoryMessage::EventsRequest(request) => {
+                self.respond_to_membership_history_request(&state, request)
+            }
+            MembershipHistoryMessage::Hello(hello) => {
+                self.respond_to_membership_history_hello(
+                    &mut state,
+                    source_device_id,
+                    hello,
+                    now_ms,
+                )
+                .await?
+            }
+            MembershipHistoryMessage::Decision(decision) => {
+                self.receive_membership_history_decision(
+                    &mut state,
+                    source_device_id,
+                    decision,
+                    now_ms,
+                )
+                .await?
+            }
+            MembershipHistoryMessage::Ack(ack) => MembershipHistoryMessage::Ack(ack),
+        };
+        Ok(response)
+    }
+
+    /// Start one bounded reconciliation exchange after a peer becomes
+    /// reachable. The caller supplies only the authenticated peer identity;
+    /// this owner builds every protocol message and persists every reply.
+    pub async fn reconcile_membership_history_with_peer(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        let peer_lock = {
+            let mut locks = self.peer_reconciliation_locks.lock().await;
+            Arc::clone(
+                locks
+                    .entry(peer.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let _peer_guard = peer_lock.lock().await;
+        match self
+            .reconcile_membership_history(peer, ReconciliationPeerRole::RuntimePeer)
+            .await
+        {
+            Ok(()) => {
+                self.clear_upgrade_required_after_current_confirmation(peer)
+                    .await?;
+                Ok(())
+            }
+            // A legacy probe is only version evidence when the current 1.1
+            // endpoint could not be reached. A current endpoint rejection
+            // instead means the authenticated exchange could not proceed and
+            // must never be presented as an upgrade requirement.
+            Err(current_error @ WorkspaceConvergenceError::Unavailable) => {
+                match self.deps.legacy_peer_probe.probe_legacy_peer(peer).await {
+                    Ok(()) => self.mark_peer_upgrade_required(peer).await,
+                    Err(_) => Err(current_error),
+                }
+            }
+            Err(current_error) => Err(current_error),
+        }
+    }
+
+    async fn mark_peer_upgrade_required(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        let _guard = self.state_lock.lock().await;
+        let now_ms = self.deps.clock.now_ms();
+        let mut state = self.load_state().await?;
+        self.update_peer_history_relationship(
+            &mut state,
+            peer.clone(),
+            MembershipHistoryRelationship::UpgradeRequired,
+            now_ms,
+        )?;
+        self.persist(&state).await?;
+        self.publish(&state);
+        self.notify();
+        Ok(())
+    }
+
+    async fn clear_upgrade_required_after_current_confirmation(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        let _guard = self.state_lock.lock().await;
+        let now_ms = self.deps.clock.now_ms();
+        let mut state = self.load_state().await?;
+        if state.peer_history_relationships.get(peer)
+            == Some(&MembershipHistoryRelationship::UpgradeRequired)
+        {
+            self.update_peer_history_relationship(
+                &mut state,
+                peer.clone(),
+                MembershipHistoryRelationship::Consistent,
+                now_ms,
+            )?;
+            self.persist(&state).await?;
+            self.publish(&state);
+            self.notify();
+        }
+        Ok(())
+    }
+
+    async fn reconcile_membership_history_with_sponsor(
+        &self,
+        sponsor: &DeviceId,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        self.reconcile_membership_history(sponsor, ReconciliationPeerRole::AuthenticatedSponsor)
+            .await
+    }
+
+    async fn reconcile_membership_history(
+        &self,
+        peer: &DeviceId,
+        peer_role: ReconciliationPeerRole,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        let initial = {
+            let _guard = self.state_lock.lock().await;
+            let state = self.load_state().await?;
+            if state.removed
+                || matches!(
+                    state.peer_history_relationships.get(peer),
+                    Some(
+                        MembershipHistoryRelationship::PendingRemovalDecision
+                            | MembershipHistoryRelationship::Diverged
+                            | MembershipHistoryRelationship::Invalid
+                    )
+                )
+            {
+                return Ok(());
+            }
+            let Some(history) = state.membership_reconciliation.as_ref() else {
+                return Err(WorkspaceConvergenceError::Unavailable);
+            };
+            let Some(member_instance_id) = state.own_instance else {
+                return Err(WorkspaceConvergenceError::Unavailable);
+            };
+            if matches!(peer_role, ReconciliationPeerRole::RuntimePeer)
+                && state
+                    .peer_history_relationships
+                    .get(peer)
+                    .is_none_or(|relationship| {
+                        *relationship == MembershipHistoryRelationship::Unknown
+                    })
+            {
+                MembershipHistoryMessage::EventsResponse(MembershipEventsResponse {
+                    lineage_id: state.space_lineage.clone(),
+                    after_event_id: None,
+                    events: history.events_after(
+                        None,
+                        uc_core::membership::MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE,
+                    ),
+                })
+            } else {
+                let admission = self.local_admission_facts(Some(member_instance_id)).await?;
+                MembershipHistoryMessage::Hello(MembershipHistoryHello {
+                    lineage_id: state.space_lineage.clone(),
+                    member_instance_id,
+                    admission,
+                    known_head: history.known_head(),
+                    applied_head: history.applied_head(),
+                    applied_members_digest: history.applied_members_digest(),
+                })
+            }
+        };
+
+        let mut outgoing = initial;
+        for _ in 0..3 {
+            let reply = self
+                .deps
+                .membership_history_exchange
+                .exchange_membership_history(peer, outgoing)
+                .await
+                .map_err(|error| match error {
+                    MembershipHistoryExchangeError::Offline
+                    | MembershipHistoryExchangeError::Transport => {
+                        WorkspaceConvergenceError::Unavailable
+                    }
+                    MembershipHistoryExchangeError::Rejected => {
+                        WorkspaceConvergenceError::Inconsistent(
+                            "membership history exchange rejected".to_owned(),
+                        )
+                    }
+                })?;
+            if let MembershipHistoryMessage::Ack(ack) = reply {
+                tracing::debug!(?ack, "membership history exchange completed");
+                return Ok(());
+            }
+            outgoing = self.handle_membership_history(peer, reply).await?;
+            if let MembershipHistoryMessage::Ack(ack) = outgoing {
+                tracing::debug!(?ack, "membership history exchange completed locally");
+                return Ok(());
+            }
+        }
+        Err(WorkspaceConvergenceError::Inconsistent(
+            "membership history exchange exceeded its round limit".to_owned(),
+        ))
+    }
+
+    /// Persist the local user's decision for one pending remote removal.
+    /// The only caller-controlled facts are the opaque pending identifier and
+    /// accept/reject choice; this owner derives and signs every other field.
+    pub async fn decide_membership_removal(
+        &self,
+        removal_event_id: MembershipEventId,
+        decision: RemovalDecision,
+    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+        let (snapshot, recipients, signed_decision) = {
+            let _guard = self.state_lock.lock().await;
+            let now_ms = self.deps.clock.now_ms();
+            let mut state = self.load_state().await?;
+            let own_member_instance_id = state
+                .own_instance
+                .ok_or(WorkspaceConvergenceError::NotAMember)?;
+            let history = state
+                .membership_reconciliation
+                .as_ref()
+                .ok_or(WorkspaceConvergenceError::NotAMember)?;
+            if history.pending_removal_decision() != Some(removal_event_id) {
+                return Err(WorkspaceConvergenceError::Inconsistent(
+                    "membership removal is no longer pending".to_owned(),
+                ));
+            }
+            let removal =
+                history
+                    .event(removal_event_id)
+                    .ok_or(WorkspaceConvergenceError::Inconsistent(
+                        "membership removal is unknown".to_owned(),
+                    ))?;
+            let removal_author_device_id = history
+                .device_for_member_before(removal_event_id, &removal.author_member_instance_id)
+                .ok_or(WorkspaceConvergenceError::Inconsistent(
+                    "membership removal author is unknown".to_owned(),
+                ))?;
+            let resulting_members_digest = match decision {
+                RemovalDecision::Accept => removal.resulting_members_digest,
+                RemovalDecision::Reject => history.applied_members_digest().ok_or(
+                    WorkspaceConvergenceError::Inconsistent(
+                        "membership removal has no applied parent".to_owned(),
+                    ),
+                )?,
+            };
+            let mut recipients = history
+                .effective_members()
+                .into_iter()
+                .filter_map(|member| history.device_for_member(&member))
+                .filter(|device| *device != self.deps.own_device)
+                .collect::<Vec<_>>();
+            recipients.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            recipients.dedup();
+            let unsigned = MembershipDecision::new(
+                state.space_lineage.clone(),
+                removal_event_id,
+                own_member_instance_id,
+                decision,
+                history.applied_head(),
+                resulting_members_digest,
+                uuid::Uuid::new_v4().into_bytes(),
+                Vec::new(),
+            );
+            let signature = self
+                .deps
+                .member_signatures
+                .sign_current_member_payload(&unsigned.signing_payload())
+                .await
+                .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+            let signed_decision = MembershipDecision::new(
+                unsigned.lineage_id,
+                unsigned.removal_event_id,
+                unsigned.decided_by_member_instance_id,
+                unsigned.decision,
+                unsigned.observed_applied_head,
+                unsigned.resulting_members_digest,
+                unsigned.decision_nonce,
+                signature,
+            );
+            let applied_events = {
+                let history = state
+                    .membership_reconciliation
+                    .as_mut()
+                    .ok_or(WorkspaceConvergenceError::NotAMember)?;
+                let previous_applied_head = history.applied_head();
+                history
+                    .record_decision(signed_decision.clone())
+                    .map_err(|_| {
+                        WorkspaceConvergenceError::Inconsistent(
+                            "membership removal decision was rejected".to_owned(),
+                        )
+                    })?;
+                history.newly_applied_events_after(previous_applied_head)
+            };
+            if decision == RemovalDecision::Accept {
+                for applied_event in applied_events {
+                    if let MembershipOperation::AddDevice { admission } = &applied_event.operation {
+                        self.save_member_facts(admission, now_ms).await?;
+                    }
+                    if !applied_event.security_update_payload.is_empty() {
+                        self.deps
+                            .security_updates
+                            .apply_group_epoch_update(&applied_event.security_update_payload)
+                            .await?;
+                    }
+                }
+            }
+            let relationship = match decision {
+                RemovalDecision::Accept => MembershipHistoryRelationship::Consistent,
+                RemovalDecision::Reject => MembershipHistoryRelationship::Diverged,
+            };
+            self.update_peer_history_relationship(
+                &mut state,
+                removal_author_device_id.clone(),
+                relationship,
+                now_ms,
+            )?;
+            self.persist(&state).await?;
+            self.publish(&state);
+            self.notify();
+            (state.snapshot(), recipients, signed_decision)
+        };
+
+        for recipient in recipients {
+            let _ = self
+                .deps
+                .membership_history_exchange
+                .exchange_membership_history(
+                    &recipient,
+                    MembershipHistoryMessage::Decision(signed_decision.clone()),
+                )
+                .await;
+        }
+        Ok(snapshot)
+    }
+
+    fn respond_to_membership_history_request(
+        &self,
+        state: &WorkspaceConvergenceState,
+        request: MembershipEventsRequest,
+    ) -> MembershipHistoryMessage {
+        if request.validate().is_err() || request.lineage_id != state.space_lineage {
+            return MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid);
+        }
+        let Some(history) = state.membership_reconciliation.as_ref() else {
+            return MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid);
+        };
+        let events = history.events_after(request.after_event_id, usize::from(request.max_events));
+        if events.is_empty() {
+            return MembershipHistoryMessage::Ack(MembershipHistoryAck::Consistent);
+        }
+        MembershipHistoryMessage::EventsResponse(MembershipEventsResponse {
+            lineage_id: state.space_lineage.clone(),
+            after_event_id: request.after_event_id,
+            events,
+        })
+    }
+
+    async fn respond_to_membership_history_hello(
+        &self,
+        state: &mut WorkspaceConvergenceState,
+        source_device_id: &DeviceId,
+        hello: MembershipHistoryHello,
+        now_ms: i64,
+    ) -> Result<MembershipHistoryMessage, WorkspaceConvergenceError> {
+        let lineage_matches = hello.lineage_id == state.space_lineage;
+        let device_matches = hello.admission.device_id == *source_device_id;
+        let instance_matches = hello.admission.member_instance == hello.member_instance_id;
+        let signature_valid = self
+            .deps
+            .member_signatures
+            .verify_member_instance_payload(
+                source_device_id,
+                hello.member_instance_id,
+                &hello.admission.signing_payload(),
+                &hello.admission.identity_signature,
+            )
+            .await
+            .unwrap_or(false);
+        if !lineage_matches || !device_matches || !instance_matches || !signature_valid {
+            tracing::debug!(
+                lineage_matches,
+                device_matches,
+                instance_matches,
+                signature_valid,
+                "membership history hello was invalid"
+            );
+            return Ok(MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid));
+        }
+        let upgrade_requirement_cleared = state.peer_history_relationships.get(source_device_id)
+            == Some(&MembershipHistoryRelationship::UpgradeRequired);
+        if upgrade_requirement_cleared {
+            self.update_peer_history_relationship(
+                state,
+                source_device_id.clone(),
+                MembershipHistoryRelationship::Consistent,
+                now_ms,
+            )?;
+        }
+        let Some(history) = state.membership_reconciliation.as_ref() else {
+            return Ok(MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid));
+        };
+        if history.known_event_count() > 0
+            && !history.has_admitted_device(source_device_id)
+            && state.own_instance.is_some()
+        {
+            let security_state = self.deps.security_updates.current_state().await?;
+            let mut digest = sha2::Sha256::new();
+            digest.update(b"uniclipboard-membership-security/v1\0");
+            digest.update(security_state.space_id.as_ref().as_bytes());
+            digest.update(security_state.group_epoch.to_be_bytes());
+            self.record_local_admission_history(
+                state,
+                &hello.admission,
+                digest.finalize().into(),
+                Vec::new(),
+            )
+            .await?;
+            self.save_member_facts(&hello.admission, now_ms).await?;
+            self.persist(state).await?;
+        } else if upgrade_requirement_cleared {
+            self.persist(state).await?;
+        }
+        if upgrade_requirement_cleared {
+            self.publish(state);
+            self.notify();
+        }
+        let history = state
+            .membership_reconciliation
+            .as_ref()
+            .ok_or(WorkspaceConvergenceError::NotAMember)?;
+        if hello.known_head == history.known_head() && hello.applied_head == history.applied_head()
+        {
+            return Ok(MembershipHistoryMessage::Ack(
+                MembershipHistoryAck::Consistent,
+            ));
+        }
+        let events = history.events_after(
+            hello.known_head,
+            uc_core::membership::MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE,
+        );
+        if events.is_empty() {
+            return Ok(MembershipHistoryMessage::EventsRequest(
+                MembershipEventsRequest {
+                    lineage_id: state.space_lineage.clone(),
+                    after_event_id: history.known_head(),
+                    max_events: uc_core::membership::MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE as u16,
+                },
+            ));
+        }
+        Ok(MembershipHistoryMessage::EventsResponse(
+            MembershipEventsResponse {
+                lineage_id: state.space_lineage.clone(),
+                after_event_id: hello.known_head,
+                events,
+            },
+        ))
+    }
+
+    async fn receive_membership_history_events(
+        &self,
+        state: &mut WorkspaceConvergenceState,
+        source_device_id: &DeviceId,
+        response: MembershipEventsResponse,
+        now_ms: i64,
+    ) -> Result<MembershipHistoryMessage, WorkspaceConvergenceError> {
+        if response.validate().is_err() || response.lineage_id != state.space_lineage {
+            self.update_peer_history_relationship(
+                state,
+                source_device_id.clone(),
+                MembershipHistoryRelationship::Invalid,
+                now_ms,
+            )?;
+            self.persist(state).await?;
+            self.publish(state);
+            return Ok(MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid));
+        }
+
+        let mut outcome = MembershipReconciliationOutcome::UpdatesApplied;
+        for event in response.events {
+            if !self
+                .verify_membership_history_event(state, source_device_id, &event)
+                .await?
+            {
+                tracing::debug!(
+                    parent_depth = event.parent_depth,
+                    "membership history event signature was invalid"
+                );
+                self.update_peer_history_relationship(
+                    state,
+                    source_device_id.clone(),
+                    MembershipHistoryRelationship::Invalid,
+                    now_ms,
+                )?;
+                self.persist(state).await?;
+                self.publish(state);
+                return Ok(MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid));
+            }
+            let applied_events = {
+                let Some(history) = state.membership_reconciliation.as_mut() else {
+                    return Err(WorkspaceConvergenceError::NotAMember);
+                };
+                let previous_applied_head = history.applied_head();
+                outcome = match history.receive_verified(event) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        tracing::debug!(
+                            ?error,
+                            "membership history event failed structural validation"
+                        );
+                        self.update_peer_history_relationship(
+                            state,
+                            source_device_id.clone(),
+                            MembershipHistoryRelationship::Invalid,
+                            now_ms,
+                        )?;
+                        self.persist(state).await?;
+                        self.publish(state);
+                        return Ok(MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid));
+                    }
+                };
+                history.newly_applied_events_after(previous_applied_head)
+            };
+            for applied_event in applied_events {
+                if let MembershipOperation::AddDevice { admission } = &applied_event.operation {
+                    self.save_member_facts(admission, now_ms).await?;
+                }
+                if !applied_event.security_update_payload.is_empty() {
+                    self.deps
+                        .security_updates
+                        .apply_group_epoch_update(&applied_event.security_update_payload)
+                        .await?;
+                }
+            }
+            if matches!(outcome, MembershipReconciliationOutcome::Diverged) {
+                break;
+            }
+        }
+
+        let (relationship, ack) = match outcome {
+            MembershipReconciliationOutcome::UpdatesApplied => (
+                MembershipHistoryRelationship::Consistent,
+                MembershipHistoryAck::UpdatesApplied,
+            ),
+            MembershipReconciliationOutcome::RemovalDecisionRequired { removal_event_id } => (
+                MembershipHistoryRelationship::PendingRemovalDecision,
+                MembershipHistoryAck::RemovalDecisionRequired { removal_event_id },
+            ),
+            MembershipReconciliationOutcome::RemovalAccepted { removal_event_id } => (
+                MembershipHistoryRelationship::Consistent,
+                MembershipHistoryAck::RemovalAccepted { removal_event_id },
+            ),
+            MembershipReconciliationOutcome::RemovalRejected { removal_event_id } => (
+                MembershipHistoryRelationship::Diverged,
+                MembershipHistoryAck::RemovalRejected { removal_event_id },
+            ),
+            MembershipReconciliationOutcome::Diverged => (
+                MembershipHistoryRelationship::Diverged,
+                MembershipHistoryAck::Diverged,
+            ),
+        };
+        self.update_peer_history_relationship(
+            state,
+            source_device_id.clone(),
+            relationship,
+            now_ms,
+        )?;
+        self.persist(state).await?;
+        self.publish(state);
+        Ok(MembershipHistoryMessage::Ack(ack))
+    }
+
+    async fn receive_membership_history_decision(
+        &self,
+        state: &mut WorkspaceConvergenceState,
+        source_device_id: &DeviceId,
+        decision: MembershipDecision,
+        now_ms: i64,
+    ) -> Result<MembershipHistoryMessage, WorkspaceConvergenceError> {
+        let Some(history) = state.membership_reconciliation.as_ref() else {
+            return Ok(MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid));
+        };
+        let valid_binding = decision.lineage_id == state.space_lineage
+            && history.event(decision.removal_event_id).is_some()
+            && history.device_for_member_before(
+                decision.removal_event_id,
+                &decision.decided_by_member_instance_id,
+            ) == Some(source_device_id.clone());
+        let valid_signature = if valid_binding {
+            self.deps
+                .member_signatures
+                .verify_member_instance_payload(
+                    source_device_id,
+                    decision.decided_by_member_instance_id,
+                    &decision.signing_payload(),
+                    &decision.signature,
+                )
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !valid_signature {
+            self.update_peer_history_relationship(
+                state,
+                source_device_id.clone(),
+                MembershipHistoryRelationship::Invalid,
+                now_ms,
+            )?;
+            self.persist(state).await?;
+            self.publish(state);
+            return Ok(MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid));
+        }
+        let local_decision = state
+            .membership_reconciliation
+            .as_ref()
+            .and_then(|history| {
+                state
+                    .own_instance
+                    .and_then(|own| history.decision_for(decision.removal_event_id, own))
+            })
+            .map(|decision| decision.decision);
+        let outcome = state
+            .membership_reconciliation
+            .as_mut()
+            .ok_or(WorkspaceConvergenceError::NotAMember)?
+            .record_peer_decision(decision.clone());
+        let (relationship, ack) = match outcome {
+            Ok(MembershipReconciliationOutcome::RemovalAccepted { removal_event_id }) => (
+                if local_decision.is_none_or(|local| local == decision.decision) {
+                    MembershipHistoryRelationship::Consistent
+                } else {
+                    MembershipHistoryRelationship::Diverged
+                },
+                MembershipHistoryAck::RemovalAccepted { removal_event_id },
+            ),
+            Ok(MembershipReconciliationOutcome::RemovalRejected { removal_event_id }) => (
+                if local_decision == Some(decision.decision) {
+                    MembershipHistoryRelationship::Consistent
+                } else {
+                    MembershipHistoryRelationship::Diverged
+                },
+                MembershipHistoryAck::RemovalRejected { removal_event_id },
+            ),
+            Ok(MembershipReconciliationOutcome::Diverged) => (
+                MembershipHistoryRelationship::Diverged,
+                MembershipHistoryAck::Diverged,
+            ),
+            _ => {
+                self.update_peer_history_relationship(
+                    state,
+                    source_device_id.clone(),
+                    MembershipHistoryRelationship::Invalid,
+                    now_ms,
+                )?;
+                self.persist(state).await?;
+                self.publish(state);
+                return Ok(MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid));
+            }
+        };
+        self.update_peer_history_relationship(
+            state,
+            source_device_id.clone(),
+            relationship,
+            now_ms,
+        )?;
+        self.persist(state).await?;
+        self.publish(state);
+        Ok(MembershipHistoryMessage::Ack(ack))
+    }
+
+    async fn verify_membership_history_event(
+        &self,
+        state: &WorkspaceConvergenceState,
+        _source_device_id: &DeviceId,
+        event: &MembershipEvent,
+    ) -> Result<bool, WorkspaceConvergenceError> {
+        let Some(history) = state.membership_reconciliation.as_ref() else {
+            return Ok(false);
+        };
+        let author_device = match event.parent_event_id {
+            Some(_) => history.device_for_member(&event.author_member_instance_id),
+            None => match &event.operation {
+                MembershipOperation::AddDevice { admission }
+                    if admission.member_instance == event.author_member_instance_id =>
+                {
+                    Some(admission.device_id.clone())
+                }
+                _ => None,
+            },
+        };
+        let Some(author_device) = author_device else {
+            return Ok(false);
+        };
+        let valid_author = self
+            .deps
+            .member_signatures
+            .verify_member_instance_payload(
+                &author_device,
+                event.author_member_instance_id,
+                &event.signing_payload(),
+                &event.signature,
+            )
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+        Ok(valid_author)
+    }
+
+    fn update_peer_history_relationship(
+        &self,
+        state: &mut WorkspaceConvergenceState,
+        peer: DeviceId,
+        relationship: MembershipHistoryRelationship,
+        now_ms: i64,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        state
+            .apply(
+                WorkspaceConvergenceEvent::PeerHistoryRelationshipUpdated { peer, relationship },
+                now_ms,
+            )
+            .map_err(|_| {
+                WorkspaceConvergenceError::Inconsistent("history relationship rejected".to_owned())
+            })?;
+        Ok(())
+    }
+
+    /// Submit a local member removal by appending one signed history event.
+    /// Other devices receive the event through history reconciliation and
+    /// decide for themselves; this path never emits an auto-applied intent.
     pub async fn submit_removal(
         &self,
         target: &DeviceId,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
         let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
         if state.removed {
             return Err(WorkspaceConvergenceError::OwnInstanceRemoved);
         }
-        let view = self.deps.recovery.current_view().await?;
-        // The initiator is the local current instance recorded by the last
-        // admission; the security view can carry stale instances of this
-        // device from earlier admissions.
-        let own = match state.own_instance {
-            Some(own) => own,
-            None => self
-                .deps
-                .recovery
-                .own_instance()
-                .await?
-                .ok_or(WorkspaceConvergenceError::NotAMember)?,
-        };
-        let target_member = view
-            .members
-            .iter()
-            .find(|member| member.device_id == *target)
+        let own = state
+            .own_instance
+            .ok_or(WorkspaceConvergenceError::NotAMember)?;
+        let target_member = state
+            .membership_reconciliation
+            .as_ref()
+            .ok_or(WorkspaceConvergenceError::NotAMember)?
+            .effective_members()
+            .into_iter()
+            .find(|member| {
+                state
+                    .membership_reconciliation
+                    .as_ref()
+                    .and_then(|history| history.device_for_member(member))
+                    .as_ref()
+                    == Some(target)
+            })
             .ok_or(WorkspaceConvergenceError::UnknownTarget)?;
-        if target_member.instance == own {
+        if target_member == own {
             return Err(WorkspaceConvergenceError::SelfTarget);
         }
-        if state.effective_members().is_empty() {
-            return Err(WorkspaceConvergenceError::RecoveryRequired);
-        }
-
-        let mut view_members = view
-            .members
-            .iter()
-            .map(|member| member.instance)
-            .collect::<Vec<_>>();
-        view_members.sort_unstable();
-        view_members.dedup();
-        let content = RemovalIntentContent {
-            space_lineage: state.space_lineage.clone(),
-            view_epoch: view.epoch,
-            view_members,
-            initiator: own,
-            target: target_member.instance,
-        };
-        content.validate().map_err(|_| {
-            WorkspaceConvergenceError::Inconsistent("invalid removal intent content".to_owned())
-        })?;
-        let payload = content.canonical_bytes();
-        let signature = self
-            .deps
-            .member_signatures
-            .sign_current_member_payload(&payload)
-            .await
-            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-        let intent = SignedRemovalIntent::new(content, signature, view.causal_proof.clone());
-        self.deps.verification.verify_intent(&intent).await?;
-
-        self.accept_intent(&mut state, intent, now_ms).await?;
-        Ok(state.snapshot())
-    }
-
-    /// Verify a validated intent, merge it into the intent set, and form the
-    /// next continuous removal change in one save commit. Idempotent for a
-    /// known intent. Shared by local submission, the ordinary-member-channel
-    /// endpoint, and the restricted late-submission entry.
-    async fn accept_intent(
-        &self,
-        state: &mut WorkspaceConvergenceState,
-        intent: SignedRemovalIntent,
-        now_ms: i64,
-    ) -> Result<uc_core::membership::RemovalIntentId, WorkspaceConvergenceError> {
-        if intent.content.space_lineage != state.space_lineage {
-            warn!(
-                intent_id = %intent.intent_id,
-                target_instance = %intent.content.target,
-                reason = "space_mismatch",
-                "workspace removal intent rejected"
-            );
-            return Err(WorkspaceConvergenceError::Inconsistent(
-                "intent space mismatch".to_owned(),
-            ));
-        }
-        self.deps
-            .verification
-            .verify_intent(&intent)
-            .await
-            .map_err(|error| {
-                warn!(
-                    intent_id = %intent.intent_id,
-                    target_instance = %intent.content.target,
-                    reason = "verification_failed",
-                    "workspace removal intent rejected"
-                );
-                WorkspaceConvergenceError::IntentVerification(error)
-            })?;
-        let to_remove = state
-            .record_removal_intent(&intent, now_ms)
-            .map_err(|error| {
-                warn!(
-                    intent_id = %intent.intent_id,
-                    target_instance = %intent.content.target,
-                    reason = ?error,
-                    "workspace removal intent rejected"
-                );
-                WorkspaceConvergenceError::Inconsistent("intent rejected".to_owned())
-            })?;
-        if to_remove.is_empty() {
-            // The intent did not change the effective membership: its exact
-            // target is no longer current, or the local instance was not
-            // affected. The intent stays recorded as historical material.
-            debug!(
-                intent_id = %intent.intent_id,
-                target_instance = %intent.content.target,
-                own_instance = %state
-                    .own_instance
-                    .map_or_else(|| "none".to_owned(), |own| own.to_string()),
-                epoch = state.current_epoch(),
-                outcome = "recorded_without_membership_change",
-                "workspace removal intent recorded without membership change"
-            );
-            self.persist(state).await?;
-            self.notify();
-            return Ok(intent.intent_id);
-        }
-        let removed_instances = to_remove.iter().copied().collect::<Vec<_>>();
-        let change = self.build_removal_change(state, &removed_instances, now_ms)?;
-        self.apply_and_publish_change(state, change, now_ms).await?;
+        let security_state_digest = state
+            .current_digest()
+            .map(|digest| *digest.as_bytes())
+            .unwrap_or([0; 32]);
+        self.record_local_removal_history(&mut state, target_member, security_state_digest)
+            .await?;
+        self.persist(&state).await?;
+        self.publish(&state);
         self.notify();
-        info!(
-            intent_id = %intent.intent_id,
-            target_instance = %intent.content.target,
-            own_instance = %state
-                .own_instance
-                .map_or_else(|| "none".to_owned(), |own| own.to_string()),
-            epoch = state.current_epoch(),
-            removed_count = removed_instances.len(),
-            "workspace removal change recorded"
-        );
-        Ok(intent.intent_id)
+        Ok(state.snapshot())
     }
 
     /// Build the locally signed facts that a joiner returns after its group
@@ -429,10 +1073,9 @@ impl WorkspaceConvergence {
         let member_instance = match member_instance {
             Some(instance) => instance,
             None => self
-                .deps
-                .recovery
-                .own_instance()
+                .load_state()
                 .await?
+                .own_instance
                 .ok_or(WorkspaceConvergenceError::NotAMember)?,
         };
         let mut facts = uc_core::membership::AdmissionChangeFacts {
@@ -509,7 +1152,7 @@ impl WorkspaceConvergence {
         session: &uc_core::ports::pairing::PairingSessionId,
         joiner: uc_core::membership::AdmissionChangeFacts,
         security_update_payload: Vec<u8>,
-    ) -> Result<uc_core::membership::AdmissionCommittedFacts, WorkspaceConvergenceError> {
+    ) -> Result<uc_core::membership::AdmissionSavedFacts, WorkspaceConvergenceError> {
         let _guard = self.state_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
@@ -522,15 +1165,22 @@ impl WorkspaceConvergence {
                     "joiner readiness does not match the in-flight admission".to_owned(),
                 ));
             }
-            if record.invitation_generation < state.removal_intents.len() as u64 {
+            if record.invitation_generation < Self::admission_generation(&state) {
                 // The admission generation advanced after the invitation was
                 // bound; an old invitation cannot recover its old authority.
-                return Err(WorkspaceConvergenceError::Inconsistent(
-                    "admission generation advanced".to_owned(),
-                ));
+                return Err(WorkspaceConvergenceError::AdmissionGenerationAdvanced);
             }
         }
-        let own = self.local_admission_facts(None).await?;
+        let own_instance = match state.own_instance {
+            Some(instance) => instance,
+            None => self
+                .deps
+                .member_signatures
+                .current_member_instance(&self.deps.own_device)
+                .await
+                .map_err(|_| WorkspaceConvergenceError::Unavailable)?,
+        };
+        let own = self.local_admission_facts(Some(own_instance)).await?;
         let mut additions = Vec::new();
         if !state.effective_members().contains(&own.member_instance) {
             additions.push(own.clone());
@@ -543,30 +1193,8 @@ impl WorkspaceConvergence {
                 "admission unchanged".to_owned(),
             ));
         }
-        // The roster persistence failures abort the commit before any
-        // workspace change is persisted, keeping the save boundary intact.
-        self.save_member_facts(&joiner, now_ms).await?;
-        for facts in &additions {
-            let payload = if facts.member_instance == joiner.member_instance {
-                security_update_payload.clone()
-            } else {
-                Vec::new()
-            };
-            let change = self.build_admission_change(&state, facts.clone(), payload, now_ms);
-            let (outcome, effect) = state
-                .apply(WorkspaceConvergenceEvent::CommittedChange(change), now_ms)
-                .map_err(|_| {
-                    WorkspaceConvergenceError::Inconsistent("admission rejected".to_owned())
-                })?;
-            if !matches!(outcome, WorkspaceMergeOutcome::Updated) || !effect.persist {
-                return Err(WorkspaceConvergenceError::Inconsistent(
-                    "admission unchanged".to_owned(),
-                ));
-            }
-        }
-        // The sponsor's own member instance is recorded with the same
-        // commit; without it the handoff drive and the completion
-        // confirmation cannot identify the local member.
+        // The local instance owns the admission event signatures. Establish
+        // its durable history before the first event is appended.
         if state.own_instance.is_none() {
             state
                 .apply(
@@ -579,27 +1207,21 @@ impl WorkspaceConvergence {
                     WorkspaceConvergenceError::Inconsistent("own instance rejected".to_owned())
                 })?;
         }
-        // Pending handoff facts for the joiner: it must receive the whole
-        // continuous chain from its own saved state (no change yet).
-        let Some(digest) = state.current_digest() else {
-            return Err(WorkspaceConvergenceError::Inconsistent(
-                "admission produced no digest".to_owned(),
-            ));
-        };
-        let (outcome, effect) = state
-            .apply(
-                WorkspaceConvergenceEvent::PendingHandoffCreated {
-                    recipient: joiner.member_instance,
-                    recipient_device: joiner.device_id,
-                    confirmed_epoch: 0,
-                    target_digest: *digest.as_bytes(),
-                    has_more: false,
-                },
-                now_ms,
+        // The roster persistence failures abort the commit before any
+        // workspace change is persisted, keeping the save boundary intact.
+        self.save_member_facts(&joiner, now_ms).await?;
+        let security_state_digest = sha2::Sha256::digest(&security_update_payload).into();
+        for facts in &additions {
+            let event_security_update = (facts.member_instance == joiner.member_instance)
+                .then_some(security_update_payload.clone())
+                .unwrap_or_default();
+            self.record_local_admission_history(
+                &mut state,
+                facts,
+                security_state_digest,
+                event_security_update,
             )
-            .map_err(|_| WorkspaceConvergenceError::InvalidHandoff)?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state).await?;
+            .await?;
         }
         let _ = state.apply(
             WorkspaceConvergenceEvent::AdmissionCleared {
@@ -611,38 +1233,58 @@ impl WorkspaceConvergence {
         self.publish(&state);
         self.notify();
         info!(joiner_device_id = %joiner.device_id.as_str(), "workspace admission change recorded");
-        Ok(uc_core::membership::AdmissionCommittedFacts {
-            change_digest: *digest.as_bytes(),
-            change_count: state.changes.len() as u64,
+        let history = state
+            .membership_reconciliation
+            .as_ref()
+            .ok_or(WorkspaceConvergenceError::NotAMember)?;
+        let history_digest = history.applied_members_digest().ok_or_else(|| {
+            WorkspaceConvergenceError::Inconsistent(
+                "admission produced no history digest".to_owned(),
+            )
+        })?;
+        Ok(uc_core::membership::AdmissionSavedFacts {
+            history_digest,
+            history_event_count: history.known_event_count() as u64,
             sponsor_facts: own,
         })
     }
 
-    /// The joiner durably records the sponsor's admission-saved
-    /// confirmation. Until then it stays locally ready and must not take
-    /// part in ordinary content exchange. The sponsor's member facts carried
-    /// by the confirmation are persisted in the same save boundary.
-    pub async fn record_admission_committed(
+    /// Complete the joiner's admission only after it has saved the sponsor's
+    /// member facts and recovered the exact history progress the sponsor
+    /// committed. The sponsor is already authenticated by the pairing
+    /// channel, so it may relay earlier members' individually signed events;
+    /// every event is still verified against its actual author before it is
+    /// persisted.
+    pub async fn record_admission_saved(
         &self,
-        confirmation: uc_core::membership::AdmissionCommittedFacts,
+        confirmation: uc_core::membership::AdmissionSavedFacts,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
         self.save_member_facts(&confirmation.sponsor_facts, now_ms)
             .await?;
-        let (outcome, effect) = state
-            .apply(
-                WorkspaceConvergenceEvent::LocalAdmissionCommitted(confirmation),
-                now_ms,
-            )
-            .map_err(|_| {
-                WorkspaceConvergenceError::Inconsistent("admission committed rejected".to_owned())
-            })?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state).await?;
+        self.reconcile_membership_history_with_sponsor(&confirmation.sponsor_facts.device_id)
+            .await?;
+
+        let _guard = self.state_lock.lock().await;
+        let state = self.load_state().await?;
+        let history = state
+            .membership_reconciliation
+            .as_ref()
+            .ok_or(WorkspaceConvergenceError::NotAMember)?;
+        if history.known_event_count() as u64 != confirmation.history_event_count
+            || history.applied_members_digest() != Some(confirmation.history_digest)
+        {
+            tracing::debug!(
+                local_history_event_count = history.known_event_count(),
+                sponsor_history_event_count = confirmation.history_event_count,
+                digest_matches =
+                    history.applied_members_digest() == Some(confirmation.history_digest),
+                "sponsor admission history did not match the saved confirmation"
+            );
+            return Err(WorkspaceConvergenceError::Inconsistent(
+                "sponsor admission history is incomplete or mismatched".to_owned(),
+            ));
         }
-        self.notify();
         Ok(state.snapshot())
     }
 
@@ -696,92 +1338,156 @@ impl WorkspaceConvergence {
         Ok(())
     }
 
-    fn build_admission_change(
-        &self,
-        state: &WorkspaceConvergenceState,
-        facts: uc_core::membership::AdmissionChangeFacts,
-        security_update_payload: Vec<u8>,
-        now_ms: i64,
-    ) -> WorkspaceChange {
-        let previous_epoch = state.current_epoch();
-        let previous_digest = state
-            .changes
-            .last()
-            .map(uc_core::membership::compute_change_digest)
-            .unwrap_or_else(initial_digest);
-        let security_updates = if security_update_payload.is_empty() {
-            Vec::new()
-        } else {
-            use sha2::{Digest, Sha256};
-            vec![uc_core::membership::RelayedSecurityUpdate {
-                previous_epoch,
-                next_epoch: previous_epoch.saturating_add(1),
-                payload: security_update_payload.clone(),
-                digest: Sha256::digest(&security_update_payload).into(),
-            }]
-        };
-        let mut change = WorkspaceChange {
-            space_lineage: state.space_lineage.clone(),
-            kind: WorkspaceChangeKind::Admission,
-            previous_epoch,
-            next_epoch: previous_epoch.saturating_add(1),
-            previous_digest,
-            digest: [0; 32],
-            security_updates,
-            admission: Some(facts),
-            removal: None,
-            created_at_ms: now_ms,
-        };
-        change.digest = uc_core::membership::compute_change_digest(&change);
-        change
-    }
-
-    async fn apply_and_publish_change(
+    async fn record_local_admission_history(
         &self,
         state: &mut WorkspaceConvergenceState,
-        change: WorkspaceChange,
-        now_ms: i64,
+        facts: &uc_core::membership::AdmissionChangeFacts,
+        security_state_digest: [u8; 32],
+        security_update_payload: Vec<u8>,
     ) -> Result<(), WorkspaceConvergenceError> {
-        let (outcome, effect) = state
-            .apply(WorkspaceConvergenceEvent::CommittedChange(change), now_ms)
-            .map_err(|_| WorkspaceConvergenceError::Inconsistent("change rejected".to_owned()))?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(state).await?;
+        use sha2::{Digest, Sha256};
+
+        let own_instance = state
+            .own_instance
+            .ok_or(WorkspaceConvergenceError::NotAMember)?;
+        let (parent_event_id, parent_depth, mut members) = {
+            let history = state.membership_reconciliation.get_or_insert_with(|| {
+                uc_core::membership::MembershipReconciliation::new(
+                    state.space_lineage.clone(),
+                    own_instance,
+                )
+            });
+            let (parent_event_id, parent_depth) = history.next_event_position();
+            (parent_event_id, parent_depth, history.effective_members())
+        };
+        members.insert(facts.member_instance);
+        let mut members_hasher = Sha256::new();
+        members_hasher.update(b"uniclipboard-membership-members/v1\0");
+        members_hasher.update(state.space_lineage.as_bytes());
+        for member in members {
+            members_hasher.update(member.as_bytes());
         }
-        if effect.publish {
-            self.publish(state);
-        }
+        let resulting_members_digest = members_hasher.finalize().into();
+        let admission_bundle_digest = Some(Sha256::digest(facts.signing_payload()).into());
+        let operation_id = uuid::Uuid::new_v4().into_bytes();
+        let unsigned = uc_core::membership::MembershipEvent::new(
+            state.space_lineage.clone(),
+            parent_event_id,
+            parent_depth,
+            operation_id,
+            own_instance,
+            uc_core::membership::MembershipOperation::AddDevice {
+                admission: facts.clone(),
+            },
+            resulting_members_digest,
+            security_state_digest,
+            security_update_payload,
+            admission_bundle_digest,
+            Vec::new(),
+        );
+        let signature = self
+            .deps
+            .member_signatures
+            .sign_current_member_payload(&unsigned.signing_payload())
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+        let event = uc_core::membership::MembershipEvent::new(
+            unsigned.lineage_id,
+            unsigned.parent_event_id,
+            unsigned.parent_depth,
+            unsigned.operation_id,
+            unsigned.author_member_instance_id,
+            unsigned.operation,
+            unsigned.resulting_members_digest,
+            unsigned.security_state_digest,
+            unsigned.security_update_payload,
+            unsigned.admission_bundle_digest,
+            signature,
+        );
+        state
+            .membership_reconciliation
+            .as_mut()
+            .ok_or(WorkspaceConvergenceError::NotAMember)?
+            .receive_verified(event)
+            .map_err(|_| {
+                WorkspaceConvergenceError::Inconsistent("admission history rejected".to_owned())
+            })?;
         Ok(())
     }
 
-    fn build_removal_change(
+    async fn record_local_removal_history(
         &self,
-        state: &WorkspaceConvergenceState,
-        removed_instances: &[uc_core::membership::MemberInstanceId],
-        now_ms: i64,
-    ) -> Result<WorkspaceChange, WorkspaceConvergenceError> {
-        let previous_epoch = state.current_epoch();
-        let previous_digest = state
-            .changes
-            .last()
-            .map(uc_core::membership::compute_change_digest)
-            .unwrap_or_else(initial_digest);
-        let mut change = WorkspaceChange {
-            space_lineage: state.space_lineage.clone(),
-            kind: WorkspaceChangeKind::Removal,
-            previous_epoch,
-            next_epoch: previous_epoch.saturating_add(1),
-            previous_digest,
-            digest: [0; 32],
-            security_updates: Vec::new(),
-            admission: None,
-            removal: Some(uc_core::membership::RemovalChangeFacts {
-                removed_instances: removed_instances.to_vec(),
-            }),
-            created_at_ms: now_ms,
+        state: &mut WorkspaceConvergenceState,
+        removed_member: uc_core::membership::MemberInstanceId,
+        security_state_digest: [u8; 32],
+    ) -> Result<(), WorkspaceConvergenceError> {
+        use sha2::{Digest, Sha256};
+
+        let own_instance = state
+            .own_instance
+            .ok_or(WorkspaceConvergenceError::NotAMember)?;
+        let (parent_event_id, parent_depth, mut members) = {
+            let history = state
+                .membership_reconciliation
+                .as_ref()
+                .ok_or(WorkspaceConvergenceError::NotAMember)?;
+            let (parent_event_id, parent_depth) = history.next_event_position();
+            (parent_event_id, parent_depth, history.effective_members())
         };
-        change.digest = uc_core::membership::compute_change_digest(&change);
-        Ok(change)
+        if !members.remove(&removed_member) {
+            return Err(WorkspaceConvergenceError::UnknownTarget);
+        }
+        let mut members_hasher = Sha256::new();
+        members_hasher.update(b"uniclipboard-membership-members/v1\0");
+        members_hasher.update(state.space_lineage.as_bytes());
+        for member in members {
+            members_hasher.update(member.as_bytes());
+        }
+        let resulting_members_digest = members_hasher.finalize().into();
+        let operation_id = uuid::Uuid::new_v4().into_bytes();
+        let unsigned = uc_core::membership::MembershipEvent::new(
+            state.space_lineage.clone(),
+            parent_event_id,
+            parent_depth,
+            operation_id,
+            own_instance,
+            uc_core::membership::MembershipOperation::RemoveDevice {
+                member: removed_member,
+            },
+            resulting_members_digest,
+            security_state_digest,
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
+        let signature = self
+            .deps
+            .member_signatures
+            .sign_current_member_payload(&unsigned.signing_payload())
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+        let event = uc_core::membership::MembershipEvent::new(
+            unsigned.lineage_id,
+            unsigned.parent_event_id,
+            unsigned.parent_depth,
+            unsigned.operation_id,
+            unsigned.author_member_instance_id,
+            unsigned.operation,
+            unsigned.resulting_members_digest,
+            unsigned.security_state_digest,
+            unsigned.security_update_payload,
+            unsigned.admission_bundle_digest,
+            signature,
+        );
+        state
+            .membership_reconciliation
+            .as_mut()
+            .ok_or(WorkspaceConvergenceError::NotAMember)?
+            .receive_verified(event)
+            .map_err(|_| {
+                WorkspaceConvergenceError::Inconsistent("removal history rejected".to_owned())
+            })?;
+        Ok(())
     }
 
     /// Record the local member instance and its readiness record after a
@@ -822,1659 +1528,166 @@ impl WorkspaceConvergence {
         Ok(state.snapshot())
     }
 
-    /// Mark the current effective instance of a device temporarily
-    /// unreachable. Removed instances are ignored.
-    pub async fn mark_device_unreachable(
+    /// Establish the single current-history starting point after a retained
+    /// pre-1.1 space has completed its shared protection upgrade.
+    pub async fn initialize_upgraded_legacy_space(
         &self,
-        device_id: &DeviceId,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        let Some(instance) = state.latest_instance_for_device(device_id) else {
-            return Ok(state.snapshot());
-        };
-        if !state.effective_members().contains(&instance) {
-            return Ok(state.snapshot());
-        }
-        let (outcome, effect) = state
-            .apply(
-                WorkspaceConvergenceEvent::MemberUnreachable(instance),
-                now_ms,
-            )
-            .map_err(|_| {
-                WorkspaceConvergenceError::Inconsistent("member state rejected".to_owned())
-            })?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state).await?;
-        }
-        if effect.publish {
-            self.publish(&state);
-        }
-        Ok(state.snapshot())
-    }
-
-    /// Mark the current effective instance of a device back online.
-    pub async fn mark_device_reachable(
-        &self,
-        device_id: &DeviceId,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        let Some(instance) = state.latest_instance_for_device(device_id) else {
-            return Ok(state.snapshot());
-        };
-        let (outcome, effect) = state
-            .apply(WorkspaceConvergenceEvent::MemberReachable(instance), now_ms)
-            .map_err(|_| {
-                WorkspaceConvergenceError::Inconsistent("member state rejected".to_owned())
-            })?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state).await?;
-        }
-        if effect.publish {
-            self.publish(&state);
-        }
-        self.notify();
-        Ok(state.snapshot())
-    }
-
-    /// Continuous changes from `from_epoch` (exclusive) up to the current
-    /// target, bounded to `MAX_HANDOFF_BATCH_CHANGES` per batch.
-    pub fn handoff_batch(
-        &self,
-        state: &WorkspaceConvergenceState,
-        from_epoch: u64,
-    ) -> Vec<WorkspaceChange> {
-        state
-            .changes
+        let own_instance = self
+            .deps
+            .member_signatures
+            .current_member_instance(&self.deps.own_device)
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+        let own_facts = self.local_admission_facts(Some(own_instance)).await?;
+        let members = self
+            .deps
+            .member_repo
+            .list()
+            .await
+            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
+        let is_initializer = members
             .iter()
-            .filter(|change| change.next_epoch > from_epoch)
-            .take(MAX_HANDOFF_BATCH_CHANGES)
-            .cloned()
-            .collect()
-    }
+            .map(|member| &member.device_id)
+            .chain(std::iter::once(&self.deps.own_device))
+            .min_by(|left, right| left.as_str().cmp(right.as_str()))
+            == Some(&self.deps.own_device);
+        let security_state = self.deps.security_updates.current_state().await?;
+        let mut digest = sha2::Sha256::new();
+        digest.update(b"uniclipboard-membership-security/v1\0");
+        digest.update(security_state.space_id.as_ref().as_bytes());
+        digest.update(security_state.group_epoch.to_be_bytes());
 
-    /// Whether a handoff batch to `member` must continue after the returned
-    /// batch: the current target digest is not yet included.
-    pub fn has_more_after(
-        &self,
-        state: &WorkspaceConvergenceState,
-        batch: &[WorkspaceChange],
-    ) -> bool {
-        state.changes.last().is_some_and(|last| {
-            batch
-                .last()
-                .is_none_or(|last_batch| last_batch.change_id() != last.change_id())
-        })
-    }
-
-    /// Update handoff progress after a recipient's durable acknowledgement.
-    pub async fn apply_handoff_progress(
-        &self,
-        recipient: uc_core::membership::MemberInstanceId,
-        confirmed_epoch: u64,
-        target_digest: [u8; 32],
-        has_more: bool,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
         let _guard = self.state_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
-        let (outcome, effect) = state
-            .apply(
-                WorkspaceConvergenceEvent::HandoffAdvanced {
-                    recipient,
-                    confirmed_epoch,
-                    target_digest,
-                    has_more,
-                },
-                now_ms,
-            )
-            .map_err(|_| WorkspaceConvergenceError::InvalidHandoff)?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state).await?;
-        }
-        if effect.publish {
-            self.publish(&state);
-        }
-        self.notify();
-        Ok(state.snapshot())
-    }
-
-    /// One reconcile pass: propagate validated intents, notify removed
-    /// targets, submit historical intents when the local instance is
-    /// removed, and save pending handoff records for members that have not
-    /// yet confirmed the current digest. Network exchanges happen outside
-    /// the state lock; responses are applied back inside it.
-    pub async fn reconcile(&self) -> Result<(), WorkspaceConvergenceError> {
-        loop {
-            let outgoing = {
-                let _guard = self.state_lock.lock().await;
-                self.reconcile_plan().await?
-            };
-            if outgoing.is_empty() {
-                return Ok(());
-            }
-            let mut responses = Vec::with_capacity(outgoing.len());
-            for item in outgoing {
-                let outcome = match &item {
-                    Outgoing::Exchange { recipient, message } => ExchangeOutcome::Exchange(
-                        self.deps
-                            .exchange
-                            .exchange(recipient, message.clone())
-                            .await,
-                    ),
-                    Outgoing::Late { recipient, intent } => ExchangeOutcome::Exchange(
-                        self.deps
-                            .late_submission
-                            .submit_late(
-                                recipient,
-                                RemovalLateSubmission::Intent(Box::new(intent.clone())),
-                            )
-                            .await
-                            .map(|_| RemovalExchangeMessage::IntentAck(intent.intent_id))
-                            .map_err(|error| match error {
-                                uc_core::membership::RemovalLateSubmissionTransportError::Transport => {
-                                    RemovalExchangeError::Transport
-                                }
-                                uc_core::membership::RemovalLateSubmissionTransportError::Offline => {
-                                    RemovalExchangeError::Offline
-                                }
-                            }),
-                    ),
-                    Outgoing::Notice { recipient, notice } => ExchangeOutcome::Exchange(
-                        self.deps
-                            .notice
-                            .send_notice(recipient, notice.clone())
-                            .await
-                            .map(|_| RemovalExchangeMessage::IntentAck(notice.intent_id))
-                            .map_err(|error| match error {
-                                uc_core::membership::RemovalNoticeTransportError::Transport => {
-                                    RemovalExchangeError::Transport
-                                }
-                                uc_core::membership::RemovalNoticeTransportError::Offline => {
-                                    RemovalExchangeError::Offline
-                                }
-                            }),
-                    ),
-                    Outgoing::Recovery {
-                        recipient,
-                        binding,
-                        message,
-                    } => ExchangeOutcome::Recovery(
-                        self.deps
-                            .recovery_transport
-                            .exchange_recovery(recipient, binding, message.clone())
-                            .await,
-                    ),
-                };
-                responses.push((item, outcome));
-            }
-            let progressed = {
-                let _guard = self.state_lock.lock().await;
-                self.apply_exchange_responses(responses).await?
-            };
-            if !progressed {
-                return Ok(());
-            }
-        }
-    }
-
-    /// Lock-held decision: what to send this pass, plus pending-handoff
-    /// bookkeeping. No network happens here.
-    async fn reconcile_plan(&self) -> Result<Vec<Outgoing>, WorkspaceConvergenceError> {
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        if state.phase == WorkspacePhase::RecoveryRequired {
-            return Ok(Vec::new());
-        }
-        let own_device = self.deps.device_identity.current_device_id();
-        let mut outgoing = Vec::new();
-
-        // The local member always confirms its own current chain once it
-        // has one; the digest, the chain and the confirmation are the
-        // persisted progress facts of this device.
-        self.confirm_own_if_needed(&mut state, now_ms).await?;
-
-        if state.removed {
-            // The local instance observed its own removal: the only network
-            // action is submitting historical intents through the restricted
-            // late entry. No intent exchange, notice or handoff bookkeeping.
-            for intent in &state.removal_intent_records {
-                let intent_id = intent.intent_id;
-                for member in state.effective_members() {
-                    let Some(device) = state.member_devices.get(&member).cloned() else {
-                        continue;
-                    };
-                    if device == own_device {
-                        continue;
-                    }
-                    if state
-                        .peer_intent_acks
-                        .contains_key(&(device.clone(), intent_id))
-                    {
-                        continue;
-                    }
-                    outgoing.push(Outgoing::Late {
-                        recipient: device,
-                        intent: intent.clone(),
-                    });
-                }
-            }
-            if !outgoing.is_empty() {
-                state.updated_at_ms = now_ms;
-                self.persist(&state).await?;
-            }
-            return Ok(outgoing);
-        }
-
-        // Intent propagation on the ordinary member channel: every validated
-        // intent is sent to every effective member that has not acknowledged
-        // it yet (idempotent, retriable).
-        for intent in &state.removal_intent_records {
-            let intent_id = intent.intent_id;
-            for member in state.effective_members() {
-                let Some(device) = state.member_devices.get(&member).cloned() else {
-                    continue;
-                };
-                if device == own_device {
-                    continue;
-                }
-                if state
-                    .peer_intent_acks
-                    .contains_key(&(device.clone(), intent_id))
-                {
-                    continue;
-                }
-                outgoing.push(Outgoing::Exchange {
-                    recipient: device,
-                    message: RemovalExchangeMessage::Intent(Box::new(intent.clone())),
-                });
-            }
-        }
-
-        // Removal notices: any accepted intent whose target is no longer
-        // effective is notified to the target device (best effort, not a
-        // completion condition).
-        for intent in &state.removal_intent_records {
-            if state.notified_removals.contains(&intent.intent_id) {
-                continue;
-            }
-            if state.effective_members().contains(&intent.content.target) {
-                continue;
-            }
-            let Some(target_device) = state.member_devices.get(&intent.content.target).cloned()
-            else {
-                continue;
-            };
-            if target_device == own_device {
-                continue;
-            }
-            // The notice issuer is the local current instance; the security
-            // view may carry stale instances of this device.
-            let Some(own) = state.own_instance else {
-                continue;
-            };
-            let mut notice = RemovalNotice {
-                space_lineage_fingerprint: RemovalNotice::space_lineage_fingerprint(
-                    &state.space_lineage,
-                ),
-                intent_id: intent.intent_id,
-                target_instance: intent.content.target,
-                target_device_id: target_device.clone(),
-                issuer_instance: own,
-                signature: Vec::new(),
-            };
-            let payload = notice.signing_payload();
-            let signature = self
-                .deps
-                .member_signatures
-                .sign_current_member_payload(&payload)
-                .await
-                .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-            notice.signature = signature;
-            outgoing.push(Outgoing::Notice {
-                recipient: target_device,
-                notice,
-            });
-        }
-
-        // Pending-handoff bookkeeping for members that have not yet
-        // confirmed the current digest, plus the handoff drive: this device
-        // hands over continuous changes to those members over the restricted
-        // recovery channel. Offline recipients keep their records for the
-        // next pass.
-        let digest = match state.current_digest() {
-            Some(digest) => digest,
-            None => {
-                if !outgoing.is_empty() {
-                    state.updated_at_ms = now_ms;
-                    self.persist(&state).await?;
-                }
-                return Ok(outgoing);
-            }
-        };
-        let fingerprint = recovery_lineage_fingerprint(&state.space_lineage);
-        let own_instance = state.own_instance;
-        let confirmed = state.confirmed_members();
-        let mut changed = false;
-        for member in state.effective_members() {
-            if confirmed.contains(&member) {
-                continue;
-            }
-            let Some(device) = state.member_devices.get(&member).cloned() else {
-                continue;
-            };
-            if device == own_device {
-                continue;
-            }
-            let confirmed_epoch = state
-                .pending_handoffs
-                .get(&member)
-                .map_or(0, |record| record.confirmed_epoch);
-            let batch = self.handoff_batch(&state, confirmed_epoch);
-            let has_more = self.has_more_after(&state, &batch);
-            let (outcome, effect) = state
+        if state.own_instance.is_none() {
+            state
                 .apply(
-                    uc_core::membership::WorkspaceConvergenceEvent::PendingHandoffCreated {
-                        recipient: member,
-                        recipient_device: device.clone(),
-                        confirmed_epoch,
-                        target_digest: *digest.as_bytes(),
-                        has_more,
-                    },
+                    WorkspaceConvergenceEvent::LocalAdmissionReady { own_instance },
                     now_ms,
                 )
-                .map_err(|_| WorkspaceConvergenceError::InvalidHandoff)?;
-            if matches!(outcome, uc_core::membership::WorkspaceMergeOutcome::Updated) {
-                changed = true;
-            }
-            if effect.publish {
-                self.publish(&state);
-            }
-            // Hand the continuous batch over unless there is nothing to
-            // hand over yet (the local chain is not ahead of the member).
-            if batch.is_empty() {
-                continue;
-            }
-            let Some(own_instance) = own_instance else {
-                continue;
-            };
-            let to_epoch = batch.last().map_or(confirmed_epoch, |last| last.next_epoch);
-            debug!(
-                recipient_device = %device.as_str(),
-                from_epoch = confirmed_epoch,
-                to_epoch,
-                batch_changes = batch.len(),
-                has_more,
-                "workspace handoff offer planned"
-            );
-            let request_number = self.next_request_number.fetch_add(1, Ordering::Relaxed);
-            let offer = uc_core::membership::RecoveryOffer {
-                space_lineage_fingerprint: fingerprint,
-                request_number,
-                reply_number: 1,
-                from_epoch: confirmed_epoch,
-                to_epoch,
-                has_more,
-                target_digest: *digest.as_bytes(),
-                changes: batch,
-            };
-            outgoing.push(Outgoing::Recovery {
-                recipient: device,
-                binding: RecoveryBinding {
-                    space_lineage_fingerprint: fingerprint,
-                    history_key_number: uc_core::membership::MIN_HISTORY_KEY_NUMBER,
-                    from_epoch: confirmed_epoch,
-                    sender_instance: *own_instance.as_bytes(),
-                    receiver_instance: *member.as_bytes(),
-                    sender_transport_public_key: Vec::new(),
-                    receiver_transport_public_key: Vec::new(),
-                    from_range_epoch: confirmed_epoch,
-                    to_range_epoch: to_epoch,
-                    target_digest: *digest.as_bytes(),
-                    request_number,
-                    reply_number: 1,
-                },
-                message: uc_core::membership::RecoveryChannelMessage::Offer(offer),
-            });
+                .map_err(|_| {
+                    WorkspaceConvergenceError::Inconsistent(
+                        "legacy upgrade readiness rejected".to_owned(),
+                    )
+                })?;
         }
-
-        // Requester drive: a member whose local chain is still empty asks
-        // one known member at a time; an open recovery session sends its
-        // acknowledgement, then continues with the next continuous batch.
-        if let Some(own_instance) = own_instance {
-            let session = self.recovery_session.lock().await.clone();
-            if let Some(session) = session {
-                if session.ack_pending {
-                    let ack = uc_core::membership::RecoveryAck {
-                        space_lineage_fingerprint: session.lineage_fingerprint,
-                        request_number: session.request_number,
-                        reply_number: session.reply_number,
-                        confirmed_epoch: state.current_epoch(),
-                        applied_digest: state
-                            .current_digest()
-                            .map_or(initial_digest(), |digest| *digest.as_bytes()),
-                        target_digest: session.target_digest,
-                        has_more: session.has_more,
-                    };
-                    outgoing.push(Outgoing::Recovery {
-                        recipient: session.responder_device.clone(),
-                        binding: self.binding_for_session(&state, &session),
-                        message: uc_core::membership::RecoveryChannelMessage::Ack(ack),
-                    });
-                    let mut next = session.clone();
-                    next.ack_pending = false;
-                    if !next.has_more {
-                        *self.recovery_session.lock().await = None;
-                    } else {
-                        *self.recovery_session.lock().await = Some(next);
-                    }
-                } else if session.has_more {
-                    let request = self
-                        .build_recovery_request(&state, own_instance, session.from_epoch)
-                        .await?;
-                    let mut next = session.clone();
-                    next.request_number = request.request_number;
-                    next.from_epoch = request.from_epoch;
-                    next.ack_pending = false;
-                    next.has_more = false;
-                    outgoing.push(Outgoing::Recovery {
-                        recipient: next.responder_device.clone(),
-                        binding: self.binding_for_session(&state, &next),
-                        message: uc_core::membership::RecoveryChannelMessage::Request(request),
-                    });
-                    *self.recovery_session.lock().await = Some(next);
-                }
-            } else if state.changes.is_empty() {
-                let candidates: Vec<(DeviceId, uc_core::membership::MemberInstanceId)> = state
-                    .member_devices
-                    .iter()
-                    .filter(|(_, device)| **device != own_device)
-                    .map(|(instance, device)| (*device, *instance))
-                    .collect();
-                if !candidates.is_empty() {
-                    let index = self.request_candidate.fetch_add(1, Ordering::Relaxed) as usize
-                        % candidates.len();
-                    let (device, instance) = candidates[index].clone();
-                    debug!(
-                        responder_device = %device.as_str(),
-                        request_number = self.next_request_number.load(Ordering::Relaxed),
-                        "workspace recovery request planned"
-                    );
-                    let request = self.build_recovery_request(&state, own_instance, 0).await?;
-                    let session = RecoverySession {
-                        responder_device: device.clone(),
-                        responder_instance: *instance.as_bytes(),
-                        lineage_fingerprint: fingerprint,
-                        history_key_number: uc_core::membership::MIN_HISTORY_KEY_NUMBER,
-                        request_number: request.request_number,
-                        reply_number: 0,
-                        target_digest: [0; 32],
-                        from_epoch: 0,
-                        has_more: false,
-                        ack_pending: false,
-                    };
-                    outgoing.push(Outgoing::Recovery {
-                        recipient: device,
-                        binding: self.binding_for_session(&state, &session),
-                        message: uc_core::membership::RecoveryChannelMessage::Request(request),
-                    });
-                    *self.recovery_session.lock().await = Some(session);
-                }
-            }
-        }
-        // Confirmation broadcast: once the local member has confirmed the
-        // current digest, its signed confirmation is offered to every other
-        // effective member that has not yet confirmed it here. Repeats are
-        // idempotent on the receiving side.
-        if let Some(own) = state.own_instance {
-            if state.confirmed_members().contains(&own) {
-                let Some(confirmation) = state.confirmed.get(&own).cloned() else {
-                    return Err(WorkspaceConvergenceError::Inconsistent(
-                        "missing own confirmation".to_owned(),
-                    ));
-                };
-                for member in state.effective_members() {
-                    if member == own || confirmed.contains(&member) {
-                        continue;
-                    }
-                    let Some(device) = state.member_devices.get(&member).cloned() else {
-                        continue;
-                    };
-                    if device == own_device {
-                        continue;
-                    }
-                    debug!(
-                        recipient_device = %device.as_str(),
-                        "workspace confirmation broadcast planned"
-                    );
-                    outgoing.push(Outgoing::Exchange {
-                        recipient: device,
-                        message: RemovalExchangeMessage::Confirmation(confirmation.clone()),
-                    });
-                }
-            }
-        }
-        if changed || !outgoing.is_empty() {
-            self.persist(&state).await?;
-        }
-        Ok(outgoing)
-    }
-
-    /// Lock-held: apply the bounded responses of the sent messages.
-    async fn apply_exchange_responses(
-        &self,
-        responses: Vec<(Outgoing, ExchangeOutcome)>,
-    ) -> Result<bool, WorkspaceConvergenceError> {
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        let mut progressed = false;
-        for (item, outcome) in responses {
-            match item {
-                Outgoing::Exchange { recipient, message } => {
-                    let ExchangeOutcome::Exchange(reply) = outcome else {
-                        continue;
-                    };
-                    let Ok(reply) = reply else {
-                        // Transport failure: keep the pending fact for the next pass.
-                        continue;
-                    };
-                    match message {
-                        RemovalExchangeMessage::Intent(intent) => {
-                            if let RemovalExchangeMessage::IntentAck(_) = reply {
-                                let (result, effect) = state
-                                    .apply(
-                                        WorkspaceConvergenceEvent::IntentAcknowledged {
-                                            peer: recipient,
-                                            intent_id: intent.intent_id,
-                                        },
-                                        now_ms,
-                                    )
-                                    .map_err(|_| WorkspaceConvergenceError::InvalidHandoff)?;
-                                progressed |= matches!(result, WorkspaceMergeOutcome::Updated);
-                                if effect.publish {
-                                    self.publish(&state);
-                                }
-                            }
-                        }
-                        RemovalExchangeMessage::IntentAck(_) => {}
-                        RemovalExchangeMessage::Confirmation(_) => {}
-                    }
-                }
-                Outgoing::Late { recipient, intent } => {
-                    // Any bounded response counts as delivered.
-                    let (result, effect) = state
-                        .apply(
-                            WorkspaceConvergenceEvent::IntentAcknowledged {
-                                peer: recipient,
-                                intent_id: intent.intent_id,
-                            },
-                            now_ms,
-                        )
-                        .map_err(|_| WorkspaceConvergenceError::InvalidHandoff)?;
-                    progressed |= matches!(result, WorkspaceMergeOutcome::Updated);
-                    if effect.publish {
-                        self.publish(&state);
-                    }
-                }
-                Outgoing::Notice {
-                    recipient: _,
-                    notice,
-                } => {
-                    let (result, effect) = state
-                        .apply(
-                            WorkspaceConvergenceEvent::RemovalNoticeDelivered(notice.intent_id),
-                            now_ms,
-                        )
-                        .map_err(|_| WorkspaceConvergenceError::InvalidHandoff)?;
-                    progressed |= matches!(result, WorkspaceMergeOutcome::Updated);
-                    if effect.publish {
-                        self.publish(&state);
-                    }
-                }
-                Outgoing::Recovery {
-                    recipient,
-                    message,
-                    binding: _,
-                } => {
-                    let ExchangeOutcome::Recovery(reply) = outcome else {
-                        continue;
-                    };
-                    progressed |= self
-                        .apply_recovery_reply(&mut state, &recipient, &message, reply, now_ms)
-                        .await?;
-                }
-            }
-        }
-        if progressed {
-            self.persist(&state).await?;
-        }
-        Ok(progressed)
-    }
-
-    /// Lock-held: sign and record the local member instance's confirmation
-    /// of the current digest when it has not confirmed it yet. Returns
-    /// whether a new confirmation was recorded.
-    async fn confirm_own_if_needed(
-        &self,
-        state: &mut WorkspaceConvergenceState,
-        now_ms: i64,
-    ) -> Result<bool, WorkspaceConvergenceError> {
-        let Some(own) = state.own_instance else {
-            return Ok(false);
-        };
-        let Some(digest) = state.current_digest() else {
-            return Ok(false);
-        };
-        if state.confirmed_members().contains(&own) {
-            return Ok(false);
-        }
-        let mut confirmation = WorkspaceConfirmation {
-            member_instance: own,
-            digest: *digest.as_bytes(),
-            signature: Vec::new(),
-        };
-        let signature = self
-            .deps
-            .member_signatures
-            .sign_current_member_payload(&confirmation.signing_payload())
-            .await
-            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-        confirmation.signature = signature;
-        let (outcome, effect) = state
-            .apply(
-                WorkspaceConvergenceEvent::ConfirmationReceived(confirmation),
-                now_ms,
+        let history_empty = state
+            .membership_reconciliation
+            .as_ref()
+            .is_none_or(|history| history.known_event_count() == 0);
+        if is_initializer && history_empty {
+            self.record_local_admission_history(
+                &mut state,
+                &own_facts,
+                digest.finalize().into(),
+                Vec::new(),
             )
-            .map_err(|_| WorkspaceConvergenceError::InvalidConfirmation)?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(state).await?;
-            debug!(
-                digest = %digest,
-                "local workspace confirmation recorded"
-            );
+            .await?;
         }
-        if effect.publish {
-            self.publish(state);
-        }
-        Ok(true)
+        self.persist(&state).await?;
+        self.publish(&state);
+        self.notify();
+        Ok(state.snapshot())
     }
 
-    /// Lock-held: verify one continuous offer against a trial state before
-    /// anything is applied. Every change must apply in order without
-    /// corrupting the state, and the final digest must equal the target.
-    fn trial_apply_changes(
-        &self,
-        state: &WorkspaceConvergenceState,
-        changes: &[WorkspaceChange],
-        target_digest: [u8; 32],
-    ) -> bool {
-        let mut trial = state.clone();
-        for change in changes {
-            trial.apply_change(change.clone(), 0);
-            if trial.failure_category.is_some() {
-                return false;
-            }
-        }
-        trial
-            .current_digest()
-            .is_some_and(|digest| *digest.as_bytes() == target_digest)
-    }
-
-    /// Lock-held: apply a verified continuous offer, persist the admitted
-    /// member facts, then confirm the local instance. Returns whether
-    /// anything changed.
-    async fn apply_verified_offer_changes(
-        &self,
-        state: &mut WorkspaceConvergenceState,
-        offer: &uc_core::membership::RecoveryOffer,
-        now_ms: i64,
-    ) -> Result<bool, WorkspaceConvergenceError> {
-        if !self.trial_apply_changes(state, &offer.changes, offer.target_digest) {
-            return Ok(false);
-        }
-        for change in &offer.changes {
-            self.apply_and_publish_change(state, change.clone(), now_ms)
-                .await?;
-            for update in &change.security_updates {
-                self.deps
-                    .security_updates
-                    .apply_group_epoch_update(&update.payload)
-                    .await
-                    .map_err(|_| {
-                        WorkspaceConvergenceError::SecurityUpdate(
-                            uc_core::membership::MembershipSecurityUpdateError::Invalid,
-                        )
-                    })?;
-            }
-            if let Some(facts) = &change.admission {
-                self.save_member_facts(facts, now_ms).await?;
-            }
-        }
-        self.confirm_own_if_needed(state, now_ms).await?;
-        Ok(true)
-    }
-
-    /// Lock-held: build the binding for a recovery message to the session
-    /// responder. The transport fills the two public keys from the
-    /// authenticated connection.
-    fn binding_for_session(
-        &self,
-        state: &WorkspaceConvergenceState,
-        session: &RecoverySession,
-    ) -> RecoveryBinding {
-        RecoveryBinding {
-            space_lineage_fingerprint: session.lineage_fingerprint,
-            history_key_number: session.history_key_number,
-            from_epoch: state.current_epoch(),
-            sender_instance: state
-                .own_instance
-                .map_or([0; 32], |instance| *instance.as_bytes()),
-            receiver_instance: session.responder_instance,
-            sender_transport_public_key: Vec::new(),
-            receiver_transport_public_key: Vec::new(),
-            from_range_epoch: state.current_epoch(),
-            to_range_epoch: state.current_epoch(),
-            target_digest: [0; 32],
-            request_number: session.request_number,
-            reply_number: session.reply_number,
-        }
-    }
-
-    /// Lock-held: build a signed recovery request from the local chain head.
-    async fn build_recovery_request(
-        &self,
-        state: &WorkspaceConvergenceState,
-        own_instance: uc_core::membership::MemberInstanceId,
-        from_epoch: u64,
-    ) -> Result<uc_core::membership::RecoveryRequest, WorkspaceConvergenceError> {
-        let request_number = self.next_request_number.fetch_add(1, Ordering::Relaxed);
-        let from_digest = state
-            .current_digest()
-            .map(|digest| *digest.as_bytes())
-            .unwrap_or_else(initial_digest);
-        let proof_payload = {
-            let mut buffer = Vec::with_capacity(32 + 8 + 8);
-            buffer.extend_from_slice(b"uniclipboard-workspace-recovery-request/v1\0");
-            buffer.extend_from_slice(own_instance.as_bytes());
-            buffer.extend_from_slice(&from_epoch.to_be_bytes());
-            buffer.extend_from_slice(&request_number.to_be_bytes());
-            buffer
-        };
-        let request_proof = self
-            .deps
-            .member_signatures
-            .sign_current_member_payload(&proof_payload)
-            .await
-            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-        Ok(uc_core::membership::RecoveryRequest {
-            space_lineage_fingerprint: recovery_lineage_fingerprint(&state.space_lineage),
-            requester_instance: *own_instance.as_bytes(),
-            requester_device: self.deps.device_identity.current_device_id(),
-            from_epoch,
-            from_digest,
-            history_key_number: uc_core::membership::MIN_HISTORY_KEY_NUMBER,
-            request_number,
-            request_proof,
-        })
-    }
-
-    /// Pull the local chain head up to the newest known member before an
-    /// admission is committed. Each known member is asked for the continuous
-    /// changes after the local head and the replies are applied until the
-    /// member has nothing more or is unreachable. This keeps an admission
-    /// change appended to the newest head the local device can reach instead
-    /// of forking the chain on a stale local head.
-    ///
-    /// Best effort and bounded: transport failures, rejections and a total
-    /// timeout simply stop the sync; the admission continues on the local
-    /// head (a forked change is still rejected by receivers on digest
-    /// mismatch).
+    /// Reconcile the local member history with every applied peer before an
+    /// admission is committed. The bounded exchange is the same one used by
+    /// the runtime when a peer becomes reachable, so admission cannot revive
+    /// the superseded recovery channel or use a second membership source.
     pub async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
-        let candidates = {
+        let history_candidates = {
             let _guard = self.state_lock.lock().await;
             let state = self.load_state().await?;
-            if state.removed || state.own_instance.is_none() {
+            if state.removed {
                 return Ok(());
             }
-            let own_device = self.deps.device_identity.current_device_id();
-            let mut candidates: Vec<(DeviceId, uc_core::membership::MemberInstanceId)> = state
-                .member_devices
-                .iter()
-                .filter(|(_, device)| **device != own_device)
-                .map(|(instance, device)| (device.clone(), *instance))
-                .collect();
-            candidates.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+            state.membership_reconciliation.as_ref().map(|history| {
+                history
+                    .effective_members()
+                    .into_iter()
+                    .filter_map(|member| history.device_for_member(&member))
+                    .filter(|device| *device != self.deps.own_device)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let mut candidates = if let Some(candidates) = history_candidates {
             candidates
+        } else {
+            self.deps
+                .peer_addr_repo
+                .list()
+                .await
+                .map_err(|_| WorkspaceConvergenceError::Unavailable)?
+                .into_iter()
+                .map(|record| record.device_id)
+                .filter(|device| *device != self.deps.own_device)
+                .collect::<Vec<_>>()
         };
-        let sync = async {
-            for (device, known_instance) in candidates {
-                loop {
-                    let (binding, request) = {
-                        let _guard = self.state_lock.lock().await;
-                        let state = self.load_state().await?;
-                        let Some(own) = state.own_instance else {
-                            return Ok(());
-                        };
-                        let from_epoch = state.current_epoch();
-                        let request = self.build_recovery_request(&state, own, from_epoch).await?;
-                        let receiver_instance = state
-                            .latest_instance_for_device(&device)
-                            .unwrap_or(known_instance);
-                        let binding = RecoveryBinding {
-                            space_lineage_fingerprint: recovery_lineage_fingerprint(
-                                &state.space_lineage,
-                            ),
-                            history_key_number: uc_core::membership::MIN_HISTORY_KEY_NUMBER,
-                            from_epoch,
-                            sender_instance: *own.as_bytes(),
-                            receiver_instance: *receiver_instance.as_bytes(),
-                            sender_transport_public_key: Vec::new(),
-                            receiver_transport_public_key: Vec::new(),
-                            from_range_epoch: from_epoch,
-                            to_range_epoch: from_epoch,
-                            target_digest: [0; 32],
-                            request_number: request.request_number,
-                            reply_number: 0,
-                        };
-                        (binding, request)
-                    };
-                    let reply = self
-                        .deps
-                        .recovery_transport
-                        .exchange_recovery(
-                            &device,
-                            &binding,
-                            RecoveryChannelMessage::Request(request),
-                        )
-                        .await;
-                    let Ok(RecoveryChannelMessage::Offer(offer)) = reply else {
-                        // Offline, transport failure or a stable rejection:
-                        // this member has nothing more for us.
-                        break;
-                    };
-                    let applied = {
-                        let _guard = self.state_lock.lock().await;
-                        let mut state = self.load_state().await?;
-                        self.apply_verified_offer_changes(
-                            &mut state,
-                            &offer,
-                            self.deps.clock.now_ms(),
-                        )
-                        .await?
-                    };
-                    if !applied || !offer.has_more {
-                        break;
-                    }
-                }
-            }
-            Ok(())
-        };
-        match tokio::time::timeout(std::time::Duration::from_secs(20), sync).await {
-            Ok(result) => result,
-            Err(_) => {
-                warn!(
-                    reason = "timeout",
-                    "pre-admission chain synchronization timed out; proceeding on the local head"
-                );
-                Ok(())
-            }
+        candidates.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        candidates.dedup();
+        for device in candidates {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                self.reconcile_membership_history_with_peer(&device),
+            )
+            .await;
         }
+        Ok(())
     }
-
-    /// Lock-held: apply the bounded reply of one planned recovery exchange.
-    /// An offer advances the local chain and schedules the acknowledgement;
-    /// an ack advances the recipient's handoff progress; a stable rejection
-    /// or transport failure keeps the facts for the next pass.
-    async fn apply_recovery_reply(
-        &self,
-        state: &mut WorkspaceConvergenceState,
-        recipient: &DeviceId,
-        sent: &RecoveryChannelMessage,
-        reply: Result<RecoveryChannelMessage, uc_core::membership::RecoveryTransportError>,
-        now_ms: i64,
-    ) -> Result<bool, WorkspaceConvergenceError> {
-        let Ok(reply) = reply else {
-            return Ok(false);
-        };
-        match (sent, reply) {
-            (RecoveryChannelMessage::Request(_), RecoveryChannelMessage::Offer(offer)) => {
-                let session = self.recovery_session.lock().await.clone();
-                let Some(session) = session else {
-                    return Ok(false);
-                };
-                if session.request_number != offer.request_number {
-                    return Ok(false);
-                }
-                let mut session = session;
-                session.reply_number = offer.reply_number;
-                session.target_digest = offer.target_digest;
-                session.from_epoch = offer.to_epoch;
-                session.has_more = offer.has_more;
-                let applied = self
-                    .apply_verified_offer_changes(state, &offer, now_ms)
-                    .await?;
-                if applied {
-                    session.ack_pending = true;
-                    *self.recovery_session.lock().await = Some(session);
-                    debug!(
-                        recipient_device = %recipient.as_str(),
-                        confirmed_epoch = state.current_epoch(),
-                        outcome = "offer_applied",
-                        "workspace recovery offer applied"
-                    );
-                } else {
-                    *self.recovery_session.lock().await = None;
-                    debug!(
-                        recipient_device = %recipient.as_str(),
-                        outcome = "offer_rejected",
-                        "workspace recovery offer could not be applied"
-                    );
-                }
-                Ok(applied)
-            }
-            (RecoveryChannelMessage::Offer(_), RecoveryChannelMessage::Ack(ack)) => {
-                let Some(recipient_instance) = state
-                    .member_devices
-                    .iter()
-                    .find_map(|(instance, device)| (device == recipient).then_some(*instance))
-                else {
-                    return Ok(false);
-                };
-                let (result, effect) = state
-                    .apply(
-                        WorkspaceConvergenceEvent::HandoffAdvanced {
-                            recipient: recipient_instance,
-                            confirmed_epoch: ack.confirmed_epoch,
-                            target_digest: ack.target_digest,
-                            has_more: ack.has_more,
-                        },
-                        now_ms,
-                    )
-                    .map_err(|_| WorkspaceConvergenceError::InvalidHandoff)?;
-                if effect.publish {
-                    self.publish(state);
-                }
-                debug!(
-                    recipient_device = %recipient.as_str(),
-                    confirmed_epoch = ack.confirmed_epoch,
-                    has_more = ack.has_more,
-                    outcome = "ack_applied",
-                    "workspace handoff acknowledgement applied"
-                );
-                Ok(matches!(result, WorkspaceMergeOutcome::Updated))
-            }
-            (RecoveryChannelMessage::Offer(_), RecoveryChannelMessage::Reject(reject))
-            | (RecoveryChannelMessage::Request(_), RecoveryChannelMessage::Reject(reject)) => {
-                debug!(
-                    recipient_device = %recipient.as_str(),
-                    reason = ?reject.reason,
-                    outcome = "rejected",
-                    "workspace recovery exchange rejected"
-                );
-                // A stable rejection does not advance progress; the
-                // requester rotates to the next candidate on a later pass.
-                *self.recovery_session.lock().await = None;
-                Ok(false)
-            }
-            _ => Ok(false),
-        }
-    }
-}
-
-fn initial_digest() -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(b"uniclipboard-workspace-initial/v1").into()
 }
 
 #[async_trait]
-impl uc_core::membership::RemovalTargetGatePort for WorkspaceConvergence {
+impl uc_core::membership::ContentExchangeGatePort for WorkspaceConvergence {
     async fn is_locally_removed(&self, device_id: &DeviceId) -> bool {
         self.locally_removed(device_id).await
     }
 }
 
 #[async_trait]
-impl uc_core::membership::RemovalAdmissionGatePort for WorkspaceConvergence {
+impl uc_core::membership::DeviceVisibilityGatePort for WorkspaceConvergence {
+    async fn is_hidden_from_device_lists(&self, device_id: &DeviceId) -> bool {
+        match self.load_state().await {
+            Ok(state) => state.removed || state.is_device_removed(device_id),
+            Err(_) => true,
+        }
+    }
+}
+
+#[async_trait]
+impl uc_core::membership::MembershipAdmissionGatePort for WorkspaceConvergence {
     async fn admission_decision(
         &self,
         invitation_generation: u64,
-    ) -> uc_core::membership::RemovalAdmissionDecision {
+    ) -> uc_core::membership::MembershipAdmissionDecision {
         let state = match self.load_state().await {
             Ok(state) => state,
-            Err(_) => return uc_core::membership::RemovalAdmissionDecision::Unavailable,
+            Err(_) => return uc_core::membership::MembershipAdmissionDecision::Unavailable,
         };
-        if state.phase == WorkspacePhase::RecoveryRequired {
-            return uc_core::membership::RemovalAdmissionDecision::RecoveryRequired;
-        }
-        if state.removed {
-            return uc_core::membership::RemovalAdmissionDecision::Unavailable;
-        }
-        if state.removal_intents.is_empty() {
-            return uc_core::membership::RemovalAdmissionDecision::Allowed;
-        }
-        if invitation_generation < state.removal_intents.len() as u64 {
-            return uc_core::membership::RemovalAdmissionDecision::SupersededInvitation;
-        }
-        uc_core::membership::RemovalAdmissionDecision::Allowed
+        Self::admission_decision_for_state(&state, invitation_generation)
     }
 
     async fn invitation_generation(
         &self,
-    ) -> Result<u64, uc_core::membership::RemovalAdmissionDecision> {
+    ) -> Result<u64, uc_core::membership::MembershipAdmissionDecision> {
         let state = self
             .load_state()
             .await
-            .map_err(|_| uc_core::membership::RemovalAdmissionDecision::Unavailable)?;
-        Ok(state.removal_intents.len() as u64)
+            .map_err(|_| uc_core::membership::MembershipAdmissionDecision::Unavailable)?;
+        Ok(Self::admission_generation(&state))
     }
 }
 
-/// The ordinary-member-channel intent exchange endpoint: accepts a verified
-/// intent from a current effective member, merges it, forms the removal
-/// change, and acknowledges. `IntentAck` records the peer's acknowledgement.
 #[async_trait]
-impl RemovalExchangeEndpointPort for WorkspaceConvergence {
-    async fn handle_exchange(
+impl MembershipHistoryExchangeEndpointPort for WorkspaceConvergence {
+    async fn handle_membership_history_exchange(
         &self,
         source_device_id: &DeviceId,
-        message: RemovalExchangeMessage,
-    ) -> Result<RemovalExchangeMessage, RemovalExchangeError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        match message {
-            RemovalExchangeMessage::Intent(intent) => {
-                let mut state = self
-                    .load_state()
-                    .await
-                    .map_err(|_| RemovalExchangeError::Rejected)?;
-                if state.removed {
-                    debug!(
-                        source_device = %source_device_id.as_str(),
-                        intent_id = %intent.intent_id,
-                        reason = "locally_removed",
-                        "workspace removal intent exchange rejected"
-                    );
-                    return Err(RemovalExchangeError::Rejected);
-                }
-                let source_effective = state
-                    .effective_members()
-                    .iter()
-                    .any(|member| state.member_devices.get(member) == Some(source_device_id));
-                if !source_effective {
-                    // Only current effective members may submit new intents;
-                    // a removed instance keeps only the restricted entries.
-                    debug!(
-                        source_device = %source_device_id.as_str(),
-                        intent_id = %intent.intent_id,
-                        reason = "source_not_effective",
-                        "workspace removal intent exchange rejected"
-                    );
-                    return Err(RemovalExchangeError::Rejected);
-                }
-                let latest = self
-                    .accept_intent(&mut state, *intent, now_ms)
-                    .await
-                    .map_err(|error| {
-                        debug!(
-                            source_device = %source_device_id.as_str(),
-                            reason = ?error,
-                            "workspace removal intent exchange rejected"
-                        );
-                        RemovalExchangeError::Rejected
-                    })?;
-                Ok(RemovalExchangeMessage::IntentAck(latest))
-            }
-            RemovalExchangeMessage::IntentAck(intent_id) => {
-                let mut state = self
-                    .load_state()
-                    .await
-                    .map_err(|_| RemovalExchangeError::Rejected)?;
-                let (outcome, effect) = state
-                    .apply(
-                        WorkspaceConvergenceEvent::IntentAcknowledged {
-                            peer: source_device_id.clone(),
-                            intent_id,
-                        },
-                        now_ms,
-                    )
-                    .map_err(|_| RemovalExchangeError::Rejected)?;
-                if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-                    self.persist(&state)
-                        .await
-                        .map_err(|_| RemovalExchangeError::Rejected)?;
-                }
-                Ok(RemovalExchangeMessage::IntentAck(intent_id))
-            }
-            RemovalExchangeMessage::Confirmation(confirmation) => {
-                let mut state = self
-                    .load_state()
-                    .await
-                    .map_err(|_| RemovalExchangeError::Rejected)?;
-                if state.removed {
-                    return Err(RemovalExchangeError::Rejected);
-                }
-                // The confirming member instance must belong to the sending
-                // device, and the signature must verify against its current
-                // member material.
-                if state.member_devices.get(&confirmation.member_instance) != Some(source_device_id)
-                {
-                    return Err(RemovalExchangeError::Rejected);
-                }
-                let valid = self
-                    .deps
-                    .member_signatures
-                    .verify_current_member_payload(
-                        source_device_id,
-                        &confirmation.signing_payload(),
-                        &confirmation.signature,
-                    )
-                    .await
-                    .map_err(|_| RemovalExchangeError::Rejected)?;
-                if !valid {
-                    return Err(RemovalExchangeError::Rejected);
-                }
-                let (outcome, effect) = state
-                    .apply(
-                        WorkspaceConvergenceEvent::ConfirmationReceived(confirmation),
-                        now_ms,
-                    )
-                    .map_err(|_| RemovalExchangeError::Rejected)?;
-                if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-                    self.persist(&state)
-                        .await
-                        .map_err(|_| RemovalExchangeError::Rejected)?;
-                }
-                if effect.publish {
-                    self.publish(&state);
-                }
-                self.notify();
-                Ok(RemovalExchangeMessage::IntentAck(
-                    uc_core::membership::RemovalIntentId::from_bytes([0; 32]),
-                ))
-            }
-        }
-    }
-}
-
-/// The restricted late-submission entry: a removed initiator submits a
-/// historical intent; the bounded response never discloses members, digest,
-/// generation, keys or content.
-#[async_trait]
-impl RemovalLateSubmissionEndpointPort for WorkspaceConvergence {
-    async fn handle_late_submission(
-        &self,
-        submission: RemovalLateSubmission,
-    ) -> Result<RemovalLateAcceptance, RemovalLateSubmissionError> {
-        let RemovalLateSubmission::Intent(intent) = submission;
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self
-            .load_state()
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        self.handle_membership_history(source_device_id, message)
             .await
-            .map_err(|_| RemovalLateSubmissionError::Unavailable)?;
-        if state.space_lineage.is_empty() || intent.content.space_lineage != state.space_lineage {
-            return Ok(RemovalLateAcceptance::Rejected {
-                reason: RemovalLateRejectionReason::InvalidSpaceLineage,
-            });
-        }
-        if state
-            .removal_intent_records
-            .iter()
-            .any(|known| known.intent_id == intent.intent_id)
-        {
-            return Ok(RemovalLateAcceptance::AlreadyKnown {
-                intent_id: intent.intent_id,
-            });
-        }
-        match self.accept_intent(&mut state, *intent, now_ms).await {
-            Ok(intent_id) => Ok(RemovalLateAcceptance::Accepted { intent_id }),
-            Err(_) => Ok(RemovalLateAcceptance::Rejected {
-                reason: RemovalLateRejectionReason::Invalid,
-            }),
-        }
-    }
-}
-
-/// The restricted removal-notice entry: the receiver verifies the space
-/// fingerprint, the issuer signature against its saved view material, and
-/// that the notice targets its own device before accepting (fail closed).
-#[async_trait]
-impl RemovalNoticeEndpointPort for WorkspaceConvergence {
-    async fn handle_notice(
-        &self,
-        notice: RemovalNotice,
-    ) -> Result<RemovalNoticeAcceptance, RemovalNoticeError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self
-            .load_state()
-            .await
-            .map_err(|_| RemovalNoticeError::Unavailable)?;
-        if state.space_lineage.is_empty()
-            || RemovalNotice::space_lineage_fingerprint(&state.space_lineage)
-                != notice.space_lineage_fingerprint
-        {
-            return Ok(RemovalNoticeAcceptance::Rejected {
-                reason: RemovalNoticeRejectionReason::SpaceMismatch,
-            });
-        }
-        if state
-            .removal_intent_records
-            .iter()
-            .any(|known| known.intent_id == notice.intent_id)
-            || state.accepted_removal_notices.contains(&notice.intent_id)
-        {
-            // The intent or this notice was already accepted; idempotent.
-            return Ok(RemovalNoticeAcceptance::AlreadyKnown {
-                intent_id: notice.intent_id,
-            });
-        }
-        let Some(issuer_key) = self.lookup_issuer_key(&notice).await else {
-            return Ok(RemovalNoticeAcceptance::Rejected {
-                reason: RemovalNoticeRejectionReason::Invalid,
-            });
-        };
-        if self
-            .deps
-            .notice_verification
-            .verify_notice_signature(&notice, &issuer_key)
-            .await
-            .is_err()
-        {
-            return Ok(RemovalNoticeAcceptance::Rejected {
-                reason: RemovalNoticeRejectionReason::Invalid,
-            });
-        }
-        if !self.notice_targets_own_device(&notice).await {
-            return Ok(RemovalNoticeAcceptance::Rejected {
-                reason: RemovalNoticeRejectionReason::Invalid,
-            });
-        }
-        let (outcome, effect) = state
-            .apply(
-                WorkspaceConvergenceEvent::RemovalNoticeAccepted(notice.intent_id),
-                now_ms,
-            )
-            .map_err(|_| RemovalNoticeError::Rejected)?;
-        if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
-            self.persist(&state)
-                .await
-                .map_err(|_| RemovalNoticeError::Persistence)?;
-        }
-        self.notify();
-        info!(intent = %notice.intent_id, "removal notice accepted");
-        Ok(RemovalNoticeAcceptance::Accepted {
-            intent_id: notice.intent_id,
-        })
-    }
-}
-
-impl WorkspaceConvergence {
-    /// Issuer public signing material: the current view's public material
-    /// for the issuer instance (fail closed on any mismatch).
-    async fn lookup_issuer_key(&self, notice: &RemovalNotice) -> Option<Vec<u8>> {
-        self.deps
-            .recovery
-            .current_view()
-            .await
-            .ok()
-            .and_then(|view| {
-                view.members
-                    .into_iter()
-                    .find(|member| member.instance == notice.issuer_instance)
-                    .map(|member| member.signing_public_key)
-            })
-    }
-
-    /// The notice target must be the local device: the current instance is
-    /// the target instance; when the local instance no longer exists, the
-    /// target device must match the local device (fail closed).
-    async fn notice_targets_own_device(&self, notice: &RemovalNotice) -> bool {
-        match self.deps.recovery.own_instance().await {
-            Ok(Some(own)) => own == notice.target_instance,
-            _ => notice.target_device_id == self.deps.own_device,
-        }
-    }
-}
-
-/// The restricted recovery channel endpoint. The owner verifies the
-/// connection identity, the request proof, the requester's member instance
-/// in its declared predecessor state, and whether that instance is still a
-/// current effective member before any offer is released. A removed or
-/// unknown instance receives only a stable rejection.
-#[async_trait]
-impl uc_core::membership::RecoveryTransportEndpointPort for WorkspaceConvergence {
-    async fn handle_recovery(
-        &self,
-        source_device: &DeviceId,
-        message: uc_core::membership::RecoveryChannelMessage,
-    ) -> Result<
-        uc_core::membership::RecoveryChannelMessage,
-        uc_core::membership::RecoveryTransportError,
-    > {
-        match message {
-            uc_core::membership::RecoveryChannelMessage::Request(request) => {
-                self.handle_recovery_request(source_device, request).await
-            }
-            uc_core::membership::RecoveryChannelMessage::Ack(ack) => {
-                self.handle_recovery_ack(source_device, ack).await
-            }
-            uc_core::membership::RecoveryChannelMessage::Offer(offer) => {
-                self.handle_recovery_offer(source_device, offer).await
-            }
-            _ => Err(uc_core::membership::RecoveryTransportError::Rejected(
-                uc_core::membership::RecoveryRejection::Unauthorized,
-            )),
-        }
-    }
-}
-
-impl WorkspaceConvergence {
-    async fn handle_recovery_request(
-        &self,
-        source_device: &DeviceId,
-        request: uc_core::membership::RecoveryRequest,
-    ) -> Result<
-        uc_core::membership::RecoveryChannelMessage,
-        uc_core::membership::RecoveryTransportError,
-    > {
-        debug!(
-            requester_device = %source_device.as_str(),
-            request_number = request.request_number,
-            from_epoch = request.from_epoch,
-            "workspace recovery request received"
-        );
-        if request.validate_transfer_bounds().is_err() {
-            debug!(
-                requester_device = %source_device.as_str(),
-                reason = "range_out_of_bounds",
-                "workspace recovery request rejected"
-            );
-            return Ok(uc_core::membership::RecoveryChannelMessage::Reject(
-                uc_core::membership::RecoveryReject {
-                    space_lineage_fingerprint: request.space_lineage_fingerprint,
-                    request_number: request.request_number,
-                    reply_number: 0,
-                    reason: uc_core::membership::RecoveryRejection::RangeOutOfBounds,
-                },
-            ));
-        }
-        let state = self.load_state().await.map_err(|_| {
-            uc_core::membership::RecoveryTransportError::Rejected(
-                uc_core::membership::RecoveryRejection::Unauthorized,
-            )
-        })?;
-        let requester =
-            uc_core::membership::MemberInstanceId::from_bytes(request.requester_instance);
-        if !state.effective_members().contains(&requester) {
-            // A removed or unknown instance receives no offer and no
-            // distinguishing details.
-            debug!(
-                requester_device = %source_device.as_str(),
-                reason = "unauthorized",
-                "workspace recovery request rejected"
-            );
-            return Ok(uc_core::membership::RecoveryChannelMessage::Reject(
-                uc_core::membership::RecoveryReject {
-                    space_lineage_fingerprint: request.space_lineage_fingerprint,
-                    request_number: request.request_number,
-                    reply_number: 0,
-                    reason: uc_core::membership::RecoveryRejection::Unauthorized,
-                },
-            ));
-        }
-        if state.member_devices.get(&requester) != Some(source_device) {
-            debug!(
-                requester_device = %source_device.as_str(),
-                reason = "identity_mismatch",
-                "workspace recovery request rejected"
-            );
-            return Ok(uc_core::membership::RecoveryChannelMessage::Reject(
-                uc_core::membership::RecoveryReject {
-                    space_lineage_fingerprint: request.space_lineage_fingerprint,
-                    request_number: request.request_number,
-                    reply_number: 0,
-                    reason: uc_core::membership::RecoveryRejection::IdentityMismatch,
-                },
-            ));
-        }
-        if request.from_epoch >= state.current_epoch() {
-            return Ok(uc_core::membership::RecoveryChannelMessage::Reject(
-                uc_core::membership::RecoveryReject {
-                    space_lineage_fingerprint: request.space_lineage_fingerprint,
-                    request_number: request.request_number,
-                    reply_number: 0,
-                    reason: uc_core::membership::RecoveryRejection::RangeOutOfBounds,
-                },
-            ));
-        }
-        let batch = self.handoff_batch(&state, request.from_epoch);
-        if batch.is_empty() {
-            return Ok(uc_core::membership::RecoveryChannelMessage::Reject(
-                uc_core::membership::RecoveryReject {
-                    space_lineage_fingerprint: request.space_lineage_fingerprint,
-                    request_number: request.request_number,
-                    reply_number: 0,
-                    reason: uc_core::membership::RecoveryRejection::ContinuityMissing,
-                },
-            ));
-        }
-        let digest = state.current_digest().ok_or_else(|| {
-            uc_core::membership::RecoveryTransportError::Rejected(
-                uc_core::membership::RecoveryRejection::DigestConflict,
-            )
-        })?;
-        let from_epoch = request.from_epoch;
-        let to_epoch = batch.last().map_or(from_epoch, |last| last.next_epoch);
-        let has_more = self.has_more_after(&state, &batch);
-        debug!(
-            requester_device = %source_device.as_str(),
-            from_epoch,
-            to_epoch,
-            has_more,
-            "workspace recovery offer answered"
-        );
-        Ok(uc_core::membership::RecoveryChannelMessage::Offer(
-            uc_core::membership::RecoveryOffer {
-                space_lineage_fingerprint: request.space_lineage_fingerprint,
-                request_number: request.request_number,
-                reply_number: 1,
-                from_epoch,
-                to_epoch,
-                has_more,
-                target_digest: *digest.as_bytes(),
-                changes: batch,
-            },
-        ))
-    }
-
-    async fn handle_recovery_ack(
-        &self,
-        source_device: &DeviceId,
-        ack: uc_core::membership::RecoveryAck,
-    ) -> Result<
-        uc_core::membership::RecoveryChannelMessage,
-        uc_core::membership::RecoveryTransportError,
-    > {
-        let state = self.load_state().await.map_err(|_| {
-            uc_core::membership::RecoveryTransportError::Rejected(
-                uc_core::membership::RecoveryRejection::Unauthorized,
-            )
-        })?;
-        let recipient = state
-            .member_devices
-            .iter()
-            .find_map(|(instance, device)| (device == source_device).then_some(*instance))
-            .ok_or_else(|| {
-                uc_core::membership::RecoveryTransportError::Rejected(
-                    uc_core::membership::RecoveryRejection::Unauthorized,
-                )
-            })?;
-        self.apply_handoff_progress(
-            recipient,
-            ack.confirmed_epoch,
-            ack.target_digest,
-            ack.has_more,
-        )
-        .await
-        .map_err(|_| {
-            debug!(
-                source_device = %source_device.as_str(),
-                confirmed_epoch = ack.confirmed_epoch,
-                reason = "digest_conflict",
-                "workspace recovery acknowledgement rejected"
-            );
-            uc_core::membership::RecoveryTransportError::Rejected(
-                uc_core::membership::RecoveryRejection::DigestConflict,
-            )
-        })?;
-        debug!(
-            source_device = %source_device.as_str(),
-            confirmed_epoch = ack.confirmed_epoch,
-            has_more = ack.has_more,
-            "workspace handoff acknowledgement received"
-        );
-        Ok(uc_core::membership::RecoveryChannelMessage::Ack(ack))
-    }
-
-    /// Receive a handoff offer from a carrying device: verify the lineage,
-    /// replay the request number, trial-verify the continuous changes, apply
-    /// them atomically and confirm the local instance before returning the
-    /// acknowledgement. Any failure leaves the current state unchanged and
-    /// returns a stable rejection.
-    async fn handle_recovery_offer(
-        &self,
-        source_device: &DeviceId,
-        offer: uc_core::membership::RecoveryOffer,
-    ) -> Result<
-        uc_core::membership::RecoveryChannelMessage,
-        uc_core::membership::RecoveryTransportError,
-    > {
-        debug!(
-            source_device = %source_device.as_str(),
-            request_number = offer.request_number,
-            from_epoch = offer.from_epoch,
-            to_epoch = offer.to_epoch,
-            "workspace recovery offer received"
-        );
-        {
-            let mut consumed = self.consumed_recovery_requests.lock().await;
-            if consumed.len() > 4096 {
-                consumed.clear();
-            }
-            if !consumed.insert((source_device.clone(), offer.request_number)) {
-                debug!(
-                    source_device = %source_device.as_str(),
-                    reason = "replayed_request_number",
-                    "workspace recovery offer rejected"
-                );
-                return Err(uc_core::membership::RecoveryTransportError::Rejected(
-                    uc_core::membership::RecoveryRejection::IdentityMismatch,
-                ));
-            }
-        }
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await.map_err(|_| {
-            uc_core::membership::RecoveryTransportError::Rejected(
-                uc_core::membership::RecoveryRejection::Unauthorized,
-            )
-        })?;
-        if offer.space_lineage_fingerprint != recovery_lineage_fingerprint(&state.space_lineage) {
-            debug!(
-                source_device = %source_device.as_str(),
-                reason = "space_mismatch",
-                "workspace recovery offer rejected"
-            );
-            return Err(uc_core::membership::RecoveryTransportError::Rejected(
-                uc_core::membership::RecoveryRejection::SpaceMismatch,
-            ));
-        }
-        if offer.from_epoch > state.current_epoch() {
-            // Continuity missing: the offer starts ahead of the local chain.
-            debug!(
-                source_device = %source_device.as_str(),
-                local_epoch = state.current_epoch(),
-                offer_from_epoch = offer.from_epoch,
-                reason = "continuity_missing",
-                "workspace recovery offer rejected"
-            );
-            return Err(uc_core::membership::RecoveryTransportError::Rejected(
-                uc_core::membership::RecoveryRejection::ContinuityMissing,
-            ));
-        }
-        if !self.trial_apply_changes(&state, &offer.changes, offer.target_digest) {
-            debug!(
-                source_device = %source_device.as_str(),
-                local_epoch = state.current_epoch(),
-                offer_to_epoch = offer.to_epoch,
-                reason = "trial_apply_failed",
-                "workspace recovery offer rejected"
-            );
-            return Err(uc_core::membership::RecoveryTransportError::Rejected(
-                uc_core::membership::RecoveryRejection::ContinuityMissing,
-            ));
-        }
-        for change in &offer.changes {
-            if let Err(_) = self
-                .apply_and_publish_change(&mut state, change.clone(), now_ms)
-                .await
-            {
-                return Err(uc_core::membership::RecoveryTransportError::Rejected(
-                    uc_core::membership::RecoveryRejection::ContinuityMissing,
-                ));
-            }
-            for update in &change.security_updates {
-                if let Err(_) = self
-                    .deps
-                    .security_updates
-                    .apply_group_epoch_update(&update.payload)
-                    .await
-                {
-                    return Err(uc_core::membership::RecoveryTransportError::Rejected(
-                        uc_core::membership::RecoveryRejection::ContinuityMissing,
-                    ));
-                }
-            }
-            if let Some(facts) = &change.admission {
-                // The verified admission facts are persisted with the
-                // change so the local member can reach the new member.
-                self.save_member_facts(facts, now_ms).await.map_err(|_| {
-                    uc_core::membership::RecoveryTransportError::Rejected(
-                        uc_core::membership::RecoveryRejection::ContinuityMissing,
-                    )
-                })?;
-            }
-        }
-        self.confirm_own_if_needed(&mut state, now_ms)
-            .await
-            .map_err(|_| {
-                uc_core::membership::RecoveryTransportError::Rejected(
-                    uc_core::membership::RecoveryRejection::Unauthorized,
-                )
-            })?;
-        debug!(
-            source_device = %source_device.as_str(),
-            confirmed_epoch = state.current_epoch(),
-            "workspace recovery offer applied"
-        );
-        let confirmed_epoch = state.current_epoch();
-        let applied_digest = state
-            .current_digest()
-            .map_or(initial_digest(), |digest| *digest.as_bytes());
-        Ok(uc_core::membership::RecoveryChannelMessage::Ack(
-            uc_core::membership::RecoveryAck {
-                space_lineage_fingerprint: offer.space_lineage_fingerprint,
-                request_number: offer.request_number,
-                reply_number: offer.reply_number,
-                confirmed_epoch,
-                applied_digest,
-                target_digest: offer.target_digest,
-                has_more: offer.has_more,
-            },
-        ))
+            .map_err(|_| MembershipHistoryExchangeError::Rejected)
     }
 }

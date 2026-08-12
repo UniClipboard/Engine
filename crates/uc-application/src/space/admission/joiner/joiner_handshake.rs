@@ -59,7 +59,7 @@ use uc_core::ports::space::{
 };
 use uc_core::ports::{DeviceIdentityPort, LocalIdentityPort, SettingsPort};
 use uc_core::security::IdentityFingerprint;
-use uc_core::space_access::AdmissionOffer;
+use uc_core::space_access::{AdmissionOffer, PreparedGroupJoin};
 
 use crate::facade::space_setup::RedeemPairingInvitationError;
 
@@ -105,11 +105,41 @@ pub(crate) struct JoinerHandshakeOutcome {
 pub(crate) struct PendingJoinerHandshake {
     pub(crate) session: PairingSessionId,
     pub(crate) outcome: JoinerHandshakeOutcome,
+    group_join: Option<PreparedGroupJoin>,
+    welcome: Vec<u8>,
+    encrypted_key_catalog: Vec<u8>,
+    group_epoch: u64,
+    sponsor_membership_history_event_count: u64,
 }
 
 impl PendingJoinerHandshake {
     pub(crate) fn outcome(&self) -> &JoinerHandshakeOutcome {
         &self.outcome
+    }
+
+    pub(crate) fn group_epoch(&self) -> u64 {
+        self.group_epoch
+    }
+
+    pub(crate) fn sponsor_membership_history_event_count(&self) -> u64 {
+        self.sponsor_membership_history_event_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn without_group_installation(
+        session: PairingSessionId,
+        outcome: JoinerHandshakeOutcome,
+        group_epoch: u64,
+    ) -> Self {
+        Self {
+            session,
+            outcome,
+            group_join: None,
+            welcome: Vec::new(),
+            encrypted_key_catalog: Vec::new(),
+            group_epoch,
+            sponsor_membership_history_event_count: 0,
+        }
     }
 }
 
@@ -176,7 +206,7 @@ impl JoinerHandshakeCoordinator {
         info!(session = %session, ?channel, "pairing session dialled");
 
         match self.drive(&session, channel, code, passphrase).await {
-            Ok(outcome) => Ok(PendingJoinerHandshake { session, outcome }),
+            Ok(pending) => Ok(pending),
             Err(err) => {
                 self.pairing_session
                     .close(&session, Some(format!("handshake aborted: {err}")))
@@ -195,7 +225,7 @@ impl JoinerHandshakeCoordinator {
         &self,
         pending: PendingJoinerHandshake,
         admission: uc_core::membership::AdmissionChangeFacts,
-    ) -> Result<uc_core::pairing::SponsorAdmissionCommitted, RedeemPairingInvitationError> {
+    ) -> Result<uc_core::pairing::SponsorAdmissionSaved, RedeemPairingInvitationError> {
         self.pairing_session
             .send(
                 &pending.session,
@@ -205,8 +235,8 @@ impl JoinerHandshakeCoordinator {
             .map_err(map_session_err)?;
         loop {
             match self.recv_with_ttl(&pending.session).await? {
-                PairingSessionMessage::AdmissionCommitted(committed) => {
-                    return Ok(committed);
+                PairingSessionMessage::AdmissionSaved(saved) => {
+                    return Ok(saved);
                 }
                 PairingSessionMessage::Reject(r) => {
                     return Err(map_sponsor_reject(r.reason));
@@ -220,6 +250,30 @@ impl JoinerHandshakeCoordinator {
                 }
             }
         }
+    }
+
+    /// Install the authenticated admission only after the outer workflow has
+    /// accepted the target Space. This keeps a rejected same-Space join from
+    /// replacing the current local security state.
+    pub(crate) async fn install_group_join(
+        &self,
+        pending: &mut PendingJoinerHandshake,
+        passphrase: &Passphrase,
+    ) -> Result<(), RedeemPairingInvitationError> {
+        let group_join = pending.group_join.take().ok_or_else(|| {
+            RedeemPairingInvitationError::Internal("group admission already installed".to_owned())
+        })?;
+        self.group_admission
+            .install_group_join(
+                &pending.outcome.space_id,
+                passphrase,
+                group_join,
+                &pending.welcome,
+                &pending.encrypted_key_catalog,
+                pending.group_epoch,
+            )
+            .await
+            .map_err(map_space_access_err)
     }
 
     pub(crate) async fn abort(&self, pending: PendingJoinerHandshake, error: &str) {
@@ -237,7 +291,7 @@ impl JoinerHandshakeCoordinator {
         channel: DiscoveryChannel,
         code: &InvitationCode,
         passphrase: &Passphrase,
-    ) -> Result<JoinerHandshakeOutcome, RedeemPairingInvitationError> {
+    ) -> Result<PendingJoinerHandshake, RedeemPairingInvitationError> {
         // ── 1. Collect local facts ───────────────────────────────────────
         let local_fp = self.local_identity.ensure().await.map_err(|e| {
             RedeemPairingInvitationError::Internal(format!("local_identity.ensure: {e}"))
@@ -385,17 +439,6 @@ impl JoinerHandshakeCoordinator {
             return Err(RedeemPairingInvitationError::CorruptedKeyMaterial);
         }
         let member_instance = pending_group_join.member_instance();
-        self.group_admission
-            .install_group_join(
-                &confirm.space_id,
-                passphrase,
-                pending_group_join,
-                &confirm.welcome,
-                &confirm.encrypted_key_catalog,
-                confirm.group_epoch,
-            )
-            .await
-            .map_err(map_space_access_err)?;
         info!(
             session = %session,
             sponsor_device_id = %confirm.sender_device_id.as_str(),
@@ -403,17 +446,25 @@ impl JoinerHandshakeCoordinator {
             "Confirm received; handshake surface complete"
         );
 
-        Ok(JoinerHandshakeOutcome {
-            sponsor_device_id: confirm.sender_device_id,
-            sponsor_device_name: confirm.sender_device_name,
-            sponsor_identity_fingerprint: confirm.sender_identity_fingerprint,
-            space_id: confirm.space_id,
-            discovery_channel: channel,
-            self_device_id: local_device_id,
-            self_identity_fingerprint: local_fp,
-            sponsor_transport_address_blob: confirm.transport_address_blob,
-            sponsor_space_person_id: confirm.sponsor_space_person_id,
-            member_instance,
+        Ok(PendingJoinerHandshake {
+            session: session.clone(),
+            outcome: JoinerHandshakeOutcome {
+                sponsor_device_id: confirm.sender_device_id,
+                sponsor_device_name: confirm.sender_device_name,
+                sponsor_identity_fingerprint: confirm.sender_identity_fingerprint,
+                space_id: confirm.space_id,
+                discovery_channel: channel,
+                self_device_id: local_device_id,
+                self_identity_fingerprint: local_fp,
+                sponsor_transport_address_blob: confirm.transport_address_blob,
+                sponsor_space_person_id: confirm.sponsor_space_person_id,
+                member_instance,
+            },
+            group_join: Some(pending_group_join),
+            welcome: confirm.welcome,
+            encrypted_key_catalog: confirm.encrypted_key_catalog,
+            group_epoch: confirm.group_epoch,
+            sponsor_membership_history_event_count: confirm.membership_history_event_count,
         })
     }
 
@@ -520,7 +571,7 @@ fn variant_name(message: &PairingSessionMessage) -> &'static str {
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
         PairingSessionMessage::Confirm(_) => "Confirm",
         PairingSessionMessage::Ready(_) => "Ready",
-        PairingSessionMessage::AdmissionCommitted(_) => "AdmissionCommitted",
+        PairingSessionMessage::AdmissionSaved(_) => "AdmissionSaved",
         PairingSessionMessage::Reject(_) => "Reject",
     }
 }
@@ -814,6 +865,7 @@ mod tests {
             welcome: vec![1],
             encrypted_key_catalog: vec![2],
             group_epoch: 2,
+            membership_history_event_count: 0,
         }
     }
 
@@ -872,11 +924,11 @@ mod tests {
                 sponsor_confirm(),
             )));
         b.session
-            .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionCommitted(
-                uc_core::pairing::SponsorAdmissionCommitted {
-                    facts: uc_core::membership::AdmissionCommittedFacts {
-                        change_digest: [0x11; 32],
-                        change_count: 2,
+            .push_recv(RecvStep::Msg(PairingSessionMessage::AdmissionSaved(
+                uc_core::pairing::SponsorAdmissionSaved {
+                    facts: uc_core::membership::AdmissionSavedFacts {
+                        history_digest: [0x11; 32],
+                        history_event_count: 2,
                         sponsor_facts: uc_core::membership::AdmissionChangeFacts {
                             member_instance: uc_core::membership::MemberInstanceId::from_bytes(
                                 [9; 32],
@@ -940,7 +992,7 @@ mod tests {
 
         let sent = b.session.sent();
         assert!(matches!(sent[2].1, PairingSessionMessage::Ready(_)));
-        assert_eq!(committed.facts.change_count, 2);
+        assert_eq!(committed.facts.history_event_count, 2);
         assert_eq!(b.session.closed().len(), 0, "sponsor closes the session");
     }
 

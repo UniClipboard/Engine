@@ -36,7 +36,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use tracing::{debug, warn};
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::{ContentExchangeGatePort, MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::clipboard::{ActiveClipboardPullServeError, ActiveClipboardPullServePort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::security::IdentityFingerprint;
@@ -64,6 +64,7 @@ struct HandlerState {
     member_repo: Arc<dyn MemberRepositoryPort>,
     peer_admission: Arc<dyn PeerAdmissionPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    content_gate: Arc<dyn ContentExchangeGatePort>,
     serve: Arc<dyn ActiveClipboardPullServePort>,
 }
 
@@ -73,12 +74,14 @@ impl IrohActiveClipboardPullServeAdapter {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
+        content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Self {
         Self {
             state: Arc::new(HandlerState {
                 member_repo,
                 peer_admission,
                 fingerprint_factory,
+                content_gate,
                 serve,
             }),
         }
@@ -160,36 +163,52 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
             }
         };
 
-        // 4. Resolve the content through the application-layer serve port.
+        // 4. A peer that cannot exchange content gets the normal no-content
+        // response after its request frame is consumed. This preserves the
+        // transport sequence without reading or producing local content.
+        let response = if self
+            .state
+            .content_gate
+            .is_locally_removed(&peer_device_id)
+            .await
+        {
+            debug!(
+                peer = %peer_device_id.as_str(),
+                "active-clipboard pull serve: peer cannot exchange content; responding NotAvailable"
+            );
+            PullResponse::NotAvailable
+        // 5. Resolve the content through the application-layer serve port.
         //    NotUnlocked / NotAvailable map to typed no-content statuses; a
         //    locked holder never leaks plaintext.
-        let response = match self.state.serve.serve(&snapshot_hash).await {
-            Ok(envelope) => PullResponse::Envelope(envelope),
-            Err(ActiveClipboardPullServeError::NotAvailable) => {
-                debug!(
-                    peer = %peer_device_id.as_str(),
-                    "active-clipboard pull serve: content not held; responding NotAvailable"
-                );
-                PullResponse::NotAvailable
-            }
-            Err(ActiveClipboardPullServeError::NotUnlocked) => {
-                debug!(
-                    peer = %peer_device_id.as_str(),
-                    "active-clipboard pull serve: session locked; responding Locked"
-                );
-                PullResponse::Locked
-            }
-            Err(ActiveClipboardPullServeError::Internal(reason)) => {
-                warn!(
-                    peer = %peer_device_id.as_str(),
-                    reason,
-                    "active-clipboard pull serve: internal failure; responding Internal"
-                );
-                PullResponse::Internal
+        } else {
+            match self.state.serve.serve(&snapshot_hash).await {
+                Ok(envelope) => PullResponse::Envelope(envelope),
+                Err(ActiveClipboardPullServeError::NotAvailable) => {
+                    debug!(
+                        peer = %peer_device_id.as_str(),
+                        "active-clipboard pull serve: content not held; responding NotAvailable"
+                    );
+                    PullResponse::NotAvailable
+                }
+                Err(ActiveClipboardPullServeError::NotUnlocked) => {
+                    debug!(
+                        peer = %peer_device_id.as_str(),
+                        "active-clipboard pull serve: session locked; responding Locked"
+                    );
+                    PullResponse::Locked
+                }
+                Err(ActiveClipboardPullServeError::Internal(reason)) => {
+                    warn!(
+                        peer = %peer_device_id.as_str(),
+                        reason,
+                        "active-clipboard pull serve: internal failure; responding Internal"
+                    );
+                    PullResponse::Internal
+                }
             }
         };
 
-        // 5. Write the response frame, then close the send half.
+        // 6. Write the response frame, then close the send half.
         if let Err(err) = pull_wire::write_response(&mut send, &response).await {
             warn!(
                 error = %err,
@@ -206,7 +225,7 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
             );
         }
 
-        // 6. Wait for the requester to drain + close before dropping the
+        // 7. Wait for the requester to drain + close before dropping the
         //    connection, so QUIC teardown does not race its final read.
         let _ = tokio::time::timeout(CLOSE_BARRIER_TIMEOUT, connection.closed()).await;
         Ok(())
@@ -283,6 +302,7 @@ mod tests {
     use iroh::{Endpoint, RelayMode, SecretKey};
     use tokio::sync::Mutex;
 
+    use uc_core::membership::ContentExchangeGatePort;
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::MemberSyncPreferences;
 
@@ -356,6 +376,24 @@ mod tests {
         }
     }
 
+    struct BlockedUpgradePeer;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for BlockedUpgradePeer {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            true
+        }
+    }
+
+    struct AllowAllContent;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for AllowAllContent {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            false
+        }
+    }
+
     // ----- harness -----------------------------------------------------------
 
     async fn bind_endpoint_with(seed: [u8; 32]) -> Arc<Endpoint> {
@@ -400,7 +438,7 @@ mod tests {
         member_repo: Arc<dyn MemberRepositoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
     ) -> (Arc<Endpoint>, Router) {
-        spawn_serve_with_admission(seed, member_repo, serve, true).await
+        spawn_serve_with_admission(seed, member_repo, serve, true, Arc::new(AllowAllContent)).await
     }
 
     async fn spawn_serve_with_admission(
@@ -408,6 +446,7 @@ mod tests {
         member_repo: Arc<dyn MemberRepositoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
         admitted: bool,
+        content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> (Arc<Endpoint>, Router) {
         let endpoint = bind_endpoint_with(seed).await;
         wait_for_direct_addrs(&endpoint).await;
@@ -416,6 +455,7 @@ mod tests {
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
             serve,
+            content_gate,
         );
         let router = Router::builder((*endpoint).clone())
             .accept(ACTIVE_CLIPBOARD_PULL_ALPN, adapter.handler())
@@ -522,6 +562,7 @@ mod tests {
             Arc::clone(&member_repo),
             Arc::new(NeverServe),
             false,
+            Arc::new(AllowAllContent),
         )
         .await;
 
@@ -532,6 +573,32 @@ mod tests {
                 .is_err(),
             "an unadmitted peer must not receive a response frame"
         );
+        router.shutdown().await.ok();
+    }
+
+    #[tokio::test]
+    async fn upgrade_required_member_receives_no_content() {
+        let sender_seed = [0x47u8; 32];
+        let receiver_seed = [0x48u8; 32];
+        let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+        member_repo
+            .save(&make_member(sender_seed, "upgrade-required-member"))
+            .await
+            .unwrap();
+        let (endpoint, router) = spawn_serve_with_admission(
+            receiver_seed,
+            Arc::clone(&member_repo),
+            Arc::new(NeverServe),
+            true,
+            Arc::new(BlockedUpgradePeer),
+        )
+        .await;
+
+        let hash = format!("blake3v1:{}", "9".repeat(64));
+        let response = pull_request(sender_seed, endpoint.addr(), &hash)
+            .await
+            .expect("a blocked peer receives an explicit no-content response");
+        assert_eq!(response, PullResponse::NotAvailable);
         router.shutdown().await.ok();
     }
 

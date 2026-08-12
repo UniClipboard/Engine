@@ -72,6 +72,7 @@ pub enum OperationKind {
     QueryMemberSyncPreferences,
     UpdateMemberSyncPreferences,
     RemoveMember,
+    DecideMembershipRemoval,
     QueryWorkspaceConvergence,
     QueryLegacyBootstrap,
     QuerySpaceProtection,
@@ -165,6 +166,7 @@ impl fmt::Display for OperationKind {
             Self::QueryMemberSyncPreferences => "query_member_sync_preferences",
             Self::UpdateMemberSyncPreferences => "update_member_sync_preferences",
             Self::RemoveMember => "remove_member",
+            Self::DecideMembershipRemoval => "decide_membership_removal",
             Self::QueryWorkspaceConvergence => "query_workspace_convergence",
             Self::QueryLegacyBootstrap => "query_legacy_bootstrap",
             Self::QuerySpaceProtection => "query_space_protection",
@@ -204,7 +206,9 @@ impl fmt::Display for OperationKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{Operation, OperationKind};
+    use super::{
+        DecideMembershipRemovalInput, MembershipRemovalDecision, Operation, OperationKind,
+    };
 
     #[test]
     fn workspace_convergence_operation_has_a_stable_kind() {
@@ -216,6 +220,18 @@ mod tests {
             Operation::QueryWorkspaceConvergence.kind().to_string(),
             "query_workspace_convergence"
         );
+    }
+
+    #[test]
+    fn membership_removal_decision_has_a_stable_operation_kind() {
+        let operation = Operation::DecideMembershipRemoval(DecideMembershipRemovalInput {
+            removal_event_id: "0101010101010101010101010101010101010101010101010101010101010101"
+                .to_owned(),
+            decision: MembershipRemovalDecision::Reject,
+        });
+
+        assert_eq!(operation.kind(), OperationKind::DecideMembershipRemoval);
+        assert_eq!(operation.kind().to_string(), "decide_membership_removal");
     }
 }
 
@@ -277,6 +293,7 @@ pub enum Operation {
     QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput),
     UpdateMemberSyncPreferences(UpdateMemberSyncPreferencesInput),
     RemoveMember(RemoveMemberInput),
+    DecideMembershipRemoval(DecideMembershipRemovalInput),
     QueryWorkspaceConvergence,
     QueryLegacyBootstrap(QueryLegacyBootstrapInput),
     QuerySpaceProtection,
@@ -370,6 +387,7 @@ impl Operation {
             Self::QueryMemberSyncPreferences(_) => OperationKind::QueryMemberSyncPreferences,
             Self::UpdateMemberSyncPreferences(_) => OperationKind::UpdateMemberSyncPreferences,
             Self::RemoveMember(_) => OperationKind::RemoveMember,
+            Self::DecideMembershipRemoval(_) => OperationKind::DecideMembershipRemoval,
             Self::QueryWorkspaceConvergence => OperationKind::QueryWorkspaceConvergence,
             Self::QueryLegacyBootstrap(_) => OperationKind::QueryLegacyBootstrap,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
@@ -489,6 +507,19 @@ pub struct UpdateMemberSyncPreferencesInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveMemberInput {
     pub device_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipRemovalDecision {
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecideMembershipRemovalInput {
+    pub removal_event_id: String,
+    pub decision: MembershipRemovalDecision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

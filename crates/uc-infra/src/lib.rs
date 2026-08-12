@@ -8,6 +8,7 @@ pub mod config;
 pub mod config_migration;
 pub mod db;
 pub mod device;
+pub mod file_secure_storage;
 pub mod file_transfer;
 pub mod first_sync_state;
 pub mod fs;
@@ -24,6 +25,7 @@ pub mod setup_status;
 pub mod time;
 
 pub use app_version_state::FileAppVersionStateRepository;
+pub use file_secure_storage::FileSecureStorage;
 pub use first_sync_state::FileFirstSyncStateRepository;
 pub use migration_state::FileMigrationStateRepository;
 pub use setup_status::FileSetupStatusRepository;

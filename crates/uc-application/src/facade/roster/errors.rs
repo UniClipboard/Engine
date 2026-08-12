@@ -12,7 +12,7 @@ use thiserror::Error;
 pub enum RosterError {
     /// 分布式成员移除在当前宿主上不可用(未组装)。
     #[error("distributed member removal is unavailable on this host")]
-    MemberRemovalUnavailable,
+    MembershipReconciliationUnavailable,
 
     /// 分布式成员移除流程失败。
     #[error("distributed member removal failed: {0}")]

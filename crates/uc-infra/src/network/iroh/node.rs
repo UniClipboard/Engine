@@ -36,10 +36,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    CurrentMemberSignaturePort, CurrentMembershipIdentityPort, GroupRevocationPort,
-    GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
-    MembershipAttestationEndpointPort, PeerAdmissionPort, RecoveryTransportEndpointPort,
-    RemovalExchangeEndpointPort, RemovalLateSubmissionEndpointPort, RemovalNoticeEndpointPort,
+    ContentExchangeGatePort, CurrentMemberSignaturePort, CurrentMembershipIdentityPort,
+    GroupRevocationPort, GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
+    MembershipAttestationEndpointPort, MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
@@ -65,9 +64,9 @@ use super::active_clipboard::{
 };
 use super::addr_filter::{apply_addr_filter, enumerate_local_lan_v4};
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
-use super::clipboard_dispatch_adapter::{
-    IrohClipboardDispatchAdapter, CLIPBOARD_ALPN, LEGACY_CLIPBOARD_ALPN,
-};
+#[cfg(test)]
+use super::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
+use super::clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALPN};
 use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
@@ -77,16 +76,15 @@ use super::membership_attestation_adapter::{
     IrohMembershipAttestationAdapter, IrohMembershipGossipTransportAdapter,
     IrohMembershipIdentityAdapter, MEMBERSHIP_ATTESTATION_ALPN,
 };
+use super::membership_history_exchange_adapter::{
+    IrohMembershipHistoryExchangeAdapter, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+};
 use super::net_recovery::DemandRecoveryCoordinator;
 use super::net_recovery::NetworkRecoveryObservationSource;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
-use super::removal_exchange_adapter::{
-    IrohRemovalExchangeAdapter, REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN, REMOVAL_NOTICE_ALPN,
-};
 use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
 };
-use super::workspace_recovery_adapter::{IrohWorkspaceRecoveryAdapter, WORKSPACE_RECOVERY_ALPN};
 
 /// The pairing ports produced by [`IrohNodeBuilder::install_pairing`].
 ///
@@ -944,9 +942,7 @@ impl IrohNodeBuilder {
             .router_builder
             .take()
             .expect("router_builder missing — install_* called after spawn");
-        let builder = builder
-            .accept(CLIPBOARD_ALPN, handler.clone())
-            .accept(LEGACY_CLIPBOARD_ALPN, handler);
+        let builder = builder.accept(CLIPBOARD_ALPN, handler);
         self.router_builder = Some(builder);
 
         let dispatch = Arc::new(IrohClipboardDispatchAdapter::new(
@@ -986,31 +982,18 @@ impl IrohNodeBuilder {
         Ok(GroupUpdateHandlers { dispatch: adapter })
     }
 
-    pub fn install_member_removal(
+    pub fn install_membership_history_exchange(
         &mut self,
-        adapter: &IrohRemovalExchangeAdapter,
+        adapter: &IrohMembershipHistoryExchangeAdapter,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-        exchange_endpoint: Arc<dyn RemovalExchangeEndpointPort>,
-        late_submission: Arc<dyn RemovalLateSubmissionEndpointPort>,
-        notice_endpoint: Arc<dyn RemovalNoticeEndpointPort>,
+        endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
     ) -> Result<(), IrohNodeError> {
-        let handlers = adapter.handlers(
-            member_repo,
-            peer_admission,
-            fingerprint_factory,
-            exchange_endpoint,
-            late_submission,
-            notice_endpoint,
-        );
         let builder = self.take_router_builder()?;
-        self.router_builder = Some(
-            builder
-                .accept(REMOVAL_EXCHANGE_ALPN, handlers.exchange)
-                .accept(REMOVAL_LATE_ALPN, handlers.late)
-                .accept(REMOVAL_NOTICE_ALPN, handlers.notice),
-        );
+        self.router_builder = Some(builder.accept(
+            MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+            adapter.handler(member_repo, fingerprint_factory, endpoint),
+        ));
         Ok(())
     }
 
@@ -1077,36 +1060,11 @@ impl IrohNodeBuilder {
         ))
     }
 
-    pub fn install_workspace_recovery(
-        &mut self,
-        adapter: &IrohWorkspaceRecoveryAdapter,
-        member_repo: Arc<dyn MemberRepositoryPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-        recovery_endpoint: Arc<dyn RecoveryTransportEndpointPort>,
-    ) -> Result<(), IrohNodeError> {
-        let handlers = adapter.handlers(member_repo, fingerprint_factory, recovery_endpoint);
-        let builder = self.take_router_builder()?;
-        self.router_builder = Some(builder.accept(WORKSPACE_RECOVERY_ALPN, handlers.recovery));
-        Ok(())
-    }
-
-    pub fn build_workspace_recovery_adapter(
+    pub fn build_membership_history_exchange_adapter(
         &self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        session: Arc<InMemorySession>,
-    ) -> Arc<IrohWorkspaceRecoveryAdapter> {
-        Arc::new(IrohWorkspaceRecoveryAdapter::new(
-            Arc::clone(&self.endpoint),
-            peer_addr_repo,
-            session,
-        ))
-    }
-
-    pub fn build_member_removal_exchange_adapter(
-        &self,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-    ) -> Arc<IrohRemovalExchangeAdapter> {
-        Arc::new(IrohRemovalExchangeAdapter::new(
+    ) -> Arc<IrohMembershipHistoryExchangeAdapter> {
+        Arc::new(IrohMembershipHistoryExchangeAdapter::new(
             Arc::clone(&self.endpoint),
             peer_addr_repo,
         ))
@@ -1239,12 +1197,14 @@ impl IrohNodeBuilder {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
+        content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> ActiveClipboardPullHandlers {
         let serve_adapter = IrohActiveClipboardPullServeAdapter::new(
             member_repo,
             peer_admission,
             fingerprint_factory,
             serve,
+            content_gate,
         );
         let handler = serve_adapter.handler();
 
@@ -1537,6 +1497,13 @@ mod tests {
     #[async_trait]
     impl CurrentMemberSignaturePort for UnavailableMemberSignatures {
         async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
+            Err(CurrentMemberSignatureError::Unavailable)
+        }
+
+        async fn current_member_instance(
+            &self,
+            _device_id: &DeviceId,
+        ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
             Err(CurrentMemberSignatureError::Unavailable)
         }
 
@@ -1834,6 +1801,8 @@ mod tests {
         assert_eq!(unknown_state, uc_core::ports::ReachabilityState::Unknown,);
 
         let node = builder.spawn();
+        assert!(node.accepts_protocol_for_test(CLIPBOARD_ALPN).await);
+        assert!(!node.accepts_protocol_for_test(LEGACY_CLIPBOARD_ALPN).await);
         node.shutdown().await;
     }
 

@@ -38,7 +38,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::RemovalTargetGatePort;
+use uc_core::membership::DeviceVisibilityGatePort;
 use uc_core::ports::{
     DeviceIdentityPort, PeerAddressRepositoryPort, PresenceError, PresencePort, ReachabilityState,
 };
@@ -71,7 +71,7 @@ pub(crate) struct EnsureReachableAllUseCase {
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     presence: Arc<dyn PresencePort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
-    removal_gate: Arc<dyn RemovalTargetGatePort>,
+    visibility_gate: Arc<dyn DeviceVisibilityGatePort>,
 }
 
 impl EnsureReachableAllUseCase {
@@ -79,13 +79,13 @@ impl EnsureReachableAllUseCase {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         presence: Arc<dyn PresencePort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
-        removal_gate: Arc<dyn RemovalTargetGatePort>,
+        visibility_gate: Arc<dyn DeviceVisibilityGatePort>,
     ) -> Self {
         Self {
             peer_addr_repo,
             presence,
             device_identity,
-            removal_gate,
+            visibility_gate,
         }
     }
 
@@ -110,8 +110,8 @@ impl EnsureReachableAllUseCase {
                 continue;
             }
             if self
-                .removal_gate
-                .is_locally_removed(&record.device_id)
+                .visibility_gate
+                .is_hidden_from_device_lists(&record.device_id)
                 .await
             {
                 continue;
@@ -235,8 +235,8 @@ mod tests {
     struct AllowAllRemovalTargets;
 
     #[async_trait]
-    impl RemovalTargetGatePort for AllowAllRemovalTargets {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+    impl DeviceVisibilityGatePort for AllowAllRemovalTargets {
+        async fn is_hidden_from_device_lists(&self, _device_id: &DeviceId) -> bool {
             false
         }
     }
@@ -244,8 +244,8 @@ mod tests {
     struct RemovedTarget(DeviceId);
 
     #[async_trait]
-    impl RemovalTargetGatePort for RemovedTarget {
-        async fn is_locally_removed(&self, device_id: &DeviceId) -> bool {
+    impl DeviceVisibilityGatePort for RemovedTarget {
+        async fn is_hidden_from_device_lists(&self, device_id: &DeviceId) -> bool {
             *device_id == self.0
         }
     }

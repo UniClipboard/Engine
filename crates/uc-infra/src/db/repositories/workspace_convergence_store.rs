@@ -1,7 +1,7 @@
 //! Workspace convergence state SQLite encrypted repository (ADR-016).
 //!
-//! The whole persisted convergence state (change chain, confirmations,
-//! pending handoff records, waiting members, phase) is sealed with the
+//! The whole persisted convergence state (membership history, peer branch
+//! relationships, pending admissions, phase) is sealed with the
 //! MasterKey AEAD before it is written; the only plaintext columns are the
 //! space lookup token and the updated timestamp. Loading verifies that the
 //! state belongs to the requested space, so a stale state from another
@@ -205,7 +205,7 @@ impl<E: DbExecutor + Send + Sync> WorkspaceConvergenceRepositoryPort
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
     use std::fs;
 
     use diesel::prelude::*;
@@ -214,8 +214,8 @@ mod tests {
     use tempfile::{tempdir, TempDir};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
-        MemberInstanceId, RemovalIntentId, WorkspaceConvergenceRepositoryPort,
-        WorkspaceConvergenceState, WorkspacePhase,
+        MemberInstanceId, MembershipHistoryRelationship, MembershipReconciliation,
+        WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState, WorkspacePhase,
     };
 
     use super::DieselWorkspaceConvergenceStore;
@@ -247,7 +247,14 @@ mod tests {
 
     fn persisted_state() -> WorkspaceConvergenceState {
         let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 123);
-        state.removal_intents = BTreeSet::from([RemovalIntentId::from_bytes([0x42; 32])]);
+        state.peer_history_relationships = BTreeMap::from([(
+            DeviceId::new("workspace-state-sensitive-marker"),
+            MembershipHistoryRelationship::PendingRemovalDecision,
+        )]);
+        state.membership_reconciliation = Some(MembershipReconciliation::new(
+            SPACE.to_owned(),
+            MemberInstanceId::from_bytes([0x24; 32]),
+        ));
         state.phase = WorkspacePhase::Converging;
         state.updated_at_ms = 123;
         state
@@ -324,41 +331,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chain_order_and_revision_survive_a_round_trip() {
+    async fn membership_history_state_and_revision_survive_a_round_trip() {
         let (store, pool, _directory) = make_store();
         let mut state = persisted_state();
-        let a = MemberInstanceId::from_bytes([0x0a; 32]);
-        let digest = [0x11; 32];
-        let change = uc_core::membership::WorkspaceChange {
-            space_lineage: SPACE.to_owned(),
-            kind: uc_core::membership::WorkspaceChangeKind::Admission,
-            previous_epoch: 0,
-            next_epoch: 1,
-            previous_digest: digest,
-            digest,
-            security_updates: Vec::new(),
-            admission: Some(uc_core::membership::AdmissionChangeFacts {
-                member_instance: a,
-                device_id: DeviceId::new("sensitive-device-name"),
-                device_name: "sensitive-device-name".to_owned(),
-                identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
-                    "ABCD-EFGH-IJKL-MNOP",
-                )
-                .unwrap(),
-                transport_public_key: vec![1; 32],
-                transport_address_blob: vec![2; 16],
-                identity_signature: vec![3; 64],
-            }),
-            removal: None,
-            created_at_ms: 55,
-        };
-        state.changes.push(change);
         state.revision = 7;
         store.save_state(&state).await.unwrap();
         let reopened = reopen_store(pool.clone());
         let loaded = reopened.load_state().await.unwrap().unwrap();
-        assert_eq!(loaded.changes.len(), 1);
-        assert_eq!(loaded.changes[0].change_id(), state.changes[0].change_id());
+        assert_eq!(
+            loaded.membership_reconciliation,
+            state.membership_reconciliation
+        );
+        assert_eq!(
+            loaded.peer_history_relationships,
+            state.peer_history_relationships
+        );
         assert_eq!(loaded.revision, 7);
     }
 }

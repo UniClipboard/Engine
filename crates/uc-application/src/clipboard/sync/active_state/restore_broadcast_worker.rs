@@ -26,6 +26,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, instrument, warn};
 
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
 use uc_core::ports::{PeerAddressRepositoryPort, PresencePort, SettingsPort};
 use uc_core::MemberRepositoryPort;
@@ -56,6 +57,7 @@ impl RestoreBroadcastWorker {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         presence: Arc<dyn PresencePort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Self {
         Self {
             rx,
@@ -63,7 +65,7 @@ impl RestoreBroadcastWorker {
             dispatch,
             peer_addr_repo,
             presence,
-            send_gate: MemberSendGate::new(member_repo),
+            send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
         }
     }
 
@@ -158,6 +160,7 @@ mod tests {
         ActiveClipboardState, ClipboardContentCategory, ClipboardContentCategorySet,
     };
     use uc_core::ids::{DeviceId, EntryId};
+    use uc_core::membership::ContentExchangeGatePort;
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::clipboard::ActiveClipboardDispatchError;
     use uc_core::ports::{
@@ -277,6 +280,24 @@ mod tests {
         }
     }
 
+    struct BlockedUpgradePeer;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for BlockedUpgradePeer {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            true
+        }
+    }
+
+    struct AllowAllContent;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for AllowAllContent {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            false
+        }
+    }
+
     fn request(snapshot_hash: &str) -> RestoreBroadcastRequest {
         let mut categories = ClipboardContentCategorySet::empty();
         categories.insert(ClipboardContentCategory::Text);
@@ -310,6 +331,7 @@ mod tests {
             }),
             Arc::new(StaticPresence(presence)),
             Arc::new(AllowAllMembers),
+            Arc::new(AllowAllContent),
         );
         (worker, tx, dispatch)
     }
@@ -342,6 +364,35 @@ mod tests {
         assert_eq!(sent.len(), 1, "exactly one peer is in the roster");
         assert_eq!(sent[0], ("peer-1".to_string(), "blake3v1:aa".to_string()));
         drop(sent);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn upgrade_required_peer_does_not_receive_restore_broadcast() {
+        let (tx, rx) = unbounded_channel();
+        let dispatch = Arc::new(DispatchSpy::default());
+        let worker = RestoreBroadcastWorker::new(
+            rx,
+            Arc::new(FixedSettings {
+                sync_on_restore: true,
+            }),
+            Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
+            Arc::new(OnePeerAddrRepo {
+                device: DeviceId::new("peer-1"),
+            }),
+            Arc::new(StaticPresence(ReachabilityState::Online)),
+            Arc::new(AllowAllMembers),
+            Arc::new(BlockedUpgradePeer),
+        );
+        let handle = worker.spawn();
+
+        tx.send(request("blake3v1:aa")).unwrap();
+        tokio::time::sleep(RESTORE_BROADCAST_DEBOUNCE + Duration::from_millis(80)).await;
+
+        assert!(
+            dispatch.sent.lock().unwrap().is_empty(),
+            "a peer that must upgrade must not receive restored clipboard content"
+        );
         handle.abort();
     }
 

@@ -84,11 +84,8 @@ use uc_infra::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
 pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
+use uc_infra::security::DefaultMembershipSecurityUpdateAdapter;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
-use uc_infra::security::{
-    DefaultMembershipSecurityUpdateAdapter, RemovalIntentVerificationAdapter,
-    RemovalNoticeVerificationAdapter, RemovalRecoveryAdapter,
-};
 
 #[cfg(not(feature = "lan-compat"))]
 struct UnavailableMobileDeviceLookup;
@@ -164,6 +161,7 @@ pub struct SyncEngineAssembly {
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
     /// 与 sync assembly 同生命周期。
     outbound_progress_translator: OutboundProgressRuntime,
+    convergence_assembly: Arc<SpaceConvergenceAssembly>,
     space_application_runtime: SpaceApplicationRuntime,
 }
 
@@ -184,17 +182,30 @@ impl SyncEngineAssembly {
     }
 
     #[cfg(test)]
-    pub(crate) async fn member_removal_exchange_is_reachable_for_test(&self) -> bool {
+    pub(crate) async fn membership_history_exchange_is_reachable_for_test(&self) -> bool {
         self.iroh_node
-            .accepts_protocol_for_test(uc_infra::network::iroh::REMOVAL_EXCHANGE_ALPN)
+            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN)
             .await
     }
 
     #[cfg(test)]
-    pub(crate) async fn member_removal_late_is_reachable_for_test(&self) -> bool {
+    pub(crate) async fn legacy_upgrade_is_reachable_for_test(&self) -> bool {
         self.iroh_node
-            .accepts_protocol_for_test(uc_infra::network::iroh::REMOVAL_LATE_ALPN)
+            .accepts_protocol_for_test(uc_infra::network::iroh::LEGACY_UPGRADE_ALPN)
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn deprecated_removal_protocols_are_reachable_for_test(&self) -> bool {
+        let (exchange, late, notice) = tokio::join!(
+            self.iroh_node
+                .accepts_protocol_for_test(b"uniclipboard/removal-exchange/1"),
+            self.iroh_node
+                .accepts_protocol_for_test(b"uniclipboard/removal-late/1"),
+            self.iroh_node
+                .accepts_protocol_for_test(b"uniclipboard/removal-notice/1"),
+        );
+        exchange || late || notice
     }
 
     /// Attach the externally-created restore source to the Active Clipboard
@@ -218,6 +229,12 @@ impl SyncEngineAssembly {
 
     pub(crate) fn clipboard_receiver(&self) -> Arc<dyn ClipboardReceiverPort> {
         Arc::clone(&self.clipboard_receiver)
+    }
+
+    pub(crate) fn convergence_content_gate(
+        &self,
+    ) -> Arc<dyn uc_core::membership::ContentExchangeGatePort> {
+        self.convergence_assembly.removal_gate()
     }
 
     /// Coordinated teardown. Order matters:
@@ -536,7 +553,7 @@ pub async fn build_sync_engine_assembly(
     // we'd have to re-wrap anyway.
     //
     let identity_store = Arc::new(IrohIdentityStore::new(
-        Arc::clone(&deps.security.secure_storage),
+        Arc::clone(&space_setup.iroh_identity_storage),
         Arc::new(Sha256IdentityFingerprintFactory),
     ));
 
@@ -562,8 +579,8 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.settings),
         Arc::clone(&deps.security.fingerprint),
     );
-    let removal_exchange_adapter =
-        builder.build_member_removal_exchange_adapter(Arc::clone(&space_setup.peer_addr_repo));
+    let membership_history_exchange_adapter =
+        builder.build_membership_history_exchange_adapter(Arc::clone(&space_setup.peer_addr_repo));
     let membership_transport = builder.build_membership_gossip_transport(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&deps.device.device_identity),
@@ -589,19 +606,9 @@ pub async fn build_sync_engine_assembly(
     );
     let legacy_upgrade_dispatch: Arc<dyn LegacyUpgradeDispatchPort> =
         legacy_upgrade_adapter.clone();
-    let workspace_recovery_adapter = builder.build_workspace_recovery_adapter(
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.membership_session),
-    );
     let convergence_assembly = SpaceConvergenceAssembly::new(SpaceConvergenceDeps {
         workspace: WorkspaceConvergenceDeps {
             repository: Arc::clone(&space_setup.workspace_convergence_repository),
-            verification: Arc::new(RemovalIntentVerificationAdapter),
-            recovery: Arc::new(RemovalRecoveryAdapter::new(
-                space_setup.membership_session.as_ref().clone(),
-                Arc::clone(&space_setup.key_epoch_repository),
-                removal_identity.clone(),
-            )),
             member_signatures: Arc::clone(&space_setup.current_member_signatures),
             member_repo: Arc::clone(&deps.device.member_repo),
             membership_identity: removal_identity,
@@ -613,11 +620,8 @@ pub async fn build_sync_engine_assembly(
             )),
             clock: Arc::clone(&deps.system.clock),
             device_identity: Arc::clone(&deps.device.device_identity),
-            exchange: removal_exchange_adapter.clone(),
-            late_submission: removal_exchange_adapter.clone(),
-            notice: removal_exchange_adapter.clone(),
-            notice_verification: Arc::new(RemovalNoticeVerificationAdapter),
-            recovery_transport: workspace_recovery_adapter.clone(),
+            membership_history_exchange: membership_history_exchange_adapter.clone(),
+            legacy_peer_probe: legacy_upgrade_adapter.clone(),
             trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             own_device: deps.device.device_identity.current_device_id(),
@@ -662,20 +666,11 @@ pub async fn build_sync_engine_assembly(
         &membership_transport,
         convergence_assembly.membership_gossip_endpoint(),
     )?;
-    builder.install_member_removal(
-        &removal_exchange_adapter,
-        Arc::clone(&deps.device.member_repo),
-        Arc::clone(&space_setup.peer_admission),
-        Arc::clone(&deps.security.fingerprint),
-        convergence_assembly.removal_exchange(),
-        convergence_assembly.removal_late_submission(),
-        convergence_assembly.removal_notice(),
-    )?;
-    builder.install_workspace_recovery(
-        &workspace_recovery_adapter,
+    builder.install_membership_history_exchange(
+        &membership_history_exchange_adapter,
         Arc::clone(&deps.device.member_repo),
         Arc::clone(&deps.security.fingerprint),
-        convergence_assembly.recovery_transport(),
+        convergence_assembly.membership_history_exchange(),
     )?;
     builder.install_legacy_upgrade_handler(
         legacy_upgrade_adapter.as_ref(),
@@ -805,6 +800,7 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
         active_clipboard_pull_serve,
+        convergence_assembly.removal_gate(),
     );
 
     let iroh_node = builder.spawn();
@@ -847,7 +843,7 @@ pub async fn build_sync_engine_assembly(
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             presence: Arc::clone(&presence),
             analytics: Arc::clone(&space_setup.analytics_facade),
-            removal_gate: convergence_assembly.removal_gate(),
+            visibility_gate: convergence_assembly.device_visibility_gate(),
             convergence: Arc::clone(&convergence_assembly),
         },
         transition: SpaceTransitionDeps {
@@ -1037,6 +1033,7 @@ pub async fn build_sync_engine_assembly(
         advance_register: Arc::clone(&deps.clipboard.active_register),
         mobile_consumability: deps.clipboard.mobile_consumability.clone(),
         member_repo: Arc::clone(&deps.device.member_repo),
+        content_gate: convergence_assembly.removal_gate(),
         peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
         presence: Arc::clone(&presence),
         entry_lookup: Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
@@ -1081,6 +1078,7 @@ pub async fn build_sync_engine_assembly(
         clipboard_receiver,
         active_clipboard_lifecycle,
         outbound_progress_translator,
+        convergence_assembly,
         space_application_runtime,
     })
 }

@@ -1,9 +1,12 @@
 # ADR-019：工作空间收敛等待状态按设备精确公开
 
-- **状态**：已实施（Engine、绑定与移动测试宿主）
+- **状态**：等待名单已实施；ADR-020 的上线核对、待用户决定和分叉关系待重新同步
 - **日期**：2026-08-11
 - **修订**：ADR-016 的对外收敛状态展示边界
+- **被修订**：ADR-020 不再把等待名单解释为全局一致；名单只描述本机已知传播，待用户移除决定
+  和分叉设备分别公开，不能由普通在线状态推断
 - **相关文档**：`docs/adr/016-workspace-wide-convergence.md`、
+  `docs/adr/020-membership-reconciliation-and-user-decisions.md`、
   `docs/specs/019-device-specific-convergence-waiting-status.md`、
   `docs/architecture/architecture-bible.md`
 
@@ -25,23 +28,25 @@ ADR-016 已规定 `WorkspaceConvergence` 是工作空间收敛的唯一负责人
 成员、当前确认结果、待交接记录和暂时不可达记录中推导等待设备名单；不新增第二份等待队列、缓存或
 持久化字段。
 
-名单只在 `WaitingForOfflineMember` 阶段公开，并且每个设备必须同时满足：
+名单只在 `workspace_completion` 为 `WaitingForOfflineMember` 时公开，并且每个设备必须同时满足：
 
 - 是当前有效成员，而非已移除或历史成员；
 - 尚未确认当前工作空间目标；
 - 当前确实不可达，并且该不可达状态是当前剩余收敛条件；
 - 不是本机当前成员实例。
 
-名单按设备标识稳定排序，并去除重复项。`waiting_member_count` 直接等于名单长度；在任何其他阶段，
-名单必须为空且数量必须为零。
+名单按设备标识稳定排序，并去除重复项。`workspace_completion.waiting_member_count` 直接等于名单
+长度；在任何其他工作空间完成阶段，名单必须为空且数量必须为零。下一项成员变化同时处于
+`membership_transition=AwaitingCommit` 时，不能遮住这份提交后等待名单。
 
 同一设备移除后重新加入会产生新的成员实例。推导只使用当前有效实例，因此旧实例的不可达、待交接或
 确认记录不得出现在新实例的等待名单中。
 
 ### 查询与通知共用一份完整摘要
 
-`QueryWorkspaceConvergence` 和 `WorkspaceConvergenceChanged` 必须使用同一份 Engine 摘要，包含
-`waiting_member_device_ids` 及与其一致的等待数量。绑定、宿主和产品侧投影只完整透传该摘要，不重新
+`QueryWorkspaceConvergence` 和 `WorkspaceConvergenceChanged` 必须使用同一份 Engine 摘要，在
+`workspace_completion` 内包含 `waiting_member_device_ids` 及与其一致的等待数量。绑定、宿主和
+产品侧投影只完整透传该摘要，不重新
 计算名单，不按在线状态补充或删除设备。
 
 产品端以设备条目的稳定设备标识匹配该名单，只在命中的设备条目上显示等待状态及说明。产品端不保留
@@ -98,5 +103,6 @@ ADR-016 已规定 `WorkspaceConvergence` 是工作空间收敛的唯一负责人
 4. 仅有其他离线设备、但它们不阻塞当前收敛时，名单不包含它们；
 5. 成员移除后，该成员不会继续出现在名单中；
 6. 同一设备移除后重新加入，旧成员实例不会污染新实例的名单；
-7. 非等待阶段始终返回空名单和零数量；
-8. 查询结果与实时通知携带完全一致的名单和数量，绑定与产品侧投影不自行推导。
+7. 非等待完成阶段始终返回空名单和零数量；
+8. 下一项变化处于 `AwaitingCommit` 时，前一项提交后等待名单仍完整保留；
+9. 查询结果与实时通知携带完全一致的名单和数量，绑定与产品侧投影不自行推导。

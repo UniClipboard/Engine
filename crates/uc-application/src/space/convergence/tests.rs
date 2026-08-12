@@ -1,23 +1,20 @@
 //! WorkspaceConvergence owner tests (ADR-016 flow semantics).
 
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityError,
     CurrentMembershipIdentityPort, MemberInstanceId, MemberRepositoryPort,
-    MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalCausalProof,
-    RemovalCausalProofMember, RemovalExchangeEndpointPort, RemovalExchangeMessage,
-    RemovalIntentContent, RemovalIntentVerificationError, RemovalIntentVerificationPort,
-    RemovalLateAcceptance, RemovalLateRejectionReason, RemovalLateSubmission,
-    RemovalLateSubmissionEndpointPort, RemovalNotice, RemovalNoticeAcceptance,
-    RemovalNoticeEndpointPort, RemovalRecoveryError, RemovalRecoveryPort, RemovalViewMember,
-    RemovalViewSnapshot, SignedRemovalIntent, WorkspaceChange, WorkspaceChangeKind,
-    WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
-    WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState, WorkspacePhase,
+    MembershipAdmissionDecision, MembershipAdmissionGatePort, MembershipEventsResponse,
+    MembershipHistoryAck, MembershipHistoryMessage, MembershipOperation, MembershipReconciliation,
+    MembershipSecurityUpdateError, MembershipSecurityUpdatePort, WorkspaceConvergenceEvent,
+    WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
+    WorkspaceConvergenceState,
 };
 use uc_core::ports::{ClockPort, DeviceIdentityPort};
 
@@ -29,75 +26,144 @@ const SPACE: &str = "test-workspace";
 
 #[derive(Clone, Default)]
 struct UnusedExchange {
-    sent: Arc<Mutex<Vec<uc_core::membership::RemovalExchangeMessage>>>,
+    history_sent: Arc<Mutex<Vec<(DeviceId, MembershipHistoryMessage)>>>,
+}
+
+#[derive(Clone)]
+struct ScriptedExchange {
+    replies: Arc<Mutex<VecDeque<MembershipHistoryMessage>>>,
+    history_sent: Arc<Mutex<Vec<(DeviceId, MembershipHistoryMessage)>>>,
+}
+
+struct RejectingExchange;
+
+struct BlockingTrackingExchange {
+    active: AtomicUsize,
+    calls: AtomicUsize,
+    maximum_active: AtomicUsize,
+    started: tokio::sync::Notify,
+    releases: tokio::sync::Semaphore,
+}
+
+impl BlockingTrackingExchange {
+    fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            maximum_active: AtomicUsize::new(0),
+            started: tokio::sync::Notify::new(),
+            releases: tokio::sync::Semaphore::new(0),
+        }
+    }
 }
 
 #[async_trait]
-impl uc_core::membership::RemovalExchangePort for UnusedExchange {
-    async fn exchange(
+impl uc_core::membership::MembershipHistoryExchangePort for BlockingTrackingExchange {
+    async fn exchange_membership_history(
         &self,
         _recipient: &DeviceId,
-        message: uc_core::membership::RemovalExchangeMessage,
-    ) -> Result<
-        uc_core::membership::RemovalExchangeMessage,
-        uc_core::membership::RemovalExchangeError,
-    > {
-        self.sent.lock().unwrap().push(message);
-        Ok(uc_core::membership::RemovalExchangeMessage::IntentAck(
-            uc_core::membership::RemovalIntentId::from_bytes([0; 32]),
+        _message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, uc_core::membership::MembershipHistoryExchangeError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.maximum_active.fetch_max(active, Ordering::SeqCst);
+        self.started.notify_waiters();
+        let permit = self
+            .releases
+            .acquire()
+            .await
+            .expect("test exchange remains open");
+        permit.forget();
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(MembershipHistoryMessage::Ack(
+            MembershipHistoryAck::Consistent,
         ))
     }
 }
 
-#[derive(Clone, Default)]
-struct UnusedLate;
-
 #[async_trait]
-impl uc_core::membership::RemovalLateSubmissionPort for UnusedLate {
-    async fn submit_late(
+impl uc_core::membership::MembershipHistoryExchangePort for RejectingExchange {
+    async fn exchange_membership_history(
         &self,
         _recipient: &DeviceId,
-        _submission: uc_core::membership::RemovalLateSubmission,
-    ) -> Result<
-        uc_core::membership::RemovalLateAcceptance,
-        uc_core::membership::RemovalLateSubmissionTransportError,
-    > {
-        Ok(uc_core::membership::RemovalLateAcceptance::AlreadyKnown {
-            intent_id: uc_core::membership::RemovalIntentId::from_bytes([0; 32]),
-        })
+        _message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, uc_core::membership::MembershipHistoryExchangeError> {
+        Err(uc_core::membership::MembershipHistoryExchangeError::Rejected)
     }
 }
 
-#[derive(Clone, Default)]
-struct UnusedNotice;
+#[derive(Clone)]
+struct ScriptedLegacyProbe {
+    responses: Arc<Mutex<VecDeque<Result<(), uc_core::membership::LegacyPeerProbeError>>>>,
+    calls: Arc<Mutex<Vec<DeviceId>>>,
+}
 
-#[async_trait]
-impl uc_core::membership::RemovalNoticePort for UnusedNotice {
-    async fn send_notice(
-        &self,
-        _recipient: &DeviceId,
-        _notice: uc_core::membership::RemovalNotice,
-    ) -> Result<
-        uc_core::membership::RemovalNoticeAcceptance,
-        uc_core::membership::RemovalNoticeTransportError,
-    > {
-        Ok(uc_core::membership::RemovalNoticeAcceptance::Accepted {
-            intent_id: uc_core::membership::RemovalIntentId::from_bytes([0; 32]),
-        })
+impl ScriptedLegacyProbe {
+    fn new(responses: Vec<Result<(), uc_core::membership::LegacyPeerProbeError>>) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(responses.into())),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 }
 
-#[derive(Clone, Default)]
-struct RejectingNoticeVerification;
+#[async_trait]
+impl uc_core::membership::LegacyPeerProbePort for ScriptedLegacyProbe {
+    async fn probe_legacy_peer(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<(), uc_core::membership::LegacyPeerProbeError> {
+        self.calls.lock().unwrap().push(peer.clone());
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Err(uc_core::membership::LegacyPeerProbeError::Transport))
+    }
+}
+
+impl ScriptedExchange {
+    fn new(replies: Vec<MembershipHistoryMessage>) -> Self {
+        Self {
+            replies: Arc::new(Mutex::new(replies.into())),
+            history_sent: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
 
 #[async_trait]
-impl uc_core::membership::RemovalNoticeVerificationPort for RejectingNoticeVerification {
-    async fn verify_notice_signature(
+impl uc_core::membership::MembershipHistoryExchangePort for ScriptedExchange {
+    async fn exchange_membership_history(
         &self,
-        _notice: &uc_core::membership::RemovalNotice,
-        _issuer_public_key: &[u8],
-    ) -> Result<(), uc_core::membership::RemovalNoticeVerificationError> {
-        Ok(())
+        recipient: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, uc_core::membership::MembershipHistoryExchangeError> {
+        self.history_sent
+            .lock()
+            .unwrap()
+            .push((recipient.clone(), message));
+        self.replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or(uc_core::membership::MembershipHistoryExchangeError::Transport)
+    }
+}
+
+#[async_trait]
+impl uc_core::membership::MembershipHistoryExchangePort for UnusedExchange {
+    async fn exchange_membership_history(
+        &self,
+        recipient: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, uc_core::membership::MembershipHistoryExchangeError> {
+        self.history_sent
+            .lock()
+            .unwrap()
+            .push((recipient.clone(), message));
+        Ok(MembershipHistoryMessage::Ack(
+            MembershipHistoryAck::Consistent,
+        ))
     }
 }
 
@@ -174,25 +240,19 @@ impl CurrentMembershipAnnouncementPort for FixedAnnouncementMaterial {
 }
 
 #[derive(Clone, Default)]
-struct AcceptingVerifier;
-
-#[async_trait]
-impl RemovalIntentVerificationPort for AcceptingVerifier {
-    async fn verify_intent(
-        &self,
-        _intent: &SignedRemovalIntent,
-    ) -> Result<(), RemovalIntentVerificationError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Default)]
 struct FixedSigner;
 
 #[async_trait]
 impl CurrentMemberSignaturePort for FixedSigner {
     async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
         Ok(1)
+    }
+
+    async fn current_member_instance(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<MemberInstanceId, CurrentMemberSignatureError> {
+        Ok(instance(0x0a))
     }
 
     async fn sign_current_member_payload(
@@ -212,61 +272,36 @@ impl CurrentMemberSignaturePort for FixedSigner {
     }
 }
 
-#[derive(Clone)]
-struct FakeRecovery {
-    members: Arc<Mutex<Vec<(DeviceId, MemberInstanceId)>>>,
-    own_device: DeviceId,
-}
-
-impl FakeRecovery {
-    fn new(own_device: DeviceId, members: Vec<(DeviceId, MemberInstanceId)>) -> Self {
-        Self {
-            members: Arc::new(Mutex::new(members)),
-            own_device,
-        }
-    }
-}
+#[derive(Clone, Default)]
+struct EventSignatureOnlyVerifier;
 
 #[async_trait]
-impl RemovalRecoveryPort for FakeRecovery {
-    async fn current_view(&self) -> Result<RemovalViewSnapshot, RemovalRecoveryError> {
-        let members = self
-            .members
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(device_id, instance)| RemovalViewMember {
-                device_id: *device_id,
-                instance: *instance,
-                signing_public_key: instance.as_bytes().to_vec(),
-            })
-            .collect::<Vec<_>>();
-        let causal_proof = RemovalCausalProof::new(
-            1,
-            members
-                .iter()
-                .map(|member| RemovalCausalProofMember {
-                    device_id: member.device_id,
-                    instance: member.instance,
-                    signing_public_key: member.signing_public_key.clone(),
-                })
-                .collect(),
-        );
-        Ok(RemovalViewSnapshot {
-            epoch: 1,
-            members,
-            causal_proof,
-        })
+impl CurrentMemberSignaturePort for EventSignatureOnlyVerifier {
+    async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
+        Ok(1)
     }
 
-    async fn own_instance(&self) -> Result<Option<MemberInstanceId>, RemovalRecoveryError> {
-        Ok(self
-            .members
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(device_id, _)| *device_id == self.own_device)
-            .map(|(_, instance)| *instance))
+    async fn current_member_instance(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<MemberInstanceId, CurrentMemberSignatureError> {
+        Ok(instance(0x1a))
+    }
+
+    async fn sign_current_member_payload(
+        &self,
+        _payload: &[u8],
+    ) -> Result<Vec<u8>, CurrentMemberSignatureError> {
+        Ok(b"signature".to_vec())
+    }
+
+    async fn verify_current_member_payload(
+        &self,
+        _member: &DeviceId,
+        _payload: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, CurrentMemberSignatureError> {
+        Ok(signature.len() != 64)
     }
 }
 
@@ -293,6 +328,31 @@ impl MembershipSecurityUpdatePort for UnusedSecurityUpdates {
 }
 
 #[derive(Clone, Default)]
+struct RecordingSecurityUpdates {
+    applied_payloads: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+#[async_trait]
+impl MembershipSecurityUpdatePort for RecordingSecurityUpdates {
+    async fn current_state(
+        &self,
+    ) -> Result<uc_core::membership::MembershipSecurityState, MembershipSecurityUpdateError> {
+        Ok(uc_core::membership::MembershipSecurityState {
+            space_id: SpaceId::from_str(SPACE),
+            group_epoch: 0,
+        })
+    }
+
+    async fn apply_group_epoch_update(
+        &self,
+        payload: &[u8],
+    ) -> Result<u64, MembershipSecurityUpdateError> {
+        self.applied_payloads.lock().unwrap().push(payload.to_vec());
+        Ok(1)
+    }
+}
+
+#[derive(Clone, Default)]
 struct UnusedClock;
 
 #[async_trait]
@@ -315,6 +375,7 @@ impl DeviceIdentityPort for UnusedDeviceIdentity {
 struct Harness {
     owner: Arc<WorkspaceConvergence>,
     repository: MemoryWorkspaceRepository,
+    history_exchange: Arc<UnusedExchange>,
 }
 
 fn instance(byte: u8) -> MemberInstanceId {
@@ -323,9 +384,15 @@ fn instance(byte: u8) -> MemberInstanceId {
 
 fn harness(own_device: &str, members: Vec<(DeviceId, MemberInstanceId)>) -> Harness {
     let repository = MemoryWorkspaceRepository::default();
-    let owner =
-        WorkspaceConvergence::new(test_deps(Arc::new(repository.clone()), own_device, members));
-    Harness { owner, repository }
+    let history_exchange = Arc::new(UnusedExchange::default());
+    let mut deps = test_deps(Arc::new(repository.clone()), own_device, members);
+    deps.membership_history_exchange = history_exchange.clone();
+    let owner = WorkspaceConvergence::new(deps);
+    Harness {
+        owner,
+        repository,
+        history_exchange,
+    }
 }
 
 /// Build the full dependency set with no-op defaults for every port except
@@ -334,12 +401,10 @@ fn harness(own_device: &str, members: Vec<(DeviceId, MemberInstanceId)>) -> Harn
 pub(crate) fn test_deps(
     repository: Arc<dyn WorkspaceConvergenceRepositoryPort>,
     own_device: &str,
-    members: Vec<(DeviceId, MemberInstanceId)>,
+    _members: Vec<(DeviceId, MemberInstanceId)>,
 ) -> WorkspaceConvergenceDeps {
     WorkspaceConvergenceDeps {
         repository,
-        verification: Arc::new(AcceptingVerifier),
-        recovery: Arc::new(FakeRecovery::new(DeviceId::new(own_device), members)),
         member_signatures: Arc::new(FixedSigner),
         member_repo: Arc::new(uc_application_test_member_repo()),
         membership_identity: Arc::new(FixedMembershipIdentity {
@@ -349,32 +414,23 @@ pub(crate) fn test_deps(
         security_updates: Arc::new(UnusedSecurityUpdates),
         clock: Arc::new(UnusedClock),
         device_identity: Arc::new(UnusedDeviceIdentity),
-        exchange: Arc::new(UnusedExchange::default()),
-        late_submission: Arc::new(UnusedLate),
-        notice: Arc::new(UnusedNotice),
-        notice_verification: Arc::new(RejectingNoticeVerification),
-        recovery_transport: Arc::new(UnusedRecoveryTransport),
+        membership_history_exchange: Arc::new(UnusedExchange::default()),
+        legacy_peer_probe: Arc::new(UnusedLegacyProbe),
         trusted_peer_repo: Arc::new(TestTrustedPeerRepo),
         peer_addr_repo: Arc::new(TestPeerAddrRepo),
         own_device: DeviceId::new(own_device),
     }
 }
 
-#[derive(Clone, Default)]
-struct UnusedRecoveryTransport;
+struct UnusedLegacyProbe;
 
 #[async_trait]
-impl uc_core::membership::RecoveryTransportPort for UnusedRecoveryTransport {
-    async fn exchange_recovery(
+impl uc_core::membership::LegacyPeerProbePort for UnusedLegacyProbe {
+    async fn probe_legacy_peer(
         &self,
-        _recipient: &DeviceId,
-        _binding: &uc_core::membership::RecoveryBinding,
-        _message: uc_core::membership::RecoveryChannelMessage,
-    ) -> Result<
-        uc_core::membership::RecoveryChannelMessage,
-        uc_core::membership::RecoveryTransportError,
-    > {
-        Err(uc_core::membership::RecoveryTransportError::Offline)
+        _peer: &DeviceId,
+    ) -> Result<(), uc_core::membership::LegacyPeerProbeError> {
+        Err(uc_core::membership::LegacyPeerProbeError::Transport)
     }
 }
 
@@ -433,6 +489,41 @@ impl uc_core::ports::PeerAddressRepositoryPort for TestPeerAddrRepo {
     }
 }
 
+struct FixedPeerAddrRepo {
+    records: Vec<uc_core::ports::PeerAddressRecord>,
+}
+
+#[async_trait]
+impl uc_core::ports::PeerAddressRepositoryPort for FixedPeerAddrRepo {
+    async fn get(
+        &self,
+        device: &DeviceId,
+    ) -> Result<Option<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+        Ok(self
+            .records
+            .iter()
+            .find(|record| &record.device_id == device)
+            .cloned())
+    }
+
+    async fn upsert(
+        &self,
+        _record: &uc_core::ports::PeerAddressRecord,
+    ) -> Result<(), uc_core::ports::PeerAddressError> {
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+    ) -> Result<Vec<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+        Ok(self.records.clone())
+    }
+
+    async fn remove(&self, _device: &DeviceId) -> Result<(), uc_core::ports::PeerAddressError> {
+        Ok(())
+    }
+}
+
 fn uc_application_test_member_repo() -> impl MemberRepositoryPort {
     struct Empty;
     #[async_trait]
@@ -466,90 +557,50 @@ fn uc_application_test_member_repo() -> impl MemberRepositoryPort {
     Empty
 }
 
-fn admission_change_for(
+fn admission_facts_for(
     instance: MemberInstanceId,
     device: &DeviceId,
-    lineage: &str,
-) -> WorkspaceChange {
-    WorkspaceChange {
-        space_lineage: lineage.to_owned(),
-        kind: WorkspaceChangeKind::Admission,
-        previous_epoch: 0,
-        next_epoch: 1,
-        previous_digest: *uc_core::membership::WorkspaceDigest::from_bytes(
-            Sha256::digest(b"uniclipboard-workspace-initial/v1").into(),
+) -> uc_core::membership::AdmissionChangeFacts {
+    uc_core::membership::AdmissionChangeFacts {
+        member_instance: instance,
+        device_id: *device,
+        device_name: "device".to_owned(),
+        identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
+            "ABCD-EFGH-IJKL-MNOP",
         )
-        .as_bytes(),
-        digest: [0; 32],
-        security_updates: Vec::new(),
-        admission: Some(uc_core::membership::AdmissionChangeFacts {
-            member_instance: instance,
-            device_id: *device,
-            device_name: "device".to_owned(),
-            identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
-                "ABCD-EFGH-IJKL-MNOP",
-            )
-            .unwrap(),
-            transport_public_key: vec![1; 32],
-            transport_address_blob: vec![2; 16],
-            identity_signature: vec![3; 64],
-        }),
-        removal: None,
-        created_at_ms: 1,
+        .unwrap(),
+        transport_public_key: vec![1; 32],
+        transport_address_blob: vec![2; 16],
+        identity_signature: vec![3; 64],
     }
 }
 
-#[tokio::test]
-async fn removal_forms_a_continuous_change_and_publishes_a_snapshot() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let harness = harness(
-        "device-a",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-b"), b),
-        ],
-    );
-
-    // Seed the chain with the two admissions so both members are effective.
-    let repo = harness.repository.clone();
-    {
-        let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-        let first = admission_change_for(a, &DeviceId::new("device-a"), SPACE);
-        state
-            .apply(WorkspaceConvergenceEvent::CommittedChange(first), 1)
-            .unwrap();
-        let first_digest = uc_core::membership::compute_change_digest(&state.changes[0]);
-        let mut second = admission_change_for(b, &DeviceId::new("device-b"), SPACE);
-        second.previous_epoch = 1;
-        second.next_epoch = 2;
-        second.previous_digest = first_digest;
-        second.digest = uc_core::membership::compute_change_digest(&second);
-        state
-            .apply(WorkspaceConvergenceEvent::CommittedChange(second), 1)
-            .unwrap();
-        repo.save_state(&state).await.unwrap();
-    }
-
-    let snapshot = harness
-        .owner
-        .submit_removal(&DeviceId::new("device-b"))
-        .await
-        .unwrap();
-    assert_eq!(snapshot.effective_member_count, 1);
-    assert_eq!(snapshot.change_count, 3);
-    assert_eq!(snapshot.removal_intent_count, 1);
-    assert_eq!(snapshot.phase, WorkspacePhase::Converging);
-
-    let loaded = harness.repository.load_state().await.unwrap().unwrap();
-    assert_eq!(
-        loaded.effective_members(),
-        std::collections::BTreeSet::from([a])
-    );
-    assert_eq!(loaded.changes.len(), 3);
-    assert!(!loaded.removed);
+fn membership_event(
+    parent: Option<uc_core::membership::MembershipEventId>,
+    parent_depth: u64,
+    author: MemberInstanceId,
+    member: MemberInstanceId,
+    device_id: &str,
+    operation_byte: u8,
+) -> uc_core::membership::MembershipEvent {
+    uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        parent,
+        parent_depth,
+        [operation_byte; 16],
+        author,
+        MembershipOperation::AddDevice {
+            admission: admission_facts_for(member, &DeviceId::new(device_id)),
+        },
+        [operation_byte; 32],
+        [operation_byte.saturating_add(1); 32],
+        Vec::new(),
+        None,
+        vec![operation_byte],
+    )
 }
 
+// 流程：A 尝试移除不存在的设备或移除自己；操作失败，原成员历史和状态均不得保存变化。
 #[tokio::test]
 async fn removing_an_unknown_or_self_target_fails_without_saving() {
     let a = instance(0x0a);
@@ -561,6 +612,16 @@ async fn removing_an_unknown_or_self_target_fails_without_saving() {
             (DeviceId::new("device-b"), b),
         ],
     );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis.clone()).unwrap();
+    history.receive_verified(addition.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    let before = state.clone();
+    harness.repository.save_state(&state).await.unwrap();
 
     assert!(matches!(
         harness
@@ -578,110 +639,34 @@ async fn removing_an_unknown_or_self_target_fails_without_saving() {
     ));
     assert_eq!(
         harness.repository.load_state().await.unwrap(),
-        None,
-        "failed removal must not persist any state"
+        Some(before),
+        "failed removal must not change the saved state"
     );
 }
 
-fn signed_intent_for(
-    lineage: &str,
-    initiator: MemberInstanceId,
-    target: MemberInstanceId,
-) -> SignedRemovalIntent {
-    let content = RemovalIntentContent {
-        space_lineage: lineage.to_owned(),
-        view_epoch: 1,
-        view_members: vec![initiator, target],
-        initiator,
-        target,
-    };
-    content.validate().unwrap();
-    SignedRemovalIntent::new(
-        content,
-        b"signature".to_vec(),
-        RemovalCausalProof::new(
-            1,
-            vec![
-                RemovalCausalProofMember {
-                    device_id: DeviceId::new("device-a"),
-                    instance: initiator,
-                    signing_public_key: vec![1; 32],
-                },
-                RemovalCausalProofMember {
-                    device_id: DeviceId::new("device-b"),
-                    instance: target,
-                    signing_public_key: vec![2; 32],
-                },
-            ],
-        ),
-    )
-}
-
-async fn seeded_two_member_state(
-    repo: &MemoryWorkspaceRepository,
-    a: MemberInstanceId,
-    b: MemberInstanceId,
-    own_instance: MemberInstanceId,
-) {
+// 流程：成员历史在邀请签发后继续前进；旧邀请绑定的历史位置失效，不能再用于加入。
+#[tokio::test]
+async fn membership_history_advancement_invalidates_an_older_invitation() {
+    let a = instance(0x0a);
+    let harness = harness("device-a", vec![(DeviceId::new("device-a"), a)]);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis).unwrap();
     let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    let first = admission_change_for(a, &DeviceId::new("device-a"), SPACE);
-    state
-        .apply(WorkspaceConvergenceEvent::CommittedChange(first), 1)
-        .unwrap();
-    let first_digest = uc_core::membership::compute_change_digest(&state.changes[0]);
-    let mut second = admission_change_for(b, &DeviceId::new("device-b"), SPACE);
-    second.previous_epoch = 1;
-    second.next_epoch = 2;
-    second.previous_digest = first_digest;
-    second.digest = uc_core::membership::compute_change_digest(&second);
-    state
-        .apply(WorkspaceConvergenceEvent::CommittedChange(second), 1)
-        .unwrap();
-    state
-        .apply(
-            WorkspaceConvergenceEvent::LocalAdmissionReady { own_instance },
-            1,
-        )
-        .unwrap();
-    repo.save_state(&state).await.unwrap();
-}
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
 
-#[tokio::test]
-async fn exchange_endpoint_accepts_a_remote_intent_and_forms_the_same_change() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let harness = harness(
-        "device-a",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-b"), b),
-        ],
-    );
-    seeded_two_member_state(&harness.repository, a, b, a).await;
-
-    let intent = signed_intent_for(SPACE, a, b);
-    let reply = harness
-        .owner
-        .handle_exchange(
-            &DeviceId::new("device-a"),
-            RemovalExchangeMessage::Intent(Box::new(intent.clone())),
-        )
-        .await
-        .unwrap();
-    assert_eq!(reply, RemovalExchangeMessage::IntentAck(intent.intent_id));
-
-    let state = harness.repository.load_state().await.unwrap().unwrap();
-    assert_eq!(state.removal_intents.len(), 1);
     assert_eq!(
-        state.effective_members(),
-        std::collections::BTreeSet::from([a])
+        harness.owner.admission_decision(0).await,
+        MembershipAdmissionDecision::SupersededInvitation
     );
-    assert_eq!(state.changes.len(), 3);
-    assert!(!state.removed);
 }
 
+// 流程：A 完成新成员加入后联系尚未建立历史关系的 B；首包携带受限的连续历史，
+// 让 B 即使尚未保存 A 的最新成员资料也能验证并接纳本次引荐。
 #[tokio::test]
-async fn exchange_endpoint_rejects_a_non_member_source() {
+async fn admission_sync_introduces_the_applied_signed_history_to_each_peer() {
     let a = instance(0x0a);
     let b = instance(0x0b);
     let harness = harness(
@@ -691,198 +676,1359 @@ async fn exchange_endpoint_rejects_a_non_member_source() {
             (DeviceId::new("device-b"), b),
         ],
     );
-    seeded_two_member_state(&harness.repository, a, b, a).await;
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis.clone()).unwrap();
+    history.receive_verified(addition.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
 
-    let intent = signed_intent_for(SPACE, a, b);
-    let result = harness
-        .owner
-        .handle_exchange(
-            &DeviceId::new("device-unknown"),
-            RemovalExchangeMessage::Intent(Box::new(intent)),
-        )
-        .await;
-    assert!(matches!(
-        result,
-        Err(uc_core::membership::RemovalExchangeError::Rejected)
-    ));
-    let state = harness.repository.load_state().await.unwrap().unwrap();
-    assert!(state.removal_intent_records.is_empty());
-}
+    harness.owner.synchronize_chain().await.unwrap();
 
-#[tokio::test]
-async fn late_submission_is_bounded_and_idempotent() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let harness = harness(
-        "device-a",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-b"), b),
-        ],
-    );
-    seeded_two_member_state(&harness.repository, a, b, a).await;
-
-    let intent = signed_intent_for(SPACE, a, b);
-    let first = harness
-        .owner
-        .handle_late_submission(RemovalLateSubmission::Intent(Box::new(intent.clone())))
-        .await
-        .unwrap();
-    assert!(matches!(first, RemovalLateAcceptance::Accepted { .. }));
-
-    let second = harness
-        .owner
-        .handle_late_submission(RemovalLateSubmission::Intent(Box::new(intent)))
-        .await
-        .unwrap();
-    assert!(matches!(second, RemovalLateAcceptance::AlreadyKnown { .. }));
-
-    let wrong = harness
-        .owner
-        .handle_late_submission(RemovalLateSubmission::Intent(Box::new(signed_intent_for(
-            "other-space",
-            a,
-            b,
-        ))))
-        .await
-        .unwrap();
-    assert!(matches!(
-        wrong,
-        RemovalLateAcceptance::Rejected {
-            reason: RemovalLateRejectionReason::InvalidSpaceLineage
-        }
-    ));
-}
-
-#[tokio::test]
-async fn notice_marks_the_local_instance_removed() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let harness = harness(
-        "device-b",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-b"), b),
-        ],
-    );
-    seeded_two_member_state(&harness.repository, a, b, b).await;
-
-    let notice = RemovalNotice {
-        space_lineage_fingerprint: RemovalNotice::space_lineage_fingerprint(SPACE),
-        intent_id: uc_core::membership::RemovalIntentId::from_bytes([7; 32]),
-        target_instance: b,
-        target_device_id: DeviceId::new("device-b"),
-        issuer_instance: a,
-        signature: vec![1, 2, 3],
+    let sent = harness.history_exchange.history_sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, DeviceId::new("device-b"));
+    let MembershipHistoryMessage::EventsResponse(introduction) = &sent[0].1 else {
+        panic!("unknown member must receive a signed history introduction");
     };
-    let acceptance = harness.owner.handle_notice(notice.clone()).await.unwrap();
-    assert!(matches!(
-        acceptance,
-        RemovalNoticeAcceptance::Accepted { .. }
-    ));
-
-    let snapshot = harness.owner.query().await.unwrap();
-    assert!(snapshot.removed);
-
-    // Idempotent for the same intent.
-    let again = harness.owner.handle_notice(notice).await.unwrap();
-    assert!(matches!(
-        again,
-        RemovalNoticeAcceptance::AlreadyKnown { .. }
-    ));
+    assert_eq!(introduction.after_event_id, None);
+    assert_eq!(introduction.events, vec![genesis, addition]);
 }
 
+// 流程：A 不在线时 B 将 C 加入空间；A 恢复但未保存 C 的资料，C 首次联系即提交
+// 从起点到 C 的连续成员记录，使 A 能从历史本身验证 C 的准入关系。
 #[tokio::test]
-async fn intent_targeting_the_local_instance_marks_removed() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let harness = harness(
-        "device-b",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-b"), b),
-        ],
-    );
-    seeded_two_member_state(&harness.repository, a, b, b).await;
-
-    let intent = signed_intent_for(SPACE, a, b);
-    harness
-        .owner
-        .handle_late_submission(RemovalLateSubmission::Intent(Box::new(intent)))
-        .await
-        .unwrap();
-
-    let state = harness.repository.load_state().await.unwrap().unwrap();
-    assert!(state.removed);
-    assert_eq!(
-        state.effective_members(),
-        std::collections::BTreeSet::from([a])
-    );
-}
-
-#[tokio::test]
-async fn reconcile_propagates_intents_and_removal_notices() {
+async fn unknown_admitted_member_introduces_its_signed_history_before_regular_exchange() {
     let a = instance(0x0a);
     let b = instance(0x0b);
     let c = instance(0x0c);
-    let exchange = Arc::new(UnusedExchange::default());
     let repository = MemoryWorkspaceRepository::default();
-    let owner = WorkspaceConvergence::new(WorkspaceConvergenceDeps {
-        repository: Arc::new(repository.clone()),
-        verification: Arc::new(AcceptingVerifier),
-        recovery: Arc::new(FakeRecovery::new(
-            DeviceId::new("device-a"),
-            vec![
-                (DeviceId::new("device-a"), a),
-                (DeviceId::new("device-b"), b),
-                (DeviceId::new("device-c"), c),
-            ],
-        )),
-        member_signatures: Arc::new(FixedSigner),
-        member_repo: Arc::new(uc_application_test_member_repo()),
-        membership_identity: Arc::new(FixedMembershipIdentity {
-            space: SpaceId::from_str(SPACE),
-        }),
-        announcement_material: Arc::new(FixedAnnouncementMaterial),
-        security_updates: Arc::new(UnusedSecurityUpdates),
-        clock: Arc::new(UnusedClock),
-        device_identity: Arc::new(UnusedDeviceIdentity),
-        exchange: Arc::clone(&exchange) as Arc<dyn uc_core::membership::RemovalExchangePort>,
-        late_submission: Arc::new(UnusedLate),
-        notice: Arc::new(UnusedNotice),
-        notice_verification: Arc::new(RejectingNoticeVerification),
-        recovery_transport: Arc::new(UnusedRecoveryTransport),
-        trusted_peer_repo: Arc::new(TestTrustedPeerRepo),
-        peer_addr_repo: Arc::new(TestPeerAddrRepo),
-        own_device: DeviceId::new("device-a"),
-    });
-    seeded_two_member_state(&repository, a, b, a).await;
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let b_join = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let c_join = membership_event(Some(b_join.event_id()), 2, b, c, "device-c", 3);
+    let exchange = Arc::new(ScriptedExchange::new(vec![MembershipHistoryMessage::Ack(
+        MembershipHistoryAck::UpdatesApplied,
+    )]));
+    let mut deps = test_deps(
+        Arc::new(repository.clone()),
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    deps.membership_history_exchange = exchange.clone();
+    deps.own_device = DeviceId::new("device-c");
+    let owner = WorkspaceConvergence::new(deps);
+    owner.record_local_readiness(c).await.unwrap();
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    history.receive_verified(genesis.clone()).unwrap();
+    history.receive_verified(b_join.clone()).unwrap();
+    history.receive_verified(c_join.clone()).unwrap();
     let mut state = repository.load_state().await.unwrap().unwrap();
-    let mut third = admission_change_for(c, &DeviceId::new("device-c"), SPACE);
-    third.previous_epoch = 2;
-    third.next_epoch = 3;
-    third.previous_digest = uc_core::membership::compute_change_digest(&state.changes[1]);
-    third.digest = uc_core::membership::compute_change_digest(&third);
-    state
-        .apply(WorkspaceConvergenceEvent::CommittedChange(third), 1)
-        .unwrap();
+    state.membership_reconciliation = Some(history);
     repository.save_state(&state).await.unwrap();
+
     owner
-        .submit_removal(&DeviceId::new("device-c"))
+        .reconcile_membership_history_with_peer(&DeviceId::new("device-a"))
         .await
         .unwrap();
 
-    owner.reconcile().await.unwrap();
+    let sent = exchange.history_sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    let MembershipHistoryMessage::EventsResponse(introduction) = &sent[0].1 else {
+        panic!("unknown member must send signed history on first contact");
+    };
+    assert_eq!(introduction.after_event_id, None);
+    assert_eq!(introduction.events, vec![genesis, b_join, c_join]);
+}
 
-    let sent = exchange.sent.lock().unwrap();
+// 流程：普通内容面对一致设备可通过，面对待决定或已分叉设备被阻止；成员资格本身不被改写。
+#[tokio::test]
+async fn content_gate_blocks_only_pending_or_diverged_history_peers() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let harness = harness(
+        "device-a",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+        ],
+    );
+    let pending = DeviceId::new("device-pending");
+    let unaffected = DeviceId::new("device-unaffected");
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state
+        .apply(
+            WorkspaceConvergenceEvent::PeerHistoryRelationshipUpdated {
+                peer: pending,
+                relationship:
+                    uc_core::membership::MembershipHistoryRelationship::PendingRemovalDecision,
+            },
+            2,
+        )
+        .unwrap();
+    harness.repository.save_state(&state).await.unwrap();
+
+    assert!(harness.owner.locally_removed(&pending).await);
+    assert!(!harness.owner.locally_removed(&unaffected).await);
+}
+
+// 流程：A 已确认 B 低于 1.1 并重启；重启后升级提示和双向内容暂停仍然保留。
+#[tokio::test]
+async fn upgrade_required_peer_remains_blocked_after_owner_restart() {
+    let a = instance(0x0a);
+    let repository = MemoryWorkspaceRepository::default();
+    let first = WorkspaceConvergence::new(test_deps(
+        Arc::new(repository.clone()),
+        "device-a",
+        vec![(DeviceId::new("device-a"), a)],
+    ));
+    let peer = DeviceId::new("device-b");
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state
+        .apply(
+            WorkspaceConvergenceEvent::PeerHistoryRelationshipUpdated {
+                peer: peer.clone(),
+                relationship: uc_core::membership::MembershipHistoryRelationship::UpgradeRequired,
+            },
+            2,
+        )
+        .unwrap();
+    repository.save_state(&state).await.unwrap();
+    assert!(first.locally_removed(&peer).await);
+
+    let restarted = WorkspaceConvergence::new(test_deps(
+        Arc::new(repository),
+        "device-a",
+        vec![(DeviceId::new("device-a"), a)],
+    ));
+
+    assert!(restarted.locally_removed(&peer).await);
+    assert_eq!(
+        restarted
+            .query()
+            .await
+            .unwrap()
+            .upgrade_required_peer_device_ids,
+        vec![peer]
+    );
+}
+
+// 流程：A 已是 1.1，B 曾被标记为需要升级；B 升级到 1.1 后上线并完成当前成员历史回应。
+// 证明：A 只运行当前流程、清除升级提示并恢复 B 的正常内容资格。
+#[tokio::test]
+async fn current_peer_confirmation_clears_upgrade_required_without_legacy_probe() {
+    let repository = MemoryWorkspaceRepository::default();
+    let exchange = Arc::new(ScriptedExchange::new(vec![MembershipHistoryMessage::Ack(
+        MembershipHistoryAck::Consistent,
+    )]));
+    let probe = Arc::new(ScriptedLegacyProbe::new(Vec::new()));
+    let peer = DeviceId::new("device-b");
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.membership_history_exchange = exchange.clone();
+    deps.legacy_peer_probe = probe.clone();
+    let owner = WorkspaceConvergence::new(deps);
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let a = instance(0x0a);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis).unwrap();
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    state
+        .apply(
+            WorkspaceConvergenceEvent::PeerHistoryRelationshipUpdated {
+                peer: peer.clone(),
+                relationship: uc_core::membership::MembershipHistoryRelationship::UpgradeRequired,
+            },
+            2,
+        )
+        .unwrap();
+    repository.save_state(&state).await.unwrap();
+
+    owner
+        .reconcile_membership_history_with_peer(&peer)
+        .await
+        .unwrap();
+
+    let snapshot = owner.query().await.unwrap();
+    assert!(snapshot.upgrade_required_peer_device_ids.is_empty());
+    assert!(!owner.locally_removed(&peer).await);
+    assert_eq!(exchange.history_sent.lock().unwrap().len(), 1);
+    assert!(probe.calls.lock().unwrap().is_empty());
+}
+
+// 流程：A、B 都从低于 1.1 的同一旧 Space 升级，双方起初都没有 1.1 成员历史；
+// A 建立唯一历史起点，B 通过当前问候提交自己的签名资料，双方保存同一历史后 A 清除升级提示。
+#[tokio::test]
+async fn two_upgraded_legacy_members_establish_one_current_history_and_resume_exchange() {
+    let a_repository = MemoryWorkspaceRepository::default();
+    let mut a_state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    a_state
+        .apply(
+            WorkspaceConvergenceEvent::PeerHistoryRelationshipUpdated {
+                peer: DeviceId::new("device-b"),
+                relationship: uc_core::membership::MembershipHistoryRelationship::UpgradeRequired,
+            },
+            2,
+        )
+        .unwrap();
+    a_repository.save_state(&a_state).await.unwrap();
+    let a_owner = WorkspaceConvergence::new(test_deps(
+        Arc::new(a_repository.clone()),
+        "device-a",
+        Vec::new(),
+    ));
+
+    let b_repository = MemoryWorkspaceRepository::default();
+    let b = instance(0x0b);
+    let mut b_state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    b_state.own_instance = Some(b);
+    b_state.membership_reconciliation = Some(MembershipReconciliation::new(SPACE.to_owned(), b));
+    b_repository.save_state(&b_state).await.unwrap();
+    let b_owner = WorkspaceConvergence::new(test_deps(
+        Arc::new(b_repository.clone()),
+        "device-b",
+        Vec::new(),
+    ));
+
+    let initialized = a_owner.initialize_upgraded_legacy_space().await.unwrap();
+    assert_eq!(initialized.history_event_count, 1);
+    let response = a_owner
+        .handle_membership_history(
+            &DeviceId::new("device-b"),
+            MembershipHistoryMessage::Hello(uc_core::membership::MembershipHistoryHello {
+                lineage_id: SPACE.to_owned(),
+                member_instance_id: b,
+                admission: admission_facts_for(b, &DeviceId::new("device-b")),
+                known_head: None,
+                applied_head: None,
+                applied_members_digest: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let MembershipHistoryMessage::EventsResponse(events) = response else {
+        panic!("initializer must return the shared current history");
+    };
+    assert_eq!(events.events.len(), 2);
+
+    let acknowledgement = b_owner
+        .handle_membership_history(
+            &DeviceId::new("device-a"),
+            MembershipHistoryMessage::EventsResponse(events),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        acknowledgement,
+        MembershipHistoryMessage::Ack(MembershipHistoryAck::UpdatesApplied)
+    );
+    let a_snapshot = a_owner.query().await.unwrap();
+    let b_snapshot = b_owner.query().await.unwrap();
+    assert_eq!(a_snapshot.history_event_count, 2);
+    assert_eq!(b_snapshot.history_event_count, 2);
+    assert_eq!(a_snapshot.effective_member_count, 2);
+    assert_eq!(b_snapshot.effective_member_count, 2);
+    assert!(a_snapshot.upgrade_required_peer_device_ids.is_empty());
+    assert!(!a_owner.locally_removed(&DeviceId::new("device-b")).await);
+}
+
+// 流程：A 已是 1.1，B 低于 1.1；当前成员历史入口没有回应，但旧入口空连接成功。
+// 证明：只有旧入口的正面证据会让 A 保存“B 需要升级”，并暂停内容同步。
+#[tokio::test]
+async fn confirmed_legacy_peer_is_marked_upgrade_required_after_current_flow_is_unavailable() {
+    let repository = MemoryWorkspaceRepository::default();
+    let exchange = Arc::new(ScriptedExchange::new(Vec::new()));
+    let probe = Arc::new(ScriptedLegacyProbe::new(vec![Ok(())]));
+    let peer = DeviceId::new("device-b");
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.membership_history_exchange = exchange.clone();
+    deps.legacy_peer_probe = probe.clone();
+    let owner = WorkspaceConvergence::new(deps);
+    let a = instance(0x0a);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    repository.save_state(&state).await.unwrap();
+
+    owner
+        .reconcile_membership_history_with_peer(&peer)
+        .await
+        .unwrap();
+
+    assert!(owner.locally_removed(&peer).await);
+    assert_eq!(
+        owner
+            .query()
+            .await
+            .unwrap()
+            .upgrade_required_peer_device_ids,
+        vec![peer.clone()]
+    );
+    assert_eq!(*probe.calls.lock().unwrap(), vec![peer]);
+}
+
+// 流程：A 从已有 Space 启动为 1.1，B 仍低于 1.1 且已经在线；A 解锁后恢复成员活动，但没有新的上线通知。
+// 证明：会话恢复会让负责人主动核对已保存的 B，并在旧入口确认后保存“B 需要升级”。
+#[tokio::test]
+async fn session_resume_reconciles_an_existing_legacy_member_without_a_new_online_event() {
+    let repository = MemoryWorkspaceRepository::default();
+    let exchange = Arc::new(ScriptedExchange::new(Vec::new()));
+    let probe = Arc::new(ScriptedLegacyProbe::new(vec![Ok(())]));
+    let peer = DeviceId::new("device-b");
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.membership_history_exchange = exchange;
+    deps.legacy_peer_probe = probe.clone();
+    deps.peer_addr_repo = Arc::new(FixedPeerAddrRepo {
+        records: vec![uc_core::ports::PeerAddressRecord {
+            device_id: peer.clone(),
+            addr_blob: vec![1],
+            observed_at: chrono::Utc::now(),
+        }],
+    });
+    let owner = WorkspaceConvergence::new(deps);
+    let (_presence_tx, presence_events) = tokio::sync::broadcast::channel(1);
+
+    let runtime = Arc::clone(&owner).start(presence_events);
+    runtime
+        .activity()
+        .resume()
+        .await
+        .expect("resume workspace convergence after session unlock");
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if owner
+                .query()
+                .await
+                .unwrap()
+                .upgrade_required_peer_device_ids
+                == vec![peer.clone()]
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("startup reconciliation marks the existing legacy member");
+    runtime.shutdown().await;
+
+    assert_eq!(*probe.calls.lock().unwrap(), vec![peer]);
+}
+
+// 流程：A 与 B 均无法完成当前流程和旧入口空连接。
+// 证明：网络或身份类失败不产生“需要升级”提示，也不改变原有关系。
+#[tokio::test]
+async fn indeterminate_peer_does_not_be_reported_as_requiring_an_upgrade() {
+    let repository = MemoryWorkspaceRepository::default();
+    let exchange = Arc::new(ScriptedExchange::new(Vec::new()));
+    let probe = Arc::new(ScriptedLegacyProbe::new(vec![Err(
+        uc_core::membership::LegacyPeerProbeError::Transport,
+    )]));
+    let peer = DeviceId::new("device-b");
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.membership_history_exchange = exchange;
+    deps.legacy_peer_probe = probe.clone();
+    let owner = WorkspaceConvergence::new(deps);
+    let a = instance(0x0a);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    state
+        .apply(
+            WorkspaceConvergenceEvent::PeerHistoryRelationshipUpdated {
+                peer: peer.clone(),
+                relationship: uc_core::membership::MembershipHistoryRelationship::Consistent,
+            },
+            2,
+        )
+        .unwrap();
+    repository.save_state(&state).await.unwrap();
+
+    assert!(owner
+        .reconcile_membership_history_with_peer(&peer)
+        .await
+        .is_err());
+
+    assert!(owner
+        .query()
+        .await
+        .unwrap()
+        .upgrade_required_peer_device_ids
+        .is_empty());
+    assert!(!owner.locally_removed(&peer).await);
+    assert_eq!(*probe.calls.lock().unwrap(), vec![peer]);
+}
+
+// 流程：A 尝试与 B 进行本次 1.1 的成员历史核对，B 明确拒绝该请求；旧入口空连接即使可用也不能改写结果。
+// 证明：明确拒绝属于当前流程或身份资料问题，不是旧版本的正面证据；A 不探测旧入口、不显示升级提示。
+#[tokio::test]
+async fn rejected_current_peer_is_not_probed_or_reported_as_requiring_an_upgrade() {
+    let repository = MemoryWorkspaceRepository::default();
+    let probe = Arc::new(ScriptedLegacyProbe::new(vec![Ok(())]));
+    let peer = DeviceId::new("device-b");
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.membership_history_exchange = Arc::new(RejectingExchange);
+    deps.legacy_peer_probe = probe.clone();
+    let owner = WorkspaceConvergence::new(deps);
+    let a = instance(0x0a);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    repository.save_state(&state).await.unwrap();
+
+    assert!(owner
+        .reconcile_membership_history_with_peer(&peer)
+        .await
+        .is_err());
+
+    assert!(owner
+        .query()
+        .await
+        .unwrap()
+        .upgrade_required_peer_device_ids
+        .is_empty());
+    assert!(!owner.locally_removed(&peer).await);
+    assert!(probe.calls.lock().unwrap().is_empty());
+}
+
+// 流程：B 的两次上线通知几乎同时到达 A；第一次核对尚未完成时，第二次必须等待，不能并行识别或拨号。
+#[tokio::test]
+async fn concurrent_online_events_run_one_reconciliation_per_peer() {
+    let repository = MemoryWorkspaceRepository::default();
+    let exchange = Arc::new(BlockingTrackingExchange::new());
+    let peer = DeviceId::new("device-b");
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.membership_history_exchange = exchange.clone();
+    let owner = WorkspaceConvergence::new(deps);
+    let a = instance(0x0a);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    repository.save_state(&state).await.unwrap();
+
+    let first_owner = Arc::clone(&owner);
+    let first_peer = peer.clone();
+    let first = tokio::spawn(async move {
+        first_owner
+            .reconcile_membership_history_with_peer(&first_peer)
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        exchange.started.notified(),
+    )
+    .await
+    .expect("first reconciliation starts");
+
+    let second_owner = Arc::clone(&owner);
+    let second_peer = peer.clone();
+    let second = tokio::spawn(async move {
+        second_owner
+            .reconcile_membership_history_with_peer(&second_peer)
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(exchange.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(exchange.maximum_active.load(Ordering::SeqCst), 1);
+
+    exchange.releases.add_permits(2);
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    assert_eq!(exchange.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(exchange.maximum_active.load(Ordering::SeqCst), 1);
+}
+
+// 流程：B 收到 A 提交的有效移除历史；B 保存同一事件，但不改变成员集合，并发布一次待用户决定。
+#[tokio::test]
+async fn received_remote_removal_history_is_saved_and_waits_for_a_local_decision() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let harness = harness(
+        "device-b",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(addition.event_id()),
+        2,
+        [3; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        [3; 32],
+        [4; 32],
+        Vec::new(),
+        None,
+        b"signature".to_vec(),
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), b);
+    assert!(history.receive_verified(genesis).is_ok());
+    assert!(history.receive_verified(addition.clone()).is_ok());
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(b);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+
+    let reply = harness
+        .owner
+        .handle_membership_history(
+            &DeviceId::new("device-a"),
+            MembershipHistoryMessage::EventsResponse(MembershipEventsResponse {
+                lineage_id: SPACE.to_owned(),
+                after_event_id: Some(addition.event_id()),
+                events: vec![removal.clone()],
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        reply,
+        MembershipHistoryMessage::Ack(MembershipHistoryAck::RemovalDecisionRequired {
+            removal_event_id: removal.event_id(),
+        })
+    );
+    let state = harness.repository.load_state().await.unwrap().unwrap();
+    assert_eq!(state.effective_members(), [a, b].into());
+    assert_eq!(
+        state
+            .peer_history_relationships
+            .get(&DeviceId::new("device-a")),
+        Some(&uc_core::membership::MembershipHistoryRelationship::PendingRemovalDecision)
+    );
+}
+
+// 流程：B 收到 A 对 B 的移除时先保存事实但不改变本机安全状态；B 明确接受后，才应用该移除携带的安全更新。
+#[tokio::test]
+async fn pending_remote_removal_does_not_apply_its_security_update_before_acceptance() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let repository = MemoryWorkspaceRepository::default();
+    let security_updates = Arc::new(RecordingSecurityUpdates::default());
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-b", Vec::new());
+    deps.security_updates = security_updates.clone();
+    deps.own_device = DeviceId::new("device-b");
+    let owner = WorkspaceConvergence::new(deps);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(addition.event_id()),
+        2,
+        [3; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        [3; 32],
+        [4; 32],
+        b"pending-removal-security-update".to_vec(),
+        None,
+        b"signature".to_vec(),
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), b);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(addition.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(b);
+    state.membership_reconciliation = Some(history);
+    repository.save_state(&state).await.unwrap();
+
+    owner
+        .handle_membership_history(
+            &DeviceId::new("device-a"),
+            MembershipHistoryMessage::EventsResponse(MembershipEventsResponse {
+                lineage_id: SPACE.to_owned(),
+                after_event_id: Some(addition.event_id()),
+                events: vec![removal.clone()],
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        security_updates.applied_payloads.lock().unwrap().is_empty(),
+        "a remote removal cannot alter local security state before the local user accepts it"
+    );
+
+    owner
+        .decide_membership_removal(
+            removal.event_id(),
+            uc_core::membership::RemovalDecision::Accept,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        security_updates.applied_payloads.lock().unwrap().as_slice(),
+        [b"pending-removal-security-update".to_vec()],
+        "the accepted removal must apply its saved security update exactly once"
+    );
+}
+
+// 流程：A 与 B 已经分叉；A 请求 B 的旧 Space 成员资料，B 必须拒绝，不再继续交换旧分支。
+#[tokio::test]
+async fn diverged_peer_cannot_request_old_space_membership_history() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let harness = harness(
+        "device-b",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), b);
+    history.receive_verified(genesis).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(b);
+    state.membership_reconciliation = Some(history);
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-a"),
+        uc_core::membership::MembershipHistoryRelationship::Diverged,
+    );
+    harness.repository.save_state(&state).await.unwrap();
+
+    let reply = harness
+        .owner
+        .handle_membership_history(
+            &DeviceId::new("device-a"),
+            MembershipHistoryMessage::EventsRequest(uc_core::membership::MembershipEventsRequest {
+                lineage_id: SPACE.to_owned(),
+                after_event_id: None,
+                max_events: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        reply,
+        MembershipHistoryMessage::Ack(MembershipHistoryAck::Diverged),
+        "a diverged peer must not receive old-space membership history"
+    );
+}
+
+// 流程：A 已移除 B；B 接受后回传决定，A 仍依据移除前保存的成员关系验证并记录该回传。
+#[tokio::test]
+async fn removal_author_records_the_removed_peer_acceptance() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let harness = harness(
+        "device-a",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(addition.event_id()),
+        2,
+        [3; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        [3; 32],
+        [4; 32],
+        Vec::new(),
+        None,
+        b"signature".to_vec(),
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(addition.clone()).unwrap();
+    history.receive_verified(removal.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+    let decision = uc_core::membership::MembershipDecision::new(
+        SPACE.to_owned(),
+        removal.event_id(),
+        b,
+        uc_core::membership::RemovalDecision::Accept,
+        Some(addition.event_id()),
+        removal.resulting_members_digest,
+        [4; 16],
+        b"signature".to_vec(),
+    );
+
+    let reply = harness
+        .owner
+        .handle_membership_history(
+            &DeviceId::new("device-b"),
+            MembershipHistoryMessage::Decision(decision.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        reply,
+        MembershipHistoryMessage::Ack(MembershipHistoryAck::RemovalAccepted {
+            removal_event_id: removal.event_id(),
+        })
+    );
+    let state = harness.repository.load_state().await.unwrap().unwrap();
+    assert_eq!(
+        state
+            .membership_reconciliation
+            .unwrap()
+            .decision_for(removal.event_id(), b),
+        Some(&decision)
+    );
+}
+
+// 流程：A 提交移除后，B 与 A、C 都曾交换到同一待决定历史；B 拒绝时把决定发给 A、C，等待双方按决定结果解除阻断或进入分叉。
+#[tokio::test]
+async fn rejecting_a_pending_removal_notifies_author_and_pending_peers() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-b",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let b_join = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let c_join = membership_event(Some(b_join.event_id()), 2, a, c, "device-c", 3);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(c_join.event_id()),
+        3,
+        [4; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        [4; 32],
+        [5; 32],
+        Vec::new(),
+        None,
+        b"signature".to_vec(),
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), b);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(b_join).unwrap();
+    history.receive_verified(c_join).unwrap();
+    assert!(matches!(
+        history.receive_verified(removal.clone()),
+        Ok(uc_core::membership::MembershipReconciliationOutcome::RemovalDecisionRequired { .. })
+    ));
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(b);
+    state.membership_reconciliation = Some(history);
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-a"),
+        uc_core::membership::MembershipHistoryRelationship::PendingRemovalDecision,
+    );
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-c"),
+        uc_core::membership::MembershipHistoryRelationship::PendingRemovalDecision,
+    );
+    harness.repository.save_state(&state).await.unwrap();
+
+    harness
+        .owner
+        .decide_membership_removal(
+            removal.event_id(),
+            uc_core::membership::RemovalDecision::Reject,
+        )
+        .await
+        .unwrap();
+
+    let state = harness.repository.load_state().await.unwrap().unwrap();
+    assert_eq!(
+        state
+            .peer_history_relationships
+            .get(&DeviceId::new("device-a")),
+        Some(&uc_core::membership::MembershipHistoryRelationship::Diverged)
+    );
+    assert_eq!(
+        state
+            .peer_history_relationships
+            .get(&DeviceId::new("device-c")),
+        Some(&uc_core::membership::MembershipHistoryRelationship::PendingRemovalDecision)
+    );
+    let sent = harness.history_exchange.history_sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].0, DeviceId::new("device-a"));
+    assert_eq!(sent[1].0, DeviceId::new("device-c"));
     assert!(sent
         .iter()
-        .any(|m| matches!(m, uc_core::membership::RemovalExchangeMessage::Intent(_))));
-    assert!(sent.iter().any(|m| matches!(
-        m,
-        uc_core::membership::RemovalExchangeMessage::Confirmation(_)
-    )));
+        .all(|(_, message)| matches!(message, MembershipHistoryMessage::Decision(_))));
+}
+
+// 流程：C 接受 A 对 B 的移除时，先按决定前的成员分支固定通知名单；即使应用后 B 已不再有效，也必须收到 C 的相反决定。
+#[tokio::test]
+async fn accepting_a_removal_still_notifies_the_removed_target() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let b_join = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let c_join = membership_event(Some(b_join.event_id()), 2, a, c, "device-c", 3);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(c_join.event_id()),
+        3,
+        [4; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        [4; 32],
+        [5; 32],
+        Vec::new(),
+        None,
+        b"signature".to_vec(),
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(b_join).unwrap();
+    history.receive_verified(c_join).unwrap();
+    history.receive_verified(removal.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+
+    harness
+        .owner
+        .decide_membership_removal(
+            removal.event_id(),
+            uc_core::membership::RemovalDecision::Accept,
+        )
+        .await
+        .unwrap();
+
+    let sent = harness.history_exchange.history_sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(sent.iter().any(|(device, _)| device.as_str() == "device-a"));
+    assert!(sent.iter().any(|(device, _)| device.as_str() == "device-b"));
+}
+
+// 流程：B、C 对同一项移除都选择拒绝；B 收到 C 的签名决定后确认双方仍在同一旧分支，解除内容阻断。
+#[tokio::test]
+async fn matching_rejections_restore_a_consistent_peer_relationship() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-b",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let b_join = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let c_join = membership_event(Some(b_join.event_id()), 2, a, c, "device-c", 3);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(c_join.event_id()),
+        3,
+        [4; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        [4; 32],
+        [5; 32],
+        Vec::new(),
+        None,
+        b"signature".to_vec(),
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), b);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(b_join).unwrap();
+    history.receive_verified(c_join.clone()).unwrap();
+    history.receive_verified(removal.clone()).unwrap();
+    let local_decision = uc_core::membership::MembershipDecision::new(
+        SPACE.to_owned(),
+        removal.event_id(),
+        b,
+        uc_core::membership::RemovalDecision::Reject,
+        Some(c_join.event_id()),
+        c_join.resulting_members_digest,
+        [5; 16],
+        b"signature".to_vec(),
+    );
+    history.record_decision(local_decision).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(b);
+    state.membership_reconciliation = Some(history);
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-c"),
+        uc_core::membership::MembershipHistoryRelationship::PendingRemovalDecision,
+    );
+    harness.repository.save_state(&state).await.unwrap();
+    let peer_decision = uc_core::membership::MembershipDecision::new(
+        SPACE.to_owned(),
+        removal.event_id(),
+        c,
+        uc_core::membership::RemovalDecision::Reject,
+        Some(c_join.event_id()),
+        c_join.resulting_members_digest,
+        [6; 16],
+        b"signature".to_vec(),
+    );
+
+    harness
+        .owner
+        .handle_membership_history(
+            &DeviceId::new("device-c"),
+            MembershipHistoryMessage::Decision(peer_decision),
+        )
+        .await
+        .unwrap();
+
+    let state = harness.repository.load_state().await.unwrap().unwrap();
+    assert_eq!(
+        state
+            .peer_history_relationships
+            .get(&DeviceId::new("device-c")),
+        Some(&uc_core::membership::MembershipHistoryRelationship::Consistent)
+    );
+}
+
+// 流程：B 拒绝 A 提交的待决定移除后，保留原成员关系，并只隔离与 A 的旧分支。
+#[tokio::test]
+async fn rejecting_a_pending_removal_keeps_membership_and_isolates_only_that_peer() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let harness = harness(
+        "device-b",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(addition.event_id()),
+        2,
+        [3; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        [3; 32],
+        [4; 32],
+        Vec::new(),
+        None,
+        b"signature".to_vec(),
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), b);
+    assert!(history.receive_verified(genesis).is_ok());
+    assert!(history.receive_verified(addition).is_ok());
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(b);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+    harness
+        .owner
+        .handle_membership_history(
+            &DeviceId::new("device-a"),
+            MembershipHistoryMessage::EventsResponse(MembershipEventsResponse {
+                lineage_id: SPACE.to_owned(),
+                after_event_id: removal.parent_event_id,
+                events: vec![removal.clone()],
+            }),
+        )
+        .await
+        .unwrap();
+
+    harness
+        .owner
+        .decide_membership_removal(
+            removal.event_id(),
+            uc_core::membership::RemovalDecision::Reject,
+        )
+        .await
+        .unwrap();
+
+    let state = harness.repository.load_state().await.unwrap().unwrap();
+    assert_eq!(state.effective_members(), [a, b].into());
+    assert_eq!(
+        state
+            .peer_history_relationships
+            .get(&DeviceId::new("device-a")),
+        Some(&uc_core::membership::MembershipHistoryRelationship::Diverged)
+    );
+}
+
+// 流程：A 完成 B 的加入并提交历史；当前有效成员及其设备绑定写入签名历史，随后移除 B 也按该历史生效。
+#[tokio::test]
+async fn committed_admission_records_the_effective_members_in_signed_history() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let harness = harness(
+        "device-a",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+        ],
+    );
+    let session = uc_core::ports::pairing::PairingSessionId::new("history-admission");
+    harness.owner.record_local_readiness(a).await.unwrap();
+    harness
+        .owner
+        .begin_admission(&session, &DeviceId::new("device-b"), 0)
+        .await
+        .unwrap();
+    let joiner = uc_core::membership::AdmissionChangeFacts {
+        member_instance: b,
+        device_id: DeviceId::new("device-b"),
+        device_name: "b".to_owned(),
+        identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
+            "ABCD-EFGH-IJKL-MNOP",
+        )
+        .unwrap(),
+        transport_public_key: vec![2; 32],
+        transport_address_blob: vec![3],
+        identity_signature: vec![4],
+    };
+
+    harness
+        .owner
+        .commit_joiner_admission(&session, joiner, vec![5])
+        .await
+        .unwrap();
+
+    let state = harness.repository.load_state().await.unwrap().unwrap();
+    let history = state.membership_reconciliation.as_ref().unwrap();
+    assert_eq!(history.effective_members(), [a, b].into());
+    assert_eq!(
+        history.device_for_member(&a),
+        Some(DeviceId::new("device-a"))
+    );
+    assert_eq!(
+        history.device_for_member(&b),
+        Some(DeviceId::new("device-b"))
+    );
+    assert_eq!(state.effective_members(), [a, b].into());
+
+    harness
+        .owner
+        .submit_removal(&DeviceId::new("device-b"))
+        .await
+        .unwrap();
+    let state = harness.repository.load_state().await.unwrap().unwrap();
+    let history = state.membership_reconciliation.as_ref().unwrap();
+    assert_eq!(history.effective_members(), [a].into());
+    assert_eq!(state.effective_members(), [a].into());
+}
+
+// 流程：赞助方当前分支仍有 A 的有效成员实例；A 再次使用邀请加入时必须拒绝重复成员。
+#[tokio::test]
+async fn sponsor_rejects_a_joiner_with_an_active_member_instance() {
+    let c = instance(0x0c);
+    let a = instance(0x0a);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-c"), c),
+            (DeviceId::new("device-a"), a),
+        ],
+    );
+    let genesis = membership_event(None, 0, c, c, "device-c", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, c, a, "device-a", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(addition).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+
+    assert_eq!(
+        harness
+            .owner
+            .admission_decision_for_joiner(2, &DeviceId::new("device-a"))
+            .await,
+        MembershipAdmissionDecision::Unavailable
+    );
+}
+
+// 流程：赞助方当前分支只保留 A 的旧移除记录；A 使用新成员实例重新加入时必须允许继续准入。
+#[tokio::test]
+async fn sponsor_allows_a_removed_device_to_rejoin_with_a_new_instance() {
+    let c = instance(0x0c);
+    let a = instance(0x0a);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-c"), c),
+            (DeviceId::new("device-a"), a),
+        ],
+    );
+    let genesis = membership_event(None, 0, c, c, "device-c", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, c, a, "device-a", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(addition.event_id()),
+        2,
+        [3; 16],
+        c,
+        MembershipOperation::RemoveDevice { member: a },
+        [3; 32],
+        [4; 32],
+        Vec::new(),
+        None,
+        b"signature".to_vec(),
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(addition).unwrap();
+    history.receive_verified(removal).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+
+    assert_eq!(
+        harness
+            .owner
+            .admission_decision_for_joiner(3, &DeviceId::new("device-a"))
+            .await,
+        MembershipAdmissionDecision::Allowed
+    );
+}
+
+// 流程：新建空间的 A 首次邀请 B；即使此前没有成员历史，A 也先记录自己的成员实例并完成 B 的加入。
+#[tokio::test]
+async fn first_sponsor_admission_records_the_initial_member_instance() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let harness = harness(
+        "device-a",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+        ],
+    );
+    let session = uc_core::ports::pairing::PairingSessionId::new("first-admission");
+    harness
+        .owner
+        .begin_admission(&session, &DeviceId::new("device-b"), 0)
+        .await
+        .unwrap();
+
+    harness
+        .owner
+        .commit_joiner_admission(
+            &session,
+            admission_facts_for(b, &DeviceId::new("device-b")),
+            vec![5],
+        )
+        .await
+        .expect("a newly created space can sponsor its first admission");
+
+    let state = harness.repository.load_state().await.unwrap().unwrap();
+    assert_eq!(state.own_instance, Some(a));
+    assert_eq!(state.effective_members(), [a, b].into());
+}
+
+// 流程：加入方收到的发起者历史摘要与本机事实不符；加入被拒绝，原历史位置保持不变。
+#[tokio::test]
+async fn saved_admission_rejects_a_mismatched_sponsor_history() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let harness = harness(
+        "device-a",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+        ],
+    );
+
+    harness.owner.record_local_readiness(a).await.unwrap();
+    let before = harness.repository.load_state().await.unwrap().unwrap();
+    let before_history = before.membership_reconciliation.unwrap();
+
+    let result = harness
+        .owner
+        .record_admission_saved(uc_core::membership::AdmissionSavedFacts {
+            history_digest: [0x11; 32],
+            history_event_count: before_history.known_event_count() as u64,
+            sponsor_facts: admission_facts_for(b, &DeviceId::new("device-b")),
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(WorkspaceConvergenceError::Inconsistent(message))
+            if message == "sponsor admission history is incomplete or mismatched"
+    ));
+
+    let after = harness.repository.load_state().await.unwrap().unwrap();
+    let after_history = after.membership_reconciliation.unwrap();
+    assert_eq!(after_history.known_head(), before_history.known_head());
+    assert_eq!(after_history.applied_head(), before_history.applied_head());
+    assert_eq!(
+        after_history.known_event_count(),
+        before_history.known_event_count()
+    );
+}
+
+// 流程：加入方保存准入资料前尚缺发起者的完整历史；先拉取并验证连续历史，匹配后才完成加入。
+#[tokio::test]
+async fn saved_admission_fetches_the_sponsor_history_before_join_completion() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let c = instance(0x0c);
+    let repository = MemoryWorkspaceRepository::default();
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let b_join = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let c_join = membership_event(Some(b_join.event_id()), 2, b, c, "device-c", 3);
+    let mut sponsor_history = MembershipReconciliation::new(SPACE.to_owned(), b);
+    sponsor_history.receive_verified(genesis.clone()).unwrap();
+    sponsor_history.receive_verified(b_join.clone()).unwrap();
+    sponsor_history.receive_verified(c_join.clone()).unwrap();
+    let exchange = Arc::new(ScriptedExchange::new(vec![
+        MembershipHistoryMessage::EventsResponse(MembershipEventsResponse {
+            lineage_id: SPACE.to_owned(),
+            after_event_id: None,
+            events: vec![genesis, b_join, c_join],
+        }),
+    ]));
+    let mut deps = test_deps(
+        Arc::new(repository.clone()),
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    deps.membership_history_exchange = exchange.clone();
+    deps.own_device = DeviceId::new("device-c");
+    let owner = WorkspaceConvergence::new(deps);
+    owner.record_local_readiness(c).await.unwrap();
+
+    owner
+        .record_admission_saved(uc_core::membership::AdmissionSavedFacts {
+            history_digest: sponsor_history.applied_members_digest().unwrap(),
+            history_event_count: sponsor_history.known_event_count() as u64,
+            sponsor_facts: admission_facts_for(b, &DeviceId::new("device-b")),
+        })
+        .await
+        .unwrap();
+
     let state = repository.load_state().await.unwrap().unwrap();
-    assert_eq!(state.peer_intent_acks.len(), 1);
-    assert_eq!(state.notified_removals.len(), 1);
+    let history = state.membership_reconciliation.unwrap();
+    assert_eq!(history.known_event_count(), 3);
+    assert_eq!(
+        history.applied_members_digest(),
+        sponsor_history.applied_members_digest()
+    );
+    let sent = exchange.history_sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, DeviceId::new("device-b"));
+    assert!(matches!(sent[0].1, MembershipHistoryMessage::Hello(_)));
+}
+
+// 流程：A 的旧实例已被 C 移除，随后 C 把 A 的新实例加入同一条已验证历史；A
+// 以新实例拉取整条历史时直接采用最终分支，不为已废弃的旧实例产生待确认项。
+#[tokio::test]
+async fn saved_readmission_adopts_history_that_replaces_the_local_old_instance() {
+    let c = instance(0x0c);
+    let old_a = instance(0x0a);
+    let new_a = instance(0x1a);
+    let repository = MemoryWorkspaceRepository::default();
+    let genesis = membership_event(None, 0, c, c, "device-c", 1);
+    let old_admission = membership_event(Some(genesis.event_id()), 1, c, old_a, "device-a", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(old_admission.event_id()),
+        2,
+        [3; 16],
+        c,
+        MembershipOperation::RemoveDevice { member: old_a },
+        [3; 32],
+        [4; 32],
+        Vec::new(),
+        None,
+        b"signature".to_vec(),
+    );
+    let readmission = membership_event(Some(removal.event_id()), 3, c, new_a, "device-a", 4);
+    let mut sponsor_history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    for event in [
+        genesis.clone(),
+        old_admission.clone(),
+        removal.clone(),
+        readmission.clone(),
+    ] {
+        sponsor_history.receive_verified(event).unwrap();
+    }
+    let exchange = Arc::new(ScriptedExchange::new(vec![
+        MembershipHistoryMessage::EventsResponse(MembershipEventsResponse {
+            lineage_id: SPACE.to_owned(),
+            after_event_id: None,
+            events: vec![genesis, old_admission, removal, readmission],
+        }),
+    ]));
+    let mut deps = test_deps(
+        Arc::new(repository.clone()),
+        "device-a",
+        vec![
+            (DeviceId::new("device-c"), c),
+            (DeviceId::new("device-a"), new_a),
+        ],
+    );
+    deps.membership_history_exchange = exchange;
+    deps.member_signatures = Arc::new(EventSignatureOnlyVerifier);
+    deps.own_device = DeviceId::new("device-a");
+    let owner = WorkspaceConvergence::new(deps);
+    owner.record_local_readiness(new_a).await.unwrap();
+
+    let snapshot = owner
+        .record_admission_saved(uc_core::membership::AdmissionSavedFacts {
+            history_digest: sponsor_history.applied_members_digest().unwrap(),
+            history_event_count: sponsor_history.known_event_count() as u64,
+            sponsor_facts: admission_facts_for(c, &DeviceId::new("device-c")),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.effective_member_count, 2);
+    assert!(snapshot.pending_removal_decision_event_id.is_none());
+    assert!(!snapshot.removed);
+    assert_eq!(
+        snapshot.convergence_digest,
+        sponsor_history
+            .applied_members_digest()
+            .map(uc_core::membership::WorkspaceDigest::from_bytes)
+    );
 }

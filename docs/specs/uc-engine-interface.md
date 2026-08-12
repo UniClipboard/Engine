@@ -106,7 +106,8 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `ListDevices` | 返回设备编号、显示名和在线状态 |
 | `QueryMemberSyncPreferences` | 查询指定成员的发送、接收和内容类型偏好 |
 | `UpdateMemberSyncPreferences` | 局部更新指定成员的同步偏好，未提供字段保持不变 |
-| `RemoveMember` | 保存一次不可撤销的目标成员移除，并立即停止向目标发送新内容 |
+| `RemoveMember` | 追加一条签名成员历史移除，并立即停止向目标发送新内容 |
+| `DecideMembershipRemoval` | 对收到且尚未采用的成员移除选择接受或拒绝 |
 | `QueryWorkspaceConvergence` | 返回当前空间的完整工作空间收敛状态 |
 | `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引 |
 | `QuerySearchTags` | 查询当前索引中的标签和条目数量 |
@@ -161,31 +162,29 @@ LAN 内容读写复用核心现有的加密历史、系统剪贴板写入、内�
 
 `QueryMemberSyncPreferences` 和 `UpdateMemberSyncPreferences` 只接受稳定设备编号。局部更新中未提供的开关和内容类型必须保持原值。
 
-工作空间收敛由核心完整负责，宿主只使用三个入口：提交一次成员移除、查询当前状态和订阅变化事件。`RemoveMember` 在意图、本机限制与连续工作空间变化同一提交点保存成功后返回；同一目标的重复请求返回同一事实，其他目标可并发保存。宿主不保存意图、不安排交接顺序、不选择交接设备，也不创建重试队列。
+工作空间收敛由核心完整负责。宿主只追加本机移除、对收到的移除作一次接受或拒绝、查询当前状态和订阅变化事件。`RemoveMember` 保存签名成员历史并立即限制本机向目标发送；`DecideMembershipRemoval` 只接受完整快照中的待决定编号。宿主不保存成员历史、不安排消息顺序，也不创建重试队列。
 
 返回与 `WorkspaceConvergenceChanged` 事件使用同一份完整快照：
 
-- `phase`：`locally_applied`、`converging`、`waiting_for_offline_member`、`complete` 或 `recovery_required`；
+- `phase`：`locally_applied`、`converging`、`complete` 或 `recovery_required`；
 - `revision`：只随成功持久化状态变化递增的不透明版本；
-- `change_count`：已验证工作空间变化数量；
-- `removal_intent_count`：已验证、尚用于计算当前目标的移除意图数量；
+- `history_event_count`：已保存的签名成员历史条目数量；
 - `effective_member_count`：当前有效成员实例数量；
-- `confirmed_member_count`：已确认当前摘要且关系可用的有效成员数量；
-- `waiting_member_device_ids`：仅在 `waiting_for_offline_member` 阶段出现的、当前确实阻塞收敛的
-  非本机设备稳定标识列表；按标识稳定排序，其他阶段为空；
-- `waiting_member_count`：`waiting_member_device_ids` 的长度；其他阶段为零；
+- `pending_removal_decision_device_ids`：已收到移除、仍等待本机选择的设备稳定标识；按标识稳定排序；
+- `pending_removal_decision_event_id`：提交接受或拒绝时使用的待决定编号；没有待决定项时为空；
+- `diverged_peer_device_ids`：已确认成员历史分叉、不能进行普通交换的设备稳定标识；按标识稳定排序；
 - `convergence_digest`：当前工作空间摘要；尚未形成时为空；
 - `removed`：本机当前成员实例是否已经观察到自身被移出；
 - `updated_at_ms`：最近一次成功保存状态的时间；
 - `failure_category`：可选的稳定类别，不含底层错误原文。
 
-快照不得包含设备名称、成员实例、地址、在线名单、签名、密钥、安全变化正文、邀请资料、网络错误原文或剪贴板内容。`waiting_member_device_ids` 是唯一例外：它只在等待阶段给出当前阻塞收敛的稳定设备标识；宿主和产品端只用它匹配既有设备条目，不得根据在线状态、设备列表或缓存推断等待对象。完整规则见[按设备精确公开收敛等待状态](019-device-specific-convergence-waiting-status.md)。
+快照不得包含设备名称、成员实例、地址、在线名单、签名、密钥、安全变化正文、邀请资料、网络错误原文或剪贴板内容。待决定和分叉设备标识只用于匹配既有设备条目；宿主和产品端不得根据在线状态、设备列表或缓存推断成员历史关系。
 
-`removed` 为 `true` 表示本机收到确定性的移除信号：或在本机在线时验收了以本机为目标的移除意图，或收到了当前成员定向投递的移除通知。该字段只反映本机已观察到的单一事实，不包含成员列表、收敛摘要、安全代次、密钥或内容；桌面端可据此直接展示“此设备已被移除，需重新配对”，无需自行推断。
+`removed` 为 `true` 表示本机已经采用以当前成员实例为目标的成员历史移除。该字段只反映本机已观察到的单一事实，不包含成员列表、收敛摘要、安全代次、密钥或内容；桌面端可据此直接展示“此设备已被移除，需重新配对”，无需自行推断。
 
-`locally_applied` 只表示本机已停止信任目标，`complete` 只表示全部当前保留成员已经实际应用同一安全状态。网络发送成功、发起操作返回或交接设备单独通知均不足以代表完成。收到此前未知但合法的意图后，状态重新进入 `converging`；连续性、空间、身份或摘要无法验证、发现不可自动解决的分叉或有效成员为空时进入 `recovery_required`，核心停止自动推进。普通离线、超时和重启只延长收敛，不撤销意图或恢复旧状态。
+`locally_applied` 表示本机已保存当前成员历史状态；`converging` 表示正在核对成员历史。网络发送成功或发起操作返回都不足以代表两台设备关系一致。收到此前未知但合法的成员历史后，状态重新进入 `converging`；连续性、空间、身份或摘要无法验证、发现不可自动解决的分叉或有效成员为空时进入 `recovery_required`，核心停止自动推进。普通离线、超时和重启不改变成员历史。
 
-工作空间收敛状态在本机保存变化、收到交接、收到确认、收到迟到意图、设备上线以及进入需要恢复时主动通知。事件消费者落后时按通用规则收到 `RefreshRequired`，随后调用 `QueryWorkspaceConvergence` 读取完整当前事实。iOS、Android 和 HarmonyOS 绑定必须公开相同字段、结果、错误、入口和通知。
+工作空间收敛状态在本机保存成员历史或用户决定、收到成员历史、设备上线以及进入需要恢复时主动通知。事件消费者落后时按通用规则收到 `RefreshRequired`，随后调用 `QueryWorkspaceConvergence` 读取完整当前事实。iOS、Android 和 HarmonyOS 绑定必须公开相同字段、结果、错误、入口和通知。
 
 搜索查询、标签、状态和重建都由核心执行。搜索结果可以正常返回预览、文件名、文件路径、链接和自定义标签，但这些用户内容不得出现在调试输出或日志中。加密会话锁定时，宿主不得读取搜索结果、标签或状态，也不得触发重建。
 
