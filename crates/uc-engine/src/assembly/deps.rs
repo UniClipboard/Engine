@@ -58,6 +58,8 @@ pub struct BackgroundRuntimeDeps {
 /// AppFacade path.
 #[derive(Clone)]
 pub struct SyncEngineDeps {
+    /// Dedicated file-backed storage for the long-lived iroh network identity.
+    pub iroh_identity_storage: Arc<dyn uc_core::ports::SecureStoragePort>,
     /// Automatic legacy protection is installed only with the P2P runtime.
     pub legacy_protection: Arc<dyn uc_core::membership::LegacyProtectionPort>,
     /// Authoritative authorization check used by every inbound Iroh handler

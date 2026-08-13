@@ -147,7 +147,7 @@ pub(crate) struct SpaceSessionCoordinator {
 }
 
 pub struct SpaceSessionActivityDeps {
-    pub membership: crate::space::convergence::discovery::MembershipConvergenceActivity,
+    pub membership: crate::space::runtime::SpaceMembershipActivity,
     pub receive: Arc<dyn EnsureReceiveReadyPort>,
 }
 

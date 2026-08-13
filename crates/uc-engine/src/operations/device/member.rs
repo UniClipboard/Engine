@@ -13,10 +13,11 @@ use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ReachabilityState;
 
 use crate::{
-    ContentTypesPatch, ContentTypesSummary, DeviceSummary, EngineError, EngineErrorCategory,
-    LegacyBootstrapOutcome, LegacyBootstrapSummary, MemberProtectionStatusSummary,
-    MemberProtectionSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
-    OperationResult, QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RemoveMemberInput,
+    ContentTypesPatch, ContentTypesSummary, DecideMembershipRemovalInput, DeviceSummary,
+    EngineError, EngineErrorCategory, LegacyBootstrapOutcome, LegacyBootstrapSummary,
+    MemberProtectionStatusSummary, MemberProtectionSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesSummary, MembershipRemovalDecision, OperationResult,
+    QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RemoveMemberInput,
     SpaceProtectionModeSummary, SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
     WorkspaceConvergenceFailureCategorySummary, WorkspaceConvergencePhaseSummary,
     WorkspaceConvergenceSummary,
@@ -119,6 +120,33 @@ pub async fn execute_remove_member(
     ))
 }
 
+pub async fn execute_decide_membership_removal(
+    facade: &AppFacade,
+    input: DecideMembershipRemovalInput,
+) -> Result<OperationResult, EngineError> {
+    let removal_event_id = uc_core::membership::MembershipEventId::from_hex(
+        &input.removal_event_id,
+    )
+    .ok_or_else(|| {
+        EngineError::new(
+            MEMBER_INVALID_INPUT_CODE,
+            EngineErrorCategory::InvalidInput,
+            false,
+        )
+    })?;
+    let decision = match input.decision {
+        MembershipRemovalDecision::Accept => uc_core::membership::RemovalDecision::Accept,
+        MembershipRemovalDecision::Reject => uc_core::membership::RemovalDecision::Reject,
+    };
+    let snapshot = facade
+        .decide_membership_removal(removal_event_id, decision)
+        .await
+        .map_err(map_roster_error)?;
+    Ok(OperationResult::WorkspaceConvergence(
+        workspace_convergence_summary(snapshot),
+    ))
+}
+
 pub async fn execute_query_space_protection(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
@@ -201,9 +229,6 @@ pub(crate) fn workspace_convergence_summary(
             uc_core::membership::WorkspacePhase::Converging => {
                 WorkspaceConvergencePhaseSummary::Converging
             }
-            uc_core::membership::WorkspacePhase::WaitingForOfflineMember => {
-                WorkspaceConvergencePhaseSummary::WaitingForOfflineMember
-            }
             uc_core::membership::WorkspacePhase::Complete => {
                 WorkspaceConvergencePhaseSummary::Complete
             }
@@ -212,16 +237,26 @@ pub(crate) fn workspace_convergence_summary(
             }
         },
         revision: snapshot.revision,
-        change_count: u64::try_from(snapshot.change_count).unwrap_or(u64::MAX),
-        removal_intent_count: u64::try_from(snapshot.removal_intent_count).unwrap_or(u64::MAX),
+        history_event_count: u64::try_from(snapshot.history_event_count).unwrap_or(u64::MAX),
         effective_member_count: u64::try_from(snapshot.effective_member_count).unwrap_or(u64::MAX),
-        confirmed_member_count: u64::try_from(snapshot.confirmed_member_count).unwrap_or(u64::MAX),
-        waiting_member_device_ids: snapshot
-            .waiting_member_device_ids
+        pending_removal_decision_device_ids: snapshot
+            .pending_removal_decision_device_ids
             .into_iter()
             .map(|device_id| device_id.to_string())
             .collect(),
-        waiting_member_count: u64::try_from(snapshot.waiting_member_count).unwrap_or(u64::MAX),
+        pending_removal_decision_event_id: snapshot
+            .pending_removal_decision_event_id
+            .map(|event_id| event_id.to_hex()),
+        diverged_peer_device_ids: snapshot
+            .diverged_peer_device_ids
+            .into_iter()
+            .map(|device_id| device_id.to_string())
+            .collect(),
+        upgrade_required_peer_device_ids: snapshot
+            .upgrade_required_peer_device_ids
+            .into_iter()
+            .map(|device_id| device_id.to_string())
+            .collect(),
         convergence_digest: snapshot.convergence_digest.map(|digest| digest.to_string()),
         removed: snapshot.removed,
         updated_at_ms: snapshot.updated_at_ms,
@@ -323,7 +358,7 @@ fn member_preferences_result(preferences: MemberSyncPreferencesView) -> Operatio
 
 fn map_roster_error(error: RosterError) -> EngineError {
     let (code, category, retryable, variant) = match error {
-        RosterError::MemberRemovalUnavailable => (
+        RosterError::MembershipReconciliationUnavailable => (
             QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             false,
@@ -415,7 +450,7 @@ mod tests {
 
     #[test]
     fn workspace_convergence_errors_have_a_stable_public_mapping() {
-        let unavailable = map_roster_error(RosterError::MemberRemovalUnavailable);
+        let unavailable = map_roster_error(RosterError::MembershipReconciliationUnavailable);
         let failed = map_roster_error(RosterError::MemberRemoval("internal detail".into()));
         let invalid_input = map_roster_error(RosterError::MemberRemovalInvalidInput);
         let target_not_found = map_roster_error(RosterError::MemberRemovalTargetNotFound);
@@ -433,12 +468,17 @@ mod tests {
         let summary = workspace_convergence_summary(WorkspaceSnapshot {
             phase: WorkspacePhase::LocallyApplied,
             revision: 3,
-            change_count: 1,
-            removal_intent_count: 0,
+            history_event_count: 1,
             effective_member_count: 2,
-            confirmed_member_count: 0,
-            waiting_member_device_ids: vec![uc_core::ids::DeviceId::new("device-b")],
-            waiting_member_count: 1,
+            pending_removal_decision_device_ids: vec![uc_core::ids::DeviceId::new("device-c")],
+            pending_removal_decision_event_id: Some(
+                uc_core::membership::MembershipEventId::from_hex(
+                    "0101010101010101010101010101010101010101010101010101010101010101",
+                )
+                .unwrap(),
+            ),
+            diverged_peer_device_ids: vec![uc_core::ids::DeviceId::new("device-d")],
+            upgrade_required_peer_device_ids: vec![uc_core::ids::DeviceId::new("device-e")],
             convergence_digest: None,
             removed: false,
             updated_at_ms: 123,
@@ -450,21 +490,19 @@ mod tests {
             WorkspaceConvergenceSummary {
                 phase: WorkspaceConvergencePhaseSummary::LocallyApplied,
                 revision: 3,
-                change_count: 1,
-                removal_intent_count: 0,
+                history_event_count: 1,
                 effective_member_count: 2,
-                confirmed_member_count: 0,
-                waiting_member_device_ids: vec!["device-b".to_owned()],
-                waiting_member_count: 1,
+                pending_removal_decision_device_ids: vec!["device-c".to_owned()],
+                pending_removal_decision_event_id: Some(
+                    "0101010101010101010101010101010101010101010101010101010101010101".to_owned(),
+                ),
+                diverged_peer_device_ids: vec!["device-d".to_owned()],
+                upgrade_required_peer_device_ids: vec!["device-e".to_owned()],
                 convergence_digest: None,
                 removed: false,
                 updated_at_ms: 123,
                 failure_category: Some(WorkspaceConvergenceFailureCategorySummary::Storage),
             }
-        );
-        assert_eq!(
-            summary.waiting_member_device_ids,
-            vec!["device-b".to_owned()]
         );
     }
 }

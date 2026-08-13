@@ -34,6 +34,7 @@ use tracing::{debug, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId};
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::clipboard::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
     ActiveClipboardReceiverPort, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
@@ -113,6 +114,7 @@ pub struct ActiveClipboardDeps {
     pub advance_register: Arc<dyn AdvanceActiveClipboardPort>,
     pub mobile_consumability: MobileConsumabilityProbe,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
+    pub content_gate: Arc<dyn ContentExchangeGatePort>,
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     /// Presence stream for the peer-online resync worker: an "online"
     /// transition triggers a resend of the current register to that peer.
@@ -211,6 +213,7 @@ pub struct ActiveClipboardFacade {
     member_repo: Arc<dyn MemberRepositoryPort>,
     settings: Arc<dyn SettingsPort>,
     presence: Arc<dyn PresencePort>,
+    content_gate: Arc<dyn ContentExchangeGatePort>,
     load_register: Arc<dyn LoadActiveClipboardPort>,
     reconstructor: SnapshotReconstructor,
     local_advancer: LocalActiveRegisterAdvancer,
@@ -231,7 +234,10 @@ impl ActiveClipboardFacade {
             Arc::clone(&deps.clock),
             mobile_consumability.clone(),
         );
-        let send_gate = MemberSendGate::new(Arc::clone(&deps.member_repo));
+        let send_gate = MemberSendGate::new_with_content_gate(
+            Arc::clone(&deps.member_repo),
+            Arc::clone(&deps.content_gate),
+        );
 
         let (converged_tx, _) = broadcast::channel::<ActiveClipboardConvergedEvent>(16);
 
@@ -241,6 +247,7 @@ impl ActiveClipboardFacade {
             Arc::clone(&deps.load_register),
             deps.advance_register,
             Arc::clone(&deps.member_repo),
+            Arc::clone(&deps.content_gate),
             deps.entry_lookup,
             reconstructor.clone(),
             deps.coordinator,
@@ -261,7 +268,10 @@ impl ActiveClipboardFacade {
         if let (Some(pull_client), Some(pull_apply)) = (deps.pull_client, deps.pull_apply) {
             let store: Arc<dyn InboundPulledContentStore> = Arc::new(PulledContentStore {
                 cipher: Arc::clone(&deps.transfer_cipher),
-                receive_gate: MemberReceiveGate::new(Arc::clone(&deps.member_repo)),
+                receive_gate: MemberReceiveGate::new(
+                    Arc::clone(&deps.member_repo),
+                    Arc::clone(&deps.content_gate),
+                ),
                 apply: pull_apply,
             });
             inbound_uc = inbound_uc.with_pull(pull_client, store);
@@ -278,6 +288,7 @@ impl ActiveClipboardFacade {
             member_repo: deps.member_repo,
             settings: deps.settings,
             presence: deps.presence,
+            content_gate: deps.content_gate,
             load_register: deps.load_register,
             reconstructor,
             local_advancer,
@@ -373,6 +384,7 @@ impl ActiveClipboardFacade {
             self.reconstructor.clone(),
             Arc::clone(&self.dispatch),
             Arc::clone(&self.member_repo),
+            Arc::clone(&self.content_gate),
         )
     }
 
@@ -387,6 +399,7 @@ impl ActiveClipboardFacade {
             Arc::clone(&self.peer_addr_repo),
             Arc::clone(&self.presence),
             Arc::clone(&self.member_repo),
+            Arc::clone(&self.content_gate),
         )
     }
 
@@ -841,6 +854,15 @@ mod pull_store_tests {
         }
     }
 
+    struct AllowAllContent;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for AllowAllContent {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            false
+        }
+    }
+
     struct ApplyNeverCalled;
 
     #[async_trait]
@@ -870,7 +892,10 @@ mod pull_store_tests {
             encode_snapshot_to_v3_bytes(&snapshot).expect("encode text envelope");
         let store = PulledContentStore {
             cipher: Arc::new(PlaintextCipher(plaintext.to_vec())),
-            receive_gate: MemberReceiveGate::new(Arc::new(TextDeniedMemberRepo)),
+            receive_gate: MemberReceiveGate::new(
+                Arc::new(TextDeniedMemberRepo),
+                Arc::new(AllowAllContent),
+            ),
             apply: Arc::new(ApplyNeverCalled),
         };
 

@@ -16,12 +16,12 @@ use uc_core::ports::pairing::{DiscoveryChannel, PairingSessionId};
 
 use uc_core::ids::{DeviceId, EventId, RepresentationId};
 use uc_core::membership::{
-    AdmissionChangeFacts, AdmissionCommittedFacts, MemberInstanceId, RelationshipStateResetError,
-    RelationshipStateResetPort, RemovalAdmissionDecision, SpaceSecurityStateResetError,
+    AdmissionChangeFacts, AdmissionSavedFacts, MemberInstanceId, MembershipAdmissionDecision,
+    RelationshipStateResetError, RelationshipStateResetPort, SpaceSecurityStateResetError,
     SpaceSecurityStateResetPort, WorkspacePhase, WorkspaceSnapshot,
 };
 use uc_core::pairing::invitation::InvitationCode;
-use uc_core::pairing::SponsorAdmissionCommitted;
+use uc_core::pairing::SponsorAdmissionSaved;
 use uc_core::security::IdentityFingerprint;
 use uc_core::setup::SetupStatus;
 use uc_observability_contract::analytics::{
@@ -150,7 +150,7 @@ mockall::mock! {
             &self,
             pending: PendingJoinerHandshake,
             admission: AdmissionChangeFacts,
-        ) -> Result<SponsorAdmissionCommitted, RedeemPairingInvitationError>;
+        ) -> Result<SponsorAdmissionSaved, RedeemPairingInvitationError>;
     }
 }
 
@@ -165,8 +165,12 @@ struct RecordingOwner {
 
 #[async_trait]
 impl WorkspaceAdmissionOwnerPort for RecordingOwner {
-    async fn admission_decision(&self, _: u64) -> RemovalAdmissionDecision {
-        RemovalAdmissionDecision::Allowed
+    async fn admission_decision_for_joiner(
+        &self,
+        _: u64,
+        _: &DeviceId,
+    ) -> MembershipAdmissionDecision {
+        MembershipAdmissionDecision::Allowed
     }
     async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
         Ok(())
@@ -185,7 +189,7 @@ impl WorkspaceAdmissionOwnerPort for RecordingOwner {
         _: &PairingSessionId,
         _: AdmissionChangeFacts,
         _security_update_payload: Vec<u8>,
-    ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
+    ) -> Result<AdmissionSavedFacts, WorkspaceConvergenceError> {
         unimplemented!("sponsor-side method not exercised in switch-space tests")
     }
     async fn local_admission_facts(
@@ -211,9 +215,9 @@ impl WorkspaceAdmissionOwnerPort for RecordingOwner {
         }
         Ok(switch_snapshot())
     }
-    async fn record_admission_committed(
+    async fn record_admission_saved(
         &self,
-        _confirmation: AdmissionCommittedFacts,
+        _confirmation: AdmissionSavedFacts,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
         if *self.fail_committed.lock().unwrap() {
             return Err(WorkspaceConvergenceError::Unavailable);
@@ -233,12 +237,12 @@ fn switch_snapshot() -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         phase: WorkspacePhase::LocallyApplied,
         revision: 1,
-        change_count: 0,
-        removal_intent_count: 0,
+        history_event_count: 0,
         effective_member_count: 1,
-        confirmed_member_count: 0,
-        waiting_member_device_ids: Vec::new(),
-        waiting_member_count: 0,
+        pending_removal_decision_device_ids: Vec::new(),
+        pending_removal_decision_event_id: None,
+        diverged_peer_device_ids: Vec::new(),
+        upgrade_required_peer_device_ids: Vec::new(),
         convergence_digest: None,
         removed: false,
         updated_at_ms: 0,
@@ -361,24 +365,26 @@ fn outcome_default() -> JoinerHandshakeOutcome {
     }
 }
 fn pending_default() -> PendingJoinerHandshake {
-    PendingJoinerHandshake {
-        session: PairingSessionId::new("session-1"),
-        outcome: outcome_default(),
-    }
+    PendingJoinerHandshake::without_group_installation(
+        PairingSessionId::new("session-1"),
+        outcome_default(),
+        2,
+    )
 }
 
 fn pending_with_sponsor_person() -> PendingJoinerHandshake {
-    PendingJoinerHandshake {
-        session: PairingSessionId::new("session-1"),
-        outcome: outcome_with_sponsor_person(),
-    }
+    PendingJoinerHandshake::without_group_installation(
+        PairingSessionId::new("session-1"),
+        outcome_with_sponsor_person(),
+        2,
+    )
 }
 
-fn committed_default() -> SponsorAdmissionCommitted {
-    SponsorAdmissionCommitted {
-        facts: AdmissionCommittedFacts {
-            change_digest: [0x11; 32],
-            change_count: 2,
+fn saved_default() -> SponsorAdmissionSaved {
+    SponsorAdmissionSaved {
+        facts: AdmissionSavedFacts {
+            history_digest: [0x11; 32],
+            history_event_count: 2,
             sponsor_facts: AdmissionChangeFacts {
                 member_instance: MemberInstanceId::from_bytes([9; 32]),
                 device_id: DeviceId::new("sponsor-device"),
@@ -547,7 +553,7 @@ async fn happy_path_executes_all_4_phases() {
         .return_once(|_, _| Ok(pending_default()));
     env.handshake
         .expect_complete()
-        .return_once(|_, _| Ok(committed_default()));
+        .return_once(|_, _| Ok(saved_default()));
 
     // Phase 3 — swap
     env.blob_migration_repo
@@ -717,7 +723,7 @@ async fn confirmed_switch_preserves_unreadable_history_and_migrates_readable_row
         .return_once(|_, _| Ok(pending_default()));
     env.handshake
         .expect_complete()
-        .return_once(|_, _| Ok(committed_default()));
+        .return_once(|_, _| Ok(saved_default()));
 
     env.blob_migration_repo
         .expect_count_records()
@@ -1033,7 +1039,7 @@ async fn happy_path_persists_identity_intent_and_invokes_adopt() {
         .return_once(|_, _| Ok(pending_with_sponsor_person()));
     env.handshake
         .expect_complete()
-        .return_once(|_, _| Ok(committed_default()));
+        .return_once(|_, _| Ok(saved_default()));
 
     // Phase 3 — no records to swap.
     env.blob_migration_repo

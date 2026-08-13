@@ -13,10 +13,9 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchPort, LegacyUpgradeEndpointPort,
-    MembershipAttestationEndpointPort, MembershipGossipEndpointPort, RecoveryTransportEndpointPort,
-    RemovalExchangeEndpointPort, RemovalLateSubmissionEndpointPort, RemovalNoticeEndpointPort,
-    RemovalTargetGatePort,
+    ContentExchangeGatePort, DeviceVisibilityGatePort, GroupRevocationPort,
+    GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MembershipAttestationEndpointPort,
+    MembershipGossipEndpointPort, MembershipHistoryExchangeEndpointPort,
 };
 use uc_core::ports::PresenceEvent;
 
@@ -74,7 +73,9 @@ impl SpaceConvergenceAssembly {
             GroupUpdateDelivery::new(group_revocation, group_update_dispatch),
         );
         membership.install_group_update_delivery(Arc::clone(&group_update_delivery));
-        let legacy_upgrade = Arc::new(AutomaticLegacyUpgrade::new(legacy_upgrade));
+        let legacy_upgrade = Arc::new(
+            AutomaticLegacyUpgrade::new(legacy_upgrade).with_convergence(Arc::clone(&workspace)),
+        );
         Self {
             workspace,
             membership,
@@ -83,30 +84,20 @@ impl SpaceConvergenceAssembly {
         }
     }
 
-    /// Removal-exchange endpoint installed on the shared node.
-    pub fn removal_exchange(&self) -> Arc<dyn RemovalExchangeEndpointPort> {
-        Arc::clone(&self.workspace) as Arc<dyn RemovalExchangeEndpointPort>
-    }
-
-    /// Removal late-submission endpoint installed on the shared node.
-    pub fn removal_late_submission(&self) -> Arc<dyn RemovalLateSubmissionEndpointPort> {
-        Arc::clone(&self.workspace) as Arc<dyn RemovalLateSubmissionEndpointPort>
-    }
-
-    /// Removal-notice endpoint installed on the shared node.
-    pub fn removal_notice(&self) -> Arc<dyn RemovalNoticeEndpointPort> {
-        Arc::clone(&self.workspace) as Arc<dyn RemovalNoticeEndpointPort>
-    }
-
-    /// Recovery-transport endpoint installed on the shared node.
-    pub fn recovery_transport(&self) -> Arc<dyn RecoveryTransportEndpointPort> {
-        Arc::clone(&self.workspace) as Arc<dyn RecoveryTransportEndpointPort>
+    /// Member-history endpoint installed on the authenticated member channel.
+    pub fn membership_history_exchange(&self) -> Arc<dyn MembershipHistoryExchangeEndpointPort> {
+        Arc::clone(&self.workspace) as Arc<dyn MembershipHistoryExchangeEndpointPort>
     }
 
     /// Removal gate used by clipboard / keepalive callers to self-filter
     /// removed devices.
-    pub fn removal_gate(&self) -> Arc<dyn RemovalTargetGatePort> {
-        Arc::clone(&self.workspace) as Arc<dyn RemovalTargetGatePort>
+    pub fn removal_gate(&self) -> Arc<dyn ContentExchangeGatePort> {
+        Arc::clone(&self.workspace) as Arc<dyn ContentExchangeGatePort>
+    }
+
+    /// Device-list gate. A content pause must not hide a still-paired device.
+    pub fn device_visibility_gate(&self) -> Arc<dyn DeviceVisibilityGatePort> {
+        Arc::clone(&self.workspace) as Arc<dyn DeviceVisibilityGatePort>
     }
 
     /// Membership attestation endpoint installed on the shared node.

@@ -6,15 +6,15 @@
 //!
 //! 1. the joiner's local readiness facts are saved by the owner
 //!    (`record_local_readiness`) before the readiness reply is sent;
-//! 2. the sponsor's "admission change saved" confirmation is recorded by
-//!    the owner (`record_admission_committed`) once received, together with
+//! 2. the sponsor's saved member-history reply is recorded by
+//!    the owner (`record_admission_saved`) once received, together with
 //!    the sponsor's member facts.
 //!
 //! ## Ordering: owner saves before declaring success
 //!
 //! Mirrors sponsor-side ADR-017 cleanup: `record_local_readiness` →
 //! `setup_status.set_status(completed)` land **before** the readiness
-//! reply, and `record_admission_committed` lands before `execute` returns
+//! reply, and `record_admission_saved` lands before `execute` returns
 //! `Ok`. The caller never gets a success result that isn't backed by fully
 //! committed local state. Join success is not the result of the pairing
 //! handshake: it is the fact that the workspace has saved the member
@@ -93,8 +93,11 @@ impl RedeemPairingInvitationUseCase {
             method: PairingMethod::Code,
         });
         let result = async {
-            let pending = self.handshake.handshake(&cmd.code, &cmd.passphrase).await?;
+            let mut pending = self.handshake.handshake(&cmd.code, &cmd.passphrase).await?;
             let channel = pending.outcome().discovery_channel;
+            self.handshake
+                .install_group_join(&mut pending, &cmd.passphrase)
+                .await?;
             let persisted = match self.persist(pending.outcome().clone()).await {
                 Ok(persisted) => persisted,
                 Err(error) => {
@@ -141,15 +144,15 @@ impl RedeemPairingInvitationUseCase {
                     RedeemPairingInvitationError::Internal(format!("save local readiness: {error}"))
                 })?;
             let committed = self.handshake.complete(pending, admission).await?;
-            // The sponsor saved the admission change; the joiner records
-            // the confirmation and the sponsor's member facts with the
-            // owner before reporting success.
+            // The sponsor saved the admission history; the joiner records
+            // the sponsor's member facts with the owner before reporting
+            // success.
             self.workspace_convergence
-                .record_admission_committed(committed.facts)
+                .record_admission_saved(committed.facts)
                 .await
                 .map_err(|error| {
                     RedeemPairingInvitationError::Internal(format!(
-                        "record admission committed: {error}"
+                        "record admission saved: {error}"
                     ))
                 })?;
             Ok((persisted, channel))
@@ -265,13 +268,13 @@ mod tests {
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
     use uc_core::membership::{
-        AdmissionChangeFacts, AdmissionCommittedFacts, MemberInstanceId, RemovalAdmissionDecision,
+        AdmissionChangeFacts, AdmissionSavedFacts, MemberInstanceId, MembershipAdmissionDecision,
         WorkspacePhase, WorkspaceSnapshot,
     };
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::session_message::{
-        PairingReject, PairingRejectReason, PairingSessionMessage, SponsorAdmissionCommitted,
-        SponsorAdmissionOffer, SponsorConfirm,
+        PairingReject, PairingRejectReason, PairingSessionMessage, SponsorAdmissionOffer,
+        SponsorAdmissionSaved, SponsorConfirm,
     };
     use uc_core::ports::pairing::{
         DialError, DialOutcome, DiscoveryChannel, PairingSessionId, PairingSessionPort,
@@ -309,9 +312,9 @@ mod tests {
             me.recv
                 .lock()
                 .unwrap()
-                .push_back(PairingSessionMessage::AdmissionCommitted(
-                    SponsorAdmissionCommitted {
-                        facts: committed_facts(),
+                .push_back(PairingSessionMessage::AdmissionSaved(
+                    SponsorAdmissionSaved {
+                        facts: saved_facts(),
                     },
                 ));
             me
@@ -342,6 +345,7 @@ mod tests {
                     welcome: vec![1],
                     encrypted_key_catalog: vec![2],
                     group_epoch: 2,
+                    membership_history_event_count: 0,
                 }));
         }
     }
@@ -535,12 +539,16 @@ mod tests {
         calls: StdMutex<Vec<&'static str>>,
         fail_readiness: StdMutex<bool>,
         fail_committed: StdMutex<bool>,
-        committed_facts: StdMutex<Option<AdmissionCommittedFacts>>,
+        committed_facts: StdMutex<Option<AdmissionSavedFacts>>,
     }
     #[async_trait]
     impl WorkspaceAdmissionOwnerPort for RecordingOwner {
-        async fn admission_decision(&self, _: u64) -> RemovalAdmissionDecision {
-            RemovalAdmissionDecision::Allowed
+        async fn admission_decision_for_joiner(
+            &self,
+            _: u64,
+            _: &DeviceId,
+        ) -> MembershipAdmissionDecision {
+            MembershipAdmissionDecision::Allowed
         }
         async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
             Ok(())
@@ -559,7 +567,7 @@ mod tests {
             _: &PairingSessionId,
             _: AdmissionChangeFacts,
             _security_update_payload: Vec<u8>,
-        ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
+        ) -> Result<AdmissionSavedFacts, WorkspaceConvergenceError> {
             unimplemented!("sponsor-side method not exercised in joiner tests")
         }
         async fn local_admission_facts(
@@ -580,14 +588,11 @@ mod tests {
             assert_eq!(own_instance, MemberInstanceId::from_bytes([7; 32]));
             Ok(snapshot())
         }
-        async fn record_admission_committed(
+        async fn record_admission_saved(
             &self,
-            confirmation: AdmissionCommittedFacts,
+            confirmation: AdmissionSavedFacts,
         ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push("record_admission_committed");
+            self.calls.lock().unwrap().push("record_admission_saved");
             if *self.fail_committed.lock().unwrap() {
                 return Err(WorkspaceConvergenceError::Unavailable);
             }
@@ -603,10 +608,10 @@ mod tests {
         }
     }
 
-    fn committed_facts() -> AdmissionCommittedFacts {
-        AdmissionCommittedFacts {
-            change_digest: [0x11; 32],
-            change_count: 2,
+    fn saved_facts() -> AdmissionSavedFacts {
+        AdmissionSavedFacts {
+            history_digest: [0x11; 32],
+            history_event_count: 2,
             sponsor_facts: AdmissionChangeFacts {
                 member_instance: MemberInstanceId::from_bytes([9; 32]),
                 device_id: DeviceId::new("sponsor-device"),
@@ -635,12 +640,12 @@ mod tests {
         WorkspaceSnapshot {
             phase: WorkspacePhase::LocallyApplied,
             revision: 1,
-            change_count: 0,
-            removal_intent_count: 0,
+            history_event_count: 0,
             effective_member_count: 1,
-            confirmed_member_count: 0,
-            waiting_member_device_ids: Vec::new(),
-            waiting_member_count: 0,
+            pending_removal_decision_device_ids: Vec::new(),
+            pending_removal_decision_event_id: None,
+            diverged_peer_device_ids: Vec::new(),
+            upgrade_required_peer_device_ids: Vec::new(),
             convergence_digest: None,
             removed: false,
             updated_at_ms: fixed_now_ms(),
@@ -759,7 +764,7 @@ mod tests {
             vec![
                 "local_admission_facts",
                 "record_local_readiness",
-                "record_admission_committed",
+                "record_admission_saved",
             ]
         );
         let sent = h.session.sent.lock().unwrap().clone();
@@ -831,7 +836,7 @@ mod tests {
         let err = uc.execute(cmd("X")).await.unwrap_err();
         match err {
             RedeemPairingInvitationError::Internal(m) => {
-                assert!(m.contains("record admission committed"), "msg = {m}")
+                assert!(m.contains("record admission saved"), "msg = {m}")
             }
             other => panic!("expected Internal, got {other:?}"),
         }

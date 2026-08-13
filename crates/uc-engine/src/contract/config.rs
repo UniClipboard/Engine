@@ -16,6 +16,9 @@ pub struct EngineConfig {
     #[cfg(feature = "dev-tools")]
     #[serde(skip)]
     test_relay_fallback: Option<bool>,
+    #[cfg(feature = "dev-tools")]
+    #[serde(skip)]
+    test_iroh_bind_port: Option<u16>,
 }
 
 impl EngineConfig {
@@ -28,6 +31,8 @@ impl EngineConfig {
             rendezvous_base_url: None,
             #[cfg(feature = "dev-tools")]
             test_relay_fallback: None,
+            #[cfg(feature = "dev-tools")]
+            test_iroh_bind_port: None,
         }
     }
 
@@ -65,6 +70,12 @@ impl EngineConfig {
         self
     }
 
+    #[cfg(feature = "dev-tools")]
+    pub fn with_test_iroh_bind_port(mut self, port: u16) -> Self {
+        self.test_iroh_bind_port = Some(port);
+        self
+    }
+
     pub(crate) fn rendezvous_base_url_override(&self) -> Option<String> {
         #[cfg(feature = "dev-tools")]
         {
@@ -80,6 +91,17 @@ impl EngineConfig {
         #[cfg(feature = "dev-tools")]
         {
             return self.test_relay_fallback;
+        }
+        #[cfg(not(feature = "dev-tools"))]
+        {
+            None
+        }
+    }
+
+    pub(crate) fn test_iroh_bind_port_override(&self) -> Option<u16> {
+        #[cfg(feature = "dev-tools")]
+        {
+            return self.test_iroh_bind_port;
         }
         #[cfg(not(feature = "dev-tools"))]
         {
@@ -104,6 +126,11 @@ impl fmt::Debug for EngineConfig {
         debug.field(
             "has_test_relay_fallback_override",
             &self.test_relay_fallback.is_some(),
+        );
+        #[cfg(feature = "dev-tools")]
+        debug.field(
+            "has_test_iroh_bind_port_override",
+            &self.test_iroh_bind_port.is_some(),
         );
         debug.finish()
     }

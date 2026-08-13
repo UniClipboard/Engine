@@ -12,7 +12,6 @@ const INVITATION_INVALID_STATE_CODE: u32 = 1221;
 const INVITATION_INVALID_INPUT_CODE: u32 = 1222;
 const INVITATION_UNAVAILABLE_CODE: u32 = 1223;
 const INVITATION_FAILED_CODE: u32 = 1224;
-const INVITATION_MEMBER_REMOVAL_RECOVERY_CODE: u32 = 1225;
 
 pub async fn execute_issue_invitation(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     let invitation = facade
@@ -40,17 +39,17 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
             EngineErrorCategory::InvalidState,
             true,
         ),
-        IssuePairingInvitationError::MemberRemovalInProgress => EngineError::new(
+        IssuePairingInvitationError::MembershipReconciliationInProgress => EngineError::new(
             INVITATION_INVALID_STATE_CODE,
             EngineErrorCategory::InvalidState,
             true,
         ),
-        IssuePairingInvitationError::MemberRemovalRecoveryRequired => EngineError::new(
-            INVITATION_MEMBER_REMOVAL_RECOVERY_CODE,
+        IssuePairingInvitationError::MembershipReconciliationRequired => EngineError::new(
+            INVITATION_INVALID_STATE_CODE,
             EngineErrorCategory::InvalidState,
             false,
         ),
-        IssuePairingInvitationError::MemberRemovalUnavailable => EngineError::new(
+        IssuePairingInvitationError::MembershipReconciliationUnavailable => EngineError::new(
             INVITATION_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             true,

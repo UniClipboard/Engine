@@ -43,7 +43,7 @@ use uc_core::ports::setup::{MigrationStateError, MigrationStatePort};
 use uc_core::ports::{ContentHashPort, PeerAddressRecord};
 use uc_core::security::IdentityFingerprint;
 use uc_core::setup::{MigrationPhase, MigrationRunId};
-use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
+use uc_core::trusted_peer::TrustedPeer;
 
 pub struct NoopMobileConsumableBackfill;
 
@@ -243,18 +243,11 @@ use uc_application::facade::{
 use uc_core::membership::{
     CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityError,
-    CurrentMembershipIdentityPort, MemberInstanceId, MembershipSecurityUpdateError,
-    MembershipSecurityUpdatePort, RemovalCausalProof, RemovalCausalProofMember,
-    RemovalExchangeMessage, RemovalIntentVerificationError, RemovalIntentVerificationPort,
-    RemovalLateAcceptance, RemovalLateRejectionReason, RemovalLateSubmission,
-    RemovalLateSubmissionPort, RemovalNotice, RemovalNoticeAcceptance, RemovalNoticePort,
-    RemovalNoticeVerificationError, RemovalNoticeVerificationPort, RemovalRecoveryError,
-    RemovalRecoveryPort, RemovalViewMember, RemovalViewSnapshot, SignedRemovalIntent,
+    CurrentMembershipIdentityPort, MembershipSecurityUpdateError, MembershipSecurityUpdatePort,
     WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
     WorkspaceConvergenceState,
 };
 use uc_core::ports::{ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, SettingsPort};
-use uc_core::setup::SetupStatus;
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
 /// Build a workspace convergence owner whose member/trust/address writes go
@@ -274,8 +267,6 @@ pub fn test_workspace_convergence(
     let own_device = device_identity.current_device_id();
     let workspace = WorkspaceConvergenceDeps {
         repository: Arc::new(MemoryWorkspaceRepo::default()),
-        verification: Arc::new(NoopIntentVerifier),
-        recovery: Arc::new(FixedRecovery::new(own_device)),
         member_signatures: Arc::new(FixedSigner),
         member_repo: Arc::clone(&member_repo),
         membership_identity: Arc::new(FixedMembershipIdentity::new(
@@ -292,11 +283,8 @@ pub fn test_workspace_convergence(
         security_updates: Arc::new(NoopSecurityUpdates),
         clock: Arc::clone(&clock),
         device_identity: Arc::clone(&device_identity),
-        exchange: Arc::new(NoopExchange),
-        late_submission: Arc::new(NoopLateSubmission),
-        notice: Arc::new(NoopNotice),
-        notice_verification: Arc::new(NoopNoticeVerification),
-        recovery_transport: Arc::new(NoopRecoveryTransport),
+        membership_history_exchange: Arc::new(NoopExchange),
+        legacy_peer_probe: Arc::new(NoopLegacyPeerProbe),
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         peer_addr_repo: Arc::clone(&peer_addr_repo),
         own_device,
@@ -679,66 +667,18 @@ impl WorkspaceConvergenceRepositoryPort for MemoryWorkspaceRepo {
     }
 }
 
-struct NoopIntentVerifier;
-#[async_trait]
-impl RemovalIntentVerificationPort for NoopIntentVerifier {
-    async fn verify_intent(
-        &self,
-        _intent: &SignedRemovalIntent,
-    ) -> Result<(), RemovalIntentVerificationError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct FixedRecovery {
-    own_device: DeviceId,
-}
-impl FixedRecovery {
-    fn new(own_device: DeviceId) -> Self {
-        Self { own_device }
-    }
-    fn own_instance(&self) -> MemberInstanceId {
-        let bytes: [u8; 32] = {
-            let mut b = [0u8; 32];
-            let id = self.own_device.as_str();
-            let n = id.len().min(32);
-            b[..n].copy_from_slice(id.as_bytes()[..n].try_into().unwrap());
-            b
-        };
-        MemberInstanceId::from_bytes(bytes)
-    }
-}
-#[async_trait]
-impl RemovalRecoveryPort for FixedRecovery {
-    async fn current_view(&self) -> Result<RemovalViewSnapshot, RemovalRecoveryError> {
-        let member = RemovalViewMember {
-            device_id: self.own_device,
-            instance: self.own_instance(),
-            signing_public_key: self.own_instance().as_bytes().to_vec(),
-        };
-        let causal = RemovalCausalProofMember {
-            device_id: member.device_id,
-            instance: member.instance,
-            signing_public_key: member.signing_public_key.clone(),
-        };
-        Ok(RemovalViewSnapshot {
-            epoch: 1,
-            members: vec![member],
-            causal_proof: RemovalCausalProof::new(1, vec![causal]),
-        })
-    }
-    async fn own_instance(&self) -> Result<Option<MemberInstanceId>, RemovalRecoveryError> {
-        Ok(Some(self.own_instance()))
-    }
-}
-
 #[derive(Clone, Default)]
 struct FixedSigner;
 #[async_trait]
 impl CurrentMemberSignaturePort for FixedSigner {
     async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
         Ok(1)
+    }
+    async fn current_member_instance(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
+        Ok(uc_core::membership::MemberInstanceId::from_bytes([1; 32]))
     }
     async fn sign_current_member_payload(
         &self,
@@ -879,75 +819,29 @@ impl MembershipSecurityUpdatePort for NoopSecurityUpdates {
 #[derive(Clone, Default)]
 struct NoopExchange;
 #[async_trait]
-impl uc_core::membership::RemovalExchangePort for NoopExchange {
-    async fn exchange(
+impl uc_core::membership::MembershipHistoryExchangePort for NoopExchange {
+    async fn exchange_membership_history(
         &self,
         _recipient: &DeviceId,
-        _message: RemovalExchangeMessage,
-    ) -> Result<RemovalExchangeMessage, uc_core::membership::RemovalExchangeError> {
-        Ok(RemovalExchangeMessage::IntentAck(
-            uc_core::membership::RemovalIntentId::from_bytes([0; 32]),
+        _message: uc_core::membership::MembershipHistoryMessage,
+    ) -> Result<
+        uc_core::membership::MembershipHistoryMessage,
+        uc_core::membership::MembershipHistoryExchangeError,
+    > {
+        Ok(uc_core::membership::MembershipHistoryMessage::Ack(
+            uc_core::membership::MembershipHistoryAck::Consistent,
         ))
     }
 }
 
-#[derive(Clone, Default)]
-struct NoopLateSubmission;
+struct NoopLegacyPeerProbe;
+
 #[async_trait]
-impl RemovalLateSubmissionPort for NoopLateSubmission {
-    async fn submit_late(
+impl uc_core::membership::LegacyPeerProbePort for NoopLegacyPeerProbe {
+    async fn probe_legacy_peer(
         &self,
-        _recipient: &DeviceId,
-        _submission: RemovalLateSubmission,
-    ) -> Result<RemovalLateAcceptance, uc_core::membership::RemovalLateSubmissionTransportError>
-    {
-        Ok(RemovalLateAcceptance::Rejected {
-            reason: RemovalLateRejectionReason::Invalid,
-        })
-    }
-}
-
-#[derive(Clone, Default)]
-struct NoopRecoveryTransport;
-
-#[async_trait::async_trait]
-impl uc_core::membership::RecoveryTransportPort for NoopRecoveryTransport {
-    async fn exchange_recovery(
-        &self,
-        _recipient: &uc_core::ids::DeviceId,
-        _binding: &uc_core::membership::RecoveryBinding,
-        _message: uc_core::membership::RecoveryChannelMessage,
-    ) -> Result<
-        uc_core::membership::RecoveryChannelMessage,
-        uc_core::membership::RecoveryTransportError,
-    > {
-        Err(uc_core::membership::RecoveryTransportError::Offline)
-    }
-}
-
-struct NoopNotice;
-#[async_trait]
-impl RemovalNoticePort for NoopNotice {
-    async fn send_notice(
-        &self,
-        _recipient: &DeviceId,
-        _notice: RemovalNotice,
-    ) -> Result<RemovalNoticeAcceptance, uc_core::membership::RemovalNoticeTransportError> {
-        Ok(RemovalNoticeAcceptance::Accepted {
-            intent_id: uc_core::membership::RemovalIntentId::from_bytes([0; 32]),
-        })
-    }
-}
-
-#[derive(Clone, Default)]
-struct NoopNoticeVerification;
-#[async_trait]
-impl RemovalNoticeVerificationPort for NoopNoticeVerification {
-    async fn verify_notice_signature(
-        &self,
-        _notice: &RemovalNotice,
-        _issuer_public_key: &[u8],
-    ) -> Result<(), RemovalNoticeVerificationError> {
-        Ok(())
+        _peer: &DeviceId,
+    ) -> Result<(), uc_core::membership::LegacyPeerProbeError> {
+        Err(uc_core::membership::LegacyPeerProbeError::Transport)
     }
 }

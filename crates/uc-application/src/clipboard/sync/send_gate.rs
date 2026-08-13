@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::MemberRepositoryPort;
 
 /// Reads a peer's per-device sync preferences to decide whether outbound
@@ -29,11 +30,25 @@ use uc_core::MemberRepositoryPort;
 #[derive(Clone)]
 pub(crate) struct MemberSendGate {
     member_repo: Arc<dyn MemberRepositoryPort>,
+    content_gate: Option<Arc<dyn ContentExchangeGatePort>>,
 }
 
 impl MemberSendGate {
     pub(crate) fn new(member_repo: Arc<dyn MemberRepositoryPort>) -> Self {
-        Self { member_repo }
+        Self {
+            member_repo,
+            content_gate: None,
+        }
+    }
+
+    pub(crate) fn new_with_content_gate(
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        content_gate: Arc<dyn ContentExchangeGatePort>,
+    ) -> Self {
+        Self {
+            member_repo,
+            content_gate: Some(content_gate),
+        }
     }
 
     /// Full outbound gate (issue #1017 D2): `send_enabled` ∧
@@ -53,6 +68,12 @@ impl MemberSendGate {
         peer: &DeviceId,
         categories: &ClipboardContentCategorySet,
     ) -> bool {
+        if let Some(content_gate) = &self.content_gate {
+            if content_gate.is_locally_removed(peer).await {
+                info!(device = %peer.as_str(), reason = "content_exchange_blocked", "active state send gate: skipping peer while content exchange is blocked");
+                return false;
+            }
+        }
         match self.member_repo.get(peer).await {
             Ok(Some(member)) => {
                 if !member.sync_preferences.send_enabled {

@@ -11,14 +11,16 @@ use thiserror::Error;
 use tracing::{debug, instrument, warn};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    LegacyUpgradeDescriptor, LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort,
-    LegacyUpgradeEndpointPort, LegacyUpgradeId, LegacyUpgradeRequest, LegacyUpgradeResponse,
-    LegacyUpgradeResponseKind, MemberRepositoryPort, ProtectionGroupAdmission, ProtectionGroupId,
+    LegacyPeerProbeError, LegacyPeerProbePort, LegacyUpgradeDescriptor, LegacyUpgradeDispatchError,
+    LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort, LegacyUpgradeId, LegacyUpgradeRequest,
+    LegacyUpgradeResponse, LegacyUpgradeResponseKind, MemberRepositoryPort,
+    ProtectionGroupAdmission, ProtectionGroupId,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_core::space_access::GroupAdmission;
 
+use super::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
 use super::connect_with_staggered_retry;
 
 const WIRE_VERSION: u8 = 1;
@@ -308,6 +310,30 @@ impl LegacyUpgradeDispatchPort for IrohLegacyUpgradeAdapter {
     }
 }
 
+#[async_trait]
+impl LegacyPeerProbePort for IrohLegacyUpgradeAdapter {
+    #[instrument(name = "legacy_upgrade.probe", level = "debug", skip_all, fields(device_id = %peer))]
+    async fn probe_legacy_peer(&self, peer: &DeviceId) -> Result<(), LegacyPeerProbeError> {
+        let addr = self
+            .resolve_addr(peer)
+            .await
+            .ok_or(LegacyPeerProbeError::Offline)?;
+        let connection = connect_with_staggered_retry(
+            Arc::clone(&self.endpoint),
+            addr,
+            LEGACY_CLIPBOARD_ALPN,
+            "legacy-upgrade-probe",
+        )
+        .await
+        .map_err(|_| LegacyPeerProbeError::Transport)?;
+
+        // A successful authenticated ALPN connection is the only positive
+        // legacy-version signal. Do not open a stream or send a legacy request.
+        connection.close(0u32.into(), b"probe-complete");
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct IrohLegacyUpgradeHandler {
     state: Arc<HandlerState>,
@@ -451,16 +477,61 @@ async fn emit_rejected(send: &mut iroh::endpoint::SendStream) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::future::pending;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
+    use iroh::protocol::{AcceptError, ProtocolHandler, Router};
     use iroh::{RelayMode, SecretKey};
+    use tokio::sync::Mutex;
     use uc_core::membership::{LegacyUpgradeError, MembershipError, SpaceMember};
+    use uc_core::ports::{PeerAddressError, PeerAddressRecord};
     use uc_core::MemberSyncPreferences;
 
     use super::*;
+    use crate::network::iroh::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
     use crate::security::Sha256IdentityFingerprintFactory;
+
+    #[derive(Default)]
+    struct MemoryPeerAddresses(Mutex<HashMap<String, PeerAddressRecord>>);
+
+    #[async_trait]
+    impl PeerAddressRepositoryPort for MemoryPeerAddresses {
+        async fn get(
+            &self,
+            device: &DeviceId,
+        ) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
+            Ok(self.0.lock().await.get(device.as_str()).cloned())
+        }
+
+        async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
+            self.0
+                .lock()
+                .await
+                .insert(record.device_id.as_str().to_owned(), record.clone());
+            Ok(())
+        }
+
+        async fn list(&self) -> Result<Vec<PeerAddressRecord>, PeerAddressError> {
+            Ok(self.0.lock().await.values().cloned().collect())
+        }
+
+        async fn remove(&self, device: &DeviceId) -> Result<(), PeerAddressError> {
+            self.0.lock().await.remove(device.as_str());
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EmptyConnectionHandler;
+
+    impl ProtocolHandler for EmptyConnectionHandler {
+        async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+            let _ = connection.closed().await;
+            Ok(())
+        }
+    }
 
     struct StaticMembers(Vec<SpaceMember>);
 
@@ -527,6 +598,47 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("endpoint never published direct addresses")
+    }
+
+    // 流程：B 只监听 0.19 已有的旧内容入口；A 建立空连接后立即关闭，不发送任何旧请求，并确认 B 低于 1.1。
+    #[tokio::test]
+    async fn legacy_probe_recognizes_a_peer_with_only_the_v019_clipboard_endpoint() {
+        let sender = endpoint([0x21; 32]).await;
+        let receiver = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .secret_key(SecretKey::from_bytes(&[0x22; 32]))
+                .alpns(vec![LEGACY_CLIPBOARD_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .unwrap(),
+        );
+        wait_for_direct_addrs(&sender).await;
+        wait_for_direct_addrs(&receiver).await;
+        let router = Router::builder((*receiver).clone())
+            .accept(LEGACY_CLIPBOARD_ALPN, EmptyConnectionHandler)
+            .spawn();
+        let peer = DeviceId::new("device-b");
+        let addresses = Arc::new(MemoryPeerAddresses::default());
+        addresses
+            .upsert(&PeerAddressRecord {
+                device_id: peer.clone(),
+                addr_blob: postcard::to_stdvec(&receiver.addr()).unwrap(),
+                observed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let probe = IrohLegacyUpgradeAdapter::new(
+            sender.clone(),
+            addresses,
+            Arc::new(StaticMembers(Vec::new())),
+            Arc::new(Sha256IdentityFingerprintFactory),
+        );
+
+        assert_eq!(probe.probe_legacy_peer(&peer).await, Ok(()));
+
+        router.shutdown().await.ok();
+        sender.close().await;
     }
 
     fn member_for(seed: [u8; 32], device_id: &str) -> SpaceMember {

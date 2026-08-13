@@ -47,8 +47,8 @@ use uc_application::facade::space_setup::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    MemberRepositoryPort, MembershipError, PeerAdmissionPort, RemovalAdmissionDecision,
-    RemovalAdmissionGatePort, RemovalTargetGatePort, SpaceMember,
+    DeviceVisibilityGatePort, MemberRepositoryPort, MembershipAdmissionDecision,
+    MembershipAdmissionGatePort, MembershipError, PeerAdmissionPort, SpaceMember,
 };
 use uc_core::ports::pairing::PairingSessionPort;
 use uc_core::ports::space::ProofPort;
@@ -74,22 +74,22 @@ use uc_infra::security::{
 
 // ─── in-memory fakes ────────────────────────────────────────────────────────
 
-struct AllowRemovalAdmission;
+struct AllowMembershipAdmission;
 
 #[async_trait]
-impl RemovalTargetGatePort for AllowRemovalAdmission {
-    async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+impl DeviceVisibilityGatePort for AllowMembershipAdmission {
+    async fn is_hidden_from_device_lists(&self, _device_id: &DeviceId) -> bool {
         false
     }
 }
 
 #[async_trait]
-impl RemovalAdmissionGatePort for AllowRemovalAdmission {
-    async fn admission_decision(&self, _invitation_generation: u64) -> RemovalAdmissionDecision {
-        RemovalAdmissionDecision::Allowed
+impl MembershipAdmissionGatePort for AllowMembershipAdmission {
+    async fn admission_decision(&self, _invitation_generation: u64) -> MembershipAdmissionDecision {
+        MembershipAdmissionDecision::Allowed
     }
 
-    async fn invitation_generation(&self) -> Result<u64, RemovalAdmissionDecision> {
+    async fn invitation_generation(&self) -> Result<u64, MembershipAdmissionDecision> {
         Ok(0)
     }
 }
@@ -406,7 +406,7 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
                 as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
             presence,
             analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
-            removal_gate: Arc::new(AllowRemovalAdmission),
+            visibility_gate: Arc::new(AllowMembershipAdmission),
             convergence: common::test_workspace_convergence(
                 Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
                 Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,

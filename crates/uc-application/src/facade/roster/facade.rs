@@ -20,9 +20,10 @@ use tokio::sync::broadcast;
 use tracing::instrument;
 
 use uc_core::membership::{
-    BootstrapId, GroupBootstrapPort, GroupBootstrapResult, LegacyBootstrapStatus,
-    MemberProtectionStatus as CoreMemberProtectionStatus, MemberRepositoryPort,
-    RemovalTargetGatePort, SpaceProtectionMode as CoreSpaceProtectionMode, SpaceProtectionSnapshot,
+    BootstrapId, DeviceVisibilityGatePort, GroupBootstrapPort, GroupBootstrapResult,
+    LegacyBootstrapStatus, MemberProtectionStatus as CoreMemberProtectionStatus,
+    MemberRepositoryPort, MembershipEventId, RemovalDecision,
+    SpaceProtectionMode as CoreSpaceProtectionMode, SpaceProtectionSnapshot,
     SpaceProtectionStatusPort,
 };
 use uc_core::ports::{ConnectionChannelPort, LocalIdentityPort, PresenceEvent, PresencePort};
@@ -59,7 +60,7 @@ pub struct MemberRosterFacade {
     group_bootstrap: Option<Arc<dyn GroupBootstrapPort>>,
     space_protection: Option<Arc<dyn SpaceProtectionStatusPort>>,
     workspace_convergence: Option<Arc<crate::space::convergence::WorkspaceConvergence>>,
-    removal_gate: Option<Arc<dyn RemovalTargetGatePort>>,
+    visibility_gate: Option<Arc<dyn DeviceVisibilityGatePort>>,
 }
 
 impl MemberRosterFacade {
@@ -72,7 +73,7 @@ impl MemberRosterFacade {
             group_bootstrap: None,
             space_protection: None,
             workspace_convergence: None,
-            removal_gate: None,
+            visibility_gate: None,
         }
     }
 
@@ -93,14 +94,14 @@ impl MemberRosterFacade {
         mut self,
         convergence: Arc<crate::space::convergence::assembly::SpaceConvergenceAssembly>,
     ) -> Self {
-        self.removal_gate = Some(convergence.removal_gate());
+        self.visibility_gate = Some(convergence.device_visibility_gate());
         self.workspace_convergence = Some(Arc::clone(&convergence.workspace));
         self
     }
 
     #[cfg(test)]
-    fn with_removal_gate(mut self, removal_gate: Arc<dyn RemovalTargetGatePort>) -> Self {
-        self.removal_gate = Some(removal_gate);
+    fn with_visibility_gate(mut self, visibility_gate: Arc<dyn DeviceVisibilityGatePort>) -> Self {
+        self.visibility_gate = Some(visibility_gate);
         self
     }
 
@@ -186,8 +187,11 @@ impl MemberRosterFacade {
             if entry.is_local {
                 continue;
             }
-            if let Some(removal_gate) = &self.removal_gate {
-                if removal_gate.is_locally_removed(&entry.device_id).await {
+            if let Some(visibility_gate) = &self.visibility_gate {
+                if visibility_gate
+                    .is_hidden_from_device_lists(&entry.device_id)
+                    .await
+                {
                     continue;
                 }
             }
@@ -271,10 +275,26 @@ impl MemberRosterFacade {
         let convergence = self
             .workspace_convergence
             .as_ref()
-            .ok_or(RosterError::MemberRemovalUnavailable)?;
+            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
         let target = DeviceId::new(target);
         convergence
             .submit_removal(&target)
+            .await
+            .map_err(map_workspace_convergence_error)
+    }
+
+    /// 记录本机对已收到成员移除的唯一决定。
+    pub async fn decide_membership_removal(
+        &self,
+        removal_event_id: MembershipEventId,
+        decision: RemovalDecision,
+    ) -> Result<WorkspaceSnapshot, RosterError> {
+        let convergence = self
+            .workspace_convergence
+            .as_ref()
+            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
+        convergence
+            .decide_membership_removal(removal_event_id, decision)
             .await
             .map_err(map_workspace_convergence_error)
     }
@@ -284,7 +304,7 @@ impl MemberRosterFacade {
         let convergence = self
             .workspace_convergence
             .as_ref()
-            .ok_or(RosterError::MemberRemovalUnavailable)?;
+            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
         convergence
             .query()
             .await
@@ -516,8 +536,8 @@ mod tests {
     struct RemovedTarget(DeviceId);
 
     #[async_trait]
-    impl RemovalTargetGatePort for RemovedTarget {
-        async fn is_locally_removed(&self, device_id: &DeviceId) -> bool {
+    impl DeviceVisibilityGatePort for RemovedTarget {
+        async fn is_hidden_from_device_lists(&self, device_id: &DeviceId) -> bool {
             *device_id == self.0
         }
     }
@@ -549,7 +569,7 @@ mod tests {
             presence: Arc::new(StaticPresence),
             connection_channel: None,
         })
-        .with_removal_gate(Arc::new(RemovedTarget(DeviceId::new("bob"))));
+        .with_visibility_gate(Arc::new(RemovedTarget(DeviceId::new("bob"))));
 
         let snapshots = roster.list_peer_snapshots().await.unwrap();
         assert_eq!(

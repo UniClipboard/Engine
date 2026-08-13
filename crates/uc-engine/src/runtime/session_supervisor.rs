@@ -197,7 +197,15 @@ impl SessionOperationGate {
         let drained = tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()).await;
         if drained.is_err() {
             cancellation.cancel();
-            self.wait_for_drain().await;
+            if tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain())
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    error_kind = "session_operation_drain_timeout",
+                    "session operation did not stop after cancellation"
+                );
+            }
         }
     }
 
@@ -260,5 +268,19 @@ mod tests {
             Ok(()) => {}
             Err(error) => panic!("operation gate close task did not complete: {error}"),
         }
+    }
+
+    // 流程：会话关闭后仍有操作忽略取消信号；等待两段固定期限后关闭必须继续完成。
+    #[tokio::test(start_paused = true)]
+    async fn closed_gate_stops_waiting_when_an_operation_ignores_cancellation() {
+        let gate = Arc::new(SessionOperationGate::new_open());
+        let _lease = gate.acquire().expect("new gate accepts an operation");
+
+        tokio::time::timeout(
+            SESSION_OPERATION_GRACE.saturating_mul(2) + Duration::from_millis(1),
+            gate.close_and_wait(),
+        )
+        .await
+        .expect("gate close must remain bounded after cancellation");
     }
 }

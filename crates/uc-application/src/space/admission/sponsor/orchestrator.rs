@@ -36,7 +36,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 use uc_observability_contract::FlowId;
 
-use uc_core::membership::RemovalAdmissionDecision;
+use uc_core::membership::MembershipAdmissionDecision;
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::pairing::session_message::{
     JoinerReady, JoinerRequest, PairingRejectReason, PairingSessionMessage,
@@ -51,6 +51,7 @@ use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::admission::invitation::holder::{
     InMemoryPairingInvitationHolder, TakeMatchingError,
 };
+use crate::space::convergence::WorkspaceConvergenceError;
 
 use super::sponsor_handshake::{JoinerFacts, SponsorHandshakeCoordinator, Verdict};
 
@@ -301,9 +302,9 @@ impl PairingInboundOrchestrator {
                 let generation = invitation.admission_generation();
                 if self
                     .workspace_convergence
-                    .admission_decision(generation)
+                    .admission_decision_for_joiner(generation, &request.device_id)
                     .await
-                    != RemovalAdmissionDecision::Allowed
+                    != MembershipAdmissionDecision::Allowed
                 {
                     // An old or currently blocked invitation must not disclose the
                     // space's current removal state before constructing an admission offer.
@@ -434,27 +435,34 @@ impl PairingInboundOrchestrator {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(session)
             .unwrap_or(0);
-        if let Err(error) = self
+        let admission_snapshot = match self
             .workspace_convergence
             .begin_admission(session, &facts.device_id, generation)
             .await
         {
-            warn!(
-                session = %session,
-                error = %error,
-                "begin_admission failed; rejecting with Internal"
-            );
-            self.handshake
-                .reject(
-                    session,
-                    PairingRejectReason::Internal(format!("begin_admission: {error}")),
-                )
-                .await;
-            self.emit_failure(session, PairingFailureReason::Internal);
-            return;
-        }
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                warn!(
+                    session = %session,
+                    error = %error,
+                    "begin_admission failed; rejecting with Internal"
+                );
+                self.handshake
+                    .reject(
+                        session,
+                        PairingRejectReason::Internal(format!("begin_admission: {error}")),
+                    )
+                    .await;
+                self.emit_failure(session, PairingFailureReason::Internal);
+                return;
+            }
+        };
 
-        let security_update_payload = match self.handshake.confirm(session).await {
+        let security_update_payload = match self
+            .handshake
+            .confirm(session, admission_snapshot.history_event_count as u64)
+            .await
+        {
             Ok(payload) => payload,
             Err(err) => {
                 warn!(
@@ -547,6 +555,13 @@ impl PairingInboundOrchestrator {
             .await
         {
             Ok(committed) => committed,
+            Err(WorkspaceConvergenceError::AdmissionGenerationAdvanced) => {
+                self.handshake
+                    .reject(session, PairingRejectReason::AdmissionUnavailable)
+                    .await;
+                self.emit_failure(session, PairingFailureReason::Internal);
+                return;
+            }
             Err(error) => {
                 warn!(
                     session = %session,
@@ -567,7 +582,7 @@ impl PairingInboundOrchestrator {
             .handshake
             .send_committed(
                 session,
-                uc_core::pairing::SponsorAdmissionCommitted { facts: committed },
+                uc_core::pairing::SponsorAdmissionSaved { facts: committed },
             )
             .await
         {
@@ -629,7 +644,7 @@ fn variant_name(message: &PairingSessionMessage) -> &'static str {
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
         PairingSessionMessage::Confirm(_) => "Confirm",
         PairingSessionMessage::Ready(_) => "Ready",
-        PairingSessionMessage::AdmissionCommitted(_) => "AdmissionCommitted",
+        PairingSessionMessage::AdmissionSaved(_) => "AdmissionSaved",
         PairingSessionMessage::Reject(_) => "Reject",
     }
 }
@@ -642,7 +657,7 @@ mod tests {
     //!
     //! match → consume → handshake.begin → verify → owner.begin_admission
     //! → confirm → Ready → owner.commit_joiner_admission →
-    //! AdmissionCommitted → close.
+    //! AdmissionSaved → close.
     //!
     //! The handshake wire adapter is covered in `sponsor_handshake::tests`;
     //! the owner's own save boundaries in
@@ -658,8 +673,9 @@ mod tests {
 
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
     use uc_core::membership::{
-        AdmissionChangeFacts, AdmissionCommittedFacts, MemberInstanceId, MemberRepositoryPort,
-        MembershipError, RemovalAdmissionDecision, SpaceMember, WorkspacePhase, WorkspaceSnapshot,
+        AdmissionChangeFacts, AdmissionSavedFacts, MemberInstanceId, MemberRepositoryPort,
+        MembershipAdmissionDecision, MembershipError, SpaceMember, WorkspacePhase,
+        WorkspaceSnapshot,
     };
     use uc_core::pairing::invitation::{InvitationCode, PairingInvitation};
     use uc_core::pairing::session_message::{
@@ -718,7 +734,7 @@ mod tests {
     /// in order and lets tests script the admission decision and failures.
     struct RecordingOwner {
         calls: StdMutex<Vec<&'static str>>,
-        decision: RemovalAdmissionDecision,
+        decision: MembershipAdmissionDecision,
         fail_begin: bool,
         fail_commit: bool,
     }
@@ -726,12 +742,12 @@ mod tests {
         fn allowed() -> Self {
             Self {
                 calls: StdMutex::new(Vec::new()),
-                decision: RemovalAdmissionDecision::Allowed,
+                decision: MembershipAdmissionDecision::Allowed,
                 fail_begin: false,
                 fail_commit: false,
             }
         }
-        fn with_decision(decision: RemovalAdmissionDecision) -> Self {
+        fn with_decision(decision: MembershipAdmissionDecision) -> Self {
             Self {
                 decision,
                 ..Self::allowed()
@@ -755,7 +771,11 @@ mod tests {
     }
     #[async_trait]
     impl WorkspaceAdmissionOwnerPort for RecordingOwner {
-        async fn admission_decision(&self, _: u64) -> RemovalAdmissionDecision {
+        async fn admission_decision_for_joiner(
+            &self,
+            _: u64,
+            _: &DeviceId,
+        ) -> MembershipAdmissionDecision {
             self.calls.lock().unwrap().push("admission_decision");
             self.decision
         }
@@ -783,16 +803,16 @@ mod tests {
             session: &PairingSessionId,
             joiner: AdmissionChangeFacts,
             _security_update_payload: Vec<u8>,
-        ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
+        ) -> Result<AdmissionSavedFacts, WorkspaceConvergenceError> {
             self.calls.lock().unwrap().push("commit_joiner_admission");
             assert_eq!(session.as_str(), "session-1");
             assert_eq!(joiner.device_id.as_str(), "joiner-device");
             if self.fail_commit {
                 return Err(WorkspaceConvergenceError::Unavailable);
             }
-            Ok(AdmissionCommittedFacts {
-                change_digest: [0x11; 32],
-                change_count: 2,
+            Ok(AdmissionSavedFacts {
+                history_digest: [0x11; 32],
+                history_event_count: 2,
                 sponsor_facts: joiner_facts(),
             })
         }
@@ -815,9 +835,9 @@ mod tests {
         ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
             unimplemented!("joiner-side method not exercised in sponsor tests")
         }
-        async fn record_admission_committed(
+        async fn record_admission_saved(
             &self,
-            _: AdmissionCommittedFacts,
+            _: AdmissionSavedFacts,
         ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
             unimplemented!("joiner-side method not exercised in sponsor tests")
         }
@@ -827,12 +847,12 @@ mod tests {
         WorkspaceSnapshot {
             phase: WorkspacePhase::LocallyApplied,
             revision: 1,
-            change_count: 0,
-            removal_intent_count: 0,
+            history_event_count: 0,
             effective_member_count: 1,
-            confirmed_member_count: 0,
-            waiting_member_device_ids: Vec::new(),
-            waiting_member_count: 0,
+            pending_removal_decision_device_ids: Vec::new(),
+            pending_removal_decision_event_id: None,
+            diverged_peer_device_ids: Vec::new(),
+            upgrade_required_peer_device_ids: Vec::new(),
             convergence_digest: None,
             removed: false,
             updated_at_ms: fixed_now_ms(),
@@ -1230,13 +1250,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             kinds,
-            vec!["AdmissionOffer", "Confirm", "AdmissionCommitted"],
+            vec!["AdmissionOffer", "Confirm", "AdmissionSaved"],
             "wire sequence: offer → confirm → admission-saved confirmation"
         );
         assert!(
             matches!(
                 sent.last().map(|(_, m)| m),
-                Some(PairingSessionMessage::AdmissionCommitted(_))
+                Some(PairingSessionMessage::AdmissionSaved(_))
             ),
             "last wire frame must be the admission-saved confirmation"
         );
@@ -1257,7 +1277,7 @@ mod tests {
     async fn owner_rejects_admission_with_reject_and_no_save() {
         let mut bundle = Bundle::happy();
         bundle.owner = Arc::new(RecordingOwner::with_decision(
-            RemovalAdmissionDecision::SupersededInvitation,
+            MembershipAdmissionDecision::SupersededInvitation,
         ));
         bundle.holder.insert(pending("CODE-1")).await;
         let (orch, session_port, owner) = bundle.build();
@@ -1348,7 +1368,7 @@ mod tests {
         assert!(
             !sent
                 .iter()
-                .any(|(_, m)| matches!(m, PairingSessionMessage::AdmissionCommitted(_))),
+                .any(|(_, m)| matches!(m, PairingSessionMessage::AdmissionSaved(_))),
             "no admission-saved confirmation after a failed commit"
         );
         assert!(
@@ -1396,7 +1416,7 @@ mod tests {
             !session_port
                 .sent()
                 .iter()
-                .any(|(_, m)| matches!(m, PairingSessionMessage::AdmissionCommitted(_))),
+                .any(|(_, m)| matches!(m, PairingSessionMessage::AdmissionSaved(_))),
             "no confirmation on a readiness mismatch"
         );
     }

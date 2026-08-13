@@ -77,7 +77,7 @@ impl MembershipConvergence {
         MembershipEventBatch {
             space_id: announcement.space_id.clone(),
             batch_id: announcement.content_digest,
-            events: vec![MembershipEvent::Announcement(announcement.clone())],
+            events: vec![MembershipGossipEvent::Announcement(announcement.clone())],
         }
         .validate_transfer_bounds()
         .map_err(|error| MembershipConvergenceError::Relationship(error.to_string()))?;
@@ -426,7 +426,7 @@ impl MembershipConvergence {
                 .await
                 .map_err(|_| MembershipGossipEndpointError::Persistence)?
             {
-                events.push(MembershipEvent::Announcement(announcement));
+                events.push(MembershipGossipEvent::Announcement(announcement));
             }
         }
         if let Some(epoch) = request.security_updates_after_epoch {
@@ -452,7 +452,11 @@ impl MembershipConvergence {
                 .collect::<Vec<_>>();
             updates.sort_by_key(|update| update.previous_epoch);
             updates.dedup_by_key(|update| update.digest);
-            events.extend(updates.into_iter().map(MembershipEvent::SecurityUpdate));
+            events.extend(
+                updates
+                    .into_iter()
+                    .map(MembershipGossipEvent::SecurityUpdate),
+            );
         }
         let batch_input = serde_json::to_vec(&(&request.space_id, &events))
             .map_err(|_| MembershipGossipEndpointError::Persistence)?;
@@ -704,7 +708,7 @@ impl MembershipConvergence {
         }
         let mut applied = 0usize;
         for event in &batch.events {
-            if let MembershipEvent::SecurityUpdate(update) = event {
+            if let MembershipGossipEvent::SecurityUpdate(update) = event {
                 self.apply_relayed_security_updates(&batch.space_id, std::slice::from_ref(update))
                     .await?;
                 applied = applied.saturating_add(1);
@@ -738,7 +742,7 @@ impl MembershipGossipEndpointPort for MembershipConvergence {
                 }
                 for event in &batch.events {
                     match event {
-                        MembershipEvent::SponsorSeed(seed)
+                        MembershipGossipEvent::SponsorSeed(seed)
                             if &seed.source_device_id == source_device_id
                                 && seed.space_id == batch.space_id =>
                         {
@@ -752,7 +756,7 @@ impl MembershipGossipEndpointPort for MembershipConvergence {
                                     _ => MembershipGossipEndpointError::Persistence,
                                 })?;
                         }
-                        MembershipEvent::SecurityUpdate(update) => {
+                        MembershipGossipEvent::SecurityUpdate(update) => {
                             let applied = self
                                 .apply_relayed_security_updates(
                                     &batch.space_id,
@@ -781,7 +785,7 @@ impl MembershipGossipEndpointPort for MembershipConvergence {
                                 );
                             }
                         }
-                        MembershipEvent::Announcement(announcement) => {
+                        MembershipGossipEvent::Announcement(announcement) => {
                             self.accept_verified_announcement(announcement.clone())
                                 .await
                                 .map_err(|error| match error {
@@ -792,7 +796,7 @@ impl MembershipGossipEndpointPort for MembershipConvergence {
                                     _ => MembershipGossipEndpointError::Persistence,
                                 })?;
                         }
-                        MembershipEvent::SponsorSeed(_) => {
+                        MembershipGossipEvent::SponsorSeed(_) => {
                             return Err(MembershipGossipEndpointError::Rejected);
                         }
                     }

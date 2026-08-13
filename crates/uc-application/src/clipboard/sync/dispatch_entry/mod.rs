@@ -103,7 +103,7 @@ use uc_core::clipboard::{
     ClipboardContentCategory, ClipboardContentCategorySet, EntryDeliveryRecord,
 };
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::RemovalTargetGatePort;
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClockPort, ConnectionChannel,
@@ -328,7 +328,7 @@ pub(crate) struct AllowAllRemovalTargets;
 
 #[cfg(test)]
 #[async_trait::async_trait]
-impl RemovalTargetGatePort for AllowAllRemovalTargets {
+impl ContentExchangeGatePort for AllowAllRemovalTargets {
     async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
         false
     }
@@ -388,7 +388,7 @@ impl DispatchClipboardEntryUseCase {
         first_sync_state: Arc<dyn FirstSyncStatePort>,
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
-        removal_gate: Arc<dyn RemovalTargetGatePort>,
+        removal_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {

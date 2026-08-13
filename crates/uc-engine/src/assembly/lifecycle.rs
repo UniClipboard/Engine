@@ -48,6 +48,7 @@ pub async fn build_daemon_lifecycle(
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
+    iroh_bind_port_override: Option<u16>,
 ) -> anyhow::Result<DaemonLifecycle> {
     // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
     // member_repo 已不再持有的孤儿条目清掉,恢复设计意图的不变量
@@ -117,6 +118,9 @@ pub async fn build_daemon_lifecycle(
     // #900：从 env 读取直连可达性（固定 UDP 端口 + 广播公网地址）并写入。
     // 必须在 `build_sync_engine_assembly`（首次 endpoint 快照/配对交换）之前。
     crate::assembly::network::apply_iroh_direct_reachability_from_env(&mut iroh_config);
+    if let Some(port) = iroh_bind_port_override {
+        iroh_config.bind_port = Some(port);
+    }
     crate::assembly::network::apply_congestion_controller_from_env(&mut iroh_config);
 
     tracing::info!(

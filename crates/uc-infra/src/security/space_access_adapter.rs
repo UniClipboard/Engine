@@ -2622,6 +2622,15 @@ impl CurrentMemberSignaturePort for DefaultSpaceAccessAdapter {
         MlsGroupEngine::current_epoch(&group).map_err(|_| CurrentMemberSignatureError::InvalidState)
     }
 
+    async fn current_member_instance(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::current_member_instance(&group, device_id.as_str().as_bytes())
+            .map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+
     async fn sign_current_member_payload(
         &self,
         payload: &[u8],
@@ -2641,6 +2650,24 @@ impl CurrentMemberSignaturePort for DefaultSpaceAccessAdapter {
         MlsGroupEngine::verify_member_payload(
             &group,
             member.as_str().as_bytes(),
+            payload,
+            signature,
+        )
+        .map_err(|_| CurrentMemberSignatureError::InvalidState)
+    }
+
+    async fn verify_member_instance_payload(
+        &self,
+        member: &DeviceId,
+        member_instance: uc_core::membership::MemberInstanceId,
+        payload: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        MlsGroupEngine::verify_member_instance_payload(
+            &group,
+            member.as_str().as_bytes(),
+            member_instance,
             payload,
             signature,
         )

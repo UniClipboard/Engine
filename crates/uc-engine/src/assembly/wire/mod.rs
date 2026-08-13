@@ -161,7 +161,7 @@ pub struct CoreWiringInputs {
     pub profile_id: ProfileId,
     pub app_version: String,
     pub config_source_mode: uc_core::ports::ConfigSourceMode,
-    pub legacy_iroh_identity_dir: PathBuf,
+    pub iroh_identity_dir: PathBuf,
     pub iroh_blob_store_dir: PathBuf,
     pub system_clipboard: SystemClipboardLayer,
     pub analytics_sink: Arc<dyn AnalyticsPort>,
@@ -209,7 +209,7 @@ pub fn wire_dependencies_from_inputs(
         profile_id,
         app_version,
         config_source_mode,
-        legacy_iroh_identity_dir,
+        iroh_identity_dir,
         iroh_blob_store_dir,
         system_clipboard,
         analytics_sink,
@@ -490,9 +490,11 @@ pub fn wire_dependencies_from_inputs(
         clipboard_change_origin,
     } = build_blob_processing_assembly(&storage_config, spool_dir.clone())?;
 
-    // The host resolves these directories once. The identity directory
-    // is only a migration source for old backups; active identity storage uses
-    // the secure-storage wrapper created above.
+    // The network identity remains in its dedicated file storage so upgrades
+    // preserve the endpoint identity paired by earlier releases.
+    let iroh_identity_storage: Arc<dyn SecureStoragePort> = Arc::new(
+        uc_infra::FileSecureStorage::with_base_dir(iroh_identity_dir.clone()),
+    );
     // The remaining bypass repos are `Arc::clone`d directly from `infra` at the
     // `WiredDependencies` construction site below (infra retains ownership).
     let iroh_blob_store_dir_for_wiring = iroh_blob_store_dir;
@@ -511,6 +513,7 @@ pub fn wire_dependencies_from_inputs(
     // travels on `AppDeps.config_migration`.
     let config_migration = build_config_migration_facade(
         &platform.secure_storage,
+        &iroh_identity_storage,
         db_pool_for_config_migration,
         &infra.clock,
         &infra.setup_status,
@@ -522,7 +525,7 @@ pub fn wire_dependencies_from_inputs(
             vault_dir: vault_path.clone(),
             settings_path: settings_path.clone(),
             app_data_root: app_data_root.clone(),
-            iroh_identity_dir: legacy_iroh_identity_dir,
+            iroh_identity_dir,
         },
     );
 
@@ -633,6 +636,7 @@ pub fn wire_dependencies_from_inputs(
     let wired = WiredDependencies {
         deps,
         sync_engine: SyncEngineDeps {
+            iroh_identity_storage,
             legacy_protection,
             peer_admission,
             peer_addr_repo: Arc::clone(&peer_addr_repo),

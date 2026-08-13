@@ -19,7 +19,7 @@ use async_trait::async_trait;
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionChangeFacts, AdmissionCommittedFacts, MemberInstanceId, RemovalAdmissionDecision,
+    AdmissionChangeFacts, AdmissionSavedFacts, MemberInstanceId, MembershipAdmissionDecision,
     WorkspaceSnapshot,
 };
 use uc_core::ports::pairing::PairingSessionId;
@@ -31,9 +31,13 @@ use crate::space::convergence::{WorkspaceConvergence, WorkspaceConvergenceError}
 /// this module.
 #[async_trait]
 pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
-    /// Whether the workspace currently allows an admission bound to the
-    /// given invitation generation.
-    async fn admission_decision(&self, invitation_generation: u64) -> RemovalAdmissionDecision;
+    /// Whether the workspace currently allows this device to join through
+    /// an invitation bound to the given generation.
+    async fn admission_decision_for_joiner(
+        &self,
+        invitation_generation: u64,
+        joiner_device_id: &DeviceId,
+    ) -> MembershipAdmissionDecision;
 
     /// Pull the local chain head up to the newest known member before an
     /// admission is committed. Best effort and bounded; the admission may
@@ -67,7 +71,7 @@ pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
         session: &PairingSessionId,
         joiner: AdmissionChangeFacts,
         security_update_payload: Vec<u8>,
-    ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError>;
+    ) -> Result<AdmissionSavedFacts, WorkspaceConvergenceError>;
 
     /// Locally signed facts the joiner returns after its group session is
     /// active. `member_instance` overrides the security-view resolution:
@@ -85,20 +89,25 @@ pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
         own_instance: MemberInstanceId,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError>;
 
-    /// Record the sponsor's "admission change saved" confirmation once the
-    /// joiner received it.
-    async fn record_admission_committed(
+    /// Save the sponsor's member facts once the joiner received its saved
+    /// member-history reply.
+    async fn record_admission_saved(
         &self,
-        confirmation: AdmissionCommittedFacts,
+        confirmation: AdmissionSavedFacts,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError>;
 }
 
 #[async_trait]
 impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
-    async fn admission_decision(&self, invitation_generation: u64) -> RemovalAdmissionDecision {
-        uc_core::membership::RemovalAdmissionGatePort::admission_decision(
+    async fn admission_decision_for_joiner(
+        &self,
+        invitation_generation: u64,
+        joiner_device_id: &DeviceId,
+    ) -> MembershipAdmissionDecision {
+        WorkspaceConvergence::admission_decision_for_joiner(
             self,
             invitation_generation,
+            joiner_device_id,
         )
         .await
     }
@@ -135,7 +144,7 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         session: &PairingSessionId,
         joiner: AdmissionChangeFacts,
         security_update_payload: Vec<u8>,
-    ) -> Result<AdmissionCommittedFacts, WorkspaceConvergenceError> {
+    ) -> Result<AdmissionSavedFacts, WorkspaceConvergenceError> {
         WorkspaceConvergence::commit_joiner_admission(
             self,
             session,
@@ -159,10 +168,10 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         WorkspaceConvergence::record_local_readiness(self, own_instance).await
     }
 
-    async fn record_admission_committed(
+    async fn record_admission_saved(
         &self,
-        confirmation: AdmissionCommittedFacts,
+        confirmation: AdmissionSavedFacts,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        WorkspaceConvergence::record_admission_committed(self, confirmation).await
+        WorkspaceConvergence::record_admission_saved(self, confirmation).await
     }
 }

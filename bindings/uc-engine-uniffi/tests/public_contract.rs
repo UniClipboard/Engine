@@ -558,7 +558,6 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     let convergence = engine
         .query_workspace_convergence()
         .expect("binding must query the current workspace convergence");
-    assert_eq!(convergence.removal_intent_count, 0);
     assert_eq!(convergence.effective_member_count, 0);
 
     engine
@@ -653,10 +652,8 @@ fn mobile_binding_exposes_membership_convergence() {
         status.phase,
         uc_engine_uniffi::WorkspaceConvergencePhase::LocallyApplied
     );
-    assert_eq!(status.change_count, 0);
+    assert_eq!(status.history_event_count, 0);
     assert_eq!(status.effective_member_count, 0);
-    assert_eq!(status.confirmed_member_count, 0);
-    assert_eq!(status.waiting_member_count, 0);
     engine
         .shutdown(5_000)
         .expect("binding engine must shut down within the deadline");

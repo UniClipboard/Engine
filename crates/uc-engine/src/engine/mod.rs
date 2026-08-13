@@ -117,7 +117,7 @@ impl Engine {
         let should_emit_terminal = self.operations.finish(&registered.id).await;
         if should_emit_terminal {
             self.events.send(EngineEvent::OperationFinished {
-                operation_id: registered.id,
+                operation_id: registered.id.clone(),
                 terminal: terminal_for_result(&result),
             });
         }
@@ -146,7 +146,7 @@ impl Engine {
         let should_emit_terminal = self.operations.finish(&registered.id).await;
         if should_emit_terminal {
             self.events.send(EngineEvent::OperationFinished {
-                operation_id: registered.id,
+                operation_id: registered.id.clone(),
                 terminal: terminal_for_result(&result),
             });
         }
@@ -447,6 +447,45 @@ mod tests {
                 state: EngineState::Quiesced,
             })
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_does_not_wait_for_an_abandoned_operation_future() {
+        let runtime = Arc::new(FakeRuntime {
+            block_operations: AtomicBool::new(true),
+            ..FakeRuntime::default()
+        });
+        let (engine, _events) = Engine::from_runtime(runtime.clone(), 8);
+        let engine = Arc::new(engine);
+        let operation_started = runtime.operation_started.notified();
+        let execute_engine = Arc::clone(&engine);
+        let execute = tokio::spawn(async move {
+            execute_engine
+                .execute(Operation::SendText(SendTextInput {
+                    text: "private text".into(),
+                    target_devices: Vec::new(),
+                }))
+                .await
+        });
+        operation_started.await;
+
+        execute.abort();
+        execute.await.expect_err("operation task must be cancelled");
+
+        let shutdown_engine = Arc::clone(&engine);
+        let shutdown =
+            tokio::spawn(async move { shutdown_engine.shutdown(Duration::from_secs(60)).await });
+        tokio::task::yield_now().await;
+        if !shutdown.is_finished() {
+            shutdown.abort();
+            let _ = shutdown.await;
+            panic!("an abandoned operation future kept its in-flight registration");
+        }
+        shutdown
+            .await
+            .expect("shutdown task must finish")
+            .expect("an abandoned operation future must release its in-flight registration");
+        assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

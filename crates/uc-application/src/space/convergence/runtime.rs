@@ -1,13 +1,12 @@
 //! Event-driven runtime for the unified workspace convergence owner.
 //!
 //! The runtime advances immediately on new changes, handoff progress,
-//! confirmations, member-online events and session resumption; it never
-//! relies on fixed-interval polling for normal progress. A slow timer only
-//! covers offline recovery retries.
+//! member-online events and session resumption. Membership history is
+//! reconciled only after an authenticated peer becomes reachable; the
+//! superseded automatic-removal protocol is not a runtime fallback.
 
 use std::sync::Arc;
 use std::time::Duration;
-
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
@@ -16,9 +15,6 @@ use uc_core::ports::PresenceEvent;
 
 use super::WorkspaceConvergence;
 
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
-
-#[allow(dead_code)]
 enum WorkspaceConvergenceRuntimeCommand {
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
@@ -44,26 +40,10 @@ impl WorkspaceConvergence {
     ) -> WorkspaceConvergenceRuntime {
         let (commands, mut command_rx) = mpsc::unbounded_channel();
         let owner = Arc::clone(&self);
-        let wake = self.wake_handle();
         let task = tokio::spawn(async move {
             let mut paused = false;
             let mut presence_open = true;
-            let mut run_now = true;
             loop {
-                if run_now && !paused {
-                    run_now = false;
-                    if let Err(error) = owner.reconcile().await {
-                        warn!(
-                            error = %error,
-                            retryable = true,
-                            "workspace convergence reconcile deferred"
-                        );
-                    }
-                }
-                let timer = tokio::time::sleep(RECONCILE_INTERVAL);
-                tokio::pin!(timer);
-                let wake = wake.notified();
-                tokio::pin!(wake);
                 tokio::select! {
                     command = command_rx.recv() => match command {
                         Some(WorkspaceConvergenceRuntimeCommand::Pause(completed)) => {
@@ -72,8 +52,10 @@ impl WorkspaceConvergence {
                         }
                         Some(WorkspaceConvergenceRuntimeCommand::Resume(completed)) => {
                             paused = false;
-                            run_now = true;
                             let _ = completed.send(());
+                            if let Err(error) = owner.synchronize_chain().await {
+                                warn!(error = %error, "workspace convergence: resumed membership history exchange deferred");
+                            }
                         }
                         Some(WorkspaceConvergenceRuntimeCommand::Shutdown(completed)) => {
                             let _ = completed.send(());
@@ -81,37 +63,25 @@ impl WorkspaceConvergence {
                         }
                         None => break,
                     },
-                    _ = &mut wake, if !paused => {
-                        run_now = true;
-                    }
                     event = presence_events.recv(), if !paused && presence_open => match event {
                         Ok(event) if event.state == uc_core::ports::ReachabilityState::Online => {
                             debug!(device_id = %event.device_id.as_str(), "workspace convergence: member online");
-                            if let Err(error) = owner.mark_device_reachable(&event.device_id).await
+                            if let Err(error) = owner
+                                .reconcile_membership_history_with_peer(&event.device_id)
+                                .await
                             {
-                                warn!(error = %error, "workspace convergence: reachable marking failed");
+                                warn!(error = %error, "workspace convergence: membership history exchange deferred");
                             }
-                            run_now = true;
                         }
                         Ok(event) if event.state == uc_core::ports::ReachabilityState::Offline => {
                             debug!(device_id = %event.device_id.as_str(), "workspace convergence: member offline");
-                            if let Err(error) =
-                                owner.mark_device_unreachable(&event.device_id).await
-                            {
-                                warn!(error = %error, "workspace convergence: unreachable marking failed");
-                            }
                         }
                         Ok(_) => {}
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            run_now = true;
-                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => {
                             presence_open = false;
                         }
                     },
-                    _ = &mut timer, if !paused => {
-                        run_now = true;
-                    }
                 }
             }
         });
@@ -161,6 +131,28 @@ impl WorkspaceConvergenceRuntime {
                 }
             }
         }
+    }
+}
+
+impl WorkspaceConvergenceActivity {
+    pub(crate) async fn pause(&self) -> Result<(), String> {
+        let (completed, response) = oneshot::channel();
+        self.commands
+            .send(WorkspaceConvergenceRuntimeCommand::Pause(completed))
+            .map_err(|_| "workspace convergence runtime stopped".to_owned())?;
+        response
+            .await
+            .map_err(|_| "workspace convergence runtime stopped".to_owned())
+    }
+
+    pub(crate) async fn resume(&self) -> Result<(), String> {
+        let (completed, response) = oneshot::channel();
+        self.commands
+            .send(WorkspaceConvergenceRuntimeCommand::Resume(completed))
+            .map_err(|_| "workspace convergence runtime stopped".to_owned())?;
+        response
+            .await
+            .map_err(|_| "workspace convergence runtime stopped".to_owned())
     }
 }
 

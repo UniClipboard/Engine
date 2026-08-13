@@ -25,7 +25,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tracing::{debug, info, instrument, warn};
 
-use uc_core::membership::{RemovalAdmissionDecision, RemovalAdmissionGatePort};
+use uc_core::membership::{MembershipAdmissionDecision, MembershipAdmissionGatePort};
 use uc_core::pairing::invitation::PairingInvitation;
 use uc_core::ports::pairing_invitation::{
     CodeOrigin, InvitationError, IssuedInvitation, PairingInvitationAddressCandidate,
@@ -56,7 +56,7 @@ pub(crate) struct IssuePairingInvitationUseCase {
     /// "early dial failure" (NetworkNotStarted / ServiceUnavailable) leaves
     /// a started signal so PostHog can compute the "tried to invite" cohort.
     analytics: Arc<dyn AnalyticsFacade>,
-    removal_admission: Arc<dyn RemovalAdmissionGatePort>,
+    membership_admission: Arc<dyn MembershipAdmissionGatePort>,
 }
 
 impl IssuePairingInvitationUseCase {
@@ -68,7 +68,7 @@ impl IssuePairingInvitationUseCase {
         clock: Arc<dyn ClockPort>,
         holder: Arc<InMemoryPairingInvitationHolder>,
         analytics: Arc<dyn AnalyticsFacade>,
-        removal_admission: Arc<dyn RemovalAdmissionGatePort>,
+        membership_admission: Arc<dyn MembershipAdmissionGatePort>,
     ) -> Self {
         Self {
             pairing_invitation,
@@ -78,7 +78,7 @@ impl IssuePairingInvitationUseCase {
             clock,
             holder,
             analytics,
-            removal_admission,
+            membership_admission,
         }
     }
 
@@ -197,28 +197,29 @@ impl IssuePairingInvitationUseCase {
     }
 
     async fn current_admission_generation(&self) -> Result<u64, IssuePairingInvitationError> {
-        self.removal_admission
+        self.membership_admission
             .invitation_generation()
             .await
-            .map_err(map_removal_admission_decision)
+            .map_err(map_membership_admission_decision)
     }
 }
 
-fn map_removal_admission_decision(
-    decision: RemovalAdmissionDecision,
+fn map_membership_admission_decision(
+    decision: MembershipAdmissionDecision,
 ) -> IssuePairingInvitationError {
     match decision {
-        RemovalAdmissionDecision::Allowed => IssuePairingInvitationError::Internal(
-            "removal admission gate returned an incomplete allow result".into(),
+        MembershipAdmissionDecision::Allowed => IssuePairingInvitationError::Internal(
+            "membership admission gate returned an incomplete allow result".into(),
         ),
-        RemovalAdmissionDecision::AwaitingConvergence => {
-            IssuePairingInvitationError::MemberRemovalInProgress
+        MembershipAdmissionDecision::AwaitingConvergence => {
+            IssuePairingInvitationError::MembershipReconciliationInProgress
         }
-        RemovalAdmissionDecision::RecoveryRequired => {
-            IssuePairingInvitationError::MemberRemovalRecoveryRequired
+        MembershipAdmissionDecision::RecoveryRequired => {
+            IssuePairingInvitationError::MembershipReconciliationRequired
         }
-        RemovalAdmissionDecision::SupersededInvitation | RemovalAdmissionDecision::Unavailable => {
-            IssuePairingInvitationError::MemberRemovalUnavailable
+        MembershipAdmissionDecision::SupersededInvitation
+        | MembershipAdmissionDecision::Unavailable => {
+            IssuePairingInvitationError::MembershipReconciliationUnavailable
         }
     }
 }
@@ -244,23 +245,23 @@ mod tests {
     use chrono::Duration;
 
     use uc_core::ids::DeviceId;
-    use uc_core::membership::{RemovalAdmissionDecision, RemovalAdmissionGatePort};
+    use uc_core::membership::{MembershipAdmissionDecision, MembershipAdmissionGatePort};
     use uc_core::pairing::invitation::{InvitationCode, InvitationState};
 
-    struct FixedRemovalAdmissionGate(RemovalAdmissionDecision);
+    struct FixedMembershipAdmissionGate(MembershipAdmissionDecision);
 
     #[async_trait]
-    impl RemovalAdmissionGatePort for FixedRemovalAdmissionGate {
+    impl MembershipAdmissionGatePort for FixedMembershipAdmissionGate {
         async fn admission_decision(
             &self,
             _invitation_generation: u64,
-        ) -> RemovalAdmissionDecision {
+        ) -> MembershipAdmissionDecision {
             self.0
         }
 
-        async fn invitation_generation(&self) -> Result<u64, RemovalAdmissionDecision> {
+        async fn invitation_generation(&self) -> Result<u64, MembershipAdmissionDecision> {
             match self.0 {
-                RemovalAdmissionDecision::Allowed => Ok(0),
+                MembershipAdmissionDecision::Allowed => Ok(0),
                 decision => Err(decision),
             }
         }
@@ -490,7 +491,9 @@ mod tests {
             clock,
             holder.clone(),
             analytics_facade,
-            Arc::new(FixedRemovalAdmissionGate(RemovalAdmissionDecision::Allowed)),
+            Arc::new(FixedMembershipAdmissionGate(
+                MembershipAdmissionDecision::Allowed,
+            )),
         );
         Harness {
             uc,
@@ -550,14 +553,14 @@ mod tests {
             clock,
             holder.clone(),
             wrap_facade(analytics.clone()),
-            Arc::new(FixedRemovalAdmissionGate(
-                RemovalAdmissionDecision::AwaitingConvergence,
+            Arc::new(FixedMembershipAdmissionGate(
+                MembershipAdmissionDecision::AwaitingConvergence,
             )),
         );
 
         assert!(matches!(
             uc.execute().await,
-            Err(IssuePairingInvitationError::MemberRemovalInProgress)
+            Err(IssuePairingInvitationError::MembershipReconciliationInProgress)
         ));
         assert_eq!(port.calls(), 0);
         assert_eq!(holder.len().await, 0);

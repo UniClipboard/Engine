@@ -172,9 +172,20 @@ impl MembershipConvergenceRuntime {
             .send(MembershipConvergenceRuntimeCommand::Shutdown(completed))
             .is_ok()
         {
-            let _ = response.await;
+            if tokio::time::timeout(Duration::from_secs(2), response)
+                .await
+                .is_err()
+            {
+                warn!(
+                    error_kind = "membership_gossip_shutdown_timeout",
+                    "membership gossip runtime did not stop in time; aborting"
+                );
+            }
         }
         if let Some(task) = self.task.take() {
+            if !task.is_finished() {
+                task.abort();
+            }
             if let Err(error) = task.await {
                 if !error.is_cancelled() {
                     warn!(

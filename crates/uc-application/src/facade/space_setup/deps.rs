@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    MemberRepositoryPort, RelationshipStateResetPort, RemovalTargetGatePort,
+    DeviceVisibilityGatePort, MemberRepositoryPort, RelationshipStateResetPort,
     SpaceSecurityStateResetPort,
 };
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
@@ -45,7 +45,7 @@ pub struct SpaceAdmissionDeps {
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     pub presence: Arc<dyn PresencePort>,
     pub analytics: Arc<dyn AnalyticsFacade>,
-    pub removal_gate: Arc<dyn RemovalTargetGatePort>,
+    pub visibility_gate: Arc<dyn DeviceVisibilityGatePort>,
     /// The assembled space convergence owners behind the admission seam.
     /// Always present: the assembly layer guarantees the owner exists.
     pub convergence: Arc<SpaceConvergenceAssembly>,

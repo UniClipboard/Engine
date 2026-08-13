@@ -38,6 +38,7 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId, SpaceId};
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::clipboard::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientError, ActiveClipboardPullClientPort,
     ActiveClipboardReceiverPort, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
@@ -159,6 +160,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         load_register: Arc<dyn LoadActiveClipboardPort>,
         advance_register: Arc<dyn AdvanceActiveClipboardPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        content_gate: Arc<dyn ContentExchangeGatePort>,
         entry_lookup: Arc<dyn FindEntryIdBySnapshotHashPort>,
         reconstructor: SnapshotReconstructor,
         coordinator: Arc<ClipboardWriteCoordinator>,
@@ -174,14 +176,17 @@ impl ApplyInboundActiveClipboardStateUseCase {
             is_unlocked,
             load_register,
             advance_register,
-            receive_gate: MemberReceiveGate::new(Arc::clone(&member_repo)),
+            receive_gate: MemberReceiveGate::new(
+                Arc::clone(&member_repo),
+                Arc::clone(&content_gate),
+            ),
             entry_lookup,
             reconstructor,
             coordinator,
             dispatch,
             peer_addr_repo,
             presence,
-            send_gate: MemberSendGate::new(member_repo),
+            send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
             clock,
             mobile_consumability,
             pull_client: None,
@@ -730,6 +735,24 @@ mod tests {
         }
     }
 
+    struct AllowAllContent;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for AllowAllContent {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            false
+        }
+    }
+
+    struct BlockedContent;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for BlockedContent {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            true
+        }
+    }
+
     #[derive(Default)]
     struct EmptyPeerAddrRepo;
     #[async_trait]
@@ -871,6 +894,22 @@ mod tests {
         receive_enabled: bool,
         now_ms: i64,
     ) -> Harness {
+        harness_with_content_gate(
+            unlocked,
+            register,
+            receive_enabled,
+            now_ms,
+            Arc::new(AllowAllContent),
+        )
+    }
+
+    fn harness_with_content_gate(
+        unlocked: bool,
+        register: Option<ActiveClipboardState>,
+        receive_enabled: bool,
+        now_ms: i64,
+        content_gate: Arc<dyn ContentExchangeGatePort>,
+    ) -> Harness {
         let advance = Arc::new(AdvanceSpy::default());
         let dispatch = Arc::new(DispatchSpy::default());
         let reconstructor = SnapshotReconstructor::new(
@@ -892,6 +931,7 @@ mod tests {
             Arc::new(FixedRegister(register)),
             Arc::clone(&advance) as Arc<dyn AdvanceActiveClipboardPort>,
             Arc::new(MemberRepoStub { receive_enabled }),
+            content_gate,
             Arc::new(EntryLookupNeverCalled),
             reconstructor,
             coordinator,
@@ -979,6 +1019,14 @@ mod tests {
         // gate stops it. Entry lookup / reconstruct / OS write would panic if
         // reached.
         let h = harness(true, None, false, 1_000);
+        h.uc.handle_one(inbound("blake3v1:aa", 1_000, "dev-x"))
+            .await;
+        assert_inert(&h);
+    }
+
+    #[tokio::test]
+    async fn upgrade_required_peer_is_dropped_before_current_clipboard_is_read() {
+        let h = harness_with_content_gate(true, None, true, 1_000, Arc::new(BlockedContent));
         h.uc.handle_one(inbound("blake3v1:aa", 1_000, "dev-x"))
             .await;
         assert_inert(&h);
@@ -1261,6 +1309,7 @@ mod tests {
             Arc::new(MemberRepoStub {
                 receive_enabled: true,
             }),
+            Arc::new(AllowAllContent),
             Arc::new(EntryLookupAlwaysMissing),
             reconstructor,
             coordinator,

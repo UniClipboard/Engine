@@ -59,7 +59,7 @@ use crate::space::lifecycle::switch_space::{JoinerHandshakeRunner, SwitchSpaceUs
 use crate::space::lifecycle::unlock_space::UnlockSpaceUseCase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    RelationshipStateResetPort, RemovalAdmissionGatePort, RemovalTargetGatePort,
+    DeviceVisibilityGatePort, MembershipAdmissionGatePort, RelationshipStateResetPort,
 };
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::setup::MigrationStatePort;
@@ -118,7 +118,7 @@ pub struct SpaceFacade {
     migration_state: Arc<dyn MigrationStatePort>,
     blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
-    removal_gate: Arc<dyn RemovalTargetGatePort>,
+    visibility_gate: Arc<dyn DeviceVisibilityGatePort>,
     /// Held for the desktop keepalive scheduler — `list_paired_peer_device_ids`
     /// reads `peer_addr_repo.list()` and `ensure_reachable_one` forwards to
     /// `presence.ensure_reachable`. Both are thin wrappers driven by the
@@ -170,7 +170,7 @@ impl SpaceFacade {
             peer_addr_repo,
             presence,
             analytics,
-            removal_gate,
+            visibility_gate,
             convergence,
             ..
         } = admission;
@@ -231,7 +231,7 @@ impl SpaceFacade {
             Arc::clone(&clock),
             Arc::clone(&invitation_holder),
             Arc::clone(&analytics),
-            Arc::clone(&workspace_convergence) as Arc<dyn RemovalAdmissionGatePort>,
+            Arc::clone(&workspace_convergence) as Arc<dyn MembershipAdmissionGatePort>,
         ));
         // T8 · F1 hook: construct ensure_reachable_all early so peer_addr_repo /
         // device_identity can still be Arc::clone'd here — both are moved into
@@ -246,7 +246,7 @@ impl SpaceFacade {
             Arc::clone(&peer_addr_repo),
             presence,
             Arc::clone(&device_identity),
-            Arc::clone(&removal_gate),
+            Arc::clone(&visibility_gate),
         ));
         // Build the sponsor-side pairing stack: the handshake
         // coordinator owns wire I/O for the AdmissionOffer→Confirm flow;
@@ -345,7 +345,7 @@ impl SpaceFacade {
             migration_state: migration_state_for_facade,
             blob_migration_repo: blob_migration_repo_for_facade,
             member_repo: member_repo_for_facade,
-            removal_gate,
+            visibility_gate,
             peer_addr_repo: peer_addr_repo_for_facade,
             presence: presence_for_facade,
             local_device_id: local_device_id_for_facade,
@@ -751,8 +751,8 @@ impl SpaceFacade {
         for record in records {
             if record.device_id == self.local_device_id
                 || self
-                    .removal_gate
-                    .is_locally_removed(&record.device_id)
+                    .visibility_gate
+                    .is_hidden_from_device_lists(&record.device_id)
                     .await
             {
                 continue;
@@ -852,9 +852,9 @@ mod tests {
         GroupUpdateDispatchPort, KeyEpochError, LegacyProtectionCommand, LegacyProtectionPort,
         LegacyProtectionResult, LegacyProtectionSnapshot, LegacyRequestInspection,
         LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort, LegacyUpgradeError,
-        LegacyUpgradeRequest, LegacyUpgradeResponse, MembershipError, PendingGroupUpdate,
-        RelationshipStateResetError, RelationshipStateResetPort, RemovalAdmissionDecision,
-        RemovalAdmissionGatePort, RemovalTargetGatePort, RevocationId, SpaceMember,
+        LegacyUpgradeRequest, LegacyUpgradeResponse, MembershipAdmissionDecision,
+        MembershipAdmissionGatePort, MembershipError, PendingGroupUpdate,
+        RelationshipStateResetError, RelationshipStateResetPort, RevocationId, SpaceMember,
         SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
     };
     use uc_core::pairing::invitation::InvitationCode;
@@ -891,25 +891,25 @@ mod tests {
         SpaceAccessProofArtifact,
     };
 
-    struct AllowRemovalAdmission;
+    struct AllowMembershipAdmission;
 
     #[async_trait]
-    impl RemovalTargetGatePort for AllowRemovalAdmission {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+    impl DeviceVisibilityGatePort for AllowMembershipAdmission {
+        async fn is_hidden_from_device_lists(&self, _device_id: &DeviceId) -> bool {
             false
         }
     }
 
     #[async_trait]
-    impl RemovalAdmissionGatePort for AllowRemovalAdmission {
+    impl MembershipAdmissionGatePort for AllowMembershipAdmission {
         async fn admission_decision(
             &self,
             _invitation_generation: u64,
-        ) -> RemovalAdmissionDecision {
-            RemovalAdmissionDecision::Allowed
+        ) -> MembershipAdmissionDecision {
+            MembershipAdmissionDecision::Allowed
         }
 
-        async fn invitation_generation(&self) -> Result<u64, RemovalAdmissionDecision> {
+        async fn invitation_generation(&self) -> Result<u64, MembershipAdmissionDecision> {
             Ok(0)
         }
     }
@@ -1881,7 +1881,7 @@ mod tests {
                     as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
                 presence: Arc::new(FakePresence),
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
-                removal_gate: Arc::new(AllowRemovalAdmission),
+                visibility_gate: Arc::new(AllowMembershipAdmission),
                 convergence: Arc::new(SpaceConvergenceAssembly::new(
                     crate::space::convergence::assembly::SpaceConvergenceDeps {
                         workspace: crate::space::convergence::tests::test_deps(

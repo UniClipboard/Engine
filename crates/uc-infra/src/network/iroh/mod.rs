@@ -17,15 +17,14 @@ pub mod group_update_adapter;
 pub mod identity_store;
 pub mod legacy_upgrade_adapter;
 pub mod membership_attestation_adapter;
+pub mod membership_history_exchange_adapter;
 mod net_recovery;
 pub mod node;
 pub mod persistable_addr;
 pub mod presence_adapter;
 pub mod relay_probe;
-pub mod removal_exchange_adapter;
 pub(crate) mod runtime_consts;
 pub mod transfer_progress_adapter;
-pub mod workspace_recovery_adapter;
 
 #[cfg(test)]
 pub(crate) struct StaticPeerAdmission(pub(crate) bool);
@@ -59,6 +58,10 @@ pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
 pub use legacy_upgrade_adapter::{
     IrohLegacyUpgradeAdapter, IrohLegacyUpgradeHandler, LEGACY_UPGRADE_ALPN,
 };
+pub use membership_history_exchange_adapter::{
+    IrohMembershipHistoryExchangeAdapter, IrohMembershipHistoryExchangeHandler,
+    MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+};
 pub use net_recovery::NetworkRecoveryObservation;
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
@@ -69,11 +72,4 @@ pub use presence_adapter::{IrohPresenceAdapter, IrohPresenceHandler, PRESENCE_AL
 pub use relay_probe::{
     IrohRelayProbeAdapter, RelayProbeError as IrohRelayProbeError,
     RelayProbeReport as IrohRelayProbeReport,
-};
-pub use removal_exchange_adapter::{
-    IrohRemovalExchangeAdapter, IrohRemovalExchangeHandler, IrohRemovalLateHandler,
-    IrohRemovalNoticeHandler, REMOVAL_EXCHANGE_ALPN, REMOVAL_LATE_ALPN, REMOVAL_NOTICE_ALPN,
-};
-pub use workspace_recovery_adapter::{
-    IrohWorkspaceRecoveryAdapter, IrohWorkspaceRecoveryHandler, WORKSPACE_RECOVERY_ALPN,
 };

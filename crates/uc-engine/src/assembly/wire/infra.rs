@@ -204,9 +204,10 @@ pub(super) fn build_blob_processing_assembly(
 /// on `AppDeps.config_migration`.
 ///
 /// The local-identity port reads the device fingerprint for the export manifest
-/// from the same secure-storage view used by the running node. Single-user mode
+/// from the same dedicated identity storage used by the running node. Single-user mode
 pub(super) fn build_config_migration_facade(
     secure_storage: &Arc<dyn SecureStoragePort>,
+    iroh_identity_storage: &Arc<dyn SecureStoragePort>,
     db_pool_for_config_migration: DbPool,
     clock: &Arc<dyn ClockPort>,
     setup_status: &Arc<dyn SetupStatusPort>,
@@ -218,7 +219,7 @@ pub(super) fn build_config_migration_facade(
     let config_migration_profile = ProfileId::from("default");
     let config_migration_local_identity: Arc<dyn LocalIdentityPort> =
         Arc::new(IrohIdentityStore::new(
-            secure_storage.clone(),
+            iroh_identity_storage.clone(),
             Arc::new(Sha256IdentityFingerprintFactory),
         ));
     let config_migration_adapter = Arc::new(

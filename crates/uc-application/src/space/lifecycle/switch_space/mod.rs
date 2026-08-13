@@ -126,7 +126,15 @@ pub(crate) trait JoinerHandshakeRunner: Send + Sync {
         &self,
         pending: PendingJoinerHandshake,
         admission: uc_core::membership::AdmissionChangeFacts,
-    ) -> Result<uc_core::pairing::SponsorAdmissionCommitted, RedeemPairingInvitationError>;
+    ) -> Result<uc_core::pairing::SponsorAdmissionSaved, RedeemPairingInvitationError>;
+
+    async fn install_group_join(
+        &self,
+        _pending: &mut PendingJoinerHandshake,
+        _passphrase: &Passphrase,
+    ) -> Result<(), RedeemPairingInvitationError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -143,8 +151,16 @@ impl JoinerHandshakeRunner for JoinerHandshakeCoordinator {
         &self,
         pending: PendingJoinerHandshake,
         admission: uc_core::membership::AdmissionChangeFacts,
-    ) -> Result<uc_core::pairing::SponsorAdmissionCommitted, RedeemPairingInvitationError> {
+    ) -> Result<uc_core::pairing::SponsorAdmissionSaved, RedeemPairingInvitationError> {
         self.complete(pending, admission).await
+    }
+
+    async fn install_group_join(
+        &self,
+        pending: &mut PendingJoinerHandshake,
+        passphrase: &Passphrase,
+    ) -> Result<(), RedeemPairingInvitationError> {
+        self.install_group_join(pending, passphrase).await
     }
 }
 
@@ -488,12 +504,16 @@ impl SwitchSpaceUseCase {
         // 与 redeem use case 相同的统一加入语义：握手到 Confirm 后，先由
         // 工作空间负责人保存本机就绪事实，再发送就绪回复并等待"准入变化
         // 已保存"确认。不形成第二条握手编排路径。
-        let pending = self
+        let mut pending = self
             .handshake
             .run(code, new_passphrase)
             .await
             .map_err(map_redeem_err)?;
         let outcome = pending.outcome().clone();
+        self.handshake
+            .install_group_join(&mut pending, new_passphrase)
+            .await
+            .map_err(|error| SwitchSpaceError::Internal(format!("install admission: {error}")))?;
         self.relationship_reset
             .clear_all_relationships()
             .await
@@ -519,12 +539,12 @@ impl SwitchSpaceUseCase {
             .handshake
             .complete(pending, admission)
             .await
-            .map_err(|error| SwitchSpaceError::Internal(format!("complete admission: {error}")))?;
+            .map_err(map_redeem_err)?;
         self.workspace_convergence
-            .record_admission_committed(committed.facts)
+            .record_admission_saved(committed.facts)
             .await
             .map_err(|error| {
-                SwitchSpaceError::Internal(format!("record admission committed: {error}"))
+                SwitchSpaceError::Internal(format!("record admission saved: {error}"))
             })?;
         Ok(outcome)
     }

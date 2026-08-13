@@ -10,6 +10,7 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::{ClipboardContentCategory, ClipboardContentCategorySet};
 use uc_core::ids::DeviceId;
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClipboardReceiverPort, ClockPort, ConnectionChannel, InboundClipboard,
@@ -60,6 +61,8 @@ pub trait ClipboardInboundEventPort: Send + Sync {
 pub struct ClipboardInboundRuntimeDeps {
     pub receiver: Arc<dyn ClipboardReceiverPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
+    /// Blocks content from peers that cannot participate in normal exchange.
+    pub content_gate: Arc<dyn ContentExchangeGatePort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
     pub settings: Arc<dyn SettingsPort>,
     pub clock: Arc<dyn ClockPort>,
@@ -118,7 +121,7 @@ impl ClipboardInboundRuntime {
     pub fn start(deps: ClipboardInboundRuntimeDeps) -> Self {
         let mut receiver = deps.receiver.subscribe();
         let processor = InboundProcessor {
-            receive_gate: MemberReceiveGate::new(deps.member_repo),
+            receive_gate: MemberReceiveGate::new(deps.member_repo, deps.content_gate),
             settings: deps.settings,
             transfer_cipher: deps.transfer_cipher,
             clock: deps.clock,
@@ -511,6 +514,7 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     use uc_core::ids::{DeviceId, FormatId, RepresentationId};
+    use uc_core::membership::ContentExchangeGatePort;
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
     use uc_core::ports::{
         ClipboardHeader, ClipboardReceiverPort, ClockPort, ConnectionChannel, InboundClipboard,
@@ -570,6 +574,24 @@ mod tests {
     }
 
     struct AllowAllMembers;
+
+    struct AllowAllContent;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for AllowAllContent {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            false
+        }
+    }
+
+    struct BlockedUpgradePeer;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for BlockedUpgradePeer {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            true
+        }
+    }
 
     #[async_trait]
     impl MemberRepositoryPort for AllowAllMembers {
@@ -867,6 +889,7 @@ mod tests {
         ClipboardInboundRuntimeDeps {
             receiver,
             member_repo: Arc::new(AllowAllMembers),
+            content_gate: Arc::new(AllowAllContent),
             transfer_cipher: Arc::new(EchoCipher),
             settings: Arc::new(FixedSettings { sync_enabled: true }),
             clock: Arc::new(FixedClock),
@@ -885,7 +908,26 @@ mod tests {
         ClipboardInboundRuntimeDeps {
             receiver,
             member_repo,
+            content_gate: Arc::new(AllowAllContent),
             transfer_cipher,
+            settings: Arc::new(FixedSettings { sync_enabled: true }),
+            clock: Arc::new(FixedClock),
+            apply,
+            events,
+        }
+    }
+
+    fn deps_with_content_gate(
+        receiver: Arc<FakeReceiver>,
+        content_gate: Arc<dyn ContentExchangeGatePort>,
+        apply: Arc<dyn InboundClipboardApplyPort>,
+        events: Arc<dyn ClipboardInboundEventPort>,
+    ) -> ClipboardInboundRuntimeDeps {
+        ClipboardInboundRuntimeDeps {
+            receiver,
+            member_repo: Arc::new(AllowAllMembers),
+            content_gate,
+            transfer_cipher: Arc::new(NeverCipher),
             settings: Arc::new(FixedSettings { sync_enabled: true }),
             clock: Arc::new(FixedClock),
             apply,
@@ -1145,6 +1187,28 @@ mod tests {
         runtime_deps.transfer_cipher = Arc::new(NeverCipher);
         let runtime = ClipboardInboundRuntime::start(runtime_deps);
         let (inbound, result) = fixture("peer-disabled", "hash-disabled");
+
+        receiver.publish(inbound);
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), result.wait())
+                .await
+                .expect("receipt settled"),
+            Some(InboundClipboardDisposition::Rejected)
+        );
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn upgrade_required_peer_is_rejected_before_decrypt_or_apply() {
+        let receiver = Arc::new(FakeReceiver::new());
+        let runtime = ClipboardInboundRuntime::start(deps_with_content_gate(
+            Arc::clone(&receiver),
+            Arc::new(BlockedUpgradePeer),
+            Arc::new(NeverApply),
+            Arc::new(RecordingEvents::default()),
+        ));
+        let (inbound, result) = fixture("peer-needs-upgrade", "hash-needs-upgrade");
 
         receiver.publish(inbound);
 

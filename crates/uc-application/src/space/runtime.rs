@@ -11,17 +11,44 @@ use crate::space::convergence::legacy_upgrade::AutomaticLegacyUpgradeRuntime;
 use crate::space::convergence::membership_connectivity::{
     start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
 };
-use crate::space::convergence::WorkspaceConvergenceRuntime;
+use crate::space::convergence::{WorkspaceConvergenceActivity, WorkspaceConvergenceRuntime};
 use uc_core::ports::PresenceEvent;
 
 #[derive(Clone)]
 pub struct SpaceApplicationHandle {
-    activity: MembershipConvergenceActivity,
+    activity: SpaceMembershipActivity,
 }
 
 impl SpaceApplicationHandle {
-    pub fn membership_activity(&self) -> MembershipConvergenceActivity {
+    pub fn membership_activity(&self) -> SpaceMembershipActivity {
         self.activity.clone()
+    }
+}
+
+#[derive(Clone)]
+pub struct SpaceMembershipActivity {
+    membership: MembershipConvergenceActivity,
+    workspace: WorkspaceConvergenceActivity,
+}
+
+#[async_trait::async_trait]
+impl crate::space::convergence::discovery::MembershipConvergenceActivityPort
+    for SpaceMembershipActivity
+{
+    async fn pause(&self) -> Result<(), String> {
+        self.workspace.pause().await?;
+        self.membership
+            .pause()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn resume(&self) -> Result<(), String> {
+        self.membership
+            .resume()
+            .await
+            .map_err(|error| error.to_string())?;
+        self.workspace.resume().await
     }
 }
 
@@ -53,7 +80,10 @@ impl SpaceApplicationRuntime {
             start_membership_connectivity(connectivity, presence_events.resubscribe());
         let legacy_upgrade_runtime = assembly.start_legacy_upgrade_runtime(presence_events);
         let handle = SpaceApplicationHandle {
-            activity: membership_runtime.activity(),
+            activity: SpaceMembershipActivity {
+                membership: membership_runtime.activity(),
+                workspace: convergence_runtime.activity(),
+            },
         };
         Self {
             handle,

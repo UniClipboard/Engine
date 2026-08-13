@@ -170,7 +170,7 @@ impl ConfigMigrationAdapter {
     ///
     /// The current-profile KEK is read once and used twice by the export: as the
     /// bundle's own AEAD key and as a carried secret so the target can
-    /// auto-unlock after apply. The P2P identity is carried alongside it.
+    /// auto-unlock after apply. The P2P identity travels separately as files.
     fn collect_secrets(&self) -> Result<CollectedSecrets, ConfigMigrationError> {
         let mut entries = Vec::new();
         let mut kek = None;

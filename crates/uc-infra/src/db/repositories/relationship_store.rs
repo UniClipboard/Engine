@@ -1300,7 +1300,7 @@ mod tests {
     use uc_core::membership::{
         CandidateStatus, DeviceAnnouncement, MembershipAnnouncementRepositoryPort,
         MembershipAppliedSecurityUpdateRepositoryPort, MembershipCandidateRepositoryPort,
-        MembershipEvent, MembershipEventBatch, MembershipOutboxRepositoryPort,
+        MembershipEventBatch, MembershipGossipEvent, MembershipOutboxRepositoryPort,
         PendingMembershipBatch, RelationshipStateResetPort, RelayedSecurityUpdate,
         SpaceMembershipCandidate, SponsorCandidateSeed,
     };
@@ -1772,7 +1772,7 @@ mod tests {
             MembershipEventBatch {
                 space_id: uc_core::ids::SpaceId::from("outbox-space"),
                 batch_id: [7; 32],
-                events: vec![MembershipEvent::SponsorSeed(SponsorCandidateSeed {
+                events: vec![MembershipGossipEvent::SponsorSeed(SponsorCandidateSeed {
                     space_id: uc_core::ids::SpaceId::from("outbox-space"),
                     device_id: DeviceId::new("outbox-device"),
                     device_name_hint: "outbox-name-plaintext-probe-81f3".to_string(),

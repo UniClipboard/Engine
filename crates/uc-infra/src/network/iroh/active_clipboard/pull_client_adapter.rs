@@ -205,7 +205,7 @@ mod tests {
     use iroh::{RelayMode, SecretKey};
     use tokio::sync::Mutex;
 
-    use uc_core::membership::{MembershipError, SpaceMember};
+    use uc_core::membership::{ContentExchangeGatePort, MembershipError, SpaceMember};
     use uc_core::ports::clipboard::{ActiveClipboardPullServeError, ActiveClipboardPullServePort};
     use uc_core::ports::security::IdentityFingerprintFactoryPort;
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
@@ -215,6 +215,15 @@ mod tests {
         IrohActiveClipboardPullServeAdapter, ACTIVE_CLIPBOARD_PULL_ALPN,
     };
     use crate::security::Sha256IdentityFingerprintFactory;
+
+    struct AllowAllContent;
+
+    #[async_trait]
+    impl ContentExchangeGatePort for AllowAllContent {
+        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
+            false
+        }
+    }
 
     // ----- in-memory peer_addr_repo -----------------------------------------
 
@@ -360,6 +369,7 @@ mod tests {
             Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
             StubServe::new(serve_result),
+            Arc::new(AllowAllContent),
         );
         let router = Router::builder((*endpoint).clone())
             .accept(ACTIVE_CLIPBOARD_PULL_ALPN, adapter.handler())

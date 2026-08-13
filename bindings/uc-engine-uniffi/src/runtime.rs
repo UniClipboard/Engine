@@ -206,7 +206,6 @@ pub struct Device {
 pub enum WorkspaceConvergencePhase {
     LocallyApplied,
     Converging,
-    WaitingForOfflineMember,
     Complete,
     RecoveryRequired,
 }
@@ -227,12 +226,12 @@ pub enum WorkspaceConvergenceFailureCategory {
 pub struct WorkspaceConvergence {
     pub phase: WorkspaceConvergencePhase,
     pub revision: u64,
-    pub change_count: u64,
-    pub removal_intent_count: u64,
+    pub history_event_count: u64,
     pub effective_member_count: u64,
-    pub confirmed_member_count: u64,
-    pub waiting_member_device_ids: Vec<String>,
-    pub waiting_member_count: u64,
+    pub pending_removal_decision_device_ids: Vec<String>,
+    pub pending_removal_decision_event_id: Option<String>,
+    pub diverged_peer_device_ids: Vec<String>,
+    pub upgrade_required_peer_device_ids: Vec<String>,
     pub convergence_digest: Option<String>,
     pub removed: bool,
     pub updated_at_ms: i64,
@@ -243,6 +242,12 @@ pub struct WorkspaceConvergence {
 pub enum EntryNotResendableReason {
     RemoteOrigin,
     PayloadLost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MembershipRemovalDecision {
+    Accept,
+    Reject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -307,6 +312,11 @@ enum WorkerCommand {
     },
     RemoveMember {
         device_id: String,
+        response: mpsc::Sender<Result<WorkspaceConvergence, BindingError>>,
+    },
+    DecideMembershipRemoval {
+        removal_event_id: String,
+        decision: MembershipRemovalDecision,
         response: mpsc::Sender<Result<WorkspaceConvergence, BindingError>>,
     },
     ResendEntry {
@@ -763,6 +773,18 @@ impl MobileEngine {
     pub fn remove_member(&self, device_id: String) -> Result<WorkspaceConvergence, BindingError> {
         self.request(|response| WorkerCommand::RemoveMember {
             device_id,
+            response,
+        })
+    }
+
+    pub fn decide_membership_removal(
+        &self,
+        removal_event_id: String,
+        decision: MembershipRemovalDecision,
+    ) -> Result<WorkspaceConvergence, BindingError> {
+        self.request(|response| WorkerCommand::DecideMembershipRemoval {
+            removal_event_id,
+            decision,
             response,
         })
     }
@@ -1352,6 +1374,31 @@ async fn run_worker_loop(
                     .and_then(map_workspace_convergence);
                 let _ = response.send(result);
             }
+            WorkerCommand::DecideMembershipRemoval {
+                removal_event_id,
+                decision,
+                response,
+            } => {
+                let decision = match decision {
+                    MembershipRemovalDecision::Accept => {
+                        uc_engine::MembershipRemovalDecision::Accept
+                    }
+                    MembershipRemovalDecision::Reject => {
+                        uc_engine::MembershipRemovalDecision::Reject
+                    }
+                };
+                let result = engine
+                    .execute(Operation::DecideMembershipRemoval(
+                        uc_engine::DecideMembershipRemovalInput {
+                            removal_event_id,
+                            decision,
+                        },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_workspace_convergence);
+                let _ = response.send(result);
+            }
             WorkerCommand::ResendEntry {
                 entry_id,
                 target_devices,
@@ -1714,7 +1761,7 @@ map_enum!(map_invitation_availability, uc_engine::InvitationAvailability => Invi
 );
 
 map_enum!(map_workspace_convergence_phase, uc_engine::WorkspaceConvergencePhaseSummary => WorkspaceConvergencePhase,
-    LocallyApplied, Converging, WaitingForOfflineMember, Complete, RecoveryRequired,
+    LocallyApplied, Converging, Complete, RecoveryRequired,
 );
 
 map_enum!(map_workspace_convergence_failure_category, uc_engine::WorkspaceConvergenceFailureCategorySummary => WorkspaceConvergenceFailureCategory,
@@ -1795,12 +1842,12 @@ fn map_workspace_convergence_summary(
     WorkspaceConvergence {
         phase: map_workspace_convergence_phase(summary.phase),
         revision: summary.revision,
-        change_count: summary.change_count,
-        removal_intent_count: summary.removal_intent_count,
+        history_event_count: summary.history_event_count,
         effective_member_count: summary.effective_member_count,
-        confirmed_member_count: summary.confirmed_member_count,
-        waiting_member_device_ids: summary.waiting_member_device_ids,
-        waiting_member_count: summary.waiting_member_count,
+        pending_removal_decision_device_ids: summary.pending_removal_decision_device_ids,
+        pending_removal_decision_event_id: summary.pending_removal_decision_event_id,
+        diverged_peer_device_ids: summary.diverged_peer_device_ids,
+        upgrade_required_peer_device_ids: summary.upgrade_required_peer_device_ids,
         convergence_digest: summary.convergence_digest,
         removed: summary.removed,
         updated_at_ms: summary.updated_at_ms,
@@ -2343,16 +2390,21 @@ mod tests {
     fn workspace_convergence_methods_and_events_share_the_complete_snapshot() {
         let _query: fn(&MobileEngine) -> Result<WorkspaceConvergence, BindingError> =
             MobileEngine::query_workspace_convergence;
+        let _decide: fn(
+            &MobileEngine,
+            String,
+            MembershipRemovalDecision,
+        ) -> Result<WorkspaceConvergence, BindingError> = MobileEngine::decide_membership_removal;
         let event = map_engine_event(uc_engine::EngineEvent::WorkspaceConvergenceChanged(
             uc_engine::WorkspaceConvergenceSummary {
                 phase: uc_engine::WorkspaceConvergencePhaseSummary::Converging,
                 revision: 2,
-                change_count: 1,
-                removal_intent_count: 1,
+                history_event_count: 1,
                 effective_member_count: 2,
-                confirmed_member_count: 0,
-                waiting_member_device_ids: vec!["device-b".to_owned()],
-                waiting_member_count: 1,
+                pending_removal_decision_device_ids: vec!["device-c".to_owned()],
+                pending_removal_decision_event_id: Some("event-c".to_owned()),
+                diverged_peer_device_ids: vec!["device-d".to_owned()],
+                upgrade_required_peer_device_ids: vec!["device-e".to_owned()],
                 convergence_digest: None,
                 removed: false,
                 updated_at_ms: 42,
@@ -2366,12 +2418,12 @@ mod tests {
                 convergence: WorkspaceConvergence {
                     phase: WorkspaceConvergencePhase::Converging,
                     revision: 2,
-                    change_count: 1,
-                    removal_intent_count: 1,
+                    history_event_count: 1,
                     effective_member_count: 2,
-                    confirmed_member_count: 0,
-                    waiting_member_device_ids: vec!["device-b".to_owned()],
-                    waiting_member_count: 1,
+                    pending_removal_decision_device_ids: vec!["device-c".to_owned()],
+                    pending_removal_decision_event_id: Some("event-c".to_owned()),
+                    diverged_peer_device_ids: vec!["device-d".to_owned()],
+                    upgrade_required_peer_device_ids: vec!["device-e".to_owned()],
                     convergence_digest: None,
                     removed: false,
                     updated_at_ms: 42,
@@ -2383,8 +2435,16 @@ mod tests {
             panic!("workspace convergence event must map");
         };
         assert_eq!(
-            convergence.waiting_member_device_ids,
-            vec!["device-b".to_owned()]
+            convergence.pending_removal_decision_device_ids,
+            vec!["device-c".to_owned()]
+        );
+        assert_eq!(
+            convergence.diverged_peer_device_ids,
+            vec!["device-d".to_owned()]
+        );
+        assert_eq!(
+            convergence.upgrade_required_peer_device_ids,
+            vec!["device-e".to_owned()]
         );
     }
 
