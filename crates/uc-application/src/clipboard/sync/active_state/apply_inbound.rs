@@ -38,7 +38,7 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId, SpaceId};
-use uc_core::membership::ContentExchangeGatePort;
+use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::clipboard::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientError, ActiveClipboardPullClientPort,
     ActiveClipboardReceiverPort, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
@@ -128,6 +128,7 @@ pub(crate) struct ApplyInboundActiveClipboardStateUseCase {
     coordinator: Arc<ClipboardWriteCoordinator>,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     /// Reachability tracker: the re-broadcast fan-out skips peers already known
     /// offline rather than burning a dial timeout per stale/ghost roster entry.
     presence: Arc<dyn PresencePort>,
@@ -166,6 +167,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         coordinator: Arc<ClipboardWriteCoordinator>,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
         presence: Arc<dyn PresencePort>,
         clock: Arc<dyn ClockPort>,
         mobile_consumability: MobileConsumabilityProbe,
@@ -185,6 +187,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
             coordinator,
             dispatch,
             peer_addr_repo,
+            peer_scope,
             presence,
             send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
             clock,
@@ -282,6 +285,17 @@ impl ApplyInboundActiveClipboardStateUseCase {
         // 1. Locked → fully lazy (D5).
         if !self.is_unlocked.is_unlocked(&Self::space_id()).await {
             debug!("active state inbound dropped: space locked");
+            return;
+        }
+
+        let peer_is_current = self
+            .peer_scope
+            .snapshot()
+            .await
+            .map(|scope| scope.peer_device_ids.contains(&peer))
+            .unwrap_or(false);
+        if !peer_is_current {
+            debug!("active state inbound dropped: source is outside current peer scope");
             return;
         }
 
@@ -501,6 +515,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let advance_register = Arc::clone(&self.advance_register);
         let dispatch = Arc::clone(&self.dispatch);
         let peer_addr_repo = Arc::clone(&self.peer_addr_repo);
+        let peer_scope = Arc::clone(&self.peer_scope);
         let presence = Arc::clone(&self.presence);
         let send_gate = self.send_gate.clone();
         let converged_tx = self.converged_tx.clone();
@@ -559,6 +574,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 fan_out_active_state(
                     &dispatch,
                     &peer_addr_repo,
+                    &peer_scope,
                     &presence,
                     &send_gate,
                     &state,
@@ -937,6 +953,7 @@ mod tests {
             coordinator,
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
             Arc::new(EmptyPeerAddrRepo),
+            Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             Arc::new(StaticPresence(ReachabilityState::Online)),
             Arc::new(FixedClock(now_ms)),
             MobileConsumabilityProbe::new(Arc::new(crate::test_support::FixedFileSets::empty())),
@@ -1315,6 +1332,7 @@ mod tests {
             coordinator,
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
             peer_addr_repo,
+            Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             Arc::new(StaticPresence(ReachabilityState::Online)),
             Arc::new(FixedClock(1_000)),
             probe,

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
-use uc_core::membership::ContentExchangeGatePort;
+use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_core::MemberRepositoryPort;
 
@@ -31,6 +31,7 @@ pub(crate) struct TargetSelector {
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
     removal_gate: Arc<dyn ContentExchangeGatePort>,
+    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
 }
 
 impl TargetSelector {
@@ -43,6 +44,7 @@ impl TargetSelector {
             peer_addr_repo,
             member_repo,
             Arc::new(super::AllowAllRemovalTargets),
+            Arc::new(super::AllTestPeerScope),
         )
     }
 
@@ -50,11 +52,13 @@ impl TargetSelector {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
         removal_gate: Arc<dyn ContentExchangeGatePort>,
+        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     ) -> Self {
         Self {
             peer_addr_repo,
             member_repo,
             removal_gate,
+            peer_scope,
         }
     }
 
@@ -70,10 +74,16 @@ impl TargetSelector {
             self.peer_addr_repo.list().await.map_err(|err| {
                 DispatchSyncError::Repository(format!("peer_addr_repo.list: {err}"))
             })?;
+        let scope = self.peer_scope.snapshot().await.map_err(|error| {
+            DispatchSyncError::Repository(format!("current peer scope: {error:?}"))
+        })?;
 
         let mut candidates: Vec<DeviceId> = Vec::with_capacity(records.len());
         for record in records {
             if record.device_id == *local_device {
+                continue;
+            }
+            if !scope.peer_device_ids.contains(&record.device_id) {
                 continue;
             }
             // ADR-005 §2.5 resend: `target_filter` narrows the fan-out
@@ -201,6 +211,7 @@ mod tests {
             Arc::new(RemovedTarget {
                 device_id: dev(removed_device_id),
             }),
+            Arc::new(super::super::AllTestPeerScope),
         )
     }
 

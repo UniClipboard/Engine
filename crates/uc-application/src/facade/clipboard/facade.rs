@@ -9,7 +9,7 @@ use bytes::Bytes;
 use tracing::instrument;
 
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::ContentExchangeGatePort;
+use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     CancelDirectoryAttemptTransfersPort, CleanupDirectoryStagingPort, ClipboardDispatchPort,
@@ -50,6 +50,7 @@ pub struct ClipboardSyncDeps {
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     /// 已保存成员移除意图对发送路径的硬限制。
     pub removal_gate: Arc<dyn ContentExchangeGatePort>,
+    pub peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     pub presence: Arc<dyn PresencePort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
     pub clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
@@ -208,6 +209,7 @@ impl ClipboardSyncFacade {
             Arc::clone(&deps.entry_delivery_repo),
             Arc::clone(&deps.host_event_bus),
             Arc::clone(&deps.removal_gate),
+            Arc::clone(&deps.peer_scope),
         ));
         let view_uc = Arc::new(GetEntryDeliveryViewUseCase::new(
             Arc::clone(&deps.entry_repo),
@@ -948,6 +950,7 @@ mod tests {
             peer_addr_repo: Arc::new(peer_addr_repo),
             member_repo: Arc::new(make_member_repo_all_enabled()),
             removal_gate: Arc::new(crate::clipboard::sync::dispatch_entry::AllowAllRemovalTargets),
+            peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             presence: Arc::new(presence),
             transfer_cipher: Arc::new(cipher),
             clipboard_dispatch: Arc::new(dispatch),

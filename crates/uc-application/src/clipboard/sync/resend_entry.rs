@@ -18,6 +18,7 @@ use tracing::info;
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::clipboard::EntryDeliveryStatus;
 use uc_core::ids::{DeviceId, EntryId};
+use uc_core::membership::CurrentWorkspacePeerScopePort;
 use uc_core::ports::clipboard::{
     ClipboardPayloadResolverPort, EntryFileSetRepositoryPort, GetClipboardEntryPort,
     GetRepresentationPort, UpdateRepresentationProcessingResultPort,
@@ -146,6 +147,7 @@ impl ResendEntryRunner for ResendEntryUseCase {
 pub(crate) struct ResendEntryUseCase {
     entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
+    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     delivery: Arc<dyn ExistingLocalEntryDeliveryRunner>,
 }
 
@@ -166,6 +168,7 @@ pub(crate) struct ResendEntryDeps {
     pub blob_store: Arc<dyn BlobReaderPort>,
     pub entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
+    pub peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
     pub settings: Arc<dyn SettingsPort>,
     pub entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
@@ -199,6 +202,7 @@ impl ResendEntryUseCase {
         let resend = Self {
             entry_delivery_repo: deps.entry_delivery_repo,
             trusted_peer_repo: deps.trusted_peer_repo,
+            peer_scope: deps.peer_scope,
             delivery: Arc::clone(&delivery),
         };
         (resend, delivery)
@@ -224,6 +228,18 @@ impl ResendEntryUseCase {
             .into_iter()
             .map(|tp| tp.peer_device_id)
             .collect();
+        let current = self
+            .peer_scope
+            .snapshot()
+            .await
+            .map_err(|err| ResendEntryError::Storage(format!("current peer scope: {err:?}")))?
+            .peer_device_ids
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let trusted = trusted
+            .into_iter()
+            .filter(|device| current.contains(device))
+            .collect::<Vec<_>>();
 
         let targets: Vec<DeviceId> = match &cmd.target_filter {
             Some(filter) => {
@@ -312,6 +328,25 @@ mod tests {
     use uc_core::settings::model::Settings;
     use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
     use uc_core::BlobId;
+
+    struct FixedPeerScope(Vec<DeviceId>);
+
+    #[async_trait]
+    impl CurrentWorkspacePeerScopePort for FixedPeerScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<
+            uc_core::membership::CurrentWorkspacePeerSnapshot,
+            uc_core::membership::CurrentWorkspacePeerScopeError,
+        > {
+            Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+                revision: 1,
+                source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
+                local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
+                peer_device_ids: self.0.clone(),
+            })
+        }
+    }
 
     use crate::clipboard::sync::dispatch_entry::{
         DispatchClipboardEntryInput, DispatchOutcome, DispatchPerTarget, DispatchSyncError,
@@ -756,6 +791,7 @@ mod tests {
             trusted_peer_repo: Arc::new(StubTrustedPeerRepo {
                 peers: trusted_peers,
             }),
+            peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             device_identity: Arc::new(StubDeviceIdentity(local)),
             settings: Arc::new(StubSettings),
             entry_file_set_repo: Arc::new(StubFileSetRepo { file_set: None }),
@@ -815,6 +851,7 @@ mod tests {
             trusted_peer_repo: Arc::new(StubTrustedPeerRepo {
                 peers: vec![trusted(&local, "peer-b", 1)],
             }),
+            peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             device_identity: Arc::new(StubDeviceIdentity(local)),
             settings: Arc::new(StubSettings),
             entry_file_set_repo: Arc::new(StubFileSetRepo { file_set: None }),
@@ -871,6 +908,7 @@ mod tests {
             trusted_peer_repo: Arc::new(StubTrustedPeerRepo {
                 peers: vec![trusted(&local, "peer-b", 1)],
             }),
+            peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             device_identity: Arc::new(StubDeviceIdentity(local)),
             settings: Arc::new(StubSettings),
             entry_file_set_repo: Arc::new(StubFileSetRepo { file_set: None }),
@@ -921,6 +959,29 @@ mod tests {
             ResendEntryError::TargetNotTrusted(d) => assert_eq!(d.as_str(), "ghost"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn resend_filter_rejects_removed_peer_even_when_trust_record_remains() {
+        let local = DeviceId::new("self");
+        let (mut uc, entry_id) = build_uc(
+            Vec::new(),
+            vec![trusted(&local, "peer-a", 1)],
+            Arc::new(UnusedDispatchRunner),
+        );
+        uc.peer_scope = Arc::new(FixedPeerScope(Vec::new()));
+
+        let err = uc
+            .execute(ResendEntryCommand {
+                entry_id,
+                target_filter: Some(vec![DeviceId::new("peer-a")]),
+            })
+            .await
+            .expect_err("removed peer must not be resendable");
+
+        assert!(
+            matches!(err, ResendEntryError::TargetNotTrusted(device) if device == DeviceId::new("peer-a"))
+        );
     }
 
     /// V4 — `target_filter = None`,所有 trusted peer 都已 Delivered ⇒
@@ -1151,6 +1212,7 @@ mod tests {
             trusted_peer_repo: Arc::new(StubTrustedPeerRepo {
                 peers: vec![trusted(&local, "peer-a", 1)],
             }),
+            peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             device_identity: Arc::new(StubDeviceIdentity(local)),
             settings: Arc::new(StubSettings),
             entry_file_set_repo: Arc::new(StubFileSetRepo {
@@ -1295,6 +1357,7 @@ mod tests {
             trusted_peer_repo: Arc::new(StubTrustedPeerRepo {
                 peers: vec![trusted(&local, "peer-a", 1)],
             }),
+            peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             device_identity: Arc::new(StubDeviceIdentity(local)),
             settings: Arc::new(StubSettings),
             entry_file_set_repo: Arc::new(StubFileSetRepo {

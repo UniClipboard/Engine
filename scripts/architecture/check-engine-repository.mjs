@@ -367,6 +367,34 @@ function checkPlaintextScanner() {
   return problems
 }
 
+function checkCurrentPeerScopeOwnership() {
+  const problems = []
+  const scopedConsumers = [
+    'crates/uc-application/src/facade/roster/facade.rs',
+    'crates/uc-application/src/space/convergence/reachability.rs',
+    'crates/uc-application/src/space/convergence/membership_connectivity.rs',
+    'crates/uc-application/src/space/convergence/legacy_upgrade.rs',
+    'crates/uc-application/src/clipboard/sync/dispatch_entry/target_selector.rs',
+    'crates/uc-application/src/clipboard/sync/active_state/fanout.rs',
+    'crates/uc-application/src/clipboard/sync/resend_entry.rs',
+  ]
+  for (const path of scopedConsumers) {
+    const source = read(path)
+    if (!source.includes('CurrentWorkspacePeerScopePort') || !source.includes('.snapshot().await')) {
+      addProblem(
+        problems,
+        'current peer scope',
+        `${path} must consume one complete CurrentWorkspacePeerScopePort snapshot`
+      )
+    }
+  }
+  const corePorts = read('crates/uc-core/src/membership/ports.rs')
+  if (corePorts.includes('DeviceVisibilityGatePort')) {
+    addProblem(problems, 'current peer scope', 'the superseded device visibility gate was restored')
+  }
+  return problems
+}
+
 function repositorySources() {
   return {
     engine: read('crates/uc-engine/src/lib.rs'),
@@ -391,6 +419,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkPublicSurface(metadata, sources),
     ...checkBindingProvenance(metadata, sources),
     ...checkLanIsolation(metadata, sources),
+    ...checkCurrentPeerScopeOwnership(),
     ...(includePlaintext ? checkPlaintextScanner() : []),
   ]
 }

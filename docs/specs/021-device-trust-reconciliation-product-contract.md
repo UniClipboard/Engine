@@ -10,6 +10,7 @@
 - **相关文档**：`docs/adr/020-membership-reconciliation-and-user-decisions.md`、
   `docs/specs/016-workspace-wide-convergence.md`、
   `docs/specs/019-device-specific-convergence-waiting-status.md`、
+  `docs/specs/022-current-member-runtime-scope.md`、
   `docs/architecture/architecture-bible.md`
 
 本规格先定义 Engine 应向完整 P2P 产品提供的事实和动作，不授权实现尚待产品确认的恢复策略。

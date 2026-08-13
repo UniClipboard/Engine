@@ -38,7 +38,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::DeviceVisibilityGatePort;
+use uc_core::membership::CurrentWorkspacePeerScopePort;
 use uc_core::ports::{
     DeviceIdentityPort, PeerAddressRepositoryPort, PresenceError, PresencePort, ReachabilityState,
 };
@@ -71,7 +71,7 @@ pub(crate) struct EnsureReachableAllUseCase {
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     presence: Arc<dyn PresencePort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
-    visibility_gate: Arc<dyn DeviceVisibilityGatePort>,
+    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
 }
 
 impl EnsureReachableAllUseCase {
@@ -79,13 +79,13 @@ impl EnsureReachableAllUseCase {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         presence: Arc<dyn PresencePort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
-        visibility_gate: Arc<dyn DeviceVisibilityGatePort>,
+        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     ) -> Self {
         Self {
             peer_addr_repo,
             presence,
             device_identity,
-            visibility_gate,
+            peer_scope,
         }
     }
 
@@ -95,6 +95,9 @@ impl EnsureReachableAllUseCase {
     ) -> Result<EnsureReachableAllReport, EnsureReachableAllError> {
         let records = self.peer_addr_repo.list().await.map_err(|err| {
             EnsureReachableAllError::Repository(format!("peer_addr_repo.list: {err}"))
+        })?;
+        let scope = self.peer_scope.snapshot().await.map_err(|error| {
+            EnsureReachableAllError::Repository(format!("current peer scope: {error:?}"))
         })?;
 
         let local = self.device_identity.current_device_id();
@@ -109,11 +112,7 @@ impl EnsureReachableAllUseCase {
                 );
                 continue;
             }
-            if self
-                .visibility_gate
-                .is_hidden_from_device_lists(&record.device_id)
-                .await
-            {
+            if !scope.peer_device_ids.contains(&record.device_id) {
                 continue;
             }
             targets.push(record.device_id);
@@ -232,21 +231,51 @@ mod tests {
         }
     }
 
-    struct AllowAllRemovalTargets;
+    struct AllTestPeers;
 
     #[async_trait]
-    impl DeviceVisibilityGatePort for AllowAllRemovalTargets {
-        async fn is_hidden_from_device_lists(&self, _device_id: &DeviceId) -> bool {
-            false
+    impl CurrentWorkspacePeerScopePort for AllTestPeers {
+        async fn snapshot(
+            &self,
+        ) -> Result<
+            uc_core::membership::CurrentWorkspacePeerSnapshot,
+            uc_core::membership::CurrentWorkspacePeerScopeError,
+        > {
+            Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+                revision: 1,
+                source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
+                local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
+                peer_device_ids: [
+                    "peer-a",
+                    "peer-b",
+                    "peer-c",
+                    "peer-ok-1",
+                    "peer-err",
+                    "peer-ok-2",
+                ]
+                .into_iter()
+                .map(DeviceId::new)
+                .collect(),
+            })
         }
     }
 
-    struct RemovedTarget(DeviceId);
+    struct RetainedPeerOnly;
 
     #[async_trait]
-    impl DeviceVisibilityGatePort for RemovedTarget {
-        async fn is_hidden_from_device_lists(&self, device_id: &DeviceId) -> bool {
-            *device_id == self.0
+    impl CurrentWorkspacePeerScopePort for RetainedPeerOnly {
+        async fn snapshot(
+            &self,
+        ) -> Result<
+            uc_core::membership::CurrentWorkspacePeerSnapshot,
+            uc_core::membership::CurrentWorkspacePeerScopeError,
+        > {
+            Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+                revision: 1,
+                source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
+                local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
+                peer_device_ids: vec![DeviceId::new("retained")],
+            })
         }
     }
 
@@ -270,7 +299,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(local)),
-            Arc::new(AllowAllRemovalTargets),
+            Arc::new(AllTestPeers),
         );
 
         let report = uc.execute().await.expect("ok");
@@ -290,7 +319,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(local)),
-            Arc::new(AllowAllRemovalTargets),
+            Arc::new(AllTestPeers),
         );
 
         let err = uc.execute().await.unwrap_err();
@@ -318,7 +347,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(DeviceId::new("local-device"))),
-            Arc::new(AllowAllRemovalTargets),
+            Arc::new(AllTestPeers),
         );
 
         let report = uc.execute().await.expect("ok");
@@ -359,7 +388,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(DeviceId::new("local-device"))),
-            Arc::new(AllowAllRemovalTargets),
+            Arc::new(AllTestPeers),
         );
 
         let report = uc.execute().await.expect("ok");
@@ -394,7 +423,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(DeviceId::new("local-device"))),
-            Arc::new(AllowAllRemovalTargets),
+            Arc::new(AllTestPeers),
         );
 
         let report = uc.execute().await.expect("ok");
@@ -452,7 +481,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(DeviceId::new("local-device"))),
-            Arc::new(AllowAllRemovalTargets),
+            Arc::new(AllTestPeers),
         );
 
         let started = std::time::Instant::now();
@@ -486,7 +515,7 @@ mod tests {
             Arc::new(repo),
             Arc::new(presence),
             Arc::new(FixedDevice(DeviceId::new("local-device"))),
-            Arc::new(RemovedTarget(DeviceId::new("removed"))),
+            Arc::new(RetainedPeerOnly),
         );
 
         let report = uc.execute().await.expect("ok");

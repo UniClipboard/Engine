@@ -14,12 +14,13 @@ use chrono::Utc;
 use tokio::sync::broadcast;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult,
-    LegacyProtectionSnapshot, LegacyRequestInspection, LegacyUpgradeDescriptor,
-    LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort,
-    LegacyUpgradeError, LegacyUpgradeId, LegacyUpgradeRequest, LegacyUpgradeResponse,
-    MemberRepositoryPort, MembershipError, ProtectionGroupAdmission, ProtectionGroupId,
-    SpaceMember,
+    CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort,
+    CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot, LegacyProtectionCommand,
+    LegacyProtectionPort, LegacyProtectionResult, LegacyProtectionSnapshot,
+    LegacyRequestInspection, LegacyUpgradeDescriptor, LegacyUpgradeDispatchError,
+    LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort, LegacyUpgradeError, LegacyUpgradeId,
+    LegacyUpgradeRequest, LegacyUpgradeResponse, MemberRepositoryPort, MembershipError,
+    ProtectionGroupAdmission, ProtectionGroupId, SpaceMember,
 };
 use uc_core::ports::{DeviceIdentityPort, PresenceEvent, ReachabilityState};
 use uc_core::space_access::GroupAdmission;
@@ -84,6 +85,24 @@ struct ScenarioIdentity(DeviceId);
 impl DeviceIdentityPort for ScenarioIdentity {
     fn current_device_id(&self) -> DeviceId {
         self.0
+    }
+}
+
+struct ScenarioPeerScope {
+    peers: Vec<DeviceId>,
+}
+
+#[async_trait]
+impl CurrentWorkspacePeerScopePort for ScenarioPeerScope {
+    async fn snapshot(
+        &self,
+    ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
+        Ok(CurrentWorkspacePeerSnapshot {
+            revision: 1,
+            source: CurrentWorkspacePeerScopeSource::Legacy,
+            local_membership: CurrentWorkspaceLocalMembership::Active,
+            peer_device_ids: self.peers.clone(),
+        })
     }
 }
 
@@ -288,13 +307,21 @@ impl UpgradeWorld {
                     .filter(|member_id| *member_id != device_id)
                     .map(|member_id| scenario_member(*member_id))
                     .collect();
-                let automatic_upgrade =
-                    Arc::new(AutomaticLegacyUpgrade::new(AutomaticLegacyUpgradeDeps {
+                let automatic_upgrade = Arc::new(
+                    AutomaticLegacyUpgrade::new(AutomaticLegacyUpgradeDeps {
                         member_repo: Arc::new(ScenarioMembers { members }),
                         device_identity: Arc::new(ScenarioIdentity(*device_id)),
                         protection: protection.get(device_id).unwrap().clone(),
                         dispatch: network.clone(),
-                    }));
+                    })
+                    .with_peer_scope(Arc::new(ScenarioPeerScope {
+                        peers: ids
+                            .iter()
+                            .filter(|peer| *peer != device_id)
+                            .copied()
+                            .collect(),
+                    })),
+                );
                 (*device_id, automatic_upgrade)
             })
             .collect();

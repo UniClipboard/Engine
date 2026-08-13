@@ -166,6 +166,12 @@ pub struct SyncEngineAssembly {
 }
 
 impl SyncEngineAssembly {
+    pub(crate) fn current_peer_scope(
+        &self,
+    ) -> Arc<dyn uc_core::membership::CurrentWorkspacePeerScopePort> {
+        self.convergence_assembly.current_peer_scope()
+    }
+
     pub(crate) fn subscribe_network_recovery_observations(
         &self,
     ) -> tokio::sync::broadcast::Receiver<uc_infra::network::iroh::NetworkRecoveryObservation> {
@@ -634,6 +640,7 @@ pub async fn build_sync_engine_assembly(
             trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             presence: Arc::clone(&presence),
+            space_protection: Arc::clone(&deps.security.space_access_ports.space_protection),
             own_device: deps.device.device_identity.current_device_id(),
         },
         membership: MembershipConvergenceDeps {
@@ -842,7 +849,6 @@ pub async fn build_sync_engine_assembly(
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             presence: Arc::clone(&presence),
             analytics: Arc::clone(&space_setup.analytics_facade),
-            visibility_gate: convergence_assembly.device_visibility_gate(),
             convergence: Arc::clone(&convergence_assembly),
         },
         transition: SpaceTransitionDeps {
@@ -883,6 +889,7 @@ pub async fn build_sync_engine_assembly(
             peer_addresses: Arc::clone(&space_setup.peer_addr_repo),
             presence: Arc::clone(&presence),
             local_device_id: deps.device.device_identity.current_device_id(),
+            peer_scope: convergence_assembly.current_peer_scope(),
         },
         presence.subscribe(),
         Arc::clone(&facade),
@@ -904,6 +911,7 @@ pub async fn build_sync_engine_assembly(
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             member_repo: Arc::clone(&deps.device.member_repo),
             removal_gate: convergence_assembly.removal_gate(),
+            peer_scope: convergence_assembly.current_peer_scope(),
             presence: Arc::clone(&presence),
             transfer_cipher: Arc::clone(&deps.security.transfer_cipher),
             clipboard_dispatch,
@@ -1034,6 +1042,7 @@ pub async fn build_sync_engine_assembly(
         member_repo: Arc::clone(&deps.device.member_repo),
         content_gate: convergence_assembly.removal_gate(),
         peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
+        peer_scope: convergence_assembly.current_peer_scope(),
         presence: Arc::clone(&presence),
         entry_lookup: Arc::clone(&deps.clipboard.entry_ports.find_by_snapshot_hash),
         availability: Some(Arc::clone(&deps.clipboard.entry_ports.availability)),

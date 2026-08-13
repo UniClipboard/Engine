@@ -84,6 +84,7 @@ pub(crate) fn build_clipboard_runtime(
         blob_store: deps.storage.blob_store.clone(),
         entry_delivery_repo: wired.shared.entry_delivery_repo.clone(),
         trusted_peer_repo: wired.shared.trusted_peer_repo.clone(),
+        peer_scope: sync_engine.current_peer_scope(),
         device_identity: deps.device.device_identity.clone(),
         entry_file_set_repo: deps.storage.entry_file_set_repo.clone(),
     }));

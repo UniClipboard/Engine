@@ -45,7 +45,7 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
-use uc_core::membership::ContentExchangeGatePort;
+use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::clipboard::{ActiveClipboardDispatchPort, LoadActiveClipboardPort};
 use uc_core::ports::presence::{PresenceEvent, ReachabilityState};
 use uc_core::ports::PresencePort;
@@ -67,6 +67,7 @@ pub(crate) struct PeerOnlineResyncWorker {
     load_register: Arc<dyn LoadActiveClipboardPort>,
     reconstructor: SnapshotReconstructor,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
+    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     send_gate: MemberSendGate,
 }
 
@@ -76,6 +77,7 @@ impl PeerOnlineResyncWorker {
         load_register: Arc<dyn LoadActiveClipboardPort>,
         reconstructor: SnapshotReconstructor,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
+        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
         content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Self {
@@ -84,6 +86,7 @@ impl PeerOnlineResyncWorker {
             load_register,
             reconstructor,
             dispatch,
+            peer_scope,
             send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
         }
     }
@@ -199,6 +202,15 @@ impl PeerOnlineResyncWorker {
         };
 
         for target in targets {
+            let is_current = self
+                .peer_scope
+                .snapshot()
+                .await
+                .map(|scope| scope.peer_device_ids.contains(&target))
+                .unwrap_or(false);
+            if !is_current {
+                continue;
+            }
             // Never resend the state to the device that activated it: it is
             // already the source of truth for this activation.
             if target == state.activated_by {
@@ -496,6 +508,7 @@ mod tests {
             Arc::new(FixedRegister(register)),
             reconstructor(),
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
+            Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             Arc::new(AllowAllMembers),
             Arc::new(AllowAllContent),
         );
@@ -549,6 +562,7 @@ mod tests {
             Arc::new(FixedRegister(Some(state("blake3v1:aa", "self")))),
             reconstructor(),
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
+            Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             Arc::new(AllowAllMembers),
             Arc::new(BlockedUpgradePeer),
         );

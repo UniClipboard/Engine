@@ -24,6 +24,7 @@ use tracing::{debug, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::DeviceId;
+use uc_core::membership::CurrentWorkspacePeerScopePort;
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
 use uc_core::ports::{PeerAddressRepositoryPort, PresencePort, ReachabilityState};
 
@@ -73,11 +74,22 @@ pub(crate) async fn send_active_state_to(
 pub(crate) async fn fan_out_active_state(
     dispatch: &Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: &Arc<dyn PeerAddressRepositoryPort>,
+    peer_scope: &Arc<dyn CurrentWorkspacePeerScopePort>,
     presence: &Arc<dyn PresencePort>,
     send_gate: &MemberSendGate,
     state: &ActiveClipboardState,
     categories: &ClipboardContentCategorySet,
 ) {
+    let scope = match peer_scope.snapshot().await {
+        Ok(snapshot) => snapshot
+            .peer_device_ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        Err(err) => {
+            warn!(error = ?err, "active state fan-out skipped: current peer scope unavailable");
+            return;
+        }
+    };
     let records = match peer_addr_repo.list().await {
         Ok(r) => r,
         Err(err) => {
@@ -88,6 +100,9 @@ pub(crate) async fn fan_out_active_state(
 
     for record in records {
         let target = record.device_id;
+        if !scope.contains(&target) {
+            continue;
+        }
         // Never echo the state back to the device that activated it.
         if target == state.activated_by {
             continue;

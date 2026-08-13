@@ -48,9 +48,11 @@ pub use membership_history::{
 pub use ports::{
     BeginRevocationOutcome, ContentExchangeGatePort, CurrentMemberSignaturePort,
     CurrentMembershipAnnouncementMaterial, CurrentMembershipAnnouncementPort,
-    CurrentMembershipIdentity, CurrentMembershipIdentityPort, DeviceVisibilityGatePort,
-    GroupRevocationPort, GroupUpdateDispatchPort, LegacyPeerProbePort, MemberRepositoryPort,
-    MembershipAdmissionDecision, MembershipAdmissionGatePort, MembershipAnnouncementRepositoryPort,
+    CurrentMembershipIdentity, CurrentMembershipIdentityPort, CurrentWorkspaceLocalMembership,
+    CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
+    CurrentWorkspacePeerSnapshot, GroupRevocationPort, GroupUpdateDispatchPort,
+    LegacyPeerProbePort, MemberRepositoryPort, MembershipAdmissionDecision,
+    MembershipAdmissionGatePort, MembershipAnnouncementRepositoryPort,
     MembershipAppliedSecurityUpdateRepositoryPort, MembershipAttestationEndpointPort,
     MembershipAttestationPort, MembershipCandidateRepositoryPort, MembershipGossipEndpointPort,
     MembershipGossipTransportPort, MembershipHistoryExchangeEndpointPort,
@@ -77,7 +79,8 @@ pub use upgrade::{
     LegacyUpgradeResponse, LegacyUpgradeResponseKind, ProtectionGroupAdmission, ProtectionGroupId,
 };
 pub use workspace_convergence::{
-    AdmissionChangeFacts, AdmissionSavedFacts, PendingAdmissionRecord, WorkspaceConvergenceError,
+    AdmissionChangeFacts, AdmissionSavedFacts, PendingAdmissionRecord,
+    PendingAppliedMembershipEffect, PendingMembershipDecisionDelivery, WorkspaceConvergenceError,
     WorkspaceConvergenceEvent, WorkspaceConvergenceState, WorkspaceDigest, WorkspaceEffect,
     WorkspaceFailureCategory, WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
 };

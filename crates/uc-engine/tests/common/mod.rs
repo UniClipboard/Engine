@@ -244,6 +244,7 @@ use uc_core::membership::{
     CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityError,
     CurrentMembershipIdentityPort, MembershipSecurityUpdateError, MembershipSecurityUpdatePort,
+    SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
     WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
     WorkspaceConvergenceState,
 };
@@ -291,6 +292,7 @@ pub fn test_workspace_convergence(
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         peer_addr_repo: Arc::clone(&peer_addr_repo),
         presence: Arc::new(NoopPresence),
+        space_protection: Arc::new(ReadySpaceProtection),
         own_device,
     };
     Arc::new(SpaceConvergenceAssembly::new(SpaceConvergenceDeps {
@@ -860,6 +862,22 @@ impl uc_core::membership::MembershipHistoryExchangePort for NoopExchange {
 }
 
 struct NoopLegacyPeerProbe;
+
+struct ReadySpaceProtection;
+
+#[async_trait]
+impl SpaceProtectionStatusPort for ReadySpaceProtection {
+    async fn query_space_protection(
+        &self,
+        _members: &[DeviceId],
+    ) -> Result<SpaceProtectionSnapshot, SpaceProtectionError> {
+        Ok(SpaceProtectionSnapshot {
+            mode: SpaceProtectionMode::Ready,
+            members: Vec::new(),
+            legacy_bootstrap: None,
+        })
+    }
+}
 
 #[async_trait]
 impl uc_core::membership::LegacyPeerProbePort for NoopLegacyPeerProbe {

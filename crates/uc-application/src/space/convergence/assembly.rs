@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use uc_core::membership::{
-    ContentExchangeGatePort, DeviceVisibilityGatePort, GroupRevocationPort,
+    ContentExchangeGatePort, CurrentWorkspacePeerScopePort, GroupRevocationPort,
     GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MembershipAttestationEndpointPort,
     MembershipGossipEndpointPort, MembershipHistoryExchangeEndpointPort,
 };
@@ -95,9 +95,8 @@ impl SpaceConvergenceAssembly {
         Arc::clone(&self.workspace) as Arc<dyn ContentExchangeGatePort>
     }
 
-    /// Device-list gate. A content pause must not hide a still-paired device.
-    pub fn device_visibility_gate(&self) -> Arc<dyn DeviceVisibilityGatePort> {
-        Arc::clone(&self.workspace) as Arc<dyn DeviceVisibilityGatePort>
+    pub fn current_peer_scope(&self) -> Arc<dyn CurrentWorkspacePeerScopePort> {
+        Arc::clone(&self.workspace) as Arc<dyn CurrentWorkspacePeerScopePort>
     }
 
     /// Membership attestation endpoint installed on the shared node.

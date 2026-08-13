@@ -26,7 +26,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, instrument, warn};
 
-use uc_core::membership::ContentExchangeGatePort;
+use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
 use uc_core::ports::{PeerAddressRepositoryPort, PresencePort, SettingsPort};
 use uc_core::MemberRepositoryPort;
@@ -45,6 +45,7 @@ pub(crate) struct RestoreBroadcastWorker {
     settings: Arc<dyn SettingsPort>,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     presence: Arc<dyn PresencePort>,
     send_gate: MemberSendGate,
 }
@@ -55,6 +56,7 @@ impl RestoreBroadcastWorker {
         settings: Arc<dyn SettingsPort>,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
         presence: Arc<dyn PresencePort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
         content_gate: Arc<dyn ContentExchangeGatePort>,
@@ -64,6 +66,7 @@ impl RestoreBroadcastWorker {
             settings,
             dispatch,
             peer_addr_repo,
+            peer_scope,
             presence,
             send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
         }
@@ -137,6 +140,7 @@ impl RestoreBroadcastWorker {
         fan_out_active_state(
             &self.dispatch,
             &self.peer_addr_repo,
+            &self.peer_scope,
             &self.presence,
             &self.send_gate,
             &request.state,
@@ -160,7 +164,11 @@ mod tests {
         ActiveClipboardState, ClipboardContentCategory, ClipboardContentCategorySet,
     };
     use uc_core::ids::{DeviceId, EntryId};
-    use uc_core::membership::ContentExchangeGatePort;
+    use uc_core::membership::{
+        ContentExchangeGatePort, CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
+        CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
+        CurrentWorkspacePeerSnapshot,
+    };
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::clipboard::ActiveClipboardDispatchError;
     use uc_core::ports::{
@@ -298,6 +306,22 @@ mod tests {
         }
     }
 
+    struct FixedPeerScope(Vec<DeviceId>);
+
+    #[async_trait]
+    impl CurrentWorkspacePeerScopePort for FixedPeerScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
+            Ok(CurrentWorkspacePeerSnapshot {
+                revision: 1,
+                source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+                local_membership: CurrentWorkspaceLocalMembership::Active,
+                peer_device_ids: self.0.clone(),
+            })
+        }
+    }
+
     fn request(snapshot_hash: &str) -> RestoreBroadcastRequest {
         let mut categories = ClipboardContentCategorySet::empty();
         categories.insert(ClipboardContentCategory::Text);
@@ -329,11 +353,39 @@ mod tests {
             Arc::new(OnePeerAddrRepo {
                 device: DeviceId::new("peer-1"),
             }),
+            Arc::new(FixedPeerScope(vec![DeviceId::new("peer-1")])),
             Arc::new(StaticPresence(presence)),
             Arc::new(AllowAllMembers),
             Arc::new(AllowAllContent),
         );
         (worker, tx, dispatch)
+    }
+
+    #[tokio::test]
+    async fn removed_peer_with_stale_address_does_not_receive_restore_broadcast() {
+        let (tx, rx) = unbounded_channel();
+        let dispatch = Arc::new(DispatchSpy::default());
+        let worker = RestoreBroadcastWorker::new(
+            rx,
+            Arc::new(FixedSettings {
+                sync_on_restore: true,
+            }),
+            Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
+            Arc::new(OnePeerAddrRepo {
+                device: DeviceId::new("peer-1"),
+            }),
+            Arc::new(FixedPeerScope(vec![])),
+            Arc::new(StaticPresence(ReachabilityState::Online)),
+            Arc::new(AllowAllMembers),
+            Arc::new(AllowAllContent),
+        );
+        let handle = worker.spawn();
+
+        tx.send(request("blake3v1:aa")).unwrap();
+        tokio::time::sleep(RESTORE_BROADCAST_DEBOUNCE + Duration::from_millis(80)).await;
+
+        assert!(dispatch.sent.lock().unwrap().is_empty());
+        handle.abort();
     }
 
     #[tokio::test]
@@ -380,6 +432,7 @@ mod tests {
             Arc::new(OnePeerAddrRepo {
                 device: DeviceId::new("peer-1"),
             }),
+            Arc::new(FixedPeerScope(vec![DeviceId::new("peer-1")])),
             Arc::new(StaticPresence(ReachabilityState::Online)),
             Arc::new(AllowAllMembers),
             Arc::new(BlockedUpgradePeer),

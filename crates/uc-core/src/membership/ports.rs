@@ -518,11 +518,38 @@ pub trait ContentExchangeGatePort: Send + Sync {
     async fn is_locally_removed(&self, device_id: &DeviceId) -> bool;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentWorkspacePeerScopeSource {
+    CurrentHistory,
+    Legacy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentWorkspaceLocalMembership {
+    Active,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentWorkspacePeerSnapshot {
+    pub revision: u64,
+    pub source: CurrentWorkspacePeerScopeSource,
+    pub local_membership: CurrentWorkspaceLocalMembership,
+    pub peer_device_ids: Vec<DeviceId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentWorkspacePeerScopeError {
+    Locked,
+    Unavailable,
+    Corrupt,
+}
+
 #[async_trait]
-pub trait DeviceVisibilityGatePort: Send + Sync {
-    /// Returns `true` only when the device is no longer a visible member.
-    /// A content pause, including an upgrade requirement, must not hide it.
-    async fn is_hidden_from_device_lists(&self, device_id: &DeviceId) -> bool;
+pub trait CurrentWorkspacePeerScopePort: Send + Sync {
+    async fn snapshot(
+        &self,
+    ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError>;
 }
 
 /// 准入前由成员历史负责人给出的唯一决定。

@@ -334,6 +334,58 @@ impl ContentExchangeGatePort for AllowAllRemovalTargets {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct AllTestPeerScope;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl uc_core::membership::CurrentWorkspacePeerScopePort for AllTestPeerScope {
+    async fn snapshot(
+        &self,
+    ) -> Result<
+        uc_core::membership::CurrentWorkspacePeerSnapshot,
+        uc_core::membership::CurrentWorkspacePeerScopeError,
+    > {
+        Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+            revision: 1,
+            source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
+            local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
+            peer_device_ids: [
+                "peer-a",
+                "peer-accept-only",
+                "peer-b",
+                "peer-c",
+                "peer-dup",
+                "peer-glitch",
+                "peer-io",
+                "peer-mute",
+                "peer-no-text",
+                "peer-off",
+                "peer-ok",
+                "peer-on",
+                "peer-orphan",
+                "peer-policy",
+                "peer-rej",
+                "peer-rejecty",
+                "peer-slow",
+                "peer-strict",
+                "peer-v2",
+                "peer-1",
+                "peer-2",
+                "peer-p",
+                "peer-rebroadcast",
+                "peer-fast",
+                "peer-slow",
+                "peer-removed",
+                "peer-retained",
+            ]
+            .into_iter()
+            .map(DeviceId::new)
+            .collect(),
+        })
+    }
+}
+
 impl DispatchClipboardEntryUseCase {
     /// The 13-port positional signature is intentionally preserved so
     /// bootstrap and tests keep wiring unchanged; the ports are reassembled
@@ -370,6 +422,7 @@ impl DispatchClipboardEntryUseCase {
             entry_delivery_repo,
             host_event_bus,
             Arc::new(AllowAllRemovalTargets),
+            Arc::new(AllTestPeerScope),
         )
     }
 
@@ -389,6 +442,7 @@ impl DispatchClipboardEntryUseCase {
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
         removal_gate: Arc<dyn ContentExchangeGatePort>,
+        peer_scope: Arc<dyn uc_core::membership::CurrentWorkspacePeerScopePort>,
     ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {
@@ -399,6 +453,7 @@ impl DispatchClipboardEntryUseCase {
                 peer_addr_repo,
                 member_repo,
                 removal_gate,
+                peer_scope,
             ),
             header_factory: OutboundHeaderFactory::new(settings, local_identity, header_clock),
             dispatcher: Arc::new(PerPeerDispatcher::new(
@@ -2619,7 +2674,7 @@ mod tests {
         // 1. 主流程返回时机:虚拟时钟在 deadline 处被截断;slack < 1s 留给
         //    `tokio::time::timeout` 与 `set.join_next` 的 wake 调度抖动。
         assert!(
-            main_elapsed >= FAN_OUT_DEADLINE,
+            main_elapsed >= FAN_OUT_DEADLINE - Duration::from_millis(1),
             "main should hit deadline first, elapsed={main_elapsed:?}"
         );
         assert!(

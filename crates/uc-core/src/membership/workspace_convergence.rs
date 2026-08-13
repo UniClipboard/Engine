@@ -10,7 +10,22 @@ use crate::ports::pairing::PairingSessionId;
 use crate::security::IdentityFingerprint;
 
 use super::member_instance::MemberInstanceId;
-use super::membership_history::{MembershipHistoryRelationship, MembershipReconciliation};
+use super::membership_history::{
+    MembershipDecision, MembershipEventId, MembershipHistoryRelationship, MembershipReconciliation,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAppliedMembershipEffect {
+    pub event_id: MembershipEventId,
+    pub member_facts_completed: bool,
+    pub security_update_completed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMembershipDecisionDelivery {
+    pub recipient: DeviceId,
+    pub decision: MembershipDecision,
+}
 
 /// Facts required to save a member's local roster and transport record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +167,10 @@ pub struct WorkspaceConvergenceState {
     pub own_instance: Option<MemberInstanceId>,
     pub peer_history_relationships: BTreeMap<DeviceId, MembershipHistoryRelationship>,
     pub membership_reconciliation: Option<MembershipReconciliation>,
+    #[serde(default)]
+    pub pending_applied_membership_effects: Vec<PendingAppliedMembershipEffect>,
+    #[serde(default)]
+    pub pending_membership_decision_deliveries: Vec<PendingMembershipDecisionDelivery>,
     pub pending_admissions: BTreeMap<PairingSessionId, PendingAdmissionRecord>,
     pub phase: WorkspacePhase,
     pub failure_category: Option<WorkspaceFailureCategory>,
@@ -167,6 +186,8 @@ impl Default for WorkspaceConvergenceState {
             own_instance: None,
             peer_history_relationships: BTreeMap::new(),
             membership_reconciliation: None,
+            pending_applied_membership_effects: Vec::new(),
+            pending_membership_decision_deliveries: Vec::new(),
             pending_admissions: BTreeMap::new(),
             phase: WorkspacePhase::LocallyApplied,
             failure_category: None,

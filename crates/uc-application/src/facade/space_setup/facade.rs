@@ -59,7 +59,7 @@ use crate::space::lifecycle::switch_space::{JoinerHandshakeRunner, SwitchSpaceUs
 use crate::space::lifecycle::unlock_space::UnlockSpaceUseCase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    DeviceVisibilityGatePort, MembershipAdmissionGatePort, RelationshipStateResetPort,
+    CurrentWorkspacePeerScopePort, MembershipAdmissionGatePort, RelationshipStateResetPort,
 };
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
 use uc_core::ports::setup::MigrationStatePort;
@@ -118,7 +118,7 @@ pub struct SpaceFacade {
     migration_state: Arc<dyn MigrationStatePort>,
     blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
-    visibility_gate: Arc<dyn DeviceVisibilityGatePort>,
+    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     /// Held for the desktop keepalive scheduler — `list_paired_peer_device_ids`
     /// reads `peer_addr_repo.list()` and `ensure_reachable_one` forwards to
     /// `presence.ensure_reachable`. Both are thin wrappers driven by the
@@ -170,12 +170,12 @@ impl SpaceFacade {
             peer_addr_repo,
             presence,
             analytics,
-            visibility_gate,
             convergence,
             ..
         } = admission;
         let convergence = Arc::clone(&convergence);
         let workspace_convergence = Arc::clone(&convergence.workspace);
+        let peer_scope = convergence.current_peer_scope();
         let group_update_delivery: Arc<dyn GroupUpdateDeliveryPort> =
             convergence.group_update_delivery();
         let SpaceTransitionDeps {
@@ -246,7 +246,7 @@ impl SpaceFacade {
             Arc::clone(&peer_addr_repo),
             presence,
             Arc::clone(&device_identity),
-            Arc::clone(&visibility_gate),
+            Arc::clone(&peer_scope),
         ));
         // Build the sponsor-side pairing stack: the handshake
         // coordinator owns wire I/O for the AdmissionOffer→Confirm flow;
@@ -345,7 +345,7 @@ impl SpaceFacade {
             migration_state: migration_state_for_facade,
             blob_migration_repo: blob_migration_repo_for_facade,
             member_repo: member_repo_for_facade,
-            visibility_gate,
+            peer_scope,
             peer_addr_repo: peer_addr_repo_for_facade,
             presence: presence_for_facade,
             local_device_id: local_device_id_for_facade,
@@ -747,13 +747,13 @@ impl SpaceFacade {
         let records = self.peer_addr_repo.list().await.map_err(|err| {
             EnsureReachableAllError::Repository(format!("peer_addr_repo.list: {err}"))
         })?;
+        let scope = self.peer_scope.snapshot().await.map_err(|error| {
+            EnsureReachableAllError::Repository(format!("current peer scope: {error:?}"))
+        })?;
         let mut peers = Vec::with_capacity(records.len());
         for record in records {
             if record.device_id == self.local_device_id
-                || self
-                    .visibility_gate
-                    .is_hidden_from_device_lists(&record.device_id)
-                    .await
+                || !scope.peer_device_ids.contains(&record.device_id)
             {
                 continue;
             }
@@ -852,8 +852,7 @@ mod tests {
         GroupUpdateDispatchPort, KeyEpochError, LegacyProtectionCommand, LegacyProtectionPort,
         LegacyProtectionResult, LegacyProtectionSnapshot, LegacyRequestInspection,
         LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort, LegacyUpgradeError,
-        LegacyUpgradeRequest, LegacyUpgradeResponse, MembershipAdmissionDecision,
-        MembershipAdmissionGatePort, MembershipError, PendingGroupUpdate,
+        LegacyUpgradeRequest, LegacyUpgradeResponse, MembershipError, PendingGroupUpdate,
         RelationshipStateResetError, RelationshipStateResetPort, RevocationId, SpaceMember,
         SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
     };
@@ -891,28 +890,6 @@ mod tests {
         SpaceAccessProofArtifact,
     };
 
-    struct AllowMembershipAdmission;
-
-    #[async_trait]
-    impl DeviceVisibilityGatePort for AllowMembershipAdmission {
-        async fn is_hidden_from_device_lists(&self, _device_id: &DeviceId) -> bool {
-            false
-        }
-    }
-
-    #[async_trait]
-    impl MembershipAdmissionGatePort for AllowMembershipAdmission {
-        async fn admission_decision(
-            &self,
-            _invitation_generation: u64,
-        ) -> MembershipAdmissionDecision {
-            MembershipAdmissionDecision::Allowed
-        }
-
-        async fn invitation_generation(&self) -> Result<u64, MembershipAdmissionDecision> {
-            Ok(0)
-        }
-    }
     use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError, TrustedPeerRepositoryPort};
     use uc_core::SessionId;
 
@@ -1881,7 +1858,6 @@ mod tests {
                     as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
                 presence: Arc::new(FakePresence),
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
-                visibility_gate: Arc::new(AllowMembershipAdmission),
                 convergence: Arc::new(SpaceConvergenceAssembly::new(
                     crate::space::convergence::assembly::SpaceConvergenceDeps {
                         workspace: crate::space::convergence::tests::test_deps(

@@ -14,6 +14,7 @@ use uc_core::clipboard::{
     FILE_DISPLAY_METADATA_MIME,
 };
 use uc_core::ids::{DeviceId, EntryId};
+use uc_core::membership::CurrentWorkspacePeerScopePort;
 use uc_core::ports::clipboard::{
     ClipboardPayloadResolverPort, EntryFileSetRepositoryPort, GetClipboardEntryPort,
     GetRepresentationPort, UpdateRepresentationProcessingResultPort,
@@ -164,6 +165,7 @@ pub struct ClipboardOutboundDeps {
     pub blob_store: Arc<dyn BlobReaderPort>,
     pub entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
+    pub peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
 }
 
@@ -520,6 +522,7 @@ impl ClipboardOutboundFacade {
             blob_store: deps.blob_store,
             entry_delivery_repo: deps.entry_delivery_repo,
             trusted_peer_repo: deps.trusted_peer_repo,
+            peer_scope: deps.peer_scope,
             device_identity: deps.device_identity,
             settings: deps.settings,
             entry_file_set_repo: deps.entry_file_set_repo,

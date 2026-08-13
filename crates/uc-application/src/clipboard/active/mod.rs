@@ -34,7 +34,7 @@ use tracing::{debug, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::ContentExchangeGatePort;
+use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::clipboard::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
     ActiveClipboardReceiverPort, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
@@ -116,6 +116,7 @@ pub struct ActiveClipboardDeps {
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub content_gate: Arc<dyn ContentExchangeGatePort>,
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    pub peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     /// Presence stream for the peer-online resync worker: an "online"
     /// transition triggers a resend of the current register to that peer.
     pub presence: Arc<dyn PresencePort>,
@@ -210,6 +211,7 @@ pub struct ActiveClipboardFacade {
     inbound_uc: Arc<ApplyInboundActiveClipboardStateUseCase>,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
     settings: Arc<dyn SettingsPort>,
     presence: Arc<dyn PresencePort>,
@@ -253,6 +255,7 @@ impl ActiveClipboardFacade {
             deps.coordinator,
             Arc::clone(&deps.dispatch),
             Arc::clone(&deps.peer_addr_repo),
+            Arc::clone(&deps.peer_scope),
             Arc::clone(&deps.presence),
             deps.clock,
             mobile_consumability,
@@ -285,6 +288,7 @@ impl ActiveClipboardFacade {
             inbound_uc,
             dispatch: deps.dispatch,
             peer_addr_repo: deps.peer_addr_repo,
+            peer_scope: deps.peer_scope,
             member_repo: deps.member_repo,
             settings: deps.settings,
             presence: deps.presence,
@@ -333,6 +337,7 @@ impl ActiveClipboardFacade {
         fan_out_active_state(
             &self.dispatch,
             &self.peer_addr_repo,
+            &self.peer_scope,
             &self.presence,
             &self.send_gate,
             &state,
@@ -383,6 +388,7 @@ impl ActiveClipboardFacade {
             Arc::clone(&self.load_register),
             self.reconstructor.clone(),
             Arc::clone(&self.dispatch),
+            Arc::clone(&self.peer_scope),
             Arc::clone(&self.member_repo),
             Arc::clone(&self.content_gate),
         )
@@ -397,6 +403,7 @@ impl ActiveClipboardFacade {
             Arc::clone(&self.settings),
             Arc::clone(&self.dispatch),
             Arc::clone(&self.peer_addr_repo),
+            Arc::clone(&self.peer_scope),
             Arc::clone(&self.presence),
             Arc::clone(&self.member_repo),
             Arc::clone(&self.content_gate),

@@ -8,6 +8,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uc_core::ids::DeviceId;
+use uc_core::membership::CurrentWorkspacePeerScopePort;
 use uc_core::ports::{
     PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort, ReachabilityState,
 };
@@ -25,6 +26,7 @@ pub struct MembershipConnectivityDeps {
     pub peer_addresses: Arc<dyn PeerAddressRepositoryPort>,
     pub presence: Arc<dyn PresencePort>,
     pub local_device_id: DeviceId,
+    pub peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
 }
 
 pub struct MembershipConnectivityRuntime {
@@ -110,6 +112,15 @@ impl MembershipConnectivity {
                 _ = cancel.cancelled() => break,
                 event = presence_events.recv() => match event {
                     Ok(event) if event.state == ReachabilityState::Online => {
+                        let allowed = self
+                            .deps
+                            .peer_scope
+                            .snapshot()
+                            .await
+                            .is_ok_and(|scope| scope.peer_device_ids.contains(&event.device_id));
+                        if !allowed {
+                            continue;
+                        }
                         let now = Instant::now();
                         backoff
                             .entry(event.device_id.as_str().to_string())
@@ -148,10 +159,20 @@ impl MembershipConnectivity {
             warn!("failed to list paired peers for membership connectivity");
             return true;
         };
-        let peers = records
+        let Ok(scope) = self.deps.peer_scope.snapshot().await else {
+            warn!("current peer scope is unavailable for membership connectivity");
+            backoff.clear();
+            return true;
+        };
+        let addressable = records
             .into_iter()
             .map(|record| record.device_id)
+            .collect::<HashSet<_>>();
+        let peers = scope
+            .peer_device_ids
+            .into_iter()
             .filter(|device| device != &self.deps.local_device_id)
+            .filter(|device| addressable.contains(device))
             .collect::<Vec<_>>();
         let paired = peers
             .iter()
@@ -286,6 +307,44 @@ mod tests {
         events: broadcast::Sender<PresenceEvent>,
     }
 
+    struct EmptyPeerScope;
+
+    struct FixedPeerScope(Vec<DeviceId>);
+
+    #[async_trait::async_trait]
+    impl uc_core::membership::CurrentWorkspacePeerScopePort for FixedPeerScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<
+            uc_core::membership::CurrentWorkspacePeerSnapshot,
+            uc_core::membership::CurrentWorkspacePeerScopeError,
+        > {
+            Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+                revision: 1,
+                source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
+                local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
+                peer_device_ids: self.0.clone(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::membership::CurrentWorkspacePeerScopePort for EmptyPeerScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<
+            uc_core::membership::CurrentWorkspacePeerSnapshot,
+            uc_core::membership::CurrentWorkspacePeerScopeError,
+        > {
+            Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+                revision: 1,
+                source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
+                local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
+                peer_device_ids: Vec::new(),
+            })
+        }
+    }
+
     #[async_trait::async_trait]
     impl PresencePort for BlockingPresence {
         async fn ensure_reachable(
@@ -338,6 +397,7 @@ mod tests {
                 peer_addresses: Arc::new(EmptyPeerAddresses),
                 presence: presence.clone(),
                 local_device_id: DeviceId::new("device-a"),
+                peer_scope: Arc::new(FixedPeerScope(vec![DeviceId::new("device-b")])),
             },
             presence_events,
         );
@@ -355,5 +415,37 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
             .await
             .expect("shutdown interrupts the in-flight online event dial");
+    }
+
+    #[tokio::test]
+    async fn online_event_for_a_non_current_peer_does_not_start_a_dial() {
+        let (events, presence_events) = broadcast::channel(4);
+        let presence = Arc::new(BlockingPresence {
+            started: Notify::new(),
+            events: events.clone(),
+        });
+        let runtime = start_membership_connectivity(
+            MembershipConnectivityDeps {
+                peer_addresses: Arc::new(EmptyPeerAddresses),
+                presence: presence.clone(),
+                local_device_id: DeviceId::new("device-a"),
+                peer_scope: Arc::new(EmptyPeerScope),
+            },
+            presence_events,
+        );
+        events
+            .send(PresenceEvent {
+                device_id: DeviceId::new("removed-device"),
+                state: ReachabilityState::Online,
+                at: Utc::now(),
+            })
+            .expect("presence event has a receiver");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), presence.started.notified())
+                .await
+                .is_err()
+        );
+        runtime.shutdown().await;
     }
 }

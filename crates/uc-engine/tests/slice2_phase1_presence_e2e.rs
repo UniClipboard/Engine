@@ -52,8 +52,8 @@ use uc_application::facade::space_setup::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    DeviceVisibilityGatePort, MemberRepositoryPort, MembershipAdmissionDecision,
-    MembershipAdmissionGatePort, MembershipError, PeerAdmissionPort, SpaceMember,
+    MemberRepositoryPort, MembershipAdmissionDecision, MembershipAdmissionGatePort,
+    MembershipError, PeerAdmissionPort, SpaceMember,
 };
 use uc_core::ports::pairing::PairingSessionPort;
 use uc_core::ports::space::ProofPort;
@@ -80,13 +80,6 @@ use uc_infra::security::{
 // ─── in-memory fakes (duplicated from slice1_handshake_e2e.rs) ──────────────
 
 struct AllowMembershipAdmission;
-
-#[async_trait]
-impl DeviceVisibilityGatePort for AllowMembershipAdmission {
-    async fn is_hidden_from_device_lists(&self, _device_id: &DeviceId) -> bool {
-        false
-    }
-}
 
 #[async_trait]
 impl MembershipAdmissionGatePort for AllowMembershipAdmission {
@@ -462,7 +455,6 @@ async fn build_side(name: &'static str, rendezvous_base_url: String) -> Side {
                 as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
             presence,
             analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
-            visibility_gate: Arc::new(AllowMembershipAdmission),
             convergence: common::test_workspace_convergence(
                 Arc::clone(&member_repo) as Arc<dyn MemberRepositoryPort>,
                 Arc::clone(&trusted_peer_repo) as Arc<dyn TrustedPeerRepositoryPort>,

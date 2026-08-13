@@ -20,7 +20,7 @@ use tokio::sync::broadcast;
 use tracing::instrument;
 
 use uc_core::membership::{
-    BootstrapId, DeviceVisibilityGatePort, GroupBootstrapPort, GroupBootstrapResult,
+    BootstrapId, CurrentWorkspacePeerScopePort, GroupBootstrapPort, GroupBootstrapResult,
     LegacyBootstrapStatus, MemberProtectionStatus as CoreMemberProtectionStatus,
     MemberRepositoryPort, MembershipEventId, RemovalDecision,
     SpaceProtectionMode as CoreSpaceProtectionMode, SpaceProtectionSnapshot,
@@ -60,7 +60,7 @@ pub struct MemberRosterFacade {
     group_bootstrap: Option<Arc<dyn GroupBootstrapPort>>,
     space_protection: Option<Arc<dyn SpaceProtectionStatusPort>>,
     workspace_convergence: Option<Arc<crate::space::convergence::WorkspaceConvergence>>,
-    visibility_gate: Option<Arc<dyn DeviceVisibilityGatePort>>,
+    peer_scope: Option<Arc<dyn CurrentWorkspacePeerScopePort>>,
 }
 
 impl MemberRosterFacade {
@@ -73,7 +73,7 @@ impl MemberRosterFacade {
             group_bootstrap: None,
             space_protection: None,
             workspace_convergence: None,
-            visibility_gate: None,
+            peer_scope: None,
         }
     }
 
@@ -94,14 +94,14 @@ impl MemberRosterFacade {
         mut self,
         convergence: Arc<crate::space::convergence::assembly::SpaceConvergenceAssembly>,
     ) -> Self {
-        self.visibility_gate = Some(convergence.device_visibility_gate());
+        self.peer_scope = Some(convergence.current_peer_scope());
         self.workspace_convergence = Some(Arc::clone(&convergence.workspace));
         self
     }
 
     #[cfg(test)]
-    fn with_visibility_gate(mut self, visibility_gate: Arc<dyn DeviceVisibilityGatePort>) -> Self {
-        self.visibility_gate = Some(visibility_gate);
+    fn with_peer_scope(mut self, peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>) -> Self {
+        self.peer_scope = Some(peer_scope);
         self
     }
 
@@ -132,7 +132,13 @@ impl MemberRosterFacade {
             .list()
             .await
             .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
-
+        let scope = self
+            .peer_scope
+            .as_ref()
+            .ok_or(RosterError::MembershipReconciliationUnavailable)?
+            .snapshot()
+            .await
+            .map_err(|_| RosterError::MembershipReconciliationUnavailable)?;
         let local_fp = self
             .local_identity
             .get_current_fingerprint()
@@ -144,6 +150,9 @@ impl MemberRosterFacade {
             let is_local = local_fp
                 .as_ref()
                 .is_some_and(|fp| fp == &member.identity_fingerprint);
+            if !is_local && !scope.peer_device_ids.contains(&member.device_id) {
+                continue;
+            }
             let state = self.presence.current_state(&member.device_id).await;
             entries.push(RosterEntry {
                 device_id: member.device_id,
@@ -158,17 +167,13 @@ impl MemberRosterFacade {
     /// 列出成员摘要。该方法面向 daemon/http 等外部入口,只返回应用层值对象。
     #[instrument(skip_all)]
     pub async fn list_members(&self) -> Result<Vec<MemberSummary>, RosterError> {
-        let members = self
-            .member_repo
-            .list()
-            .await
-            .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
-
-        Ok(members
+        Ok(self
+            .list_with_presence()
+            .await?
             .into_iter()
-            .map(|member| MemberSummary {
-                device_id: member.device_id.as_str().to_string(),
-                device_name: member.device_name,
+            .map(|entry| MemberSummary {
+                device_id: entry.device_id.as_str().to_string(),
+                device_name: entry.device_name,
             })
             .collect())
     }
@@ -186,14 +191,6 @@ impl MemberRosterFacade {
         for entry in entries {
             if entry.is_local {
                 continue;
-            }
-            if let Some(visibility_gate) = &self.visibility_gate {
-                if visibility_gate
-                    .is_hidden_from_device_lists(&entry.device_id)
-                    .await
-                {
-                    continue;
-                }
             }
             let path = match &self.connection_channel {
                 Some(port) => port.path_for(&entry.device_id).await,
@@ -581,12 +578,22 @@ mod tests {
         }
     }
 
-    struct RemovedTarget(DeviceId);
+    struct FixedPeerScope(Vec<DeviceId>);
 
     #[async_trait]
-    impl DeviceVisibilityGatePort for RemovedTarget {
-        async fn is_hidden_from_device_lists(&self, device_id: &DeviceId) -> bool {
-            *device_id == self.0
+    impl CurrentWorkspacePeerScopePort for FixedPeerScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<
+            uc_core::membership::CurrentWorkspacePeerSnapshot,
+            uc_core::membership::CurrentWorkspacePeerScopeError,
+        > {
+            Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+                revision: 1,
+                source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
+                local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
+                peer_device_ids: self.0.clone(),
+            })
         }
     }
 
@@ -617,7 +624,7 @@ mod tests {
             presence: Arc::new(StaticPresence),
             connection_channel: None,
         })
-        .with_visibility_gate(Arc::new(RemovedTarget(DeviceId::new("bob"))));
+        .with_peer_scope(Arc::new(FixedPeerScope(vec![DeviceId::new("charlie")])));
 
         let snapshots = roster.list_peer_snapshots().await.unwrap();
         assert_eq!(
@@ -626,6 +633,15 @@ mod tests {
                 .map(|snapshot| snapshot.peer_id)
                 .collect::<Vec<_>>(),
             vec!["charlie"]
+        );
+
+        let members = roster.list_members().await.unwrap();
+        assert_eq!(
+            members
+                .into_iter()
+                .map(|member| member.device_id)
+                .collect::<Vec<_>>(),
+            vec!["alice", "charlie"]
         );
     }
 }

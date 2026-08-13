@@ -18,6 +18,8 @@
 - [工作空间全局收敛](specs/016-workspace-wide-convergence.md)
 - [配对作为工作空间准入通道](specs/017-pairing-as-workspace-admission.md)
 - [按设备精确公开收敛等待状态](specs/019-device-specific-convergence-waiting-status.md)
+- [个人设备信任核对产品契约](specs/021-device-trust-reconciliation-product-contract.md)
+- [当前成员运行范围统一派生](specs/022-current-member-runtime-scope.md)
 - [Engine 仓库检查](specs/engine-repository-checks.md)
 - [Port 定义](specs/ports.md)
 - [uc-engine 跨平台核心接口](specs/uc-engine-interface.md)

@@ -7,11 +7,11 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, debug_span, info, instrument, warn, Instrument};
 use uc_core::membership::{
-    decide_legacy_upgrade, LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult,
-    LegacyRequestInspection, LegacyUpgradeAction, LegacyUpgradeDescriptor,
-    LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort,
-    LegacyUpgradeError, LegacyUpgradeRequest, LegacyUpgradeResponse, LegacyUpgradeResponseKind,
-    MemberRepositoryPort,
+    decide_legacy_upgrade, CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
+    LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult, LegacyRequestInspection,
+    LegacyUpgradeAction, LegacyUpgradeDescriptor, LegacyUpgradeDispatchError,
+    LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort, LegacyUpgradeError, LegacyUpgradeRequest,
+    LegacyUpgradeResponse, LegacyUpgradeResponseKind, MemberRepositoryPort,
 };
 use uc_core::ports::{DeviceIdentityPort, PresenceEvent, ReachabilityState};
 
@@ -31,6 +31,7 @@ pub struct AutomaticLegacyUpgradeDeps {
 pub struct AutomaticLegacyUpgrade {
     deps: AutomaticLegacyUpgradeDeps,
     convergence: Option<Arc<WorkspaceConvergence>>,
+    peer_scope: Option<Arc<dyn CurrentWorkspacePeerScopePort>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,11 +73,19 @@ impl AutomaticLegacyUpgrade {
         Self {
             deps,
             convergence: None,
+            peer_scope: None,
         }
     }
 
     pub fn with_convergence(mut self, convergence: Arc<WorkspaceConvergence>) -> Self {
+        self.peer_scope = Some(Arc::clone(&convergence) as Arc<dyn CurrentWorkspacePeerScopePort>);
         self.convergence = Some(convergence);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_peer_scope(mut self, peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>) -> Self {
+        self.peer_scope = Some(peer_scope);
         self
     }
 
@@ -97,22 +106,32 @@ impl AutomaticLegacyUpgrade {
         discovery_phase: LegacyDiscoveryPhase,
     ) -> Result<LegacyUpgradePassOutcome, LegacyUpgradeError> {
         let local_device_id = self.deps.device_identity.current_device_id();
+        let scope = self
+            .peer_scope
+            .as_ref()
+            .ok_or_else(|| LegacyUpgradeError::Internal("current peer scope is absent".into()))?
+            .snapshot()
+            .await
+            .map_err(|_| {
+                LegacyUpgradeError::Internal("current peer scope is unavailable".into())
+            })?;
+        if scope.source != CurrentWorkspacePeerScopeSource::Legacy {
+            return Ok(LegacyUpgradePassOutcome::ready(false));
+        }
         let members = self
             .deps
             .member_repo
             .list()
             .await
             .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
-        let member_ids = members
-            .iter()
-            .map(|member| member.device_id)
-            .collect::<Vec<_>>();
+        let mut member_ids = scope.peer_device_ids.clone();
+        member_ids.push(local_device_id);
         let mut successful_exchanges = 0usize;
         let mut should_create_local_group = false;
 
         for member in members
             .iter()
-            .filter(|member| member.device_id != local_device_id)
+            .filter(|member| scope.peer_device_ids.contains(&member.device_id))
         {
             let request = self
                 .deps
@@ -259,16 +278,20 @@ impl AutomaticLegacyUpgrade {
         request: &LegacyUpgradeRequest,
     ) -> Result<LegacyUpgradeResponse, LegacyUpgradeError> {
         let local_device_id = self.deps.device_identity.current_device_id();
-        let members = self
-            .deps
-            .member_repo
-            .list()
+        let scope = self
+            .peer_scope
+            .as_ref()
+            .ok_or(LegacyUpgradeError::Unauthorized)?
+            .snapshot()
             .await
-            .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
-        let member_ids = members
-            .iter()
-            .map(|member| member.device_id)
-            .collect::<Vec<_>>();
+            .map_err(|_| LegacyUpgradeError::Unauthorized)?;
+        if scope.source != CurrentWorkspacePeerScopeSource::Legacy
+            || !scope.peer_device_ids.contains(request.source_device_id())
+        {
+            return Err(LegacyUpgradeError::Unauthorized);
+        }
+        let mut member_ids = scope.peer_device_ids;
+        member_ids.push(local_device_id);
         let protection = self.deps.protection.snapshot(&member_ids).await?;
         if protection
             .protected_members
@@ -331,15 +354,13 @@ impl AutomaticLegacyUpgrade {
     async fn bootstrap_local_group(&self) -> Result<LegacyUpgradeDescriptor, LegacyUpgradeError> {
         let local_device_id = self.deps.device_identity.current_device_id();
         let retained_members = self
-            .deps
-            .member_repo
-            .list()
+            .peer_scope
+            .as_ref()
+            .ok_or_else(|| LegacyUpgradeError::Internal("current peer scope is absent".into()))?
+            .snapshot()
             .await
-            .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?
-            .into_iter()
-            .map(|member| member.device_id)
-            .filter(|device_id| device_id != &local_device_id)
-            .collect::<Vec<_>>();
+            .map_err(|_| LegacyUpgradeError::Internal("current peer scope is unavailable".into()))?
+            .peer_device_ids;
         let descriptor = match self
             .deps
             .protection

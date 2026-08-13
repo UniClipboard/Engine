@@ -46,7 +46,7 @@ use uc_core::membership::{
     MembershipHistoryExchangePort, MembershipHistoryHello, MembershipHistoryMessage,
     MembershipHistoryRelationship, MembershipOperation, MembershipReconciliationOutcome,
     MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalDecision,
-    WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
+    SpaceProtectionStatusPort, WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
     WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState, WorkspaceMergeOutcome,
     WorkspacePhase, WorkspaceSnapshot,
 };
@@ -110,6 +110,7 @@ pub struct WorkspaceConvergenceDeps {
     pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     pub presence: Arc<dyn PresencePort>,
+    pub space_protection: Arc<dyn SpaceProtectionStatusPort>,
     pub own_device: DeviceId,
 }
 
@@ -361,20 +362,138 @@ impl WorkspaceConvergence {
         Ok(())
     }
 
+    fn enqueue_applied_membership_effects(
+        state: &mut WorkspaceConvergenceState,
+        events: &[MembershipEvent],
+    ) {
+        for event in events {
+            let event_id = event.event_id();
+            if state
+                .pending_applied_membership_effects
+                .iter()
+                .any(|effect| effect.event_id == event_id)
+            {
+                continue;
+            }
+            state.pending_applied_membership_effects.push(
+                uc_core::membership::PendingAppliedMembershipEffect {
+                    event_id,
+                    member_facts_completed: !matches!(
+                        event.operation,
+                        MembershipOperation::AddDevice { .. }
+                    ),
+                    security_update_completed: event.security_update_payload.is_empty(),
+                },
+            );
+        }
+    }
+
+    async fn execute_pending_membership_effects(
+        &self,
+        state: &mut WorkspaceConvergenceState,
+        now_ms: i64,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        for index in 0..state.pending_applied_membership_effects.len() {
+            let effect = state.pending_applied_membership_effects[index].clone();
+            let event = state
+                .membership_reconciliation
+                .as_ref()
+                .and_then(|history| history.event(effect.event_id))
+                .cloned()
+                .ok_or_else(|| {
+                    WorkspaceConvergenceError::Inconsistent(
+                        "pending membership effect references an unknown event".to_owned(),
+                    )
+                })?;
+
+            if !effect.member_facts_completed {
+                if let MembershipOperation::AddDevice { admission } = &event.operation {
+                    self.save_member_facts(admission, now_ms).await?;
+                }
+                state.pending_applied_membership_effects[index].member_facts_completed = true;
+                self.persist(state).await?;
+            }
+            if !effect.security_update_completed {
+                self.deps
+                    .security_updates
+                    .apply_group_epoch_update(&event.security_update_payload)
+                    .await?;
+                state.pending_applied_membership_effects[index].security_update_completed = true;
+                self.persist(state).await?;
+            }
+        }
+        state.pending_applied_membership_effects.clear();
+        self.persist(state).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn recover_pending_membership_effects(
+        &self,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        let _guard = self.state_lock.lock().await;
+        let mut state = self.load_state().await?;
+        if state.pending_applied_membership_effects.is_empty() {
+            return Ok(());
+        }
+        self.execute_pending_membership_effects(&mut state, self.deps.clock.now_ms())
+            .await?;
+        self.publish(&state);
+        self.notify();
+        Ok(())
+    }
+
+    pub(crate) async fn deliver_pending_membership_decisions(
+        &self,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        let pending = {
+            let _guard = self.state_lock.lock().await;
+            self.load_state()
+                .await?
+                .pending_membership_decision_deliveries
+        };
+        for delivery in pending {
+            let delivered = self
+                .deps
+                .membership_history_exchange
+                .exchange_membership_history(
+                    &delivery.recipient,
+                    MembershipHistoryMessage::Decision(delivery.decision.clone()),
+                )
+                .await
+                .is_ok();
+            if !delivered {
+                continue;
+            }
+            let _guard = self.state_lock.lock().await;
+            let mut state = self.load_state().await?;
+            state.pending_membership_decision_deliveries.retain(|item| {
+                item.recipient != delivery.recipient || item.decision != delivery.decision
+            });
+            self.persist(&state).await?;
+        }
+        Ok(())
+    }
+
     fn publish(&self, state: &WorkspaceConvergenceState) {
         let _ = self.events.send(state.snapshot());
     }
 
     /// Whether the local device may currently drive content sends.
     pub async fn locally_removed(&self, device_id: &DeviceId) -> bool {
+        let in_current_scope = uc_core::membership::CurrentWorkspacePeerScopePort::snapshot(self)
+            .await
+            .map(|scope| scope.peer_device_ids.contains(device_id))
+            .unwrap_or(false);
+        if !in_current_scope {
+            return true;
+        }
         let state = match self.load_state().await {
             Ok(state) => state,
             Err(_) => return true,
         };
-        if state.removed {
-            return true;
-        }
-        state.is_device_removed(device_id) || !state.allows_normal_exchange(device_id)
+        state.removed
+            || state.is_device_removed(device_id)
+            || !state.allows_normal_exchange(device_id)
     }
 
     /// Whether the local member instance has observed its own removal.
@@ -967,18 +1086,19 @@ impl WorkspaceConvergence {
                     })?;
                 history.newly_applied_events_after(previous_applied_head)
             };
+            for recipient in &recipients {
+                state.pending_membership_decision_deliveries.push(
+                    uc_core::membership::PendingMembershipDecisionDelivery {
+                        recipient: recipient.clone(),
+                        decision: signed_decision.clone(),
+                    },
+                );
+            }
             if decision == RemovalDecision::Accept {
-                for applied_event in applied_events {
-                    if let MembershipOperation::AddDevice { admission } = &applied_event.operation {
-                        self.save_member_facts(admission, now_ms).await?;
-                    }
-                    if !applied_event.security_update_payload.is_empty() {
-                        self.deps
-                            .security_updates
-                            .apply_group_epoch_update(&applied_event.security_update_payload)
-                            .await?;
-                    }
-                }
+                Self::enqueue_applied_membership_effects(&mut state, &applied_events);
+                self.persist(&state).await?;
+                self.execute_pending_membership_effects(&mut state, now_ms)
+                    .await?;
             }
             let relationship = match decision {
                 RemovalDecision::Accept => MembershipHistoryRelationship::Consistent,
@@ -996,16 +1116,9 @@ impl WorkspaceConvergence {
             (state.snapshot(), recipients, signed_decision)
         };
 
-        for recipient in recipients {
-            let _ = self
-                .deps
-                .membership_history_exchange
-                .exchange_membership_history(
-                    &recipient,
-                    MembershipHistoryMessage::Decision(signed_decision.clone()),
-                )
-                .await;
-        }
+        let _ = recipients;
+        let _ = signed_decision;
+        self.deliver_pending_membership_decisions().await?;
         Ok(snapshot)
     }
 
@@ -1273,17 +1386,10 @@ impl WorkspaceConvergence {
                 };
                 history.newly_applied_events_after(previous_applied_head)
             };
-            for applied_event in applied_events {
-                if let MembershipOperation::AddDevice { admission } = &applied_event.operation {
-                    self.save_member_facts(admission, now_ms).await?;
-                }
-                if !applied_event.security_update_payload.is_empty() {
-                    self.deps
-                        .security_updates
-                        .apply_group_epoch_update(&applied_event.security_update_payload)
-                        .await?;
-                }
-            }
+            Self::enqueue_applied_membership_effects(state, &applied_events);
+            self.persist(state).await?;
+            self.execute_pending_membership_effects(state, now_ms)
+                .await?;
             if matches!(outcome, MembershipReconciliationOutcome::Diverged) {
                 break;
             }
@@ -2146,12 +2252,116 @@ impl uc_core::membership::ContentExchangeGatePort for WorkspaceConvergence {
 }
 
 #[async_trait]
-impl uc_core::membership::DeviceVisibilityGatePort for WorkspaceConvergence {
-    async fn is_hidden_from_device_lists(&self, device_id: &DeviceId) -> bool {
-        match self.load_state().await {
-            Ok(state) => state.removed || state.is_device_removed(device_id),
-            Err(_) => true,
-        }
+impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence {
+    async fn snapshot(
+        &self,
+    ) -> Result<
+        uc_core::membership::CurrentWorkspacePeerSnapshot,
+        uc_core::membership::CurrentWorkspacePeerScopeError,
+    > {
+        use uc_core::membership::{
+            CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
+            CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot,
+        };
+
+        let state = self.load_state().await.map_err(|error| match error {
+            WorkspaceConvergenceError::Repository(
+                uc_core::membership::WorkspaceConvergenceRepositoryError::Locked,
+            ) => CurrentWorkspacePeerScopeError::Locked,
+            WorkspaceConvergenceError::Repository(
+                uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt,
+            ) => CurrentWorkspacePeerScopeError::Corrupt,
+            _ => CurrentWorkspacePeerScopeError::Unavailable,
+        })?;
+        let history = state
+            .membership_reconciliation
+            .as_ref()
+            .filter(|history| history.applied_head().is_some());
+        let Some(history) = history else {
+            let members = self
+                .deps
+                .member_repo
+                .list()
+                .await
+                .map_err(|_| CurrentWorkspacePeerScopeError::Unavailable)?;
+            let member_ids = members
+                .iter()
+                .map(|member| member.device_id)
+                .collect::<Vec<_>>();
+            let protection = self
+                .deps
+                .space_protection
+                .query_space_protection(&member_ids)
+                .await
+                .map_err(|error| match error {
+                    uc_core::membership::SpaceProtectionError::Corrupted => {
+                        CurrentWorkspacePeerScopeError::Corrupt
+                    }
+                    _ => CurrentWorkspacePeerScopeError::Unavailable,
+                })?;
+            if protection.mode != uc_core::membership::SpaceProtectionMode::Legacy {
+                return Err(CurrentWorkspacePeerScopeError::Unavailable);
+            }
+            let local_is_member = member_ids.contains(&self.deps.own_device);
+            let mut peer_device_ids = if local_is_member {
+                member_ids
+                    .into_iter()
+                    .filter(|device| *device != self.deps.own_device)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            peer_device_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            peer_device_ids.dedup();
+            return Ok(CurrentWorkspacePeerSnapshot {
+                revision: state.revision,
+                source: CurrentWorkspacePeerScopeSource::Legacy,
+                local_membership: if local_is_member {
+                    CurrentWorkspaceLocalMembership::Active
+                } else {
+                    CurrentWorkspaceLocalMembership::Removed
+                },
+                peer_device_ids,
+            });
+        };
+        let local_membership = if state.removed
+            || state
+                .own_instance
+                .is_none_or(|instance| !history.effective_members().contains(&instance))
+        {
+            CurrentWorkspaceLocalMembership::Removed
+        } else {
+            CurrentWorkspaceLocalMembership::Active
+        };
+        let pending_additions = state
+            .pending_applied_membership_effects
+            .iter()
+            .filter_map(|effect| history.event(effect.event_id))
+            .filter_map(|event| match &event.operation {
+                MembershipOperation::AddDevice { admission } => Some(admission.device_id.clone()),
+                MembershipOperation::RemoveDevice { .. } => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut peer_device_ids = if local_membership == CurrentWorkspaceLocalMembership::Active {
+            history
+                .effective_members()
+                .into_iter()
+                .filter_map(|member| history.device_for_member(&member))
+                .filter(|device| *device != self.deps.own_device)
+                .filter(|device| !pending_additions.contains(device))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        peer_device_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        peer_device_ids.dedup();
+
+        Ok(CurrentWorkspacePeerSnapshot {
+            revision: state.revision,
+            source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+            local_membership,
+            peer_device_ids,
+        })
     }
 }
 

@@ -41,8 +41,18 @@ impl WorkspaceConvergence {
         let (commands, mut command_rx) = mpsc::unbounded_channel();
         let owner = Arc::clone(&self);
         let task = tokio::spawn(async move {
+            if let Err(error) = owner.recover_pending_membership_effects().await {
+                warn!(error = %error, "workspace convergence: pending membership effects deferred");
+            }
+            if let Err(error) = owner.deliver_pending_membership_decisions().await {
+                warn!(error = %error, "workspace convergence: pending membership decisions deferred");
+            }
             let mut paused = false;
             let mut presence_open = true;
+            let mut recovery_tick = tokio::time::interval_at(
+                tokio::time::Instant::now() + Duration::from_secs(30),
+                Duration::from_secs(30),
+            );
             loop {
                 tokio::select! {
                     command = command_rx.recv() => match command {
@@ -53,6 +63,12 @@ impl WorkspaceConvergence {
                         Some(WorkspaceConvergenceRuntimeCommand::Resume(completed)) => {
                             paused = false;
                             let _ = completed.send(());
+                            if let Err(error) = owner.recover_pending_membership_effects().await {
+                                warn!(error = %error, "workspace convergence: pending membership effects deferred after resume");
+                            }
+                            if let Err(error) = owner.deliver_pending_membership_decisions().await {
+                                warn!(error = %error, "workspace convergence: pending membership decisions deferred after resume");
+                            }
                             if let Err(error) = owner.synchronize_chain().await {
                                 warn!(error = %error, "workspace convergence: resumed membership history exchange deferred");
                             }
@@ -82,6 +98,14 @@ impl WorkspaceConvergence {
                             presence_open = false;
                         }
                     },
+                    _ = recovery_tick.tick(), if !paused => {
+                        if let Err(error) = owner.recover_pending_membership_effects().await {
+                            warn!(error = %error, "workspace convergence: periodic membership effect recovery deferred");
+                        }
+                        if let Err(error) = owner.deliver_pending_membership_decisions().await {
+                            warn!(error = %error, "workspace convergence: periodic membership decision delivery deferred");
+                        }
+                    }
                 }
             }
         });
