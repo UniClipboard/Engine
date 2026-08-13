@@ -24,6 +24,8 @@ test('notifies consumers only after release publication and interop verification
   assert.match(workflow, /git clone --local desktop new-desktop/)
   assert.match(workflow, /Resolve the previous Engine-compatible desktop consumer/)
   assert.match(workflow, /PREVIOUS_DESKTOP_COMMIT/)
+  assert.match(workflow, /git -C engine merge-base --is-ancestor "\$candidate_engine_commit" "\$PREVIOUS_COMMIT"/)
+  assert.match(workflow, /No desktop consumer can be upgraded to previous Engine commit/)
   assert.match(workflow, /git -C old-desktop checkout --detach "\$PREVIOUS_DESKTOP_COMMIT"/)
   assert.match(workflow, /fetch-depth:\s*0/)
   assert.doesNotMatch(workflow, /uses:\s*\S+@(?![0-9a-f]{40})/)

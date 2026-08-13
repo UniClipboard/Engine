@@ -337,6 +337,7 @@ jobs:
           engine_dependency="uc-engine = { git = \"https://github.com/UniClipboard/Engine.git\", rev = \"$PREVIOUS_COMMIT\" }"
           observability_dependency="uc-observability-contract = { git = \"https://github.com/UniClipboard/Engine.git\", rev = \"$PREVIOUS_COMMIT\" }"
           previous_desktop_commit=""
+          fallback_desktop_commit=""
           while IFS= read -r candidate; do
             cargo_toml=$(git -C desktop show "$candidate:Cargo.toml" 2>/dev/null || true)
             if grep -Fqx "$engine_dependency" <<<"$cargo_toml" \
@@ -344,9 +345,20 @@ jobs:
               previous_desktop_commit="$candidate"
               break
             fi
+            candidate_engine_commit=$(sed -nE 's/^uc-engine = \{ git = "https:\/\/github\.com\/UniClipboard\/Engine\.git", rev = "([0-9a-f]{40})" \}$/\1/p' <<<"$cargo_toml")
+            candidate_observability_commit=$(sed -nE 's/^uc-observability-contract = \{ git = "https:\/\/github\.com\/UniClipboard\/Engine\.git", rev = "([0-9a-f]{40})" \}$/\1/p' <<<"$cargo_toml")
+            if [[ -z "$fallback_desktop_commit" \
+              && "$candidate_engine_commit" == "$candidate_observability_commit" \
+              && -n "$candidate_engine_commit" ]] \
+              && git -C engine merge-base --is-ancestor "$candidate_engine_commit" "$PREVIOUS_COMMIT"; then
+              fallback_desktop_commit="$candidate"
+            fi
           done < <(git -C desktop log --format='%H' -- Cargo.toml)
           if [[ -z "$previous_desktop_commit" ]]; then
-            echo "No desktop consumer on main is pinned to previous Engine commit: $PREVIOUS_COMMIT" >&2
+            previous_desktop_commit="$fallback_desktop_commit"
+          fi
+          if [[ -z "$previous_desktop_commit" ]]; then
+            echo "No desktop consumer can be upgraded to previous Engine commit: $PREVIOUS_COMMIT" >&2
             exit 1
           fi
           echo "commit=$previous_desktop_commit" >> "$GITHUB_OUTPUT"
