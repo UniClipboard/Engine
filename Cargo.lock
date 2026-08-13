@@ -4522,7 +4522,7 @@ dependencies = [
 
 [[package]]
 name = "openmls-validation"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "openmls",
  "openmls_basic_credential",
@@ -7076,7 +7076,7 @@ checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "uc-application"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7114,7 +7114,7 @@ dependencies = [
 
 [[package]]
 name = "uc-content-hash"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "blake3",
  "hex",
@@ -7122,7 +7122,7 @@ dependencies = [
 
 [[package]]
 name = "uc-core"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -7152,7 +7152,7 @@ dependencies = [
 
 [[package]]
 name = "uc-engine"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7182,7 +7182,7 @@ dependencies = [
 
 [[package]]
 name = "uc-engine-uniffi"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "cargo_metadata",
  "jni 0.21.1",
@@ -7204,7 +7204,7 @@ dependencies = [
 
 [[package]]
 name = "uc-infra"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -7289,7 +7289,7 @@ dependencies = [
 
 [[package]]
 name = "uc-mobile-lan"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7316,7 +7316,7 @@ dependencies = [
 
 [[package]]
 name = "uc-mobile-probe-core"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "base64",
  "jni 0.21.1",
@@ -7331,7 +7331,7 @@ dependencies = [
 
 [[package]]
 name = "uc-mobile-proto"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "base64",
  "chrono",
@@ -7345,7 +7345,7 @@ dependencies = [
 
 [[package]]
 name = "uc-observability-contract"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7360,7 +7360,7 @@ dependencies = [
 
 [[package]]
 name = "uc-ohos-napi"
-version = "1.0.0-rc.8"
+version = "1.1.0-rc.1"
 dependencies = [
  "cargo_metadata",
  "json5",
