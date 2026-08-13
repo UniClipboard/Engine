@@ -329,65 +329,54 @@ jobs:
           echo "commit=$previous_commit" >> "$GITHUB_OUTPUT"
 
       - id: previous-desktop
-        name: Resolve the previous Engine-compatible desktop consumer
+        name: Build a previous Engine-compatible desktop consumer
         env:
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
           PREVIOUS_COMMIT: ${{ steps.previous.outputs.commit }}
         shell: bash
         run: |
           engine_dependency="uc-engine = { git = \"https://github.com/UniClipboard/Engine.git\", rev = \"$PREVIOUS_COMMIT\" }"
           observability_dependency="uc-observability-contract = { git = \"https://github.com/UniClipboard/Engine.git\", rev = \"$PREVIOUS_COMMIT\" }"
           previous_desktop_commit=""
-          fallback_desktop_commit=""
+          git clone --local desktop old-desktop
           while IFS= read -r candidate; do
             cargo_toml=$(git -C desktop show "$candidate:Cargo.toml" 2>/dev/null || true)
-            if grep -Fqx "$engine_dependency" <<<"$cargo_toml" \
-              && grep -Fqx "$observability_dependency" <<<"$cargo_toml"; then
+            candidate_engine_commit=$(sed -nE 's/^uc-engine = \{ git = "https:\/\/github\.com\/UniClipboard\/Engine\.git", rev = "([0-9a-f]{40})" \}$/\1/p' <<<"$cargo_toml")
+            candidate_observability_commit=$(sed -nE 's/^uc-observability-contract = \{ git = "https:\/\/github\.com\/UniClipboard\/Engine\.git", rev = "([0-9a-f]{40})" \}$/\1/p' <<<"$cargo_toml")
+            if ! { grep -Fqx "$engine_dependency" <<<"$cargo_toml" \
+              && grep -Fqx "$observability_dependency" <<<"$cargo_toml"; } \
+              && ! { [[ "$candidate_engine_commit" == "$candidate_observability_commit" \
+                && -n "$candidate_engine_commit" ]] \
+                && git -C engine merge-base --is-ancestor "$candidate_engine_commit" "$PREVIOUS_COMMIT"; }; then
+              continue
+            fi
+            git -C old-desktop checkout --detach --force "$candidate"
+            git -C old-desktop clean -fdx
+            if node old-desktop/scripts/adopt-engine-release.mjs \
+                --root old-desktop \
+                --version "$PREVIOUS_TAG" \
+                --source-commit "$PREVIOUS_COMMIT" \
+              && cargo update --manifest-path old-desktop/Cargo.toml -p uc-engine --precise "$PREVIOUS_COMMIT" \
+              && cargo build \
+                --manifest-path old-desktop/Cargo.toml \
+                --target-dir "$RUNNER_TEMP/old-target" \
+                -p uc-daemon --bin uniclipd \
+                -p uc-cli --bin uniclip \
+                --features uc-cli/dev-tools \
+                --locked; then
               previous_desktop_commit="$candidate"
               break
             fi
-            candidate_engine_commit=$(sed -nE 's/^uc-engine = \{ git = "https:\/\/github\.com\/UniClipboard\/Engine\.git", rev = "([0-9a-f]{40})" \}$/\1/p' <<<"$cargo_toml")
-            candidate_observability_commit=$(sed -nE 's/^uc-observability-contract = \{ git = "https:\/\/github\.com\/UniClipboard\/Engine\.git", rev = "([0-9a-f]{40})" \}$/\1/p' <<<"$cargo_toml")
-            if [[ -z "$fallback_desktop_commit" \
-              && "$candidate_engine_commit" == "$candidate_observability_commit" \
-              && -n "$candidate_engine_commit" ]] \
-              && git -C engine merge-base --is-ancestor "$candidate_engine_commit" "$PREVIOUS_COMMIT"; then
-              fallback_desktop_commit="$candidate"
-            fi
           done < <(git -C desktop log --format='%H' -- Cargo.toml)
           if [[ -z "$previous_desktop_commit" ]]; then
-            previous_desktop_commit="$fallback_desktop_commit"
-          fi
-          if [[ -z "$previous_desktop_commit" ]]; then
-            echo "No desktop consumer can be upgraded to previous Engine commit: $PREVIOUS_COMMIT" >&2
+            echo "No desktop consumer builds with previous Engine commit: $PREVIOUS_COMMIT" >&2
             exit 1
           fi
           echo "commit=$previous_desktop_commit" >> "$GITHUB_OUTPUT"
 
       - name: Create isolated desktop consumers
-        env:
-          PREVIOUS_DESKTOP_COMMIT: ${{ steps.previous-desktop.outputs.commit }}
         run: |
-          git clone --local desktop old-desktop
           git clone --local desktop new-desktop
-          git -C old-desktop checkout --detach "$PREVIOUS_DESKTOP_COMMIT"
-
-      - name: Build the previous Engine consumer
-        env:
-          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
-          PREVIOUS_COMMIT: ${{ steps.previous.outputs.commit }}
-        run: |
-          node old-desktop/scripts/adopt-engine-release.mjs \
-            --root old-desktop \
-            --version "$PREVIOUS_TAG" \
-            --source-commit "$PREVIOUS_COMMIT"
-          cargo update --manifest-path old-desktop/Cargo.toml -p uc-engine --precise "$PREVIOUS_COMMIT"
-          cargo build \
-            --manifest-path old-desktop/Cargo.toml \
-            --target-dir "$RUNNER_TEMP/old-target" \
-            -p uc-daemon --bin uniclipd \
-            -p uc-cli --bin uniclip \
-            --features uc-cli/dev-tools \
-            --locked
 
       - name: Build the new Engine consumer
         run: |
