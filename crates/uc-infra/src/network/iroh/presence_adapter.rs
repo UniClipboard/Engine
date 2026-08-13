@@ -27,9 +27,9 @@
 //!
 //! ## ALPN
 //!
-//! [`PRESENCE_ALPN`] = `uniclipboard/presence/0`. The accept side runs
+//! [`PRESENCE_ALPN`] = `uniclipboard/presence/1`. The accept side runs
 //! [`IrohPresenceHandler`], which holds each incoming connection open until
-//! the peer closes it — mirroring `spawn_hold_open_acceptor` in the probe.
+//! the peer closes it after confirming current-space admission.
 //! The dial side is invoked from [`IrohPresenceAdapter::ensure_reachable`].
 //!
 //! ## Inbound-driven Online flip
@@ -78,10 +78,10 @@ use super::net_recovery::{
 };
 
 /// ALPN identifier for the Slice 2 presence protocol. The accept-side
-/// handler performs no application-level handshake — its sole job is to
-/// keep the connection open so the dial-side watchdog can observe peer
+/// handler confirms current-space admission before the dial side publishes
+/// Online, then keeps the connection open so the watchdog can observe peer
 /// teardown via [`Connection::closed`].
-pub const PRESENCE_ALPN: &[u8] = b"uniclipboard/presence/0";
+pub const PRESENCE_ALPN: &[u8] = b"uniclipboard/presence/1";
 
 /// Capacity of the [`broadcast`] channel that fans `PresenceEvent`s out to
 /// subscribers. 64 sits comfortably above expected burst width (N ≤ 10
@@ -89,6 +89,10 @@ pub const PRESENCE_ALPN: &[u8] = b"uniclipboard/presence/0";
 /// [`PresencePort::current_state`] per the broadcast contract.
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 const RECOVERY_CONFIRMATION_BUDGET: Duration = Duration::from_secs(2);
+const PRESENCE_ADMISSION_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const ADMISSION_CONFIRMATION_REQUEST: u8 = 1;
+const ADMISSION_ACCEPTED: u8 = 1;
+const ADMISSION_REJECTED: u8 = 2;
 
 /// Maximum age of a tracked-connection entry before [`IrohPresenceAdapter::
 /// ensure_reachable`] refuses the fast-path and forces a fresh dial.
@@ -256,16 +260,47 @@ impl ProtocolHandler for IrohPresenceHandler {
         let connection_id = connection.stable_id();
         debug!(remote = %remote, "presence connection accepted; holding open until peer closes");
 
+        let (mut send, mut receive) =
+            match tokio::time::timeout(PRESENCE_ADMISSION_IO_TIMEOUT, connection.accept_bi()).await
+            {
+                Ok(Ok(streams)) => streams,
+                _ => {
+                    connection.close(0u32.into(), b"admission_confirmation_missing");
+                    return Ok(());
+                }
+            };
+        let mut request = [0u8; 1];
+        if !matches!(
+            tokio::time::timeout(
+                PRESENCE_ADMISSION_IO_TIMEOUT,
+                receive.read_exact(&mut request)
+            )
+            .await,
+            Ok(Ok(_))
+        ) || request[0] != ADMISSION_CONFIRMATION_REQUEST
+        {
+            connection.close(0u32.into(), b"admission_confirmation_invalid");
+            return Ok(());
+        }
+
         let remote_bytes: [u8; 32] = *remote.as_bytes();
         if let Some(device_id) = self.state.resolve_device(&remote_bytes).await {
             if !self.state.is_admitted(&device_id).await {
                 warn!(device = %device_id.as_str(), "presence accept: peer is not admitted by current space protection");
-                connection.close(0u32.into(), b"peer_not_admitted");
+                let _ = send.write_all(&[ADMISSION_REJECTED]).await;
+                let _ = send.finish();
+                let _ = connection.closed().await;
                 return Ok(());
             }
             let mut inbound = self.state.inbound_connections.lock().await;
             if !self.state.accepting.load(Ordering::Acquire) {
-                connection.close(0u32.into(), b"space_inactive");
+                let _ = send.write_all(&[ADMISSION_REJECTED]).await;
+                let _ = send.finish();
+                let _ = connection.closed().await;
+                return Ok(());
+            }
+            if send.write_all(&[ADMISSION_ACCEPTED]).await.is_err() || send.finish().is_err() {
+                connection.close(0u32.into(), b"admission_confirmation_failed");
                 return Ok(());
             }
             inbound.insert(connection_id, connection.clone());
@@ -306,7 +341,9 @@ impl ProtocolHandler for IrohPresenceHandler {
         } else {
             // A peer that is no longer in the local space must not keep a
             // successful presence connection after leave or switch-space.
-            connection.close(0u32.into(), b"unknown_peer");
+            let _ = send.write_all(&[ADMISSION_REJECTED]).await;
+            let _ = send.finish();
+            let _ = connection.closed().await;
             debug!(
                 remote = %remote,
                 "inbound presence connection from unresolved peer; closing",
@@ -636,6 +673,36 @@ impl IrohPresenceAdapter {
 
         match dial {
             Ok(connection) => {
+                let admission_confirmed = async {
+                    let (mut send, mut receive) = connection.open_bi().await.map_err(|_| ())?;
+                    send.write_all(&[ADMISSION_CONFIRMATION_REQUEST])
+                        .await
+                        .map_err(|_| ())?;
+                    send.finish().map_err(|_| ())?;
+                    let mut acknowledgement = [0u8; 1];
+                    receive
+                        .read_exact(&mut acknowledgement)
+                        .await
+                        .map_err(|_| ())?;
+                    Ok::<bool, ()>(acknowledgement[0] == ADMISSION_ACCEPTED)
+                };
+                if !matches!(
+                    tokio::time::timeout(PRESENCE_ADMISSION_IO_TIMEOUT, admission_confirmed).await,
+                    Ok(Ok(true))
+                ) {
+                    connection.close(0u32.into(), b"peer_not_admitted");
+                    let now = self.now();
+                    self.last_state
+                        .lock()
+                        .await
+                        .insert(*device, ReachabilityState::Offline);
+                    self.last_offline_at
+                        .lock()
+                        .await
+                        .insert(*device, Instant::now());
+                    self.broadcast(*device, ReachabilityState::Offline, now);
+                    return Ok(ReachabilityState::Offline);
+                }
                 let now = self.now();
                 let device_id_for_watchdog = *device;
                 let peers_for_watchdog = Arc::clone(&self.peers);
@@ -1229,6 +1296,23 @@ mod tests {
         }
     }
 
+    async fn request_admission_confirmation(connection: &Connection) -> u8 {
+        let (mut send, mut receive) = connection.open_bi().await.expect("open admission stream");
+        send.write_all(&[ADMISSION_CONFIRMATION_REQUEST])
+            .await
+            .expect("write admission request");
+        send.finish().expect("finish admission request");
+        let mut acknowledgement = [0u8; 1];
+        receive
+            .read_exact(&mut acknowledgement)
+            .await
+            .expect("read admission confirmation");
+        if acknowledgement[0] != ADMISSION_ACCEPTED {
+            connection.close(0u32.into(), b"peer_not_admitted");
+        }
+        acknowledgement[0]
+    }
+
     /// Build an adapter for the dial-side tests. Inbound resolution is
     /// not exercised here — the empty `MemMemberRepo` is enough to keep
     /// the handler constructible.
@@ -1366,6 +1450,10 @@ mod tests {
             .connect(endpoint_b.addr(), PRESENCE_ALPN)
             .await
             .expect("transport connection succeeds before membership rejection");
+        assert_eq!(
+            request_admission_confirmation(&connection).await,
+            ADMISSION_REJECTED
+        );
 
         timeout(Duration::from_secs(1), connection.closed())
             .await
@@ -1657,6 +1745,57 @@ mod tests {
         endpoint_a.close().await;
     }
 
+    #[tokio::test]
+    async fn outbound_dial_rejected_by_remote_admission_never_reports_online() {
+        let endpoint_a = bound_endpoint().await;
+        wait_for_direct_addrs(&endpoint_a).await;
+        let endpoint_b = bound_endpoint().await;
+        wait_for_direct_addrs(&endpoint_b).await;
+
+        let a_member = member_for_endpoint(&endpoint_a, "device-a");
+        let b_member_repo = Arc::new(MemMemberRepo::default());
+        b_member_repo.seed(a_member);
+        let b_adapter = build_adapter_with_member_repo_and_admission(
+            Arc::clone(&endpoint_b),
+            Arc::new(FakePeerAddressRepo::default()),
+            b_member_repo,
+            false,
+        );
+        let router_b = Router::builder((*endpoint_b).clone())
+            .accept(PRESENCE_ALPN, b_adapter.handler())
+            .spawn();
+
+        let b_device_id = DeviceId::new("device-b");
+        let a_repo = Arc::new(FakePeerAddressRepo::default());
+        a_repo.seed(record(
+            &b_device_id,
+            postcard::to_stdvec(&endpoint_b.addr()).expect("encode receiver address"),
+        ));
+        let a_adapter = build_adapter(Arc::clone(&endpoint_a), a_repo);
+        let mut subscriber = a_adapter.subscribe();
+
+        let state = timeout(DIAL_BUDGET, a_adapter.verify_reachable(&b_device_id))
+            .await
+            .expect("verification finishes within budget")
+            .expect("admission rejection is a reachability verdict");
+
+        assert_eq!(state, ReachabilityState::Offline);
+        assert_eq!(
+            a_adapter.current_state(&b_device_id).await,
+            ReachabilityState::Offline
+        );
+        if let Ok(Ok(event)) = timeout(Duration::from_millis(500), subscriber.recv()).await {
+            assert_eq!(
+                event.state,
+                ReachabilityState::Offline,
+                "remote admission rejection must not emit a transient Online event"
+            );
+        }
+
+        router_b.shutdown().await.ok();
+        endpoint_a.close().await;
+    }
+
     // -- Inbound-driven Online flip ------------------------------------------
 
     /// Build a `SpaceMember` whose `identity_fingerprint` matches the
@@ -1721,6 +1860,10 @@ mod tests {
             .await
             .expect("connect within budget")
             .expect("A dial B succeeds");
+        assert_eq!(
+            request_admission_confirmation(&conn).await,
+            ADMISSION_ACCEPTED
+        );
 
         let event = timeout(Duration::from_secs(3), subscriber.recv())
             .await
@@ -1772,6 +1915,10 @@ mod tests {
         .await
         .expect("first connect within budget")
         .expect("first dial succeeds");
+        assert_eq!(
+            request_admission_confirmation(&conn1).await,
+            ADMISSION_ACCEPTED
+        );
         let first = timeout(Duration::from_secs(3), subscriber.recv())
             .await
             .expect("first event arrives")
@@ -1784,6 +1931,10 @@ mod tests {
             .await
             .expect("second connect within budget")
             .expect("second dial succeeds");
+        assert_eq!(
+            request_admission_confirmation(&conn2).await,
+            ADMISSION_ACCEPTED
+        );
 
         // Drain attempt with a tight deadline: any re-broadcast would
         // arrive within milliseconds of the second connection landing.
@@ -1831,6 +1982,10 @@ mod tests {
         .await
         .expect("connect within budget")
         .expect("dial succeeds");
+        assert_eq!(
+            request_admission_confirmation(&conn).await,
+            ADMISSION_REJECTED
+        );
         assert!(
             timeout(Duration::from_millis(500), subscriber.recv())
                 .await
@@ -1876,6 +2031,10 @@ mod tests {
             .await
             .expect("connect within budget")
             .expect("dial succeeds");
+        assert_eq!(
+            request_admission_confirmation(&conn).await,
+            ADMISSION_REJECTED
+        );
 
         // Give the handler time to run resolve_device, then assert no
         // event landed.

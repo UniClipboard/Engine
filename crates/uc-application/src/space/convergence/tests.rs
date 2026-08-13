@@ -2457,6 +2457,47 @@ async fn first_sponsor_admission_records_the_initial_member_instance() {
     assert_eq!(state.effective_members(), [a, b].into());
 }
 
+// 流程：持久成员历史仍指向 A 的旧实例，但当前安全状态已经使用新实例；
+// A 必须先恢复这项身份冲突，不能继续邀请并对外报告加入成功。
+#[tokio::test]
+async fn sponsor_rejects_admission_when_persisted_and_current_local_instances_differ() {
+    let old_a = instance(0x0b);
+    let current_a = instance(0x0a);
+    let repository = MemoryWorkspaceRepository::default();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let genesis = membership_event(None, 0, old_a, old_a, "device-a", 1);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), old_a);
+    history.receive_verified(genesis).unwrap();
+    state.own_instance = Some(old_a);
+    state.membership_reconciliation = Some(history);
+    repository.save_state(&state).await.unwrap();
+
+    let deps = test_deps(
+        Arc::new(repository.clone()),
+        "device-a",
+        vec![(DeviceId::new("device-a"), current_a)],
+    );
+    let owner = WorkspaceConvergence::new(deps);
+    let session = uc_core::ports::pairing::PairingSessionId::new("stale-local-instance");
+
+    let result = owner
+        .begin_admission(&session, &DeviceId::new("device-c"), 1)
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(WorkspaceConvergenceError::Inconsistent(message))
+            if message == "current member identity does not match persisted membership history"
+    ));
+    assert!(repository
+        .load_state()
+        .await
+        .unwrap()
+        .unwrap()
+        .pending_admissions
+        .is_empty());
+}
+
 // 流程：加入方收到的发起者历史摘要与本机事实不符；加入被拒绝，原历史位置保持不变。
 #[tokio::test]
 async fn saved_admission_rejects_a_mismatched_sponsor_history() {

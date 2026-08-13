@@ -1581,6 +1581,35 @@ impl WorkspaceConvergence {
         let _guard = self.state_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
+        if let Some(persisted_instance) = state.own_instance {
+            let current_instance = self
+                .deps
+                .member_signatures
+                .current_member_instance(&self.deps.own_device)
+                .await
+                .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+            if current_instance != persisted_instance {
+                state
+                    .apply(
+                        WorkspaceConvergenceEvent::IntegrityFailure(
+                            uc_core::membership::WorkspaceFailureCategory::IdentityMismatch,
+                        ),
+                        now_ms,
+                    )
+                    .map_err(|_| {
+                        WorkspaceConvergenceError::Inconsistent(
+                            "current member identity mismatch could not be recorded".to_owned(),
+                        )
+                    })?;
+                self.persist(&state).await?;
+                self.publish(&state);
+                self.notify();
+                return Err(WorkspaceConvergenceError::Inconsistent(
+                    "current member identity does not match persisted membership history"
+                        .to_owned(),
+                ));
+            }
+        }
         let (outcome, effect) = state
             .apply(
                 WorkspaceConvergenceEvent::AdmissionBegan {

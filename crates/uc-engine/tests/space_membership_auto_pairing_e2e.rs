@@ -667,6 +667,78 @@ async fn restarted_member_pairs_with_a_member_added_while_it_was_offline() {
 }
 
 // 场景流程：
+// 1. A 创建空间，B 加入后离线。
+// 2. A 在 B 离线期间让 C 加入，并收到加入成功。
+// 3. A、C 必须立即相互接纳、同时在线并双向接收新内容。
+// 4. A、C 同时重启后，必须再次相互接纳并双向接收。
+// 验证：离线旧成员不能让当前发起方与新加入方停在配对成功但互相拒绝的状态。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn sponsor_and_joiner_are_mutually_admitted_when_an_existing_member_is_offline() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let device_b = DeviceHarness::new(rendezvous.uri());
+    let device_c = DeviceHarness::new(rendezvous.uri());
+
+    let engine_a = device_a.start().await;
+    let engine_b = device_b.start().await;
+    let (space_id, a_id) = create_space(&engine_a, "Device A").await;
+    let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
+    wait_for_members(&engine_a, &[&b_id]).await;
+    wait_for_members(&engine_b, &[&a_id]).await;
+    engine_b
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down B before C joins through A");
+
+    let engine_c = device_c.start().await;
+    let c_id = join_through(&engine_a, &engine_c, "Device C", &space_id).await;
+    wait_for_converged_members_with_diagnostics(
+        "A and C after C joins while B is offline",
+        &engine_a,
+        &engine_c,
+        &a_id,
+        &c_id,
+    )
+    .await;
+    send_and_verify(&engine_a, &engine_c, &c_id, "A to C before restart").await;
+    send_and_verify(&engine_c, &engine_a, &a_id, "C to A before restart").await;
+
+    engine_a
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down A before mutual-admission restart");
+    engine_c
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down C before mutual-admission restart");
+
+    let engine_a = device_a.start().await;
+    let engine_c = device_c.start().await;
+    recover(&engine_a).await;
+    recover(&engine_c).await;
+    wait_for_converged_members_with_diagnostics(
+        "A and C after mutual-admission restart",
+        &engine_a,
+        &engine_c,
+        &a_id,
+        &c_id,
+    )
+    .await;
+    send_and_verify(&engine_a, &engine_c, &c_id, "A to C after restart").await;
+    send_and_verify(&engine_c, &engine_a, &a_id, "C to A after restart").await;
+
+    engine_a
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("final A shutdown after mutual admission");
+    engine_c
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("final C shutdown after mutual admission");
+}
+
+// 场景流程：
 // 1. A 创建空间，B 加入后保存 A、B 的完整成员记录。
 // 2. A 离线，B 让 C 加入；B、C 都保存 A、B、C 的完整成员记录。
 // 3. B 离线，C 让 D 加入；C、D 都保存四台设备的完整成员记录。
