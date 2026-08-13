@@ -80,8 +80,8 @@ final class ProbeModel {
         _ = await run(["command": "list_devices"])
     }
 
-    func queryWorkspaceConvergence() async {
-        _ = await run(["command": "query_workspace_convergence"])
+    func queryDeviceTrust() async {
+        _ = await run(["command": "query_device_trust"])
     }
 
     func sendText() async {

@@ -12,6 +12,7 @@ crate-type = ["lib", "cdylib"]
 [dependencies]
 napi = { version = "2.16.17", default-features = false, features = ["napi8", "tokio_rt"] }
 napi-derive = "2.16.13"
+serde_json = "1"
 tokio = { version = "1", features = ["sync", "time"] }
 uc-engine = { path = "../../crates/uc-engine" }
 zeroize = "1.8"
@@ -24,7 +25,6 @@ cargo_metadata = "0.19.2"
 json5 = "0.4.1"
 napi = { version = "2.16.17", default-features = false, features = ["noop"] }
 napi-derive = { version = "2.16.13", features = ["noop"] }
-serde_json = "1"
 
 [lints]
 workspace = true

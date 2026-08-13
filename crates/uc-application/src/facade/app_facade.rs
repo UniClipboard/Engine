@@ -732,6 +732,21 @@ impl AppFacade {
         self.member_roster.query_workspace_convergence().await
     }
 
+    pub async fn device_trust(&self) -> Result<crate::facade::DeviceTrustSnapshot, RosterError> {
+        self.member_roster.query_device_trust().await
+    }
+
+    pub async fn decide_device_trust_change(
+        &self,
+        change_id: uc_core::membership::MembershipEventId,
+        choice: crate::facade::DeviceTrustChoice,
+        confirm_local_removal: bool,
+    ) -> Result<crate::facade::DeviceTrustDecisionResult, RosterError> {
+        self.member_roster
+            .decide_device_trust_change(change_id, choice, confirm_local_removal)
+            .await
+    }
+
     pub fn subscribe_workspace_convergence(
         &self,
     ) -> broadcast::Receiver<crate::facade::WorkspaceSnapshot> {

@@ -460,6 +460,8 @@ pub enum OperationResult {
     Devices(Vec<DeviceSummary>),
     MemberSyncPreferences(MemberSyncPreferencesSummary),
     WorkspaceConvergence(WorkspaceConvergenceSummary),
+    DeviceTrust(DeviceTrustSnapshotSummary),
+    DeviceTrustDecision(DeviceTrustDecisionSummary),
     LegacyBootstrapStatus(Option<LegacyBootstrapSummary>),
     SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
@@ -647,6 +649,27 @@ impl fmt::Debug for OperationResult {
             Self::WorkspaceConvergence(summary) => debug
                 .field("kind", &"workspace_convergence")
                 .field("summary", summary),
+            Self::DeviceTrust(summary) => debug
+                .field("kind", &"device_trust")
+                .field("revision", &summary.revision)
+                .field("device_count", &summary.devices.len())
+                .field("has_current_change", &summary.current_change.is_some()),
+            Self::DeviceTrustDecision(result) => {
+                debug.field("kind", &"device_trust_decision").field(
+                    "outcome",
+                    &match result {
+                        DeviceTrustDecisionSummary::Applied { .. } => "applied",
+                        DeviceTrustDecisionSummary::KeptCurrentDeviceGroup { .. } => {
+                            "kept_current_device_group"
+                        }
+                        DeviceTrustDecisionSummary::AlreadyCompleted { .. } => "already_completed",
+                        DeviceTrustDecisionSummary::StateChanged { .. } => "state_changed",
+                        DeviceTrustDecisionSummary::LocalDeviceConfirmationRequired { .. } => {
+                            "local_device_confirmation_required"
+                        }
+                    },
+                )
+            }
             Self::LegacyBootstrapStatus(summary) => debug
                 .field("kind", &"legacy_bootstrap_status")
                 .field("summary", summary),
@@ -867,6 +890,172 @@ pub struct DeviceSummary {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum DeviceMembershipSummary {
+    Active,
+    Removed,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceReachabilitySummary {
+    Online,
+    Offline,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceGroupRelationshipSummary {
+    Consistent,
+    PendingLocalDecision,
+    Diverged,
+    Unverifiable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceCompatibilitySummary {
+    Compatible,
+    UpgradeRequired,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceSyncRelationshipSummary {
+    Usable,
+    WaitingForLocalDecision,
+    PausedGroupDiverged,
+    PausedUpgradeRequired,
+    PausedUnverifiable,
+    RemovedLocalDevice,
+    RemovedPeerDevice,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceTrustActionSummary {
+    ApplyCurrentChange,
+    KeepCurrentDeviceGroup,
+    ConfirmApplyRemovesLocalDevice,
+    RejoinDeviceGroup,
+    UpdateThisDevice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceTrustUnavailableReasonSummary {
+    NoCurrentChange,
+    ChangeNoLongerCurrent,
+    LocalDeviceConfirmationRequired,
+    LocalDeviceRemoved,
+    RecoveryNotAvailableInThisVersion,
+    PeerUpgradeRequired,
+    DeviceFactsUnverifiable,
+    EngineUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceTrustRecoverySummary {
+    NotAvailableInThisVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceTrustImpactSummary {
+    pub usable_device_ids: Vec<String>,
+    pub paused_device_ids: Vec<String>,
+    pub local_device_outcome: DeviceMembershipSummary,
+    pub requires_rejoin_device_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceTrustChangeSummary {
+    pub change_id: String,
+    pub proposed_by_device_id: String,
+    pub target_device_ids: Vec<String>,
+    pub includes_local_device: bool,
+    pub apply_impact: DeviceTrustImpactSummary,
+    pub keep_current_impact: DeviceTrustImpactSummary,
+    pub allowed_choices: Vec<crate::DeviceTrustChoiceSummary>,
+    pub blocked_reason: Option<DeviceTrustUnavailableReasonSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceTrustRelationshipSummary {
+    pub device_id: String,
+    pub display_name: String,
+    pub is_local: bool,
+    pub reachability: DeviceReachabilitySummary,
+    pub membership: DeviceMembershipSummary,
+    pub group_relationship: DeviceGroupRelationshipSummary,
+    pub compatibility: DeviceCompatibilitySummary,
+    pub sync_relationship: DeviceSyncRelationshipSummary,
+    pub available_actions: Vec<DeviceTrustActionSummary>,
+    pub blocked_reason: Option<DeviceTrustUnavailableReasonSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceTrustSnapshotSummary {
+    pub revision: u64,
+    pub local_device_id: String,
+    pub local_membership: DeviceMembershipSummary,
+    pub current_change: Option<DeviceTrustChangeSummary>,
+    pub devices: Vec<DeviceTrustRelationshipSummary>,
+    pub recovery: DeviceTrustRecoverySummary,
+    pub allowed_actions: Vec<DeviceTrustActionSummary>,
+    pub blocked_reason: Option<DeviceTrustUnavailableReasonSummary>,
+    pub updated_at_ms: i64,
+}
+
+impl DeviceTrustSnapshotSummary {
+    pub fn empty_unavailable(local_device_id: String) -> Self {
+        Self {
+            revision: 0,
+            local_device_id,
+            local_membership: DeviceMembershipSummary::Unavailable,
+            current_change: None,
+            devices: Vec::new(),
+            recovery: DeviceTrustRecoverySummary::NotAvailableInThisVersion,
+            allowed_actions: Vec::new(),
+            blocked_reason: Some(DeviceTrustUnavailableReasonSummary::EngineUnavailable),
+            updated_at_ms: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum DeviceTrustDecisionSummary {
+    Applied {
+        change_id: String,
+        snapshot: Box<DeviceTrustSnapshotSummary>,
+    },
+    KeptCurrentDeviceGroup {
+        change_id: String,
+        snapshot: Box<DeviceTrustSnapshotSummary>,
+    },
+    AlreadyCompleted {
+        change_id: String,
+        completed_choice: crate::DeviceTrustChoiceSummary,
+        snapshot: Box<DeviceTrustSnapshotSummary>,
+    },
+    StateChanged {
+        current_change_id: Option<String>,
+        snapshot: Box<DeviceTrustSnapshotSummary>,
+    },
+    LocalDeviceConfirmationRequired {
+        change_id: String,
+        snapshot: Box<DeviceTrustSnapshotSummary>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkspaceConvergencePhaseSummary {
     LocallyApplied,
     Converging,
@@ -889,8 +1078,8 @@ pub enum WorkspaceConvergenceFailureCategorySummary {
 
 /// 工作空间收敛的统一完整快照(ADR-016)。
 ///
-/// 与 `WorkspaceConvergenceChanged` 事件共享同一结构;不含设备名称、成员实例、
-/// 地址、签名、密钥、安全变化或内容。仅公开需要用户处理或阻塞进度的设备稳定标识。
+/// 仅供诊断构建观察内部进度；不含设备名称、成员实例、地址、签名、密钥、
+/// 安全变化或内容。正式产品使用完整设备信任结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceConvergenceSummary {
     pub phase: WorkspaceConvergencePhaseSummary,

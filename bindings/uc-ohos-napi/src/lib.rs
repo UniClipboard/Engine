@@ -138,6 +138,7 @@ pub struct OhEngineEvent {
     pub error_category: Option<String>,
     pub retryable: Option<bool>,
     pub workspace_convergence: Option<OhWorkspaceConvergence>,
+    pub device_trust_revision: Option<f64>,
     pub network_recovery_phase: Option<String>,
     pub next_retry_in_ms: Option<f64>,
 }

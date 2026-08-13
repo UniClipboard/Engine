@@ -72,8 +72,12 @@ pub enum OperationKind {
     QueryMemberSyncPreferences,
     UpdateMemberSyncPreferences,
     RemoveMember,
+    #[cfg(feature = "dev-tools")]
     DecideMembershipRemoval,
+    #[cfg(feature = "dev-tools")]
     QueryWorkspaceConvergence,
+    QueryDeviceTrust,
+    DecideDeviceTrustChange,
     QueryLegacyBootstrap,
     QuerySpaceProtection,
     SearchEntries,
@@ -166,8 +170,12 @@ impl fmt::Display for OperationKind {
             Self::QueryMemberSyncPreferences => "query_member_sync_preferences",
             Self::UpdateMemberSyncPreferences => "update_member_sync_preferences",
             Self::RemoveMember => "remove_member",
+            #[cfg(feature = "dev-tools")]
             Self::DecideMembershipRemoval => "decide_membership_removal",
+            #[cfg(feature = "dev-tools")]
             Self::QueryWorkspaceConvergence => "query_workspace_convergence",
+            Self::QueryDeviceTrust => "query_device_trust",
+            Self::DecideDeviceTrustChange => "decide_device_trust_change",
             Self::QueryLegacyBootstrap => "query_legacy_bootstrap",
             Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
@@ -204,7 +212,7 @@ impl fmt::Display for OperationKind {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dev-tools"))]
 mod tests {
     use super::{
         DecideMembershipRemovalInput, MembershipRemovalDecision, Operation, OperationKind,
@@ -293,8 +301,12 @@ pub enum Operation {
     QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput),
     UpdateMemberSyncPreferences(UpdateMemberSyncPreferencesInput),
     RemoveMember(RemoveMemberInput),
+    #[cfg(feature = "dev-tools")]
     DecideMembershipRemoval(DecideMembershipRemovalInput),
+    #[cfg(feature = "dev-tools")]
     QueryWorkspaceConvergence,
+    QueryDeviceTrust,
+    DecideDeviceTrustChange(DecideDeviceTrustChangeInput),
     QueryLegacyBootstrap(QueryLegacyBootstrapInput),
     QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
@@ -387,8 +399,12 @@ impl Operation {
             Self::QueryMemberSyncPreferences(_) => OperationKind::QueryMemberSyncPreferences,
             Self::UpdateMemberSyncPreferences(_) => OperationKind::UpdateMemberSyncPreferences,
             Self::RemoveMember(_) => OperationKind::RemoveMember,
+            #[cfg(feature = "dev-tools")]
             Self::DecideMembershipRemoval(_) => OperationKind::DecideMembershipRemoval,
+            #[cfg(feature = "dev-tools")]
             Self::QueryWorkspaceConvergence => OperationKind::QueryWorkspaceConvergence,
+            Self::QueryDeviceTrust => OperationKind::QueryDeviceTrust,
+            Self::DecideDeviceTrustChange(_) => OperationKind::DecideDeviceTrustChange,
             Self::QueryLegacyBootstrap(_) => OperationKind::QueryLegacyBootstrap,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
@@ -520,6 +536,20 @@ pub enum MembershipRemovalDecision {
 pub struct DecideMembershipRemovalInput {
     pub removal_event_id: String,
     pub decision: MembershipRemovalDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceTrustChoiceSummary {
+    ApplyChange,
+    KeepCurrentDeviceGroup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecideDeviceTrustChangeInput {
+    pub change_id: String,
+    pub choice: DeviceTrustChoiceSummary,
+    pub confirm_local_removal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

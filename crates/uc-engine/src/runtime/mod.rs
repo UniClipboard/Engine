@@ -39,7 +39,6 @@ use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
 use crate::assembly::search::build_search_runtime;
 use crate::assembly::sync_engine::SyncEngineAssembly;
 use crate::engine::event_stream::EventSender;
-use crate::operations::device::member::workspace_convergence_summary;
 use crate::subsystems::peer_keepalive::spawn_peer_presence_event_task;
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
@@ -121,7 +120,9 @@ fn engine_event_for_active_clipboard(
 }
 
 fn engine_event_for_workspace_convergence(snapshot: WorkspaceSnapshot) -> crate::EngineEvent {
-    crate::EngineEvent::WorkspaceConvergenceChanged(workspace_convergence_summary(snapshot))
+    crate::EngineEvent::DeviceTrustChanged {
+        revision: snapshot.revision,
+    }
 }
 
 async fn spawn_workspace_convergence_events(
@@ -589,7 +590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_convergence_changes_are_published_on_the_engine_event_stream() {
+    async fn device_trust_changes_are_published_on_the_engine_event_stream() {
         let (changes, change_stream) = tokio::sync::broadcast::channel(8);
         let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
         let tasks = Arc::new(TaskRegistry::new());
@@ -613,9 +614,7 @@ mod tests {
 
         assert_eq!(
             event_stream.next().await,
-            Some(crate::EngineEvent::WorkspaceConvergenceChanged(
-                workspace_convergence_summary(snapshot),
-            ))
+            Some(crate::EngineEvent::DeviceTrustChanged { revision: 1 })
         );
 
         tasks.shutdown(Duration::from_secs(1)).await;

@@ -9,13 +9,15 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use uc_engine::{
-    CreateSpaceInput, DecideMembershipRemovalInput, DevOperation, DevOperationResult,
-    DeviceSummary, Engine, EngineConfig, EngineErrorCategory, HistoryEntryInput, HostCapabilities,
-    HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardSnapshot,
-    HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
-    JoinSpaceInput, ListHistoryEntriesInput, MembershipRemovalDecision, Operation, OperationResult,
-    RecoverSessionInput, RemoveMemberInput, SecretString, SendTargetOutcome, SendTextInput,
-    WorkspaceConvergencePhaseSummary, WorkspaceConvergenceSummary,
+    CreateSpaceInput, DecideDeviceTrustChangeInput, DecideMembershipRemovalInput, DevOperation,
+    DevOperationResult, DeviceSummary, DeviceTrustChoiceSummary, DeviceTrustDecisionSummary,
+    DeviceTrustSnapshotSummary, Engine, EngineConfig, EngineErrorCategory, HistoryEntryInput,
+    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
+    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
+    HostSecureStorage, JoinSpaceInput, ListHistoryEntriesInput, MembershipRemovalDecision,
+    Operation, OperationResult, RecoverSessionInput, RemoveMemberInput, SecretString,
+    SendTargetOutcome, SendTextInput, WorkspaceConvergencePhaseSummary,
+    WorkspaceConvergenceSummary,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -532,6 +534,18 @@ async fn members_converge_when_sponsor_stays_offline_after_joining_c() {
         locked_query.is_err(),
         "locked membership state must not be decrypted"
     );
+    let locked_device_trust = device_trust_summary(&engine_a).await;
+    assert_eq!(locked_device_trust.local_device_id, a_id);
+    assert_eq!(
+        locked_device_trust.local_membership,
+        uc_engine::DeviceMembershipSummary::Unavailable
+    );
+    assert!(locked_device_trust.current_change.is_none());
+    assert!(locked_device_trust.devices.is_empty());
+    assert_eq!(
+        locked_device_trust.blocked_reason,
+        Some(uc_engine::DeviceTrustUnavailableReasonSummary::EngineUnavailable)
+    );
     recover(&engine_a).await;
     assert_receive_ready(&engine_a, true).await;
     wait_for_converged_members_with_diagnostics(
@@ -920,17 +934,28 @@ async fn member_removal_converges_across_three_independent_engine_directories() 
         .await
         .pending_removal_decision_event_id
         .expect("C exposes the pending removal decision");
+    let trust = device_trust_summary(&engine_c).await;
+    let change = trust
+        .current_change
+        .expect("C exposes complete device trust facts");
+    assert_eq!(change.change_id, pending_removal_event_id);
+    assert_eq!(change.proposed_by_device_id, a_id);
+    assert_eq!(change.target_device_ids, vec![b_id.clone()]);
 
     let accepted = engine_c
-        .execute(Operation::DecideMembershipRemoval(
-            DecideMembershipRemovalInput {
-                removal_event_id: pending_removal_event_id,
-                decision: MembershipRemovalDecision::Accept,
+        .execute(Operation::DecideDeviceTrustChange(
+            DecideDeviceTrustChangeInput {
+                change_id: pending_removal_event_id,
+                choice: DeviceTrustChoiceSummary::ApplyChange,
+                confirm_local_removal: false,
             },
         ))
         .await
         .expect("C accepts the pending member removal");
-    assert!(matches!(accepted, OperationResult::WorkspaceConvergence(_)));
+    assert!(matches!(
+        accepted,
+        OperationResult::DeviceTrustDecision(DeviceTrustDecisionSummary::Applied { .. })
+    ));
 
     wait_until(WAIT_TIMEOUT, || async {
         let a = workspace_convergence_summary(&engine_a).await;
@@ -1199,6 +1224,7 @@ async fn concurrent_accept_and_reject_of_one_removal_keep_their_branches_indepen
     wait_for_members(&engine_b, &[&d_id]).await;
     wait_for_members(&engine_c, &[&a_id, &b_id]).await;
     wait_for_members(&engine_d, &[&a_id, &b_id, &c_id]).await;
+    wait_for_converged_members(&engine_b, &engine_d, &b_id, &d_id).await;
     send_and_verify(
         &engine_d,
         &engine_b,
@@ -2057,6 +2083,17 @@ async fn workspace_convergence_summary(engine: &Engine) -> WorkspaceConvergenceS
         .expect("query workspace convergence state");
     let OperationResult::WorkspaceConvergence(summary) = result else {
         panic!("unexpected workspace convergence query result: {result:?}");
+    };
+    summary
+}
+
+async fn device_trust_summary(engine: &Engine) -> DeviceTrustSnapshotSummary {
+    let result = engine
+        .execute(Operation::QueryDeviceTrust)
+        .await
+        .expect("query device trust");
+    let OperationResult::DeviceTrust(summary) = result else {
+        panic!("unexpected device trust result: {result:?}");
     };
     summary
 }

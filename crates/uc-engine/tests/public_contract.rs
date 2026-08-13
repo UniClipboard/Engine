@@ -1,17 +1,21 @@
 use uc_engine::{
-    ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DecideMembershipRemovalInput,
-    DeviceSummary, EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory,
-    EngineEvent, EngineState, EntrySummary, ExportEntryInput, HostFileHandle,
-    InvitationAvailability, JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary,
-    LocalDeviceSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
-    MembershipRemovalDecision, MigrationPhaseSummary, MigrationProgressSummary, Operation,
-    OperationKind, OperationResult, QueryHistoryInput, QueryLegacyBootstrapInput,
-    QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
-    ResendEntryInput, SearchEntriesInput, SearchPageSummary, SearchResultSummary, SecretString,
-    SendFilesInput, SendImageInput, SendTextInput, SetupInvitationSummary, SetupStateSummary,
-    SpaceProtectionModeSummary, SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
-    UpdateMemberSyncPreferencesInput, WorkspaceConvergencePhaseSummary,
-    WorkspaceConvergenceSummary,
+    ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
+    EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
+    EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
+    JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary, LocalDeviceSummary,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MigrationPhaseSummary,
+    MigrationProgressSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
+    QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
+    RemoveMemberInput, ResendEntryInput, SearchEntriesInput, SearchPageSummary,
+    SearchResultSummary, SecretString, SendFilesInput, SendImageInput, SendTextInput,
+    SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary, SpaceProtectionSummary,
+    StorageStatsSummary, UnlockSpaceInput, UpdateMemberSyncPreferencesInput,
+    WorkspaceConvergencePhaseSummary, WorkspaceConvergenceSummary,
+};
+
+use uc_engine::{
+    DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary, DeviceTrustDecisionSummary,
+    DeviceTrustSnapshotSummary,
 };
 
 #[test]
@@ -106,10 +110,7 @@ fn every_public_operation_has_a_stable_kind() {
             OperationKind::VerifySecureStorageAccess,
         ),
         (Operation::ListDevices, OperationKind::ListDevices),
-        (
-            Operation::QueryWorkspaceConvergence,
-            OperationKind::QueryWorkspaceConvergence,
-        ),
+        (Operation::QueryDeviceTrust, OperationKind::QueryDeviceTrust),
         (
             Operation::QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput {
                 device_id: "member-1".into(),
@@ -128,14 +129,6 @@ fn every_public_operation_has_a_stable_kind() {
                 device_id: "member-1".into(),
             }),
             OperationKind::RemoveMember,
-        ),
-        (
-            Operation::DecideMembershipRemoval(DecideMembershipRemovalInput {
-                removal_event_id:
-                    "0101010101010101010101010101010101010101010101010101010101010101".into(),
-                decision: MembershipRemovalDecision::Reject,
-            }),
-            OperationKind::DecideMembershipRemoval,
         ),
         (
             Operation::QueryLegacyBootstrap(QueryLegacyBootstrapInput {
@@ -1390,6 +1383,60 @@ fn workspace_convergence_exposes_only_stable_facts() {
 }
 
 #[test]
+fn device_trust_operations_expose_one_complete_query_and_one_result_oriented_decision() {
+    let query = Operation::QueryDeviceTrust;
+    let decide = Operation::DecideDeviceTrustChange(DecideDeviceTrustChangeInput {
+        change_id: "01".repeat(32),
+        choice: DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
+        confirm_local_removal: false,
+    });
+
+    assert_eq!(query.kind(), OperationKind::QueryDeviceTrust);
+    assert_eq!(query.kind().to_string(), "query_device_trust");
+    assert_eq!(decide.kind(), OperationKind::DecideDeviceTrustChange);
+    assert_eq!(decide.kind().to_string(), "decide_device_trust_change");
+}
+
+#[test]
+fn device_trust_results_have_distinct_snapshot_and_decision_shapes() {
+    let snapshot = DeviceTrustSnapshotSummary::empty_unavailable("device-local".into());
+    assert!(matches!(
+        OperationResult::DeviceTrust(snapshot.clone()),
+        OperationResult::DeviceTrust(_)
+    ));
+    assert!(matches!(
+        OperationResult::DeviceTrustDecision(DeviceTrustDecisionSummary::StateChanged {
+            current_change_id: None,
+            snapshot: Box::new(snapshot),
+        }),
+        OperationResult::DeviceTrustDecision(DeviceTrustDecisionSummary::StateChanged { .. })
+    ));
+}
+
+#[test]
+fn device_trust_debug_output_redacts_device_facts_and_change_ids() {
+    let mut snapshot = DeviceTrustSnapshotSummary::empty_unavailable("private-local-id".into());
+    snapshot
+        .devices
+        .push(uc_engine::DeviceTrustRelationshipSummary {
+            device_id: "private-peer-id".into(),
+            display_name: "Private MacBook".into(),
+            is_local: false,
+            reachability: uc_engine::DeviceReachabilitySummary::Offline,
+            membership: uc_engine::DeviceMembershipSummary::Active,
+            group_relationship: uc_engine::DeviceGroupRelationshipSummary::Consistent,
+            compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
+            sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
+            available_actions: Vec::new(),
+            blocked_reason: None,
+        });
+    let debug = format!("{:?}", OperationResult::DeviceTrust(snapshot));
+    assert!(!debug.contains("private-local-id"));
+    assert!(!debug.contains("private-peer-id"));
+    assert!(!debug.contains("Private MacBook"));
+}
+
+#[test]
 fn local_device_result_redacts_the_display_name() {
     let result = OperationResult::LocalDevice(LocalDeviceSummary {
         device_id: "device-1".into(),
@@ -1622,23 +1669,9 @@ fn lagged_consumers_receive_a_refresh_event() {
 }
 
 #[test]
-fn workspace_convergence_changes_expose_a_full_replacement_snapshot() {
-    let event = EngineEvent::WorkspaceConvergenceChanged(WorkspaceConvergenceSummary {
-        phase: WorkspaceConvergencePhaseSummary::Converging,
-        revision: 1,
-        history_event_count: 1,
-        effective_member_count: 2,
-        pending_removal_decision_device_ids: Vec::new(),
-        pending_removal_decision_event_id: None,
-        diverged_peer_device_ids: Vec::new(),
-        upgrade_required_peer_device_ids: Vec::new(),
-        convergence_digest: None,
-        removed: false,
-        updated_at_ms: 123,
-        failure_category: None,
-    });
-
-    assert_eq!(event.kind(), "workspace_convergence_changed");
+fn device_trust_change_events_only_invalidate_the_complete_snapshot() {
+    let event = EngineEvent::DeviceTrustChanged { revision: 7 };
+    assert_eq!(event.kind(), "device_trust_changed");
 }
 
 #[test]

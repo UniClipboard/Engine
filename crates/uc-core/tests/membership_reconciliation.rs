@@ -125,6 +125,102 @@ fn unseen_removal_waits_for_the_local_user_before_advancing_the_applied_head() {
     assert_eq!(reconciliation.effective_members(), [a].into());
 }
 
+// 流程：C 收到由 B 转发的 A 移除 B 事件；产品事实必须仍把 A 识别为原始发起设备，并精确返回 B。
+#[test]
+fn pending_removal_facts_resolve_the_signed_author_and_exact_target_from_prior_history() {
+    let a = member(1);
+    let b = member(2);
+    let c = member(3);
+    let mut reconciliation = MembershipReconciliation::new(LINEAGE.to_owned(), c);
+    let genesis = event(None, 0, a, add_operation(a), 1);
+    let b_addition = event(Some(genesis.event_id()), 1, a, add_operation(b), 2);
+    let c_addition = event(Some(b_addition.event_id()), 2, b, add_operation(c), 3);
+    let removal = event(
+        Some(c_addition.event_id()),
+        3,
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        4,
+    );
+
+    assert!(reconciliation.receive_verified(genesis).is_ok());
+    assert!(reconciliation.receive_verified(b_addition).is_ok());
+    assert!(reconciliation.receive_verified(c_addition).is_ok());
+    assert!(reconciliation.receive_verified(removal.clone()).is_ok());
+
+    let facts = reconciliation
+        .pending_removal_facts()
+        .expect("pending removal exposes verified product facts");
+    assert_eq!(facts.removal_event_id, removal.event_id());
+    assert_eq!(facts.proposed_by_device_id, DeviceId::new("device-01"));
+    assert_eq!(facts.target_device_ids, vec![DeviceId::new("device-02")]);
+    assert!(!facts.includes_member(c));
+    assert!(facts.includes_member(b));
+}
+
+// 流程：本机已经拒绝一项移除后再次收到相同产品提交；加密历史仍能回答原决定，不需要第二份队列。
+#[test]
+fn completed_local_removal_decision_remains_queryable_from_membership_history() {
+    let a = member(1);
+    let b = member(2);
+    let mut reconciliation = MembershipReconciliation::new(LINEAGE.to_owned(), b);
+    let genesis = event(None, 0, a, add_operation(a), 1);
+    let addition = event(Some(genesis.event_id()), 1, a, add_operation(b), 2);
+    let removal = event(
+        Some(addition.event_id()),
+        2,
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        3,
+    );
+    assert!(reconciliation.receive_verified(genesis).is_ok());
+    assert!(reconciliation.receive_verified(addition.clone()).is_ok());
+    assert!(reconciliation.receive_verified(removal.clone()).is_ok());
+    assert!(reconciliation
+        .record_decision(MembershipDecision::new(
+            LINEAGE.to_owned(),
+            removal.event_id(),
+            b,
+            RemovalDecision::Reject,
+            Some(addition.event_id()),
+            [2; 32],
+            [4; 16],
+            vec![4],
+        ))
+        .is_ok());
+
+    assert_eq!(
+        reconciliation.local_removal_decision(removal.event_id()),
+        Some(RemovalDecision::Reject)
+    );
+}
+
+// 流程：A 已经应用对 B 的移除；B 不再是有效成员，但产品仍需从加密历史显示其可信名称和已移除状态。
+#[test]
+fn admitted_device_facts_remain_available_after_the_device_is_removed() {
+    let a = member(1);
+    let b = member(2);
+    let mut reconciliation = MembershipReconciliation::new(LINEAGE.to_owned(), a);
+    let genesis = event(None, 0, a, add_operation(a), 1);
+    let addition = event(Some(genesis.event_id()), 1, a, add_operation(b), 2);
+    let removal = event(
+        Some(addition.event_id()),
+        2,
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        3,
+    );
+    assert!(reconciliation.receive_verified(genesis).is_ok());
+    assert!(reconciliation.receive_verified(addition).is_ok());
+    assert!(reconciliation.receive_verified(removal).is_ok());
+
+    let devices = reconciliation.admitted_device_facts();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[1].device_id, DeviceId::new("device-02"));
+    assert_eq!(devices[1].device_name, "device");
+    assert!(!reconciliation.is_device_effective(&DeviceId::new("device-02")));
+}
+
 // 流程：A 移除 B；B 接受后向 A 回传，A 保存 B 的决定但不改变 A 已经应用的分支。
 #[test]
 fn removal_author_records_a_verified_acceptance_from_the_removed_member() {

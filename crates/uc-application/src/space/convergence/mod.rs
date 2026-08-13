@@ -50,7 +50,9 @@ use uc_core::membership::{
     WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState, WorkspaceMergeOutcome,
     WorkspacePhase, WorkspaceSnapshot,
 };
-use uc_core::ports::{ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort};
+use uc_core::ports::{
+    ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, PresencePort, ReachabilityState,
+};
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
 pub(crate) use runtime::WorkspaceConvergenceActivity;
@@ -107,13 +109,155 @@ pub struct WorkspaceConvergenceDeps {
     /// member facts here in the same save boundary.
     pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    pub presence: Arc<dyn PresencePort>,
     pub own_device: DeviceId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceMembership {
+    Active,
+    Removed,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupRelationship {
+    Consistent,
+    PendingLocalDecision,
+    Diverged,
+    Unverifiable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceCompatibility {
+    Compatible,
+    UpgradeRequired,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncRelationship {
+    Usable,
+    WaitingForLocalDecision,
+    PausedGroupDiverged,
+    PausedUpgradeRequired,
+    PausedUnverifiable,
+    RemovedLocalDevice,
+    RemovedPeerDevice,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceTrustChoice {
+    ApplyChange,
+    KeepCurrentDeviceGroup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceTrustAction {
+    ApplyCurrentChange,
+    KeepCurrentDeviceGroup,
+    ConfirmApplyRemovesLocalDevice,
+    RejoinDeviceGroup,
+    UpdateThisDevice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionUnavailableReason {
+    NoCurrentChange,
+    ChangeNoLongerCurrent,
+    LocalDeviceConfirmationRequired,
+    LocalDeviceRemoved,
+    RecoveryNotAvailableInThisVersion,
+    PeerUpgradeRequired,
+    DeviceFactsUnverifiable,
+    EngineUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAvailability {
+    NotAvailableInThisVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceTrustDecisionResult {
+    Applied {
+        change_id: MembershipEventId,
+        snapshot: DeviceTrustSnapshot,
+    },
+    KeptCurrentDeviceGroup {
+        change_id: MembershipEventId,
+        snapshot: DeviceTrustSnapshot,
+    },
+    AlreadyCompleted {
+        change_id: MembershipEventId,
+        completed_choice: DeviceTrustChoice,
+        snapshot: DeviceTrustSnapshot,
+    },
+    StateChanged {
+        current_change_id: Option<MembershipEventId>,
+        snapshot: DeviceTrustSnapshot,
+    },
+    LocalDeviceConfirmationRequired {
+        change_id: MembershipEventId,
+        snapshot: DeviceTrustSnapshot,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceTrustImpact {
+    pub usable_device_ids: Vec<DeviceId>,
+    pub paused_device_ids: Vec<DeviceId>,
+    pub local_device_outcome: DeviceMembership,
+    pub requires_rejoin_device_ids: Vec<DeviceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceTrustChange {
+    pub change_id: MembershipEventId,
+    pub proposed_by_device_id: DeviceId,
+    pub target_device_ids: Vec<DeviceId>,
+    pub includes_local_device: bool,
+    pub apply_impact: DeviceTrustImpact,
+    pub keep_current_impact: DeviceTrustImpact,
+    pub allowed_choices: Vec<DeviceTrustChoice>,
+    pub blocked_reason: Option<ActionUnavailableReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceTrustRelationship {
+    pub device_id: DeviceId,
+    pub display_name: String,
+    pub is_local: bool,
+    pub reachability: ReachabilityState,
+    pub membership: DeviceMembership,
+    pub group_relationship: GroupRelationship,
+    pub compatibility: DeviceCompatibility,
+    pub sync_relationship: SyncRelationship,
+    pub available_actions: Vec<DeviceTrustAction>,
+    pub blocked_reason: Option<ActionUnavailableReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceTrustSnapshot {
+    pub revision: u64,
+    pub local_device_id: DeviceId,
+    pub local_membership: DeviceMembership,
+    pub current_change: Option<DeviceTrustChange>,
+    pub devices: Vec<DeviceTrustRelationship>,
+    pub recovery: RecoveryAvailability,
+    pub allowed_actions: Vec<DeviceTrustAction>,
+    pub blocked_reason: Option<ActionUnavailableReason>,
+    pub updated_at_ms: i64,
 }
 
 /// The unified workspace convergence owner.
 pub struct WorkspaceConvergence {
     deps: WorkspaceConvergenceDeps,
     state_lock: tokio::sync::Mutex<()>,
+    device_trust_decision_lock: tokio::sync::Mutex<()>,
     peer_reconciliation_locks: tokio::sync::Mutex<BTreeMap<DeviceId, Arc<tokio::sync::Mutex<()>>>>,
     wake: Arc<tokio::sync::Notify>,
     events: broadcast::Sender<WorkspaceSnapshot>,
@@ -131,6 +275,7 @@ impl WorkspaceConvergence {
         Arc::new(Self {
             deps,
             state_lock: tokio::sync::Mutex::new(()),
+            device_trust_decision_lock: tokio::sync::Mutex::new(()),
             peer_reconciliation_locks: tokio::sync::Mutex::new(BTreeMap::new()),
             wake: Arc::new(tokio::sync::Notify::new()),
             events,
@@ -235,6 +380,236 @@ impl WorkspaceConvergence {
     /// Whether the local member instance has observed its own removal.
     pub async fn own_instance_removed(&self) -> bool {
         self.load_state().await.map_or(true, |state| state.removed)
+    }
+
+    pub async fn query_device_trust(
+        &self,
+    ) -> Result<DeviceTrustSnapshot, WorkspaceConvergenceError> {
+        let _guard = self.state_lock.lock().await;
+        let state = self.load_state().await?;
+        let local_device_id = self.deps.own_device.clone();
+        let workspace_unverifiable = state.failure_category.is_some();
+        let local_membership = if state.own_instance.is_none() {
+            DeviceMembership::Unavailable
+        } else if state.removed {
+            DeviceMembership::Removed
+        } else {
+            DeviceMembership::Active
+        };
+        let history = state.membership_reconciliation.as_ref();
+        let pending_facts = (!workspace_unverifiable)
+            .then(|| history.and_then(|history| history.pending_removal_facts()))
+            .flatten();
+        let includes_local_device = pending_facts.as_ref().is_some_and(|facts| {
+            state
+                .own_instance
+                .is_some_and(|member| facts.includes_member(member))
+        });
+
+        let mut names = BTreeMap::new();
+        if let Some(history) = history {
+            for admission in history.admitted_device_facts() {
+                names.insert(admission.device_id, admission.device_name);
+            }
+        }
+        let roster = self
+            .deps
+            .member_repo
+            .list()
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+        for member in roster {
+            names.insert(member.device_id, member.device_name);
+        }
+        names.entry(local_device_id.clone()).or_default();
+
+        let mut devices = Vec::with_capacity(names.len());
+        for (device_id, display_name) in names {
+            let is_local = device_id == local_device_id;
+            let reachability = if is_local {
+                ReachabilityState::Online
+            } else {
+                self.deps.presence.current_state(&device_id).await
+            };
+            let membership = if is_local {
+                local_membership
+            } else if history.is_some_and(|history| history.is_device_effective(&device_id)) {
+                DeviceMembership::Active
+            } else if history.is_some_and(|history| history.has_admitted_device(&device_id)) {
+                DeviceMembership::Removed
+            } else {
+                DeviceMembership::Unknown
+            };
+            let relationship = state.peer_history_relationships.get(&device_id);
+            let group_relationship = if workspace_unverifiable {
+                GroupRelationship::Unverifiable
+            } else {
+                match relationship {
+                    Some(MembershipHistoryRelationship::Consistent) => {
+                        GroupRelationship::Consistent
+                    }
+                    Some(MembershipHistoryRelationship::PendingRemovalDecision) => {
+                        GroupRelationship::PendingLocalDecision
+                    }
+                    Some(MembershipHistoryRelationship::Diverged) => GroupRelationship::Diverged,
+                    Some(MembershipHistoryRelationship::Invalid) => GroupRelationship::Unverifiable,
+                    Some(MembershipHistoryRelationship::Unknown)
+                    | Some(MembershipHistoryRelationship::UpgradeRequired)
+                    | None => GroupRelationship::Unknown,
+                }
+            };
+            let compatibility = match relationship {
+                Some(MembershipHistoryRelationship::UpgradeRequired) => {
+                    DeviceCompatibility::UpgradeRequired
+                }
+                Some(MembershipHistoryRelationship::Invalid)
+                | Some(MembershipHistoryRelationship::Unknown)
+                | None
+                    if !is_local =>
+                {
+                    DeviceCompatibility::Unknown
+                }
+                _ => DeviceCompatibility::Compatible,
+            };
+            let sync_relationship = if local_membership == DeviceMembership::Removed {
+                SyncRelationship::RemovedLocalDevice
+            } else if membership == DeviceMembership::Removed {
+                SyncRelationship::RemovedPeerDevice
+            } else {
+                match (group_relationship, compatibility) {
+                    (GroupRelationship::Unverifiable, _) => SyncRelationship::PausedUnverifiable,
+                    (GroupRelationship::PendingLocalDecision, _) => {
+                        SyncRelationship::WaitingForLocalDecision
+                    }
+                    (GroupRelationship::Diverged, _) => SyncRelationship::PausedGroupDiverged,
+                    (_, DeviceCompatibility::UpgradeRequired) => {
+                        SyncRelationship::PausedUpgradeRequired
+                    }
+                    (GroupRelationship::Consistent, DeviceCompatibility::Compatible) => {
+                        SyncRelationship::Usable
+                    }
+                    _ if is_local => SyncRelationship::Usable,
+                    _ => SyncRelationship::Unknown,
+                }
+            };
+            let (available_actions, blocked_reason) = match sync_relationship {
+                SyncRelationship::RemovedLocalDevice => (
+                    vec![DeviceTrustAction::RejoinDeviceGroup],
+                    Some(ActionUnavailableReason::LocalDeviceRemoved),
+                ),
+                SyncRelationship::PausedUpgradeRequired if is_local => {
+                    (vec![DeviceTrustAction::UpdateThisDevice], None)
+                }
+                SyncRelationship::PausedUpgradeRequired => (
+                    Vec::new(),
+                    Some(ActionUnavailableReason::PeerUpgradeRequired),
+                ),
+                SyncRelationship::PausedUnverifiable => (
+                    Vec::new(),
+                    Some(ActionUnavailableReason::DeviceFactsUnverifiable),
+                ),
+                _ => (Vec::new(), None),
+            };
+            devices.push(DeviceTrustRelationship {
+                device_id,
+                display_name,
+                is_local,
+                reachability,
+                membership,
+                group_relationship,
+                compatibility,
+                sync_relationship,
+                available_actions,
+                blocked_reason,
+            });
+        }
+
+        let current_change = pending_facts.map(|facts| {
+            let mut apply_usable = devices
+                .iter()
+                .filter(|device| {
+                    device.membership == DeviceMembership::Active
+                        && !facts.target_device_ids.contains(&device.device_id)
+                })
+                .map(|device| device.device_id.clone())
+                .collect::<Vec<_>>();
+            apply_usable.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            let mut keep_usable = devices
+                .iter()
+                .filter(|device| device.membership == DeviceMembership::Active)
+                .map(|device| device.device_id.clone())
+                .collect::<Vec<_>>();
+            keep_usable.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            let mut paused = vec![facts.proposed_by_device_id.clone()];
+            paused.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            DeviceTrustChange {
+                change_id: facts.removal_event_id,
+                proposed_by_device_id: facts.proposed_by_device_id,
+                target_device_ids: facts.target_device_ids.clone(),
+                includes_local_device,
+                apply_impact: DeviceTrustImpact {
+                    usable_device_ids: apply_usable,
+                    paused_device_ids: Vec::new(),
+                    local_device_outcome: if includes_local_device {
+                        DeviceMembership::Removed
+                    } else {
+                        local_membership
+                    },
+                    requires_rejoin_device_ids: facts.target_device_ids,
+                },
+                keep_current_impact: DeviceTrustImpact {
+                    usable_device_ids: keep_usable,
+                    paused_device_ids: paused,
+                    local_device_outcome: local_membership,
+                    requires_rejoin_device_ids: Vec::new(),
+                },
+                allowed_choices: vec![
+                    DeviceTrustChoice::ApplyChange,
+                    DeviceTrustChoice::KeepCurrentDeviceGroup,
+                ],
+                blocked_reason: includes_local_device
+                    .then_some(ActionUnavailableReason::LocalDeviceConfirmationRequired),
+            }
+        });
+        let (allowed_actions, blocked_reason) = if workspace_unverifiable {
+            (
+                Vec::new(),
+                Some(ActionUnavailableReason::DeviceFactsUnverifiable),
+            )
+        } else {
+            match &current_change {
+                Some(change) if change.includes_local_device => (
+                    vec![
+                        DeviceTrustAction::KeepCurrentDeviceGroup,
+                        DeviceTrustAction::ConfirmApplyRemovesLocalDevice,
+                    ],
+                    Some(ActionUnavailableReason::LocalDeviceConfirmationRequired),
+                ),
+                Some(_) => (
+                    vec![
+                        DeviceTrustAction::ApplyCurrentChange,
+                        DeviceTrustAction::KeepCurrentDeviceGroup,
+                    ],
+                    None,
+                ),
+                None if local_membership == DeviceMembership::Removed => (
+                    vec![DeviceTrustAction::RejoinDeviceGroup],
+                    Some(ActionUnavailableReason::LocalDeviceRemoved),
+                ),
+                None => (Vec::new(), Some(ActionUnavailableReason::NoCurrentChange)),
+            }
+        };
+        Ok(DeviceTrustSnapshot {
+            revision: state.revision,
+            local_device_id,
+            local_membership,
+            current_change,
+            devices,
+            recovery: RecoveryAvailability::NotAvailableInThisVersion,
+            allowed_actions,
+            blocked_reason,
+            updated_at_ms: state.updated_at_ms,
+        })
     }
 
     /// Load the current workspace snapshot without changing any state.
@@ -489,6 +864,16 @@ impl WorkspaceConvergence {
         removal_event_id: MembershipEventId,
         decision: RemovalDecision,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+        let _decision_guard = self.device_trust_decision_lock.lock().await;
+        self.decide_membership_removal_locked(removal_event_id, decision)
+            .await
+    }
+
+    async fn decide_membership_removal_locked(
+        &self,
+        removal_event_id: MembershipEventId,
+        decision: RemovalDecision,
+    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
         let (snapshot, recipients, signed_decision) = {
             let _guard = self.state_lock.lock().await;
             let now_ms = self.deps.clock.now_ms();
@@ -500,6 +885,15 @@ impl WorkspaceConvergence {
                 .membership_reconciliation
                 .as_ref()
                 .ok_or(WorkspaceConvergenceError::NotAMember)?;
+            if let Some(completed) = history.local_removal_decision(removal_event_id) {
+                return if completed == decision {
+                    Ok(state.snapshot())
+                } else {
+                    Err(WorkspaceConvergenceError::Inconsistent(
+                        "membership removal was completed with a different decision".to_owned(),
+                    ))
+                };
+            }
             if history.pending_removal_decision() != Some(removal_event_id) {
                 return Err(WorkspaceConvergenceError::Inconsistent(
                     "membership removal is no longer pending".to_owned(),
@@ -613,6 +1007,83 @@ impl WorkspaceConvergence {
                 .await;
         }
         Ok(snapshot)
+    }
+
+    pub async fn decide_device_trust_change(
+        &self,
+        change_id: MembershipEventId,
+        choice: DeviceTrustChoice,
+        confirm_local_removal: bool,
+    ) -> Result<DeviceTrustDecisionResult, WorkspaceConvergenceError> {
+        let _decision_guard = self.device_trust_decision_lock.lock().await;
+        let state = self.load_state().await?;
+        let history = state
+            .membership_reconciliation
+            .as_ref()
+            .ok_or(WorkspaceConvergenceError::NotAMember)?;
+        if let Some(completed) = history.local_removal_decision(change_id) {
+            let completed_choice = match completed {
+                RemovalDecision::Accept => DeviceTrustChoice::ApplyChange,
+                RemovalDecision::Reject => DeviceTrustChoice::KeepCurrentDeviceGroup,
+            };
+            let snapshot = self.query_device_trust().await?;
+            return if completed_choice == choice {
+                Ok(DeviceTrustDecisionResult::AlreadyCompleted {
+                    change_id,
+                    completed_choice,
+                    snapshot,
+                })
+            } else {
+                Ok(DeviceTrustDecisionResult::StateChanged {
+                    current_change_id: snapshot
+                        .current_change
+                        .as_ref()
+                        .map(|change| change.change_id),
+                    snapshot,
+                })
+            };
+        }
+        let pending = history.pending_removal_facts();
+        if pending.as_ref().map(|facts| facts.removal_event_id) != Some(change_id) {
+            let snapshot = self.query_device_trust().await?;
+            return Ok(DeviceTrustDecisionResult::StateChanged {
+                current_change_id: snapshot
+                    .current_change
+                    .as_ref()
+                    .map(|change| change.change_id),
+                snapshot,
+            });
+        }
+        let removes_local = pending.is_some_and(|facts| {
+            state
+                .own_instance
+                .is_some_and(|member| facts.includes_member(member))
+        });
+        if choice == DeviceTrustChoice::ApplyChange && removes_local && !confirm_local_removal {
+            return Ok(DeviceTrustDecisionResult::LocalDeviceConfirmationRequired {
+                change_id,
+                snapshot: self.query_device_trust().await?,
+            });
+        }
+        let decision = match choice {
+            DeviceTrustChoice::ApplyChange => RemovalDecision::Accept,
+            DeviceTrustChoice::KeepCurrentDeviceGroup => RemovalDecision::Reject,
+        };
+        self.decide_membership_removal_locked(change_id, decision)
+            .await?;
+        let snapshot = self.query_device_trust().await?;
+        Ok(match choice {
+            DeviceTrustChoice::ApplyChange => DeviceTrustDecisionResult::Applied {
+                change_id,
+                snapshot,
+            },
+            DeviceTrustChoice::KeepCurrentDeviceGroup => {
+                DeviceTrustDecisionResult::KeptCurrentDeviceGroup {
+                    change_id,
+                    snapshot,
+                }
+            }
+        })
     }
 
     fn respond_to_membership_history_request(

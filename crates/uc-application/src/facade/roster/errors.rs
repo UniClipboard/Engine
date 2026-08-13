@@ -14,6 +14,10 @@ pub enum RosterError {
     #[error("distributed member removal is unavailable on this host")]
     MembershipReconciliationUnavailable,
 
+    /// 成员状态存在，但当前加密会话尚未解锁。
+    #[error("membership reconciliation is locked")]
+    MembershipReconciliationLocked,
+
     /// 分布式成员移除流程失败。
     #[error("distributed member removal failed: {0}")]
     MemberRemoval(String),

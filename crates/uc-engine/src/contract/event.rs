@@ -2,9 +2,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "dev-tools")]
+use super::WorkspaceConvergenceSummary;
 use super::{
     EngineError, EngineState, LifecycleAction, NetworkRecoveryStatusSummary, OperationTerminal,
-    WorkspaceConvergenceSummary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,7 +28,11 @@ pub enum EngineEvent {
     TransferStatusChanged(TransferStatusChanged),
     DeliveryStatusChanged(DeliveryStatusChanged),
     PeerPresenceChanged(PeerPresenceChanged),
+    #[cfg(feature = "dev-tools")]
     WorkspaceConvergenceChanged(WorkspaceConvergenceSummary),
+    DeviceTrustChanged {
+        revision: u64,
+    },
     ActiveClipboardChanged(ActiveClipboardChanged),
     MobileLanSettingsChanged(MobileLanSettingsChanged),
     NetworkRecoveryChanged(NetworkRecoveryStatusSummary),
@@ -59,7 +64,9 @@ impl EngineEvent {
             Self::TransferStatusChanged(_) => "transfer_status_changed",
             Self::DeliveryStatusChanged(_) => "delivery_status_changed",
             Self::PeerPresenceChanged(_) => "peer_presence_changed",
+            #[cfg(feature = "dev-tools")]
             Self::WorkspaceConvergenceChanged(_) => "workspace_convergence_changed",
+            Self::DeviceTrustChanged { .. } => "device_trust_changed",
             Self::ActiveClipboardChanged(_) => "active_clipboard_changed",
             Self::MobileLanSettingsChanged(_) => "mobile_lan_settings_changed",
             Self::NetworkRecoveryChanged(_) => "network_recovery_changed",

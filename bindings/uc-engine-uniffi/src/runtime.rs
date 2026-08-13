@@ -250,6 +250,12 @@ pub enum MembershipRemovalDecision {
     Reject,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum DeviceTrustChoice {
+    ApplyChange,
+    KeepCurrentDeviceGroup,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ResendEntryOutcome {
     Completed {
@@ -307,16 +313,17 @@ enum WorkerCommand {
     ListDevices {
         response: mpsc::Sender<Result<Vec<Device>, BindingError>>,
     },
-    QueryWorkspaceConvergence {
-        response: mpsc::Sender<Result<WorkspaceConvergence, BindingError>>,
+    QueryDeviceTrust {
+        response: mpsc::Sender<Result<String, BindingError>>,
+    },
+    DecideDeviceTrustChange {
+        change_id: String,
+        choice: DeviceTrustChoice,
+        confirm_local_removal: bool,
+        response: mpsc::Sender<Result<String, BindingError>>,
     },
     RemoveMember {
         device_id: String,
-        response: mpsc::Sender<Result<WorkspaceConvergence, BindingError>>,
-    },
-    DecideMembershipRemoval {
-        removal_event_id: String,
-        decision: MembershipRemovalDecision,
         response: mpsc::Sender<Result<WorkspaceConvergence, BindingError>>,
     },
     ResendEntry {
@@ -766,25 +773,27 @@ impl MobileEngine {
         self.request(|response| WorkerCommand::ListDevices { response })
     }
 
-    pub fn query_workspace_convergence(&self) -> Result<WorkspaceConvergence, BindingError> {
-        self.request(|response| WorkerCommand::QueryWorkspaceConvergence { response })
+    pub fn query_device_trust(&self) -> Result<String, BindingError> {
+        self.request(|response| WorkerCommand::QueryDeviceTrust { response })
+    }
+
+    pub fn decide_device_trust_change(
+        &self,
+        change_id: String,
+        choice: DeviceTrustChoice,
+        confirm_local_removal: bool,
+    ) -> Result<String, BindingError> {
+        self.request(|response| WorkerCommand::DecideDeviceTrustChange {
+            change_id,
+            choice,
+            confirm_local_removal,
+            response,
+        })
     }
 
     pub fn remove_member(&self, device_id: String) -> Result<WorkspaceConvergence, BindingError> {
         self.request(|response| WorkerCommand::RemoveMember {
             device_id,
-            response,
-        })
-    }
-
-    pub fn decide_membership_removal(
-        &self,
-        removal_event_id: String,
-        decision: MembershipRemovalDecision,
-    ) -> Result<WorkspaceConvergence, BindingError> {
-        self.request(|response| WorkerCommand::DecideMembershipRemoval {
-            removal_event_id,
-            decision,
             response,
         })
     }
@@ -1355,12 +1364,39 @@ async fn run_worker_loop(
                 }
                 let _ = response.send(result);
             }
-            WorkerCommand::QueryWorkspaceConvergence { response } => {
+            WorkerCommand::QueryDeviceTrust { response } => {
                 let result = engine
-                    .execute(Operation::QueryWorkspaceConvergence)
+                    .execute(Operation::QueryDeviceTrust)
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_workspace_convergence);
+                    .and_then(map_device_trust);
+                let _ = response.send(result);
+            }
+            WorkerCommand::DecideDeviceTrustChange {
+                change_id,
+                choice,
+                confirm_local_removal,
+                response,
+            } => {
+                let choice = match choice {
+                    DeviceTrustChoice::ApplyChange => {
+                        uc_engine::DeviceTrustChoiceSummary::ApplyChange
+                    }
+                    DeviceTrustChoice::KeepCurrentDeviceGroup => {
+                        uc_engine::DeviceTrustChoiceSummary::KeepCurrentDeviceGroup
+                    }
+                };
+                let result = engine
+                    .execute(Operation::DecideDeviceTrustChange(
+                        uc_engine::DecideDeviceTrustChangeInput {
+                            change_id,
+                            choice,
+                            confirm_local_removal,
+                        },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_device_trust_decision);
                 let _ = response.send(result);
             }
             WorkerCommand::RemoveMember {
@@ -1369,31 +1405,6 @@ async fn run_worker_loop(
             } => {
                 let result = engine
                     .execute(Operation::RemoveMember(RemoveMemberInput { device_id }))
-                    .await
-                    .map_err(BindingError::from)
-                    .and_then(map_workspace_convergence);
-                let _ = response.send(result);
-            }
-            WorkerCommand::DecideMembershipRemoval {
-                removal_event_id,
-                decision,
-                response,
-            } => {
-                let decision = match decision {
-                    MembershipRemovalDecision::Accept => {
-                        uc_engine::MembershipRemovalDecision::Accept
-                    }
-                    MembershipRemovalDecision::Reject => {
-                        uc_engine::MembershipRemovalDecision::Reject
-                    }
-                };
-                let result = engine
-                    .execute(Operation::DecideMembershipRemoval(
-                        uc_engine::DecideMembershipRemovalInput {
-                            removal_event_id,
-                            decision,
-                        },
-                    ))
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_workspace_convergence);
@@ -1708,10 +1719,8 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
             state: event.state,
             at_ms: event.at_ms,
         },
-        uc_engine::EngineEvent::WorkspaceConvergenceChanged(snapshot) => {
-            BindingEvent::WorkspaceConvergenceChanged {
-                convergence: map_workspace_convergence_summary(snapshot),
-            }
+        uc_engine::EngineEvent::DeviceTrustChanged { revision } => {
+            BindingEvent::DeviceTrustChanged { revision }
         }
         uc_engine::EngineEvent::TransferProgress(event) => BindingEvent::TransferProgress {
             transfer_id: event.transfer_id,
@@ -1855,6 +1864,28 @@ fn map_workspace_convergence_summary(
             .failure_category
             .map(map_workspace_convergence_failure_category),
     }
+}
+
+fn map_device_trust(result: uc_engine::OperationResult) -> Result<String, BindingError> {
+    match result {
+        uc_engine::OperationResult::DeviceTrust(snapshot) => map_device_trust_snapshot(snapshot),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_device_trust_decision(result: uc_engine::OperationResult) -> Result<String, BindingError> {
+    match result {
+        uc_engine::OperationResult::DeviceTrustDecision(decision) => {
+            serde_json::to_string(&decision).map_err(|_| BindingError::UnexpectedResult)
+        }
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_device_trust_snapshot(
+    snapshot: uc_engine::DeviceTrustSnapshotSummary,
+) -> Result<String, BindingError> {
+    serde_json::to_string(&snapshot).map_err(|_| BindingError::UnexpectedResult)
 }
 
 fn map_resend_outcome(result: OperationResult) -> Result<ResendEntryOutcome, BindingError> {
@@ -2387,65 +2418,17 @@ mod tests {
     }
 
     #[test]
-    fn workspace_convergence_methods_and_events_share_the_complete_snapshot() {
-        let _query: fn(&MobileEngine) -> Result<WorkspaceConvergence, BindingError> =
-            MobileEngine::query_workspace_convergence;
-        let _decide: fn(
-            &MobileEngine,
-            String,
-            MembershipRemovalDecision,
-        ) -> Result<WorkspaceConvergence, BindingError> = MobileEngine::decide_membership_removal;
-        let event = map_engine_event(uc_engine::EngineEvent::WorkspaceConvergenceChanged(
-            uc_engine::WorkspaceConvergenceSummary {
-                phase: uc_engine::WorkspaceConvergencePhaseSummary::Converging,
-                revision: 2,
-                history_event_count: 1,
-                effective_member_count: 2,
-                pending_removal_decision_device_ids: vec!["device-c".to_owned()],
-                pending_removal_decision_event_id: Some("event-c".to_owned()),
-                diverged_peer_device_ids: vec!["device-d".to_owned()],
-                upgrade_required_peer_device_ids: vec!["device-e".to_owned()],
-                convergence_digest: None,
-                removed: false,
-                updated_at_ms: 42,
-                failure_category: None,
-            },
-        ));
-
-        assert_eq!(
-            event,
-            BindingEvent::WorkspaceConvergenceChanged {
-                convergence: WorkspaceConvergence {
-                    phase: WorkspaceConvergencePhase::Converging,
-                    revision: 2,
-                    history_event_count: 1,
-                    effective_member_count: 2,
-                    pending_removal_decision_device_ids: vec!["device-c".to_owned()],
-                    pending_removal_decision_event_id: Some("event-c".to_owned()),
-                    diverged_peer_device_ids: vec!["device-d".to_owned()],
-                    upgrade_required_peer_device_ids: vec!["device-e".to_owned()],
-                    convergence_digest: None,
-                    removed: false,
-                    updated_at_ms: 42,
-                    failure_category: None,
-                },
-            }
-        );
-        let BindingEvent::WorkspaceConvergenceChanged { convergence } = event else {
-            panic!("workspace convergence event must map");
-        };
-        assert_eq!(
-            convergence.pending_removal_decision_device_ids,
-            vec!["device-c".to_owned()]
-        );
-        assert_eq!(
-            convergence.diverged_peer_device_ids,
-            vec!["device-d".to_owned()]
-        );
-        assert_eq!(
-            convergence.upgrade_required_peer_device_ids,
-            vec!["device-e".to_owned()]
-        );
+    fn device_trust_json_keeps_complete_snapshot_fields() {
+        let json = map_device_trust_snapshot(
+            uc_engine::DeviceTrustSnapshotSummary::empty_unavailable("local-device".into()),
+        )
+        .unwrap();
+        assert!(json.contains("local_device_id"));
+        assert!(json.contains("current_change"));
+        assert!(json.contains("devices"));
+        assert!(json.contains("recovery"));
+        assert!(json.contains("allowed_actions"));
+        assert!(json.contains("blocked_reason"));
     }
 
     #[test]

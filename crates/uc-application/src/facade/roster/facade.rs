@@ -311,6 +311,35 @@ impl MemberRosterFacade {
             .map_err(map_workspace_convergence_error)
     }
 
+    pub async fn query_device_trust(
+        &self,
+    ) -> Result<crate::facade::DeviceTrustSnapshot, RosterError> {
+        let convergence = self
+            .workspace_convergence
+            .as_ref()
+            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
+        convergence
+            .query_device_trust()
+            .await
+            .map_err(map_workspace_convergence_error)
+    }
+
+    pub async fn decide_device_trust_change(
+        &self,
+        change_id: MembershipEventId,
+        choice: crate::facade::DeviceTrustChoice,
+        confirm_local_removal: bool,
+    ) -> Result<crate::facade::DeviceTrustDecisionResult, RosterError> {
+        let convergence = self
+            .workspace_convergence
+            .as_ref()
+            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
+        convergence
+            .decide_device_trust_change(change_id, choice, confirm_local_removal)
+            .await
+            .map_err(map_workspace_convergence_error)
+    }
+
     pub async fn query_legacy_bootstrap(
         &self,
         bootstrap_id: &str,
@@ -453,6 +482,10 @@ impl MemberRosterFacade {
 
 fn map_workspace_convergence_error(error: WorkspaceConvergenceError) -> RosterError {
     match error {
+        WorkspaceConvergenceError::Locked
+        | WorkspaceConvergenceError::Repository(
+            uc_core::membership::WorkspaceConvergenceRepositoryError::Locked,
+        ) => RosterError::MembershipReconciliationLocked,
         WorkspaceConvergenceError::SelfTarget => RosterError::MemberRemovalInvalidInput,
         WorkspaceConvergenceError::UnknownTarget => RosterError::MemberRemovalTargetNotFound,
         error => RosterError::MemberRemoval(error.to_string()),
@@ -468,6 +501,21 @@ mod tests {
     use uc_core::membership::{MemberSyncPreferences, MembershipError, SpaceMember};
     use uc_core::ports::{LocalIdentityError, ReachabilityState};
     use uc_core::security::IdentityFingerprint;
+
+    #[test]
+    fn locked_device_trust_state_keeps_a_distinct_unavailable_error() {
+        for error in [
+            WorkspaceConvergenceError::Locked,
+            WorkspaceConvergenceError::Repository(
+                uc_core::membership::WorkspaceConvergenceRepositoryError::Locked,
+            ),
+        ] {
+            assert!(matches!(
+                map_workspace_convergence_error(error),
+                RosterError::MembershipReconciliationLocked
+            ));
+        }
+    }
 
     struct Members(Vec<SpaceMember>);
 

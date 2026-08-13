@@ -358,8 +358,8 @@ pub enum BindingEvent {
         state: String,
         at_ms: i64,
     },
-    WorkspaceConvergenceChanged {
-        convergence: WorkspaceConvergence,
+    DeviceTrustChanged {
+        revision: u64,
     },
     TransferProgress {
         transfer_id: String,

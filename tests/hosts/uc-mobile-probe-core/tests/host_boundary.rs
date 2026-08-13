@@ -136,22 +136,17 @@ fn ios_and_android_probe_member_removal_through_the_shared_contract() {
     let ios_model = read(root.join("tests/hosts/ios/EngineProbe/ProbeModel.swift"));
     let ios_view = read(root.join("tests/hosts/ios/EngineProbe/ProbeView.swift"));
 
-    for command in ["RemoveMember", "QueryWorkspaceConvergence"] {
+    for command in [
+        "RemoveMember",
+        "QueryDeviceTrust",
+        "DecideDeviceTrustChange",
+    ] {
         assert!(source.contains(command), "missing command: {command}");
     }
-    for field in [
-        "phase",
-        "revision",
-        "history_event_count",
-        "effective_member_count",
-        "convergence_digest",
-        "updated_at_ms",
-        "last_workspace_phase",
-    ] {
-        assert!(source.contains(field), "missing field: {field}");
-    }
-    assert!(ios_model.contains("query_workspace_convergence"));
-    assert!(ios_view.contains("Member removal"));
+    assert!(source.contains("OperationResult::DeviceTrust"));
+    assert!(source.contains("OperationResult::DeviceTrustDecision"));
+    assert!(ios_model.contains("query_device_trust"));
+    assert!(ios_view.contains("Device trust"));
 }
 
 #[test]

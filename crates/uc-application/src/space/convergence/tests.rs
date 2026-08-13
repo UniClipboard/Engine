@@ -12,11 +12,12 @@ use uc_core::membership::{
     CurrentMembershipIdentityPort, MemberInstanceId, MemberRepositoryPort,
     MembershipAdmissionDecision, MembershipAdmissionGatePort, MembershipEventsResponse,
     MembershipHistoryAck, MembershipHistoryMessage, MembershipOperation, MembershipReconciliation,
-    MembershipSecurityUpdateError, MembershipSecurityUpdatePort, WorkspaceConvergenceEvent,
-    WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
-    WorkspaceConvergenceState,
+    MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalDecision,
+    WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
+    WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState,
 };
 use uc_core::ports::{ClockPort, DeviceIdentityPort};
+use uc_core::ports::{PresenceError, PresenceEvent, PresencePort, ReachabilityState};
 
 use crate::space::convergence::{
     WorkspaceConvergence, WorkspaceConvergenceDeps, WorkspaceConvergenceError,
@@ -376,6 +377,37 @@ struct Harness {
     owner: Arc<WorkspaceConvergence>,
     repository: MemoryWorkspaceRepository,
     history_exchange: Arc<UnusedExchange>,
+    presence: Arc<FixedPresence>,
+}
+
+#[derive(Clone, Default)]
+struct FixedPresence {
+    states: Arc<Mutex<std::collections::BTreeMap<DeviceId, ReachabilityState>>>,
+}
+
+#[async_trait]
+impl PresencePort for FixedPresence {
+    async fn ensure_reachable(
+        &self,
+        device: &DeviceId,
+    ) -> Result<ReachabilityState, PresenceError> {
+        Ok(self.current_state(device).await)
+    }
+
+    async fn current_state(&self, device: &DeviceId) -> ReachabilityState {
+        self.states
+            .lock()
+            .unwrap()
+            .get(device)
+            .copied()
+            .unwrap_or(ReachabilityState::Unknown)
+    }
+
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PresenceEvent> {
+        let (sender, receiver) = tokio::sync::broadcast::channel(1);
+        drop(sender);
+        receiver
+    }
 }
 
 fn instance(byte: u8) -> MemberInstanceId {
@@ -385,13 +417,16 @@ fn instance(byte: u8) -> MemberInstanceId {
 fn harness(own_device: &str, members: Vec<(DeviceId, MemberInstanceId)>) -> Harness {
     let repository = MemoryWorkspaceRepository::default();
     let history_exchange = Arc::new(UnusedExchange::default());
+    let presence = Arc::new(FixedPresence::default());
     let mut deps = test_deps(Arc::new(repository.clone()), own_device, members);
     deps.membership_history_exchange = history_exchange.clone();
+    deps.presence = presence.clone();
     let owner = WorkspaceConvergence::new(deps);
     Harness {
         owner,
         repository,
         history_exchange,
+        presence,
     }
 }
 
@@ -418,6 +453,7 @@ pub(crate) fn test_deps(
         legacy_peer_probe: Arc::new(UnusedLegacyProbe),
         trusted_peer_repo: Arc::new(TestTrustedPeerRepo),
         peer_addr_repo: Arc::new(TestPeerAddrRepo),
+        presence: Arc::new(FixedPresence::default()),
         own_device: DeviceId::new(own_device),
     }
 }
@@ -598,6 +634,567 @@ fn membership_event(
         None,
         vec![operation_byte],
     )
+}
+
+// 流程：C 收到 A 对 B 的移除，A 在线而 B 离线；一次查询直接返回来源、目标、两种后果和独立关系事实。
+#[tokio::test]
+async fn device_trust_query_returns_complete_pending_change_and_per_device_relationships() {
+    use crate::space::convergence::{
+        DeviceCompatibility, DeviceMembership, GroupRelationship, SyncRelationship,
+    };
+
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    harness.presence.states.lock().unwrap().extend([
+        (DeviceId::new("device-a"), ReachabilityState::Online),
+        (DeviceId::new("device-b"), ReachabilityState::Offline),
+    ]);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let b_addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let c_addition = membership_event(Some(b_addition.event_id()), 2, a, c, "device-c", 3);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(c_addition.event_id()),
+        3,
+        [4; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        [4; 32],
+        [5; 32],
+        Vec::new(),
+        None,
+        vec![4],
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    for event in [genesis, b_addition, c_addition] {
+        history.receive_verified(event).unwrap();
+    }
+    history.receive_verified(removal.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-a"),
+        uc_core::membership::MembershipHistoryRelationship::PendingRemovalDecision,
+    );
+    harness.repository.save_state(&state).await.unwrap();
+
+    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let change = snapshot.current_change.expect("one current change");
+    assert_eq!(change.change_id, removal.event_id());
+    assert_eq!(change.proposed_by_device_id, DeviceId::new("device-a"));
+    assert_eq!(change.target_device_ids, vec![DeviceId::new("device-b")]);
+    assert!(!change.includes_local_device);
+    assert!(change
+        .apply_impact
+        .requires_rejoin_device_ids
+        .contains(&DeviceId::new("device-b")));
+    assert!(change
+        .keep_current_impact
+        .paused_device_ids
+        .contains(&DeviceId::new("device-a")));
+
+    let a_view = snapshot
+        .devices
+        .iter()
+        .find(|device| device.device_id == DeviceId::new("device-a"))
+        .unwrap();
+    assert_eq!(a_view.reachability, ReachabilityState::Online);
+    assert_eq!(a_view.membership, DeviceMembership::Active);
+    assert_eq!(
+        a_view.group_relationship,
+        GroupRelationship::PendingLocalDecision
+    );
+    assert_eq!(a_view.compatibility, DeviceCompatibility::Compatible);
+    assert_eq!(
+        a_view.sync_relationship,
+        SyncRelationship::WaitingForLocalDecision
+    );
+
+    let b_view = snapshot
+        .devices
+        .iter()
+        .find(|device| device.device_id == DeviceId::new("device-b"))
+        .unwrap();
+    assert_eq!(b_view.reachability, ReachabilityState::Offline);
+    assert_eq!(b_view.membership, DeviceMembership::Active);
+    assert_eq!(b_view.group_relationship, GroupRelationship::Unknown);
+}
+
+#[tokio::test]
+async fn device_trust_query_reports_a_consistent_compatible_peer_as_usable() {
+    use crate::space::convergence::SyncRelationship;
+
+    let a = instance(0x0a);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(c_addition).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-a"),
+        uc_core::membership::MembershipHistoryRelationship::Consistent,
+    );
+    harness.repository.save_state(&state).await.unwrap();
+
+    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let peer = snapshot
+        .devices
+        .iter()
+        .find(|device| device.device_id == DeviceId::new("device-a"))
+        .unwrap();
+    assert_eq!(peer.sync_relationship, SyncRelationship::Usable);
+}
+
+#[tokio::test]
+async fn device_trust_query_keeps_reachability_independent_from_a_usable_relationship() {
+    use crate::space::convergence::{GroupRelationship, SyncRelationship};
+
+    let a = instance(0x0a);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    harness
+        .presence
+        .states
+        .lock()
+        .unwrap()
+        .insert(DeviceId::new("device-a"), ReachabilityState::Offline);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(c_addition).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-a"),
+        uc_core::membership::MembershipHistoryRelationship::Consistent,
+    );
+    harness.repository.save_state(&state).await.unwrap();
+
+    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let peer = snapshot
+        .devices
+        .iter()
+        .find(|device| device.device_id == DeviceId::new("device-a"))
+        .unwrap();
+    assert_eq!(peer.reachability, ReachabilityState::Offline);
+    assert_eq!(peer.group_relationship, GroupRelationship::Consistent);
+    assert_eq!(peer.sync_relationship, SyncRelationship::Usable);
+    assert!(snapshot.current_change.is_none());
+}
+
+#[tokio::test]
+async fn device_trust_query_reports_invalid_peer_facts_as_unverifiable_and_paused() {
+    use crate::space::convergence::{ActionUnavailableReason, GroupRelationship, SyncRelationship};
+
+    let a = instance(0x0a);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(c_addition).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-a"),
+        uc_core::membership::MembershipHistoryRelationship::Invalid,
+    );
+    harness.repository.save_state(&state).await.unwrap();
+
+    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let peer = snapshot
+        .devices
+        .iter()
+        .find(|device| device.device_id == DeviceId::new("device-a"))
+        .unwrap();
+    assert_eq!(peer.group_relationship, GroupRelationship::Unverifiable);
+    assert_eq!(peer.sync_relationship, SyncRelationship::PausedUnverifiable);
+    assert_eq!(
+        peer.blocked_reason,
+        Some(ActionUnavailableReason::DeviceFactsUnverifiable)
+    );
+}
+
+#[tokio::test]
+async fn device_trust_query_fails_closed_when_the_workspace_facts_are_unverifiable() {
+    use crate::space::convergence::{ActionUnavailableReason, GroupRelationship, SyncRelationship};
+
+    let a = instance(0x0a);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(c_addition).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-a"),
+        uc_core::membership::MembershipHistoryRelationship::Consistent,
+    );
+    state.failure_category = Some(uc_core::membership::WorkspaceFailureCategory::DigestConflict);
+    harness.repository.save_state(&state).await.unwrap();
+
+    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let peer = snapshot
+        .devices
+        .iter()
+        .find(|device| device.device_id == DeviceId::new("device-a"))
+        .unwrap();
+    assert_eq!(peer.group_relationship, GroupRelationship::Unverifiable);
+    assert_eq!(peer.sync_relationship, SyncRelationship::PausedUnverifiable);
+    assert_eq!(
+        snapshot.blocked_reason,
+        Some(ActionUnavailableReason::DeviceFactsUnverifiable)
+    );
+    assert!(snapshot.allowed_actions.is_empty());
+    assert!(snapshot.current_change.is_none());
+}
+
+// 流程：同一待决定项先保留当前组，再重复相同和相反选择；只保存一次，结果稳定且可跨查询恢复。
+#[tokio::test]
+async fn device_trust_decision_distinguishes_first_duplicate_and_conflicting_submissions() {
+    use crate::space::convergence::DeviceTrustDecisionResult;
+
+    let a = instance(0x0a);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(c_addition.event_id()),
+        2,
+        [3; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: a },
+        [3; 32],
+        [4; 32],
+        Vec::new(),
+        None,
+        vec![3],
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    for event in [genesis, c_addition] {
+        history.receive_verified(event).unwrap();
+    }
+    history.receive_verified(removal.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+
+    assert!(matches!(
+        harness
+            .owner
+            .decide_device_trust_change(
+                removal.event_id(),
+                crate::space::convergence::DeviceTrustChoice::KeepCurrentDeviceGroup,
+                false,
+            )
+            .await
+            .unwrap(),
+        DeviceTrustDecisionResult::KeptCurrentDeviceGroup { .. }
+    ));
+    assert!(matches!(
+        harness
+            .owner
+            .decide_device_trust_change(
+                removal.event_id(),
+                crate::space::convergence::DeviceTrustChoice::KeepCurrentDeviceGroup,
+                false,
+            )
+            .await
+            .unwrap(),
+        DeviceTrustDecisionResult::AlreadyCompleted { .. }
+    ));
+    let restarted = WorkspaceConvergence::new(test_deps(
+        Arc::new(harness.repository.clone()),
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-c"), c),
+        ],
+    ));
+    assert!(matches!(
+        restarted
+            .decide_device_trust_change(
+                removal.event_id(),
+                crate::space::convergence::DeviceTrustChoice::KeepCurrentDeviceGroup,
+                false,
+            )
+            .await
+            .unwrap(),
+        DeviceTrustDecisionResult::AlreadyCompleted { .. }
+    ));
+    assert!(matches!(
+        restarted
+            .decide_device_trust_change(
+                removal.event_id(),
+                crate::space::convergence::DeviceTrustChoice::ApplyChange,
+                false,
+            )
+            .await
+            .unwrap(),
+        DeviceTrustDecisionResult::StateChanged { .. }
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_matching_device_trust_decisions_save_only_one_completion() {
+    use crate::space::convergence::DeviceTrustDecisionResult;
+
+    let a = instance(0x0a);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(c_addition.event_id()),
+        2,
+        [3; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: a },
+        [3; 32],
+        [4; 32],
+        Vec::new(),
+        None,
+        vec![3],
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(c_addition).unwrap();
+    history.receive_verified(removal.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+
+    let first_owner = Arc::clone(&harness.owner);
+    let second_owner = Arc::clone(&harness.owner);
+    let (first, second) = tokio::join!(
+        first_owner.decide_device_trust_change(
+            removal.event_id(),
+            crate::space::convergence::DeviceTrustChoice::KeepCurrentDeviceGroup,
+            false,
+        ),
+        second_owner.decide_device_trust_change(
+            removal.event_id(),
+            crate::space::convergence::DeviceTrustChoice::KeepCurrentDeviceGroup,
+            false,
+        ),
+    );
+    let results = [first.unwrap(), second.unwrap()];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(
+                result,
+                DeviceTrustDecisionResult::KeptCurrentDeviceGroup { .. }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, DeviceTrustDecisionResult::AlreadyCompleted { .. }))
+            .count(),
+        1
+    );
+}
+
+// 流程：新入口完成决定后，旧入口重复相同决定；重复提交返回当前结果而不是普通失败。
+#[tokio::test]
+async fn legacy_and_device_trust_decisions_share_idempotent_completion() {
+    use crate::space::convergence::{DeviceTrustChoice, DeviceTrustDecisionResult};
+
+    let a = instance(0x0a);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(c_addition.event_id()),
+        2,
+        [3; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: a },
+        [3; 32],
+        [4; 32],
+        Vec::new(),
+        None,
+        vec![3],
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    for event in [genesis, c_addition] {
+        history.receive_verified(event).unwrap();
+    }
+    history.receive_verified(removal.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+
+    assert!(matches!(
+        harness
+            .owner
+            .decide_device_trust_change(
+                removal.event_id(),
+                DeviceTrustChoice::KeepCurrentDeviceGroup,
+                false,
+            )
+            .await
+            .unwrap(),
+        DeviceTrustDecisionResult::KeptCurrentDeviceGroup { .. }
+    ));
+    assert!(harness
+        .owner
+        .decide_membership_removal(removal.event_id(), RemovalDecision::Reject)
+        .await
+        .is_ok());
+}
+
+// 流程：待决定移除精确包含本机；没有二次确认时不能写入决定，确认后才退出当前设备组。
+#[tokio::test]
+async fn applying_a_change_that_removes_the_local_device_requires_explicit_confirmation() {
+    use crate::space::convergence::DeviceTrustDecisionResult;
+
+    let a = instance(0x0a);
+    let c = instance(0x0c);
+    let harness = harness(
+        "device-c",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-c"), c),
+        ],
+    );
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(c_addition.event_id()),
+        2,
+        [3; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: c },
+        [3; 32],
+        [4; 32],
+        Vec::new(),
+        None,
+        vec![3],
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
+    for event in [genesis, c_addition] {
+        history.receive_verified(event).unwrap();
+    }
+    history.receive_verified(removal.clone()).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(c);
+    state.membership_reconciliation = Some(history);
+    harness.repository.save_state(&state).await.unwrap();
+
+    assert!(matches!(
+        harness
+            .owner
+            .decide_device_trust_change(
+                removal.event_id(),
+                crate::space::convergence::DeviceTrustChoice::ApplyChange,
+                false,
+            )
+            .await
+            .unwrap(),
+        DeviceTrustDecisionResult::LocalDeviceConfirmationRequired { .. }
+    ));
+    assert_eq!(
+        harness
+            .repository
+            .load_state()
+            .await
+            .unwrap()
+            .unwrap()
+            .membership_reconciliation
+            .unwrap()
+            .pending_removal_decision(),
+        Some(removal.event_id())
+    );
+    assert!(matches!(
+        harness
+            .owner
+            .decide_device_trust_change(
+                removal.event_id(),
+                crate::space::convergence::DeviceTrustChoice::ApplyChange,
+                true,
+            )
+            .await
+            .unwrap(),
+        DeviceTrustDecisionResult::Applied { .. }
+    ));
 }
 
 // 流程：A 尝试移除不存在的设备或移除自己；操作失败，原成员历史和状态均不得保存变化。

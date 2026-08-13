@@ -251,6 +251,20 @@ pub enum MembershipHistoryRelationship {
     Invalid,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRemovalFacts {
+    pub removal_event_id: MembershipEventId,
+    pub proposed_by_device_id: DeviceId,
+    pub target_device_ids: Vec<DeviceId>,
+    target_members: BTreeSet<MemberInstanceId>,
+}
+
+impl PendingRemovalFacts {
+    pub fn includes_member(&self, member: MemberInstanceId) -> bool {
+        self.target_members.contains(&member)
+    }
+}
+
 /// The fixed maximum number of signed events carried by one reconciliation
 /// response. Larger histories are fetched by subsequent requests.
 pub const MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE: usize = 64;
@@ -510,6 +524,15 @@ impl MembershipReconciliation {
         }
     }
 
+    pub fn local_removal_decision(
+        &self,
+        removal_event_id: MembershipEventId,
+    ) -> Option<RemovalDecision> {
+        self.decisions
+            .get(&removal_event_id)
+            .map(|decision| decision.decision)
+    }
+
     /// Parent position required for the next locally authored event.
     ///
     /// A rejected remote removal is retained as verified evidence, but it is
@@ -550,6 +573,33 @@ impl MembershipReconciliation {
             }
         }
         members
+    }
+
+    pub fn admitted_device_facts(&self) -> Vec<AdmissionChangeFacts> {
+        let mut chain = Vec::new();
+        let mut cursor = self.known_head;
+        while let Some(event_id) = cursor {
+            let Some(event) = self.events.get(&event_id) else {
+                return Vec::new();
+            };
+            chain.push(event);
+            cursor = event.parent_event_id;
+        }
+        chain.reverse();
+
+        let mut devices = BTreeMap::new();
+        for event in chain {
+            if let MembershipOperation::AddDevice { admission } = &event.operation {
+                devices.insert(admission.device_id.clone(), admission.clone());
+            }
+        }
+        devices.into_values().collect()
+    }
+
+    pub fn is_device_effective(&self, device_id: &DeviceId) -> bool {
+        self.effective_members()
+            .into_iter()
+            .any(|member| self.device_for_member(&member).as_ref() == Some(device_id))
     }
 
     /// Device identifier bound to an effective member by the applied history.
@@ -858,6 +908,23 @@ impl MembershipReconciliation {
                 .then_some(event_id)
                 .filter(|id| !self.decisions.contains_key(id))
                 .filter(|id| self.own_member_was_active_before(*id))
+        })
+    }
+
+    pub fn pending_removal_facts(&self) -> Option<PendingRemovalFacts> {
+        let removal_event_id = self.pending_removal_decision()?;
+        let event = self.events.get(&removal_event_id)?;
+        let proposed_by_device_id =
+            self.device_for_member_before(removal_event_id, &event.author_member_instance_id)?;
+        let MembershipOperation::RemoveDevice { member } = event.operation else {
+            return None;
+        };
+        let target_device_id = self.device_for_member_before(removal_event_id, &member)?;
+        Some(PendingRemovalFacts {
+            removal_event_id,
+            proposed_by_device_id,
+            target_device_ids: vec![target_device_id],
+            target_members: [member].into(),
         })
     }
 

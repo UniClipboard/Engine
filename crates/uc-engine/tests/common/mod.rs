@@ -247,7 +247,10 @@ use uc_core::membership::{
     WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
     WorkspaceConvergenceState,
 };
-use uc_core::ports::{ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, SettingsPort};
+use uc_core::ports::{
+    ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, PresenceError, PresenceEvent,
+    PresencePort, ReachabilityState, SettingsPort,
+};
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
 /// Build a workspace convergence owner whose member/trust/address writes go
@@ -287,6 +290,7 @@ pub fn test_workspace_convergence(
         legacy_peer_probe: Arc::new(NoopLegacyPeerProbe),
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         peer_addr_repo: Arc::clone(&peer_addr_repo),
+        presence: Arc::new(NoopPresence),
         own_device,
     };
     Arc::new(SpaceConvergenceAssembly::new(SpaceConvergenceDeps {
@@ -324,6 +328,27 @@ pub fn test_workspace_convergence(
             dispatch: Arc::new(NoopLegacyUpgradeDispatch),
         },
     }))
+}
+
+struct NoopPresence;
+
+#[async_trait]
+impl PresencePort for NoopPresence {
+    async fn ensure_reachable(
+        &self,
+        _device: &DeviceId,
+    ) -> Result<ReachabilityState, PresenceError> {
+        Ok(ReachabilityState::Unknown)
+    }
+
+    async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
+        ReachabilityState::Unknown
+    }
+
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PresenceEvent> {
+        let (_sender, receiver) = tokio::sync::broadcast::channel(1);
+        receiver
+    }
 }
 
 #[derive(Default)]

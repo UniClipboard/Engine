@@ -9,10 +9,13 @@ use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
-    execute_decide_membership_removal, execute_list_devices, execute_query_legacy_bootstrap,
-    execute_query_member_sync_preferences, execute_query_space_protection,
-    execute_query_workspace_convergence, execute_remove_member,
-    execute_update_member_sync_preferences,
+    execute_decide_device_trust_change, execute_list_devices, execute_query_device_trust,
+    execute_query_legacy_bootstrap, execute_query_member_sync_preferences,
+    execute_query_space_protection, execute_remove_member, execute_update_member_sync_preferences,
+};
+#[cfg(feature = "dev-tools")]
+use crate::operations::device::member::{
+    execute_decide_membership_removal, execute_query_workspace_convergence,
 };
 use crate::operations::device::peer_connections::{
     execute_query_peer_connections, execute_refresh_peer_connections,
@@ -304,8 +307,16 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::ListDevices => {
                     execute_list_devices(self.current_facade().await?.as_ref()).await
                 }
+                #[cfg(feature = "dev-tools")]
                 Operation::QueryWorkspaceConvergence => {
                     execute_query_workspace_convergence(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryDeviceTrust => {
+                    execute_query_device_trust(self.current_facade().await?.as_ref()).await
+                }
+                Operation::DecideDeviceTrustChange(input) => {
+                    execute_decide_device_trust_change(self.current_facade().await?.as_ref(), input)
+                        .await
                 }
                 Operation::QueryMemberSyncPreferences(input) => {
                     execute_query_member_sync_preferences(
@@ -324,6 +335,7 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::RemoveMember(input) => {
                     execute_remove_member(self.current_facade().await?.as_ref(), input).await
                 }
+                #[cfg(feature = "dev-tools")]
                 Operation::DecideMembershipRemoval(input) => {
                     execute_decide_membership_removal(self.current_facade().await?.as_ref(), input)
                         .await

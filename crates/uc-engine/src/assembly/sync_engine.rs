@@ -606,6 +606,15 @@ pub async fn build_sync_engine_assembly(
     );
     let legacy_upgrade_dispatch: Arc<dyn LegacyUpgradeDispatchPort> =
         legacy_upgrade_adapter.clone();
+    // Presence is installed before the convergence owner is assembled so the
+    // owner can expose reachability as an independent product fact.
+    let presence: Arc<dyn PresencePort> = builder.install_presence(
+        Arc::clone(&space_setup.peer_addr_repo),
+        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&deps.security.fingerprint),
+        Arc::clone(&deps.system.clock),
+    );
     let convergence_assembly = SpaceConvergenceAssembly::new(SpaceConvergenceDeps {
         workspace: WorkspaceConvergenceDeps {
             repository: Arc::clone(&space_setup.workspace_convergence_repository),
@@ -624,6 +633,7 @@ pub async fn build_sync_engine_assembly(
             legacy_peer_probe: legacy_upgrade_adapter.clone(),
             trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
+            presence: Arc::clone(&presence),
             own_device: deps.device.device_identity.current_device_id(),
         },
         membership: MembershipConvergenceDeps {
@@ -676,17 +686,6 @@ pub async fn build_sync_engine_assembly(
         legacy_upgrade_adapter.as_ref(),
         convergence_assembly.legacy_upgrade_endpoint(),
     )?;
-    // Slice 2 Phase 1 · T8:在同一 iroh 节点上装 presence handler。must
-    // be before `builder.spawn()`(install_* 要求 router 未 spawn)。
-    // `Arc<dyn PresencePort>` 喂给 SpaceFacadeDeps,facade 内部再构造
-    // `EnsureReachableAllUseCase` 给 F1 hook 用。
-    let presence: Arc<dyn PresencePort> = builder.install_presence(
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&deps.device.member_repo),
-        Arc::clone(&space_setup.peer_admission),
-        Arc::clone(&deps.security.fingerprint),
-        Arc::clone(&deps.system.clock),
-    );
     // Phase 96 INDIC-01:连接通道单一真相源。复用同一 endpoint +
     // peer_addr_repo,纯读 adapter 不装 ALPN handler。
     let connection_channel: Arc<dyn ConnectionChannelPort> =

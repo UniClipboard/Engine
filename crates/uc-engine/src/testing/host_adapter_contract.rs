@@ -208,17 +208,15 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         crate::OperationResult::SpaceJoined { self_device_id, .. } => self_device_id,
         other => panic!("expected joined space, got {other:?}"),
     };
-    // ADR-017: join success is expressed by the workspace state, not by a
-    // pairing terminal. The sponsor must observe the saved admission change
-    // through the workspace convergence event.
+    // ADR-017: join success is expressed by the saved workspace state, not by
+    // a pairing terminal. The sponsor is prompted to read the complete state.
     assert!(matches!(
         next_engine_event_matching(&mut sponsor_events, |event| matches!(
             event,
-            EngineEvent::WorkspaceConvergenceChanged(snapshot)
-                if snapshot.history_event_count > 0
+            EngineEvent::DeviceTrustChanged { revision } if *revision > 0
         ))
         .await,
-        EngineEvent::WorkspaceConvergenceChanged(_)
+        EngineEvent::DeviceTrustChanged { .. }
     ));
 
     assert!(matches!(
@@ -738,23 +736,19 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
         .unwrap();
 
     let status = engine
-        .execute(crate::Operation::QueryWorkspaceConvergence)
+        .execute(crate::Operation::QueryDeviceTrust)
         .await
         .unwrap();
 
     assert!(
         matches!(
             &status,
-            crate::OperationResult::WorkspaceConvergence(summary)
-                if summary.phase == crate::WorkspaceConvergencePhaseSummary::LocallyApplied
-                    && summary.revision == 0
-                    && summary.history_event_count == 0
-                    && summary.effective_member_count == 0
-                    && summary.convergence_digest.is_none()
-                    && !summary.removed
-                    && summary.failure_category.is_none()
+            crate::OperationResult::DeviceTrust(summary)
+                if summary.revision == 0
+                    && summary.current_change.is_none()
+                    && !summary.local_device_id.is_empty()
         ),
-        "unexpected workspace convergence snapshot: {status:?}"
+        "unexpected device trust snapshot: {status:?}"
     );
     engine
         .shutdown(std::time::Duration::from_secs(15))

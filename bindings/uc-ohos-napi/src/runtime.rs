@@ -5,12 +5,12 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, DecideMembershipRemovalInput,
-    Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput,
-    HostFileHandle, InvitationAvailability, JoinSpaceInput, MembershipRemovalDecision, Operation,
-    OperationResult, OperationTerminal, RecoverSessionInput, RefreshReason, RemoveMemberInput,
-    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
-    SendTextInput,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, DecideDeviceTrustChangeInput,
+    DeviceTrustChoiceSummary, Engine, EngineConfig, EngineError, EngineEvent, EngineState,
+    EventStream, ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput,
+    Operation, OperationResult, OperationTerminal, RecoverSessionInput, RefreshReason,
+    RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput,
+    SendReportSummary, SendTextInput,
 };
 use zeroize::Zeroizing;
 
@@ -139,14 +139,50 @@ impl OhEngine {
     }
 
     #[napi]
-    pub async fn query_workspace_convergence(&self) -> napi::Result<OhWorkspaceConvergence> {
-        let result = self
+    pub async fn query_device_trust(&self) -> napi::Result<String> {
+        match self
             .engine
-            .execute(Operation::QueryWorkspaceConvergence)
+            .execute(Operation::QueryDeviceTrust)
             .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::WorkspaceConvergence(summary) => workspace_convergence(summary),
+            .map_err(engine_error)?
+        {
+            OperationResult::DeviceTrust(snapshot) => device_trust_json(snapshot),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn decide_device_trust_change(
+        &self,
+        change_id: String,
+        choice: String,
+        confirm_local_removal: bool,
+    ) -> napi::Result<String> {
+        let choice = match choice.as_str() {
+            "apply_change" => DeviceTrustChoiceSummary::ApplyChange,
+            "keep_current_device_group" => DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
+            _ => {
+                return Err(napi::Error::new(
+                    Status::InvalidArg,
+                    "invalid device trust choice",
+                ))
+            }
+        };
+        match self
+            .engine
+            .execute(Operation::DecideDeviceTrustChange(
+                DecideDeviceTrustChangeInput {
+                    change_id,
+                    choice,
+                    confirm_local_removal,
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::DeviceTrustDecision(result) => {
+                serde_json::to_string(&result).map_err(|_| unexpected_result())
+            }
             _ => Err(unexpected_result()),
         }
     }
@@ -156,38 +192,6 @@ impl OhEngine {
         let result = self
             .engine
             .execute(Operation::RemoveMember(RemoveMemberInput { device_id }))
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::WorkspaceConvergence(summary) => workspace_convergence(summary),
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn decide_membership_removal(
-        &self,
-        removal_event_id: String,
-        decision: String,
-    ) -> napi::Result<OhWorkspaceConvergence> {
-        let decision = match decision.as_str() {
-            "accept" => MembershipRemovalDecision::Accept,
-            "reject" => MembershipRemovalDecision::Reject,
-            _ => {
-                return Err(napi::Error::new(
-                    Status::InvalidArg,
-                    "invalid removal decision",
-                ))
-            }
-        };
-        let result = self
-            .engine
-            .execute(Operation::DecideMembershipRemoval(
-                DecideMembershipRemovalInput {
-                    removal_event_id,
-                    decision,
-                },
-            ))
             .await
             .map_err(engine_error)?;
         match result {
@@ -494,6 +498,10 @@ fn workspace_convergence(
     })
 }
 
+fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Result<String> {
+    serde_json::to_string(&summary).map_err(|_| unexpected_result())
+}
+
 fn engine_error(error: EngineError) -> napi::Error {
     napi::Error::new(
         Status::GenericFailure,
@@ -546,6 +554,7 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         error_category: None,
         retryable: None,
         workspace_convergence: None,
+        device_trust_revision: None,
         network_recovery_phase: None,
         next_retry_in_ms: None,
     };
@@ -572,8 +581,8 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
             map_event_error(error, &mut mapped);
         }
         EngineEvent::Fatal { error } => map_event_error(error, &mut mapped),
-        EngineEvent::WorkspaceConvergenceChanged(summary) => {
-            mapped.workspace_convergence = workspace_convergence(summary).ok();
+        EngineEvent::DeviceTrustChanged { revision } => {
+            mapped.device_trust_revision = Some(revision as f64);
         }
         EngineEvent::NetworkRecoveryChanged(status) => {
             mapped.network_recovery_phase = Some(recovery_phase(status.phase).to_owned());
@@ -639,57 +648,10 @@ fn invalid_restore_mode() -> napi::Error {
 
 #[cfg(test)]
 mod tests {
+    use super::{count, device_trust_json, map_event, workspace_convergence};
     use uc_engine::{
         EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
     };
-    use uc_engine::{WorkspaceConvergencePhaseSummary, WorkspaceConvergenceSummary};
-
-    use super::{count, map_event, workspace_convergence};
-
-    #[test]
-    fn workspace_convergence_event_keeps_the_complete_snapshot() {
-        let event = map_event(EngineEvent::WorkspaceConvergenceChanged(
-            WorkspaceConvergenceSummary {
-                phase: WorkspaceConvergencePhaseSummary::Converging,
-                revision: 2,
-                history_event_count: 1,
-                effective_member_count: 2,
-                pending_removal_decision_device_ids: vec!["device-c".to_owned()],
-                pending_removal_decision_event_id: Some("event-c".to_owned()),
-                diverged_peer_device_ids: vec!["device-d".to_owned()],
-                upgrade_required_peer_device_ids: vec!["device-e".to_owned()],
-                convergence_digest: None,
-                removed: true,
-                updated_at_ms: 42,
-                failure_category: None,
-            },
-        ));
-
-        assert_eq!(event.kind, "workspace_convergence_changed");
-        let convergence = event.workspace_convergence.unwrap();
-        assert_eq!(convergence.phase, "converging");
-        assert_eq!(convergence.revision, 2.0);
-        assert_eq!(convergence.history_event_count, 1);
-        assert_eq!(convergence.effective_member_count, 2);
-        assert_eq!(
-            convergence.pending_removal_decision_device_ids,
-            vec!["device-c".to_owned()]
-        );
-        assert_eq!(
-            convergence.pending_removal_decision_event_id.as_deref(),
-            Some("event-c")
-        );
-        assert_eq!(
-            convergence.diverged_peer_device_ids,
-            vec!["device-d".to_owned()]
-        );
-        assert_eq!(
-            convergence.upgrade_required_peer_device_ids,
-            vec!["device-e".to_owned()]
-        );
-        assert_eq!(convergence.removed, true);
-        assert_eq!(convergence.updated_at_ms, 42.0);
-    }
 
     #[test]
     fn refresh_event_keeps_only_the_stable_reason() {
@@ -794,5 +756,19 @@ mod tests {
             status.upgrade_required_peer_device_ids,
             vec!["device-e".to_owned()]
         );
+    }
+
+    #[test]
+    fn device_trust_json_keeps_complete_snapshot_fields() {
+        let json = device_trust_json(uc_engine::DeviceTrustSnapshotSummary::empty_unavailable(
+            "local-device".into(),
+        ))
+        .unwrap();
+        assert!(json.contains("local_device_id"));
+        assert!(json.contains("current_change"));
+        assert!(json.contains("devices"));
+        assert!(json.contains("recovery"));
+        assert!(json.contains("allowed_actions"));
+        assert!(json.contains("blocked_reason"));
     }
 }

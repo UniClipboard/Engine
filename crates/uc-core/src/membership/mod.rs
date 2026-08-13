@@ -42,8 +42,8 @@ pub use membership_history::{
     MembershipEventsRequest, MembershipEventsResponse, MembershipHistoryAck,
     MembershipHistoryError, MembershipHistoryHello, MembershipHistoryMessage,
     MembershipHistoryProtocolError, MembershipHistoryRelationship, MembershipOperation,
-    MembershipReconciliation, MembershipReconciliationOutcome, RemovalDecision,
-    MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE,
+    MembershipReconciliation, MembershipReconciliationOutcome, PendingRemovalFacts,
+    RemovalDecision, MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE,
 };
 pub use ports::{
     BeginRevocationOutcome, ContentExchangeGatePort, CurrentMemberSignaturePort,
