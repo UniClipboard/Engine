@@ -2321,7 +2321,9 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
             {
                 return Err(CurrentWorkspacePeerScopeError::Unavailable);
             }
-            let local_is_member = member_ids.contains(&self.deps.own_device);
+            let local_is_member = protection.mode
+                == uc_core::membership::SpaceProtectionMode::Legacy
+                || member_ids.contains(&self.deps.own_device);
             let mut peer_device_ids = if local_is_member {
                 member_ids
                     .into_iter()

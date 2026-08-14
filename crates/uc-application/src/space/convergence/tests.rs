@@ -820,6 +820,23 @@ async fn current_peer_scope_uses_legacy_members_only_in_explicit_legacy_mode() {
 }
 
 #[tokio::test]
+async fn current_peer_scope_accepts_a_legacy_roster_that_only_stores_remote_members() {
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-b")]));
+    deps.space_protection = Arc::new(FixedSpaceProtection(SpaceProtectionMode::Legacy));
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(
+        snapshot.local_membership,
+        uc_core::membership::CurrentWorkspaceLocalMembership::Active
+    );
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
+}
+
+#[tokio::test]
 async fn device_trust_uses_the_legacy_scope_for_a_fresh_workspace() {
     use crate::space::convergence::DeviceMembership;
 
