@@ -177,6 +177,11 @@ pub struct WorkspaceConvergenceState {
     pub revision: u64,
     pub removed: bool,
     pub updated_at_ms: i64,
+    /// Set only when the final pre-ADR-020 persisted layout was migrated.
+    /// It keeps the existing workspace on the explicit legacy-upgrade path
+    /// until signed membership history has been established.
+    #[serde(default)]
+    pub migrated_from_pre_adr_020: bool,
 }
 
 impl Default for WorkspaceConvergenceState {
@@ -194,6 +199,7 @@ impl Default for WorkspaceConvergenceState {
             revision: 0,
             removed: false,
             updated_at_ms: 0,
+            migrated_from_pre_adr_020: false,
         }
     }
 }

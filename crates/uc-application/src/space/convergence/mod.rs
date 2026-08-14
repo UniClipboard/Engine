@@ -509,7 +509,17 @@ impl WorkspaceConvergence {
         let local_device_id = self.deps.own_device.clone();
         let workspace_unverifiable = state.failure_category.is_some();
         let local_membership = if state.own_instance.is_none() {
-            DeviceMembership::Unavailable
+            match uc_core::membership::CurrentWorkspacePeerScopePort::snapshot(self).await {
+                Ok(scope) => match scope.local_membership {
+                    uc_core::membership::CurrentWorkspaceLocalMembership::Active => {
+                        DeviceMembership::Active
+                    }
+                    uc_core::membership::CurrentWorkspaceLocalMembership::Removed => {
+                        DeviceMembership::Removed
+                    }
+                },
+                Err(_) => DeviceMembership::Unavailable,
+            }
         } else if state.removed {
             DeviceMembership::Removed
         } else {
@@ -2192,6 +2202,13 @@ impl WorkspaceConvergence {
             )
             .await?;
         }
+        if state
+            .membership_reconciliation
+            .as_ref()
+            .is_some_and(|history| history.applied_head().is_some())
+        {
+            state.migrated_from_pre_adr_020 = false;
+        }
         self.persist(&state).await?;
         self.publish(&state);
         self.notify();
@@ -2299,7 +2316,9 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
                     }
                     _ => CurrentWorkspacePeerScopeError::Unavailable,
                 })?;
-            if protection.mode != uc_core::membership::SpaceProtectionMode::Legacy {
+            if protection.mode != uc_core::membership::SpaceProtectionMode::Legacy
+                && !state.migrated_from_pre_adr_020
+            {
                 return Err(CurrentWorkspacePeerScopeError::Unavailable);
             }
             let local_is_member = member_ids.contains(&self.deps.own_device);

@@ -820,6 +820,102 @@ async fn current_peer_scope_uses_legacy_members_only_in_explicit_legacy_mode() {
 }
 
 #[tokio::test]
+async fn device_trust_uses_the_legacy_scope_for_a_fresh_workspace() {
+    use crate::space::convergence::DeviceMembership;
+
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-a")]));
+    deps.space_protection = Arc::new(FixedSpaceProtection(SpaceProtectionMode::Legacy));
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.query_device_trust().await.unwrap();
+
+    assert_eq!(snapshot.local_membership, DeviceMembership::Active);
+    assert_eq!(snapshot.devices.len(), 1);
+    assert_eq!(snapshot.devices[0].membership, DeviceMembership::Active);
+}
+
+#[tokio::test]
+async fn device_trust_does_not_infer_membership_without_legacy_or_current_history() {
+    use crate::space::convergence::DeviceMembership;
+
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-a")]));
+    deps.space_protection = Arc::new(FixedSpaceProtection(SpaceProtectionMode::Ready));
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.query_device_trust().await.unwrap();
+
+    assert_eq!(snapshot.local_membership, DeviceMembership::Unavailable);
+    assert_eq!(
+        snapshot.devices[0].membership,
+        DeviceMembership::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn current_peer_scope_keeps_a_migrated_pre_adr_020_workspace_in_legacy_upgrade() {
+    let repository = MemoryWorkspaceRepository::default();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(instance(0x0a));
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+    ]));
+    deps.space_protection = Arc::new(FixedSpaceProtection(SpaceProtectionMode::Ready));
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(
+        snapshot.source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
+    );
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
+}
+
+#[tokio::test]
+async fn device_trust_query_returns_a_migrated_workspace_as_upgrade_required() {
+    use crate::space::convergence::{DeviceCompatibility, SyncRelationship};
+
+    let repository = MemoryWorkspaceRepository::default();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(instance(0x0a));
+    state.migrated_from_pre_adr_020 = true;
+    state.peer_history_relationships.insert(
+        DeviceId::new("device-b"),
+        uc_core::membership::MembershipHistoryRelationship::UpgradeRequired,
+    );
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+    ]));
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.query_device_trust().await.unwrap();
+    let peer = snapshot
+        .devices
+        .iter()
+        .find(|device| device.device_id == DeviceId::new("device-b"))
+        .unwrap();
+
+    assert_eq!(snapshot.local_device_id, DeviceId::new("device-a"));
+    assert_eq!(snapshot.devices.len(), 2);
+    assert_eq!(peer.compatibility, DeviceCompatibility::UpgradeRequired);
+    assert_eq!(
+        peer.sync_relationship,
+        SyncRelationship::PausedUpgradeRequired
+    );
+}
+
+#[tokio::test]
 async fn current_peer_scope_does_not_infer_legacy_mode_from_missing_history() {
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());

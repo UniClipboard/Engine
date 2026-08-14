@@ -483,6 +483,9 @@ fn map_workspace_convergence_error(error: WorkspaceConvergenceError) -> RosterEr
         | WorkspaceConvergenceError::Repository(
             uc_core::membership::WorkspaceConvergenceRepositoryError::Locked,
         ) => RosterError::MembershipReconciliationLocked,
+        WorkspaceConvergenceError::Repository(
+            uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt,
+        ) => RosterError::MembershipReconciliationCorrupt,
         WorkspaceConvergenceError::SelfTarget => RosterError::MemberRemovalInvalidInput,
         WorkspaceConvergenceError::UnknownTarget => RosterError::MemberRemovalTargetNotFound,
         error => RosterError::MemberRemoval(error.to_string()),
@@ -512,6 +515,18 @@ mod tests {
                 RosterError::MembershipReconciliationLocked
             ));
         }
+    }
+
+    #[test]
+    fn corrupt_device_trust_state_keeps_a_distinct_invalid_state_error() {
+        let error = map_workspace_convergence_error(WorkspaceConvergenceError::Repository(
+            uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt,
+        ));
+
+        assert!(matches!(
+            error,
+            RosterError::MembershipReconciliationCorrupt
+        ));
     }
 
     struct Members(Vec<SpaceMember>);

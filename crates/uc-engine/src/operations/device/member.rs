@@ -656,6 +656,12 @@ fn map_roster_error(error: RosterError) -> EngineError {
             false,
             "workspace_convergence_locked",
         ),
+        RosterError::MembershipReconciliationCorrupt => (
+            QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+            "workspace_convergence_corrupt",
+        ),
         RosterError::MemberRemoval(_) => (
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
@@ -743,12 +749,16 @@ mod tests {
     #[test]
     fn workspace_convergence_errors_have_a_stable_public_mapping() {
         let unavailable = map_roster_error(RosterError::MembershipReconciliationUnavailable);
+        let corrupt = map_roster_error(RosterError::MembershipReconciliationCorrupt);
         let failed = map_roster_error(RosterError::MemberRemoval("internal detail".into()));
         let invalid_input = map_roster_error(RosterError::MemberRemovalInvalidInput);
         let target_not_found = map_roster_error(RosterError::MemberRemovalTargetNotFound);
 
         assert_eq!(unavailable.category(), EngineErrorCategory::Unavailable);
         assert!(!unavailable.is_retryable());
+        assert_eq!(corrupt.category(), EngineErrorCategory::InvalidState);
+        assert_eq!(corrupt.code(), QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE);
+        assert_ne!(corrupt.code(), failed.code());
         assert_eq!(failed.category(), EngineErrorCategory::InvalidState);
         assert!(!failed.is_retryable());
         assert_eq!(invalid_input.category(), EngineErrorCategory::InvalidInput);

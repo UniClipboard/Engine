@@ -18,6 +18,10 @@ pub enum RosterError {
     #[error("membership reconciliation is locked")]
     MembershipReconciliationLocked,
 
+    /// The encrypted local membership state matches no supported format.
+    #[error("membership reconciliation state is corrupt")]
+    MembershipReconciliationCorrupt,
+
     /// 分布式成员移除流程失败。
     #[error("distributed member removal failed: {0}")]
     MemberRemoval(String),
