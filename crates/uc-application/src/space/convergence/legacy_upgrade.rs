@@ -313,7 +313,7 @@ impl AutomaticLegacyUpgrade {
                 device_id != &local_device_id && device_id != request.source_device_id()
             })
             .collect::<Vec<_>>();
-        let admission = match self
+        let admission_result = self
             .deps
             .protection
             .execute(LegacyProtectionCommand::AdmitMember {
@@ -321,14 +321,25 @@ impl AutomaticLegacyUpgrade {
                 existing_members: existing_member_ids,
                 request: request.clone(),
             })
-            .await?
-        {
-            LegacyProtectionResult::MemberAdmitted(admission) => admission,
-            LegacyProtectionResult::GroupReady(_) => {
-                return Err(LegacyUpgradeError::Internal(
-                    "legacy protection returned an unexpected result".into(),
-                ));
+            .await;
+        let admission = match admission_result {
+            Err(error) => {
+                warn!(
+                    error_kind = "admit_member",
+                    retryable = true,
+                    error = %error,
+                    "legacy upgrade admission failed"
+                );
+                return Err(error);
             }
+            Ok(result) => match result {
+                LegacyProtectionResult::MemberAdmitted(admission) => admission,
+                LegacyProtectionResult::GroupReady(_) => {
+                    return Err(LegacyUpgradeError::Internal(
+                        "legacy protection returned an unexpected result".into(),
+                    ));
+                }
+            },
         };
         let protection_group_id =
             local_descriptor
