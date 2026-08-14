@@ -2075,6 +2075,7 @@ impl WorkspaceConvergence {
     fn complete_legacy_migration_for_roster(
         state: &mut WorkspaceConvergenceState,
         retained_device_ids: &[DeviceId],
+        protection: &uc_core::membership::SpaceProtectionSnapshot,
     ) -> bool {
         if !state.migrated_from_pre_adr_020 {
             return false;
@@ -2082,10 +2083,18 @@ impl WorkspaceConvergence {
         let Some(history) = state.membership_reconciliation.as_ref() else {
             return false;
         };
-        if retained_device_ids
+        let history_covers_roster = retained_device_ids
             .iter()
-            .all(|device_id| history.is_device_effective(device_id))
-        {
+            .all(|device_id| history.is_device_effective(device_id));
+        let protection_covers_roster = protection.mode
+            == uc_core::membership::SpaceProtectionMode::Ready
+            && retained_device_ids.iter().all(|device_id| {
+                protection.members.iter().any(|member| {
+                    member.device_id == *device_id
+                        && member.status == uc_core::membership::MemberProtectionStatus::Protected
+                })
+            });
+        if history_covers_roster && protection_covers_roster {
             state.migrated_from_pre_adr_020 = false;
             return true;
         }
@@ -2112,9 +2121,16 @@ impl WorkspaceConvergence {
         retained_device_ids.push(self.deps.own_device);
         retained_device_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         retained_device_ids.dedup();
+        let protection = self
+            .deps
+            .space_protection
+            .query_space_protection(&retained_device_ids)
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
         Ok(Self::complete_legacy_migration_for_roster(
             state,
             &retained_device_ids,
+            &protection,
         ))
     }
 
@@ -2262,14 +2278,14 @@ impl WorkspaceConvergence {
         protection_member_ids.push(self.deps.own_device);
         protection_member_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         protection_member_ids.dedup();
-        let resumes_owned_legacy_bootstrap = self
+        let protection = self
             .deps
             .space_protection
             .query_space_protection(&protection_member_ids)
             .await
-            .map_err(|_| WorkspaceConvergenceError::Unavailable)?
-            .legacy_bootstrap
-            .is_some_and(|item| {
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+        let resumes_owned_legacy_bootstrap =
+            protection.legacy_bootstrap.as_ref().is_some_and(|item| {
                 item.status == uc_core::membership::LegacyBootstrapStatus::AwaitingReadmission
             });
         let is_initializer = is_stable_initializer || resumes_owned_legacy_bootstrap;
@@ -2307,7 +2323,7 @@ impl WorkspaceConvergence {
             )
             .await?;
         }
-        Self::complete_legacy_migration_for_roster(&mut state, &protection_member_ids);
+        Self::complete_legacy_migration_for_roster(&mut state, &protection_member_ids, &protection);
         self.persist(&state).await?;
         self.publish(&state);
         self.notify();

@@ -481,6 +481,36 @@ impl SpaceProtectionStatusPort for FixedSpaceProtection {
     }
 }
 
+struct PartiallyProtectedRoster;
+
+#[async_trait]
+impl SpaceProtectionStatusPort for PartiallyProtectedRoster {
+    async fn query_space_protection(
+        &self,
+        members: &[DeviceId],
+    ) -> Result<SpaceProtectionSnapshot, SpaceProtectionError> {
+        Ok(SpaceProtectionSnapshot {
+            mode: SpaceProtectionMode::Ready,
+            members: members
+                .iter()
+                .map(|device_id| MemberProtection {
+                    device_id: *device_id,
+                    status: if device_id == &DeviceId::new("device-b") {
+                        MemberProtectionStatus::AwaitingReadmission
+                    } else {
+                        MemberProtectionStatus::Protected
+                    },
+                })
+                .collect(),
+            legacy_bootstrap: Some(LegacyBootstrapProgress {
+                bootstrap_id: BootstrapId::generate(),
+                status: LegacyBootstrapStatus::AwaitingReadmission,
+                pending_readmission: 1,
+            }),
+        })
+    }
+}
+
 #[derive(Default)]
 struct ProtectsQueriedMembers {
     queries: Mutex<Vec<Vec<DeviceId>>>,
@@ -2238,6 +2268,55 @@ async fn admitted_legacy_roster_completes_migration_and_switches_to_current_hist
     assert_eq!(
         scope.source,
         uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
+    );
+    assert_eq!(scope.peer_device_ids, vec![DeviceId::new("device-b")]);
+}
+
+// Flow: signed membership history reaches the retained peer before that peer has joined the
+// shared protection group. History coverage alone must not end the legacy upgrade phase.
+#[tokio::test]
+async fn membership_history_does_not_complete_migration_before_protection_roster_is_ready() {
+    let repository = MemoryWorkspaceRepository::default();
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history
+        .receive_verified(membership_event(None, 0, a, a, "device-a", 1))
+        .unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+    ]));
+    deps.space_protection = Arc::new(PartiallyProtectedRoster);
+    let owner = WorkspaceConvergence::new(deps);
+
+    owner
+        .handle_membership_history(
+            &DeviceId::new("device-b"),
+            MembershipHistoryMessage::Hello(uc_core::membership::MembershipHistoryHello {
+                lineage_id: SPACE.to_owned(),
+                member_instance_id: b,
+                admission: admission_facts_for(b, &DeviceId::new("device-b")),
+                known_head: None,
+                applied_head: None,
+                applied_members_digest: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let saved = repository.load_state().await.unwrap().unwrap();
+    let scope = owner.snapshot().await.unwrap();
+    assert!(saved.migrated_from_pre_adr_020);
+    assert_eq!(
+        scope.source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
     );
     assert_eq!(scope.peer_device_ids, vec![DeviceId::new("device-b")]);
 }
