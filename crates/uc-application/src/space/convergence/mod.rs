@@ -2337,7 +2337,13 @@ impl WorkspaceConvergence {
         &self,
         sponsor: &DeviceId,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        self.initialize_upgraded_legacy_space().await?;
+        let own_instance = self
+            .deps
+            .member_signatures
+            .current_member_instance(&self.deps.own_device)
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+        self.record_local_readiness(own_instance).await?;
         self.reconcile_membership_history_with_sponsor(sponsor)
             .await?;
         self.query().await

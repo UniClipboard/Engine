@@ -2321,14 +2321,15 @@ async fn membership_history_does_not_complete_migration_before_protection_roster
     assert_eq!(scope.peer_device_ids, vec![DeviceId::new("device-b")]);
 }
 
-// Flow: the non-initializing legacy member has joined the shared protection group but still has
-// no applied membership history; completing that join must actively fetch the sponsor history.
+// Flow: the legacy joiner has joined the shared protection group but still has no applied
+// membership history. Even when its device ID sorts before the sponsor, completing that join must
+// fetch the sponsor history instead of creating a competing local root.
 #[tokio::test]
-async fn upgraded_legacy_joiner_fetches_sponsor_history_before_resuming_exchange() {
+async fn upgraded_legacy_joiner_fetches_sponsor_history_when_its_device_id_is_smallest() {
     let a = instance(0x09);
     let b = instance(0x0a);
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let b_join = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let genesis = membership_event(None, 0, a, a, "device-z", 1);
+    let b_join = membership_event(Some(genesis.event_id()), 1, a, b, "device-a", 2);
     let exchange = Arc::new(ScriptedExchange::new(vec![
         MembershipHistoryMessage::EventsResponse(MembershipEventsResponse {
             lineage_id: SPACE.to_owned(),
@@ -2339,19 +2340,19 @@ async fn upgraded_legacy_joiner_fetches_sponsor_history_before_resuming_exchange
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(
         Arc::new(repository),
-        "device-b",
+        "device-a",
         vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-b"), b),
+            (DeviceId::new("device-z"), a),
+            (DeviceId::new("device-a"), b),
         ],
     );
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-a")]));
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-z")]));
     deps.membership_history_exchange = exchange.clone();
-    deps.own_device = DeviceId::new("device-b");
+    deps.own_device = DeviceId::new("device-a");
     let owner = WorkspaceConvergence::new(deps);
 
     let snapshot = owner
-        .complete_upgraded_legacy_join(&DeviceId::new("device-a"))
+        .complete_upgraded_legacy_join(&DeviceId::new("device-z"))
         .await
         .unwrap();
 
@@ -2359,7 +2360,7 @@ async fn upgraded_legacy_joiner_fetches_sponsor_history_before_resuming_exchange
     assert_eq!(snapshot.effective_member_count, 2);
     let sent = exchange.history_sent.lock().unwrap();
     assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].0, DeviceId::new("device-a"));
+    assert_eq!(sent[0].0, DeviceId::new("device-z"));
     assert!(matches!(sent[0].1, MembershipHistoryMessage::Hello(_)));
 }
 
