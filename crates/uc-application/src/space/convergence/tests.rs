@@ -200,6 +200,7 @@ impl WorkspaceConvergenceRepositoryPort for MemoryWorkspaceRepository {
 #[derive(Clone)]
 struct FixedMembershipIdentity {
     space: SpaceId,
+    device_id: DeviceId,
 }
 
 #[async_trait]
@@ -209,7 +210,7 @@ impl CurrentMembershipIdentityPort for FixedMembershipIdentity {
     ) -> Result<CurrentMembershipIdentity, CurrentMembershipIdentityError> {
         Ok(CurrentMembershipIdentity {
             space_id: self.space.clone(),
-            device_id: DeviceId::new("device-a"),
+            device_id: self.device_id,
             device_name: "a".to_owned(),
             identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
                 "ABCD-EFGH-IJKL-MNOP",
@@ -447,6 +448,7 @@ pub(crate) fn test_deps(
         member_repo: Arc::new(uc_application_test_member_repo()),
         membership_identity: Arc::new(FixedMembershipIdentity {
             space: SpaceId::from_str(SPACE),
+            device_id: DeviceId::new(own_device),
         }),
         announcement_material: Arc::new(FixedAnnouncementMaterial),
         security_updates: Arc::new(UnusedSecurityUpdates),
@@ -2032,6 +2034,48 @@ async fn two_upgraded_legacy_members_establish_one_current_history_and_resume_ex
     assert_eq!(b_snapshot.effective_member_count, 2);
     assert!(a_snapshot.upgrade_required_peer_device_ids.is_empty());
     assert!(!a_owner.locally_removed(&DeviceId::new("device-b")).await);
+}
+
+// Flow: the non-initializing legacy member has joined the shared protection group but still has
+// no applied membership history; completing that join must actively fetch the sponsor history.
+#[tokio::test]
+async fn upgraded_legacy_joiner_fetches_sponsor_history_before_resuming_exchange() {
+    let a = instance(0x09);
+    let b = instance(0x0a);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let b_join = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let exchange = Arc::new(ScriptedExchange::new(vec![
+        MembershipHistoryMessage::EventsResponse(MembershipEventsResponse {
+            lineage_id: SPACE.to_owned(),
+            after_event_id: None,
+            events: vec![genesis, b_join],
+        }),
+    ]));
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(
+        Arc::new(repository),
+        "device-b",
+        vec![
+            (DeviceId::new("device-a"), a),
+            (DeviceId::new("device-b"), b),
+        ],
+    );
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-a")]));
+    deps.membership_history_exchange = exchange.clone();
+    deps.own_device = DeviceId::new("device-b");
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner
+        .complete_upgraded_legacy_join(&DeviceId::new("device-a"))
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.history_event_count, 2);
+    assert_eq!(snapshot.effective_member_count, 2);
+    let sent = exchange.history_sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, DeviceId::new("device-a"));
+    assert!(matches!(sent[0].1, MembershipHistoryMessage::Hello(_)));
 }
 
 // 流程：A 已是 1.1，B 低于 1.1；当前成员历史入口没有回应，但旧入口空连接成功。

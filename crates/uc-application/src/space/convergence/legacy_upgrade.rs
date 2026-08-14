@@ -179,10 +179,9 @@ impl AutomaticLegacyUpgrade {
                             admission,
                         })
                         .await?;
-                    self.initialize_current_history().await?;
                     if let Some(convergence) = &self.convergence {
                         convergence
-                            .reconcile_membership_history_with_peer(&member.device_id)
+                            .complete_upgraded_legacy_join(&member.device_id)
                             .await
                             .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
                     }

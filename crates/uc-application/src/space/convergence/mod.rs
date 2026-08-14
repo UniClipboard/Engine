@@ -2215,6 +2215,19 @@ impl WorkspaceConvergence {
         Ok(state.snapshot())
     }
 
+    /// Complete a retained legacy member's protection-group join by fetching
+    /// the sponsor's authoritative current membership history before normal
+    /// peer reconciliation resumes.
+    pub async fn complete_upgraded_legacy_join(
+        &self,
+        sponsor: &DeviceId,
+    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+        self.initialize_upgraded_legacy_space().await?;
+        self.reconcile_membership_history_with_sponsor(sponsor)
+            .await?;
+        self.query().await
+    }
+
     /// Reconcile the local member history with every applied peer before an
     /// admission is committed. The bounded exchange is the same one used by
     /// the runtime when a peer becomes reachable, so admission cannot revive
