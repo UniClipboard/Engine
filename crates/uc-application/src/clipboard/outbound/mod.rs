@@ -1034,7 +1034,6 @@ pub(crate) async fn publish_file_blob_refs(
 
         info!(
             entry_id = %entry_id.as_str(),
-            file = %file.path.display(),
             size_bytes = file.size,
             reused_existing = result.reused_existing,
             publish_ms,
@@ -1059,6 +1058,7 @@ pub(crate) async fn publish_file_blob_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::sync::Mutex;
     use uc_core::clipboard::{
         ContentHash, EntryFileSet, EntryFileSetError, EntryFileSetLine, FileSetMemberKind,
@@ -1067,6 +1067,63 @@ mod tests {
     use uc_core::ids::{EntryId, FormatId, RepresentationId};
 
     struct FakeOutbound;
+
+    #[derive(Clone, Default)]
+    struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedWriter {
+        fn dump(&self) -> String {
+            String::from_utf8(self.0.lock().expect("lock captured logs").clone())
+                .expect("captured logs should be UTF-8")
+        }
+    }
+
+    impl Write for CapturedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("lock captured logs")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWriter {
+        type Writer = CapturedWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    struct SuccessfulFilePublishGateway;
+
+    #[async_trait]
+    impl OutboundBlobPublishGateway for SuccessfulFilePublishGateway {
+        async fn publish_blob(
+            &self,
+            _command: PublishBlobCommand,
+        ) -> Result<PublishBlobResult, BlobTransferError> {
+            unreachable!("file log test publishes a path only")
+        }
+
+        async fn publish_blob_path(
+            &self,
+            command: PublishBlobPathCommand,
+        ) -> Result<PublishBlobResult, BlobTransferError> {
+            Ok(PublishBlobResult {
+                ticket: uc_core::ports::blob::BlobTicket::from_bytes(vec![1, 2, 3]),
+                entry_id: command.entry_id.expect("entry id"),
+                plaintext_hash: uc_core::ports::blob::PlaintextHash::from_bytes([4; 32]),
+                digest: uc_core::ports::blob::BlobDigest::from_bytes([5; 32]),
+                reused_existing: false,
+            })
+        }
+    }
 
     #[async_trait]
     impl ClipboardOutboundPort for FakeOutbound {
@@ -1093,6 +1150,42 @@ mod tests {
                 blob_ref_count: 0,
             })
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn file_blob_publish_logs_do_not_include_source_path_or_filename() {
+        let source_path = PathBuf::from("/private/customer-payroll-secret.txt");
+        let files = vec![FileSyncIntent {
+            path: source_path.clone(),
+            filename: "customer-payroll-secret.txt".to_string(),
+            size: 17,
+        }];
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        publish_file_blob_refs(
+            &SuccessfulFilePublishGateway,
+            &files,
+            &EntryId::from("entry-file-log-redaction"),
+        )
+        .await
+        .expect("file publish should succeed");
+
+        let logs = writer.dump();
+        assert!(logs.contains("file blob published"));
+        assert!(
+            !logs.contains("customer-payroll-secret.txt"),
+            "source filename leaked into outbound logs: {logs}"
+        );
+        assert!(
+            !logs.contains(&source_path.display().to_string()),
+            "source path leaked into outbound logs: {logs}"
+        );
     }
 
     /// Stub runner — every `dispatch_capture` test gets one of these so
