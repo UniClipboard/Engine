@@ -828,11 +828,7 @@ impl WorkspaceConvergence {
             .reconcile_membership_history(peer, ReconciliationPeerRole::RuntimePeer)
             .await
         {
-            Ok(()) => {
-                self.clear_upgrade_required_after_current_confirmation(peer)
-                    .await?;
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             // A legacy probe is only version evidence when the current 1.1
             // endpoint could not be reached. A current endpoint rejection
             // instead means the authenticated exchange could not proceed and
@@ -866,16 +862,18 @@ impl WorkspaceConvergence {
         Ok(())
     }
 
-    async fn clear_upgrade_required_after_current_confirmation(
+    async fn record_current_peer_confirmation(
         &self,
         peer: &DeviceId,
     ) -> Result<(), WorkspaceConvergenceError> {
         let _guard = self.state_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
-        if state.peer_history_relationships.get(peer)
-            == Some(&MembershipHistoryRelationship::UpgradeRequired)
-        {
+        if matches!(
+            state.peer_history_relationships.get(peer),
+            None | Some(MembershipHistoryRelationship::Unknown)
+                | Some(MembershipHistoryRelationship::UpgradeRequired)
+        ) {
             self.update_peer_history_relationship(
                 &mut state,
                 peer.clone(),
@@ -972,6 +970,12 @@ impl WorkspaceConvergence {
                 })?;
             if let MembershipHistoryMessage::Ack(ack) = reply {
                 tracing::debug!(?ack, "membership history exchange completed");
+                if matches!(
+                    ack,
+                    MembershipHistoryAck::Consistent | MembershipHistoryAck::UpdatesApplied
+                ) {
+                    self.record_current_peer_confirmation(peer).await?;
+                }
                 return Ok(());
             }
             outgoing = self.handle_membership_history(peer, reply).await?;

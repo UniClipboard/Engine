@@ -1814,6 +1814,13 @@ async fn unknown_admitted_member_introduces_its_signed_history_before_regular_ex
     };
     assert_eq!(introduction.after_event_id, None);
     assert_eq!(introduction.events, vec![genesis, b_join, c_join]);
+    let state = repository.load_state().await.unwrap().unwrap();
+    assert_eq!(
+        state
+            .peer_history_relationships
+            .get(&DeviceId::new("device-a")),
+        Some(&uc_core::membership::MembershipHistoryRelationship::Consistent)
+    );
 }
 
 // 流程：普通内容面对一致设备可通过，面对待决定或已分叉设备被阻止；成员资格本身不被改写。
