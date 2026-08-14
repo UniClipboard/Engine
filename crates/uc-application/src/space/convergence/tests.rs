@@ -2036,6 +2036,21 @@ async fn two_upgraded_legacy_members_establish_one_current_history_and_resume_ex
     assert!(!a_owner.locally_removed(&DeviceId::new("device-b")).await);
 }
 
+// Flow: this device created the persisted legacy bootstrap before a restart, but its device ID is
+// not the deterministic minimum; the bootstrap owner must still finish the missing history root.
+#[tokio::test]
+async fn active_legacy_bootstrap_owner_initializes_history_after_restart_even_when_not_smallest() {
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "device-z", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-a")]));
+    deps.space_protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.initialize_upgraded_legacy_space().await.unwrap();
+
+    assert_eq!(snapshot.history_event_count, 1);
+}
+
 // Flow: the non-initializing legacy member has joined the shared protection group but still has
 // no applied membership history; completing that join must actively fetch the sponsor history.
 #[tokio::test]
