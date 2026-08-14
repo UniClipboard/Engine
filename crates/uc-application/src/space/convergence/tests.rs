@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
-    CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityError,
-    CurrentMembershipIdentityPort, CurrentWorkspacePeerScopePort, MemberInstanceId,
-    MemberProtection, MemberProtectionStatus, MemberRepositoryPort, MembershipAdmissionDecision,
-    MembershipAdmissionGatePort, MembershipEventsResponse, MembershipHistoryAck,
-    MembershipHistoryMessage, MembershipOperation, MembershipReconciliation,
+    BootstrapId, CurrentMemberSignatureError, CurrentMemberSignaturePort,
+    CurrentMembershipAnnouncementMaterial, CurrentMembershipAnnouncementPort,
+    CurrentMembershipIdentity, CurrentMembershipIdentityError, CurrentMembershipIdentityPort,
+    CurrentWorkspacePeerScopePort, LegacyBootstrapProgress, LegacyBootstrapStatus,
+    MemberInstanceId, MemberProtection, MemberProtectionStatus, MemberRepositoryPort,
+    MembershipAdmissionDecision, MembershipAdmissionGatePort, MembershipEventsResponse,
+    MembershipHistoryAck, MembershipHistoryMessage, MembershipOperation, MembershipReconciliation,
     MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalDecision,
     SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
     WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
@@ -480,6 +481,16 @@ impl SpaceProtectionStatusPort for FixedSpaceProtection {
 #[derive(Default)]
 struct ProtectsQueriedMembers {
     queries: Mutex<Vec<Vec<DeviceId>>>,
+    active_legacy_bootstrap: bool,
+}
+
+impl ProtectsQueriedMembers {
+    fn with_active_legacy_bootstrap() -> Self {
+        Self {
+            active_legacy_bootstrap: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -498,7 +509,13 @@ impl SpaceProtectionStatusPort for ProtectsQueriedMembers {
                     status: MemberProtectionStatus::Protected,
                 })
                 .collect(),
-            legacy_bootstrap: None,
+            legacy_bootstrap: self
+                .active_legacy_bootstrap
+                .then(|| LegacyBootstrapProgress {
+                    bootstrap_id: BootstrapId::generate(),
+                    status: LegacyBootstrapStatus::AwaitingReadmission,
+                    pending_readmission: 1,
+                }),
         })
     }
 }
@@ -946,6 +963,28 @@ async fn migrated_remote_only_roster_checks_local_protection_before_membership()
         protection.queries.lock().unwrap().as_slice(),
         &[vec![DeviceId::new("device-a"), DeviceId::new("device-b")]]
     );
+}
+
+#[tokio::test]
+async fn active_legacy_bootstrap_keeps_remote_only_roster_in_upgrade_scope() {
+    let repository = MemoryWorkspaceRepository::default();
+    let protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-b")]));
+    deps.space_protection = protection;
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(
+        snapshot.source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
+    );
+    assert_eq!(
+        snapshot.local_membership,
+        uc_core::membership::CurrentWorkspaceLocalMembership::Active
+    );
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
 }
 
 #[tokio::test]

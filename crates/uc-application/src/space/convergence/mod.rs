@@ -2320,8 +2320,13 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
                     }
                     _ => CurrentWorkspacePeerScopeError::Unavailable,
                 })?;
+            let active_legacy_bootstrap =
+                protection.legacy_bootstrap.as_ref().is_some_and(|item| {
+                    item.status == uc_core::membership::LegacyBootstrapStatus::AwaitingReadmission
+                });
             if protection.mode != uc_core::membership::SpaceProtectionMode::Legacy
                 && !state.migrated_from_pre_adr_020
+                && !active_legacy_bootstrap
             {
                 return Err(CurrentWorkspacePeerScopeError::Unavailable);
             }
