@@ -89,6 +89,7 @@ impl DeviceIdentityPort for ScenarioIdentity {
 }
 
 struct ScenarioPeerScope {
+    source: CurrentWorkspacePeerScopeSource,
     peers: Vec<DeviceId>,
 }
 
@@ -99,7 +100,7 @@ impl CurrentWorkspacePeerScopePort for ScenarioPeerScope {
     ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
         Ok(CurrentWorkspacePeerSnapshot {
             revision: 1,
-            source: CurrentWorkspacePeerScopeSource::Legacy,
+            source: self.source,
             local_membership: CurrentWorkspaceLocalMembership::Active,
             peer_device_ids: self.peers.clone(),
         })
@@ -315,6 +316,7 @@ impl UpgradeWorld {
                         dispatch: network.clone(),
                     })
                     .with_peer_scope(Arc::new(ScenarioPeerScope {
+                        source: CurrentWorkspacePeerScopeSource::Legacy,
                         peers: ids
                             .iter()
                             .filter(|peer| *peer != device_id)
@@ -429,6 +431,37 @@ async fn a_legacy_device_automatically_installs_a_ready_peers_admission() {
         world.protection("device-b").group_id().as_ref(),
         Some(&group("group-a"))
     );
+}
+
+#[tokio::test]
+async fn a_current_device_admits_a_known_legacy_member() {
+    let local_device_id = DeviceId::new("device-a");
+    let remote_device_id = DeviceId::new("device-b");
+    let protection = Arc::new(ScenarioProtection::legacy());
+    protection.set_group("group-a");
+    let automatic_upgrade = AutomaticLegacyUpgrade::new(AutomaticLegacyUpgradeDeps {
+        member_repo: Arc::new(ScenarioMembers {
+            members: vec![scenario_member(remote_device_id)],
+        }),
+        device_identity: Arc::new(ScenarioIdentity(local_device_id)),
+        protection: protection.clone(),
+        dispatch: Arc::new(ScenarioNetwork::default()),
+    })
+    .with_peer_scope(Arc::new(ScenarioPeerScope {
+        source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+        peers: vec![remote_device_id],
+    }));
+
+    let response = automatic_upgrade
+        .handle_legacy_upgrade_request(&remote_device_id, legacy_request("device-b", "device-a"))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        response.kind,
+        uc_core::membership::LegacyUpgradeResponseKind::Admission(_)
+    ));
+    assert_eq!(protection.admission_calls.load(Ordering::Acquire), 1);
 }
 
 #[tokio::test]

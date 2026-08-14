@@ -7,11 +7,12 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, debug_span, info, instrument, warn, Instrument};
 use uc_core::membership::{
-    decide_legacy_upgrade, CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
-    LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult, LegacyRequestInspection,
-    LegacyUpgradeAction, LegacyUpgradeDescriptor, LegacyUpgradeDispatchError,
-    LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort, LegacyUpgradeError, LegacyUpgradeRequest,
-    LegacyUpgradeResponse, LegacyUpgradeResponseKind, MemberRepositoryPort,
+    decide_legacy_upgrade, CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopePort,
+    CurrentWorkspacePeerScopeSource, LegacyProtectionCommand, LegacyProtectionPort,
+    LegacyProtectionResult, LegacyRequestInspection, LegacyUpgradeAction, LegacyUpgradeDescriptor,
+    LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort,
+    LegacyUpgradeError, LegacyUpgradeRequest, LegacyUpgradeResponse, LegacyUpgradeResponseKind,
+    MemberRepositoryPort,
 };
 use uc_core::ports::{DeviceIdentityPort, PresenceEvent, ReachabilityState};
 
@@ -285,7 +286,7 @@ impl AutomaticLegacyUpgrade {
             .snapshot()
             .await
             .map_err(|_| LegacyUpgradeError::Unauthorized)?;
-        if scope.source != CurrentWorkspacePeerScopeSource::Legacy
+        if scope.local_membership != CurrentWorkspaceLocalMembership::Active
             || !scope.peer_device_ids.contains(request.source_device_id())
         {
             return Err(LegacyUpgradeError::Unauthorized);
