@@ -1966,6 +1966,7 @@ async fn current_peer_confirmation_clears_upgrade_required_without_legacy_probe(
 async fn two_upgraded_legacy_members_establish_one_current_history_and_resume_exchange() {
     let a_repository = MemoryWorkspaceRepository::default();
     let mut a_state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    a_state.migrated_from_pre_adr_020 = true;
     a_state
         .apply(
             WorkspaceConvergenceEvent::PeerHistoryRelationshipUpdated {
@@ -1976,23 +1977,28 @@ async fn two_upgraded_legacy_members_establish_one_current_history_and_resume_ex
         )
         .unwrap();
     a_repository.save_state(&a_state).await.unwrap();
-    let a_owner = WorkspaceConvergence::new(test_deps(
-        Arc::new(a_repository.clone()),
-        "device-a",
-        Vec::new(),
-    ));
+    let mut a_deps = test_deps(Arc::new(a_repository.clone()), "device-a", Vec::new());
+    a_deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+    ]));
+    a_deps.space_protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
+    let a_owner = WorkspaceConvergence::new(a_deps);
 
     let b_repository = MemoryWorkspaceRepository::default();
     let b = instance(0x0b);
     let mut b_state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
     b_state.own_instance = Some(b);
     b_state.membership_reconciliation = Some(MembershipReconciliation::new(SPACE.to_owned(), b));
+    b_state.migrated_from_pre_adr_020 = true;
     b_repository.save_state(&b_state).await.unwrap();
-    let b_owner = WorkspaceConvergence::new(test_deps(
-        Arc::new(b_repository.clone()),
-        "device-b",
-        Vec::new(),
-    ));
+    let mut b_deps = test_deps(Arc::new(b_repository.clone()), "device-b", Vec::new());
+    b_deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+    ]));
+    b_deps.space_protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
+    let b_owner = WorkspaceConvergence::new(b_deps);
 
     let initialized = a_owner.initialize_upgraded_legacy_space().await.unwrap();
     assert_eq!(initialized.history_event_count, 1);
@@ -2034,6 +2040,30 @@ async fn two_upgraded_legacy_members_establish_one_current_history_and_resume_ex
     assert_eq!(b_snapshot.effective_member_count, 2);
     assert!(a_snapshot.upgrade_required_peer_device_ids.is_empty());
     assert!(!a_owner.locally_removed(&DeviceId::new("device-b")).await);
+    assert!(
+        !a_repository
+            .load_state()
+            .await
+            .unwrap()
+            .unwrap()
+            .migrated_from_pre_adr_020
+    );
+    assert!(
+        !b_repository
+            .load_state()
+            .await
+            .unwrap()
+            .unwrap()
+            .migrated_from_pre_adr_020
+    );
+    assert_eq!(
+        a_owner.snapshot().await.unwrap().source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
+    );
+    assert_eq!(
+        b_owner.snapshot().await.unwrap().source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
+    );
 }
 
 // Flow: this device created the persisted legacy bootstrap before a restart, but its device ID is
@@ -2049,6 +2079,84 @@ async fn active_legacy_bootstrap_owner_initializes_history_after_restart_even_wh
     let snapshot = owner.initialize_upgraded_legacy_space().await.unwrap();
 
     assert_eq!(snapshot.history_event_count, 1);
+}
+
+// Flow: the deterministic initializer creates the signed history root while a retained legacy
+// peer still awaits admission; that peer must remain in the upgrade scope until its signed
+// admission is present in the current history.
+#[tokio::test]
+async fn initialized_legacy_history_keeps_retained_peer_in_upgrade_scope_until_admission() {
+    let repository = MemoryWorkspaceRepository::default();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+    ]));
+    deps.space_protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
+    let owner = WorkspaceConvergence::new(deps);
+
+    let initialized = owner.initialize_upgraded_legacy_space().await.unwrap();
+    let scope = owner.snapshot().await.unwrap();
+
+    assert_eq!(initialized.history_event_count, 1);
+    assert_eq!(
+        scope.source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
+    );
+    assert_eq!(scope.peer_device_ids, vec![DeviceId::new("device-b")]);
+}
+
+// Flow: the retained legacy peer submits its signed current identity after the initializer has
+// created the history root; once the applied history covers the retained roster, the migration
+// marker must be cleared and the current history becomes the only runtime scope.
+#[tokio::test]
+async fn admitted_legacy_roster_completes_migration_and_switches_to_current_history() {
+    let repository = MemoryWorkspaceRepository::default();
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history
+        .receive_verified(membership_event(None, 0, a, a, "device-a", 1))
+        .unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+    ]));
+    deps.space_protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
+    let owner = WorkspaceConvergence::new(deps);
+
+    owner
+        .handle_membership_history(
+            &DeviceId::new("device-b"),
+            MembershipHistoryMessage::Hello(uc_core::membership::MembershipHistoryHello {
+                lineage_id: SPACE.to_owned(),
+                member_instance_id: b,
+                admission: admission_facts_for(b, &DeviceId::new("device-b")),
+                known_head: None,
+                applied_head: None,
+                applied_members_digest: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let saved = repository.load_state().await.unwrap().unwrap();
+    let scope = owner.snapshot().await.unwrap();
+    assert!(!saved.migrated_from_pre_adr_020);
+    assert_eq!(
+        scope.source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
+    );
+    assert_eq!(scope.peer_device_ids, vec![DeviceId::new("device-b")]);
 }
 
 // Flow: the non-initializing legacy member has joined the shared protection group but still has

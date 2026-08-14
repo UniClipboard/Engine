@@ -1275,10 +1275,10 @@ impl WorkspaceConvergence {
         let Some(history) = state.membership_reconciliation.as_ref() else {
             return Ok(MembershipHistoryMessage::Ack(MembershipHistoryAck::Invalid));
         };
-        if history.known_event_count() > 0
+        let member_admitted = history.known_event_count() > 0
             && !history.has_admitted_device(source_device_id)
-            && state.own_instance.is_some()
-        {
+            && state.own_instance.is_some();
+        if member_admitted {
             let security_state = self.deps.security_updates.current_state().await?;
             let mut digest = sha2::Sha256::new();
             digest.update(b"uniclipboard-membership-security/v1\0");
@@ -1292,11 +1292,14 @@ impl WorkspaceConvergence {
             )
             .await?;
             self.save_member_facts(&hello.admission, now_ms).await?;
-            self.persist(state).await?;
-        } else if upgrade_requirement_cleared {
+        }
+        let legacy_migration_completed = self
+            .complete_legacy_migration_if_roster_covered(state)
+            .await?;
+        if member_admitted || upgrade_requirement_cleared || legacy_migration_completed {
             self.persist(state).await?;
         }
-        if upgrade_requirement_cleared {
+        if upgrade_requirement_cleared || legacy_migration_completed {
             self.publish(state);
             self.notify();
         }
@@ -1427,6 +1430,8 @@ impl WorkspaceConvergence {
                 MembershipHistoryAck::Diverged,
             ),
         };
+        self.complete_legacy_migration_if_roster_covered(state)
+            .await?;
         self.update_peer_history_relationship(
             state,
             source_device_id.clone(),
@@ -2031,6 +2036,52 @@ impl WorkspaceConvergence {
         Ok(())
     }
 
+    fn complete_legacy_migration_for_roster(
+        state: &mut WorkspaceConvergenceState,
+        retained_device_ids: &[DeviceId],
+    ) -> bool {
+        if !state.migrated_from_pre_adr_020 {
+            return false;
+        }
+        let Some(history) = state.membership_reconciliation.as_ref() else {
+            return false;
+        };
+        if retained_device_ids
+            .iter()
+            .all(|device_id| history.is_device_effective(device_id))
+        {
+            state.migrated_from_pre_adr_020 = false;
+            return true;
+        }
+        false
+    }
+
+    async fn complete_legacy_migration_if_roster_covered(
+        &self,
+        state: &mut WorkspaceConvergenceState,
+    ) -> Result<bool, WorkspaceConvergenceError> {
+        if !state.migrated_from_pre_adr_020 {
+            return Ok(false);
+        }
+        let members = self
+            .deps
+            .member_repo
+            .list()
+            .await
+            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
+        let mut retained_device_ids = members
+            .into_iter()
+            .map(|member| member.device_id)
+            .collect::<Vec<_>>();
+        retained_device_ids.push(self.deps.own_device);
+        retained_device_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        retained_device_ids.dedup();
+        Ok(Self::complete_legacy_migration_for_roster(
+            state,
+            &retained_device_ids,
+        ))
+    }
+
     async fn record_local_removal_history(
         &self,
         state: &mut WorkspaceConvergenceState,
@@ -2220,13 +2271,7 @@ impl WorkspaceConvergence {
             )
             .await?;
         }
-        if state
-            .membership_reconciliation
-            .as_ref()
-            .is_some_and(|history| history.applied_head().is_some())
-        {
-            state.migrated_from_pre_adr_020 = false;
-        }
+        Self::complete_legacy_migration_for_roster(&mut state, &protection_member_ids);
         self.persist(&state).await?;
         self.publish(&state);
         self.notify();
@@ -2321,10 +2366,14 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
             ) => CurrentWorkspacePeerScopeError::Corrupt,
             _ => CurrentWorkspacePeerScopeError::Unavailable,
         })?;
-        let history = state
-            .membership_reconciliation
-            .as_ref()
-            .filter(|history| history.applied_head().is_some());
+        let history = if state.migrated_from_pre_adr_020 {
+            None
+        } else {
+            state
+                .membership_reconciliation
+                .as_ref()
+                .filter(|history| history.applied_head().is_some())
+        };
         let Some(history) = history else {
             let members = self
                 .deps

@@ -179,7 +179,7 @@ pub struct WorkspaceConvergenceState {
     pub updated_at_ms: i64,
     /// Set only when the final pre-ADR-020 persisted layout was migrated.
     /// It keeps the existing workspace on the explicit legacy-upgrade path
-    /// until signed membership history has been established.
+    /// until signed membership history covers the retained legacy roster.
     #[serde(default)]
     pub migrated_from_pre_adr_020: bool,
 }
