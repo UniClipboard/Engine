@@ -443,6 +443,7 @@ pub(crate) fn test_deps(
     _members: Vec<(DeviceId, MemberInstanceId)>,
 ) -> WorkspaceConvergenceDeps {
     WorkspaceConvergenceDeps {
+        initial_state_origin: super::WorkspaceConvergenceStateOrigin::CurrentInstallation,
         repository,
         member_signatures: Arc::new(FixedSigner),
         member_repo: Arc::new(uc_application_test_member_repo()),
@@ -2114,6 +2115,81 @@ async fn initialized_legacy_history_keeps_retained_peer_in_upgrade_scope_until_a
         uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
     );
     assert_eq!(scope.peer_device_ids, vec![DeviceId::new("device-b")]);
+}
+
+// Flow: a pre-ADR-020 installation has a retained legacy roster but no convergence-state row.
+// Creating the current-history root must preserve every retained peer until each admission exists.
+#[tokio::test]
+async fn fresh_legacy_upgrade_keeps_the_full_roster_in_scope_after_history_initialization() {
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.initial_state_origin =
+        super::WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState;
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+        legacy_member("device-c"),
+    ]));
+    deps.space_protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
+    let owner = WorkspaceConvergence::new(deps);
+
+    let initialized = owner.initialize_upgraded_legacy_space().await.unwrap();
+    let scope = owner.snapshot().await.unwrap();
+    let saved = repository.load_state().await.unwrap().unwrap();
+
+    assert_eq!(initialized.history_event_count, 1);
+    assert!(saved.migrated_from_pre_adr_020);
+    assert_eq!(
+        scope.source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
+    );
+    assert_eq!(
+        scope.peer_device_ids,
+        vec![DeviceId::new("device-b"), DeviceId::new("device-c")]
+    );
+}
+
+#[test]
+fn earlier_app_version_marks_an_upgrade_without_convergence_state() {
+    assert_eq!(
+        super::WorkspaceConvergenceStateOrigin::from_version_transition(
+            Some("0.19.1"),
+            "1.0.0-alpha.3"
+        ),
+        super::WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState
+    );
+    assert_eq!(
+        super::WorkspaceConvergenceStateOrigin::from_version_transition(
+            Some("1.0.0-alpha.3"),
+            "1.0.0-alpha.3"
+        ),
+        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
+    );
+    assert_eq!(
+        super::WorkspaceConvergenceStateOrigin::from_version_transition(None, "1.0.0-alpha.3"),
+        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
+    );
+    assert_eq!(
+        super::WorkspaceConvergenceStateOrigin::from_version_transition(
+            Some("1.1.0"),
+            "1.0.0-alpha.3"
+        ),
+        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
+    );
+    assert_eq!(
+        super::WorkspaceConvergenceStateOrigin::from_version_transition(
+            Some("not-semver"),
+            "1.0.0-alpha.3"
+        ),
+        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
+    );
+    assert_eq!(
+        super::WorkspaceConvergenceStateOrigin::from_version_transition(
+            Some("0.19.1"),
+            "not-semver"
+        ),
+        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
+    );
 }
 
 // Flow: the retained legacy peer submits its signed current identity after the initializer has

@@ -91,6 +91,7 @@ pub enum WorkspaceConvergenceError {
 }
 
 pub struct WorkspaceConvergenceDeps {
+    pub initial_state_origin: WorkspaceConvergenceStateOrigin,
     pub repository: Arc<dyn WorkspaceConvergenceRepositoryPort>,
     pub member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
@@ -112,6 +113,28 @@ pub struct WorkspaceConvergenceDeps {
     pub presence: Arc<dyn PresencePort>,
     pub space_protection: Arc<dyn SpaceProtectionStatusPort>,
     pub own_device: DeviceId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceConvergenceStateOrigin {
+    CurrentInstallation,
+    UpgradeWithoutConvergenceState,
+}
+
+impl WorkspaceConvergenceStateOrigin {
+    pub fn from_version_transition(previous: Option<&str>, current: &str) -> Self {
+        let Some(previous) = previous.and_then(|value| semver::Version::parse(value).ok()) else {
+            return Self::CurrentInstallation;
+        };
+        let Ok(current) = semver::Version::parse(current) else {
+            return Self::CurrentInstallation;
+        };
+        if previous < current {
+            Self::UpgradeWithoutConvergenceState
+        } else {
+            Self::CurrentInstallation
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,9 +368,18 @@ impl WorkspaceConvergence {
             .await
             .map(|identity| identity.space_id.as_ref().to_owned())
             .unwrap_or_default();
-        let mut state = self.deps.repository.load_state().await?.unwrap_or_else(|| {
-            WorkspaceConvergenceState::fresh(lineage.clone(), self.deps.clock.now_ms())
-        });
+        let mut state = match self.deps.repository.load_state().await? {
+            Some(state) => state,
+            None => {
+                let mut state =
+                    WorkspaceConvergenceState::fresh(lineage.clone(), self.deps.clock.now_ms());
+                state.migrated_from_pre_adr_020 = matches!(
+                    self.deps.initial_state_origin,
+                    WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState
+                );
+                state
+            }
+        };
         if state.space_lineage.is_empty() {
             state.space_lineage = lineage;
         }

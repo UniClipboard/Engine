@@ -66,6 +66,7 @@ pub(crate) struct ProductionRuntime {
 struct SessionFactory {
     wired: WiredDependencies,
     paths: uc_application::facade::AppPaths,
+    app_version: String,
     events: EventSender,
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
@@ -278,6 +279,7 @@ impl ProductionRuntime {
         let session_factory = Arc::new(SessionFactory {
             wired: wired.clone(),
             paths: paths.clone(),
+            app_version: app_version.clone(),
             events: events.clone(),
             rendezvous_base_url: rendezvous_base_url.clone(),
             relay_fallback_override,
@@ -345,6 +347,7 @@ impl ProductionRuntime {
             &wired.deps,
             &wired.sync_engine,
             &wired.shared,
+            &factory.app_version,
             #[cfg(feature = "lan-compat")]
             wired.mobile_sync_ports.clone(),
             factory.rendezvous_base_url.clone(),

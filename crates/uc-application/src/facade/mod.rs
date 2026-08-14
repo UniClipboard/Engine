@@ -107,7 +107,9 @@ pub use crate::space::convergence::{
     DeviceTrustRelationship, DeviceTrustSnapshot, GroupRelationship, RecoveryAvailability,
     SyncRelationship,
 };
-pub use crate::space::convergence::{WorkspaceConvergenceDeps, WorkspaceConvergenceError};
+pub use crate::space::convergence::{
+    WorkspaceConvergenceDeps, WorkspaceConvergenceError, WorkspaceConvergenceStateOrigin,
+};
 pub use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
     ReceiveReadinessStatus,

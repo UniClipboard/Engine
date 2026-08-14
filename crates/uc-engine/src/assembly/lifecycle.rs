@@ -45,6 +45,7 @@ pub async fn build_daemon_lifecycle(
     deps: &AppDeps,
     space_setup: &SyncEngineDeps,
     shared: &SharedRuntimeDeps,
+    current_app_version: &str,
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
@@ -142,6 +143,7 @@ pub async fn build_daemon_lifecycle(
         deps,
         space_setup,
         shared,
+        current_app_version,
         #[cfg(feature = "lan-compat")]
         mobile_sync_ports,
         iroh_config,

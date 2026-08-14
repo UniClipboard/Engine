@@ -270,6 +270,8 @@ pub fn test_workspace_convergence(
 ) -> Arc<SpaceConvergenceAssembly> {
     let own_device = device_identity.current_device_id();
     let workspace = WorkspaceConvergenceDeps {
+        initial_state_origin:
+            uc_application::facade::WorkspaceConvergenceStateOrigin::CurrentInstallation,
         repository: Arc::new(MemoryWorkspaceRepo::default()),
         member_signatures: Arc::new(FixedSigner),
         member_repo: Arc::clone(&member_repo),
