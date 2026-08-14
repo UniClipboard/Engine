@@ -14,7 +14,7 @@ use uc_core::membership::{
     LegacyUpgradeError, LegacyUpgradeRequest, LegacyUpgradeResponse, LegacyUpgradeResponseKind,
     MemberRepositoryPort,
 };
-use uc_core::ports::{DeviceIdentityPort, PresenceEvent, ReachabilityState};
+use uc_core::ports::{DeviceIdentityPort, PresenceEvent, PresencePort, ReachabilityState};
 
 use super::WorkspaceConvergence;
 
@@ -27,6 +27,7 @@ pub struct AutomaticLegacyUpgradeDeps {
     pub device_identity: Arc<dyn DeviceIdentityPort>,
     pub protection: Arc<dyn LegacyProtectionPort>,
     pub dispatch: Arc<dyn LegacyUpgradeDispatchPort>,
+    pub presence: Arc<dyn PresencePort>,
 }
 
 pub struct AutomaticLegacyUpgrade {
@@ -184,6 +185,24 @@ impl AutomaticLegacyUpgrade {
                             .complete_upgraded_legacy_join(&member.device_id)
                             .await
                             .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
+                    }
+                    match self.deps.presence.ensure_reachable(&member.device_id).await {
+                        Ok(state) => {
+                            debug!(
+                                device_id = %member.device_id,
+                                ?state,
+                                "legacy upgrade refreshed peer reachability"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                device_id = %member.device_id,
+                                error_kind = "post_upgrade_reconnect",
+                                retryable = true,
+                                error = %error,
+                                "legacy upgrade peer reconnect deferred"
+                            );
+                        }
                     }
                     info!(device_id = %member.device_id, "legacy upgrade joined a peer protection group");
                     return Ok(LegacyUpgradePassOutcome::ready(true));

@@ -328,6 +328,7 @@ pub fn test_workspace_convergence(
             device_identity: Arc::new(NoopDeviceIdentity),
             protection: Arc::new(NoopLegacyProtection),
             dispatch: Arc::new(NoopLegacyUpgradeDispatch),
+            presence: Arc::new(NoopPresence),
         },
     }))
 }

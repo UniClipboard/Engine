@@ -675,6 +675,7 @@ pub async fn build_sync_engine_assembly(
             device_identity: Arc::clone(&deps.device.device_identity),
             protection: Arc::clone(&space_setup.legacy_protection),
             dispatch: Arc::clone(&legacy_upgrade_dispatch),
+            presence: Arc::clone(&presence),
         },
     });
     builder.install_membership_handler(
