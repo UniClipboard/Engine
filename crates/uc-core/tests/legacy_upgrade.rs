@@ -183,9 +183,14 @@ fn protection_contract_exposes_complete_commands_without_private_join_state() {
     let snapshot = LegacyProtectionSnapshot {
         descriptor: descriptor.clone(),
         protected_members: vec![DeviceId::new("device-a")],
+        pending_readmission_members: vec![DeviceId::new("device-b")],
     };
     assert_eq!(snapshot.descriptor, descriptor);
     assert_eq!(snapshot.protected_members, vec![DeviceId::new("device-a")]);
+    assert_eq!(
+        snapshot.pending_readmission_members,
+        vec![DeviceId::new("device-b")]
+    );
 
     let command = LegacyProtectionCommand::CreateGroup {
         sponsor: DeviceId::new("device-a"),

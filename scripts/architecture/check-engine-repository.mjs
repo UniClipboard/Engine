@@ -380,7 +380,10 @@ function checkCurrentPeerScopeOwnership() {
   ]
   for (const path of scopedConsumers) {
     const source = read(path)
-    if (!source.includes('CurrentWorkspacePeerScopePort') || !source.includes('.snapshot().await')) {
+    if (
+      !source.includes('CurrentWorkspacePeerScopePort') ||
+      !/\.snapshot\(\)\s*\.await/.test(source)
+    ) {
       addProblem(
         problems,
         'current peer scope',

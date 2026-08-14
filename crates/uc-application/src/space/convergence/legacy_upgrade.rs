@@ -286,14 +286,23 @@ impl AutomaticLegacyUpgrade {
             .snapshot()
             .await
             .map_err(|_| LegacyUpgradeError::Unauthorized)?;
-        if scope.local_membership != CurrentWorkspaceLocalMembership::Active
-            || !scope.peer_device_ids.contains(request.source_device_id())
+        if scope.local_membership != CurrentWorkspaceLocalMembership::Active {
+            return Err(LegacyUpgradeError::Unauthorized);
+        }
+        let source_is_current_member = scope.peer_device_ids.contains(request.source_device_id());
+        let mut member_ids = scope.peer_device_ids;
+        member_ids.push(local_device_id);
+        if !member_ids.contains(request.source_device_id()) {
+            member_ids.push(*request.source_device_id());
+        }
+        let protection = self.deps.protection.snapshot(&member_ids).await?;
+        if !source_is_current_member
+            && !protection
+                .pending_readmission_members
+                .contains(request.source_device_id())
         {
             return Err(LegacyUpgradeError::Unauthorized);
         }
-        let mut member_ids = scope.peer_device_ids;
-        member_ids.push(local_device_id);
-        let protection = self.deps.protection.snapshot(&member_ids).await?;
         if protection
             .protected_members
             .contains(request.source_device_id())
