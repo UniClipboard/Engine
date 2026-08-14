@@ -180,6 +180,12 @@ impl AutomaticLegacyUpgrade {
                         })
                         .await?;
                     self.initialize_current_history().await?;
+                    if let Some(convergence) = &self.convergence {
+                        convergence
+                            .reconcile_membership_history_with_peer(&member.device_id)
+                            .await
+                            .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
+                    }
                     info!(device_id = %member.device_id, "legacy upgrade joined a peer protection group");
                     return Ok(LegacyUpgradePassOutcome::ready(true));
                 }
@@ -316,6 +322,7 @@ impl AutomaticLegacyUpgrade {
                 kind: LegacyUpgradeResponseKind::UpToDate,
             });
         }
+        self.initialize_current_history().await?;
         let existing_member_ids = protection
             .protected_members
             .into_iter()
