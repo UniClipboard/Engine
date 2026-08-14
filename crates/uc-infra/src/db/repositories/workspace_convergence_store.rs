@@ -92,7 +92,7 @@ impl From<DeviceTrustInitialWorkspaceState> for WorkspaceConvergenceState {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020: false,
+            migrated_from_pre_adr_020: true,
         }
     }
 }
@@ -780,7 +780,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_device_trust_state_is_versioned_without_changing_its_facts() {
+    async fn initial_device_trust_state_keeps_pre_adr_020_migration_provenance() {
         let (store, pool, _directory) = make_store();
         let local = MemberInstanceId::from_bytes([0x0a; 32]);
         let expected_relationships = BTreeMap::from([(
@@ -807,7 +807,7 @@ mod tests {
         assert_eq!(loaded.own_instance, Some(local));
         assert_eq!(loaded.peer_history_relationships, expected_relationships);
         assert_eq!(loaded.revision, 9);
-        assert!(!loaded.migrated_from_pre_adr_020);
+        assert!(loaded.migrated_from_pre_adr_020);
         let reopened = reopen_store(pool);
         assert_eq!(reopened.load_state().await.unwrap(), Some(loaded));
     }
