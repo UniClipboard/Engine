@@ -25,7 +25,7 @@ use uc_core::ports::pairing::PairingSessionId;
 
 use uc_core::membership::RelayedSecurityUpdate;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct UnversionedCurrentWorkspaceState {
     space_lineage: String,
     own_instance: Option<MemberInstanceId>,
@@ -59,6 +59,10 @@ struct DeviceTrustInitialWorkspaceState {
 
 impl From<UnversionedCurrentWorkspaceState> for WorkspaceConvergenceState {
     fn from(state: UnversionedCurrentWorkspaceState) -> Self {
+        let migrated_from_pre_adr_020 = state
+            .membership_reconciliation
+            .as_ref()
+            .is_none_or(|history| history.applied_head().is_none());
         Self {
             space_lineage: state.space_lineage,
             own_instance: state.own_instance,
@@ -72,13 +76,17 @@ impl From<UnversionedCurrentWorkspaceState> for WorkspaceConvergenceState {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020: false,
+            migrated_from_pre_adr_020,
         }
     }
 }
 
 impl From<DeviceTrustInitialWorkspaceState> for WorkspaceConvergenceState {
     fn from(state: DeviceTrustInitialWorkspaceState) -> Self {
+        let migrated_from_pre_adr_020 = state
+            .membership_reconciliation
+            .as_ref()
+            .is_none_or(|history| history.applied_head().is_none());
         Self {
             space_lineage: state.space_lineage,
             own_instance: state.own_instance,
@@ -92,7 +100,7 @@ impl From<DeviceTrustInitialWorkspaceState> for WorkspaceConvergenceState {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020: true,
+            migrated_from_pre_adr_020,
         }
     }
 }
@@ -807,6 +815,37 @@ mod tests {
         assert_eq!(loaded.own_instance, Some(local));
         assert_eq!(loaded.peer_history_relationships, expected_relationships);
         assert_eq!(loaded.revision, 9);
+        assert!(loaded.migrated_from_pre_adr_020);
+        let reopened = reopen_store(pool);
+        assert_eq!(reopened.load_state().await.unwrap(), Some(loaded));
+    }
+
+    #[tokio::test]
+    async fn unversioned_state_without_current_history_keeps_legacy_migration_provenance() {
+        let (store, pool, _directory) = make_store();
+        let local = MemberInstanceId::from_bytes([0x0a; 32]);
+        let unversioned = super::UnversionedCurrentWorkspaceState {
+            space_lineage: SPACE.to_owned(),
+            own_instance: Some(local),
+            peer_history_relationships: BTreeMap::from([(
+                DeviceId::new("device-b"),
+                MembershipHistoryRelationship::UpgradeRequired,
+            )]),
+            membership_reconciliation: None,
+            pending_applied_membership_effects: Vec::new(),
+            pending_membership_decision_deliveries: Vec::new(),
+            pending_admissions: BTreeMap::new(),
+            phase: WorkspacePhase::Converging,
+            failure_category: None,
+            revision: 9,
+            removed: false,
+            updated_at_ms: 456,
+        };
+        insert_unversioned_payload(&pool, &unversioned, unversioned.updated_at_ms);
+
+        let loaded = store.load_state().await.unwrap().unwrap();
+
+        assert!(loaded.membership_reconciliation.is_none());
         assert!(loaded.migrated_from_pre_adr_020);
         let reopened = reopen_store(pool);
         assert_eq!(reopened.load_state().await.unwrap(), Some(loaded));
