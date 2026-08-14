@@ -2305,10 +2305,14 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
                 .iter()
                 .map(|member| member.device_id)
                 .collect::<Vec<_>>();
+            let mut protection_member_ids = member_ids.clone();
+            protection_member_ids.push(self.deps.own_device);
+            protection_member_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            protection_member_ids.dedup();
             let protection = self
                 .deps
                 .space_protection
-                .query_space_protection(&member_ids)
+                .query_space_protection(&protection_member_ids)
                 .await
                 .map_err(|error| match error {
                     uc_core::membership::SpaceProtectionError::Corrupted => {
@@ -2323,7 +2327,10 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
             }
             let local_is_member = protection.mode
                 == uc_core::membership::SpaceProtectionMode::Legacy
-                || member_ids.contains(&self.deps.own_device);
+                || protection.members.iter().any(|member| {
+                    member.device_id == self.deps.own_device
+                        && member.status == uc_core::membership::MemberProtectionStatus::Protected
+                });
             let mut peer_device_ids = if local_is_member {
                 member_ids
                     .into_iter()

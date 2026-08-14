@@ -10,11 +10,12 @@ use uc_core::membership::{
     CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityError,
     CurrentMembershipIdentityPort, CurrentWorkspacePeerScopePort, MemberInstanceId,
-    MemberRepositoryPort, MembershipAdmissionDecision, MembershipAdmissionGatePort,
-    MembershipEventsResponse, MembershipHistoryAck, MembershipHistoryMessage, MembershipOperation,
-    MembershipReconciliation, MembershipSecurityUpdateError, MembershipSecurityUpdatePort,
-    RemovalDecision, SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot,
-    SpaceProtectionStatusPort, WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
+    MemberProtection, MemberProtectionStatus, MemberRepositoryPort, MembershipAdmissionDecision,
+    MembershipAdmissionGatePort, MembershipEventsResponse, MembershipHistoryAck,
+    MembershipHistoryMessage, MembershipOperation, MembershipReconciliation,
+    MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalDecision,
+    SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
+    WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
     WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState,
 };
 use uc_core::ports::{ClockPort, DeviceIdentityPort};
@@ -476,6 +477,32 @@ impl SpaceProtectionStatusPort for FixedSpaceProtection {
     }
 }
 
+#[derive(Default)]
+struct ProtectsQueriedMembers {
+    queries: Mutex<Vec<Vec<DeviceId>>>,
+}
+
+#[async_trait]
+impl SpaceProtectionStatusPort for ProtectsQueriedMembers {
+    async fn query_space_protection(
+        &self,
+        members: &[DeviceId],
+    ) -> Result<SpaceProtectionSnapshot, SpaceProtectionError> {
+        self.queries.lock().unwrap().push(members.to_vec());
+        Ok(SpaceProtectionSnapshot {
+            mode: SpaceProtectionMode::Ready,
+            members: members
+                .iter()
+                .map(|device_id| MemberProtection {
+                    device_id: *device_id,
+                    status: MemberProtectionStatus::Protected,
+                })
+                .collect(),
+            legacy_bootstrap: None,
+        })
+    }
+}
+
 struct UnusedLegacyProbe;
 
 #[async_trait]
@@ -884,7 +911,7 @@ async fn current_peer_scope_keeps_a_migrated_pre_adr_020_workspace_in_legacy_upg
         legacy_member("device-a"),
         legacy_member("device-b"),
     ]));
-    deps.space_protection = Arc::new(FixedSpaceProtection(SpaceProtectionMode::Ready));
+    deps.space_protection = Arc::new(ProtectsQueriedMembers::default());
     let owner = WorkspaceConvergence::new(deps);
 
     let snapshot = owner.snapshot().await.unwrap();
@@ -894,6 +921,31 @@ async fn current_peer_scope_keeps_a_migrated_pre_adr_020_workspace_in_legacy_upg
         uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
     );
     assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
+}
+
+#[tokio::test]
+async fn migrated_remote_only_roster_checks_local_protection_before_membership() {
+    let repository = MemoryWorkspaceRepository::default();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+    let protection = Arc::new(ProtectsQueriedMembers::default());
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-b")]));
+    deps.space_protection = protection.clone();
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(
+        snapshot.local_membership,
+        uc_core::membership::CurrentWorkspaceLocalMembership::Active
+    );
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
+    assert_eq!(
+        protection.queries.lock().unwrap().as_slice(),
+        &[vec![DeviceId::new("device-a"), DeviceId::new("device-b")]]
+    );
 }
 
 #[tokio::test]
