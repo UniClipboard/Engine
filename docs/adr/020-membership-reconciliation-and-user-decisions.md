@@ -17,6 +17,7 @@
   `docs/specs/016-workspace-wide-convergence.md`、
   `docs/specs/017-pairing-as-workspace-admission.md`、
   `docs/specs/019-device-specific-convergence-waiting-status.md`、
+  `docs/specs/023-durable-membership-proof-and-admission-activation.md`、
   `docs/architecture/architecture-bible.md`
 
 ## 1. Overview
@@ -87,7 +88,7 @@ Relationship: 调用 uc-core 规则和 uc-infra 能力，由 uc-engine 组装；
 
 ```text
 Component: Space membership domain
-Path: crates/uc-core/src/space/
+Path: crates/uc-core/src/membership/
 Responsibility: 成员实例、成员事件、历史关系、用户决定、摘要和签名验证规则。
 Relationship: 不创建网络连接，不安排后台任务，不依赖具体持久化或传输实现。
 ```
@@ -159,7 +160,8 @@ Relationship: 不保存第二份成员状态，不逐消息编排核对协议。
 - `resulting_members_digest`：应用事件后的完整成员集合摘要。
 - `security_state_digest`：该分支结果安全状态摘要。
 - `admission_bundle_digest`：加入时绑定同一加入方和结果的交付材料摘要；非加入为空。
-- `signature`：发起成员使用父事件中有效身份，对 `event_id` 和完整正文签名。
+- `signature`：发起成员对 `event_id` 和完整正文签名。当前 V1 验证仍通过已应用头和当前 OpenMLS 成员树
+  解析作者；“从精确父历史取得当时有效身份和永久公钥”是规格 023 的待实施替换规则。
 
 事件只允许一个父事件。多个事件引用同一父事件时形成历史分支；没有多父事件和自动合并事件。
 
@@ -275,7 +277,8 @@ Relationship: 不保存第二份成员状态，不逐消息编排核对协议。
 
 #### 接收未确认移除
 
-1. 验证移除的沿革、父历史、发起者在父事件中的资格、目标成员、签名和结果安全状态。
+1. 验证移除的沿革、父历史、目标成员、签名和结果安全状态。当前 V1 对旧作者资格的解析仍依赖已应用头
+   和当前 OpenMLS 成员树；规格 023 实施后才改为从精确父历史验证发起者当时资格和永久凭据。
 2. 保存事件和对应安全材料，但不修改本机已应用成员集合和普通内容权限。
 3. 将双方历史关系设为 `PendingRemovalDecision`，发布一次明确用户决定。
 4. 同一事件重复到达只引用同一待决定项；重启后继续，不重复提示为新操作。
@@ -311,9 +314,9 @@ Relationship: 不保存第二份成员状态，不逐消息编排核对协议。
 
 #### 新增设备传播
 
-连续的 `AddDevice` 事件验证通过后可以自动应用。加入成功仍要求发起方和加入方都保存并启用同一
-事件和安全状态；这不表示所有离线旧成员已经应用。旧成员上线后可自动补齐新增，除非补齐路径先
-经过一项尚未决定的移除或已分叉历史。
+连续的 `AddDevice` 事件验证通过后可以自动应用。待实施的规格 023 进一步要求发起方和加入方都保存并
+确认同一事件和安全状态后才返回加入成功；这不表示所有离线旧成员已经应用。旧成员上线后可自动补齐
+新增，除非补齐路径先经过一项尚未决定的移除或已分叉历史。
 
 ### 内容与成员传播门禁
 
@@ -637,6 +640,8 @@ Relationship: 不保存第二份成员状态，不逐消息编排核对协议。
    保护状态，稳定发起端建立唯一历史起点，每台设备提交自己签名的当前身份资料；当前历史起点建立后，
    普通流程只按双方已保存的历史头请求和验证缺失事件。持久升级记录只允许保留成员完成同一次保护和接纳，
    不授予普通资格；共同保护状态和已应用历史都覆盖保留成员后才结束提升，不从旧成员表补造历史。
+6. 历史作者验证材料的长期保存，以及新 AddDevice 从候选到普通权限的完成边界，由待实施的规格 023
+   细化；本 ADR 的离线分支、移除决定和分叉规则保持不变。
 
 产品如何呈现移除发起方、目标设备和影响仍属于界面设计，不改变本 ADR 已实施的事实、动作和安全边界。
 
