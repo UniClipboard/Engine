@@ -109,20 +109,11 @@ pub(crate) struct PendingJoinerHandshake {
     welcome: Vec<u8>,
     encrypted_key_catalog: Vec<u8>,
     group_epoch: u64,
-    sponsor_membership_history_event_count: u64,
 }
 
 impl PendingJoinerHandshake {
     pub(crate) fn outcome(&self) -> &JoinerHandshakeOutcome {
         &self.outcome
-    }
-
-    pub(crate) fn group_epoch(&self) -> u64 {
-        self.group_epoch
-    }
-
-    pub(crate) fn sponsor_membership_history_event_count(&self) -> u64 {
-        self.sponsor_membership_history_event_count
     }
 
     #[cfg(test)]
@@ -138,7 +129,6 @@ impl PendingJoinerHandshake {
             welcome: Vec::new(),
             encrypted_key_catalog: Vec::new(),
             group_epoch,
-            sponsor_membership_history_event_count: 0,
         }
     }
 }
@@ -464,7 +454,6 @@ impl JoinerHandshakeCoordinator {
             welcome: confirm.welcome,
             encrypted_key_catalog: confirm.encrypted_key_catalog,
             group_epoch: confirm.group_epoch,
-            sponsor_membership_history_event_count: confirm.membership_history_event_count,
         })
     }
 

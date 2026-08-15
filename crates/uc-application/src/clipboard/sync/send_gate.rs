@@ -34,13 +34,6 @@ pub(crate) struct MemberSendGate {
 }
 
 impl MemberSendGate {
-    pub(crate) fn new(member_repo: Arc<dyn MemberRepositoryPort>) -> Self {
-        Self {
-            member_repo,
-            content_gate: None,
-        }
-    }
-
     pub(crate) fn new_with_content_gate(
         member_repo: Arc<dyn MemberRepositoryPort>,
         content_gate: Arc<dyn ContentExchangeGatePort>,
@@ -167,7 +160,10 @@ mod tests {
     }
 
     fn gate(member: Option<SpaceMember>) -> MemberSendGate {
-        MemberSendGate::new(Arc::new(StubRepo { member }))
+        MemberSendGate {
+            member_repo: Arc::new(StubRepo { member }),
+            content_gate: None,
+        }
     }
 
     fn category_set(c: ClipboardContentCategory) -> ClipboardContentCategorySet {

@@ -257,11 +257,6 @@ pub fn wire_dependencies_from_inputs(
             &infra.db_executor,
         );
     let membership_session = Arc::clone(&platform.session);
-    let key_epoch_repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> =
-        Arc::new(DieselSpaceSecurityStore::new(
-            Arc::clone(&infra.db_executor),
-            platform.session.as_ref().clone(),
-        ));
     let workspace_convergence_repository: Arc<
         dyn uc_core::membership::WorkspaceConvergenceRepositoryPort,
     > = Arc::new(DieselWorkspaceConvergenceStore::new(
@@ -649,7 +644,6 @@ pub fn wire_dependencies_from_inputs(
             membership_applied_security_update_repo,
             current_member_signatures,
             membership_session,
-            key_epoch_repository,
             workspace_convergence_repository,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             blob_migration_repo: Arc::clone(&infra.blob_migration_repo),
