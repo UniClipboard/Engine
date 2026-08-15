@@ -14,6 +14,10 @@ use super::{AdmissionChangeFacts, MemberInstanceId};
 pub struct MembershipEventId([u8; 32]);
 
 impl MembershipEventId {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -171,6 +175,16 @@ pub enum RemovalDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MembershipDecisionId([u8; 32]);
+
+impl MembershipDecisionId {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MembershipDecision {

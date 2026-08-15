@@ -10,6 +10,7 @@ mod preferences;
 mod protection;
 mod revocation;
 mod upgrade;
+mod versioned_membership_history;
 mod workspace_convergence;
 
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
@@ -77,6 +78,20 @@ pub use upgrade::{
     LegacyUpgradeDescriptor, LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort,
     LegacyUpgradeEndpointPort, LegacyUpgradeError, LegacyUpgradeId, LegacyUpgradeRequest,
     LegacyUpgradeResponse, LegacyUpgradeResponseKind, ProtectionGroupAdmission, ProtectionGroupId,
+};
+pub use versioned_membership_history::{
+    AdmissionActivationReceipt, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1,
+    HistoricalMembershipSignatureError, HistoricalMembershipSignatureVerifier,
+    LegacyCheckpointAttestationV2, LegacyPrefixCheckpointV2, MembershipActivationBaselineV2,
+    MembershipActivationReceiptRecord, MembershipActivationReceiptStoreOutcome,
+    MembershipAdmissionV2, MembershipCredential, MembershipCredentialId,
+    MembershipDecisionStoreOutcome, MembershipDecisionV1Evidence, MembershipDecisionV2,
+    MembershipEventV1Evidence, MembershipEventV2, MembershipHistoryV2Error,
+    MembershipHistoryV2ReceiveOutcome, MembershipOperationV2, VersionedMembershipDecision,
+    VersionedMembershipEvent, VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1, LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2,
+    LEGACY_PREFIX_CHECKPOINT_FORMAT_V2, MEMBERSHIP_CREDENTIAL_FORMAT_V1,
+    MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 pub use workspace_convergence::{
     AdmissionChangeFacts, AdmissionSavedFacts, PendingAdmissionRecord,
