@@ -170,15 +170,21 @@ impl LegacyProtectionPort for DefaultLegacyProtection {
         )
         .await
         .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
-        let protected_members = protection
-            .members
-            .into_iter()
-            .filter(|member| member.status == MemberProtectionStatus::Protected)
-            .map(|member| member.device_id)
-            .collect();
+        let mut protected_members = Vec::new();
+        let mut pending_readmission_members = Vec::new();
+        for member in protection.members {
+            match member.status {
+                MemberProtectionStatus::Protected => protected_members.push(member.device_id),
+                MemberProtectionStatus::AwaitingReadmission => {
+                    pending_readmission_members.push(member.device_id);
+                }
+                _ => {}
+            }
+        }
         Ok(LegacyProtectionSnapshot {
             descriptor,
             protected_members,
+            pending_readmission_members,
         })
     }
 

@@ -643,6 +643,25 @@ mod tests {
         assert!(persisted.get("auto_sync").is_none());
     }
 
+    #[test]
+    fn v0191_auto_sync_choice_maps_to_automatic_sync_setting() {
+        let json = r#"{
+            "schema_version": 3,
+            "sync": {
+                "auto_sync": false,
+                "sync_frequency": "interval",
+                "sync_on_restore": true
+            }
+        }"#;
+
+        let settings: Settings = serde_json::from_str(json).expect("parse v0.19.1 settings");
+
+        assert!(settings.sync.sync_enabled);
+        assert!(!settings.sync.auto_sync_enabled);
+        assert_eq!(settings.sync.sync_frequency, SyncFrequency::Interval);
+        assert!(settings.sync.sync_on_restore);
+    }
+
     /// `security` 段缺所有字段时回退默认,且未来加新字段不会再 break 启动。
     #[test]
     fn security_empty_object_falls_back_to_default() {

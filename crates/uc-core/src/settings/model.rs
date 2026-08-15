@@ -172,6 +172,7 @@ pub struct ContentTypes {
 #[serde(default)]
 pub struct SyncSettings {
     pub sync_enabled: bool,
+    #[serde(alias = "auto_sync")]
     pub auto_sync_enabled: bool,
     pub sync_frequency: SyncFrequency,
     pub content_types: ContentTypes,

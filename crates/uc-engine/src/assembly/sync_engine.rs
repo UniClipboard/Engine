@@ -534,6 +534,8 @@ mod outbound_progress_tests {
 pub enum SyncEngineAssemblyError {
     #[error(transparent)]
     IrohNode(#[from] IrohNodeError),
+    #[error(transparent)]
+    AppVersionState(#[from] uc_core::ports::AppVersionStateError),
 }
 
 /// Assemble the Slice 1 `SpaceFacade` from an already-wired dependency
@@ -549,9 +551,16 @@ pub async fn build_sync_engine_assembly(
     deps: &AppDeps,
     space_setup: &SyncEngineDeps,
     shared: &SharedRuntimeDeps,
+    current_app_version: &str,
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     iroh_config: IrohNodeConfig,
 ) -> Result<SyncEngineAssembly, SyncEngineAssemblyError> {
+    let previous_app_version = deps.app_version_state.read().await?;
+    let initial_state_origin =
+        uc_application::facade::WorkspaceConvergenceStateOrigin::from_version_transition(
+            previous_app_version.as_deref(),
+            current_app_version,
+        );
     // IdentityFingerprintFactory is stateless — the one in SecurityPorts is
     // the same `Sha256IdentityFingerprintFactory` ZST, but we construct a
     // fresh one here rather than down-casting through `dyn` because
@@ -623,6 +632,7 @@ pub async fn build_sync_engine_assembly(
     );
     let convergence_assembly = SpaceConvergenceAssembly::new(SpaceConvergenceDeps {
         workspace: WorkspaceConvergenceDeps {
+            initial_state_origin,
             repository: Arc::clone(&space_setup.workspace_convergence_repository),
             member_signatures: Arc::clone(&space_setup.current_member_signatures),
             member_repo: Arc::clone(&deps.device.member_repo),
@@ -675,6 +685,7 @@ pub async fn build_sync_engine_assembly(
             device_identity: Arc::clone(&deps.device.device_identity),
             protection: Arc::clone(&space_setup.legacy_protection),
             dispatch: Arc::clone(&legacy_upgrade_dispatch),
+            presence: Arc::clone(&presence),
         },
     });
     builder.install_membership_handler(

@@ -7,13 +7,14 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, debug_span, info, instrument, warn, Instrument};
 use uc_core::membership::{
-    decide_legacy_upgrade, CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
-    LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult, LegacyRequestInspection,
-    LegacyUpgradeAction, LegacyUpgradeDescriptor, LegacyUpgradeDispatchError,
-    LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort, LegacyUpgradeError, LegacyUpgradeRequest,
-    LegacyUpgradeResponse, LegacyUpgradeResponseKind, MemberRepositoryPort,
+    decide_legacy_upgrade, CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopePort,
+    CurrentWorkspacePeerScopeSource, LegacyProtectionCommand, LegacyProtectionPort,
+    LegacyProtectionResult, LegacyRequestInspection, LegacyUpgradeAction, LegacyUpgradeDescriptor,
+    LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort,
+    LegacyUpgradeError, LegacyUpgradeRequest, LegacyUpgradeResponse, LegacyUpgradeResponseKind,
+    MemberRepositoryPort,
 };
-use uc_core::ports::{DeviceIdentityPort, PresenceEvent, ReachabilityState};
+use uc_core::ports::{DeviceIdentityPort, PresenceEvent, PresencePort, ReachabilityState};
 
 use super::WorkspaceConvergence;
 
@@ -26,6 +27,7 @@ pub struct AutomaticLegacyUpgradeDeps {
     pub device_identity: Arc<dyn DeviceIdentityPort>,
     pub protection: Arc<dyn LegacyProtectionPort>,
     pub dispatch: Arc<dyn LegacyUpgradeDispatchPort>,
+    pub presence: Arc<dyn PresencePort>,
 }
 
 pub struct AutomaticLegacyUpgrade {
@@ -178,7 +180,30 @@ impl AutomaticLegacyUpgrade {
                             admission,
                         })
                         .await?;
-                    self.initialize_current_history().await?;
+                    if let Some(convergence) = &self.convergence {
+                        convergence
+                            .complete_upgraded_legacy_join(&member.device_id)
+                            .await
+                            .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
+                    }
+                    match self.deps.presence.ensure_reachable(&member.device_id).await {
+                        Ok(state) => {
+                            debug!(
+                                device_id = %member.device_id,
+                                ?state,
+                                "legacy upgrade refreshed peer reachability"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                device_id = %member.device_id,
+                                error_kind = "post_upgrade_reconnect",
+                                retryable = true,
+                                error = %error,
+                                "legacy upgrade peer reconnect deferred"
+                            );
+                        }
+                    }
                     info!(device_id = %member.device_id, "legacy upgrade joined a peer protection group");
                     return Ok(LegacyUpgradePassOutcome::ready(true));
                 }
@@ -285,14 +310,23 @@ impl AutomaticLegacyUpgrade {
             .snapshot()
             .await
             .map_err(|_| LegacyUpgradeError::Unauthorized)?;
-        if scope.source != CurrentWorkspacePeerScopeSource::Legacy
-            || !scope.peer_device_ids.contains(request.source_device_id())
+        if scope.local_membership != CurrentWorkspaceLocalMembership::Active {
+            return Err(LegacyUpgradeError::Unauthorized);
+        }
+        let source_is_current_member = scope.peer_device_ids.contains(request.source_device_id());
+        let mut member_ids = scope.peer_device_ids;
+        member_ids.push(local_device_id);
+        if !member_ids.contains(request.source_device_id()) {
+            member_ids.push(*request.source_device_id());
+        }
+        let protection = self.deps.protection.snapshot(&member_ids).await?;
+        if !source_is_current_member
+            && !protection
+                .pending_readmission_members
+                .contains(request.source_device_id())
         {
             return Err(LegacyUpgradeError::Unauthorized);
         }
-        let mut member_ids = scope.peer_device_ids;
-        member_ids.push(local_device_id);
-        let protection = self.deps.protection.snapshot(&member_ids).await?;
         if protection
             .protected_members
             .contains(request.source_device_id())
@@ -306,6 +340,7 @@ impl AutomaticLegacyUpgrade {
                 kind: LegacyUpgradeResponseKind::UpToDate,
             });
         }
+        self.initialize_current_history().await?;
         let existing_member_ids = protection
             .protected_members
             .into_iter()
@@ -313,7 +348,7 @@ impl AutomaticLegacyUpgrade {
                 device_id != &local_device_id && device_id != request.source_device_id()
             })
             .collect::<Vec<_>>();
-        let admission = match self
+        let admission_result = self
             .deps
             .protection
             .execute(LegacyProtectionCommand::AdmitMember {
@@ -321,14 +356,25 @@ impl AutomaticLegacyUpgrade {
                 existing_members: existing_member_ids,
                 request: request.clone(),
             })
-            .await?
-        {
-            LegacyProtectionResult::MemberAdmitted(admission) => admission,
-            LegacyProtectionResult::GroupReady(_) => {
-                return Err(LegacyUpgradeError::Internal(
-                    "legacy protection returned an unexpected result".into(),
-                ));
+            .await;
+        let admission = match admission_result {
+            Err(error) => {
+                warn!(
+                    error_kind = "admit_member",
+                    retryable = true,
+                    error = %error,
+                    "legacy upgrade admission failed"
+                );
+                return Err(error);
             }
+            Ok(result) => match result {
+                LegacyProtectionResult::MemberAdmitted(admission) => admission,
+                LegacyProtectionResult::GroupReady(_) => {
+                    return Err(LegacyUpgradeError::Internal(
+                        "legacy protection returned an unexpected result".into(),
+                    ));
+                }
+            },
         };
         let protection_group_id =
             local_descriptor

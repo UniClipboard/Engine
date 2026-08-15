@@ -68,6 +68,7 @@ pub struct ProtectionGroupAdmission {
 pub struct LegacyProtectionSnapshot {
     pub descriptor: LegacyUpgradeDescriptor,
     pub protected_members: Vec<DeviceId>,
+    pub pending_readmission_members: Vec<DeviceId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -22,7 +22,9 @@ use uc_core::membership::{
     LegacyUpgradeRequest, LegacyUpgradeResponse, MemberRepositoryPort, MembershipError,
     ProtectionGroupAdmission, ProtectionGroupId, SpaceMember,
 };
-use uc_core::ports::{DeviceIdentityPort, PresenceEvent, ReachabilityState};
+use uc_core::ports::{
+    DeviceIdentityPort, PresenceError, PresenceEvent, PresencePort, ReachabilityState,
+};
 use uc_core::space_access::GroupAdmission;
 
 #[derive(Clone, Default)]
@@ -89,6 +91,7 @@ impl DeviceIdentityPort for ScenarioIdentity {
 }
 
 struct ScenarioPeerScope {
+    source: CurrentWorkspacePeerScopeSource,
     peers: Vec<DeviceId>,
 }
 
@@ -99,7 +102,7 @@ impl CurrentWorkspacePeerScopePort for ScenarioPeerScope {
     ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
         Ok(CurrentWorkspacePeerSnapshot {
             revision: 1,
-            source: CurrentWorkspacePeerScopeSource::Legacy,
+            source: self.source,
             local_membership: CurrentWorkspaceLocalMembership::Active,
             peer_device_ids: self.peers.clone(),
         })
@@ -110,6 +113,7 @@ struct ScenarioProtection {
     descriptor: Mutex<LegacyUpgradeDescriptor>,
     bootstrap_group_id: Mutex<ProtectionGroupId>,
     protected: Mutex<HashSet<DeviceId>>,
+    pending_readmission: Mutex<HashSet<DeviceId>>,
     cached: Mutex<Vec<(LegacyUpgradeRequest, ProtectionGroupAdmission)>>,
     snapshot_calls: AtomicUsize,
     inspection_calls: AtomicUsize,
@@ -124,6 +128,7 @@ impl ScenarioProtection {
             )),
             bootstrap_group_id: Mutex::new(group("unconfigured-group")),
             protected: Mutex::new(HashSet::new()),
+            pending_readmission: Mutex::new(HashSet::new()),
             cached: Mutex::new(Vec::new()),
             snapshot_calls: AtomicUsize::new(0),
             inspection_calls: AtomicUsize::new(0),
@@ -138,6 +143,10 @@ impl ScenarioProtection {
 
     fn set_bootstrap_group(&self, group_id: &str) {
         *self.bootstrap_group_id.lock().unwrap() = group(group_id);
+    }
+
+    fn set_awaiting_readmission(&self, device_id: DeviceId) {
+        self.pending_readmission.lock().unwrap().insert(device_id);
     }
 
     fn group_id(&self) -> Option<ProtectionGroupId> {
@@ -157,11 +166,17 @@ impl LegacyProtectionPort for ScenarioProtection {
     ) -> Result<LegacyProtectionSnapshot, LegacyUpgradeError> {
         self.snapshot_calls.fetch_add(1, Ordering::AcqRel);
         let protected = self.protected.lock().unwrap();
+        let pending_readmission = self.pending_readmission.lock().unwrap();
         Ok(LegacyProtectionSnapshot {
             descriptor: self.descriptor.lock().unwrap().clone(),
             protected_members: member_ids
                 .iter()
                 .filter(|device_id| protected.contains(device_id))
+                .copied()
+                .collect(),
+            pending_readmission_members: member_ids
+                .iter()
+                .filter(|device_id| pending_readmission.contains(device_id))
                 .copied()
                 .collect(),
         })
@@ -257,6 +272,7 @@ impl LegacyProtectionPort for ScenarioProtection {
 struct ScenarioNetwork {
     endpoints: Mutex<HashMap<DeviceId, Arc<AutomaticLegacyUpgrade>>>,
     exchange_calls: AtomicUsize,
+    reconnects: Mutex<Vec<DeviceId>>,
 }
 
 #[async_trait]
@@ -279,6 +295,25 @@ impl LegacyUpgradeDispatchPort for ScenarioNetwork {
             .handle_legacy_upgrade_request(request.source_device_id(), request.clone())
             .await
             .map_err(|_| LegacyUpgradeDispatchError::Rejected)
+    }
+}
+
+#[async_trait]
+impl PresencePort for ScenarioNetwork {
+    async fn ensure_reachable(
+        &self,
+        device: &DeviceId,
+    ) -> Result<ReachabilityState, PresenceError> {
+        self.reconnects.lock().unwrap().push(*device);
+        Ok(ReachabilityState::Online)
+    }
+
+    async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
+        ReachabilityState::Unknown
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+        broadcast::channel(1).1
     }
 }
 
@@ -313,8 +348,10 @@ impl UpgradeWorld {
                         device_identity: Arc::new(ScenarioIdentity(*device_id)),
                         protection: protection.get(device_id).unwrap().clone(),
                         dispatch: network.clone(),
+                        presence: network.clone(),
                     })
                     .with_peer_scope(Arc::new(ScenarioPeerScope {
+                        source: CurrentWorkspacePeerScopeSource::Legacy,
                         peers: ids
                             .iter()
                             .filter(|peer| *peer != device_id)
@@ -429,6 +466,120 @@ async fn a_legacy_device_automatically_installs_a_ready_peers_admission() {
         world.protection("device-b").group_id().as_ref(),
         Some(&group("group-a"))
     );
+}
+
+#[tokio::test]
+async fn joining_a_ready_group_reconnects_the_sponsor_immediately() {
+    let world = UpgradeWorld::new(&["device-a", "device-b"]);
+    world.protection("device-a").set_group("group-a");
+    world.publish_devices();
+
+    world
+        .reconcile("device-b", LegacyDiscoveryPhase::Discovering)
+        .await;
+
+    assert_eq!(
+        *world.network.reconnects.lock().unwrap(),
+        vec![DeviceId::new("device-a")]
+    );
+}
+
+#[tokio::test]
+async fn a_current_device_admits_a_known_legacy_member() {
+    let local_device_id = DeviceId::new("device-a");
+    let remote_device_id = DeviceId::new("device-b");
+    let protection = Arc::new(ScenarioProtection::legacy());
+    protection.set_group("group-a");
+    let automatic_upgrade = AutomaticLegacyUpgrade::new(AutomaticLegacyUpgradeDeps {
+        member_repo: Arc::new(ScenarioMembers {
+            members: vec![scenario_member(remote_device_id)],
+        }),
+        device_identity: Arc::new(ScenarioIdentity(local_device_id)),
+        protection: protection.clone(),
+        dispatch: Arc::new(ScenarioNetwork::default()),
+        presence: Arc::new(ScenarioNetwork::default()),
+    })
+    .with_peer_scope(Arc::new(ScenarioPeerScope {
+        source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+        peers: vec![remote_device_id],
+    }));
+
+    let response = automatic_upgrade
+        .handle_legacy_upgrade_request(&remote_device_id, legacy_request("device-b", "device-a"))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        response.kind,
+        uc_core::membership::LegacyUpgradeResponseKind::Admission(_)
+    ));
+    assert_eq!(protection.admission_calls.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn a_current_device_admits_a_legacy_member_awaiting_readmission() {
+    let local_device_id = DeviceId::new("device-a");
+    let remote_device_id = DeviceId::new("device-b");
+    let protection = Arc::new(ScenarioProtection::legacy());
+    protection.set_group("group-a");
+    protection.set_awaiting_readmission(remote_device_id);
+    let automatic_upgrade = AutomaticLegacyUpgrade::new(AutomaticLegacyUpgradeDeps {
+        member_repo: Arc::new(ScenarioMembers {
+            members: vec![scenario_member(remote_device_id)],
+        }),
+        device_identity: Arc::new(ScenarioIdentity(local_device_id)),
+        protection: protection.clone(),
+        dispatch: Arc::new(ScenarioNetwork::default()),
+        presence: Arc::new(ScenarioNetwork::default()),
+    })
+    .with_peer_scope(Arc::new(ScenarioPeerScope {
+        source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+        peers: vec![],
+    }));
+
+    let response = automatic_upgrade
+        .handle_legacy_upgrade_request(&remote_device_id, legacy_request("device-b", "device-a"))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        response.kind,
+        uc_core::membership::LegacyUpgradeResponseKind::Admission(_)
+    ));
+    assert_eq!(protection.admission_calls.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn a_known_legacy_member_without_current_or_readmission_status_is_rejected() {
+    let local_device_id = DeviceId::new("device-a");
+    let remote_device_id = DeviceId::new("device-b");
+    let protection = Arc::new(ScenarioProtection::legacy());
+    protection.set_group("group-a");
+    let automatic_upgrade = AutomaticLegacyUpgrade::new(AutomaticLegacyUpgradeDeps {
+        member_repo: Arc::new(ScenarioMembers {
+            members: vec![scenario_member(remote_device_id)],
+        }),
+        device_identity: Arc::new(ScenarioIdentity(local_device_id)),
+        protection: protection.clone(),
+        dispatch: Arc::new(ScenarioNetwork::default()),
+        presence: Arc::new(ScenarioNetwork::default()),
+    })
+    .with_peer_scope(Arc::new(ScenarioPeerScope {
+        source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+        peers: vec![],
+    }));
+
+    assert_eq!(
+        automatic_upgrade
+            .handle_legacy_upgrade_request(
+                &remote_device_id,
+                legacy_request("device-b", "device-a"),
+            )
+            .await
+            .unwrap_err(),
+        LegacyUpgradeError::Unauthorized
+    );
+    assert_eq!(protection.admission_calls.load(Ordering::Acquire), 0);
 }
 
 #[tokio::test]

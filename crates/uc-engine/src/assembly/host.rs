@@ -277,6 +277,7 @@ pub fn derive_app_paths(directories: &HostDirectories) -> AppPaths {
 
 fn adopt_v019_profile_directories(app_data_root: &Path) -> WiringResult<()> {
     let directories = [("iroh-identity", "identity"), ("iroh-blobs", "blob store")];
+    let mut removals = Vec::new();
     let mut moves = Vec::new();
     let entries = match std::fs::read_dir(app_data_root) {
         Ok(entries) => entries
@@ -307,11 +308,25 @@ fn adopt_v019_profile_directories(app_data_root: &Path) -> WiringResult<()> {
             continue;
         };
         if current.exists() {
+            let legacy_is_empty =
+                std::fs::read_dir(&legacy).is_ok_and(|mut entries| entries.next().is_none());
+            if legacy_is_empty {
+                removals.push((legacy, description));
+                continue;
+            }
             return Err(WiringError::SettingsInit(format!(
                 "v0.19 {description} directory conflict"
             )));
         }
         moves.push((legacy, current, description));
+    }
+
+    for (legacy, description) in removals {
+        std::fs::remove_dir(&legacy).map_err(|_| {
+            WiringError::SettingsInit(format!(
+                "failed to remove empty v0.19 {description} directory"
+            ))
+        })?;
     }
 
     for (legacy, current, description) in moves {
@@ -607,10 +622,30 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_v019_and_current_identity_directories_stop_startup() {
+    fn empty_v019_identity_directory_is_removed_when_current_identity_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let current_identity = root.path().join("iroh-identity");
+        let legacy_identity = root.path().join("iroh-identity_profile");
+        std::fs::create_dir_all(&current_identity).unwrap();
+        std::fs::create_dir_all(&legacy_identity).unwrap();
+        std::fs::write(current_identity.join("identity.bin"), b"current identity").unwrap();
+
+        adopt_v019_profile_directories(root.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read(current_identity.join("identity.bin")).unwrap(),
+            b"current identity"
+        );
+        assert!(!legacy_identity.exists());
+    }
+
+    #[test]
+    fn nonempty_v019_and_current_blob_directories_stop_startup() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("iroh-identity_a")).unwrap();
-        std::fs::create_dir_all(root.path().join("iroh-blobs_a")).unwrap();
+        let legacy_blobs = root.path().join("iroh-blobs_a");
+        std::fs::create_dir_all(&legacy_blobs).unwrap();
+        std::fs::write(legacy_blobs.join("blobs.db"), b"legacy blobs").unwrap();
         std::fs::create_dir_all(root.path().join("iroh-blobs")).unwrap();
 
         let error = adopt_v019_profile_directories(root.path()).unwrap_err();
@@ -618,6 +653,22 @@ mod tests {
         assert!(error.to_string().contains("blob store directory conflict"));
         assert!(root.path().join("iroh-identity_a").exists());
         assert!(!root.path().join("iroh-identity").exists());
+    }
+
+    #[test]
+    fn multiple_empty_v019_directories_stop_startup() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("iroh-identity")).unwrap();
+        std::fs::create_dir_all(root.path().join("iroh-identity_a")).unwrap();
+        std::fs::create_dir_all(root.path().join("iroh-identity_b")).unwrap();
+
+        let error = adopt_v019_profile_directories(root.path()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("multiple v0.19 identity directories found"));
+        assert!(root.path().join("iroh-identity_a").exists());
+        assert!(root.path().join("iroh-identity_b").exists());
     }
 
     #[derive(Default)]
@@ -766,6 +817,7 @@ mod tests {
             &wiring.wired.deps,
             &wiring.wired.sync_engine,
             &wiring.wired.shared,
+            "test",
             #[cfg(feature = "lan-compat")]
             wiring.wired.mobile_sync_ports.clone(),
             None,

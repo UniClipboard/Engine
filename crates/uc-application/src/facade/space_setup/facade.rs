@@ -1875,6 +1875,7 @@ mod tests {
                             }),
                             protection: Arc::new(NoopLegacyProtection),
                             dispatch: Arc::new(NoopLegacyUpgradeDispatch),
+                            presence: Arc::new(FakePresence),
                         },
                     },
                 )),
