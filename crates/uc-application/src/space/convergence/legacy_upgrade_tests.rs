@@ -6,8 +6,8 @@ use std::sync::{
 };
 
 use super::{
-    AutomaticLegacyUpgrade, AutomaticLegacyUpgradeDeps, AutomaticLegacyUpgradeRuntime,
-    LegacyDiscoveryPhase,
+    select_legacy_upgrade_candidates, AutomaticLegacyUpgrade, AutomaticLegacyUpgradeDeps,
+    AutomaticLegacyUpgradeRuntime, LegacyDiscoveryPhase, LegacyUpgradePassOutcome,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -118,6 +118,7 @@ struct ScenarioProtection {
     snapshot_calls: AtomicUsize,
     inspection_calls: AtomicUsize,
     admission_calls: AtomicUsize,
+    snapshot_error: AtomicUsize,
 }
 
 impl ScenarioProtection {
@@ -133,6 +134,7 @@ impl ScenarioProtection {
             snapshot_calls: AtomicUsize::new(0),
             inspection_calls: AtomicUsize::new(0),
             admission_calls: AtomicUsize::new(0),
+            snapshot_error: AtomicUsize::new(0),
         }
     }
 
@@ -156,6 +158,10 @@ impl ScenarioProtection {
             .protection_group_id()
             .cloned()
     }
+
+    fn fail_snapshot(&self) {
+        self.snapshot_error.store(1, Ordering::Release);
+    }
 }
 
 #[async_trait]
@@ -165,6 +171,11 @@ impl LegacyProtectionPort for ScenarioProtection {
         member_ids: &[DeviceId],
     ) -> Result<LegacyProtectionSnapshot, LegacyUpgradeError> {
         self.snapshot_calls.fetch_add(1, Ordering::AcqRel);
+        if self.snapshot_error.load(Ordering::Acquire) != 0 {
+            return Err(LegacyUpgradeError::Internal(
+                "simulated protection snapshot failure".into(),
+            ));
+        }
         let protected = self.protected.lock().unwrap();
         let pending_readmission = self.pending_readmission.lock().unwrap();
         Ok(LegacyProtectionSnapshot {
@@ -266,6 +277,29 @@ impl LegacyProtectionPort for ScenarioProtection {
             }
         }
     }
+}
+
+#[test]
+fn candidate_selection_separates_legacy_roster_from_current_history_readmissions() {
+    let legacy_peer = DeviceId::new("device-b");
+    let pending_peer = DeviceId::new("device-c");
+
+    assert_eq!(
+        select_legacy_upgrade_candidates(
+            CurrentWorkspacePeerScopeSource::Legacy,
+            vec![legacy_peer],
+            vec![pending_peer],
+        ),
+        vec![legacy_peer]
+    );
+    assert_eq!(
+        select_legacy_upgrade_candidates(
+            CurrentWorkspacePeerScopeSource::CurrentHistory,
+            vec![legacy_peer],
+            vec![pending_peer],
+        ),
+        vec![pending_peer]
+    );
 }
 
 #[derive(Default)]
@@ -482,6 +516,98 @@ async fn joining_a_ready_group_reconnects_the_sponsor_immediately() {
         *world.network.reconnects.lock().unwrap(),
         vec![DeviceId::new("device-a")]
     );
+}
+
+#[tokio::test]
+async fn current_history_continues_only_persisted_legacy_readmissions() {
+    let local_device_id = DeviceId::new("device-a");
+    let pending_device_id = DeviceId::new("device-b");
+    let stale_device_id = DeviceId::new("device-c");
+    let protection = Arc::new(ScenarioProtection::legacy());
+    protection.set_group("group-a");
+    protection.set_awaiting_readmission(pending_device_id);
+    let network = Arc::new(ScenarioNetwork::default());
+    let automatic_upgrade = AutomaticLegacyUpgrade::new(AutomaticLegacyUpgradeDeps {
+        member_repo: Arc::new(ScenarioMembers {
+            members: vec![
+                scenario_member(pending_device_id),
+                scenario_member(stale_device_id),
+            ],
+        }),
+        device_identity: Arc::new(ScenarioIdentity(local_device_id)),
+        protection,
+        dispatch: network.clone(),
+        presence: network.clone(),
+    })
+    .with_peer_scope(Arc::new(ScenarioPeerScope {
+        source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+        peers: Vec::new(),
+    }));
+
+    automatic_upgrade
+        .reconcile_once(LegacyDiscoveryPhase::Discovering)
+        .await
+        .unwrap();
+
+    assert_eq!(network.exchange_calls.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn current_history_without_pending_readmissions_finishes_without_network_work() {
+    let local_device_id = DeviceId::new("device-a");
+    let stale_device_id = DeviceId::new("device-b");
+    let protection = Arc::new(ScenarioProtection::legacy());
+    let network = Arc::new(ScenarioNetwork::default());
+    let automatic_upgrade = AutomaticLegacyUpgrade::new(AutomaticLegacyUpgradeDeps {
+        member_repo: Arc::new(ScenarioMembers {
+            members: vec![scenario_member(stale_device_id)],
+        }),
+        device_identity: Arc::new(ScenarioIdentity(local_device_id)),
+        protection: protection.clone(),
+        dispatch: network.clone(),
+        presence: network.clone(),
+    })
+    .with_peer_scope(Arc::new(ScenarioPeerScope {
+        source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+        peers: Vec::new(),
+    }));
+
+    let outcome = automatic_upgrade
+        .reconcile_once(LegacyDiscoveryPhase::Discovering)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, LegacyUpgradePassOutcome::ready(false));
+    assert_eq!(network.exchange_calls.load(Ordering::Acquire), 0);
+    assert_eq!(protection.group_id(), None);
+}
+
+#[tokio::test]
+async fn current_history_does_not_fall_back_when_the_readmission_snapshot_fails() {
+    let local_device_id = DeviceId::new("device-a");
+    let stale_device_id = DeviceId::new("device-b");
+    let protection = Arc::new(ScenarioProtection::legacy());
+    protection.fail_snapshot();
+    let network = Arc::new(ScenarioNetwork::default());
+    let automatic_upgrade = AutomaticLegacyUpgrade::new(AutomaticLegacyUpgradeDeps {
+        member_repo: Arc::new(ScenarioMembers {
+            members: vec![scenario_member(stale_device_id)],
+        }),
+        device_identity: Arc::new(ScenarioIdentity(local_device_id)),
+        protection,
+        dispatch: network.clone(),
+        presence: network.clone(),
+    })
+    .with_peer_scope(Arc::new(ScenarioPeerScope {
+        source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+        peers: Vec::new(),
+    }));
+
+    assert!(automatic_upgrade
+        .reconcile_once(LegacyDiscoveryPhase::Discovering)
+        .await
+        .is_err());
+    assert_eq!(network.exchange_calls.load(Ordering::Acquire), 0);
 }
 
 #[tokio::test]

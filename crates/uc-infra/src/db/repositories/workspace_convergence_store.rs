@@ -526,9 +526,9 @@ mod tests {
     use tempfile::{tempdir, TempDir};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
-        AdmissionChangeFacts, MemberInstanceId, MembershipHistoryRelationship,
-        MembershipReconciliation, PendingAdmissionRecord, WorkspaceConvergenceRepositoryPort,
-        WorkspaceConvergenceState, WorkspacePhase,
+        AdmissionChangeFacts, MemberInstanceId, MembershipEvent, MembershipHistoryRelationship,
+        MembershipOperation, MembershipReconciliation, PendingAdmissionRecord,
+        WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState, WorkspacePhase,
     };
 
     use super::DieselWorkspaceConvergenceStore;
@@ -707,6 +707,101 @@ mod tests {
             state.peer_history_relationships
         );
         assert_eq!(loaded.revision, 7);
+    }
+
+    #[tokio::test]
+    async fn affected_migrated_state_preserves_removed_history_across_an_encrypted_restart() {
+        let (store, pool, _directory) = make_store();
+        let local = MemberInstanceId::from_bytes([0x0a; 32]);
+        let removed = MemberInstanceId::from_bytes([0x0b; 32]);
+        let admission = |member_instance, device_id: &str, byte: u8| AdmissionChangeFacts {
+            member_instance,
+            device_id: DeviceId::new(device_id),
+            device_name: device_id.to_owned(),
+            identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
+                "ABCD-EFGH-IJKL-MNOP",
+            )
+            .unwrap(),
+            transport_public_key: vec![byte; 32],
+            transport_address_blob: vec![byte; 16],
+            identity_signature: vec![byte; 64],
+        };
+        let genesis = MembershipEvent::new(
+            SPACE.to_owned(),
+            None,
+            0,
+            [1; 16],
+            local,
+            MembershipOperation::AddDevice {
+                admission: admission(local, "device-a", 1),
+            },
+            [1; 32],
+            [2; 32],
+            Vec::new(),
+            None,
+            vec![1],
+        );
+        let addition = MembershipEvent::new(
+            SPACE.to_owned(),
+            Some(genesis.event_id()),
+            1,
+            [2; 16],
+            local,
+            MembershipOperation::AddDevice {
+                admission: admission(removed, "removed-device-sensitive-marker", 2),
+            },
+            [2; 32],
+            [3; 32],
+            Vec::new(),
+            None,
+            vec![2],
+        );
+        let removal = MembershipEvent::new(
+            SPACE.to_owned(),
+            Some(addition.event_id()),
+            2,
+            [3; 16],
+            local,
+            MembershipOperation::RemoveDevice { member: removed },
+            [3; 32],
+            [4; 32],
+            Vec::new(),
+            None,
+            vec![3],
+        );
+        let mut history = MembershipReconciliation::new(SPACE.to_owned(), local);
+        for event in [genesis, addition, removal] {
+            history.receive_verified(event).unwrap();
+        }
+        let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 123);
+        state.own_instance = Some(local);
+        state.membership_reconciliation = Some(history);
+        state.migrated_from_pre_adr_020 = true;
+
+        store.save_state(&state).await.unwrap();
+
+        let loaded = reopen_store(pool.clone())
+            .load_state()
+            .await
+            .unwrap()
+            .unwrap();
+        let loaded_history = loaded.membership_reconciliation.as_ref().unwrap();
+        assert!(loaded.migrated_from_pre_adr_020);
+        assert!(loaded_history.applied_head().is_some());
+        assert!(
+            !loaded_history.is_device_effective(&DeviceId::new("removed-device-sensitive-marker"))
+        );
+
+        let mut connection = pool.get().unwrap();
+        let rows = diesel::sql_query("SELECT encrypted_payload FROM workspace_convergence_state")
+            .load::<EncryptedPayloadRow>(&mut connection)
+            .unwrap();
+        let marker = b"removed-device-sensitive-marker";
+        assert!(rows.iter().all(|row| {
+            !row.encrypted_payload
+                .windows(marker.len())
+                .any(|window| window == marker)
+        }));
     }
 
     #[tokio::test]

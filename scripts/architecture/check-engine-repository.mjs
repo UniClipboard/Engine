@@ -395,6 +395,57 @@ function checkCurrentPeerScopeOwnership() {
   if (corePorts.includes('DeviceVisibilityGatePort')) {
     addProblem(problems, 'current peer scope', 'the superseded device visibility gate was restored')
   }
+
+  const convergence = read('crates/uc-application/src/space/convergence/mod.rs')
+  const implementationStart = convergence.indexOf(
+    'impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence'
+  )
+  const implementation = convergence.slice(implementationStart)
+  const appliedHistory = implementation.indexOf(
+    '.filter(|history| history.applied_head().is_some())'
+  )
+  const legacyFallback = implementation.indexOf('let Some(history) = history else')
+  if (
+    implementationStart < 0 ||
+    appliedHistory < 0 ||
+    legacyFallback < 0 ||
+    appliedHistory > legacyFallback ||
+    implementation.slice(0, legacyFallback).includes('migrated_from_pre_adr_020')
+  ) {
+    addProblem(
+      problems,
+      'current peer scope',
+      'applied membership history must be selected before the legacy roster fallback'
+    )
+  }
+
+  const allowedPendingReadmissionConsumers = new Set([
+    'crates/uc-application/src/space/convergence/legacy_upgrade.rs',
+    'crates/uc-application/src/space/convergence/legacy_upgrade_tests.rs',
+  ])
+  const applicationRoot = join(REPOSITORY_ROOT, 'crates/uc-application/src')
+  const pendingDirectories = [applicationRoot]
+  while (pendingDirectories.length > 0) {
+    const directory = pendingDirectories.pop()
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        pendingDirectories.push(path)
+      } else if (entry.name.endsWith('.rs')) {
+        const relativePath = relative(REPOSITORY_ROOT, path)
+        if (
+          readFileSync(path, 'utf8').includes('pending_readmission_members') &&
+          !allowedPendingReadmissionConsumers.has(relativePath)
+        ) {
+          addProblem(
+            problems,
+            'current peer scope',
+            `${relativePath} must not use legacy readmission candidates for ordinary work`
+          )
+        }
+      }
+    }
+  }
   return problems
 }
 
