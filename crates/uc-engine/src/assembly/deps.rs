@@ -93,6 +93,8 @@ pub struct SyncEngineDeps {
         Arc<dyn uc_core::membership::WorkspaceConvergenceRepositoryPort>,
     /// Profile-scoped encrypted persistence for durable admission attempts.
     pub admission_attempt_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    pub admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort>,
+    pub legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort>,
     /// plaintext-hash → ciphertext-digest dedupe cache (Slice 3 Phase 1).
     pub blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,
     /// switch-space backup table + main-table inline_data batch IO.

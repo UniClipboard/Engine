@@ -284,7 +284,7 @@ impl From<&uc_core::setup::MigrationPhase> for MigrationPhaseKind {
 /// Read-only snapshot of switch-space progress for UI polling.
 ///
 /// 粗粒度——不写"x of N records"这种 phase 3 实时进度。phase 3 在
-/// `SwitchSpaceUseCase::execute` / `resume_pending` 内部流式跑完，期间
+/// `SwitchSpaceUseCase::execute` 内部流式跑完，期间
 /// 不暴露增量计数器；UI 看到 `phase = HandshakeDone` 就知道"还在跑
 /// phase 3"，看到 `phase = Swapped` 就知道"快做完了"。
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -21,6 +21,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tracing::{debug, error, info, info_span, warn, Instrument};
+use zeroize::Zeroize;
 
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
@@ -43,8 +44,8 @@ use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
 use uc_core::space_access::{
-    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer, PreparedGroupJoin,
-    ProofDerivedKey,
+    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
+    PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
 };
 
 use super::key_material::KeyMaterialStore;
@@ -215,6 +216,15 @@ struct AdmissionKdfOffer {
 }
 
 #[derive(Serialize, Deserialize)]
+struct AdmissionTargetAccessV1 {
+    version: u16,
+    target_space_id: String,
+    keyslot: KeySlot,
+    kek: Vec<u8>,
+    master_key: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub(crate) struct PortableKeyCatalog {
     version: u8,
     pub(crate) state: SpaceKeyState,
@@ -325,6 +335,158 @@ fn derive_admission_proof_key(
 }
 
 impl DefaultSpaceAccessAdapter {
+    // Stage 4 keeps production admission fail-closed until the data generation
+    // owner can invoke this only after manifest verification.
+    #[allow(dead_code)]
+    fn decode_prepared_target_access(
+        target_space_id: &SpaceId,
+        scope: &KeyScope,
+        encoded: &[u8],
+    ) -> Result<(KeySlot, Kek, MasterKey), SpaceAccessError> {
+        let mut state: AdmissionTargetAccessV1 =
+            serde_json::from_slice(encoded).map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        if state.version != 1
+            || state.target_space_id != target_space_id.as_ref()
+            || &state.keyslot.scope != scope
+        {
+            state.kek.zeroize();
+            state.master_key.zeroize();
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+
+        let result = (|| {
+            let kek = Kek::from_bytes(&state.kek).map_err(map_encryption_error)?;
+            let master_key =
+                MasterKey::from_bytes(&state.master_key).map_err(map_encryption_error)?;
+            let wrapped = state
+                .keyslot
+                .wrapped_master_key
+                .as_ref()
+                .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+            let unwrapped = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob)
+                .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+            if unwrapped != master_key {
+                return Err(SpaceAccessError::CorruptedKeyMaterial);
+            }
+            Ok((state.keyslot.clone(), kek, master_key))
+        })();
+        state.kek.zeroize();
+        state.master_key.zeroize();
+        result
+    }
+
+    pub(crate) async fn prepared_target_session(
+        &self,
+        target_space_id: &SpaceId,
+        encoded: &[u8],
+    ) -> Result<Arc<InMemorySession>, SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let (_, _, master_key) =
+            Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(target_space_id.clone(), master_key);
+        Ok(session)
+    }
+
+    pub(crate) async fn resume_source_for_transition(
+        &self,
+        source_space_id: &SpaceId,
+    ) -> Result<(), SpaceAccessError> {
+        if self.session.current_space_id().ok().as_ref() == Some(source_space_id) {
+            return Ok(());
+        }
+        self.session.clear();
+        match SpaceAccessStore::try_resume_session(self, source_space_id).await? {
+            Some(_) => Ok(()),
+            None => Err(SpaceAccessError::NotInitialized),
+        }
+    }
+
+    pub(crate) async fn activate_prepared_target_access(
+        &self,
+        target_space_id: &SpaceId,
+        encoded: &[u8],
+    ) -> Result<(), SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let (keyslot, kek, master_key) =
+            Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
+        let previous = if self
+            .key_material
+            .keyslot_exists()
+            .await
+            .map_err(map_encryption_error)?
+        {
+            Some((
+                self.key_material
+                    .load_keyslot(&scope)
+                    .await
+                    .map_err(map_encryption_error)?,
+                self.key_material
+                    .load_kek(&scope)
+                    .await
+                    .map_err(map_encryption_error)?,
+            ))
+        } else {
+            None
+        };
+        let previous_session = self.session.snapshot();
+
+        if let Err(error) = self.key_material.store_kek(&scope, &kek).await {
+            return Err(map_encryption_error(error));
+        }
+        if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
+            self.restore_join_install(&scope, previous, previous_session)
+                .await;
+            return Err(map_encryption_error(error));
+        }
+        self.session
+            .set_master_key_for_space(target_space_id.clone(), master_key);
+        self.kek_observed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    async fn prepare_target_access(
+        &self,
+        target_space_id: &SpaceId,
+        passphrase: &DomainPassphrase,
+    ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let keyslot_draft = KeySlot::draft_v1(scope).map_err(map_encryption_error)?;
+        let legacy = LegacyPassphrase(passphrase.expose().to_string());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot_draft.salt, &keyslot_draft.kdf)
+            .map_err(|error| map_and_log_kdf_error(error, "prepare_target_access"))?;
+        let master_key = MasterKey::generate().map_err(map_encryption_error)?;
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let mut state = AdmissionTargetAccessV1 {
+            version: 1,
+            target_space_id: target_space_id.as_ref().to_owned(),
+            keyslot: keyslot_draft.finalize(WrappedMasterKey { blob: wrapped }),
+            kek: kek.as_bytes().to_vec(),
+            master_key: master_key.as_bytes().to_vec(),
+        };
+        let encoded = serde_json::to_vec(&state)
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()));
+        state.kek.zeroize();
+        state.master_key.zeroize();
+        encoded.map(PreparedAdmissionTargetAccess::from_bytes)
+    }
+
     async fn prepare_admission_offer(
         &self,
         space_id: &SpaceId,
@@ -2011,9 +2173,22 @@ mod intent_ports {
     use uc_core::ports::space::{
         CurrentSessionProofKeyPort, DeriveAdmissionProofKeyPort, DeriveProofKeyPort,
         DeriveSpaceSubkeyPort, FactoryResetSpacePort, GroupAdmissionPort, InitializeSpacePort,
-        IsSpaceUnlockedPort, LockSpacePort, PrepareAdmissionOfferPort, PrepareJoinOfferPort,
-        ResumeSpaceSessionPort, UnlockSpacePort, VerifyKeychainAccessPort,
+        IsSpaceUnlockedPort, LockSpacePort, PrepareAdmissionOfferPort,
+        PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort, ResumeSpaceSessionPort,
+        UnlockSpacePort, VerifyKeychainAccessPort,
     };
+
+    #[async_trait]
+    impl PrepareAdmissionTargetAccessPort for DefaultSpaceAccessAdapter {
+        async fn prepare_target_access(
+            &self,
+            target_space_id: &SpaceId,
+            passphrase: &DomainPassphrase,
+        ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError> {
+            DefaultSpaceAccessAdapter::prepare_target_access(self, target_space_id, passphrase)
+                .await
+        }
+    }
 
     #[async_trait]
     impl InitializeSpacePort for DefaultSpaceAccessAdapter {
@@ -4615,6 +4790,93 @@ mod admission_tests {
                 .unwrap(),
             old_slot
         );
+    }
+
+    #[tokio::test]
+    async fn preparing_target_access_does_not_replace_the_active_space() {
+        use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
+
+        let directory = tempdir().unwrap();
+        let secure_storage = memory_secure_storage();
+        let key_material = local_key_material(&directory, secure_storage);
+        let session = Arc::new(InMemorySession::new());
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(key_material.clone(), session.clone(), repository);
+        let source_space = SpaceId::from("source-space");
+        SpaceAccessStore::initialize(
+            &adapter,
+            &source_space,
+            &Passphrase::new("source passphrase"),
+        )
+        .await
+        .unwrap();
+        let source_root = session.get_master_key().unwrap();
+        let scope = KeyScope {
+            profile_id: "default".into(),
+        };
+        let source_slot = key_material.load_keyslot(&scope).await.unwrap();
+        let source_kek = key_material.load_kek(&scope).await.unwrap();
+
+        let prepared = PrepareAdmissionTargetAccessPort::prepare_target_access(
+            &adapter,
+            &SpaceId::from("target-space"),
+            &Passphrase::new("target passphrase"),
+        )
+        .await
+        .unwrap();
+
+        assert!(!prepared.as_bytes().is_empty());
+        assert_eq!(session.current_space_id().unwrap(), source_space);
+        assert_eq!(session.get_master_key().unwrap(), source_root);
+        assert_eq!(
+            key_material.load_keyslot(&scope).await.unwrap(),
+            source_slot
+        );
+        assert_eq!(key_material.load_kek(&scope).await.unwrap(), source_kek);
+    }
+
+    #[tokio::test]
+    async fn prepared_target_access_changes_space_only_when_explicitly_activated() {
+        use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
+
+        let directory = tempdir().unwrap();
+        let secure_storage = memory_secure_storage();
+        let key_material = local_key_material(&directory, secure_storage);
+        let session = Arc::new(InMemorySession::new());
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(key_material.clone(), session.clone(), repository);
+        let source_space = SpaceId::from("source-space");
+        let target_space = SpaceId::from("target-space");
+        SpaceAccessStore::initialize(
+            &adapter,
+            &source_space,
+            &Passphrase::new("source passphrase"),
+        )
+        .await
+        .unwrap();
+        let prepared = PrepareAdmissionTargetAccessPort::prepare_target_access(
+            &adapter,
+            &target_space,
+            &Passphrase::new("target passphrase"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.current_space_id().unwrap(), source_space);
+
+        adapter
+            .activate_prepared_target_access(&target_space, prepared.as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(session.current_space_id().unwrap(), target_space);
+        let target_root = session.get_master_key().unwrap();
+
+        session.clear();
+        SpaceAccessStore::try_resume_session(&adapter, &target_space)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.current_space_id().unwrap(), target_space);
+        assert_eq!(session.get_master_key().unwrap(), target_root);
     }
 
     #[tokio::test]

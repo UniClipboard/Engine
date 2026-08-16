@@ -119,6 +119,10 @@ impl SpaceConvergenceAssembly {
         Arc::clone(&self.group_update_delivery)
     }
 
+    pub fn space_transition_recovery(&self) -> Arc<dyn crate::facade::SpaceTransitionRecoveryPort> {
+        Arc::clone(&self.workspace) as Arc<dyn crate::facade::SpaceTransitionRecoveryPort>
+    }
+
     /// Start the event-driven workspace convergence runtime.
     pub fn start_workspace_runtime(
         &self,

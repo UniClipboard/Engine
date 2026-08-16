@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use uc_core::membership::{
     AdmissionAttemptId, AdmissionAttemptRepositoryError, AdmissionAttemptRepositoryPort,
     AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionProfileMetadataV1,
-    AdmissionTerminalResultV1, CompletionHelperAdmissionStageV1, CurrentLocalJoinProjectionV1,
-    JoinerAdmissionStageV1, SponsorAdmissionStageV1, TerminalAdmissionAttemptV1,
-    TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
+    AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, AdmissionTerminalResultV1,
+    CompletionHelperAdmissionStageV1, CurrentLocalJoinProjectionV1, JoinerAdmissionStageV1,
+    SponsorAdmissionStageV1, TerminalAdmissionAttemptV1, TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
 };
 
 use crate::db::ports::DbExecutor;
@@ -86,6 +86,28 @@ fn executor_error(error: anyhow::Error) -> AdmissionAttemptRepositoryError {
         .downcast_ref::<AdmissionAttemptRepositoryError>()
         .cloned()
         .unwrap_or_else(|| repository_error(error))
+}
+
+fn decode_space_transition(
+    encoded: Option<&[u8]>,
+) -> Result<Option<AdmissionSpaceTransitionV2>, AdmissionAttemptRepositoryError> {
+    encoded
+        .map(|bytes| {
+            AdmissionSpaceTransitionV2::decode(bytes)
+                .ok_or(AdmissionAttemptRepositoryError::Corrupt)
+        })
+        .transpose()
+}
+
+fn decode_space_transition_result(
+    encoded: Option<&[u8]>,
+) -> Result<Option<AdmissionSpaceTransitionResultV2>, AdmissionAttemptRepositoryError> {
+    encoded
+        .map(|bytes| {
+            AdmissionSpaceTransitionResultV2::decode(bytes)
+                .ok_or(AdmissionAttemptRepositoryError::Corrupt)
+        })
+        .transpose()
 }
 
 impl<E: DbExecutor> DieselAdmissionAttemptStore<E> {
@@ -235,6 +257,31 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
     let rank = attempt
         .stage_rank()
         .ok_or(AdmissionAttemptRepositoryError::Corrupt)?;
+    let transition = decode_space_transition(attempt.space_transition.as_deref())?;
+    let transition_result =
+        decode_space_transition_result(attempt.space_transition_result.as_deref())?;
+    if transition.as_ref().is_some_and(|transition| {
+        !joiner
+            || rank < 3
+            || transition.attempt_id() != attempt.attempt_id
+            || attempt.target_access_state.is_none()
+    }) {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    if let Some(result) = &transition_result {
+        let valid_terminal = joiner
+            && attempt.terminal_result == Some(AdmissionTerminalResultV1::Active)
+            && transition
+                .as_ref()
+                .is_some_and(|transition| result.matches_cleanup_pending(transition));
+        if !valid_terminal {
+            return Err(AdmissionAttemptRepositoryError::Corrupt);
+        }
+    } else if attempt.terminal_result == Some(AdmissionTerminalResultV1::Active)
+        && transition.is_some()
+    {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
     if rank >= 2
         && !rejected
         && (attempt.lineage_id.is_none()
@@ -246,6 +293,9 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
             || attempt.security_commitment.is_none()
             || attempt.security_commit.is_none()
             || attempt.security_welcome.is_none()
+            || attempt.target_protection_group_id.is_none()
+            || attempt.target_key_catalog.is_none()
+            || attempt.target_relationships.is_none()
             || attempt.staged_security_state.is_none())
     {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
@@ -279,6 +329,43 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
             message.message_id,
         ))
     }) {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    Ok(())
+}
+
+fn validate_attempt_update(
+    current: &AdmissionAttemptV1,
+    next: &AdmissionAttemptV1,
+) -> Result<(), AdmissionAttemptRepositoryError> {
+    validate_attempt(current)?;
+    validate_attempt(next)?;
+    let current_transition = decode_space_transition(current.space_transition.as_deref())?;
+    let next_transition = decode_space_transition(next.space_transition.as_deref())?;
+    let transition_is_valid = match (&current_transition, &next_transition) {
+        (None, None) => true,
+        (None, Some(next)) => next.is_initial(),
+        (Some(current), Some(next)) => current == next || current.can_advance_to(next),
+        (Some(current), None) => {
+            next.terminal_result == Some(AdmissionTerminalResultV1::Rejected)
+                && current.phase_rank() < current.activation_started_rank()
+                && next.space_transition_result.is_none()
+        }
+    };
+    if !transition_is_valid {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    if current.space_transition_result.is_some()
+        && current.space_transition_result != next.space_transition_result
+    {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    let access_is_valid = current.target_access_state == next.target_access_state
+        || (current_transition.is_some()
+            && next_transition.is_none()
+            && next.terminal_result == Some(AdmissionTerminalResultV1::Rejected)
+            && next.target_access_state.is_none());
+    if !access_is_valid {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
     Ok(())
@@ -490,6 +577,8 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                     {
                         return Err(anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt));
                     }
+                    validate_attempt_update(&current, &next)
+                        .map_err(|error| anyhow::anyhow!(error))?;
                     if current.is_terminal() {
                         validate_terminal_delivery_update(&current, &next)
                             .map_err(|error| anyhow::anyhow!(error))?;
@@ -567,6 +656,8 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                             AdmissionAttemptRepositoryError::VersionConflict
                         ));
                     }
+                    validate_attempt_update(&current, &next)
+                        .map_err(|error| anyhow::anyhow!(error))?;
                     let replacement = self
                         .seal_attempt(
                             &next,
@@ -673,6 +764,7 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                         candidate_event_id: attempt.candidate_event_id,
                         cancel_outcome: attempt.cancel_outcome,
                         replay_result: attempt.completion.unwrap_or_default(),
+                        space_transition_result: attempt.space_transition_result,
                         acknowledgment_rebuild: attempt.inbox_dedup,
                     };
                     state.terminals.insert(attempt_id, terminal.clone());
@@ -811,9 +903,12 @@ mod tests {
     use diesel::RunQueryDsl;
     use tempfile::tempdir;
     use uc_core::membership::{
-        AdmissionAttemptId, AdmissionAttemptRepositoryPort, AdmissionAttemptV1,
-        AdmissionInboxRecordV1, AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1,
-        AdmissionTerminalResultV1, JoinerAdmissionStageV1,
+        AdmissionAttemptId, AdmissionAttemptRepositoryPort, AdmissionAttemptRoleStateV1,
+        AdmissionAttemptV1, AdmissionInboxRecordV1, AdmissionOutboxMessageV1,
+        AdmissionOutboxPurposeV1, AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+        AdmissionTerminalResultV1, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
+        CrossSpaceTransitionV2, JoinerAdmissionStageV1, SponsorAdmissionStageV1,
+        SponsorAdmissionStateV1, CROSS_SPACE_TRANSITION_FORMAT_V2,
     };
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
@@ -843,6 +938,132 @@ mod tests {
             self.values.lock().unwrap().remove(key);
             Ok(())
         }
+    }
+
+    fn cross_space_transition(
+        attempt_id: AdmissionAttemptId,
+        phase: CrossSpaceTransitionPhaseV2,
+    ) -> CrossSpaceTransitionV2 {
+        let finalized = phase.rank() >= CrossSpaceTransitionPhaseV2::SourceFinalized.rank();
+        CrossSpaceTransitionV2 {
+            transition_format_version: CROSS_SPACE_TRANSITION_FORMAT_V2,
+            attempt_id,
+            source_space_id: "source-space".to_owned(),
+            source_generation: [0xb1; 16],
+            source_backup_ref: b"encrypted-source-backup".to_vec(),
+            source_backup_digest: [0xb2; 32],
+            source_revision_at_backup: 7,
+            target_space_id: "target-space".to_owned(),
+            target_generation: [0xb3; 16],
+            target_keyslot_ref: b"target-keyslot".to_vec(),
+            target_workspace_ref: b"target-workspace".to_vec(),
+            phase,
+            final_source_revision: finalized.then_some(9),
+            final_manifest_digest: finalized.then_some([0xb4; 32]),
+            migrated_records: 3,
+            preserved_unreadable_records: 1,
+        }
+    }
+
+    fn prepared_joiner(attempt_id: AdmissionAttemptId) -> AdmissionAttemptV1 {
+        let mut attempt = AdmissionAttemptV1::new_joiner(
+            attempt_id,
+            [0xb5; 16],
+            JoinerAdmissionStageV1::Prepared,
+        );
+        attempt.local_join_ordinal = Some(0);
+        attempt.lineage_id = Some("target-space".to_owned());
+        attempt.base_history_position = Some(b"base-position".to_vec());
+        attempt.candidate_event = Some(b"candidate-event".to_vec());
+        attempt.candidate_event_id = Some([0xb6; 32]);
+        attempt.candidate_key_package = Some(b"key-package".to_vec());
+        attempt.target_members_digest = Some([0xb7; 32]);
+        attempt.security_commitment = Some(b"security-commitment".to_vec());
+        attempt.security_commit = Some(b"security-commit".to_vec());
+        attempt.security_welcome = Some(b"security-welcome".to_vec());
+        attempt.target_protection_group_id = Some("target-protection-group".to_owned());
+        attempt.target_key_catalog = Some(b"target-key-catalog".to_vec());
+        attempt.target_relationships = Some(Vec::new());
+        attempt.staged_security_state = Some(b"staged-security".to_vec());
+        attempt.base_membership_history = Some(b"base-history".to_vec());
+        attempt.verified_membership_history = Some(b"verified-history".to_vec());
+        attempt.prepared_proof = Some(b"prepared-proof".to_vec());
+        attempt.target_access_state = Some(b"target-access".to_vec());
+        attempt
+    }
+
+    #[test]
+    fn cross_space_transition_is_joiner_bound_and_forward_only() {
+        let attempt_id = AdmissionAttemptId::from_bytes([0xb8; 32]);
+        let mut current = prepared_joiner(attempt_id);
+        current.space_transition = AdmissionSpaceTransitionV2::CrossSpace(cross_space_transition(
+            attempt_id,
+            CrossSpaceTransitionPhaseV2::TargetStaged,
+        ))
+        .encode();
+        assert!(super::validate_attempt(&current).is_ok());
+
+        let mut wrong_attempt = current.clone();
+        wrong_attempt.space_transition =
+            AdmissionSpaceTransitionV2::CrossSpace(cross_space_transition(
+                AdmissionAttemptId::from_bytes([0xb9; 32]),
+                CrossSpaceTransitionPhaseV2::TargetStaged,
+            ))
+            .encode();
+        assert!(super::validate_attempt(&wrong_attempt).is_err());
+
+        let mut sponsor = current.clone();
+        sponsor.join_id = None;
+        sponsor.local_join_ordinal = None;
+        sponsor.role_state = AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
+            stage: SponsorAdmissionStageV1::Prepared,
+        });
+        assert!(super::validate_attempt(&sponsor).is_err());
+
+        let mut skipped = current.clone();
+        skipped.record_version += 1;
+        skipped.space_transition = AdmissionSpaceTransitionV2::CrossSpace(cross_space_transition(
+            attempt_id,
+            CrossSpaceTransitionPhaseV2::SourceFinalized,
+        ))
+        .encode();
+        assert!(super::validate_attempt_update(&current, &skipped).is_err());
+
+        let mut replaced_access = current.clone();
+        replaced_access.record_version += 1;
+        replaced_access.target_access_state = Some(b"other-target-access".to_vec());
+        assert!(super::validate_attempt_update(&current, &replaced_access).is_err());
+    }
+
+    #[test]
+    fn cross_space_terminal_result_cannot_be_missing_or_replaced() {
+        let attempt_id = AdmissionAttemptId::from_bytes([0xba; 32]);
+        let transition =
+            cross_space_transition(attempt_id, CrossSpaceTransitionPhaseV2::CleanupPending);
+        let mut active = prepared_joiner(attempt_id);
+        active.role_state =
+            AdmissionAttemptRoleStateV1::Joiner(uc_core::membership::JoinerAdmissionStateV1 {
+                stage: JoinerAdmissionStageV1::Completed,
+            });
+        active.activation_receipt = Some(b"activation-receipt".to_vec());
+        active.completion = Some(b"completion".to_vec());
+        active.terminal_result = Some(AdmissionTerminalResultV1::Active);
+        active.space_transition =
+            AdmissionSpaceTransitionV2::CrossSpace(transition.clone()).encode();
+        assert!(super::validate_attempt(&active).is_err());
+
+        let result = CrossSpaceTransitionResultV2::from_cleanup_pending(&transition).unwrap();
+        active.space_transition_result =
+            AdmissionSpaceTransitionResultV2::CrossSpace(result.clone()).encode();
+        assert!(super::validate_attempt(&active).is_ok());
+
+        let mut replaced = active.clone();
+        replaced.record_version += 1;
+        let mut changed_result = result;
+        changed_result.migrated_records += 1;
+        replaced.space_transition_result =
+            AdmissionSpaceTransitionResultV2::CrossSpace(changed_result).encode();
+        assert!(super::validate_attempt_update(&active, &replaced).is_err());
     }
 
     #[tokio::test]
@@ -878,6 +1099,9 @@ mod tests {
         prepared.security_commitment = Some(b"public-security-commitment".to_vec());
         prepared.security_commit = Some(b"security-commit".to_vec());
         prepared.security_welcome = Some(b"security-welcome-private".to_vec());
+        prepared.target_protection_group_id = Some("target-protection-group-private".to_owned());
+        prepared.target_key_catalog = Some(b"target-key-catalog-private".to_vec());
+        prepared.target_relationships = Some(Vec::new());
         prepared.staged_security_state = Some(b"staged-mls-private-state".to_vec());
         prepared.base_membership_history = Some(b"base-history-private".to_vec());
         prepared.verified_membership_history = Some(b"verified-history-private".to_vec());
@@ -1336,6 +1560,7 @@ mod tests {
         attempt.local_join_ordinal = Some(0);
         attempt.resume_private_key = Some(b"private-resume-key-marker".to_vec());
         attempt.invitation_claim = Some(b"private-invitation-marker".to_vec());
+        attempt.target_access_state = Some(b"private-target-access-marker".to_vec());
         attempt.outboxes.push(AdmissionOutboxMessageV1 {
             purpose: AdmissionOutboxPurposeV1::JoinRequest,
             recipient: b"private-recipient-marker".to_vec(),
@@ -1346,11 +1571,12 @@ mod tests {
         });
         store.create(&attempt, None, None).await.unwrap();
 
-        let markers: [&[u8]; 4] = [
+        let markers: [&[u8]; 5] = [
             b"private-resume-key-marker",
             b"private-invitation-marker",
             b"private-recipient-marker",
             b"private-message-marker",
+            b"private-target-access-marker",
         ];
         let files = fs::read_dir(directory.path())
             .unwrap()

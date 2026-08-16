@@ -126,6 +126,7 @@ impl EngineRuntime for ProductionRuntime {
             _ => {}
         }
         let session_lease = self.session_supervisor.acquire_operation().await?;
+        let may_require_session_transition = matches!(&operation, Operation::JoinSpace(_));
         let operation = async {
             match operation {
                 Operation::CreateSpace(input) => {
@@ -458,10 +459,29 @@ impl EngineRuntime for ProductionRuntime {
             }
         };
         let session_cancellation = session_lease.cancellation();
-        tokio::select! {
+        let result = tokio::select! {
             _ = session_cancellation.cancelled() => Err(super::operation_unavailable_error()),
             result = operation => result,
+        };
+        if may_require_session_transition && result.is_ok() {
+            let convergence = self
+                .current_session_field(|session| session.sync_engine.space_transition_recovery())
+                .await?;
+            if convergence
+                .requires_session_transition()
+                .await
+                .map_err(|error| {
+                    super::operation_error_with_code(1103, "inspect join space transition", error)
+                })?
+            {
+                self.session_supervisor
+                    .transition_session(session_lease)
+                    .await?;
+                return result;
+            }
         }
+        drop(session_lease);
+        result
     }
 
     #[cfg(feature = "dev-tools")]

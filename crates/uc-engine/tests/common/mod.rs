@@ -101,6 +101,13 @@ impl MigrationStatePort for NoopMigrationState {
     }
 }
 
+#[async_trait]
+impl uc_core::ports::setup::LegacyMigrationRecoveryPort for NoopMigrationState {
+    async fn recover(&self) -> Result<(), uc_core::ports::setup::LegacyMigrationRecoveryError> {
+        Ok(())
+    }
+}
+
 pub struct NoopKeyMigration;
 
 #[async_trait]
@@ -296,7 +303,11 @@ pub fn test_workspace_convergence(
         admission_security_transition: Arc::new(
             uc_infra::security::AdmissionSecurityTransitionAdapter,
         ),
+        admission_space_transition: Arc::new(
+            uc_infra::security::FailClosedAdmissionSpaceTransition,
+        ),
         admission_outbox_delivery: Arc::new(DeferredAdmissionOutboxDelivery),
+        legacy_migration_recovery: Arc::new(NoopMigrationState),
         member_signatures: Arc::new(FixedSigner),
         member_repo: Arc::clone(&member_repo),
         membership_identity: Arc::new(FixedMembershipIdentity::new(

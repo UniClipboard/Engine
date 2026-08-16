@@ -9,9 +9,8 @@
 
 use std::path::Path;
 
+use crate::db::pool::DbPool;
 use diesel::connection::SimpleConnection;
-use diesel::r2d2::{ConnectionManager, Pool};
-use diesel::sqlite::SqliteConnection;
 
 /// Failures producing a snapshot. Underlying sqlite/diesel detail is collapsed
 /// to a non-secret string the adapter wraps further.
@@ -34,10 +33,7 @@ pub enum DbSnapshotError {
 /// being read into memory; it must not already exist (`VACUUM INTO` refuses a
 /// pre-existing target). The scratch file is removed before returning on the
 /// success path.
-pub fn snapshot_to_bytes(
-    pool: &Pool<ConnectionManager<SqliteConnection>>,
-    scratch_path: &Path,
-) -> Result<Vec<u8>, DbSnapshotError> {
+pub fn snapshot_to_bytes(pool: &DbPool, scratch_path: &Path) -> Result<Vec<u8>, DbSnapshotError> {
     // VACUUM INTO refuses to overwrite; clear any stale scratch file first.
     if scratch_path.exists() {
         std::fs::remove_file(scratch_path).map_err(|_| DbSnapshotError::Io)?;
@@ -69,7 +65,7 @@ mod tests {
     use crate::db::pool::init_db_pool;
     use diesel::RunQueryDsl;
 
-    fn temp_db_pool() -> (Pool<ConnectionManager<SqliteConnection>>, tempfile::TempDir) {
+    fn temp_db_pool() -> (DbPool, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("uniclipboard.db");
         let pool = init_db_pool(db_path.to_str().unwrap()).unwrap();

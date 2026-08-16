@@ -1,6 +1,9 @@
+mod active_space_manifest;
 mod admission;
 mod admission_attempt;
+mod admission_content_key_catalog;
 mod bootstrap;
+mod cross_space_transition;
 mod error;
 mod gossip;
 mod member;
@@ -14,6 +17,7 @@ mod upgrade;
 mod versioned_membership_history;
 mod workspace_convergence;
 
+pub use active_space_manifest::{ActiveSpaceManifestV2, ACTIVE_SPACE_MANIFEST_FORMAT_V2};
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
 pub use admission_attempt::{
     AdmissionAttemptId, AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionInboxRecordV1,
@@ -24,17 +28,29 @@ pub use admission_attempt::{
     TerminalAdmissionAttemptV1, ADMISSION_ATTEMPT_FORMAT_V1, ADMISSION_PROFILE_METADATA_FORMAT_V1,
     TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
 };
+pub use admission_content_key_catalog::{
+    AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1,
+    ADMISSION_CONTENT_KEY_CATALOG_FORMAT_V1,
+};
 pub use bootstrap::{
     BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult, LegacyBootstrapRecord,
     LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
 };
+pub use cross_space_transition::{
+    AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, CrossSpaceTransitionPhaseV2,
+    CrossSpaceTransitionResultV2, CrossSpaceTransitionV2, FreshSpaceTransitionPhaseV1,
+    FreshSpaceTransitionV1, SameSpaceTransitionPhaseV1, SameSpaceTransitionV1,
+    CROSS_SPACE_TRANSITION_FORMAT_V2, FRESH_SPACE_TRANSITION_FORMAT_V1,
+    SAME_SPACE_TRANSITION_FORMAT_V1,
+};
 pub use error::{
     AdmissionAttemptRepositoryError, AdmissionOutboxDeliveryError,
-    AdmissionSecurityTransitionError, CurrentMemberSignatureError, CurrentMembershipIdentityError,
-    GroupUpdateDispatchError, LegacyPeerProbeError, MembershipAnnouncementRepositoryError,
-    MembershipAppliedSecurityUpdateRepositoryError, MembershipAttestationEndpointError,
-    MembershipAttestationError, MembershipCandidateRepositoryError, MembershipError,
-    MembershipGossipEndpointError, MembershipGossipTransportError, MembershipHistoryExchangeError,
+    AdmissionSecurityTransitionError, AdmissionSpaceTransitionError, CurrentMemberSignatureError,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError, LegacyPeerProbeError,
+    MembershipAnnouncementRepositoryError, MembershipAppliedSecurityUpdateRepositoryError,
+    MembershipAttestationEndpointError, MembershipAttestationError,
+    MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
+    MembershipGossipTransportError, MembershipHistoryExchangeError,
     MembershipOutboxRepositoryError, MembershipSecurityUpdateError, RelationshipStateResetError,
     SpaceSecurityStateResetError, VerifiedPeerPromotionError, WorkspaceConvergenceRepositoryError,
 };
@@ -59,8 +75,10 @@ pub use membership_history::{
 };
 pub use ports::{
     AdmissionAttemptRepositoryPort, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1,
-    AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort, BeginRevocationOutcome,
-    ContentExchangeGatePort, CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
+    AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
+    AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
+    AdmissionSpaceTransitionStepV2, BeginRevocationOutcome, ContentExchangeGatePort,
+    CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityPort,
     CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort,
     CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot, GroupRevocationPort,

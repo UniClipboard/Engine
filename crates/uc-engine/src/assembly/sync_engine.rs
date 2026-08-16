@@ -259,6 +259,12 @@ impl SyncEngineAssembly {
         self.convergence_assembly.removal_gate()
     }
 
+    pub(crate) fn space_transition_recovery(
+        &self,
+    ) -> Arc<dyn uc_application::facade::SpaceTransitionRecoveryPort> {
+        self.convergence_assembly.space_transition_recovery()
+    }
+
     /// Coordinated teardown. Order matters:
     ///
     /// 1. [`SpaceFacade::on_shutdown`] aborts the sponsor-side inbound
@@ -657,7 +663,9 @@ pub async fn build_sync_engine_assembly(
             admission_security_transition: Arc::new(
                 uc_infra::security::AdmissionSecurityTransitionAdapter,
             ),
+            admission_space_transition: Arc::clone(&space_setup.admission_space_transition),
             admission_outbox_delivery: Arc::new(DeferredAdmissionOutboxDelivery),
+            legacy_migration_recovery: Arc::clone(&space_setup.legacy_migration_recovery),
             member_signatures: Arc::clone(&space_setup.current_member_signatures),
             member_repo: Arc::clone(&deps.device.member_repo),
             membership_identity: removal_identity,

@@ -111,7 +111,8 @@ pub use crate::space::convergence::{
     SyncRelationship,
 };
 pub use crate::space::convergence::{
-    WorkspaceConvergenceDeps, WorkspaceConvergenceError, WorkspaceConvergenceStateOrigin,
+    SpaceTransitionRecoveryPort, WorkspaceConvergenceDeps, WorkspaceConvergenceError,
+    WorkspaceConvergenceStateOrigin,
 };
 pub use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,

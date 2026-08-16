@@ -465,7 +465,7 @@ impl ProductionRuntime {
         })
     }
 
-    async fn current_session_field<T>(
+    async fn current_session_field<T: ?Sized>(
         &self,
         project: impl FnOnce(&ProductionSession) -> Arc<T>,
     ) -> Result<Arc<T>, EngineError> {

@@ -102,7 +102,9 @@ pub struct WorkspaceConvergenceDeps {
         Arc<dyn uc_core::membership::HistoricalMembershipSignatureVerifier>,
     pub admission_security_transition:
         Arc<dyn uc_core::membership::AdmissionSecurityTransitionPort>,
+    pub admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort>,
     pub admission_outbox_delivery: Arc<dyn uc_core::membership::AdmissionOutboxDeliveryPort>,
+    pub legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort>,
     pub member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub membership_identity: Arc<dyn CurrentMembershipIdentityPort>,
@@ -298,6 +300,13 @@ pub struct WorkspaceConvergence {
     events: broadcast::Sender<WorkspaceSnapshot>,
 }
 
+#[async_trait]
+pub trait SpaceTransitionRecoveryPort: Send + Sync {
+    async fn requires_session_transition(&self) -> Result<bool, WorkspaceConvergenceError>;
+
+    async fn recover_after_session_drain(&self) -> Result<usize, WorkspaceConvergenceError>;
+}
+
 #[derive(Clone, Copy)]
 enum ReconciliationPeerRole {
     AuthenticatedSponsor,
@@ -311,6 +320,7 @@ impl WorkspaceConvergence {
             Arc::clone(&deps.admission_attempts),
             Arc::clone(&deps.historical_membership_signatures),
             Arc::clone(&deps.admission_security_transition),
+            Arc::clone(&deps.admission_space_transition),
         );
         Arc::new(Self {
             deps,
@@ -324,6 +334,11 @@ impl WorkspaceConvergence {
     }
 
     async fn recover_pending_admissions(&self) -> Result<usize, WorkspaceConvergenceError> {
+        self.deps
+            .legacy_migration_recovery
+            .recover()
+            .await
+            .map_err(|_| WorkspaceConvergenceError::RecoveryRequired)?;
         let report = self
             .admission
             .recover_with(self.deps.admission_outbox_delivery.as_ref())
@@ -332,6 +347,23 @@ impl WorkspaceConvergence {
             self.notify();
         }
         Ok(report.deliveries_attempted)
+    }
+
+    pub async fn requires_session_transition(&self) -> Result<bool, WorkspaceConvergenceError> {
+        self.admission.requires_session_transition().await
+    }
+
+    pub async fn recover_space_transition_after_session_drain(
+        &self,
+    ) -> Result<usize, WorkspaceConvergenceError> {
+        let finished = self
+            .admission
+            .recover_space_transitions_after_session_drain()
+            .await?;
+        if finished > 0 {
+            self.notify();
+        }
+        Ok(finished)
     }
 
     fn admission_generation(state: &WorkspaceConvergenceState) -> u64 {
@@ -2384,6 +2416,17 @@ impl WorkspaceConvergence {
             .await;
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SpaceTransitionRecoveryPort for WorkspaceConvergence {
+    async fn requires_session_transition(&self) -> Result<bool, WorkspaceConvergenceError> {
+        WorkspaceConvergence::requires_session_transition(self).await
+    }
+
+    async fn recover_after_session_drain(&self) -> Result<usize, WorkspaceConvergenceError> {
+        self.recover_space_transition_after_session_drain().await
     }
 }
 

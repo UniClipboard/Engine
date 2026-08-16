@@ -24,6 +24,7 @@ pub(super) fn build_space_access_ports(
     db_executor: &Arc<DieselSqliteExecutor>,
 ) -> (
     SpaceAccessPorts,
+    Arc<uc_infra::security::DefaultSpaceAccessAdapter>,
     Arc<dyn uc_core::membership::LegacyProtectionPort>,
     Arc<dyn uc_core::membership::CurrentMemberSignaturePort>,
     Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
@@ -55,7 +56,8 @@ pub(super) fn build_space_access_ports(
     let current_member_signatures: Arc<dyn uc_core::membership::CurrentMemberSignaturePort> =
         space_access_adapter.clone();
     (
-        SpaceAccessPorts::from_adapter(space_access_adapter),
+        SpaceAccessPorts::from_adapter(Arc::clone(&space_access_adapter)),
+        space_access_adapter,
         legacy_protection,
         current_member_signatures,
         space_security_reset,

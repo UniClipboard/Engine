@@ -46,6 +46,19 @@ struct DeferredAdmissionDelivery;
 
 struct ConfirmingAdmissionDelivery;
 
+#[derive(Default)]
+struct RecordingLegacyMigrationRecovery {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl uc_core::ports::setup::LegacyMigrationRecoveryPort for RecordingLegacyMigrationRecovery {
+    async fn recover(&self) -> Result<(), uc_core::ports::setup::LegacyMigrationRecoveryError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl uc_core::membership::AdmissionOutboxDeliveryPort for DeferredAdmissionDelivery {
     async fn deliver(
@@ -400,10 +413,18 @@ fn durable_admission_repository(
 fn durable_admission_owner(
     repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
 ) -> super::admission_transaction::DurableAdmissionTransaction {
+    durable_admission_owner_with_space_transition(repository, Arc::new(NoAdmissionSpaceTransition))
+}
+
+fn durable_admission_owner_with_space_transition(
+    repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort>,
+) -> super::admission_transaction::DurableAdmissionTransaction {
     super::admission_transaction::DurableAdmissionTransaction::new(
         repository,
         Arc::new(DeterministicHistoricalVerifier),
         Arc::new(EchoAdmissionSecurityTransition::default()),
+        space_transition,
     )
 }
 
@@ -818,7 +839,9 @@ pub(crate) fn test_deps(
         admission_attempts: Arc::new(LockedAdmissionRepository),
         historical_membership_signatures: Arc::new(DeterministicHistoricalVerifier),
         admission_security_transition: Arc::new(EchoAdmissionSecurityTransition::default()),
+        admission_space_transition: Arc::new(NoAdmissionSpaceTransition),
         admission_outbox_delivery: Arc::new(DeferredAdmissionDelivery),
+        legacy_migration_recovery: Arc::new(RecordingLegacyMigrationRecovery::default()),
         member_signatures: Arc::new(FixedSigner),
         member_repo: Arc::new(uc_application_test_member_repo()),
         membership_identity: Arc::new(FixedMembershipIdentity {
@@ -837,6 +860,24 @@ pub(crate) fn test_deps(
         space_protection: Arc::new(FixedSpaceProtection(SpaceProtectionMode::Ready)),
         own_device: DeviceId::new(own_device),
     }
+}
+
+#[tokio::test]
+async fn admission_recovery_starts_with_legacy_migration_import() {
+    let directory = tempfile::tempdir().unwrap();
+    let recovery = Arc::new(RecordingLegacyMigrationRecovery::default());
+    let mut deps = test_deps(
+        Arc::new(MemoryWorkspaceRepository::default()),
+        "device-1",
+        Vec::new(),
+    );
+    deps.admission_attempts = durable_admission_repository(&directory, [0x71; 16]);
+    deps.legacy_migration_recovery = recovery.clone();
+    let owner = WorkspaceConvergence::new(deps);
+
+    owner.recover_pending_admissions().await.unwrap();
+
+    assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
 }
 
 struct FixedSpaceProtection(SpaceProtectionMode);
@@ -4098,6 +4139,7 @@ async fn durable_join_starts_once_and_survives_owner_restart() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4125,6 +4167,7 @@ async fn durable_join_starts_once_and_survives_owner_restart() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4145,6 +4188,7 @@ async fn admission_unavailable_keeps_the_exact_pending_join() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4177,6 +4221,7 @@ async fn delivery_ack_clears_only_the_exact_supported_outbox() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4213,6 +4258,7 @@ async fn reset_projection_is_atomic_and_requires_a_quiet_admission_repository() 
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4258,6 +4304,7 @@ async fn invitation_consume_retry_is_no_write_and_terminal_compaction_waits_for_
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4348,6 +4395,7 @@ async fn restart_recovery_delivers_durable_outboxes_and_compacts_settled_termina
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4383,6 +4431,7 @@ async fn restart_recovery_delivers_durable_outboxes_and_compacts_settled_termina
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4449,6 +4498,7 @@ async fn candidate_bound_to_another_attempt_leaves_sponsor_state_unchanged() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4463,6 +4513,9 @@ async fn candidate_bound_to_another_attempt_leaves_sponsor_state_unchanged() {
         security_commitment: postcard::to_stdvec(&commitment).unwrap(),
         security_commit: b"sealed-security-commit".to_vec(),
         security_welcome: postcard::to_stdvec(&commitment).unwrap(),
+        target_protection_group_id: "target-protection-group".to_owned(),
+        target_key_catalog: admission_key_catalog().encode().unwrap(),
+        target_relationships: admission_relationships(&event),
         staged_security_state: b"sponsor-staged-state".to_vec(),
         identity_binding: b"sponsor-joiner-binding".to_vec(),
     };
@@ -4510,6 +4563,7 @@ async fn activation_receipt_bound_to_another_attempt_leaves_joiner_state_unchang
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -4607,9 +4661,14 @@ async fn durable_admission_becomes_complete_only_after_both_sides_save() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
+    assert_eq!(
+        initiated.target_access_state.as_deref(),
+        Some(b"joiner-target-access".as_slice())
+    );
     let candidate_message = sponsor
         .sponsor_accept_and_offer(
             attempt_id,
@@ -4883,15 +4942,26 @@ async fn durable_admission_becomes_complete_only_after_both_sides_save() {
 
     let sponsor_before_ack = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
     assert_eq!(sponsor_before_ack.terminal_result, None);
-    let complete_ack = joiner
+    let complete_ack = match joiner
         .joiner_activate(attempt_id, &complete_message, b"admission-completion")
         .await
-        .unwrap();
+        .unwrap()
+    {
+        super::admission_transaction::JoinerActivationOutcomeV1::Active(acknowledgment) => {
+            acknowledgment
+        }
+        super::admission_transaction::JoinerActivationOutcomeV1::SpaceTransitionRequired => {
+            panic!("same-space activation must not request a space transition")
+        }
+    };
     let replayed_ack = joiner
         .joiner_activate(attempt_id, &complete_message, b"admission-completion")
         .await
         .unwrap();
-    assert_eq!(replayed_ack, complete_ack);
+    assert_eq!(
+        replayed_ack,
+        super::admission_transaction::JoinerActivationOutcomeV1::Active(complete_ack.clone())
+    );
     let joiner_saved = joiner_repository.load(attempt_id).await.unwrap().unwrap();
     let verified_history: uc_core::membership::VersionedMembershipHistory =
         uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
@@ -4959,6 +5029,302 @@ async fn durable_admission_becomes_complete_only_after_both_sides_save() {
     );
 }
 
+#[tokio::test]
+async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
+    use uc_core::membership::{
+        AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, AdmissionTerminalResultV1,
+        CrossSpaceTransitionPhaseV2,
+    };
+
+    let sponsor_dir = tempfile::tempdir().unwrap();
+    let joiner_dir = tempfile::tempdir().unwrap();
+    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0xc5; 16]);
+    let joiner_repository = durable_admission_repository(&joiner_dir, [0xc6; 16]);
+    let transition = Arc::new(SimulatedAdmissionSpaceTransition::new_with_phase_failures());
+    let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
+    let joiner = durable_admission_owner_with_space_transition(
+        Arc::clone(&joiner_repository),
+        transition.clone(),
+    );
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xc7; 32]);
+    let initiated = joiner
+        .start_join(
+            attempt_id,
+            [0xc8; 16],
+            b"sponsor",
+            b"join-request",
+            b"joiner-pending-state",
+            b"joiner-key-package",
+            b"joiner-target-access",
+        )
+        .await
+        .unwrap();
+    let (candidate, base_history, candidate_event, commitment, activation_receipt) =
+        durable_candidate_verification_fixture(attempt_id);
+    let offered = sponsor
+        .sponsor_accept_and_offer(
+            attempt_id,
+            [0xc9; 32],
+            &initiated.outboxes[0],
+            candidate.clone(),
+            base_history.clone(),
+            &candidate_event,
+            &commitment,
+            b"joiner",
+            b"candidate",
+        )
+        .await
+        .unwrap();
+    let prepared = joiner
+        .joiner_verify_and_prepare(
+            attempt_id,
+            &offered,
+            candidate,
+            base_history,
+            &candidate_event,
+            &commitment,
+            b"prepared-proof",
+            b"sponsor",
+            b"prepared",
+        )
+        .await
+        .unwrap();
+    let prepared_attempt = joiner_repository.load(attempt_id).await.unwrap().unwrap();
+    let AdmissionSpaceTransitionV2::CrossSpace(prepared_transition) =
+        AdmissionSpaceTransitionV2::decode(prepared_attempt.space_transition.as_deref().unwrap())
+            .unwrap()
+    else {
+        panic!("expected a cross-space transition");
+    };
+    assert_eq!(
+        prepared_transition.phase,
+        CrossSpaceTransitionPhaseV2::TargetStaged
+    );
+
+    let commit = sponsor
+        .sponsor_commit(
+            attempt_id,
+            &prepared,
+            b"prepared-proof",
+            b"joiner",
+            b"commit",
+        )
+        .await
+        .unwrap();
+    let applied = joiner
+        .joiner_apply(
+            attempt_id,
+            &commit,
+            &activation_receipt,
+            b"sponsor",
+            b"applied",
+        )
+        .await
+        .unwrap();
+    let complete = sponsor
+        .sponsor_complete(
+            attempt_id,
+            &applied,
+            &activation_receipt,
+            b"completion",
+            b"joiner",
+            b"complete",
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        joiner
+            .joiner_activate(attempt_id, &complete, b"completion")
+            .await
+            .unwrap(),
+        super::admission_transaction::JoinerActivationOutcomeV1::SpaceTransitionRequired
+    ));
+    assert!(transition.advances.lock().unwrap().is_empty());
+    assert!(joiner.requires_session_transition().await.unwrap());
+    let interrupted = joiner_repository.load(attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        interrupted.completion.as_deref(),
+        Some(b"completion".as_slice())
+    );
+    assert_eq!(interrupted.terminal_result, None);
+    assert_eq!(
+        match AdmissionSpaceTransitionV2::decode(interrupted.space_transition.as_deref().unwrap(),)
+            .unwrap()
+        {
+            AdmissionSpaceTransitionV2::CrossSpace(transition) => transition.phase,
+            _ => panic!("expected a cross-space transition"),
+        },
+        CrossSpaceTransitionPhaseV2::TargetStaged
+    );
+
+    for expected_phase in [
+        CrossSpaceTransitionPhaseV2::TargetStaged,
+        CrossSpaceTransitionPhaseV2::ActivationStarted,
+        CrossSpaceTransitionPhaseV2::SourceFinalized,
+        CrossSpaceTransitionPhaseV2::DataRewrapped,
+        CrossSpaceTransitionPhaseV2::TargetPromoted,
+        CrossSpaceTransitionPhaseV2::CleanupPending,
+    ] {
+        assert!(joiner
+            .recover_space_transitions_after_session_drain()
+            .await
+            .is_err());
+        let saved = joiner_repository.load(attempt_id).await.unwrap().unwrap();
+        assert_eq!(saved.terminal_result, None);
+        assert_eq!(
+            match AdmissionSpaceTransitionV2::decode(saved.space_transition.as_deref().unwrap(),)
+                .unwrap()
+            {
+                AdmissionSpaceTransitionV2::CrossSpace(transition) => transition.phase,
+                _ => panic!("expected a cross-space transition"),
+            },
+            expected_phase
+        );
+    }
+
+    let transitions_finished = joiner
+        .recover_space_transitions_after_session_drain()
+        .await
+        .unwrap();
+    assert_eq!(transitions_finished, 1);
+    assert!(!joiner.requires_session_transition().await.unwrap());
+    let recovery = joiner
+        .recover_with(&DeferredAdmissionDelivery)
+        .await
+        .unwrap();
+    assert_eq!(recovery.deliveries_confirmed, 0);
+    assert_eq!(recovery.attempts_compacted, 0);
+    assert!(joiner_repository.load(attempt_id).await.unwrap().is_none());
+    let active = joiner_repository
+        .load_terminal(attempt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.terminal_result, AdmissionTerminalResultV1::Active);
+    let AdmissionSpaceTransitionResultV2::CrossSpace(result) =
+        AdmissionSpaceTransitionResultV2::decode(
+            active.space_transition_result.as_deref().unwrap(),
+        )
+        .unwrap()
+    else {
+        panic!("expected a cross-space result");
+    };
+    let acknowledgment = match joiner
+        .joiner_activate(attempt_id, &complete, b"completion")
+        .await
+        .unwrap()
+    {
+        super::admission_transaction::JoinerActivationOutcomeV1::Active(acknowledgment) => {
+            acknowledgment
+        }
+        super::admission_transaction::JoinerActivationOutcomeV1::SpaceTransitionRequired => {
+            panic!("compacted active admission must rebuild its acknowledgment")
+        }
+    };
+    assert!(active.acknowledgment_rebuild.contains(&acknowledgment));
+    assert_eq!(result.migrated_records, 3);
+    assert_eq!(result.preserved_unreadable_records, 1);
+}
+
+#[tokio::test]
+async fn cross_space_rejection_discards_target_only_before_activation() {
+    use uc_core::membership::{AdmissionSpaceTransitionV2, AdmissionTerminalResultV1};
+
+    let sponsor_dir = tempfile::tempdir().unwrap();
+    let joiner_dir = tempfile::tempdir().unwrap();
+    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0xd1; 16]);
+    let joiner_repository = durable_admission_repository(&joiner_dir, [0xd2; 16]);
+    let transition = Arc::new(SimulatedAdmissionSpaceTransition::new_with_phase_failures());
+    let sponsor = durable_admission_owner(sponsor_repository);
+    let joiner = durable_admission_owner_with_space_transition(
+        Arc::clone(&joiner_repository),
+        transition.clone(),
+    );
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xd3; 32]);
+    let initiated = joiner
+        .start_join(
+            attempt_id,
+            [0xd4; 16],
+            b"sponsor",
+            b"join-request",
+            b"joiner-pending-state",
+            b"joiner-key-package",
+            b"joiner-target-access",
+        )
+        .await
+        .unwrap();
+    let (candidate, base_history, candidate_event, commitment, _) =
+        durable_candidate_verification_fixture(attempt_id);
+    let offered = sponsor
+        .sponsor_accept_and_offer(
+            attempt_id,
+            [0xd5; 32],
+            &initiated.outboxes[0],
+            candidate.clone(),
+            base_history.clone(),
+            &candidate_event,
+            &commitment,
+            b"joiner",
+            b"candidate",
+        )
+        .await
+        .unwrap();
+    let prepared = joiner
+        .joiner_verify_and_prepare(
+            attempt_id,
+            &offered,
+            candidate,
+            base_history,
+            &candidate_event,
+            &commitment,
+            b"prepared-proof",
+            b"sponsor",
+            b"prepared",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        AdmissionSpaceTransitionV2::decode(
+            joiner_repository
+                .load(attempt_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .space_transition
+                .as_deref()
+                .unwrap()
+        ),
+        Some(AdmissionSpaceTransitionV2::CrossSpace(_))
+    ));
+
+    let cancel = joiner
+        .request_cancel(attempt_id, b"sponsor", b"cancel")
+        .await
+        .unwrap();
+    let rejected = sponsor
+        .sponsor_decide_cancel(attempt_id, &cancel, b"joiner", b"cancelled")
+        .await
+        .unwrap();
+    let acknowledgment = joiner
+        .joiner_record_rejected(attempt_id, &rejected)
+        .await
+        .unwrap();
+    let saved = joiner_repository.load(attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        saved.terminal_result,
+        Some(AdmissionTerminalResultV1::Rejected)
+    );
+    assert!(saved.space_transition.is_none());
+    assert!(saved.space_transition_result.is_none());
+    assert!(saved.inbox_dedup.contains(&acknowledgment));
+    assert_eq!(transition.discards.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        prepared.purpose,
+        uc_core::membership::AdmissionOutboxPurposeV1::Prepared
+    );
+}
+
 // Flow: cancellation and formal commit have one persisted winner. A saved
 // cancellation before commit rejects without a formal add; a saved commit
 // makes cancellation too late and the same attempt continues forward.
@@ -4979,6 +5345,7 @@ async fn durable_admission_cancel_and_commit_have_exactly_one_winner() {
                 b"join-request",
                 b"joiner-pending-state",
                 b"joiner-key-package",
+                b"joiner-target-access",
             )
             .await
             .unwrap();
@@ -5151,6 +5518,7 @@ async fn base_history_change_after_candidate_is_durably_rejected_without_add() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -5249,6 +5617,7 @@ async fn base_history_change_during_commit_is_durably_rejected() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -5336,6 +5705,7 @@ async fn pending_member_removal_before_commit_rejects_without_add() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -5407,6 +5777,7 @@ async fn pending_inbound_projection_shows_only_the_active_lineage_non_terminal_c
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -5474,6 +5845,7 @@ async fn sponsor_business_rejection_before_commit_is_durable_and_replayable() {
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -5550,6 +5922,7 @@ async fn pending_member_removal_after_commit_permanently_keeps_add_then_remove()
             b"join-request",
             b"joiner-pending-state",
             b"joiner-key-package",
+            b"joiner-target-access",
         )
         .await
         .unwrap();
@@ -5652,6 +6025,7 @@ async fn pending_member_removal_races_commit_and_activation_without_partial_stat
                 b"join-request",
                 b"joiner-pending-state",
                 b"joiner-key-package",
+                b"joiner-target-access",
             )
             .await
             .unwrap();
@@ -5747,6 +6121,7 @@ async fn pending_member_removal_races_commit_and_activation_without_partial_stat
                 b"join-request",
                 b"joiner-pending-state",
                 b"joiner-key-package",
+                b"joiner-target-access",
             )
             .await
             .unwrap();
@@ -5842,6 +6217,197 @@ async fn pending_member_removal_races_commit_and_activation_without_partial_stat
 }
 
 struct DeterministicHistoricalVerifier;
+
+struct NoAdmissionSpaceTransition;
+
+#[async_trait]
+impl uc_core::membership::AdmissionSpaceTransitionPort for NoAdmissionSpaceTransition {
+    async fn prepare_if_needed(
+        &self,
+        input: &uc_core::membership::AdmissionSpaceTransitionPreparationV2,
+    ) -> Result<
+        uc_core::membership::AdmissionSpaceTransitionV2,
+        uc_core::membership::AdmissionSpaceTransitionError,
+    > {
+        Ok(uc_core::membership::AdmissionSpaceTransitionV2::Fresh(
+            uc_core::membership::FreshSpaceTransitionV1 {
+                transition_format_version: uc_core::membership::FRESH_SPACE_TRANSITION_FORMAT_V1,
+                attempt_id: input.attempt_id,
+                target_space_id: input.target_space_id.clone(),
+                target_generation: [0xa1; 16],
+                target_keyslot_ref: b"test-keyslot".to_vec(),
+                target_workspace_ref: b"test-workspace".to_vec(),
+                phase: uc_core::membership::FreshSpaceTransitionPhaseV1::TargetStaged,
+            },
+        ))
+    }
+
+    async fn advance(
+        &self,
+        transition: &uc_core::membership::AdmissionSpaceTransitionV2,
+    ) -> Result<
+        uc_core::membership::AdmissionSpaceTransitionStepV2,
+        uc_core::membership::AdmissionSpaceTransitionError,
+    > {
+        use uc_core::membership::{
+            AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionStepV2,
+            AdmissionSpaceTransitionV2, FreshSpaceTransitionPhaseV1,
+        };
+        let AdmissionSpaceTransitionV2::Fresh(fresh) = transition else {
+            return Err(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent);
+        };
+        let next_phase = match fresh.phase {
+            FreshSpaceTransitionPhaseV1::TargetStaged => {
+                FreshSpaceTransitionPhaseV1::ActivationStarted
+            }
+            FreshSpaceTransitionPhaseV1::ActivationStarted => {
+                FreshSpaceTransitionPhaseV1::TargetPromoted
+            }
+            FreshSpaceTransitionPhaseV1::TargetPromoted => {
+                FreshSpaceTransitionPhaseV1::CleanupPending
+            }
+            FreshSpaceTransitionPhaseV1::CleanupPending => {
+                return Ok(AdmissionSpaceTransitionStepV2::Finished(
+                    AdmissionSpaceTransitionResultV2::Fresh {
+                        target_space_id: fresh.target_space_id.clone(),
+                    },
+                ));
+            }
+        };
+        let mut next = fresh.clone();
+        next.phase = next_phase;
+        Ok(AdmissionSpaceTransitionStepV2::Advanced(
+            AdmissionSpaceTransitionV2::Fresh(next),
+        ))
+    }
+
+    async fn discard_pre_activation(
+        &self,
+        _transition: &uc_core::membership::AdmissionSpaceTransitionV2,
+    ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        Ok(())
+    }
+}
+
+struct SimulatedAdmissionSpaceTransition {
+    fail_once_at: Mutex<VecDeque<uc_core::membership::CrossSpaceTransitionPhaseV2>>,
+    advances: Mutex<Vec<uc_core::membership::CrossSpaceTransitionPhaseV2>>,
+    discards: AtomicUsize,
+}
+
+impl SimulatedAdmissionSpaceTransition {
+    fn new_with_phase_failures() -> Self {
+        use uc_core::membership::CrossSpaceTransitionPhaseV2::*;
+        Self {
+            fail_once_at: Mutex::new(VecDeque::from([
+                TargetStaged,
+                ActivationStarted,
+                SourceFinalized,
+                DataRewrapped,
+                TargetPromoted,
+                CleanupPending,
+            ])),
+            advances: Mutex::new(Vec::new()),
+            discards: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl uc_core::membership::AdmissionSpaceTransitionPort for SimulatedAdmissionSpaceTransition {
+    async fn prepare_if_needed(
+        &self,
+        input: &uc_core::membership::AdmissionSpaceTransitionPreparationV2,
+    ) -> Result<
+        uc_core::membership::AdmissionSpaceTransitionV2,
+        uc_core::membership::AdmissionSpaceTransitionError,
+    > {
+        assert_eq!(input.target_access_state, b"joiner-target-access");
+        Ok(uc_core::membership::AdmissionSpaceTransitionV2::CrossSpace(
+            uc_core::membership::CrossSpaceTransitionV2 {
+                transition_format_version: uc_core::membership::CROSS_SPACE_TRANSITION_FORMAT_V2,
+                attempt_id: input.attempt_id,
+                source_space_id: "source-space".to_owned(),
+                source_generation: [0xc1; 16],
+                source_backup_ref: b"source-backup".to_vec(),
+                source_backup_digest: [0xc2; 32],
+                source_revision_at_backup: 7,
+                target_space_id: input.target_space_id.clone(),
+                target_generation: [0xc3; 16],
+                target_keyslot_ref: b"target-keyslot".to_vec(),
+                target_workspace_ref: b"target-workspace".to_vec(),
+                phase: uc_core::membership::CrossSpaceTransitionPhaseV2::TargetStaged,
+                final_source_revision: None,
+                final_manifest_digest: None,
+                migrated_records: 0,
+                preserved_unreadable_records: 0,
+            },
+        ))
+    }
+
+    async fn advance(
+        &self,
+        transition: &uc_core::membership::AdmissionSpaceTransitionV2,
+    ) -> Result<
+        uc_core::membership::AdmissionSpaceTransitionStepV2,
+        uc_core::membership::AdmissionSpaceTransitionError,
+    > {
+        use uc_core::membership::{
+            AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionStepV2,
+            AdmissionSpaceTransitionV2, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
+        };
+        let AdmissionSpaceTransitionV2::CrossSpace(transition) = transition else {
+            return Err(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent);
+        };
+        self.advances.lock().unwrap().push(transition.phase);
+        let should_fail =
+            self.fail_once_at.lock().unwrap().front().copied() == Some(transition.phase);
+        if should_fail {
+            self.fail_once_at.lock().unwrap().pop_front();
+            return Err(uc_core::membership::AdmissionSpaceTransitionError::Storage);
+        }
+        if transition.phase == CrossSpaceTransitionPhaseV2::CleanupPending {
+            let result = CrossSpaceTransitionResultV2::from_cleanup_pending(transition)
+                .ok_or(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent)?;
+            return Ok(AdmissionSpaceTransitionStepV2::Finished(
+                AdmissionSpaceTransitionResultV2::CrossSpace(result),
+            ));
+        }
+        let mut next = transition.clone();
+        next.phase = transition
+            .phase
+            .successor()
+            .ok_or(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent)?;
+        if next.phase == CrossSpaceTransitionPhaseV2::SourceFinalized {
+            next.final_source_revision = Some(9);
+            next.final_manifest_digest = Some([0xc4; 32]);
+        }
+        if next.phase == CrossSpaceTransitionPhaseV2::DataRewrapped {
+            next.migrated_records = 3;
+            next.preserved_unreadable_records = 1;
+        }
+        Ok(AdmissionSpaceTransitionStepV2::Advanced(
+            AdmissionSpaceTransitionV2::CrossSpace(next),
+        ))
+    }
+
+    async fn discard_pre_activation(
+        &self,
+        transition: &uc_core::membership::AdmissionSpaceTransitionV2,
+    ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        let uc_core::membership::AdmissionSpaceTransitionV2::CrossSpace(transition) = transition
+        else {
+            return Err(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent);
+        };
+        if transition.phase.rank()
+            >= uc_core::membership::CrossSpaceTransitionPhaseV2::ActivationStarted.rank()
+        {
+            return Err(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent);
+        }
+        self.discards.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct EchoAdmissionSecurityTransition {
@@ -5979,6 +6545,7 @@ fn admission_verification_fixture(
         depth: 7,
         history_digest: [0x83; 32],
     };
+    let key_catalog = admission_key_catalog();
     let commitment = AdmissionSecurityCommitmentV1::new(
         ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
         "space-a".to_owned(),
@@ -5992,7 +6559,7 @@ fn admission_verification_fixture(
         [0x86; 32],
         [0x87; 32],
         [0x88; 32],
-        [0x89; 32],
+        key_catalog.digest(),
         [0x8a; 32],
     )
     .unwrap();
@@ -6078,10 +6645,55 @@ fn durable_candidate_verification_fixture(
         security_commitment: postcard::to_stdvec(&commitment).unwrap(),
         security_commit: b"sealed-security-commit".to_vec(),
         security_welcome: postcard::to_stdvec(&commitment).unwrap(),
+        target_protection_group_id: "target-protection-group".to_owned(),
+        target_key_catalog: admission_key_catalog().encode().unwrap(),
+        target_relationships: admission_relationships(&event),
         staged_security_state: b"sponsor-staged-state".to_vec(),
         identity_binding: b"sponsor-joiner-binding".to_vec(),
     };
     (candidate, history, event, commitment, receipt)
+}
+
+fn admission_key_catalog() -> uc_core::membership::AdmissionContentKeyCatalogV1 {
+    uc_core::membership::AdmissionContentKeyCatalogV1::new(
+        "content-4",
+        4,
+        vec![
+            uc_core::membership::AdmissionContentKeyEntryV1::new("legacy-v1", 0, vec![0x91; 32])
+                .unwrap(),
+            uc_core::membership::AdmissionContentKeyEntryV1::new("content-4", 4, vec![0x92; 32])
+                .unwrap(),
+        ],
+    )
+    .unwrap()
+}
+
+fn admission_relationships(
+    event: &uc_core::membership::MembershipEventV2,
+) -> Vec<uc_core::membership::AdmissionChangeFacts> {
+    use uc_core::membership::{
+        AdmissionChangeFacts, MembershipCredential, MembershipOperationV2,
+        ED25519_SIGNATURE_ALGORITHM_V1,
+    };
+    let sponsor_device = DeviceId::new("sponsor");
+    let sponsor_credential =
+        MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x81; 32]);
+    let sponsor = AdmissionChangeFacts {
+        member_instance: sponsor_credential.member_instance_id(&sponsor_device),
+        device_id: sponsor_device,
+        device_name: "sponsor".to_owned(),
+        identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
+            "QRST-UVWX-YZ23-4567",
+        )
+        .unwrap(),
+        transport_public_key: vec![4],
+        transport_address_blob: vec![5],
+        identity_signature: vec![6],
+    };
+    let MembershipOperationV2::AddDevice { admission } = &event.operation else {
+        unreachable!("fixture always creates AddDevice")
+    };
+    vec![sponsor, admission.facts.clone()]
 }
 
 fn durable_candidate_removal_fixture(

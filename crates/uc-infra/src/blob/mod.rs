@@ -7,7 +7,7 @@ mod store_port;
 
 pub use blob_writer::BlobWriter;
 pub use domain::{Blob, BlobStorageLocator};
-pub use filesystem_store::FilesystemBlobStore;
+pub use filesystem_store::{FilesystemBlobStore, SwitchableFilesystemBlobStore};
 pub use repository_port::BlobRepositoryPort;
 pub use store_port::{BlobStorePort, StoredPathBlob};
 // Re-export uc-core's BlobWriterPort under the existing path to keep

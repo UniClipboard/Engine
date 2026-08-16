@@ -5,15 +5,46 @@
 
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use uc_core::ports::SetupStatusPort;
 use uc_core::setup::SetupStatus;
 
+use crate::security::ActiveSpaceManifestStore;
+
 pub const DEFAULT_SETUP_STATUS_FILE: &str = ".setup_status";
 
 pub struct FileSetupStatusRepository {
     status_file_path: PathBuf,
+}
+
+pub struct ManifestProjectingSetupStatusRepository {
+    legacy: Arc<dyn SetupStatusPort>,
+    manifest: Arc<ActiveSpaceManifestStore>,
+}
+
+impl ManifestProjectingSetupStatusRepository {
+    pub fn new(legacy: Arc<dyn SetupStatusPort>, manifest: Arc<ActiveSpaceManifestStore>) -> Self {
+        Self { legacy, manifest }
+    }
+}
+
+#[async_trait]
+impl SetupStatusPort for ManifestProjectingSetupStatusRepository {
+    async fn get_status(&self) -> anyhow::Result<SetupStatus> {
+        if let Some(manifest) = self.manifest.load().await? {
+            return Ok(SetupStatus {
+                has_completed: true,
+                space_id: Some(uc_core::ids::SpaceId::from_str(&manifest.space_id)),
+            });
+        }
+        self.legacy.get_status().await
+    }
+
+    async fn set_status(&self, status: &SetupStatus) -> anyhow::Result<()> {
+        self.legacy.set_status(status).await
+    }
 }
 
 impl FileSetupStatusRepository {
@@ -83,5 +114,89 @@ impl SetupStatusPort for FileSetupStatusRepository {
             .map_err(|e| anyhow::anyhow!("Failed to sync status file: {e}"))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use uc_core::membership::ActiveSpaceManifestV2;
+    use uc_core::ports::{SecureStorageError, SecureStoragePort};
+
+    use crate::security::AdmissionKeyManager;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl SecureStoragePort for MemorySecureStorage {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_vec());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn active_manifest_overrides_legacy_setup_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy: Arc<dyn SetupStatusPort> = Arc::new(FileSetupStatusRepository::new(
+            directory.path().join("setup.json"),
+        ));
+        legacy
+            .set_status(&SetupStatus {
+                has_completed: true,
+                space_id: Some(uc_core::ids::SpaceId::from_str("legacy-space")),
+            })
+            .await
+            .unwrap();
+        let manifest = Arc::new(ActiveSpaceManifestStore::new(
+            directory.path().to_path_buf(),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::new(MemorySecureStorage::default()),
+                [0x31; 16],
+            )),
+        ));
+        let projecting = ManifestProjectingSetupStatusRepository::new(
+            Arc::clone(&legacy),
+            Arc::clone(&manifest),
+        );
+        assert_eq!(
+            projecting.get_status().await.unwrap().space_id,
+            Some(uc_core::ids::SpaceId::from_str("legacy-space"))
+        );
+
+        manifest
+            .promote(
+                &ActiveSpaceManifestV2::new(
+                    "target-space".to_owned(),
+                    [0x32; 16],
+                    [0x33; 16],
+                    [0x34; 16],
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let projected = projecting.get_status().await.unwrap();
+        assert!(projected.has_completed);
+        assert_eq!(
+            projected.space_id,
+            Some(uc_core::ids::SpaceId::from_str("target-space"))
+        );
     }
 }

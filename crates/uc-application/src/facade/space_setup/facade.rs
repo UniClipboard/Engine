@@ -107,10 +107,8 @@ pub struct SpaceFacade {
     /// [`Self::auto_prime_presence`] 触发一次全员预连,把 presence 缓存
     /// 填满,让 UI 查 roster 时 online/offline 立刻准。
     ensure_reachable_all: Arc<EnsureReachableAllUseCase>,
-    /// Switch-space 4 阶段重加密迁移 use case。已 setup 设备加入另一个
-    /// sponsor 空间时由 [`Self::switch_space`] 驱动；启动期补偿在
-    /// [`Self::try_resume_session`] 内通过 [`SwitchSpaceUseCase::resume_pending`]
-    /// 自动触发。
+    /// Legacy switch-space creation remains here until the versioned
+    /// admission path replaces it.
     switch_space: Arc<SwitchSpaceUseCase>,
     /// Switch-space 进度查询用——`query_migration_progress` 直接读这两份。
     /// 持有同一份 Arc 是因为 use case 内部不暴露状态访问，进度只读路径
@@ -399,23 +397,7 @@ impl SpaceFacade {
             Err(other) => return Err(TryResumeSessionError::Internal(other.to_string())),
         };
 
-        // Switch-space migration recovery hook: if there's an in-flight
-        // 4-phase migration left over from a prior daemon crash, advance
-        // it now that the session is unlocked and the new master_key is
-        // available. `None` is a noop, so the cost on idle paths is one
-        // `migration_state.get_current()` read.
-        //
-        // Failure here surfaces as `TryResumeSessionError::Internal` —
-        // the device is in a wedged state (Prepared/HandshakeDone/Swapped
-        // with replay failure) and the caller should bubble it up to the
-        // operator rather than silently continue with stale data.
         if resumed {
-            if let Err(err) = self.switch_space.resume_pending().await {
-                warn!(error = %err, "switch-space resume_pending failed during try_resume_session");
-                return Err(TryResumeSessionError::Internal(format!(
-                    "migration resume failed: {err}"
-                )));
-            }
             self.mobile_consumable_backfill.backfill_best_effort().await;
             self.ensure_relationship_storage_ready()
                 .await
@@ -501,18 +483,6 @@ impl SpaceFacade {
         let cmd: UnlockSpaceCommand = input.into();
         let out = self.unlock_space.execute(cmd).await?;
 
-        // Switch-space migration recovery hook — 镜像 try_resume_session:412-419。
-        // 手动 unlock 也必须推进 migration replay：startup_recovery 在 auto-unlock
-        // 关闭时会跳过 try_resume_session（避免无 KEK 弹钥匙串），那 hook 就不会
-        // 接管 pending HandshakeDone migration。没有这一行, 用户在 auto-unlock=off
-        // 的设备上一旦 phase 3 中断, 主表 inline 永远停在旧 master_key 加密、
-        // session 持新 master_key 的 wedged 态 —— UI 看不到任何历史。
-        if let Err(err) = self.switch_space.resume_pending().await {
-            warn!(error = %err, "switch-space resume_pending failed during unlock_space");
-            return Err(UnlockSpaceError::Internal(format!(
-                "migration resume failed: {err}"
-            )));
-        }
         self.mobile_consumable_backfill.backfill_best_effort().await;
 
         self.ensure_relationship_storage_ready()
@@ -1599,24 +1569,14 @@ mod tests {
     // `switch_space::*` smoke。
 
     /// 内存版 `MigrationStatePort`，默认行为与之前一致（`None` + 任意写都成功）。
-    /// 新增能力：通过 `with_phase` / `with_get_failure` 让单测注入 pending 阶段
-    /// 或读失败，覆盖 unlock_space → resume_pending hook 的两条关键分支。
     #[derive(Default)]
     struct FakeMigrationState {
         current: StdMutex<Option<uc_core::setup::MigrationPhase>>,
-        fail_get: std::sync::atomic::AtomicBool,
     }
     impl FakeMigrationState {
         fn with_phase(phase: uc_core::setup::MigrationPhase) -> Self {
             Self {
                 current: StdMutex::new(Some(phase)),
-                fail_get: std::sync::atomic::AtomicBool::new(false),
-            }
-        }
-        fn with_get_failure() -> Self {
-            Self {
-                current: StdMutex::new(None),
-                fail_get: std::sync::atomic::AtomicBool::new(true),
             }
         }
     }
@@ -1628,11 +1588,6 @@ mod tests {
             Option<uc_core::setup::MigrationPhase>,
             uc_core::ports::setup::MigrationStateError,
         > {
-            if self.fail_get.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(uc_core::ports::setup::MigrationStateError::Storage(
-                    "injected migration_state get failure".into(),
-                ));
-            }
             Ok(self.current.lock().unwrap().clone())
         }
         async fn set_current(
@@ -1993,14 +1948,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unlock_space_drives_resume_pending_when_migration_pending() {
-        // 回归 phase 3 中断后没人推进的 wedged 态：startup_recovery 在
-        // auto-unlock 关闭时会跳过 try_resume_session，那时 unlock_space
-        // 是唯一能在解锁后接管 migration replay 的入口。
-        //
-        // Prepared 分支走 cleanup_after_phase2_failure：跑完后
-        // migration_state 应被推回 None（验证 hook 真的被触发了，而不是
-        // 拿了个空 phase 跑回 noop）。
+    async fn unlock_space_does_not_own_legacy_migration_recovery() {
         let setup_status = InMemorySetupStatus::default();
         *setup_status.status.lock().unwrap() = SetupStatus {
             has_completed: true,
@@ -2024,44 +1972,14 @@ mod tests {
         facade
             .unlock_space(cmd)
             .await
-            .expect("unlock_space succeeds with Prepared phase recovery");
+            .expect("unlock_space succeeds without advancing legacy migration");
         let after = uc_core::ports::setup::MigrationStatePort::get_current(&*migration_state)
             .await
             .expect("get_current ok");
         assert!(
-            after.is_none(),
-            "resume_pending Prepared 分支应清掉 migration_state，实际仍为 {after:?}"
+            after.is_some(),
+            "unlock_space must leave legacy migration recovery to WorkspaceConvergence"
         );
-    }
-
-    #[tokio::test]
-    async fn unlock_space_returns_internal_when_resume_pending_fails() {
-        // resume_pending 任何失败都要冒到 unlock_space 调用方，不能 silent
-        // 吞掉——否则又会复刻 fedora 事故：session 拿到新 master_key，但
-        // 主表仍用旧 key，UI 看不到任何数据，daemon 还报 "解锁成功"。
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
-            has_completed: true,
-            space_id: None,
-        };
-        let migration_state = Arc::new(FakeMigrationState::with_get_failure());
-        let (facade, _inv, _peer) = make_facade_with_migration_state(
-            space_access(),
-            Arc::new(setup_status),
-            Arc::new(InMemorySettings::default()),
-            migration_state,
-        );
-        let cmd = UnlockSpaceInput {
-            passphrase: "hunter22hunter22".to_string(),
-        };
-        let err = facade.unlock_space(cmd).await.unwrap_err();
-        match err {
-            UnlockSpaceError::Internal(msg) => assert!(
-                msg.contains("migration resume failed"),
-                "expected prefix in internal message, got {msg}"
-            ),
-            other => panic!("expected Internal, got {other:?}"),
-        }
     }
 
     // ── F2 shutdown ──────────────────────────────────────────────────────
@@ -2380,13 +2298,11 @@ mod tests {
     // ── Switch-space smoke tests (commit 4) ──────────────────────────────
     //
     // 端口契约层面的回归在 `usecases::setup::switch_space::tests` 里覆盖；
-    // 这里只验 facade 层的转发 / 启动 hook 行为：
+    // 这里只验 facade 层的转发行为：
     // * pre-flight 把"设备未 setup"映射成 `NotSetup`。
     // * `query_migration_progress` 在空闲状态（FakeMigrationState 全返
     //   None）下返回 `phase=None, count=0`。
-    // * `try_resume_session` 在 has_completed=true + mock 返回
-    //   `Some(active_space)` 时走通 `resume_pending`（None phase 是 noop，
-    //   不会拉错路径）。
+    // * `try_resume_session` 在 has_completed=true 时只恢复当前会话。
 
     #[tokio::test]
     async fn switch_space_rejects_when_setup_not_completed() {
@@ -2419,11 +2335,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_resume_session_resumes_silent_unlock_and_runs_migration_hook() {
+    async fn try_resume_session_resumes_silent_unlock() {
         // helper 默认返回 Ok(None)，模拟没有
-        // keyslot 的场景——`try_resume_session` 应返回 Ok(false)，且
-        // resume_pending 因为 FakeMigrationState 返回 None 也是 noop。
-        // 这里覆盖的是"两个 hook 都不 panic + 错误不被吞"。
+        // keyslot 的场景——`try_resume_session` 应返回 Ok(false)。
         let setup_status = InMemorySetupStatus::default();
         *setup_status.status.lock().unwrap() = SetupStatus {
             has_completed: true,

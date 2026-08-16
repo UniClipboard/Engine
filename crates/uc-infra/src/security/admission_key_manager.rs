@@ -40,6 +40,7 @@ pub struct WrappedAdmissionAttemptDataKey {
     encrypted_key: EncryptedBlob,
 }
 
+#[derive(Clone)]
 pub struct AdmissionKeyManager {
     secure_storage: Arc<dyn SecureStoragePort>,
     profile_generation: [u8; 16],

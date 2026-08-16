@@ -5,10 +5,12 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionActivationReceipt, AdmissionAttemptId, AdmissionAttemptRepositoryError,
     AdmissionAttemptRepositoryPort, AdmissionAttemptRoleStateV1, AdmissionAttemptV1,
-    AdmissionInboxRecordV1, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1,
-    AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1,
-    AdmissionSecurityCommitmentV1, AdmissionSecurityTransitionInput,
-    AdmissionSecurityTransitionPort, AdmissionTerminalResultV1,
+    AdmissionContentKeyCatalogV1, AdmissionInboxRecordV1, AdmissionOutboxDeliveryPort,
+    AdmissionOutboxDeliveryResultV1, AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1,
+    AdmissionRejectionReasonV1, AdmissionSecurityCommitmentV1, AdmissionSecurityTransitionInput,
+    AdmissionSecurityTransitionPort, AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
+    AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionResultV2,
+    AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionV2, AdmissionTerminalResultV1,
     HistoricalMembershipSignatureVerifier, InvitationConsumeDeliveryResultV1,
     JoinerAdmissionStageV1, JoinerAdmissionStateV1, MembershipEventV2,
     MembershipHistoryV2ReceiveOutcome, MembershipOperationV2, SponsorAdmissionStageV1,
@@ -23,6 +25,7 @@ pub(crate) struct DurableAdmissionTransaction {
     repository: Arc<dyn AdmissionAttemptRepositoryPort>,
     history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     security_transition: Arc<dyn AdmissionSecurityTransitionPort>,
+    space_transition: Arc<dyn AdmissionSpaceTransitionPort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +40,9 @@ pub(crate) struct DurableAdmissionCandidateV1 {
     pub security_commitment: Vec<u8>,
     pub security_commit: Vec<u8>,
     pub security_welcome: Vec<u8>,
+    pub target_protection_group_id: String,
+    pub target_key_catalog: Vec<u8>,
+    pub target_relationships: Vec<uc_core::membership::AdmissionChangeFacts>,
     pub staged_security_state: Vec<u8>,
     pub identity_binding: Vec<u8>,
 }
@@ -67,6 +73,12 @@ pub(crate) struct AdmissionRecoveryReportV1 {
     pub deliveries_attempted: usize,
     pub deliveries_confirmed: usize,
     pub attempts_compacted: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JoinerActivationOutcomeV1 {
+    Active(AdmissionInboxRecordV1),
+    SpaceTransitionRequired,
 }
 
 pub(crate) fn verify_candidate_preparation(
@@ -129,11 +141,13 @@ impl DurableAdmissionTransaction {
         repository: Arc<dyn AdmissionAttemptRepositoryPort>,
         history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
         security_transition: Arc<dyn AdmissionSecurityTransitionPort>,
+        space_transition: Arc<dyn AdmissionSpaceTransitionPort>,
     ) -> Self {
         Self {
             repository,
             history_verifier,
             security_transition,
+            space_transition,
         }
     }
 
@@ -145,6 +159,7 @@ impl DurableAdmissionTransaction {
         request_payload: &[u8],
         pending_security_state: &[u8],
         candidate_key_package: &[u8],
+        target_access_state: &[u8],
     ) -> Result<AdmissionAttemptV1, WorkspaceConvergenceError> {
         if let Some(existing) = self.load(attempt_id).await? {
             return self.match_existing_start(
@@ -154,6 +169,7 @@ impl DurableAdmissionTransaction {
                 request_payload,
                 pending_security_state,
                 candidate_key_package,
+                target_access_state,
             );
         }
 
@@ -167,6 +183,7 @@ impl DurableAdmissionTransaction {
         attempt.local_join_ordinal = Some(metadata.next_local_join_ordinal);
         attempt.joiner_pending_security_state = Some(pending_security_state.to_vec());
         attempt.candidate_key_package = Some(candidate_key_package.to_vec());
+        attempt.target_access_state = Some(target_access_state.to_vec());
         attempt.outboxes.push(outbound_message(
             attempt_id,
             AdmissionOutboxPurposeV1::JoinRequest,
@@ -188,6 +205,7 @@ impl DurableAdmissionTransaction {
                     request_payload,
                     pending_security_state,
                     candidate_key_package,
+                    target_access_state,
                 )
             }
             Err(AdmissionAttemptRepositoryError::VersionConflict) => {
@@ -230,7 +248,12 @@ impl DurableAdmissionTransaction {
             sponsor_commitment,
             self.history_verifier.as_ref(),
         )?;
-        require_candidate_encoding(&candidate, candidate_event, sponsor_commitment)?;
+        require_candidate_encoding(
+            &candidate,
+            candidate_event,
+            sponsor_commitment,
+            &verified_history,
+        )?;
         let encoded_history = verified_history
             .encode_persisted_v2()
             .map_err(|error| inconsistent(error.to_string()))?;
@@ -360,7 +383,12 @@ impl DurableAdmissionTransaction {
             &staged.public_commitment,
             self.history_verifier.as_ref(),
         )?;
-        require_candidate_encoding(&candidate, candidate_event, sponsor_commitment)?;
+        require_candidate_encoding(
+            &candidate,
+            candidate_event,
+            sponsor_commitment,
+            &verified_history,
+        )?;
         let encoded_history = verified_history
             .encode_persisted_v2()
             .map_err(|error| inconsistent(error.to_string()))?;
@@ -390,7 +418,45 @@ impl DurableAdmissionTransaction {
             AdmissionOutboxPurposeV1::Candidate,
             Some(request_id),
         )?;
+        let transition = self
+            .space_transition
+            .prepare_if_needed(&AdmissionSpaceTransitionPreparationV2 {
+                attempt_id,
+                target_space_id: candidate.lineage_id.clone(),
+                target_security_commitment: sponsor_commitment.clone(),
+                target_membership_history: encoded_history.clone(),
+                target_security_state: staged.staged_state.clone(),
+                target_protection_group_id: candidate.target_protection_group_id.clone(),
+                target_key_catalog: candidate.target_key_catalog.clone(),
+                local_device_id: match &candidate_event.operation {
+                    MembershipOperationV2::AddDevice { admission } => {
+                        admission.facts.device_id.clone()
+                    }
+                    MembershipOperationV2::RemoveDevice { .. } => {
+                        return Err(inconsistent("admission candidate is not AddDevice"));
+                    }
+                },
+                target_relationships: candidate.target_relationships.clone(),
+                target_access_state: attempt
+                    .target_access_state
+                    .clone()
+                    .ok_or_else(|| inconsistent("target access state is missing"))?,
+            })
+            .await
+            .map_err(map_space_transition_error)?;
+        if transition.attempt_id() != attempt_id
+            || transition.target_space_id() != candidate.lineage_id
+            || !transition.is_initial()
+        {
+            return Err(inconsistent(
+                "prepared space transition does not match the admission candidate",
+            ));
+        }
+        let encoded_transition = transition
+            .encode()
+            .ok_or_else(|| inconsistent("prepared space transition is invalid"))?;
         apply_candidate(&mut attempt, candidate);
+        attempt.space_transition = Some(encoded_transition);
         attempt.staged_security_state = Some(staged.staged_state);
         attempt.base_membership_history = Some(encoded_base_history.clone());
         attempt.verified_membership_history = Some(encoded_history);
@@ -976,6 +1042,21 @@ impl DurableAdmissionTransaction {
             Some(predecessor),
         )?;
         let rejection_reason = decode_rejection_reason(&rejected.payload)?;
+        if let Some(encoded_transition) = attempt.space_transition.as_deref() {
+            let transition = AdmissionSpaceTransitionV2::decode(encoded_transition)
+                .ok_or_else(|| inconsistent("saved space transition is invalid"))?;
+            if transition.phase_rank() >= transition.activation_started_rank() {
+                return Err(inconsistent(
+                    "committed space transition cannot be rejected or rolled back",
+                ));
+            }
+            self.space_transition
+                .discard_pre_activation(&transition)
+                .await
+                .map_err(map_space_transition_error)?;
+            attempt.space_transition = None;
+            attempt.target_access_state = None;
+        }
         if let Some(staged) = attempt.staged_security_state.take() {
             self.security_transition.discard(staged);
         }
@@ -1173,35 +1254,123 @@ impl DurableAdmissionTransaction {
         attempt_id: AdmissionAttemptId,
         complete_message: &AdmissionOutboxMessageV1,
         completion: &[u8],
-    ) -> Result<AdmissionInboxRecordV1, WorkspaceConvergenceError> {
-        let mut attempt = self.required_attempt(attempt_id).await?;
+    ) -> Result<JoinerActivationOutcomeV1, WorkspaceConvergenceError> {
         let acknowledgment = inbox_record(complete_message);
+        if let Some(terminal) = self
+            .repository
+            .load_terminal(attempt_id)
+            .await
+            .map_err(map_repository_error)?
+        {
+            if terminal.terminal_result == AdmissionTerminalResultV1::Active
+                && terminal.replay_result == completion
+                && terminal.acknowledgment_rebuild.contains(&acknowledgment)
+            {
+                return Ok(JoinerActivationOutcomeV1::Active(acknowledgment));
+            }
+            return Err(inconsistent(
+                "complete replay does not match compacted admission result",
+            ));
+        }
+        let mut attempt = self.required_attempt(attempt_id).await?;
         if attempt.terminal_result == Some(AdmissionTerminalResultV1::Active)
             && attempt.completion.as_deref() == Some(completion)
             && attempt.inbox_dedup.contains(&acknowledgment)
         {
-            return Ok(acknowledgment);
+            return Ok(JoinerActivationOutcomeV1::Active(acknowledgment));
         }
         require_joiner_stage(&attempt, JoinerAdmissionStageV1::Applied)?;
-        let applied_id = active_outbox_id(&attempt, AdmissionOutboxPurposeV1::Applied)?;
-        require_message(
-            attempt_id,
-            complete_message,
-            AdmissionOutboxPurposeV1::Complete,
-            Some(applied_id),
-        )?;
-        attempt.completion = Some(completion.to_vec());
-        attempt.terminal_result = Some(AdmissionTerminalResultV1::Active);
-        attempt.role_state = AdmissionAttemptRoleStateV1::Joiner(JoinerAdmissionStateV1 {
-            stage: JoinerAdmissionStageV1::Completed,
-        });
-        accept_incoming(
-            &mut attempt,
-            complete_message,
-            &[AdmissionOutboxPurposeV1::Applied],
-        );
-        self.persist_advance(attempt).await?;
-        Ok(acknowledgment)
+        if attempt.completion.is_none() {
+            let applied_id = active_outbox_id(&attempt, AdmissionOutboxPurposeV1::Applied)?;
+            require_message(
+                attempt_id,
+                complete_message,
+                AdmissionOutboxPurposeV1::Complete,
+                Some(applied_id),
+            )?;
+            attempt.completion = Some(completion.to_vec());
+            accept_incoming(
+                &mut attempt,
+                complete_message,
+                &[AdmissionOutboxPurposeV1::Applied],
+            );
+            self.persist_advance(attempt).await?;
+            attempt = self.required_attempt(attempt_id).await?;
+        } else if attempt.completion.as_deref() != Some(completion)
+            || !attempt.inbox_dedup.contains(&acknowledgment)
+        {
+            return Err(inconsistent("complete replay does not match saved state"));
+        }
+        if let Some(encoded_transition) = attempt.space_transition.as_deref() {
+            let transition = AdmissionSpaceTransitionV2::decode(encoded_transition)
+                .ok_or_else(|| inconsistent("saved space transition is invalid"))?;
+            if matches!(transition, AdmissionSpaceTransitionV2::CrossSpace(_)) {
+                return Ok(JoinerActivationOutcomeV1::SpaceTransitionRequired);
+            }
+            self.resume_space_transition(attempt).await?;
+        } else {
+            attempt.terminal_result = Some(AdmissionTerminalResultV1::Active);
+            attempt.role_state = AdmissionAttemptRoleStateV1::Joiner(JoinerAdmissionStateV1 {
+                stage: JoinerAdmissionStageV1::Completed,
+            });
+            self.persist_advance(attempt).await?;
+        }
+        Ok(JoinerActivationOutcomeV1::Active(acknowledgment))
+    }
+
+    async fn resume_space_transition(
+        &self,
+        mut attempt: AdmissionAttemptV1,
+    ) -> Result<AdmissionAttemptV1, WorkspaceConvergenceError> {
+        if !attempt.is_joiner() || attempt.completion.is_none() {
+            return Err(inconsistent(
+                "space transition cannot run before joiner Complete is saved",
+            ));
+        }
+        loop {
+            let transition = AdmissionSpaceTransitionV2::decode(
+                attempt
+                    .space_transition
+                    .as_deref()
+                    .ok_or_else(|| inconsistent("space transition disappeared"))?,
+            )
+            .ok_or_else(|| inconsistent("saved space transition is invalid"))?;
+            match self
+                .space_transition
+                .advance(&transition)
+                .await
+                .map_err(map_space_transition_error)?
+            {
+                AdmissionSpaceTransitionStepV2::Advanced(next) => {
+                    if !transition.can_advance_to(&next) {
+                        return Err(inconsistent(
+                            "space transition adapter skipped or replaced a phase",
+                        ));
+                    }
+                    attempt.space_transition = Some(
+                        next.encode()
+                            .ok_or_else(|| inconsistent("advanced space transition is invalid"))?,
+                    );
+                    self.persist_advance(attempt).await?;
+                    attempt = self.required_attempt(transition.attempt_id()).await?;
+                }
+                AdmissionSpaceTransitionStepV2::Finished(result) => {
+                    if !result.matches_cleanup_pending(&transition) {
+                        return Err(inconsistent(
+                            "space transition result does not match cleanup state",
+                        ));
+                    }
+                    attempt.space_transition_result = Some(encode_transition_result(&result)?);
+                    attempt.terminal_result = Some(AdmissionTerminalResultV1::Active);
+                    attempt.role_state =
+                        AdmissionAttemptRoleStateV1::Joiner(JoinerAdmissionStateV1 {
+                            stage: JoinerAdmissionStageV1::Completed,
+                        });
+                    self.persist_advance(attempt).await?;
+                    return self.required_attempt(transition.attempt_id()).await;
+                }
+            }
+        }
     }
 
     pub(crate) async fn sponsor_confirm_active(
@@ -1242,6 +1411,37 @@ impl DurableAdmissionTransaction {
             .scan_recoverable()
             .await
             .map_err(map_repository_error)
+    }
+
+    pub(crate) async fn requires_session_transition(
+        &self,
+    ) -> Result<bool, WorkspaceConvergenceError> {
+        Ok(self.recoverable().await?.into_iter().any(|attempt| {
+            attempt.is_joiner()
+                && attempt.completion.is_some()
+                && attempt.space_transition.is_some()
+                && attempt.space_transition_result.is_none()
+        }))
+    }
+
+    pub(crate) async fn recover_space_transitions_after_session_drain(
+        &self,
+    ) -> Result<usize, WorkspaceConvergenceError> {
+        let attempts = self.recoverable().await?;
+        let mut finished = 0;
+        for attempt in attempts {
+            if attempt.is_joiner()
+                && attempt.completion.is_some()
+                && attempt.space_transition.is_some()
+                && attempt.space_transition_result.is_none()
+            {
+                let attempt_id = attempt.attempt_id;
+                self.resume_space_transition(attempt).await?;
+                self.compact_if_settled(attempt_id).await?;
+                finished += 1;
+            }
+        }
+        Ok(finished)
     }
 
     pub(crate) async fn recover_with(
@@ -1330,6 +1530,7 @@ impl DurableAdmissionTransaction {
             if current.is_terminal()
                 && current.outboxes.iter().all(|message| message.superseded)
                 && current.write_ahead_recovery.is_none()
+                && (current.space_transition.is_none() || current.space_transition_result.is_some())
                 && !current.cleanup_pending
             {
                 self.compact_if_settled(attempt.attempt_id).await?;
@@ -1413,6 +1614,7 @@ impl DurableAdmissionTransaction {
         if !attempt.is_terminal()
             || attempt.outboxes.iter().any(|message| !message.superseded)
             || attempt.write_ahead_recovery.is_some()
+            || (attempt.space_transition.is_some() && attempt.space_transition_result.is_none())
             || attempt.cleanup_pending
         {
             return Err(WorkspaceConvergenceError::AdmissionInProgress);
@@ -1530,6 +1732,7 @@ impl DurableAdmissionTransaction {
         request_payload: &[u8],
         pending_security_state: &[u8],
         candidate_key_package: &[u8],
+        target_access_state: &[u8],
     ) -> Result<AdmissionAttemptV1, WorkspaceConvergenceError> {
         let expected = outbound_message(
             existing.attempt_id,
@@ -1543,6 +1746,7 @@ impl DurableAdmissionTransaction {
             && existing.stage_rank() == Some(0)
             && existing.joiner_pending_security_state.as_deref() == Some(pending_security_state)
             && existing.candidate_key_package.as_deref() == Some(candidate_key_package)
+            && existing.target_access_state.as_deref() == Some(target_access_state)
             && existing.outboxes.as_slice() == [expected];
         if is_same_start {
             Ok(existing)
@@ -1578,6 +1782,7 @@ fn require_candidate_encoding(
     candidate: &DurableAdmissionCandidateV1,
     candidate_event: &MembershipEventV2,
     sponsor_commitment: &AdmissionSecurityCommitmentV1,
+    verified_history: &VersionedMembershipHistory,
 ) -> Result<(), WorkspaceConvergenceError> {
     let encoded_base_position = postcard::to_stdvec(&sponsor_commitment.base_history_position)
         .map_err(admission_storage)?;
@@ -1593,6 +1798,44 @@ fn require_candidate_encoding(
     {
         return Err(inconsistent(
             "persisted candidate does not match the verified V2 candidate",
+        ));
+    }
+    let catalog = AdmissionContentKeyCatalogV1::decode(&candidate.target_key_catalog)
+        .map_err(|error| inconsistent(error.to_string()))?;
+    if catalog.target_epoch != sponsor_commitment.target_epoch
+        || catalog.digest() != sponsor_commitment.key_catalog_digest
+        || candidate.target_protection_group_id.is_empty()
+        || candidate.target_protection_group_id.len() > 128
+        || !candidate.target_protection_group_id.is_ascii()
+    {
+        return Err(inconsistent(
+            "candidate content-key catalog does not match the security commitment",
+        ));
+    }
+    let mut member_instances = std::collections::BTreeSet::new();
+    let mut device_ids = std::collections::BTreeSet::new();
+    for facts in &candidate.target_relationships {
+        let credential = verified_history
+            .credential_for(facts.member_instance)
+            .ok_or_else(|| inconsistent("candidate relationship has no history credential"))?;
+        if credential.member_instance_id(&facts.device_id) != facts.member_instance
+            || !member_instances.insert(facts.member_instance)
+            || !device_ids.insert(facts.device_id.clone())
+        {
+            return Err(inconsistent(
+                "candidate relationship projection does not match verified history",
+            ));
+        }
+    }
+    if member_instances != verified_history.effective_members()
+        || !matches!(
+            &candidate_event.operation,
+            MembershipOperationV2::AddDevice { admission }
+                if candidate.target_relationships.contains(&admission.facts)
+        )
+    {
+        return Err(inconsistent(
+            "candidate relationship projection is incomplete",
         ));
     }
     Ok(())
@@ -1623,6 +1866,9 @@ fn apply_candidate(attempt: &mut AdmissionAttemptV1, candidate: DurableAdmission
     attempt.security_commitment = Some(candidate.security_commitment);
     attempt.security_commit = Some(candidate.security_commit);
     attempt.security_welcome = Some(candidate.security_welcome);
+    attempt.target_protection_group_id = Some(candidate.target_protection_group_id);
+    attempt.target_key_catalog = Some(candidate.target_key_catalog);
+    attempt.target_relationships = Some(candidate.target_relationships);
     attempt.staged_security_state = Some(candidate.staged_security_state);
     attempt.identity_binding = Some(candidate.identity_binding);
 }
@@ -1643,6 +1889,11 @@ fn candidate_matches(
         && attempt.security_commitment.as_deref() == Some(candidate.security_commitment.as_slice())
         && attempt.security_commit.as_deref() == Some(candidate.security_commit.as_slice())
         && attempt.security_welcome.as_deref() == Some(candidate.security_welcome.as_slice())
+        && attempt.target_protection_group_id.as_deref()
+            == Some(candidate.target_protection_group_id.as_str())
+        && attempt.target_key_catalog.as_deref() == Some(candidate.target_key_catalog.as_slice())
+        && attempt.target_relationships.as_deref()
+            == Some(candidate.target_relationships.as_slice())
         && (!compare_staged_state
             || attempt.staged_security_state.as_deref()
                 == Some(candidate.staged_security_state.as_slice()))
@@ -1799,6 +2050,27 @@ fn decode_rejection_reason(
     postcard::from_bytes::<(AdmissionRejectionReasonV1, Vec<u8>)>(payload)
         .map(|(reason, _)| reason)
         .map_err(|_| inconsistent("rejection payload is invalid"))
+}
+
+fn encode_transition_result(
+    result: &AdmissionSpaceTransitionResultV2,
+) -> Result<Vec<u8>, WorkspaceConvergenceError> {
+    result
+        .encode()
+        .ok_or_else(|| inconsistent("space transition result cannot be encoded"))
+}
+
+fn map_space_transition_error(error: AdmissionSpaceTransitionError) -> WorkspaceConvergenceError {
+    match error {
+        AdmissionSpaceTransitionError::Locked | AdmissionSpaceTransitionError::Storage => {
+            admission_storage(error)
+        }
+        AdmissionSpaceTransitionError::Unavailable => WorkspaceConvergenceError::Unavailable,
+        AdmissionSpaceTransitionError::RecoveryRequired => {
+            WorkspaceConvergenceError::RecoveryRequired
+        }
+        AdmissionSpaceTransitionError::Inconsistent => inconsistent(error.to_string()),
+    }
 }
 
 fn map_repository_error(error: AdmissionAttemptRepositoryError) -> WorkspaceConvergenceError {

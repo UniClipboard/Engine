@@ -13,8 +13,8 @@
 //!   主表立刻不可读。
 //!
 //! 本 use case 通过"四阶段迁移 + 备份表 + 一次性 migration_key"把数据
-//! 从旧 master_key 转加密到新 master_key，期间任意一步崩溃都能在下次启动
-//! 时按当前 [`MigrationPhase`] 续跑。
+//! 从旧 master_key 转加密到新 master_key。新建流程仍写旧阶段；崩溃后的
+//! 收束由 profile 级 `WorkspaceConvergence` 调用基础设施私有导入器负责。
 //!
 //! ## 阶段流程
 //!
@@ -43,17 +43,7 @@
 //!    （adopt 新 person / 回退 Solo），清空 backup 表，销毁
 //!    migration_key，`migration_state` = `None`。身份切换的*意图*在
 //!    阶段 2 写 `HandshakeDone` 时就已落盘，因此即便 commit 与
-//!    identify 之间崩溃，下次启动 resume 仍能补做。
-//!
-//! ## 启动期续跑
-//!
-//! [`Self::resume_pending`] 在 daemon 启动时（commit 4 接入 facade）按
-//! 当前 [`MigrationPhase`] 决定动作：
-//!
-//! * `None` — 不做任何事（无在飞迁移）。
-//! * `Prepared` — 视为放弃：清空 backup + 销毁 migration_key，回到 None。
-//! * `HandshakeDone` — 重跑 phase 3 + phase 4。
-//! * `Swapped` — 仅重跑 phase 4 cleanup。
+//!    identify 之间崩溃，旧状态导入器仍能补做。
 //!
 //! ## 不属于本 use case 的关切
 //!
@@ -172,6 +162,99 @@ impl JoinerHandshakeRunner for JoinerHandshakeCoordinator {
 // + `facade::space_setup::errors`）拥有，与 redeem use case 的 pattern 对齐。
 // 本模块只持有编排逻辑，类型从 facade 引入。
 
+struct LegacySwitchSpaceSteps {
+    setup_status: Arc<dyn SetupStatusPort>,
+    migration_state: Arc<dyn MigrationStatePort>,
+    key_migration: Arc<dyn KeyMigrationPort>,
+    blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
+    blob_cipher: Arc<dyn BlobCipherPort>,
+    analytics: Arc<dyn AnalyticsFacade>,
+}
+
+impl LegacySwitchSpaceSteps {
+    fn new(
+        setup_status: Arc<dyn SetupStatusPort>,
+        migration_state: Arc<dyn MigrationStatePort>,
+        key_migration: Arc<dyn KeyMigrationPort>,
+        blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
+        blob_cipher: Arc<dyn BlobCipherPort>,
+        analytics: Arc<dyn AnalyticsFacade>,
+    ) -> Self {
+        Self {
+            setup_status,
+            migration_state,
+            key_migration,
+            blob_migration_repo,
+            blob_cipher,
+            analytics,
+        }
+    }
+
+    async fn swap(&self, run_id: &MigrationRunId) -> Result<(), SwitchSpaceError> {
+        let active = active_space_placeholder();
+        let records = self
+            .blob_migration_repo
+            .list_records()
+            .await
+            .map_err(map_blob_repo_err)?;
+        for record in records {
+            let aad = Aad::from(aad::for_inline(&record.event_id, &record.representation_id));
+            let plaintext = self
+                .key_migration
+                .decrypt_with_migration_key(
+                    run_id,
+                    &Ciphertext::new(record.migration_ciphertext),
+                    &aad,
+                )
+                .await
+                .map_err(map_key_migration_err)?;
+            let target = self
+                .blob_cipher
+                .encrypt(&active, &plaintext, &aad)
+                .await
+                .map_err(map_blob_cipher_err)?;
+            self.blob_migration_repo
+                .update_main_inline_data(
+                    &record.event_id,
+                    &record.representation_id,
+                    target.as_bytes(),
+                )
+                .await
+                .map_err(map_blob_repo_err)?;
+        }
+        Ok(())
+    }
+
+    async fn commit(
+        &self,
+        run_id: &MigrationRunId,
+        target_space_id: &SpaceId,
+        identity_target: Option<Uuid>,
+    ) -> Result<(), SwitchSpaceError> {
+        self.setup_status
+            .set_status(&SetupStatus {
+                has_completed: true,
+                space_id: Some(target_space_id.clone()),
+            })
+            .await
+            .map_err(|error| SwitchSpaceError::Storage(error.to_string()))?;
+        match identity_target {
+            Some(target_person) => self.analytics.adopt_from_sponsor(target_person),
+            None => self.analytics.release_to_solo(),
+        }
+        if let Err(error) = self.blob_migration_repo.discard_all_records().await {
+            warn!(error = %error, "legacy switch cleanup could not discard backup records");
+        }
+        if let Err(error) = self.key_migration.discard_migration_key(run_id).await {
+            warn!(error = %error, "legacy switch cleanup could not discard migration key");
+        }
+        self.migration_state
+            .set_current(None)
+            .await
+            .map_err(map_migration_state_err)
+    }
+}
+
 pub(crate) struct SwitchSpaceUseCase {
     setup_status: Arc<dyn SetupStatusPort>,
     migration_state: Arc<dyn MigrationStatePort>,
@@ -181,16 +264,12 @@ pub(crate) struct SwitchSpaceUseCase {
     handshake: Arc<dyn JoinerHandshakeRunner>,
     relationship_reset: Arc<dyn RelationshipStateResetPort>,
     space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,
-    /// Switches the local analytics identity to the target Space's
-    /// person once commit phase has succeeded. `None` on the target
-    /// sponsor side falls back to Solo so cross-Space switches never
-    /// strand the device on the old person.
-    analytics: Arc<dyn AnalyticsFacade>,
     /// The workspace owner behind the admission seam. Switch-space joins
     /// the target space through the same admission semantics as
     /// `RedeemPairingInvitationUseCase`; there is no second handshake
     /// orchestration path.
     workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
+    legacy_steps: Arc<LegacySwitchSpaceSteps>,
 }
 
 impl SwitchSpaceUseCase {
@@ -207,6 +286,14 @@ impl SwitchSpaceUseCase {
         analytics: Arc<dyn AnalyticsFacade>,
         workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
     ) -> Self {
+        let legacy_steps = Arc::new(LegacySwitchSpaceSteps::new(
+            Arc::clone(&setup_status),
+            Arc::clone(&migration_state),
+            Arc::clone(&key_migration),
+            Arc::clone(&blob_migration_repo),
+            Arc::clone(&blob_cipher),
+            Arc::clone(&analytics),
+        ));
         Self {
             setup_status,
             migration_state,
@@ -216,8 +303,8 @@ impl SwitchSpaceUseCase {
             handshake,
             relationship_reset,
             space_security_reset,
-            analytics,
             workspace_convergence,
+            legacy_steps,
         }
     }
 
@@ -295,7 +382,7 @@ impl SwitchSpaceUseCase {
             .count_records()
             .await
             .map_err(map_blob_repo_err)?;
-        self.phase_3_swap(&run_id).await?;
+        self.legacy_steps.swap(&run_id).await?;
         self.migration_state
             .set_current(Some(MigrationPhase::Swapped {
                 run_id: run_id.clone(),
@@ -315,9 +402,10 @@ impl SwitchSpaceUseCase {
         // ── Phase 4 — finalise + cleanup ─────────────────────────────────
         // identity_target 已经在阶段 2/3 落进 migration_state，phase_4_commit
         // 内部负责按这个意图切换 telemetry person——这样 daemon 在 commit
-        // 与 identify 之间崩溃后，下次启动 resume_pending 续跑 phase 4 时
+        // 与 identify 之间崩溃后，旧状态导入器续跑 phase 4 时
         // 仍能从持久化状态里还原意图并补做切换。
-        self.phase_4_commit(&run_id, &target_space_id, identity_target)
+        self.legacy_steps
+            .commit(&run_id, &target_space_id, identity_target)
             .await?;
 
         Ok(SwitchSpaceResult {
@@ -329,73 +417,6 @@ impl SwitchSpaceUseCase {
             migrated_records,
             preserved_unreadable_records: preparation.preserved_unreadable_records,
         })
-    }
-
-    /// 启动期补偿：按当前 `MigrationPhase` 续跑或清理。
-    ///
-    /// 注：本方法不接受 passphrase 参数——`HandshakeDone` 续跑只需新空间
-    /// 当前 session 的 master_key（由 `try_resume_session` 在 daemon 启动
-    /// 时通过 keyring KEK 静默解锁），不需要重新走 handshake。
-    pub(crate) async fn resume_pending(&self) -> Result<(), SwitchSpaceError> {
-        let phase = match self
-            .migration_state
-            .get_current()
-            .await
-            .map_err(map_migration_state_err)?
-        {
-            None => return Ok(()),
-            Some(p) => p,
-        };
-        match phase {
-            MigrationPhase::Prepared { run_id, .. } => {
-                info!(
-                    run_id = %run_id,
-                    "found stranded Prepared migration; aborting and cleaning up"
-                );
-                self.cleanup_after_phase2_failure(&run_id).await;
-                Ok(())
-            }
-            MigrationPhase::HandshakeDone {
-                run_id,
-                target_space_id,
-                sponsor_space_person_id,
-                preserved_unreadable_records,
-            } => {
-                info!(
-                    run_id = %run_id,
-                    target_space_id = %target_space_id,
-                    "resuming HandshakeDone migration: replay phase 3 + phase 4"
-                );
-                self.phase_3_swap(&run_id).await?;
-                self.migration_state
-                    .set_current(Some(MigrationPhase::Swapped {
-                        run_id: run_id.clone(),
-                        target_space_id: target_space_id.clone(),
-                        sponsor_space_person_id,
-                        preserved_unreadable_records,
-                    }))
-                    .await
-                    .map_err(map_migration_state_err)?;
-                self.phase_4_commit(&run_id, &target_space_id, sponsor_space_person_id)
-                    .await?;
-                Ok(())
-            }
-            MigrationPhase::Swapped {
-                run_id,
-                target_space_id,
-                sponsor_space_person_id,
-                ..
-            } => {
-                info!(
-                    run_id = %run_id,
-                    target_space_id = %target_space_id,
-                    "resuming Swapped migration: replay phase 4"
-                );
-                self.phase_4_commit(&run_id, &target_space_id, sponsor_space_person_id)
-                    .await?;
-                Ok(())
-            }
-        }
     }
 
     // ── 私有 phase 实现 ──────────────────────────────────────────────────
@@ -549,85 +570,6 @@ impl SwitchSpaceUseCase {
         Ok(outcome)
     }
 
-    async fn phase_3_swap(&self, run_id: &MigrationRunId) -> Result<(), SwitchSpaceError> {
-        let active = active_space_placeholder();
-        let records = self
-            .blob_migration_repo
-            .list_records()
-            .await
-            .map_err(map_blob_repo_err)?;
-        debug!(count = records.len(), "phase 3: rewriting main table");
-
-        for rec in records {
-            let aad_bytes = aad::for_inline(&rec.event_id, &rec.representation_id);
-            let aad_obj = Aad::from(aad_bytes);
-            let mig_ct = Ciphertext::new(rec.migration_ciphertext);
-            let plain = self
-                .key_migration
-                .decrypt_with_migration_key(run_id, &mig_ct, &aad_obj)
-                .await
-                .map_err(map_key_migration_err)?;
-            let new_ct = self
-                .blob_cipher
-                .encrypt(&active, &plain, &aad_obj)
-                .await
-                .map_err(map_blob_cipher_err)?;
-            self.blob_migration_repo
-                .update_main_inline_data(&rec.event_id, &rec.representation_id, new_ct.as_bytes())
-                .await
-                .map_err(map_blob_repo_err)?;
-        }
-        Ok(())
-    }
-
-    async fn phase_4_commit(
-        &self,
-        run_id: &MigrationRunId,
-        target_space_id: &SpaceId,
-        identity_target: Option<Uuid>,
-    ) -> Result<(), SwitchSpaceError> {
-        // setup_status 切换到新 space_id（has_completed 已是 true）。
-        self.setup_status
-            .set_status(&SetupStatus {
-                has_completed: true,
-                space_id: Some(target_space_id.clone()),
-            })
-            .await
-            .map_err(|e| SwitchSpaceError::Storage(e.to_string()))?;
-
-        // Telemetry identity 切换：放在 setup_status 落盘之后、清掉
-        // migration_state 之前。`Some` 走 sponsor 派发的 person，`None`
-        // 回退到 Solo（v1→v2 未配对的 sponsor 场景）。adopt/release 内部
-        // 是 fire-and-forget，失败只会 warn——只要这一步被调到，下次
-        // capture 就会按新身份上报；即使本调用前进程崩了，重启后
-        // resume_pending 会从持久化的 migration_state 恢复 identity_target
-        // 并在 phase-4 replay 里再次调用，从而保证身份切换不会因为
-        // commit→identify 之间的崩溃而被永久跳过。
-        match identity_target {
-            Some(target_person) => self.analytics.adopt_from_sponsor(target_person),
-            None => self.analytics.release_to_solo(),
-        }
-
-        // Cleanup：失败仅 warn——下一次启动期补偿会再尝试清。
-        if let Err(err) = self.blob_migration_repo.discard_all_records().await {
-            warn!(
-                error = %err,
-                "phase 4: discard_all_records failed (will retry on next launch)"
-            );
-        }
-        if let Err(err) = self.key_migration.discard_migration_key(run_id).await {
-            warn!(
-                error = %err,
-                "phase 4: discard_migration_key failed (will be retried; harmless idle)"
-            );
-        }
-        self.migration_state
-            .set_current(None)
-            .await
-            .map_err(map_migration_state_err)?;
-        Ok(())
-    }
-
     /// Phase 1 中途失败时的 best-effort 清理。phase 1 失败前 migration_state
     /// 还没被推进到 `Prepared`，所以这里不需要清 `migration_state`。
     async fn cleanup_after_phase1_failure(&self, run_id: &MigrationRunId) {
@@ -639,7 +581,7 @@ impl SwitchSpaceUseCase {
         }
     }
 
-    /// Phase 2 失败 / `Prepared` 续跑放弃时的 best-effort 清理。
+    /// Phase 2 失败时的 best-effort 清理。
     async fn cleanup_after_phase2_failure(&self, run_id: &MigrationRunId) {
         if let Err(err) = self.blob_migration_repo.discard_all_records().await {
             warn!(error = %err, "phase2-cleanup: discard_all_records failed");

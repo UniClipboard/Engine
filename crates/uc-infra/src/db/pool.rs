@@ -1,15 +1,64 @@
 use anyhow::Result;
-use diesel::r2d2::{ConnectionManager, CustomizeConnection, Pool};
+use diesel::r2d2::{ConnectionManager, CustomizeConnection, Pool, PooledConnection};
 use diesel::sqlite::SqliteConnection;
-use diesel::{Connection, RunQueryDsl};
+use diesel::{connection::SimpleConnection, Connection, RunQueryDsl};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
 /// Embed all diesel migrations at compile time
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
-/// Type alias for SQLite connection pool
-pub type DbPool = Pool<ConnectionManager<SqliteConnection>>;
+type RawDbPool = Pool<ConnectionManager<SqliteConnection>>;
+
+#[derive(Clone)]
+pub struct DbPool {
+    inner: Arc<RwLock<RawDbPool>>,
+}
+
+impl DbPool {
+    pub fn get(
+        &self,
+    ) -> std::result::Result<
+        PooledConnection<ConnectionManager<SqliteConnection>>,
+        diesel::r2d2::PoolError,
+    > {
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get()
+    }
+
+    pub fn replace_database(&self, database_url: &str) -> Result<()> {
+        let replacement = build_raw_pool(database_url)?;
+        run_migrations_raw(&replacement)?;
+        install_revision_triggers_raw(&replacement)?;
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement;
+        Ok(())
+    }
+
+    pub fn persistent_revision(&self) -> Result<u64> {
+        let row =
+            diesel::sql_query("SELECT revision FROM uc_database_revision WHERE singleton_id = 1")
+                .get_result::<DatabaseRevisionRow>(&mut self.get()?)?;
+        u64::try_from(row.revision).map_err(|_| anyhow::anyhow!("database revision is invalid"))
+    }
+}
+
+#[derive(diesel::QueryableByName)]
+struct DatabaseRevisionRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    revision: i64,
+}
+
+#[derive(diesel::QueryableByName)]
+struct DatabaseTableRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+}
 
 /// Connection customizer that sets per-connection SQLite pragmas on each new connection.
 ///
@@ -100,6 +149,51 @@ fn enable_wal_mode(database_url: &str) -> Result<()> {
 /// // use `pool` to acquire connections: let conn = pool.get().unwrap();
 /// ```
 pub fn init_db_pool(database_url: &str) -> Result<DbPool> {
+    let pool = build_raw_pool(database_url)?;
+    run_migrations_raw(&pool)?;
+    install_revision_triggers_raw(&pool)?;
+    Ok(DbPool {
+        inner: Arc::new(RwLock::new(pool)),
+    })
+}
+
+fn install_revision_triggers_raw(pool: &RawDbPool) -> Result<()> {
+    let mut connection = pool.get()?;
+    connection.batch_execute(
+        "DROP TRIGGER IF EXISTS uc_revision___diesel_schema_migrations_insert;\
+         DROP TRIGGER IF EXISTS uc_revision___diesel_schema_migrations_update;\
+         DROP TRIGGER IF EXISTS uc_revision___diesel_schema_migrations_delete;",
+    )?;
+    let tables = diesel::sql_query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' \
+         AND name NOT LIKE 'sqlite_%' AND name != '__diesel_schema_migrations' \
+         AND name != 'uc_database_revision' ORDER BY name",
+    )
+    .load::<DatabaseTableRow>(&mut connection)?;
+    for table in tables {
+        if !table
+            .name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(anyhow::anyhow!("database table name is unsupported"));
+        }
+        for operation in ["insert", "update", "delete"] {
+            let sql = format!(
+                "CREATE TRIGGER IF NOT EXISTS uc_revision_{table}_{operation} \
+                 AFTER {operation} ON \"{table}\" BEGIN \
+                 UPDATE uc_database_revision SET revision = revision + 1 WHERE singleton_id = 1; \
+                 END",
+                table = table.name,
+                operation = operation,
+            );
+            connection.batch_execute(&sql)?;
+        }
+    }
+    Ok(())
+}
+
+fn build_raw_pool(database_url: &str) -> Result<RawDbPool> {
     // Set WAL mode once on a single connection before pool creation.
     // WAL is a persistent database-file-level setting, so it only needs to be set once.
     // Doing it here avoids "database is locked" errors when r2d2 initializes multiple
@@ -108,14 +202,122 @@ pub fn init_db_pool(database_url: &str) -> Result<DbPool> {
 
     let manager = ConnectionManager::<SqliteConnection>::new(database_url);
 
-    let pool = Pool::builder()
+    Pool::builder()
         .connection_customizer(Box::new(SqlitePragmaCustomizer))
         .build(manager)
-        .map_err(|e| anyhow::anyhow!("Failed to create database pool: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create database pool: {}", e))
+}
 
-    run_migrations(&pool)?;
+#[cfg(test)]
+mod switch_tests {
+    use diesel::{Connection, RunQueryDsl, SqliteConnection};
+    use diesel_migrations::MigrationHarness;
+    use tempfile::tempdir;
 
-    Ok(pool)
+    use super::{init_db_pool, MIGRATIONS};
+
+    #[derive(diesel::QueryableByName)]
+    struct ValueRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        value: String,
+    }
+
+    #[derive(Debug, diesel::QueryableByName)]
+    struct TriggerRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+    }
+
+    fn seed(path: &std::path::Path, value: &str) {
+        let mut connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+        diesel::sql_query("CREATE TABLE generation_probe (value TEXT NOT NULL)")
+            .execute(&mut connection)
+            .unwrap();
+        diesel::sql_query("INSERT INTO generation_probe (value) VALUES (?)")
+            .bind::<diesel::sql_types::Text, _>(value)
+            .execute(&mut connection)
+            .unwrap();
+    }
+
+    #[test]
+    fn every_clone_reads_the_replacement_database_after_switch() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source.sqlite");
+        let target = directory.path().join("target.sqlite");
+        seed(&source, "source");
+        seed(&target, "target");
+        let pool = init_db_pool(source.to_str().unwrap()).unwrap();
+        let repository_pool = pool.clone();
+        let before = diesel::sql_query("SELECT value FROM generation_probe")
+            .get_result::<ValueRow>(&mut repository_pool.get().unwrap())
+            .unwrap();
+        assert_eq!(before.value, "source");
+
+        pool.replace_database(target.to_str().unwrap()).unwrap();
+
+        let after = diesel::sql_query("SELECT value FROM generation_probe")
+            .get_result::<ValueRow>(&mut repository_pool.get().unwrap())
+            .unwrap();
+        assert_eq!(after.value, "target");
+    }
+
+    #[test]
+    fn failed_replacement_leaves_every_clone_on_the_current_database() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source.sqlite");
+        let invalid_target = directory.path().join("database-directory");
+        seed(&source, "source");
+        std::fs::create_dir(&invalid_target).unwrap();
+        let pool = init_db_pool(source.to_str().unwrap()).unwrap();
+        let repository_pool = pool.clone();
+
+        assert!(pool
+            .replace_database(invalid_target.to_str().unwrap())
+            .is_err());
+
+        let current = diesel::sql_query("SELECT value FROM generation_probe")
+            .get_result::<ValueRow>(&mut repository_pool.get().unwrap())
+            .unwrap();
+        assert_eq!(current.value, "source");
+    }
+
+    #[test]
+    fn persistent_revision_tracks_commits_and_survives_reopen() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("revision.sqlite");
+        seed(&database, "first");
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        let before = pool.persistent_revision().unwrap();
+        diesel::sql_query("INSERT INTO generation_probe (value) VALUES ('second')")
+            .execute(&mut pool.get().unwrap())
+            .unwrap();
+        let after = pool.persistent_revision().unwrap();
+        assert!(after > before);
+
+        let reopened = init_db_pool(database.to_str().unwrap()).unwrap();
+        assert_eq!(reopened.persistent_revision().unwrap(), after);
+    }
+
+    #[test]
+    fn reverting_revision_migration_removes_runtime_revision_triggers() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("revision-downgrade.sqlite");
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        let mut connection = pool.get().unwrap();
+
+        connection.revert_last_migration(MIGRATIONS).unwrap();
+
+        let remaining = diesel::sql_query(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' \
+             AND name LIKE 'uc_revision_%' ORDER BY name",
+        )
+        .load::<TriggerRow>(&mut connection)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.name)
+        .collect::<Vec<_>>();
+        assert!(remaining.is_empty(), "remaining triggers: {remaining:?}");
+    }
 }
 
 /// Apply the embedded Diesel migrations using the supplied connection pool.
@@ -126,7 +328,7 @@ pub fn init_db_pool(database_url: &str) -> Result<DbPool> {
 /// # Errors
 ///
 /// Returns an error if acquiring a connection from the pool fails or if applying migrations fails.
-fn run_migrations(pool: &DbPool) -> Result<()> {
+fn run_migrations_raw(pool: &RawDbPool) -> Result<()> {
     let mut conn = pool.get()?;
 
     info!("Running database migrations...");

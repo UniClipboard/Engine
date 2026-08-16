@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use tracing::debug;
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::BlobId;
@@ -13,6 +14,65 @@ use crate::blob::{BlobStorePort, StoredPathBlob};
 /// Filesystem-based blob storage.
 pub struct FilesystemBlobStore {
     base_dir: PathBuf,
+}
+
+#[derive(Clone)]
+pub struct SwitchableFilesystemBlobStore {
+    base_dir: Arc<RwLock<PathBuf>>,
+}
+
+impl SwitchableFilesystemBlobStore {
+    pub fn new(base_dir: PathBuf) -> Self {
+        Self {
+            base_dir: Arc::new(RwLock::new(base_dir)),
+        }
+    }
+
+    pub fn replace_root(&self, base_dir: PathBuf) {
+        *self
+            .base_dir
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = base_dir;
+    }
+
+    pub fn current_root(&self) -> PathBuf {
+        self.base_dir
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn current_store(&self) -> FilesystemBlobStore {
+        FilesystemBlobStore::new(self.current_root())
+    }
+}
+
+#[async_trait::async_trait]
+impl BlobStorePort for SwitchableFilesystemBlobStore {
+    async fn put(&self, blob_id: &BlobId, data: &[u8]) -> Result<(PathBuf, Option<i64>)> {
+        self.current_store().put(blob_id, data).await
+    }
+
+    async fn get(&self, blob_id: &BlobId) -> Result<Vec<u8>> {
+        BlobReaderPort::get(self, blob_id).await
+    }
+
+    async fn put_from_path(&self, blob_id: &BlobId, source_path: &Path) -> Result<StoredPathBlob> {
+        self.current_store()
+            .put_from_path(blob_id, source_path)
+            .await
+    }
+
+    async fn delete(&self, blob_id: &BlobId) -> Result<()> {
+        self.current_store().delete(blob_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl BlobReaderPort for SwitchableFilesystemBlobStore {
+    async fn get(&self, blob_id: &BlobId) -> Result<Vec<u8>> {
+        BlobReaderPort::get(&self.current_store(), blob_id).await
+    }
 }
 
 impl FilesystemBlobStore {
@@ -157,8 +217,38 @@ mod tests {
     use super::*;
     use uc_core::ContentHash;
 
+    use crate::blob::SwitchableFilesystemBlobStore;
+
     fn hash_of(bytes: &[u8]) -> ContentHash {
         ContentHash::from(blake3::hash(bytes).as_bytes())
+    }
+
+    #[tokio::test]
+    async fn every_clone_reads_and_writes_the_replacement_blob_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source-blobs");
+        let target = tmp.path().join("target-blobs");
+        let store = SwitchableFilesystemBlobStore::new(source.clone());
+        let reader = store.clone();
+        let source_id = BlobId::from("source-blob");
+        store.put(&source_id, b"source").await.unwrap();
+        assert_eq!(
+            BlobReaderPort::get(&reader, &source_id).await.unwrap(),
+            b"source"
+        );
+
+        store.replace_root(target.clone());
+
+        assert!(BlobReaderPort::get(&reader, &source_id).await.is_err());
+        let target_id = BlobId::from("target-blob");
+        reader.put(&target_id, b"target").await.unwrap();
+        assert!(!source.join(target_id.as_str()).exists());
+        assert_eq!(
+            tokio::fs::read(target.join(target_id.as_str()))
+                .await
+                .unwrap(),
+            b"target"
+        );
     }
 
     #[tokio::test]

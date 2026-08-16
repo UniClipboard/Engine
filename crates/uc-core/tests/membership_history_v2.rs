@@ -1,16 +1,17 @@
 use sha2::{Digest, Sha256};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionActivationReceipt, AdmissionChangeFacts, AdmissionSecurityCommitmentV1,
-    BaseMembershipHistoryPositionV1, HistoricalMembershipSignatureError,
-    HistoricalMembershipSignatureVerifier, LegacyCheckpointAttestationV2, LegacyPrefixCheckpointV2,
-    MembershipActivationBaselineV2, MembershipAdmissionV2, MembershipCredential,
-    MembershipDecision, MembershipDecisionV1Evidence, MembershipDecisionV2, MembershipEvent,
-    MembershipEventId, MembershipEventV1Evidence, MembershipEventV2, MembershipOperation,
-    MembershipOperationV2, RemovalDecision, VersionedMembershipDecision, VersionedMembershipEvent,
-    VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-    ED25519_SIGNATURE_ALGORITHM_V1, LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2,
-    LEGACY_PREFIX_CHECKPOINT_FORMAT_V2, MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
+    AdmissionActivationReceipt, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
+    AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1,
+    HistoricalMembershipSignatureError, HistoricalMembershipSignatureVerifier,
+    LegacyCheckpointAttestationV2, LegacyPrefixCheckpointV2, MembershipActivationBaselineV2,
+    MembershipAdmissionV2, MembershipCredential, MembershipDecision, MembershipDecisionV1Evidence,
+    MembershipDecisionV2, MembershipEvent, MembershipEventId, MembershipEventV1Evidence,
+    MembershipEventV2, MembershipOperation, MembershipOperationV2, RemovalDecision,
+    VersionedMembershipDecision, VersionedMembershipEvent, VersionedMembershipHistory,
+    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+    LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2, LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
+    MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 
 const LINEAGE: &str = "space-lineage";
@@ -924,4 +925,27 @@ fn verified_history_persistence_round_trip_preserves_authority_and_receipts() {
     assert_eq!(reopened, history);
     assert!(reopened.active_members().contains(&b.facts.member_instance));
     assert_eq!(reopened.depth(add_b.event_id()), Some(1));
+}
+
+#[test]
+fn admission_content_key_catalog_is_canonical_and_rejects_incomplete_history() {
+    let first = AdmissionContentKeyEntryV1::new("legacy-v1", 0, vec![0x41; 32]).unwrap();
+    let current = AdmissionContentKeyEntryV1::new("content-2", 2, vec![0x42; 32]).unwrap();
+    let forward =
+        AdmissionContentKeyCatalogV1::new("content-2", 2, vec![first.clone(), current.clone()])
+            .unwrap();
+    let reversed = AdmissionContentKeyCatalogV1::new("content-2", 2, vec![current, first]).unwrap();
+
+    assert_eq!(forward, reversed);
+    assert_eq!(forward.digest(), reversed.digest());
+    assert_eq!(
+        AdmissionContentKeyCatalogV1::decode(&forward.encode().unwrap()).unwrap(),
+        forward
+    );
+    assert!(AdmissionContentKeyCatalogV1::new(
+        "content-2",
+        2,
+        vec![AdmissionContentKeyEntryV1::new("content-2", 2, vec![0x42; 32]).unwrap()],
+    )
+    .is_err());
 }

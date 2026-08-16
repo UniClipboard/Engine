@@ -8,11 +8,12 @@ use super::admission_attempt::{
 };
 use super::error::{
     AdmissionAttemptRepositoryError, AdmissionOutboxDeliveryError,
-    AdmissionSecurityTransitionError, CurrentMemberSignatureError, CurrentMembershipIdentityError,
-    GroupUpdateDispatchError, LegacyPeerProbeError, MembershipAnnouncementRepositoryError,
-    MembershipAppliedSecurityUpdateRepositoryError, MembershipAttestationEndpointError,
-    MembershipAttestationError, MembershipCandidateRepositoryError, MembershipError,
-    MembershipGossipEndpointError, MembershipGossipTransportError, MembershipHistoryExchangeError,
+    AdmissionSecurityTransitionError, AdmissionSpaceTransitionError, CurrentMemberSignatureError,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError, LegacyPeerProbeError,
+    MembershipAnnouncementRepositoryError, MembershipAppliedSecurityUpdateRepositoryError,
+    MembershipAttestationEndpointError, MembershipAttestationError,
+    MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
+    MembershipGossipTransportError, MembershipHistoryExchangeError,
     MembershipOutboxRepositoryError, MembershipSecurityUpdateError, RelationshipStateResetError,
     SpaceSecurityStateResetError, VerifiedPeerPromotionError, WorkspaceConvergenceRepositoryError,
 };
@@ -335,6 +336,53 @@ pub trait AdmissionOutboxDeliveryPort: Send + Sync {
         attempt_id: AdmissionAttemptId,
         message: &AdmissionOutboxMessageV1,
     ) -> Result<AdmissionOutboxDeliveryResultV1, AdmissionOutboxDeliveryError>;
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AdmissionSpaceTransitionPreparationV2 {
+    pub attempt_id: AdmissionAttemptId,
+    pub target_space_id: String,
+    pub target_security_commitment: super::AdmissionSecurityCommitmentV1,
+    pub target_membership_history: Vec<u8>,
+    pub target_security_state: Vec<u8>,
+    pub target_protection_group_id: String,
+    pub target_key_catalog: Vec<u8>,
+    pub local_device_id: DeviceId,
+    pub target_relationships: Vec<super::AdmissionChangeFacts>,
+    pub target_access_state: Vec<u8>,
+}
+
+impl std::fmt::Debug for AdmissionSpaceTransitionPreparationV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdmissionSpaceTransitionPreparationV2")
+            .field("attempt_id", &self.attempt_id)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionSpaceTransitionStepV2 {
+    Advanced(super::AdmissionSpaceTransitionV2),
+    Finished(super::AdmissionSpaceTransitionResultV2),
+}
+
+#[async_trait]
+pub trait AdmissionSpaceTransitionPort: Send + Sync {
+    async fn prepare_if_needed(
+        &self,
+        input: &AdmissionSpaceTransitionPreparationV2,
+    ) -> Result<super::AdmissionSpaceTransitionV2, AdmissionSpaceTransitionError>;
+
+    async fn advance(
+        &self,
+        transition: &super::AdmissionSpaceTransitionV2,
+    ) -> Result<AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionError>;
+
+    async fn discard_pre_activation(
+        &self,
+        transition: &super::AdmissionSpaceTransitionV2,
+    ) -> Result<(), AdmissionSpaceTransitionError>;
 }
 
 #[derive(Clone, PartialEq, Eq)]

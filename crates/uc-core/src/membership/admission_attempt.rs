@@ -168,12 +168,16 @@ pub struct AdmissionAttemptV1 {
     pub security_commitment: Option<Vec<u8>>,
     pub security_commit: Option<Vec<u8>>,
     pub security_welcome: Option<Vec<u8>>,
+    pub target_protection_group_id: Option<String>,
+    pub target_key_catalog: Option<Vec<u8>>,
+    pub target_relationships: Option<Vec<super::AdmissionChangeFacts>>,
     pub staged_security_state: Option<Vec<u8>>,
     pub joiner_pending_security_state: Option<Vec<u8>>,
     pub base_membership_history: Option<Vec<u8>>,
     pub verified_membership_history: Option<Vec<u8>>,
     pub invitation_claim: Option<Vec<u8>>,
     pub space_transition: Option<Vec<u8>>,
+    pub space_transition_result: Option<Vec<u8>>,
     pub prepared_proof: Option<Vec<u8>>,
     pub activation_receipt: Option<Vec<u8>>,
     pub completion: Option<Vec<u8>>,
@@ -191,6 +195,8 @@ pub struct AdmissionAttemptV1 {
     pub rejection_reason: Option<AdmissionRejectionReasonV1>,
     pub write_ahead_recovery: Option<Vec<u8>>,
     pub cleanup_pending: bool,
+    #[serde(default)]
+    pub target_access_state: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for AdmissionAttemptV1 {
@@ -230,12 +236,16 @@ impl AdmissionAttemptV1 {
             security_commitment: None,
             security_commit: None,
             security_welcome: None,
+            target_protection_group_id: None,
+            target_key_catalog: None,
+            target_relationships: None,
             staged_security_state: None,
             joiner_pending_security_state: None,
             base_membership_history: None,
             verified_membership_history: None,
             invitation_claim: None,
             space_transition: None,
+            space_transition_result: None,
             prepared_proof: None,
             activation_receipt: None,
             completion: None,
@@ -253,6 +263,7 @@ impl AdmissionAttemptV1 {
             rejection_reason: None,
             write_ahead_recovery: None,
             cleanup_pending: false,
+            target_access_state: None,
         }
     }
 
@@ -321,6 +332,7 @@ impl AdmissionAttemptV1 {
         !self.is_terminal()
             || self.outboxes.iter().any(|message| !message.superseded)
             || self.write_ahead_recovery.is_some()
+            || (self.space_transition.is_some() && self.space_transition_result.is_none())
             || self.cleanup_pending
     }
 }
@@ -391,6 +403,7 @@ pub struct TerminalAdmissionAttemptV1 {
     pub candidate_event_id: Option<[u8; 32]>,
     pub cancel_outcome: Option<Vec<u8>>,
     pub replay_result: Vec<u8>,
+    pub space_transition_result: Option<Vec<u8>>,
     pub acknowledgment_rebuild: Vec<AdmissionInboxRecordV1>,
 }
 

@@ -20,8 +20,8 @@ use crate::crypto::domain::{ActiveSpace, Passphrase};
 use crate::ids::{DeviceId, SessionId, SpaceId};
 use crate::pairing::InvitationCode;
 use crate::space_access::{
-    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer, PreparedGroupJoin,
-    ProofDerivedKey,
+    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
+    PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
 };
 
 /// 业务语义级的空间访问失败。
@@ -205,6 +205,16 @@ pub trait InitializeSpacePort: Send + Sync {
         space_id: &SpaceId,
         passphrase: &Passphrase,
     ) -> Result<ActiveSpace, SpaceAccessError>;
+}
+
+/// Prepare target-local access material without changing the active space.
+#[async_trait]
+pub trait PrepareAdmissionTargetAccessPort: Send + Sync {
+    async fn prepare_target_access(
+        &self,
+        target_space_id: &SpaceId,
+        passphrase: &Passphrase,
+    ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError>;
 }
 
 /// Unlock an already-initialized space with its passphrase.

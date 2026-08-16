@@ -67,8 +67,8 @@ use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::search::{HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex};
 use uc_infra::security::{
-    AdmissionKeyManager, Argon2PinHasher, Blake3Hasher,
-    DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
+    space_generation_directory, ActiveSpaceManifestStore, AdmissionKeyManager, Argon2PinHasher,
+    Blake3Hasher, DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
     EncryptingInboundReceiveCommit, InMemorySession, KeyMaterialStore, ProfileLifecycleManager,
     Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
 };
@@ -217,31 +217,72 @@ pub fn wire_dependencies_from_inputs(
         analytics_facade,
         host_event_emitter,
     } = inputs;
-    let db_path = paths.db_path;
+    let legacy_db_path = paths.db_path;
     let vault_path = paths.vault_dir;
     let settings_path = paths.settings_path;
     let app_data_root = paths.app_data_root_dir.clone();
+    let generation_root = app_data_root.join("space-generations");
+    let profile_lifecycle = ProfileLifecycleManager::new(Arc::clone(&secure_storage));
+    let profile_marker = profile_lifecycle
+        .load_or_initialize()
+        .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
+    let admission_keys = Arc::new(AdmissionKeyManager::new(
+        Arc::clone(&secure_storage),
+        profile_marker.profile_generation,
+    ));
+    let active_manifest_store = Arc::new(ActiveSpaceManifestStore::new(
+        vault_path.clone(),
+        Arc::clone(&admission_keys),
+    ));
+    let active_manifest = active_manifest_store
+        .load_sync()
+        .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
+    let (db_path, blob_store_dir) = match active_manifest.as_ref() {
+        Some(manifest) => {
+            let directory = space_generation_directory(
+                &generation_root,
+                &manifest.space_id,
+                &manifest.database_generation,
+            );
+            let database = directory.join("target.sqlite");
+            if !database.is_file() {
+                return Err(WiringError::DatabaseInit(
+                    "Active space database generation is unavailable".to_owned(),
+                ));
+            }
+            (database, directory.join("blobs"))
+        }
+        None => (legacy_db_path, vault_path.join("blobs")),
+    };
 
     let db_pool = create_db_pool(&db_path)?;
+    let db_pool_for_space_transition = db_pool.clone();
     // Clone pool before infra layer consumes it — search bundle needs the same pool.
     let db_pool_for_search = db_pool.clone();
     // Config-migration export produces a consistent db snapshot via `VACUUM INTO`
     // off its own pooled connection; clone before infra consumes the pool.
     let db_pool_for_config_migration = db_pool.clone();
 
-    let infra = create_infra_layer(
+    let mut infra = create_infra_layer(
         db_pool,
         &vault_path,
         &settings_path,
         &app_data_root,
         secure_storage.clone(),
     )?;
+    infra.setup_status = Arc::new(uc_infra::ManifestProjectingSetupStatusRepository::new(
+        Arc::clone(&infra.setup_status),
+        Arc::clone(&active_manifest_store),
+    ));
 
     let storage_config = Arc::new(ClipboardStorageConfig::defaults());
+    let source_blob_root = blob_store_dir.clone();
+    let profile_salt = profile_id.inner().as_bytes().to_vec();
     let platform = create_platform_layer(
         secure_storage,
         profile_id,
         &vault_path,
+        blob_store_dir,
         infra.blob_repository.clone(),
         infra.clock.clone(),
         storage_config.clone(),
@@ -250,13 +291,18 @@ pub fn wire_dependencies_from_inputs(
 
     // Space access — single session/key access entry. See
     // `build_space_access_ports` for the §8.3 single-adapter-reuse rationale.
-    let (space_access_ports, legacy_protection, current_member_signatures, space_security_reset) =
-        build_space_access_ports(
-            &infra.key_material,
-            &platform.current_profile,
-            &platform.session,
-            &infra.db_executor,
-        );
+    let (
+        space_access_ports,
+        space_access_adapter,
+        legacy_protection,
+        current_member_signatures,
+        space_security_reset,
+    ) = build_space_access_ports(
+        &infra.key_material,
+        &platform.current_profile,
+        &platform.session,
+        &infra.db_executor,
+    );
     let membership_session = Arc::clone(&platform.session);
     let workspace_convergence_repository: Arc<
         dyn uc_core::membership::WorkspaceConvergenceRepositoryPort,
@@ -264,17 +310,21 @@ pub fn wire_dependencies_from_inputs(
         Arc::clone(&infra.db_executor),
         platform.session.as_ref().clone(),
     ));
-    let profile_lifecycle = ProfileLifecycleManager::new(Arc::clone(&platform.secure_storage));
-    let profile_marker = profile_lifecycle
-        .load_or_initialize()
-        .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
     let admission_attempt_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort> =
         Arc::new(DieselAdmissionAttemptStore::new(
             Arc::clone(&infra.db_executor),
-            AdmissionKeyManager::new(
-                Arc::clone(&platform.secure_storage),
-                profile_marker.profile_generation,
-            ),
+            admission_keys.as_ref().clone(),
+        ));
+    let admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort> =
+        Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(
+            db_pool_for_space_transition,
+            source_blob_root,
+            generation_root,
+            profile_salt,
+            Arc::clone(&platform.blob_generation_store),
+            Arc::clone(&active_manifest_store),
+            space_access_adapter,
+            Arc::clone(&platform.session),
         ));
     let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
 
@@ -513,6 +563,15 @@ pub fn wire_dependencies_from_inputs(
     let key_migration_for_wiring: Arc<dyn uc_core::ports::security::KeyMigrationPort> = Arc::new(
         uc_infra::security::DefaultKeyMigrationAdapter::new(Arc::clone(&platform.secure_storage)),
     );
+    let legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort> =
+        Arc::new(uc_infra::FileLegacyMigrationRecovery::with_defaults(
+            vault_path.clone(),
+            Arc::clone(&infra.setup_status),
+            Arc::clone(&key_migration_for_wiring),
+            Arc::clone(&infra.blob_migration_repo),
+            blob_cipher.clone(),
+            Arc::clone(&analytics_facade),
+        ));
 
     // Whole-installation configuration migration (export / import preview /
     // staged import). Assembled in the sync wiring context because its inputs
@@ -659,6 +718,8 @@ pub fn wire_dependencies_from_inputs(
             membership_session,
             workspace_convergence_repository,
             admission_attempt_repository,
+            admission_space_transition,
+            legacy_migration_recovery,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             blob_migration_repo: Arc::clone(&infra.blob_migration_repo),
             migration_state: Arc::clone(&infra.migration_state),

@@ -89,6 +89,20 @@ pub enum AdmissionSecurityTransitionError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum AdmissionSpaceTransitionError {
+    #[error("profile is locked")]
+    Locked,
+    #[error("space transition is unavailable")]
+    Unavailable,
+    #[error("space transition storage failed")]
+    Storage,
+    #[error("space transition state is inconsistent")]
+    Inconsistent,
+    #[error("space transition requires recovery")]
+    RecoveryRequired,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MembershipSecurityUpdateError {
     #[error("membership security state is unavailable")]
     Unavailable,

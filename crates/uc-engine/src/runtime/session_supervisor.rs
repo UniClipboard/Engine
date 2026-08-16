@@ -69,15 +69,40 @@ impl SessionSupervisor {
 
     pub(super) async fn rebuild_session(&self) -> Result<(), EngineError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.operations.close_and_wait().await;
+        self.operations.close_and_wait(None).await?;
         self.stop_current_session(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
             .await?;
         self.install_new_session().await
     }
 
+    pub(super) async fn transition_session(
+        &self,
+        current_operation: SessionOperationLease,
+    ) -> Result<(), EngineError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.operations
+            .close_and_wait(Some(current_operation))
+            .await?;
+        let session = self
+            .session
+            .lock()
+            .await
+            .take()
+            .ok_or_else(super::operation_unavailable_error)?;
+        let convergence = session.sync_engine.space_transition_recovery();
+        session
+            .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+            .await;
+        convergence
+            .recover_after_session_drain()
+            .await
+            .map_err(|error| operation_error_with_code(1103, "recover space transition", error))?;
+        self.install_new_session().await
+    }
+
     pub(super) async fn suspend(&self) -> Result<(), EngineError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.operations.close_and_wait().await;
+        self.operations.close_and_wait(None).await?;
         self.stop_current_session(uc_core::FileTransferCancellationReason::Unknown)
             .await
     }
@@ -121,7 +146,26 @@ impl SessionSupervisor {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .ok_or_else(super::operation_unavailable_error)?;
-        let session = ProductionRuntime::build_session(&factory).await?;
+        let mut session = ProductionRuntime::build_session(&factory).await?;
+        let convergence = session.sync_engine.space_transition_recovery();
+        if convergence
+            .requires_session_transition()
+            .await
+            .map_err(|error| {
+                operation_error_with_code(1103, "inspect pending space transition", error)
+            })?
+        {
+            session
+                .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+                .await;
+            convergence
+                .recover_after_session_drain()
+                .await
+                .map_err(|error| {
+                    operation_error_with_code(1103, "recover pending space transition", error)
+                })?;
+            session = ProductionRuntime::build_session(&factory).await?;
+        }
         *self.session.lock().await = Some(session);
         self.operations.reopen();
         Ok(())
@@ -184,7 +228,16 @@ impl SessionOperationGate {
         self.inner.changed.notify_waiters();
     }
 
-    async fn close_and_wait(&self) {
+    async fn close_and_wait(
+        &self,
+        current_operation: Option<SessionOperationLease>,
+    ) -> Result<(), EngineError> {
+        if current_operation
+            .as_ref()
+            .is_some_and(|lease| !Arc::ptr_eq(&lease.gate, &self.inner))
+        {
+            return Err(super::operation_unavailable_error());
+        }
         let cancellation = {
             let mut state = self
                 .inner
@@ -194,6 +247,7 @@ impl SessionOperationGate {
             state.open = false;
             state.cancellation.clone()
         };
+        drop(current_operation);
         let drained = tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()).await;
         if drained.is_err() {
             cancellation.cancel();
@@ -207,6 +261,7 @@ impl SessionOperationGate {
                 );
             }
         }
+        Ok(())
     }
 
     async fn wait_for_drain(&self) {
@@ -257,7 +312,7 @@ mod tests {
         let lease = gate.acquire().expect("new gate accepts an operation");
         let closing = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.close_and_wait().await }
+            async move { gate.close_and_wait(None).await }
         });
         tokio::task::yield_now().await;
         assert!(gate.acquire().is_err());
@@ -265,7 +320,8 @@ mod tests {
 
         drop(lease);
         match closing.await {
-            Ok(()) => {}
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("operation gate close failed: {error}"),
             Err(error) => panic!("operation gate close task did not complete: {error}"),
         }
     }
@@ -278,9 +334,28 @@ mod tests {
 
         tokio::time::timeout(
             SESSION_OPERATION_GRACE.saturating_mul(2) + Duration::from_millis(1),
-            gate.close_and_wait(),
+            gate.close_and_wait(None),
         )
         .await
-        .expect("gate close must remain bounded after cancellation");
+        .expect("gate close must remain bounded after cancellation")
+        .expect("gate close must accept no current operation");
+    }
+
+    #[tokio::test]
+    async fn transition_operation_excludes_itself_but_waits_for_other_operations() {
+        let gate = Arc::new(SessionOperationGate::new_open());
+        let transition = gate.acquire().expect("transition acquires ordinary lease");
+        let other = gate.acquire().expect("concurrent operation acquires lease");
+        let closing = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move { gate.close_and_wait(Some(transition)).await }
+        });
+
+        tokio::task::yield_now().await;
+        assert!(gate.acquire().is_err());
+        assert!(!closing.is_finished());
+
+        drop(other);
+        closing.await.unwrap().unwrap();
     }
 }
