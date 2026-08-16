@@ -70,6 +70,17 @@ enum LegacyDiscoveryPhase {
     Complete,
 }
 
+fn select_legacy_upgrade_candidates(
+    source: CurrentWorkspacePeerScopeSource,
+    legacy_peer_device_ids: Vec<uc_core::ids::DeviceId>,
+    pending_readmission_members: Vec<uc_core::ids::DeviceId>,
+) -> Vec<uc_core::ids::DeviceId> {
+    match source {
+        CurrentWorkspacePeerScopeSource::Legacy => legacy_peer_device_ids,
+        CurrentWorkspacePeerScopeSource::CurrentHistory => pending_readmission_members,
+    }
+}
+
 impl AutomaticLegacyUpgrade {
     pub fn new(deps: AutomaticLegacyUpgradeDeps) -> Self {
         Self {
@@ -117,23 +128,45 @@ impl AutomaticLegacyUpgrade {
             .map_err(|_| {
                 LegacyUpgradeError::Internal("current peer scope is unavailable".into())
             })?;
-        if scope.source != CurrentWorkspacePeerScopeSource::Legacy {
-            return Ok(LegacyUpgradePassOutcome::ready(false));
-        }
         let members = self
             .deps
             .member_repo
             .list()
             .await
             .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
-        let mut member_ids = scope.peer_device_ids.clone();
+        let mut member_ids = members
+            .iter()
+            .map(|member| member.device_id)
+            .collect::<Vec<_>>();
         member_ids.push(local_device_id);
+        member_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        member_ids.dedup();
+        let pending_readmission_members = match scope.source {
+            CurrentWorkspacePeerScopeSource::Legacy => Vec::new(),
+            CurrentWorkspacePeerScopeSource::CurrentHistory => {
+                self.deps
+                    .protection
+                    .snapshot(&member_ids)
+                    .await?
+                    .pending_readmission_members
+            }
+        };
+        let candidate_device_ids = select_legacy_upgrade_candidates(
+            scope.source,
+            scope.peer_device_ids,
+            pending_readmission_members,
+        );
+        if scope.source == CurrentWorkspacePeerScopeSource::CurrentHistory
+            && candidate_device_ids.is_empty()
+        {
+            return Ok(LegacyUpgradePassOutcome::ready(false));
+        }
         let mut successful_exchanges = 0usize;
         let mut should_create_local_group = false;
 
         for member in members
             .iter()
-            .filter(|member| scope.peer_device_ids.contains(&member.device_id))
+            .filter(|member| candidate_device_ids.contains(&member.device_id))
         {
             let request = self
                 .deps
@@ -230,8 +263,9 @@ impl AutomaticLegacyUpgrade {
             debug!("legacy upgrade protection group is ready");
             return Ok(LegacyUpgradePassOutcome::ready(false));
         }
-        if should_create_local_group
-            || (discovery_phase == LegacyDiscoveryPhase::Complete && successful_exchanges == 0)
+        if scope.source == CurrentWorkspacePeerScopeSource::Legacy
+            && (should_create_local_group
+                || (discovery_phase == LegacyDiscoveryPhase::Complete && successful_exchanges == 0))
         {
             self.bootstrap_local_group().await?;
             self.initialize_current_history().await?;

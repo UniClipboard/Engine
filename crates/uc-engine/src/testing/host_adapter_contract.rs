@@ -479,6 +479,28 @@ impl HostSecureStorage for MemoryHostSecureStorage {
     }
 }
 
+fn persistent_engine_host(
+    root: &std::path::Path,
+    secure_storage: MemoryHostSecureStorage,
+) -> HostCapabilities {
+    HostCapabilities::new(
+        HostDirectories::new(
+            root.join("private"),
+            root.join("cache"),
+            root.join("temporary"),
+            root.join("logs"),
+        ),
+        Box::new(secure_storage),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    )
+}
+
 #[test]
 fn secure_storage_adapter_preserves_secret_bytes() {
     let storage =
@@ -2612,6 +2634,272 @@ async fn engine_start_builds_a_resumable_real_session() {
             EngineState::Stopped,
         ]
     );
+}
+
+#[tokio::test]
+async fn engine_repairs_an_encrypted_stale_removed_device_state_across_restart() {
+    use uc_core::ids::{DeviceId, SpaceId};
+    use uc_core::membership::{
+        AdmissionChangeFacts, MemberInstanceId, MemberSyncPreferences, MembershipEvent,
+        MembershipOperation, MembershipReconciliation, SpaceMember, WorkspaceConvergenceState,
+    };
+    use uc_core::security::IdentityFingerprint;
+
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    let secure_storage = MemoryHostSecureStorage::default();
+    let config = EngineConfig::new("1.2.3");
+
+    let (engine, _events) = Engine::start(
+        config.clone(),
+        persistent_engine_host(root.path(), secure_storage.clone()),
+    )
+    .await
+    .unwrap();
+    let created = engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Current Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap();
+    let (space_id, local_device_id, local_fingerprint) = match created {
+        crate::OperationResult::SpaceCreated {
+            space_id,
+            self_device_id,
+            identity_fingerprint,
+        } => (
+            SpaceId::from_str(&space_id),
+            DeviceId::new(self_device_id),
+            IdentityFingerprint::from_display_string(identity_fingerprint).unwrap(),
+        ),
+        other => panic!("expected created space, got {other:?}"),
+    };
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+
+    let seeded = crate::assembly::host::wire_host_capabilities(
+        &config,
+        persistent_engine_host(root.path(), secure_storage.clone()),
+    )
+    .unwrap();
+    seeded
+        .wired
+        .deps
+        .security
+        .space_access_ports
+        .resume_session
+        .try_resume_session(&space_id)
+        .await
+        .unwrap()
+        .expect("resume the encrypted space before seeding affected state");
+    let repository = Arc::clone(&seeded.wired.sync_engine.workspace_convergence_repository);
+    let local_instance = MemberInstanceId::from_bytes([0x5a; 32]);
+    let removed_instance = MemberInstanceId::from_bytes([0x5b; 32]);
+    let removed_device_id = DeviceId::new("removed-device-sensitive-marker");
+    let genesis = MembershipEvent::new(
+        space_id.as_ref().to_owned(),
+        None,
+        0,
+        [0x5a; 16],
+        local_instance,
+        MembershipOperation::AddDevice {
+            admission: AdmissionChangeFacts {
+                member_instance: local_instance,
+                device_id: local_device_id,
+                device_name: "Current Device".into(),
+                identity_fingerprint: local_fingerprint,
+                transport_public_key: vec![0x5a; 32],
+                transport_address_blob: vec![0x5a; 16],
+                identity_signature: vec![0x5a; 64],
+            },
+        },
+        [0x5a; 32],
+        [0x5b; 32],
+        Vec::new(),
+        None,
+        vec![0x5a],
+    );
+    let mut history = MembershipReconciliation::new(space_id.as_ref().to_owned(), local_instance);
+    history.receive_verified(genesis.clone()).unwrap();
+    let addition = MembershipEvent::new(
+        space_id.as_ref().to_owned(),
+        Some(genesis.event_id()),
+        1,
+        [0x5b; 16],
+        local_instance,
+        MembershipOperation::AddDevice {
+            admission: AdmissionChangeFacts {
+                member_instance: removed_instance,
+                device_id: removed_device_id,
+                device_name: "Removed Device".into(),
+                identity_fingerprint: IdentityFingerprint::from_display_string(
+                    "ABCD-EFGH-IJKL-MNOP",
+                )
+                .unwrap(),
+                transport_public_key: vec![0x5b; 32],
+                transport_address_blob: vec![0x5b; 16],
+                identity_signature: vec![0x5b; 64],
+            },
+        },
+        [0x5b; 32],
+        [0x5c; 32],
+        Vec::new(),
+        None,
+        vec![0x5b],
+    );
+    history.receive_verified(addition.clone()).unwrap();
+    history
+        .receive_verified(MembershipEvent::new(
+            space_id.as_ref().to_owned(),
+            Some(addition.event_id()),
+            2,
+            [0x5c; 16],
+            local_instance,
+            MembershipOperation::RemoveDevice {
+                member: removed_instance,
+            },
+            [0x5c; 32],
+            [0x5d; 32],
+            Vec::new(),
+            None,
+            vec![0x5c],
+        ))
+        .unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(
+        space_id.as_ref().to_owned(),
+        chrono::Utc::now().timestamp_millis(),
+    );
+    state.own_instance = Some(local_instance);
+    state.membership_reconciliation = Some(history);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+    seeded
+        .wired
+        .deps
+        .device
+        .member_repo
+        .save(&SpaceMember {
+            device_id: removed_device_id,
+            device_name: "Removed Device".into(),
+            identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+                .unwrap(),
+            joined_at: chrono::Utc::now(),
+            sync_preferences: MemberSyncPreferences::default(),
+        })
+        .await
+        .unwrap();
+    drop(repository);
+    drop(seeded);
+
+    let (engine, _events) = Engine::start(
+        config.clone(),
+        persistent_engine_host(root.path(), secure_storage.clone()),
+    )
+    .await
+    .unwrap();
+    engine
+        .execute(crate::Operation::RecoverSession(
+            crate::RecoverSessionInput {
+                allow_secure_storage_unlock: true,
+            },
+        ))
+        .await
+        .unwrap();
+    let peers = engine
+        .execute(crate::Operation::QueryPeerConnections)
+        .await
+        .unwrap();
+    let crate::OperationResult::PeerConnections(peers) = peers else {
+        panic!("expected peer connections");
+    };
+    assert!(peers
+        .iter()
+        .all(|peer| peer.peer_id != removed_device_id.as_str()));
+    let devices = engine.execute(crate::Operation::ListDevices).await.unwrap();
+    let crate::OperationResult::Devices(devices) = devices else {
+        panic!("expected devices");
+    };
+    assert!(devices
+        .iter()
+        .all(|device| device.device_id != removed_device_id.as_str()));
+    let repeated_removal = engine
+        .execute(crate::Operation::RemoveMember(crate::RemoveMemberInput {
+            device_id: removed_device_id.as_str().to_owned(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        repeated_removal.category(),
+        crate::EngineErrorCategory::NotFound
+    );
+    tokio::task::yield_now().await;
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+
+    let repaired = crate::assembly::host::wire_host_capabilities(
+        &config,
+        persistent_engine_host(root.path(), secure_storage.clone()),
+    )
+    .unwrap();
+    repaired
+        .wired
+        .deps
+        .security
+        .space_access_ports
+        .resume_session
+        .try_resume_session(&space_id)
+        .await
+        .unwrap()
+        .expect("resume the repaired encrypted space");
+    let repaired_state = repaired
+        .wired
+        .sync_engine
+        .workspace_convergence_repository
+        .load_state()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!repaired_state.migrated_from_pre_adr_020);
+    assert!(!repaired_state
+        .membership_reconciliation
+        .as_ref()
+        .unwrap()
+        .is_device_effective(&removed_device_id));
+    drop(repaired);
+
+    let (restarted, _events) =
+        Engine::start(config, persistent_engine_host(root.path(), secure_storage))
+            .await
+            .unwrap();
+    restarted
+        .execute(crate::Operation::RecoverSession(
+            crate::RecoverSessionInput {
+                allow_secure_storage_unlock: true,
+            },
+        ))
+        .await
+        .unwrap();
+    let peers = restarted
+        .execute(crate::Operation::QueryPeerConnections)
+        .await
+        .unwrap();
+    let crate::OperationResult::PeerConnections(peers) = peers else {
+        panic!("expected peer connections after restart");
+    };
+    assert!(peers
+        .iter()
+        .all(|peer| peer.peer_id != removed_device_id.as_str()));
+    restarted
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+    assert_ne!(local_device_id, removed_device_id);
 }
 
 #[cfg(not(feature = "lan-compat"))]

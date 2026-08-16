@@ -818,6 +818,146 @@ async fn current_peer_scope_excludes_an_accepted_removal() {
 }
 
 #[tokio::test]
+async fn migrated_workspace_with_applied_history_does_not_restore_a_removed_peer() {
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let c = instance(0x0c);
+    let repository = MemoryWorkspaceRepository::default();
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let b_addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let c_addition = membership_event(Some(b_addition.event_id()), 2, a, c, "device-c", 3);
+    let removal = uc_core::membership::MembershipEvent::new(
+        SPACE.to_owned(),
+        Some(c_addition.event_id()),
+        3,
+        [4; 16],
+        a,
+        MembershipOperation::RemoveDevice { member: b },
+        [4; 32],
+        [5; 32],
+        Vec::new(),
+        None,
+        vec![4],
+    );
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    for event in [genesis, b_addition, c_addition, removal] {
+        history.receive_verified(event).unwrap();
+    }
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+        legacy_member("device-c"),
+    ]));
+    deps.space_protection = Arc::new(ProtectsQueriedMembers::default());
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(
+        snapshot.source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
+    );
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-c")]);
+}
+
+#[tokio::test]
+async fn runtime_clears_a_stale_legacy_marker_after_current_history_exists() {
+    let a = instance(0x0a);
+    let repository = MemoryWorkspaceRepository::default();
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history
+        .receive_verified(membership_event(None, 0, a, a, "device-a", 1))
+        .unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+    let owner = WorkspaceConvergence::new(test_deps(
+        Arc::new(repository.clone()),
+        "device-a",
+        Vec::new(),
+    ));
+    let (_presence_tx, presence_events) = tokio::sync::broadcast::channel(1);
+
+    let runtime = Arc::clone(&owner).start(presence_events);
+    for _ in 0..100 {
+        if !repository
+            .load_state()
+            .await
+            .unwrap()
+            .unwrap()
+            .migrated_from_pre_adr_020
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    runtime.shutdown().await;
+
+    let repaired = repository.load_state().await.unwrap().unwrap();
+    assert!(!repaired.migrated_from_pre_adr_020);
+
+    owner.recover_legacy_migration_marker().await.unwrap();
+    assert_eq!(repository.load_state().await.unwrap().unwrap(), repaired);
+}
+
+#[tokio::test]
+async fn session_resume_retries_a_legacy_marker_repair_deferred_while_locked() {
+    let a = instance(0x0a);
+    let repository = MemoryWorkspaceRepository::default();
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history
+        .receive_verified(membership_event(None, 0, a, a, "device-a", 1))
+        .unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+    *repository.failure.lock().unwrap() = Some(WorkspaceConvergenceRepositoryError::Locked);
+    let owner = WorkspaceConvergence::new(test_deps(
+        Arc::new(repository.clone()),
+        "device-a",
+        Vec::new(),
+    ));
+    let (_presence_tx, presence_events) = tokio::sync::broadcast::channel(1);
+    let runtime = Arc::clone(&owner).start(presence_events);
+    tokio::task::yield_now().await;
+
+    *repository.failure.lock().unwrap() = None;
+    runtime.activity().resume().await.unwrap();
+    for _ in 0..100 {
+        if !repository
+            .load_state()
+            .await
+            .unwrap()
+            .unwrap()
+            .migrated_from_pre_adr_020
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    runtime.shutdown().await;
+
+    assert!(
+        !repository
+            .load_state()
+            .await
+            .unwrap()
+            .unwrap()
+            .migrated_from_pre_adr_020
+    );
+}
+
+#[tokio::test]
 async fn current_peer_scope_keeps_a_removal_pending_local_decision() {
     let a = instance(0x0a);
     let b = instance(0x0b);
@@ -2120,10 +2260,9 @@ async fn active_legacy_bootstrap_owner_initializes_history_after_restart_even_wh
 }
 
 // Flow: the deterministic initializer creates the signed history root while a retained legacy
-// peer still awaits admission; that peer must remain in the upgrade scope until its signed
-// admission is present in the current history.
+// peer still awaits admission; ordinary peer scope must switch to current history immediately.
 #[tokio::test]
-async fn initialized_legacy_history_keeps_retained_peer_in_upgrade_scope_until_admission() {
+async fn initialized_legacy_history_excludes_pending_legacy_peer_from_ordinary_scope() {
     let repository = MemoryWorkspaceRepository::default();
     let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
     state.migrated_from_pre_adr_020 = true;
@@ -2142,15 +2281,15 @@ async fn initialized_legacy_history_keeps_retained_peer_in_upgrade_scope_until_a
     assert_eq!(initialized.history_event_count, 1);
     assert_eq!(
         scope.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
+        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
     );
-    assert_eq!(scope.peer_device_ids, vec![DeviceId::new("device-b")]);
+    assert!(scope.peer_device_ids.is_empty());
 }
 
 // Flow: a pre-ADR-020 installation has a retained legacy roster but no convergence-state row.
-// Creating the current-history root must preserve every retained peer until each admission exists.
+// Creating the current-history root must stop legacy records from granting ordinary membership.
 #[tokio::test]
-async fn fresh_legacy_upgrade_keeps_the_full_roster_in_scope_after_history_initialization() {
+async fn fresh_legacy_upgrade_switches_to_current_history_after_initialization() {
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
     deps.initial_state_origin =
@@ -2168,15 +2307,12 @@ async fn fresh_legacy_upgrade_keeps_the_full_roster_in_scope_after_history_initi
     let saved = repository.load_state().await.unwrap().unwrap();
 
     assert_eq!(initialized.history_event_count, 1);
-    assert!(saved.migrated_from_pre_adr_020);
+    assert!(!saved.migrated_from_pre_adr_020);
     assert_eq!(
         scope.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
+        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
     );
-    assert_eq!(
-        scope.peer_device_ids,
-        vec![DeviceId::new("device-b"), DeviceId::new("device-c")]
-    );
+    assert!(scope.peer_device_ids.is_empty());
 }
 
 #[test]
@@ -2273,9 +2409,9 @@ async fn admitted_legacy_roster_completes_migration_and_switches_to_current_hist
 }
 
 // Flow: signed membership history reaches the retained peer before that peer has joined the
-// shared protection group. History coverage alone must not end the legacy upgrade phase.
+// shared protection group. Ordinary scope still switches independently to current history.
 #[tokio::test]
-async fn membership_history_does_not_complete_migration_before_protection_roster_is_ready() {
+async fn membership_history_controls_ordinary_scope_before_protection_roster_is_ready() {
     let repository = MemoryWorkspaceRepository::default();
     let a = instance(0x0a);
     let b = instance(0x0b);
@@ -2313,10 +2449,10 @@ async fn membership_history_does_not_complete_migration_before_protection_roster
 
     let saved = repository.load_state().await.unwrap().unwrap();
     let scope = owner.snapshot().await.unwrap();
-    assert!(saved.migrated_from_pre_adr_020);
+    assert!(!saved.migrated_from_pre_adr_020);
     assert_eq!(
         scope.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
+        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
     );
     assert_eq!(scope.peer_device_ids, vec![DeviceId::new("device-b")]);
 }

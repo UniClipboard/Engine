@@ -1698,7 +1698,8 @@ async fn stale_removed_sponsor_cannot_replace_d_newer_same_space_state() {
 // 2. C 移除 A，使 A 的旧成员实例失效。
 // 3. A 再次通过 C 加入，并取得新的成员实例。
 // 4. C、A 必须恢复为两个有效成员，A 不能显示为已移除，并可接收内容。
-// 验证：被移除设备重新加入时，旧移除记录不会应用到新成员实例。
+// 5. C 再次从公开连接列表移除 A，重启后 A 仍不可见。
+// 验证：被移除设备重新加入时使用新成员身份，且公开列表、移除和重启结果一致。
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn removed_device_rejoins_under_a_new_instance_without_stale_removal() {
     uc_engine::init_test_tracing();
@@ -1711,6 +1712,7 @@ async fn removed_device_rejoins_under_a_new_instance_without_stale_removal() {
     let a_id = join_through(&engine_c, &engine_a, "Device A", &space_id).await;
     wait_for_members(&engine_c, &[&a_id]).await;
     wait_for_members(&engine_a, &[&c_id]).await;
+    assert!(list_peer_ids(&engine_c).await.contains(&a_id));
 
     engine_c
         .execute(Operation::RemoveMember(RemoveMemberInput {
@@ -1758,13 +1760,52 @@ async fn removed_device_rejoins_under_a_new_instance_without_stale_removal() {
         "C to A after A rejoined under a new instance",
     )
     .await;
+    send_and_verify(
+        &engine_a,
+        &engine_c,
+        &c_id,
+        "A to C after A rejoined under a new instance",
+    )
+    .await;
 
-    for engine in [engine_c, engine_a] {
-        engine
-            .shutdown(SHUTDOWN_TIMEOUT)
+    assert!(list_peer_ids(&engine_c).await.contains(&a_id));
+    engine_c
+        .execute(Operation::RemoveMember(RemoveMemberInput {
+            device_id: a_id.clone(),
+        }))
+        .await
+        .expect("remove the rejoined member from the public peer list");
+    wait_until(WAIT_TIMEOUT, || async {
+        workspace_convergence_summary(&engine_c)
             .await
-            .expect("shut down rejoin engine");
-    }
+            .effective_member_count
+            == 1
+            && !list_peer_ids(&engine_c).await.contains(&a_id)
+    })
+    .await;
+
+    engine_a
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down removed rejoin engine");
+    engine_c
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down removal author before restart");
+
+    let engine_c = device_c.start_local_only().await;
+    recover(&engine_c).await;
+    assert!(!list_peer_ids(&engine_c).await.contains(&a_id));
+    assert_eq!(
+        workspace_convergence_summary(&engine_c)
+            .await
+            .effective_member_count,
+        1
+    );
+    engine_c
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down restarted removal author");
 }
 
 // 场景流程：
@@ -1790,6 +1831,7 @@ async fn completed_removal_can_continue_from_the_recovered_member_state() {
     wait_for_members(&engine_b, &[&a_id]).await;
     wait_for_members(&engine_c, &[&a_id]).await;
 
+    assert!(list_peer_ids(&engine_a).await.contains(&b_id));
     engine_a
         .execute(Operation::RemoveMember(RemoveMemberInput {
             device_id: b_id.clone(),
@@ -1829,6 +1871,7 @@ async fn completed_removal_can_continue_from_the_recovered_member_state() {
     })
     .await;
 
+    assert!(list_peer_ids(&engine_a).await.contains(&c_id));
     engine_a
         .execute(Operation::RemoveMember(RemoveMemberInput {
             device_id: c_id.clone(),
