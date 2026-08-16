@@ -2,9 +2,12 @@ use async_trait::async_trait;
 
 use crate::ids::DeviceId;
 
+use super::admission_attempt::{
+    AdmissionAttemptId, AdmissionAttemptV1, AdmissionProfileMetadataV1, TerminalAdmissionAttemptV1,
+};
 use super::error::{
-    CurrentMemberSignatureError, CurrentMembershipIdentityError, GroupUpdateDispatchError,
-    LegacyPeerProbeError, MembershipAnnouncementRepositoryError,
+    AdmissionAttemptRepositoryError, CurrentMemberSignatureError, CurrentMembershipIdentityError,
+    GroupUpdateDispatchError, LegacyPeerProbeError, MembershipAnnouncementRepositoryError,
     MembershipAppliedSecurityUpdateRepositoryError, MembershipAttestationEndpointError,
     MembershipAttestationError, MembershipCandidateRepositoryError, MembershipError,
     MembershipGossipEndpointError, MembershipGossipTransportError, MembershipHistoryExchangeError,
@@ -241,6 +244,51 @@ pub trait WorkspaceConvergenceRepositoryPort: Send + Sync {
         Option<super::workspace_convergence::WorkspaceConvergenceState>,
         WorkspaceConvergenceRepositoryError,
     >;
+}
+
+#[async_trait]
+pub trait AdmissionAttemptRepositoryPort: Send + Sync {
+    async fn create(
+        &self,
+        attempt: &AdmissionAttemptV1,
+        consumed_invitation_digest: Option<[u8; 32]>,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError>;
+
+    async fn load(
+        &self,
+        attempt_id: AdmissionAttemptId,
+    ) -> Result<Option<AdmissionAttemptV1>, AdmissionAttemptRepositoryError>;
+
+    async fn compare_and_advance(
+        &self,
+        attempt_id: AdmissionAttemptId,
+        expected_record_version: u64,
+        next: &AdmissionAttemptV1,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError>;
+
+    async fn scan_recoverable(
+        &self,
+    ) -> Result<Vec<AdmissionAttemptV1>, AdmissionAttemptRepositoryError>;
+
+    async fn compact_terminal(
+        &self,
+        attempt_id: AdmissionAttemptId,
+        expected_record_version: u64,
+    ) -> Result<TerminalAdmissionAttemptV1, AdmissionAttemptRepositoryError>;
+
+    async fn load_terminal(
+        &self,
+        attempt_id: AdmissionAttemptId,
+    ) -> Result<Option<TerminalAdmissionAttemptV1>, AdmissionAttemptRepositoryError>;
+
+    async fn profile_metadata(
+        &self,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError>;
+
+    async fn advance_projection_floor(
+        &self,
+        expected_device_trust_revision: u64,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

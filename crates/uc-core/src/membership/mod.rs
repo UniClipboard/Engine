@@ -1,4 +1,5 @@
 mod admission;
+mod admission_attempt;
 mod bootstrap;
 mod error;
 mod gossip;
@@ -14,13 +15,21 @@ mod versioned_membership_history;
 mod workspace_convergence;
 
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
+pub use admission_attempt::{
+    AdmissionAttemptId, AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionInboxRecordV1,
+    AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1, AdmissionProfileMetadataV1,
+    AdmissionTerminalResultV1, CompletionHelperAdmissionStageV1, CompletionHelperAdmissionStateV1,
+    JoinerAdmissionStageV1, JoinerAdmissionStateV1, SponsorAdmissionStageV1,
+    SponsorAdmissionStateV1, TerminalAdmissionAttemptV1, ADMISSION_ATTEMPT_FORMAT_V1,
+    ADMISSION_PROFILE_METADATA_FORMAT_V1, TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
+};
 pub use bootstrap::{
     BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult, LegacyBootstrapRecord,
     LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
 };
 pub use error::{
-    CurrentMemberSignatureError, CurrentMembershipIdentityError, GroupUpdateDispatchError,
-    LegacyPeerProbeError, MembershipAnnouncementRepositoryError,
+    AdmissionAttemptRepositoryError, CurrentMemberSignatureError, CurrentMembershipIdentityError,
+    GroupUpdateDispatchError, LegacyPeerProbeError, MembershipAnnouncementRepositoryError,
     MembershipAppliedSecurityUpdateRepositoryError, MembershipAttestationEndpointError,
     MembershipAttestationError, MembershipCandidateRepositoryError, MembershipError,
     MembershipGossipEndpointError, MembershipGossipTransportError, MembershipHistoryExchangeError,
@@ -47,13 +56,13 @@ pub use membership_history::{
     RemovalDecision, MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE,
 };
 pub use ports::{
-    BeginRevocationOutcome, ContentExchangeGatePort, CurrentMemberSignaturePort,
-    CurrentMembershipAnnouncementMaterial, CurrentMembershipAnnouncementPort,
-    CurrentMembershipIdentity, CurrentMembershipIdentityPort, CurrentWorkspaceLocalMembership,
-    CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
-    CurrentWorkspacePeerSnapshot, GroupRevocationPort, GroupUpdateDispatchPort,
-    LegacyPeerProbePort, MemberRepositoryPort, MembershipAdmissionDecision,
-    MembershipAdmissionGatePort, MembershipAnnouncementRepositoryPort,
+    AdmissionAttemptRepositoryPort, BeginRevocationOutcome, ContentExchangeGatePort,
+    CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
+    CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityPort,
+    CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort,
+    CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot, GroupRevocationPort,
+    GroupUpdateDispatchPort, LegacyPeerProbePort, MemberRepositoryPort,
+    MembershipAdmissionDecision, MembershipAdmissionGatePort, MembershipAnnouncementRepositoryPort,
     MembershipAppliedSecurityUpdateRepositoryPort, MembershipAttestationEndpointPort,
     MembershipAttestationPort, MembershipCandidateRepositoryPort, MembershipGossipEndpointPort,
     MembershipGossipTransportPort, MembershipHistoryExchangeEndpointPort,

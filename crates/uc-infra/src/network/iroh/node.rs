@@ -1801,7 +1801,7 @@ mod tests {
         assert_eq!(unknown_state, uc_core::ports::ReachabilityState::Unknown,);
 
         let node = builder.spawn();
-        assert!(node.accepts_protocol_for_test(CLIPBOARD_ALPN).await);
+        assert!(node.accepts_protocol_for_test(PRESENCE_ALPN).await);
         assert!(!node.accepts_protocol_for_test(LEGACY_CLIPBOARD_ALPN).await);
         node.shutdown().await;
     }

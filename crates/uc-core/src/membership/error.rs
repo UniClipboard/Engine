@@ -61,6 +61,22 @@ pub enum MembershipOutboxRepositoryError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum AdmissionAttemptRepositoryError {
+    #[error("admission attempt storage is locked")]
+    Locked,
+    #[error("admission attempt storage is corrupt")]
+    Corrupt,
+    #[error("admission attempt already exists")]
+    AlreadyExists,
+    #[error("admission attempt was not found")]
+    NotFound,
+    #[error("admission attempt version conflicts with persisted state")]
+    VersionConflict,
+    #[error("admission attempt repository failed: {0}")]
+    Repository(String),
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MembershipSecurityUpdateError {
     #[error("membership security state is unavailable")]
     Unavailable,

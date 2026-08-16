@@ -1,5 +1,6 @@
 mod active_clipboard_register_cipher;
 mod active_clipboard_register_repo;
+mod admission_attempt_store;
 mod blob_reference_repo;
 mod blob_repo;
 mod clipboard_entry_repo;
@@ -34,6 +35,7 @@ mod trusted_peer_repo;
 mod workspace_convergence_store;
 
 pub use active_clipboard_register_repo::*;
+pub use admission_attempt_store::DieselAdmissionAttemptStore;
 pub use blob_reference_repo::*;
 pub use blob_repo::*;
 pub use clipboard_entry_repo::*;
