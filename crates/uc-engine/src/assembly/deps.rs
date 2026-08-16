@@ -91,6 +91,8 @@ pub struct SyncEngineDeps {
     /// Encrypted persistence for the unified workspace convergence state.
     pub workspace_convergence_repository:
         Arc<dyn uc_core::membership::WorkspaceConvergenceRepositoryPort>,
+    /// Profile-scoped encrypted persistence for durable admission attempts.
+    pub admission_attempt_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
     /// plaintext-hash → ciphertext-digest dedupe cache (Slice 3 Phase 1).
     pub blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,
     /// switch-space backup table + main-table inline_data batch IO.

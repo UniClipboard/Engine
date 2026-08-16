@@ -1,66 +1,11 @@
-use uc_core::membership::{AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1};
+use uc_core::membership::{
+    AdmissionSecurityCommitmentV1, AdmissionSecurityTransitionError,
+    AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
+    JoinerStagedSecurityTransition, SponsorPreparedSecurityTransition,
+};
 use zeroize::Zeroize;
 
 use super::mls_group::{MlsClientState, MlsGroupEngine, PendingMlsJoin};
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct AdmissionSecurityTransitionInput {
-    pub attempt_id: [u8; 32],
-    pub base_history_position: BaseMembershipHistoryPositionV1,
-    pub candidate_core_digest: [u8; 32],
-    pub key_catalog_digest: [u8; 32],
-    pub admission_bundle_digest: [u8; 32],
-}
-
-impl std::fmt::Debug for AdmissionSecurityTransitionInput {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("AdmissionSecurityTransitionInput([REDACTED])")
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct SponsorPreparedSecurityTransition {
-    pub staged_state: Vec<u8>,
-    pub commit: Vec<u8>,
-    pub welcome: Vec<u8>,
-    pub public_commitment: AdmissionSecurityCommitmentV1,
-}
-
-impl std::fmt::Debug for SponsorPreparedSecurityTransition {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SponsorPreparedSecurityTransition")
-            .field("staged_state", &"[REDACTED]")
-            .field("commit_len", &self.commit.len())
-            .field("welcome_len", &self.welcome.len())
-            .field("public_commitment", &self.public_commitment)
-            .finish()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct JoinerStagedSecurityTransition {
-    pub staged_state: Vec<u8>,
-    pub public_commitment: AdmissionSecurityCommitmentV1,
-}
-
-impl std::fmt::Debug for JoinerStagedSecurityTransition {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("JoinerStagedSecurityTransition")
-            .field("staged_state", &"[REDACTED]")
-            .field("public_commitment", &self.public_commitment)
-            .finish()
-    }
-}
-
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
-pub enum AdmissionSecurityTransitionError {
-    #[error("admission security state is invalid")]
-    InvalidState,
-    #[error("admission security commitment does not match")]
-    CommitmentMismatch,
-}
 
 pub struct AdmissionSecurityTransitionAdapter;
 
@@ -156,6 +101,60 @@ impl AdmissionSecurityTransitionAdapter {
 
     pub fn discard(mut staged_state: Vec<u8>) {
         staged_state.zeroize();
+    }
+}
+
+impl AdmissionSecurityTransitionPort for AdmissionSecurityTransitionAdapter {
+    fn prepare_sponsor(
+        &self,
+        sponsor_state: &[u8],
+        candidate_identity: &[u8],
+        key_package: &[u8],
+        input: &AdmissionSecurityTransitionInput,
+    ) -> Result<SponsorPreparedSecurityTransition, AdmissionSecurityTransitionError> {
+        Self::prepare_sponsor(sponsor_state, candidate_identity, key_package, input)
+    }
+
+    fn stage_joiner(
+        &self,
+        pending_state: &[u8],
+        key_package: &[u8],
+        expected_space_id: &[u8],
+        welcome: &[u8],
+        commit: &[u8],
+        input: &AdmissionSecurityTransitionInput,
+    ) -> Result<JoinerStagedSecurityTransition, AdmissionSecurityTransitionError> {
+        Self::stage_joiner(
+            pending_state,
+            key_package,
+            expected_space_id,
+            welcome,
+            commit,
+            input,
+        )
+    }
+
+    fn derive_public_commitment(
+        &self,
+        staged_state: &[u8],
+        commit: &[u8],
+        input: &AdmissionSecurityTransitionInput,
+    ) -> Result<AdmissionSecurityCommitmentV1, AdmissionSecurityTransitionError> {
+        Self::derive_public_commitment(staged_state, commit, input)
+    }
+
+    fn activate(
+        &self,
+        staged_state: Vec<u8>,
+        commit: &[u8],
+        expected: &AdmissionSecurityCommitmentV1,
+        input: &AdmissionSecurityTransitionInput,
+    ) -> Result<Vec<u8>, AdmissionSecurityTransitionError> {
+        Self::activate(staged_state, commit, expected, input)
+    }
+
+    fn discard(&self, staged_state: Vec<u8>) {
+        Self::discard(staged_state);
     }
 }
 

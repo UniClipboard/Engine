@@ -39,6 +39,9 @@ pub use crate::space::lifecycle::device::{DeviceFacade, DeviceFacadeError, Local
 pub use crate::space::lifecycle::encryption::{
     EncryptionFacade, EncryptionFacadeDeps, EncryptionFacadeError, EncryptionStateView,
 };
+pub use crate::space::lifecycle::profile_reset::{
+    ProfileFactoryReset, ProfileFactoryResetError, ProfileFactoryResetResult,
+};
 pub use crate::space::lifecycle::session::{
     RecoverSpaceSessionResult, SpaceActivityError, SpaceSessionAccessDeps,
     SpaceSessionActivityDeps, SpaceSessionError,

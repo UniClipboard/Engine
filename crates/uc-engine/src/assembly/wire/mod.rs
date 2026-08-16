@@ -52,8 +52,8 @@ use uc_infra::db::pool::{init_db_pool, DbPool};
 #[cfg(feature = "lan-compat")]
 use uc_infra::db::repositories::DieselMobileDeviceRepository;
 use uc_infra::db::repositories::{
-    DieselBlobMigrationRepository, DieselBlobReferenceRepository, DieselBlobRepository,
-    DieselClipboardEntryReplaceRepository, DieselClipboardEntryRepository,
+    DieselAdmissionAttemptStore, DieselBlobMigrationRepository, DieselBlobReferenceRepository,
+    DieselBlobRepository, DieselClipboardEntryReplaceRepository, DieselClipboardEntryRepository,
     DieselClipboardEventRepository, DieselClipboardRepresentationRepository,
     DieselClipboardSelectionRepository, DieselEntryAvailabilityRepository,
     DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
@@ -67,9 +67,10 @@ use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::search::{HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex};
 use uc_infra::security::{
-    Argon2PinHasher, Blake3Hasher, DecryptingClipboardRepresentationRepository,
-    EncryptingClipboardEventWriter, EncryptingInboundReceiveCommit, InMemorySession,
-    KeyMaterialStore, Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
+    AdmissionKeyManager, Argon2PinHasher, Blake3Hasher,
+    DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
+    EncryptingInboundReceiveCommit, InMemorySession, KeyMaterialStore, ProfileLifecycleManager,
+    Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::{
@@ -263,6 +264,18 @@ pub fn wire_dependencies_from_inputs(
         Arc::clone(&infra.db_executor),
         platform.session.as_ref().clone(),
     ));
+    let profile_lifecycle = ProfileLifecycleManager::new(Arc::clone(&platform.secure_storage));
+    let profile_marker = profile_lifecycle
+        .load_or_initialize()
+        .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
+    let admission_attempt_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort> =
+        Arc::new(DieselAdmissionAttemptStore::new(
+            Arc::clone(&infra.db_executor),
+            AdmissionKeyManager::new(
+                Arc::clone(&platform.secure_storage),
+                profile_marker.profile_generation,
+            ),
+        ));
     let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
 
     let relationship_store = Arc::new(EncryptedRelationshipStore::new(
@@ -645,6 +658,7 @@ pub fn wire_dependencies_from_inputs(
             current_member_signatures,
             membership_session,
             workspace_convergence_repository,
+            admission_attempt_repository,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             blob_migration_repo: Arc::clone(&infra.blob_migration_repo),
             migration_state: Arc::clone(&infra.migration_state),

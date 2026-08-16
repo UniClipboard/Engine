@@ -3,10 +3,12 @@ use async_trait::async_trait;
 use crate::ids::DeviceId;
 
 use super::admission_attempt::{
-    AdmissionAttemptId, AdmissionAttemptV1, AdmissionProfileMetadataV1, TerminalAdmissionAttemptV1,
+    AdmissionAttemptId, AdmissionAttemptV1, AdmissionInboxRecordV1, AdmissionOutboxMessageV1,
+    AdmissionProfileMetadataV1, CurrentLocalJoinProjectionV1, TerminalAdmissionAttemptV1,
 };
 use super::error::{
-    AdmissionAttemptRepositoryError, CurrentMemberSignatureError, CurrentMembershipIdentityError,
+    AdmissionAttemptRepositoryError, AdmissionOutboxDeliveryError,
+    AdmissionSecurityTransitionError, CurrentMemberSignatureError, CurrentMembershipIdentityError,
     GroupUpdateDispatchError, LegacyPeerProbeError, MembershipAnnouncementRepositoryError,
     MembershipAppliedSecurityUpdateRepositoryError, MembershipAttestationEndpointError,
     MembershipAttestationError, MembershipCandidateRepositoryError, MembershipError,
@@ -25,6 +27,9 @@ use super::revocation::{
     GroupEpoch, GroupRevocationResult, KeyEpochError, PendingGroupUpdate,
     PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
     SpaceKeyMaterial,
+};
+use super::versioned_membership_history::{
+    AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1,
 };
 use crate::ids::SpaceId;
 use crate::ports::PeerAddressRecord;
@@ -252,6 +257,7 @@ pub trait AdmissionAttemptRepositoryPort: Send + Sync {
         &self,
         attempt: &AdmissionAttemptV1,
         consumed_invitation_digest: Option<[u8; 32]>,
+        initial_membership_history_v2: Option<&[u8]>,
     ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError>;
 
     async fn load(
@@ -265,6 +271,19 @@ pub trait AdmissionAttemptRepositoryPort: Send + Sync {
         expected_record_version: u64,
         next: &AdmissionAttemptV1,
     ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError>;
+
+    async fn compare_and_advance_with_membership_history_v2(
+        &self,
+        attempt_id: AdmissionAttemptId,
+        expected_record_version: u64,
+        next: &AdmissionAttemptV1,
+        expected_membership_history_v2: Option<&[u8]>,
+        membership_history_v2: &[u8],
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError>;
+
+    async fn load_membership_history_v2(
+        &self,
+    ) -> Result<Option<Vec<u8>>, AdmissionAttemptRepositoryError>;
 
     async fn scan_recoverable(
         &self,
@@ -285,10 +304,125 @@ pub trait AdmissionAttemptRepositoryPort: Send + Sync {
         &self,
     ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError>;
 
+    async fn project_current_local_join(
+        &self,
+    ) -> Result<Option<CurrentLocalJoinProjectionV1>, AdmissionAttemptRepositoryError>;
+
     async fn advance_projection_floor(
         &self,
         expected_device_trust_revision: u64,
     ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvitationConsumeDeliveryResultV1 {
+    Consumed,
+    NotFound,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionOutboxDeliveryResultV1 {
+    Deferred,
+    Persisted(AdmissionInboxRecordV1),
+    InvitationConsume(InvitationConsumeDeliveryResultV1),
+}
+
+#[async_trait]
+pub trait AdmissionOutboxDeliveryPort: Send + Sync {
+    async fn deliver(
+        &self,
+        attempt_id: AdmissionAttemptId,
+        message: &AdmissionOutboxMessageV1,
+    ) -> Result<AdmissionOutboxDeliveryResultV1, AdmissionOutboxDeliveryError>;
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AdmissionSecurityTransitionInput {
+    pub attempt_id: [u8; 32],
+    pub base_history_position: BaseMembershipHistoryPositionV1,
+    pub candidate_core_digest: [u8; 32],
+    pub key_catalog_digest: [u8; 32],
+    pub admission_bundle_digest: [u8; 32],
+}
+
+impl std::fmt::Debug for AdmissionSecurityTransitionInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AdmissionSecurityTransitionInput([REDACTED])")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SponsorPreparedSecurityTransition {
+    pub staged_state: Vec<u8>,
+    pub commit: Vec<u8>,
+    pub welcome: Vec<u8>,
+    pub public_commitment: AdmissionSecurityCommitmentV1,
+}
+
+impl std::fmt::Debug for SponsorPreparedSecurityTransition {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SponsorPreparedSecurityTransition")
+            .field("staged_state", &"[REDACTED]")
+            .field("commit_len", &self.commit.len())
+            .field("welcome_len", &self.welcome.len())
+            .field("public_commitment", &self.public_commitment)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct JoinerStagedSecurityTransition {
+    pub staged_state: Vec<u8>,
+    pub public_commitment: AdmissionSecurityCommitmentV1,
+}
+
+impl std::fmt::Debug for JoinerStagedSecurityTransition {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JoinerStagedSecurityTransition")
+            .field("staged_state", &"[REDACTED]")
+            .field("public_commitment", &self.public_commitment)
+            .finish()
+    }
+}
+
+pub trait AdmissionSecurityTransitionPort: Send + Sync {
+    fn prepare_sponsor(
+        &self,
+        sponsor_state: &[u8],
+        candidate_identity: &[u8],
+        key_package: &[u8],
+        input: &AdmissionSecurityTransitionInput,
+    ) -> Result<SponsorPreparedSecurityTransition, AdmissionSecurityTransitionError>;
+
+    fn stage_joiner(
+        &self,
+        pending_state: &[u8],
+        key_package: &[u8],
+        expected_space_id: &[u8],
+        welcome: &[u8],
+        commit: &[u8],
+        input: &AdmissionSecurityTransitionInput,
+    ) -> Result<JoinerStagedSecurityTransition, AdmissionSecurityTransitionError>;
+
+    fn derive_public_commitment(
+        &self,
+        staged_state: &[u8],
+        commit: &[u8],
+        input: &AdmissionSecurityTransitionInput,
+    ) -> Result<AdmissionSecurityCommitmentV1, AdmissionSecurityTransitionError>;
+
+    fn activate(
+        &self,
+        staged_state: Vec<u8>,
+        commit: &[u8],
+        expected: &AdmissionSecurityCommitmentV1,
+        input: &AdmissionSecurityTransitionInput,
+    ) -> Result<Vec<u8>, AdmissionSecurityTransitionError>;
+
+    fn discard(&self, staged_state: Vec<u8>);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

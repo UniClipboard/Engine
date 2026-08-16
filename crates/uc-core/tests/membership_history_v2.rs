@@ -911,3 +911,17 @@ fn canonical_records_reject_tampered_identity_after_loading() {
         Err(uc_core::membership::MembershipHistoryV2Error::InvalidSecurityCommitment)
     );
 }
+
+#[test]
+fn verified_history_persistence_round_trip_preserves_authority_and_receipts() {
+    let (history, _a, b, _genesis, add_b) = history_with_a_and_b(true);
+
+    let encoded = history.encode_persisted_v2().unwrap();
+    let reopened =
+        VersionedMembershipHistory::decode_persisted_v2(&encoded, &DeterministicSignatureVerifier)
+            .unwrap();
+
+    assert_eq!(reopened, history);
+    assert!(reopened.active_members().contains(&b.facts.member_instance));
+    assert_eq!(reopened.depth(add_b.event_id()), Some(1));
+}

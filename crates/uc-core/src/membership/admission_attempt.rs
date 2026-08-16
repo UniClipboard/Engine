@@ -137,6 +137,20 @@ pub enum AdmissionTerminalResultV1 {
     Rejected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionRejectionReasonV1 {
+    InvitationUnavailable,
+    AuthenticationRejected,
+    IdentityConflict,
+    BaseHistoryChanged,
+    JoinerHistoryAhead,
+    HistoryConflict,
+    PeerUpgradeRequired,
+    Cancelled,
+    RemovedBeforeActivation,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionAttemptV1 {
     pub format_version: u16,
@@ -155,6 +169,9 @@ pub struct AdmissionAttemptV1 {
     pub security_commit: Option<Vec<u8>>,
     pub security_welcome: Option<Vec<u8>>,
     pub staged_security_state: Option<Vec<u8>>,
+    pub joiner_pending_security_state: Option<Vec<u8>>,
+    pub base_membership_history: Option<Vec<u8>>,
+    pub verified_membership_history: Option<Vec<u8>>,
     pub invitation_claim: Option<Vec<u8>>,
     pub space_transition: Option<Vec<u8>>,
     pub prepared_proof: Option<Vec<u8>>,
@@ -171,6 +188,7 @@ pub struct AdmissionAttemptV1 {
     pub inbox_dedup: Vec<AdmissionInboxRecordV1>,
     pub outboxes: Vec<AdmissionOutboxMessageV1>,
     pub terminal_result: Option<AdmissionTerminalResultV1>,
+    pub rejection_reason: Option<AdmissionRejectionReasonV1>,
     pub write_ahead_recovery: Option<Vec<u8>>,
     pub cleanup_pending: bool,
 }
@@ -213,6 +231,9 @@ impl AdmissionAttemptV1 {
             security_commit: None,
             security_welcome: None,
             staged_security_state: None,
+            joiner_pending_security_state: None,
+            base_membership_history: None,
+            verified_membership_history: None,
             invitation_claim: None,
             space_transition: None,
             prepared_proof: None,
@@ -229,6 +250,7 @@ impl AdmissionAttemptV1 {
             inbox_dedup: Vec::new(),
             outboxes: Vec::new(),
             terminal_result: None,
+            rejection_reason: None,
             write_ahead_recovery: None,
             cleanup_pending: false,
         }
@@ -346,6 +368,16 @@ impl AdmissionProfileMetadataV1 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentLocalJoinProjectionV1 {
+    pub device_trust_revision: u64,
+    pub attempt_id: AdmissionAttemptId,
+    pub join_id: [u8; 16],
+    pub local_join_ordinal: u64,
+    pub terminal_result: Option<AdmissionTerminalResultV1>,
+    pub rejection_reason: Option<AdmissionRejectionReasonV1>,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalAdmissionAttemptV1 {
     pub format_version: u16,
@@ -355,6 +387,7 @@ pub struct TerminalAdmissionAttemptV1 {
     pub invitation_digest: Option<[u8; 32]>,
     pub identity_binding: Vec<u8>,
     pub terminal_result: AdmissionTerminalResultV1,
+    pub rejection_reason: Option<AdmissionRejectionReasonV1>,
     pub candidate_event_id: Option<[u8; 32]>,
     pub cancel_outcome: Option<Vec<u8>>,
     pub replay_result: Vec<u8>,

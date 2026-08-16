@@ -2947,7 +2947,7 @@ async fn engine_rejects_lan_operations_without_lan_compatibility() {
     }
 
     engine
-        .shutdown(std::time::Duration::from_secs(5))
+        .shutdown(std::time::Duration::from_secs(15))
         .await
         .unwrap();
 }

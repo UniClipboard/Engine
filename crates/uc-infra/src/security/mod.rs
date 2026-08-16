@@ -32,11 +32,7 @@ pub use admission_key_manager::{
     AdmissionKeyError, AdmissionKeyManager, WrappedAdmissionAttemptDataKey,
 };
 pub use admission_proof::HmacProofAdapter;
-pub use admission_security_transition::{
-    AdmissionSecurityTransitionAdapter, AdmissionSecurityTransitionError,
-    AdmissionSecurityTransitionInput, JoinerStagedSecurityTransition,
-    SponsorPreparedSecurityTransition,
-};
+pub use admission_security_transition::AdmissionSecurityTransitionAdapter;
 pub use blob_cipher_adapter::BlobCipherAdapter;
 pub use crypto_model::{
     EncryptedBlob, KdfParams, KdfParamsV1, KeyScope, KeySlot, KeySlotConvertError, KeySlotFile,

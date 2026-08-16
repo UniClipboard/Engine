@@ -2,45 +2,10 @@ use std::sync::Arc;
 
 use rand::RngCore;
 use uc_core::ports::SecureStoragePort;
+pub use uc_core::ports::{FactoryResetPhaseV1, ProfileLifecycleError, ProfileLifecycleMarkerV1};
+use uc_core::ports::{ProfileLifecyclePort, PROFILE_LIFECYCLE_MARKER_FORMAT_V1};
 
 const PROFILE_LIFECYCLE_MARKER_NAME: &str = "profile_lifecycle_marker:v1";
-const PROFILE_LIFECYCLE_MARKER_FORMAT_V1: u16 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FactoryResetPhaseV1 {
-    None,
-    WipingKeys,
-    ClearingState,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ProfileLifecycleMarkerV1 {
-    pub marker_format_version: u16,
-    pub profile_generation: [u8; 16],
-    pub factory_reset_phase: FactoryResetPhaseV1,
-}
-
-impl std::fmt::Debug for ProfileLifecycleMarkerV1 {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProfileLifecycleMarkerV1")
-            .field("marker_format_version", &self.marker_format_version)
-            .field("profile_generation", &"[REDACTED]")
-            .field("factory_reset_phase", &self.factory_reset_phase)
-            .finish()
-    }
-}
-
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
-pub enum ProfileLifecycleError {
-    #[error("profile lifecycle storage is unavailable")]
-    SecureStorage,
-    #[error("profile lifecycle marker is corrupt")]
-    Corrupt,
-    #[error("profile lifecycle phase conflicts with persisted state")]
-    PhaseConflict,
-}
 
 pub struct ProfileLifecycleManager {
     secure_storage: Arc<dyn SecureStoragePort>,
@@ -143,6 +108,33 @@ impl ProfileLifecycleManager {
             return Err(ProfileLifecycleError::Corrupt);
         }
         Ok(reopened)
+    }
+}
+
+impl ProfileLifecyclePort for ProfileLifecycleManager {
+    fn load_or_initialize(&self) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
+        ProfileLifecycleManager::load_or_initialize(self)
+    }
+
+    fn begin_factory_reset(
+        &self,
+        expected_generation: [u8; 16],
+    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
+        ProfileLifecycleManager::begin_factory_reset(self, expected_generation)
+    }
+
+    fn mark_keys_wiped(
+        &self,
+        expected_generation: [u8; 16],
+    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
+        ProfileLifecycleManager::mark_keys_wiped(self, expected_generation)
+    }
+
+    fn complete_state_clear(
+        &self,
+        expected_generation: [u8; 16],
+    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
+        ProfileLifecycleManager::complete_state_clear(self, expected_generation)
     }
 }
 

@@ -254,6 +254,22 @@ use uc_core::ports::{
 };
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
+struct DeferredAdmissionOutboxDelivery;
+
+#[async_trait::async_trait]
+impl uc_core::membership::AdmissionOutboxDeliveryPort for DeferredAdmissionOutboxDelivery {
+    async fn deliver(
+        &self,
+        _attempt_id: uc_core::membership::AdmissionAttemptId,
+        _message: &uc_core::membership::AdmissionOutboxMessageV1,
+    ) -> Result<
+        uc_core::membership::AdmissionOutboxDeliveryResultV1,
+        uc_core::membership::AdmissionOutboxDeliveryError,
+    > {
+        Ok(uc_core::membership::AdmissionOutboxDeliveryResultV1::Deferred)
+    }
+}
+
 /// Build a workspace convergence owner whose member/trust/address writes go
 /// through the provided repositories (mirroring production assembly), with
 /// no-op ports everywhere else. The local member instance is derived
@@ -273,6 +289,14 @@ pub fn test_workspace_convergence(
         initial_state_origin:
             uc_application::facade::WorkspaceConvergenceStateOrigin::CurrentInstallation,
         repository: Arc::new(MemoryWorkspaceRepo::default()),
+        admission_attempts: Arc::new(LockedAdmissionRepo),
+        historical_membership_signatures: Arc::new(
+            uc_infra::security::OpenMlsHistoricalSignatureVerifier,
+        ),
+        admission_security_transition: Arc::new(
+            uc_infra::security::AdmissionSecurityTransitionAdapter,
+        ),
+        admission_outbox_delivery: Arc::new(DeferredAdmissionOutboxDelivery),
         member_signatures: Arc::new(FixedSigner),
         member_repo: Arc::clone(&member_repo),
         membership_identity: Arc::new(FixedMembershipIdentity::new(
@@ -694,6 +718,114 @@ impl WorkspaceConvergenceRepositoryPort for MemoryWorkspaceRepo {
         &self,
     ) -> Result<Option<WorkspaceConvergenceState>, WorkspaceConvergenceRepositoryError> {
         Ok(self.state.lock().unwrap().clone())
+    }
+}
+
+struct LockedAdmissionRepo;
+
+#[async_trait]
+impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo {
+    async fn create(
+        &self,
+        _attempt: &uc_core::membership::AdmissionAttemptV1,
+        _digest: Option<[u8; 32]>,
+        _initial_history: Option<&[u8]>,
+    ) -> Result<
+        uc_core::membership::AdmissionProfileMetadataV1,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+    async fn load(
+        &self,
+        _id: uc_core::membership::AdmissionAttemptId,
+    ) -> Result<
+        Option<uc_core::membership::AdmissionAttemptV1>,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+    async fn compare_and_advance(
+        &self,
+        _id: uc_core::membership::AdmissionAttemptId,
+        _version: u64,
+        _next: &uc_core::membership::AdmissionAttemptV1,
+    ) -> Result<
+        uc_core::membership::AdmissionProfileMetadataV1,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+    async fn compare_and_advance_with_membership_history_v2(
+        &self,
+        _id: uc_core::membership::AdmissionAttemptId,
+        _version: u64,
+        _next: &uc_core::membership::AdmissionAttemptV1,
+        _expected_history: Option<&[u8]>,
+        _history: &[u8],
+    ) -> Result<
+        uc_core::membership::AdmissionProfileMetadataV1,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+    async fn load_membership_history_v2(
+        &self,
+    ) -> Result<Option<Vec<u8>>, uc_core::membership::AdmissionAttemptRepositoryError> {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+    async fn scan_recoverable(
+        &self,
+    ) -> Result<
+        Vec<uc_core::membership::AdmissionAttemptV1>,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+    async fn compact_terminal(
+        &self,
+        _id: uc_core::membership::AdmissionAttemptId,
+        _version: u64,
+    ) -> Result<
+        uc_core::membership::TerminalAdmissionAttemptV1,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+    async fn load_terminal(
+        &self,
+        _id: uc_core::membership::AdmissionAttemptId,
+    ) -> Result<
+        Option<uc_core::membership::TerminalAdmissionAttemptV1>,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+    async fn profile_metadata(
+        &self,
+    ) -> Result<
+        uc_core::membership::AdmissionProfileMetadataV1,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+
+    async fn project_current_local_join(
+        &self,
+    ) -> Result<
+        Option<uc_core::membership::CurrentLocalJoinProjectionV1>,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+    }
+    async fn advance_projection_floor(
+        &self,
+        _revision: u64,
+    ) -> Result<
+        uc_core::membership::AdmissionProfileMetadataV1,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
     }
 }
 

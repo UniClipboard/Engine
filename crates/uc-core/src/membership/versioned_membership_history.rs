@@ -107,7 +107,7 @@ impl fmt::Display for HistoricalMembershipSignatureError {
 
 impl std::error::Error for HistoricalMembershipSignatureError {}
 
-pub trait HistoricalMembershipSignatureVerifier {
+pub trait HistoricalMembershipSignatureVerifier: Send + Sync {
     fn verify(
         &self,
         signature_algorithm_version: u16,
@@ -345,7 +345,7 @@ impl LegacyCheckpointAttestationV2 {
     pub fn verify(
         &self,
         checkpoint: &LegacyPrefixCheckpointV2,
-        verifier: &impl HistoricalMembershipSignatureVerifier,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     ) -> Result<(), MembershipHistoryV2Error> {
         checkpoint.validate()?;
         if self.attestation_format_version != LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2 {
@@ -809,6 +809,7 @@ pub enum MembershipHistoryV2Error {
     UnknownRemoval,
     InvalidDecision,
     DecisionConflict,
+    InvalidPersistedHistory,
 }
 
 impl fmt::Display for MembershipHistoryV2Error {
@@ -848,6 +849,7 @@ impl fmt::Display for MembershipHistoryV2Error {
             Self::UnknownRemoval => "membership decision references an unknown removal",
             Self::InvalidDecision => "membership decision is invalid at the removal parent",
             Self::DecisionConflict => "membership decision conflicts with retained history",
+            Self::InvalidPersistedHistory => "persisted membership history is invalid",
         })
     }
 }
@@ -873,7 +875,141 @@ pub struct VersionedMembershipHistory {
     known_head: Option<MembershipEventId>,
 }
 
+const PERSISTED_MEMBERSHIP_HISTORY_FORMAT_V2: u16 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum PersistedActivationBaselineV2 {
+    FullyVerifiedMigration {
+        lineage_id: String,
+        head_event_id: MembershipEventId,
+        head_depth: u64,
+        current_member_credentials: Vec<(MemberInstanceId, MembershipCredential)>,
+    },
+    LegacyAccepted(LegacyPrefixCheckpointV2),
+}
+
+impl From<MembershipActivationBaselineV2> for PersistedActivationBaselineV2 {
+    fn from(value: MembershipActivationBaselineV2) -> Self {
+        match value {
+            MembershipActivationBaselineV2::FullyVerifiedMigration {
+                lineage_id,
+                head_event_id,
+                head_depth,
+                current_member_credentials,
+            } => Self::FullyVerifiedMigration {
+                lineage_id,
+                head_event_id,
+                head_depth,
+                current_member_credentials,
+            },
+            MembershipActivationBaselineV2::LegacyAccepted { checkpoint } => {
+                Self::LegacyAccepted(checkpoint)
+            }
+        }
+    }
+}
+
+impl From<PersistedActivationBaselineV2> for MembershipActivationBaselineV2 {
+    fn from(value: PersistedActivationBaselineV2) -> Self {
+        match value {
+            PersistedActivationBaselineV2::FullyVerifiedMigration {
+                lineage_id,
+                head_event_id,
+                head_depth,
+                current_member_credentials,
+            } => Self::FullyVerifiedMigration {
+                lineage_id,
+                head_event_id,
+                head_depth,
+                current_member_credentials,
+            },
+            PersistedActivationBaselineV2::LegacyAccepted(checkpoint) => {
+                Self::LegacyAccepted { checkpoint }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedMembershipHistoryV2 {
+    format_version: u16,
+    lineage_id: String,
+    events: Vec<MembershipEventV2>,
+    activation_receipts: Vec<AdmissionActivationReceipt>,
+    peer_decisions: Vec<MembershipDecisionV2>,
+    activation_baseline: Option<PersistedActivationBaselineV2>,
+    known_head: Option<MembershipEventId>,
+}
+
 impl VersionedMembershipHistory {
+    pub fn encode_persisted_v2(&self) -> Result<Vec<u8>, MembershipHistoryV2Error> {
+        let persisted = PersistedMembershipHistoryV2 {
+            format_version: PERSISTED_MEMBERSHIP_HISTORY_FORMAT_V2,
+            lineage_id: self.lineage_id.clone(),
+            events: self.events.values().cloned().collect(),
+            activation_receipts: self
+                .activation_receipts
+                .values()
+                .map(|record| record.activation_receipt.clone())
+                .collect(),
+            peer_decisions: self.peer_decisions.values().cloned().collect(),
+            activation_baseline: self.activation_baseline.clone().map(Into::into),
+            known_head: self.known_head,
+        };
+        postcard::to_stdvec(&persisted)
+            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)
+    }
+
+    pub fn decode_persisted_v2(
+        bytes: &[u8],
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
+    ) -> Result<Self, MembershipHistoryV2Error> {
+        let mut persisted: PersistedMembershipHistoryV2 = postcard::from_bytes(bytes)
+            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        if persisted.format_version != PERSISTED_MEMBERSHIP_HISTORY_FORMAT_V2 {
+            return Err(MembershipHistoryV2Error::UpgradeRequired);
+        }
+        let mut history = match persisted.activation_baseline.take() {
+            Some(baseline) => Self::from_activation_baseline(baseline.into())?,
+            None => Self::new(persisted.lineage_id.clone()),
+        };
+        if history.lineage_id != persisted.lineage_id {
+            return Err(MembershipHistoryV2Error::InvalidLineage);
+        }
+        persisted
+            .events
+            .sort_by_key(|event| (event.parent_depth, event.event_id()));
+        for event in persisted.events {
+            history.verify_and_receive_event(event, verifier)?;
+        }
+        persisted
+            .activation_receipts
+            .sort_by_key(|receipt| receipt.event_id);
+        for receipt in persisted.activation_receipts {
+            history.verify_and_record_activation_receipt(receipt, verifier)?;
+        }
+        persisted
+            .peer_decisions
+            .sort_by_key(|decision| decision.decision_id());
+        for decision in persisted.peer_decisions {
+            history.verify_and_record_peer_decision(decision, verifier)?;
+        }
+        if persisted.known_head.is_some()
+            && !persisted.known_head.is_some_and(|head| {
+                history.snapshots.contains_key(&head)
+                    || history
+                        .activation_baseline
+                        .as_ref()
+                        .is_some_and(|baseline| baseline.head_and_depth().0 == head)
+            })
+        {
+            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        }
+        history.known_head = persisted.known_head;
+        history.rebuild_snapshots()?;
+        Ok(history)
+    }
+
     pub fn new(lineage_id: String) -> Self {
         Self {
             lineage_id,
@@ -994,7 +1130,7 @@ impl VersionedMembershipHistory {
     pub fn verify_and_receive_event(
         &mut self,
         event: MembershipEventV2,
-        verifier: &impl HistoricalMembershipSignatureVerifier,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     ) -> Result<MembershipHistoryV2ReceiveOutcome, MembershipHistoryV2Error> {
         if event.event_format_version != MEMBERSHIP_EVENT_FORMAT_V2 {
             return Err(MembershipHistoryV2Error::UpgradeRequired);
@@ -1052,7 +1188,7 @@ impl VersionedMembershipHistory {
     pub fn verify_and_record_activation_receipt(
         &mut self,
         receipt: AdmissionActivationReceipt,
-        verifier: &impl HistoricalMembershipSignatureVerifier,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     ) -> Result<MembershipActivationReceiptStoreOutcome, MembershipHistoryV2Error> {
         if receipt.receipt_format_version != ACTIVATION_RECEIPT_FORMAT_V1 {
             return Err(MembershipHistoryV2Error::UpgradeRequired);
@@ -1091,7 +1227,7 @@ impl VersionedMembershipHistory {
     pub fn verify_and_record_peer_decision(
         &mut self,
         decision: MembershipDecisionV2,
-        verifier: &impl HistoricalMembershipSignatureVerifier,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     ) -> Result<MembershipDecisionStoreOutcome, MembershipHistoryV2Error> {
         if decision.decision_format_version != MEMBERSHIP_DECISION_FORMAT_V2 {
             return Err(MembershipHistoryV2Error::UpgradeRequired);
@@ -1231,7 +1367,7 @@ impl VersionedMembershipHistory {
         &self,
         event: &MembershipEventV2,
         credential: &MembershipCredential,
-        verifier: &impl HistoricalMembershipSignatureVerifier,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     ) -> Result<(), MembershipHistoryV2Error> {
         credential.validate()?;
         verify_signature(
@@ -1327,7 +1463,7 @@ impl VersionedMembershipHistory {
 }
 
 fn verify_signature(
-    verifier: &impl HistoricalMembershipSignatureVerifier,
+    verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     credential: &MembershipCredential,
     payload: &[u8],
     signature: &[u8],

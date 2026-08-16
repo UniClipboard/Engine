@@ -17,6 +17,7 @@
 //! Removed instances keep only the restricted late-submission and
 //! removal-notice entries.
 
+mod admission_transaction;
 pub(crate) mod assembly;
 pub mod discovery;
 pub(crate) mod group_update_delivery;
@@ -55,6 +56,7 @@ use uc_core::ports::{
 };
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
+pub(crate) use admission_transaction::DurableAdmissionTransaction;
 pub(crate) use runtime::WorkspaceConvergenceActivity;
 pub use runtime::WorkspaceConvergenceRuntime;
 
@@ -86,6 +88,8 @@ pub enum WorkspaceConvergenceError {
     AdmissionStorage(String),
     #[error("workspace convergence admission generation advanced")]
     AdmissionGenerationAdvanced,
+    #[error("another workspace admission is already in progress")]
+    AdmissionInProgress,
     #[error("workspace convergence is unavailable")]
     Unavailable,
 }
@@ -93,6 +97,12 @@ pub enum WorkspaceConvergenceError {
 pub struct WorkspaceConvergenceDeps {
     pub initial_state_origin: WorkspaceConvergenceStateOrigin,
     pub repository: Arc<dyn WorkspaceConvergenceRepositoryPort>,
+    pub admission_attempts: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    pub historical_membership_signatures:
+        Arc<dyn uc_core::membership::HistoricalMembershipSignatureVerifier>,
+    pub admission_security_transition:
+        Arc<dyn uc_core::membership::AdmissionSecurityTransitionPort>,
+    pub admission_outbox_delivery: Arc<dyn uc_core::membership::AdmissionOutboxDeliveryPort>,
     pub member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub membership_identity: Arc<dyn CurrentMembershipIdentityPort>,
@@ -280,6 +290,7 @@ pub struct DeviceTrustSnapshot {
 /// The unified workspace convergence owner.
 pub struct WorkspaceConvergence {
     deps: WorkspaceConvergenceDeps,
+    admission: DurableAdmissionTransaction,
     state_lock: tokio::sync::Mutex<()>,
     device_trust_decision_lock: tokio::sync::Mutex<()>,
     peer_reconciliation_locks: tokio::sync::Mutex<BTreeMap<DeviceId, Arc<tokio::sync::Mutex<()>>>>,
@@ -296,14 +307,31 @@ enum ReconciliationPeerRole {
 impl WorkspaceConvergence {
     pub fn new(deps: WorkspaceConvergenceDeps) -> Arc<Self> {
         let (events, _) = broadcast::channel(64);
+        let admission = DurableAdmissionTransaction::new(
+            Arc::clone(&deps.admission_attempts),
+            Arc::clone(&deps.historical_membership_signatures),
+            Arc::clone(&deps.admission_security_transition),
+        );
         Arc::new(Self {
             deps,
+            admission,
             state_lock: tokio::sync::Mutex::new(()),
             device_trust_decision_lock: tokio::sync::Mutex::new(()),
             peer_reconciliation_locks: tokio::sync::Mutex::new(BTreeMap::new()),
             wake: Arc::new(tokio::sync::Notify::new()),
             events,
         })
+    }
+
+    async fn recover_pending_admissions(&self) -> Result<usize, WorkspaceConvergenceError> {
+        let report = self
+            .admission
+            .recover_with(self.deps.admission_outbox_delivery.as_ref())
+            .await?;
+        if report.deliveries_confirmed > 0 || report.attempts_compacted > 0 {
+            self.notify();
+        }
+        Ok(report.deliveries_attempted)
     }
 
     fn admission_generation(state: &WorkspaceConvergenceState) -> u64 {

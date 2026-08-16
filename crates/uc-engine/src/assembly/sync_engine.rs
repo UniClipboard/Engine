@@ -87,6 +87,22 @@ pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
 use uc_infra::security::DefaultMembershipSecurityUpdateAdapter;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 
+struct DeferredAdmissionOutboxDelivery;
+
+#[async_trait::async_trait]
+impl uc_core::membership::AdmissionOutboxDeliveryPort for DeferredAdmissionOutboxDelivery {
+    async fn deliver(
+        &self,
+        _attempt_id: uc_core::membership::AdmissionAttemptId,
+        _message: &uc_core::membership::AdmissionOutboxMessageV1,
+    ) -> Result<
+        uc_core::membership::AdmissionOutboxDeliveryResultV1,
+        uc_core::membership::AdmissionOutboxDeliveryError,
+    > {
+        Ok(uc_core::membership::AdmissionOutboxDeliveryResultV1::Deferred)
+    }
+}
+
 #[cfg(not(feature = "lan-compat"))]
 struct UnavailableMobileDeviceLookup;
 
@@ -634,6 +650,14 @@ pub async fn build_sync_engine_assembly(
         workspace: WorkspaceConvergenceDeps {
             initial_state_origin,
             repository: Arc::clone(&space_setup.workspace_convergence_repository),
+            admission_attempts: Arc::clone(&space_setup.admission_attempt_repository),
+            historical_membership_signatures: Arc::new(
+                uc_infra::security::OpenMlsHistoricalSignatureVerifier,
+            ),
+            admission_security_transition: Arc::new(
+                uc_infra::security::AdmissionSecurityTransitionAdapter,
+            ),
+            admission_outbox_delivery: Arc::new(DeferredAdmissionOutboxDelivery),
             member_signatures: Arc::clone(&space_setup.current_member_signatures),
             member_repo: Arc::clone(&deps.device.member_repo),
             membership_identity: removal_identity,

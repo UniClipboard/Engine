@@ -77,6 +77,18 @@ pub enum AdmissionAttemptRepositoryError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[error("admission outbox delivery is temporarily unavailable")]
+pub struct AdmissionOutboxDeliveryError;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum AdmissionSecurityTransitionError {
+    #[error("admission security state is invalid")]
+    InvalidState,
+    #[error("admission security commitment does not match")]
+    CommitmentMismatch,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MembershipSecurityUpdateError {
     #[error("membership security state is unavailable")]
     Unavailable,

@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use uc_core::membership::{
     AdmissionAttemptId, AdmissionAttemptRepositoryError, AdmissionAttemptRepositoryPort,
     AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionProfileMetadataV1,
-    AdmissionTerminalResultV1, CompletionHelperAdmissionStageV1, JoinerAdmissionStageV1,
-    SponsorAdmissionStageV1, TerminalAdmissionAttemptV1, TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
+    AdmissionTerminalResultV1, CompletionHelperAdmissionStageV1, CurrentLocalJoinProjectionV1,
+    JoinerAdmissionStageV1, SponsorAdmissionStageV1, TerminalAdmissionAttemptV1,
+    TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
 };
 
 use crate::db::ports::DbExecutor;
@@ -31,6 +32,8 @@ struct AdmissionRepositoryStateV1 {
     metadata: AdmissionProfileMetadataV1,
     attempts: BTreeMap<AdmissionAttemptId, StoredAdmissionAttemptV1>,
     terminals: BTreeMap<AdmissionAttemptId, TerminalAdmissionAttemptV1>,
+    #[serde(default)]
+    membership_history_v2: Option<Vec<u8>>,
 }
 
 impl AdmissionRepositoryStateV1 {
@@ -40,6 +43,7 @@ impl AdmissionRepositoryStateV1 {
             metadata: AdmissionProfileMetadataV1::fresh(profile_generation),
             attempts: BTreeMap::new(),
             terminals: BTreeMap::new(),
+            membership_history_v2: None,
         }
     }
 }
@@ -192,7 +196,7 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
         attempt.role_state,
         AdmissionAttemptRoleStateV1::CompletionHelper(_)
     );
-    if helper == attempt.join_id.is_some() || (!joiner && attempt.local_join_ordinal.is_some()) {
+    if joiner != attempt.join_id.is_some() || joiner != attempt.local_join_ordinal.is_some() {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
     let rejected = matches!(
@@ -216,14 +220,16 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
         )
     );
     if rejected {
-        if attempt.terminal_result != Some(AdmissionTerminalResultV1::Rejected) {
+        if attempt.terminal_result != Some(AdmissionTerminalResultV1::Rejected)
+            || attempt.rejection_reason.is_none()
+        {
             return Err(AdmissionAttemptRepositoryError::Corrupt);
         }
     } else if completed {
         if attempt.terminal_result.is_none() || attempt.completion.is_none() {
             return Err(AdmissionAttemptRepositoryError::Corrupt);
         }
-    } else if attempt.terminal_result.is_some() {
+    } else if attempt.terminal_result.is_some() || attempt.rejection_reason.is_some() {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
     let rank = attempt
@@ -244,7 +250,13 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
     {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
+    if rank >= 2 && !rejected && attempt.base_membership_history.is_none() {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
     if rank >= 3 && !rejected && !helper && attempt.prepared_proof.is_none() {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    if joiner && rank >= 3 && !rejected && attempt.verified_membership_history.is_none() {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
     if rank >= 5 && !rejected && attempt.activation_receipt.is_none() {
@@ -272,6 +284,42 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
     Ok(())
 }
 
+fn validate_terminal_delivery_update(
+    current: &AdmissionAttemptV1,
+    next: &AdmissionAttemptV1,
+) -> Result<(), AdmissionAttemptRepositoryError> {
+    if next.cleanup_pending != current.cleanup_pending
+        || !next.inbox_dedup.starts_with(&current.inbox_dedup)
+        || next.outboxes.len() != current.outboxes.len()
+    {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    for (offset, record) in next.inbox_dedup[current.inbox_dedup.len()..]
+        .iter()
+        .enumerate()
+    {
+        if next.inbox_dedup[..current.inbox_dedup.len() + offset].contains(record) {
+            return Err(AdmissionAttemptRepositoryError::Corrupt);
+        }
+    }
+    if current
+        .outboxes
+        .iter()
+        .zip(&next.outboxes)
+        .any(|(current, next)| {
+            current.purpose != next.purpose
+                || current.recipient != next.recipient
+                || current.message_id != next.message_id
+                || current.predecessor_message_id != next.predecessor_message_id
+                || current.payload != next.payload
+                || (current.superseded && !next.superseded)
+        })
+    {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
     for DieselAdmissionAttemptStore<E>
@@ -280,8 +328,13 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
         &self,
         attempt: &AdmissionAttemptV1,
         consumed_invitation_digest: Option<[u8; 32]>,
+        initial_membership_history_v2: Option<&[u8]>,
     ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        if initial_membership_history_v2.is_some_and(|history| history.is_empty()) {
+            return Err(AdmissionAttemptRepositoryError::Corrupt);
+        }
         let attempt = attempt.clone();
+        let initial_membership_history_v2 = initial_membership_history_v2.map(ToOwned::to_owned);
         self.executor
             .run(|conn| {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
@@ -352,6 +405,19 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                             .consumed_invitation_attempts
                             .insert(digest, attempt.attempt_id);
                     }
+                    if let Some(initial_history) = &initial_membership_history_v2 {
+                        match &state.membership_history_v2 {
+                            Some(current) if current != initial_history => {
+                                return Err(anyhow::anyhow!(
+                                    AdmissionAttemptRepositoryError::VersionConflict
+                                ));
+                            }
+                            None => {
+                                state.membership_history_v2 = Some(initial_history.clone());
+                            }
+                            Some(_) => {}
+                        }
+                    }
                     let wrapped = self
                         .keys
                         .create_wrapped_attempt_key(*attempt.attempt_id.as_bytes())
@@ -421,9 +487,20 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                     if next.attempt_id != attempt_id
                         || !current.same_role_as(&next)
                         || next.stage_rank() < current.stage_rank()
-                        || current.is_terminal()
                     {
                         return Err(anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt));
+                    }
+                    if current.is_terminal() {
+                        validate_terminal_delivery_update(&current, &next)
+                            .map_err(|error| anyhow::anyhow!(error))?;
+                        let mut allowed = current.clone();
+                        allowed.record_version = next.record_version;
+                        allowed.inbox_dedup = next.inbox_dedup.clone();
+                        allowed.outboxes = next.outboxes.clone();
+                        allowed.cleanup_pending = next.cleanup_pending;
+                        if allowed != next {
+                            return Err(anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt));
+                        }
                     }
                     let replacement = self
                         .seal_attempt(
@@ -442,6 +519,84 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                         .map_err(|error| anyhow::anyhow!(error))?;
                     Ok(state.metadata)
                 })
+            })
+            .map_err(executor_error)
+    }
+
+    async fn compare_and_advance_with_membership_history_v2(
+        &self,
+        attempt_id: AdmissionAttemptId,
+        expected_record_version: u64,
+        next: &AdmissionAttemptV1,
+        expected_membership_history_v2: Option<&[u8]>,
+        membership_history_v2: &[u8],
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        if membership_history_v2.is_empty() {
+            return Err(AdmissionAttemptRepositoryError::Corrupt);
+        }
+        let next = next.clone();
+        let expected_membership_history_v2 = expected_membership_history_v2.map(ToOwned::to_owned);
+        let membership_history_v2 = membership_history_v2.to_vec();
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_on(conn)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    let stored = state.attempts.get(&attempt_id).cloned().ok_or_else(|| {
+                        anyhow::anyhow!(AdmissionAttemptRepositoryError::NotFound)
+                    })?;
+                    let current = self
+                        .open_attempt(attempt_id, &stored)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    if state.membership_history_v2.as_deref()
+                        != expected_membership_history_v2.as_deref()
+                    {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::VersionConflict
+                        ));
+                    }
+                    if current.record_version != expected_record_version
+                        || next.record_version != expected_record_version.saturating_add(1)
+                        || next.attempt_id != attempt_id
+                        || !current.same_role_as(&next)
+                        || next.stage_rank() < current.stage_rank()
+                        || current.is_terminal()
+                    {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::VersionConflict
+                        ));
+                    }
+                    let replacement = self
+                        .seal_attempt(
+                            &next,
+                            stored.wrapped_data_key,
+                            stored.consumed_invitation_digest,
+                        )
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    state.attempts.insert(attempt_id, replacement);
+                    state.membership_history_v2 = Some(membership_history_v2);
+                    state.metadata.device_trust_revision = state
+                        .metadata
+                        .device_trust_revision
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    self.save_state_on(conn, &state)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    Ok(state.metadata)
+                })
+            })
+            .map_err(executor_error)
+    }
+
+    async fn load_membership_history_v2(
+        &self,
+    ) -> Result<Option<Vec<u8>>, AdmissionAttemptRepositoryError> {
+        self.executor
+            .run(|conn| {
+                self.load_state_on(conn)
+                    .map(|state| state.membership_history_v2)
+                    .map_err(|error| anyhow::anyhow!(error))
             })
             .map_err(executor_error)
     }
@@ -514,6 +669,7 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                         invitation_digest: stored.consumed_invitation_digest,
                         identity_binding,
                         terminal_result,
+                        rejection_reason: attempt.rejection_reason,
                         candidate_event_id: attempt.candidate_event_id,
                         cancel_outcome: attempt.cancel_outcome,
                         replay_result: attempt.completion.unwrap_or_default(),
@@ -550,6 +706,57 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                 self.load_state_on(conn)
                     .map(|state| state.metadata)
                     .map_err(|error| anyhow::anyhow!(error))
+            })
+            .map_err(executor_error)
+    }
+
+    async fn project_current_local_join(
+        &self,
+    ) -> Result<Option<CurrentLocalJoinProjectionV1>, AdmissionAttemptRepositoryError> {
+        self.executor
+            .run(|conn| {
+                let state = self
+                    .load_state_on(conn)
+                    .map_err(|error| anyhow::anyhow!(error))?;
+                let mut pending = state
+                    .attempts
+                    .iter()
+                    .map(|(attempt_id, stored)| self.open_attempt(*attempt_id, stored))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .filter(|attempt| attempt.is_joiner() && !attempt.is_terminal())
+                    .filter_map(|attempt| {
+                        Some(CurrentLocalJoinProjectionV1 {
+                            device_trust_revision: state.metadata.device_trust_revision,
+                            attempt_id: attempt.attempt_id,
+                            join_id: attempt.join_id?,
+                            local_join_ordinal: attempt.local_join_ordinal?,
+                            terminal_result: None,
+                            rejection_reason: None,
+                        })
+                    })
+                    .max_by_key(|projection| projection.local_join_ordinal);
+                if pending.is_some() {
+                    return Ok(pending.take());
+                }
+                Ok(state
+                    .terminals
+                    .values()
+                    .filter_map(|terminal| {
+                        let ordinal = terminal.local_join_ordinal?;
+                        if ordinal < state.metadata.join_projection_floor_ordinal {
+                            return None;
+                        }
+                        Some(CurrentLocalJoinProjectionV1 {
+                            device_trust_revision: state.metadata.device_trust_revision,
+                            attempt_id: terminal.attempt_id,
+                            join_id: terminal.join_id?,
+                            local_join_ordinal: ordinal,
+                            terminal_result: Some(terminal.terminal_result),
+                            rejection_reason: terminal.rejection_reason,
+                        })
+                    })
+                    .max_by_key(|projection| projection.local_join_ordinal))
             })
             .map_err(executor_error)
     }
@@ -601,10 +808,12 @@ mod tests {
     use std::fs;
     use std::sync::{Arc, Mutex};
 
+    use diesel::RunQueryDsl;
     use tempfile::tempdir;
     use uc_core::membership::{
         AdmissionAttemptId, AdmissionAttemptRepositoryPort, AdmissionAttemptV1,
-        AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1, JoinerAdmissionStageV1,
+        AdmissionInboxRecordV1, AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1,
+        AdmissionTerminalResultV1, JoinerAdmissionStageV1,
     };
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
@@ -655,7 +864,7 @@ mod tests {
             JoinerAdmissionStageV1::Initiated,
         );
         initiated.local_join_ordinal = Some(0);
-        store.create(&initiated, None).await.unwrap();
+        store.create(&initiated, None, None).await.unwrap();
 
         let mut prepared = initiated.clone();
         prepared.record_version = 1;
@@ -670,6 +879,8 @@ mod tests {
         prepared.security_commit = Some(b"security-commit".to_vec());
         prepared.security_welcome = Some(b"security-welcome-private".to_vec());
         prepared.staged_security_state = Some(b"staged-mls-private-state".to_vec());
+        prepared.base_membership_history = Some(b"base-history-private".to_vec());
+        prepared.verified_membership_history = Some(b"verified-history-private".to_vec());
         prepared.prepared_proof = Some(b"prepared-proof-private".to_vec());
         prepared.outboxes.push(AdmissionOutboxMessageV1 {
             purpose: AdmissionOutboxPurposeV1::Prepared,
@@ -692,6 +903,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attempt_and_membership_history_roll_back_together_on_write_failure() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("admission-history-atomic.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let generation = [0x23; 16];
+        let attempt_id = AdmissionAttemptId::from_bytes([0x24; 32]);
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            AdmissionKeyManager::new(secure_storage.clone(), generation),
+        );
+        let mut initiated = AdmissionAttemptV1::new_joiner(
+            attempt_id,
+            [0x25; 16],
+            JoinerAdmissionStageV1::Initiated,
+        );
+        initiated.local_join_ordinal = Some(0);
+        store
+            .create(&initiated, None, Some(b"base-membership-history"))
+            .await
+            .unwrap();
+
+        {
+            let mut connection = pool.get().unwrap();
+            diesel::sql_query(
+                "CREATE TRIGGER fail_admission_history_advance \
+                 BEFORE UPDATE ON admission_repository_state \
+                 BEGIN SELECT RAISE(FAIL, 'forced admission history failure'); END",
+            )
+            .execute(&mut connection)
+            .unwrap();
+        }
+        let mut next = initiated.clone();
+        next.record_version = 1;
+        next.outboxes.push(AdmissionOutboxMessageV1 {
+            purpose: AdmissionOutboxPurposeV1::JoinRequest,
+            recipient: b"sponsor".to_vec(),
+            message_id: [0x26; 32],
+            predecessor_message_id: None,
+            payload: b"request".to_vec(),
+            superseded: false,
+        });
+        assert!(store
+            .compare_and_advance_with_membership_history_v2(
+                attempt_id,
+                0,
+                &next,
+                Some(b"base-membership-history"),
+                b"advanced-membership-history",
+            )
+            .await
+            .is_err());
+        {
+            let mut connection = pool.get().unwrap();
+            diesel::sql_query("DROP TRIGGER fail_admission_history_advance")
+                .execute(&mut connection)
+                .unwrap();
+        }
+
+        let reopened = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(secure_storage, generation),
+        );
+        assert_eq!(reopened.load(attempt_id).await.unwrap(), Some(initiated));
+        assert_eq!(
+            reopened.load_membership_history_v2().await.unwrap(),
+            Some(b"base-membership-history".to_vec())
+        );
+    }
+
+    #[tokio::test]
     async fn a_second_non_terminal_attempt_cannot_take_the_profile_slot() {
         let directory = tempdir().unwrap();
         let database_path = directory.path().join("admission-slot.sqlite");
@@ -706,7 +988,7 @@ mod tests {
             JoinerAdmissionStageV1::Initiated,
         );
         first.local_join_ordinal = Some(0);
-        store.create(&first, None).await.unwrap();
+        store.create(&first, None, None).await.unwrap();
 
         let mut second = AdmissionAttemptV1::new_joiner(
             AdmissionAttemptId::from_bytes([0x54; 32]),
@@ -714,7 +996,7 @@ mod tests {
             JoinerAdmissionStageV1::Initiated,
         );
         second.local_join_ordinal = Some(1);
-        assert!(store.create(&second, None).await.is_err());
+        assert!(store.create(&second, None, None).await.is_err());
         let metadata = store.profile_metadata().await.unwrap();
         assert_eq!(metadata.next_local_join_ordinal, 1);
         assert_eq!(metadata.device_trust_revision, 1);
@@ -736,7 +1018,7 @@ mod tests {
             JoinerAdmissionStageV1::Initiated,
         );
         initiated.local_join_ordinal = Some(0);
-        store.create(&initiated, None).await.unwrap();
+        store.create(&initiated, None, None).await.unwrap();
 
         let mut incomplete = initiated;
         incomplete.record_version = 1;
@@ -774,12 +1056,14 @@ mod tests {
             JoinerAdmissionStageV1::Initiated,
         );
         initiated.local_join_ordinal = Some(0);
-        store.create(&initiated, None).await.unwrap();
+        store.create(&initiated, None, None).await.unwrap();
 
         let mut rejected = initiated;
         rejected.record_version = 1;
         assert!(rejected.set_joiner_stage(JoinerAdmissionStageV1::Rejected));
         rejected.terminal_result = Some(uc_core::membership::AdmissionTerminalResultV1::Rejected);
+        rejected.rejection_reason =
+            Some(uc_core::membership::AdmissionRejectionReasonV1::Cancelled);
         rejected.cancel_outcome = Some(b"cancelled-before-commit".to_vec());
         rejected.identity_binding = Some(b"joiner-and-sponsor-binding".to_vec());
         store
@@ -809,6 +1093,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_updates_are_monotonic_and_preserve_delivery_records() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("admission-terminal-update.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0xa1; 16]),
+        );
+        let attempt_id = AdmissionAttemptId::from_bytes([0xa2; 32]);
+        let mut attempt = AdmissionAttemptV1::new_joiner(
+            attempt_id,
+            [0xa3; 16],
+            JoinerAdmissionStageV1::Initiated,
+        );
+        attempt.local_join_ordinal = Some(0);
+        store.create(&attempt, None, None).await.unwrap();
+
+        let first_inbox = AdmissionInboxRecordV1 {
+            message_id: [0xa4; 32],
+            payload_digest: [0xa5; 32],
+            acknowledgment_payload: b"first-ack".to_vec(),
+        };
+        let second_inbox = AdmissionInboxRecordV1 {
+            message_id: [0xa6; 32],
+            payload_digest: [0xa7; 32],
+            acknowledgment_payload: b"second-ack".to_vec(),
+        };
+        let mut terminal = attempt;
+        terminal.record_version = 1;
+        assert!(terminal.set_joiner_stage(JoinerAdmissionStageV1::Rejected));
+        terminal.terminal_result = Some(AdmissionTerminalResultV1::Rejected);
+        terminal.rejection_reason =
+            Some(uc_core::membership::AdmissionRejectionReasonV1::Cancelled);
+        terminal.identity_binding = Some(b"terminal-binding".to_vec());
+        terminal.inbox_dedup.push(first_inbox.clone());
+        terminal.outboxes.extend([
+            AdmissionOutboxMessageV1 {
+                purpose: AdmissionOutboxPurposeV1::JoinRequest,
+                recipient: b"sponsor".to_vec(),
+                message_id: [0xa8; 32],
+                predecessor_message_id: None,
+                payload: b"join-request".to_vec(),
+                superseded: true,
+            },
+            AdmissionOutboxMessageV1 {
+                purpose: AdmissionOutboxPurposeV1::Rejected,
+                recipient: b"joiner".to_vec(),
+                message_id: [0xa9; 32],
+                predecessor_message_id: Some([0xa8; 32]),
+                payload: b"rejected".to_vec(),
+                superseded: false,
+            },
+        ]);
+        store
+            .compare_and_advance(attempt_id, 0, &terminal)
+            .await
+            .unwrap();
+
+        let mut reactivated = terminal.clone();
+        reactivated.record_version = 2;
+        reactivated.outboxes[0].superseded = false;
+        assert!(store
+            .compare_and_advance(attempt_id, 1, &reactivated)
+            .await
+            .is_err());
+
+        let mut altered = terminal.clone();
+        altered.record_version = 2;
+        altered.outboxes[1].recipient = b"other-device".to_vec();
+        assert!(store
+            .compare_and_advance(attempt_id, 1, &altered)
+            .await
+            .is_err());
+
+        let mut removed_inbox = terminal.clone();
+        removed_inbox.record_version = 2;
+        removed_inbox.inbox_dedup.clear();
+        assert!(store
+            .compare_and_advance(attempt_id, 1, &removed_inbox)
+            .await
+            .is_err());
+
+        let mut acknowledged = terminal.clone();
+        acknowledged.record_version = 2;
+        acknowledged.outboxes[1].superseded = true;
+        acknowledged.inbox_dedup.push(second_inbox);
+        store
+            .compare_and_advance(attempt_id, 1, &acknowledged)
+            .await
+            .unwrap();
+        assert_eq!(store.load(attempt_id).await.unwrap(), Some(acknowledged));
+    }
+
+    #[tokio::test]
+    async fn current_local_join_projection_uses_pending_then_latest_visible_ordinal() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("admission-projection.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0x74; 16]),
+        );
+        assert!(store.project_current_local_join().await.unwrap().is_none());
+
+        let first_id = AdmissionAttemptId::from_bytes([0x75; 32]);
+        let mut first =
+            AdmissionAttemptV1::new_joiner(first_id, [0x76; 16], JoinerAdmissionStageV1::Initiated);
+        first.local_join_ordinal = Some(0);
+        store.create(&first, None, None).await.unwrap();
+        let pending = store.project_current_local_join().await.unwrap().unwrap();
+        assert_eq!(pending.attempt_id, first_id);
+        assert_eq!(pending.local_join_ordinal, 0);
+        assert_eq!(pending.terminal_result, None);
+
+        let mut rejected = first;
+        rejected.record_version = 1;
+        assert!(rejected.set_joiner_stage(JoinerAdmissionStageV1::Rejected));
+        rejected.terminal_result = Some(AdmissionTerminalResultV1::Rejected);
+        rejected.rejection_reason =
+            Some(uc_core::membership::AdmissionRejectionReasonV1::Cancelled);
+        rejected.identity_binding = Some(b"first-binding".to_vec());
+        store
+            .compare_and_advance(first_id, 0, &rejected)
+            .await
+            .unwrap();
+        store.compact_terminal(first_id, 1).await.unwrap();
+        let first_terminal = store.project_current_local_join().await.unwrap().unwrap();
+        assert_eq!(first_terminal.attempt_id, first_id);
+        assert_eq!(
+            first_terminal.terminal_result,
+            Some(AdmissionTerminalResultV1::Rejected)
+        );
+
+        let second_id = AdmissionAttemptId::from_bytes([0x77; 32]);
+        let mut second = AdmissionAttemptV1::new_joiner(
+            second_id,
+            [0x78; 16],
+            JoinerAdmissionStageV1::Initiated,
+        );
+        second.local_join_ordinal = Some(1);
+        store.create(&second, None, None).await.unwrap();
+        assert_eq!(
+            store
+                .project_current_local_join()
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_id,
+            second_id
+        );
+
+        let mut second_rejected = second;
+        second_rejected.record_version = 1;
+        assert!(second_rejected.set_joiner_stage(JoinerAdmissionStageV1::Rejected));
+        second_rejected.terminal_result = Some(AdmissionTerminalResultV1::Rejected);
+        second_rejected.rejection_reason =
+            Some(uc_core::membership::AdmissionRejectionReasonV1::IdentityConflict);
+        second_rejected.identity_binding = Some(b"second-binding".to_vec());
+        store
+            .compare_and_advance(second_id, 0, &second_rejected)
+            .await
+            .unwrap();
+        store.compact_terminal(second_id, 1).await.unwrap();
+        assert_eq!(
+            store
+                .project_current_local_join()
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_id,
+            second_id
+        );
+        let revision = store
+            .profile_metadata()
+            .await
+            .unwrap()
+            .device_trust_revision;
+        store.advance_projection_floor(revision).await.unwrap();
+        assert!(store.project_current_local_join().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn compacted_join_id_cannot_be_reused_by_another_attempt() {
         let directory = tempdir().unwrap();
         let database_path = directory.path().join("admission-join-id.sqlite");
@@ -822,11 +1288,13 @@ mod tests {
         let mut first =
             AdmissionAttemptV1::new_joiner(first_id, join_id, JoinerAdmissionStageV1::Initiated);
         first.local_join_ordinal = Some(0);
-        store.create(&first, None).await.unwrap();
+        store.create(&first, None, None).await.unwrap();
         let mut rejected = first;
         rejected.record_version = 1;
         assert!(rejected.set_joiner_stage(JoinerAdmissionStageV1::Rejected));
         rejected.terminal_result = Some(uc_core::membership::AdmissionTerminalResultV1::Rejected);
+        rejected.rejection_reason =
+            Some(uc_core::membership::AdmissionRejectionReasonV1::Cancelled);
         rejected.identity_binding = Some(b"joiner-and-sponsor-binding".to_vec());
         store
             .compare_and_advance(first_id, 0, &rejected)
@@ -840,7 +1308,7 @@ mod tests {
             JoinerAdmissionStageV1::Initiated,
         );
         replay.local_join_ordinal = Some(1);
-        assert!(store.create(&replay, None).await.is_err());
+        assert!(store.create(&replay, None, None).await.is_err());
         assert_eq!(
             store
                 .profile_metadata()
@@ -876,7 +1344,7 @@ mod tests {
             payload: b"private-message-marker".to_vec(),
             superseded: false,
         });
-        store.create(&attempt, None).await.unwrap();
+        store.create(&attempt, None, None).await.unwrap();
 
         let markers: [&[u8]; 4] = [
             b"private-resume-key-marker",
