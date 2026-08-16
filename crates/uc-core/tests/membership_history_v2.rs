@@ -623,6 +623,13 @@ fn verified_and_legacy_migrations_create_explicit_activation_baselines() {
     )
     .expect("fully verified migration baseline is valid");
     assert_eq!(fully_verified.active_members().len(), 2);
+    assert_eq!(
+        fully_verified.device_for_member(
+            &a.facts.member_instance,
+            &[DeviceId::new("device-a"), DeviceId::new("device-c")]
+        ),
+        Some(DeviceId::new("device-a"))
+    );
     let add_d = event(
         &fully_verified,
         Some(head),
@@ -653,6 +660,13 @@ fn verified_and_legacy_migrations_create_explicit_activation_baselines() {
     )
     .expect("legacy accepted baseline is valid");
     assert_eq!(legacy.active_members().len(), 2);
+    assert_eq!(
+        legacy.device_for_member(
+            &c.facts.member_instance,
+            &[DeviceId::new("device-a"), DeviceId::new("device-c")]
+        ),
+        Some(DeviceId::new("device-c"))
+    );
 }
 
 #[test]

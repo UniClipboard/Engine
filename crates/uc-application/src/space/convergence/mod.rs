@@ -2437,6 +2437,148 @@ impl uc_core::membership::ContentExchangeGatePort for WorkspaceConvergence {
     }
 }
 
+impl WorkspaceConvergence {
+    async fn v2_current_peer_snapshot(
+        &self,
+        state: &WorkspaceConvergenceState,
+    ) -> Result<
+        Option<uc_core::membership::CurrentWorkspacePeerSnapshot>,
+        uc_core::membership::CurrentWorkspacePeerScopeError,
+    > {
+        use uc_core::membership::{
+            AdmissionAttemptRepositoryError, AdmissionTerminalResultV1,
+            CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
+            CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot,
+            MembershipHistoryV2Error, VersionedMembershipHistory,
+        };
+
+        let map_repository_error = |error| match error {
+            AdmissionAttemptRepositoryError::Locked => CurrentWorkspacePeerScopeError::Locked,
+            AdmissionAttemptRepositoryError::Corrupt => CurrentWorkspacePeerScopeError::Corrupt,
+            _ => CurrentWorkspacePeerScopeError::Unavailable,
+        };
+        let Some(encoded_history) = self
+            .deps
+            .admission_attempts
+            .load_membership_history_v2()
+            .await
+            .map_err(map_repository_error)?
+        else {
+            return Ok(None);
+        };
+        let history = VersionedMembershipHistory::decode_persisted_v2(
+            &encoded_history,
+            self.deps.historical_membership_signatures.as_ref(),
+        )
+        .map_err(|error| match error {
+            MembershipHistoryV2Error::UpgradeRequired => {
+                CurrentWorkspacePeerScopeError::Unavailable
+            }
+            _ => CurrentWorkspacePeerScopeError::Corrupt,
+        })?;
+        let local_join = self
+            .deps
+            .admission_attempts
+            .project_current_local_join()
+            .await
+            .map_err(map_repository_error)?;
+        if history.lineage_id() != state.space_lineage {
+            if let Some(join) = &local_join {
+                if join.terminal_result.is_none() {
+                    let attempt = self
+                        .deps
+                        .admission_attempts
+                        .load(join.attempt_id)
+                        .await
+                        .map_err(map_repository_error)?
+                        .ok_or(CurrentWorkspacePeerScopeError::Corrupt)?;
+                    let transition = attempt
+                        .space_transition
+                        .as_deref()
+                        .and_then(uc_core::membership::AdmissionSpaceTransitionV2::decode);
+                    if transition.as_ref().is_some_and(|transition| {
+                        matches!(
+                            transition,
+                            uc_core::membership::AdmissionSpaceTransitionV2::CrossSpace(item)
+                                if transition.attempt_id() == join.attempt_id
+                                    && item.source_space_id == state.space_lineage
+                                    && item.target_space_id == history.lineage_id()
+                                    && transition.phase_rank()
+                                        < transition.activation_started_rank()
+                        )
+                    }) {
+                        return Ok(None);
+                    }
+                } else if join.terminal_result == Some(AdmissionTerminalResultV1::Rejected) {
+                    let terminal = self
+                        .deps
+                        .admission_attempts
+                        .load_terminal(join.attempt_id)
+                        .await
+                        .map_err(map_repository_error)?
+                        .ok_or(CurrentWorkspacePeerScopeError::Corrupt)?;
+                    if terminal
+                        .candidate_event_id
+                        .is_some_and(|event_id| history.contains_event_id(&event_id))
+                    {
+                        return Ok(None);
+                    }
+                }
+            }
+            return Err(CurrentWorkspacePeerScopeError::Corrupt);
+        }
+
+        let members = self
+            .deps
+            .member_repo
+            .list()
+            .await
+            .map_err(|_| CurrentWorkspacePeerScopeError::Unavailable)?;
+        let mut candidate_devices = members
+            .into_iter()
+            .map(|member| member.device_id)
+            .collect::<Vec<_>>();
+        candidate_devices.push(self.deps.own_device.clone());
+        candidate_devices.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        candidate_devices.dedup();
+
+        let active_devices = history
+            .active_members()
+            .iter()
+            .map(|member| {
+                history
+                    .device_for_member(member, &candidate_devices)
+                    .ok_or(CurrentWorkspacePeerScopeError::Unavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let local_join_is_active = local_join
+            .is_none_or(|join| join.terminal_result == Some(AdmissionTerminalResultV1::Active));
+        let local_membership =
+            if active_devices.contains(&self.deps.own_device) && local_join_is_active {
+                CurrentWorkspaceLocalMembership::Active
+            } else {
+                CurrentWorkspaceLocalMembership::Removed
+            };
+        let mut peer_device_ids = if local_membership == CurrentWorkspaceLocalMembership::Active {
+            active_devices
+                .into_iter()
+                .filter(|device| *device != self.deps.own_device)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        peer_device_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        peer_device_ids.dedup();
+
+        Ok(Some(CurrentWorkspacePeerSnapshot {
+            revision: state.revision,
+            source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+            local_membership,
+            peer_device_ids,
+        }))
+    }
+}
+
 #[async_trait]
 impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence {
     async fn snapshot(
@@ -2459,6 +2601,9 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
             ) => CurrentWorkspacePeerScopeError::Corrupt,
             _ => CurrentWorkspacePeerScopeError::Unavailable,
         })?;
+        if let Some(snapshot) = self.v2_current_peer_snapshot(&state).await? {
+            return Ok(snapshot);
+        }
         let history = state
             .membership_reconciliation
             .as_ref()

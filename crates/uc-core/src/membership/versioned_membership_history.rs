@@ -942,6 +942,10 @@ struct PersistedMembershipHistoryV2 {
 }
 
 impl VersionedMembershipHistory {
+    pub fn lineage_id(&self) -> &str {
+        &self.lineage_id
+    }
+
     pub fn encode_persisted_v2(&self) -> Result<Vec<u8>, MembershipHistoryV2Error> {
         let persisted = PersistedMembershipHistoryV2 {
             format_version: PERSISTED_MEMBERSHIP_HISTORY_FORMAT_V2,
@@ -1098,6 +1102,36 @@ impl VersionedMembershipHistory {
             .and_then(|head| self.snapshots.get(&head))
             .map(|snapshot| snapshot.active_members.clone())
             .unwrap_or_default()
+    }
+
+    pub fn contains_event_id(&self, event_id: &[u8; 32]) -> bool {
+        self.events
+            .keys()
+            .any(|candidate| candidate.as_bytes() == event_id)
+    }
+
+    pub fn device_for_member(
+        &self,
+        member: &MemberInstanceId,
+        candidate_devices: &[DeviceId],
+    ) -> Option<DeviceId> {
+        self.events
+            .values()
+            .find_map(|event| match &event.operation {
+                MembershipOperationV2::AddDevice { admission }
+                    if admission.facts.member_instance == *member =>
+                {
+                    Some(admission.facts.device_id.clone())
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                let credential = self.credentials.get(member)?;
+                candidate_devices
+                    .iter()
+                    .find(|device| credential.member_instance_id(device) == *member)
+                    .cloned()
+            })
     }
 
     pub fn decision_for(

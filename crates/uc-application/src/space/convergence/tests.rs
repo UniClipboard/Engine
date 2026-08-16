@@ -254,7 +254,9 @@ impl WorkspaceConvergenceRepositoryPort for MemoryWorkspaceRepository {
     }
 }
 
-struct LockedAdmissionRepository;
+struct LockedAdmissionRepository {
+    allow_empty_history_reads: bool,
+}
 
 #[async_trait]
 impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepository {
@@ -309,7 +311,11 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo
     async fn load_membership_history_v2(
         &self,
     ) -> Result<Option<Vec<u8>>, uc_core::membership::AdmissionAttemptRepositoryError> {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        if self.allow_empty_history_reads {
+            Ok(None)
+        } else {
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        }
     }
 
     async fn scan_recoverable(
@@ -357,7 +363,11 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo
         Option<uc_core::membership::CurrentLocalJoinProjectionV1>,
         uc_core::membership::AdmissionAttemptRepositoryError,
     > {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        if self.allow_empty_history_reads {
+            Ok(None)
+        } else {
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        }
     }
 
     async fn advance_projection_floor(
@@ -836,7 +846,9 @@ pub(crate) fn test_deps(
     WorkspaceConvergenceDeps {
         initial_state_origin: super::WorkspaceConvergenceStateOrigin::CurrentInstallation,
         repository,
-        admission_attempts: Arc::new(LockedAdmissionRepository),
+        admission_attempts: Arc::new(LockedAdmissionRepository {
+            allow_empty_history_reads: true,
+        }),
         historical_membership_signatures: Arc::new(DeterministicHistoricalVerifier),
         admission_security_transition: Arc::new(EchoAdmissionSecurityTransition::default()),
         admission_space_transition: Arc::new(NoAdmissionSpaceTransition),
@@ -1655,6 +1667,272 @@ async fn current_peer_scope_hides_addition_until_pending_effects_finish() {
     let snapshot = harness.owner.snapshot().await.unwrap();
 
     assert!(snapshot.peer_device_ids.is_empty());
+}
+
+#[tokio::test]
+async fn v2_current_peer_scope_requires_a_permanent_activation_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0x72; 16]);
+    seed_v2_scope_history(Arc::clone(&admission_repository), false, false).await;
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
+    deps.admission_attempts = admission_repository;
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("sponsor"),
+        legacy_member("joiner"),
+    ]));
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert!(snapshot.peer_device_ids.is_empty());
+}
+
+#[tokio::test]
+async fn v2_current_peer_scope_opens_for_an_observer_after_activation_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0x73; 16]);
+    seed_v2_scope_history(Arc::clone(&admission_repository), true, false).await;
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
+    deps.admission_attempts = admission_repository;
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("sponsor"),
+        legacy_member("joiner"),
+    ]));
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("joiner")]);
+}
+
+#[tokio::test]
+async fn v2_joiner_scope_stays_closed_until_the_local_join_is_active() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0x74; 16]);
+    seed_v2_scope_history(Arc::clone(&admission_repository), true, true).await;
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.admission_attempts = admission_repository;
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("sponsor"),
+        legacy_member("joiner"),
+    ]));
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(
+        snapshot.local_membership,
+        uc_core::membership::CurrentWorkspaceLocalMembership::Removed
+    );
+    assert!(snapshot.peer_device_ids.is_empty());
+}
+
+#[tokio::test]
+async fn v2_joiner_scope_opens_after_the_local_join_is_active() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0x77; 16]);
+    seed_v2_scope_history(Arc::clone(&admission_repository), true, false).await;
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.admission_attempts = admission_repository;
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("sponsor"),
+        legacy_member("joiner"),
+    ]));
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(
+        snapshot.local_membership,
+        uc_core::membership::CurrentWorkspaceLocalMembership::Active
+    );
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("sponsor")]);
+}
+
+#[tokio::test]
+async fn current_peer_scope_fails_closed_when_v2_history_is_locked() {
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
+    deps.admission_attempts = Arc::new(LockedAdmissionRepository {
+        allow_empty_history_reads: false,
+    });
+    let owner = WorkspaceConvergence::new(deps);
+
+    let result = owner.snapshot().await;
+
+    assert_eq!(
+        result,
+        Err(uc_core::membership::CurrentWorkspacePeerScopeError::Locked)
+    );
+}
+
+#[tokio::test]
+async fn current_peer_scope_fails_closed_when_v2_history_is_corrupt() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0x78; 16]);
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x79; 32]);
+    let mut attempt = uc_core::membership::AdmissionAttemptV1::new_joiner(
+        attempt_id,
+        [0x7a; 16],
+        uc_core::membership::JoinerAdmissionStageV1::Initiated,
+    );
+    attempt.join_id = None;
+    attempt.local_join_ordinal = None;
+    attempt.role_state = uc_core::membership::AdmissionAttemptRoleStateV1::Sponsor(
+        uc_core::membership::SponsorAdmissionStateV1 {
+            stage: uc_core::membership::SponsorAdmissionStageV1::Accepted,
+        },
+    );
+    attempt.invitation_claim = Some(b"scope-invitation".to_vec());
+    admission_repository
+        .create(&attempt, None, Some(b"corrupt-history"))
+        .await
+        .unwrap();
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
+    deps.admission_attempts = admission_repository;
+    let owner = WorkspaceConvergence::new(deps);
+
+    let result = owner.snapshot().await;
+
+    assert_eq!(
+        result,
+        Err(uc_core::membership::CurrentWorkspacePeerScopeError::Corrupt)
+    );
+}
+
+#[tokio::test]
+async fn pending_cross_space_join_keeps_the_source_space_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0x7b; 16]);
+    seed_v2_scope_history_for_lineage(
+        Arc::clone(&admission_repository),
+        "target-space",
+        true,
+        true,
+        Some(SPACE),
+    )
+    .await;
+    let own = instance(0x0a);
+    let peer = instance(0x0b);
+    let genesis = membership_event(None, 0, own, own, "joiner", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, own, peer, "source-peer", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), own);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(addition).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(own);
+    state.membership_reconciliation = Some(history);
+    let repository = MemoryWorkspaceRepository::default();
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.admission_attempts = admission_repository;
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("source-peer")]);
+}
+
+#[tokio::test]
+async fn unrelated_pending_join_does_not_hide_a_v2_lineage_mismatch() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0x7c; 16]);
+    seed_v2_scope_history_for_lineage(
+        Arc::clone(&admission_repository),
+        "unrelated-space",
+        true,
+        true,
+        None,
+    )
+    .await;
+    let own = instance(0x0a);
+    let genesis = membership_event(None, 0, own, own, "joiner", 1);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), own);
+    history.receive_verified(genesis).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(own);
+    state.membership_reconciliation = Some(history);
+    let repository = MemoryWorkspaceRepository::default();
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.admission_attempts = admission_repository;
+    let owner = WorkspaceConvergence::new(deps);
+
+    let result = owner.snapshot().await;
+
+    assert_eq!(
+        result,
+        Err(uc_core::membership::CurrentWorkspacePeerScopeError::Corrupt)
+    );
+}
+
+#[tokio::test]
+async fn rejected_cross_space_join_restores_the_source_space_scope() {
+    use uc_core::membership::{
+        AdmissionAttemptRoleStateV1, AdmissionRejectionReasonV1, AdmissionTerminalResultV1,
+        JoinerAdmissionStageV1, JoinerAdmissionStateV1,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0x80; 16]);
+    seed_v2_scope_history_for_lineage(
+        Arc::clone(&admission_repository),
+        "target-space",
+        true,
+        true,
+        Some(SPACE),
+    )
+    .await;
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x75; 32]);
+    let mut rejected = admission_repository
+        .load(attempt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected_version = rejected.record_version;
+    rejected.record_version += 1;
+    rejected.role_state = AdmissionAttemptRoleStateV1::Joiner(JoinerAdmissionStateV1 {
+        stage: JoinerAdmissionStageV1::Rejected,
+    });
+    rejected.terminal_result = Some(AdmissionTerminalResultV1::Rejected);
+    rejected.rejection_reason = Some(AdmissionRejectionReasonV1::RemovedBeforeActivation);
+    rejected.identity_binding = Some(b"joiner-identity".to_vec());
+    rejected.space_transition = None;
+    rejected.target_access_state = None;
+    rejected.staged_security_state = None;
+    admission_repository
+        .compare_and_advance(attempt_id, expected_version, &rejected)
+        .await
+        .unwrap();
+    admission_repository
+        .compact_terminal(attempt_id, rejected.record_version)
+        .await
+        .unwrap();
+
+    let own = instance(0x0a);
+    let peer = instance(0x0b);
+    let genesis = membership_event(None, 0, own, own, "joiner", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, own, peer, "source-peer", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), own);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(addition).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(own);
+    state.membership_reconciliation = Some(history);
+    let repository = MemoryWorkspaceRepository::default();
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.admission_attempts = admission_repository;
+    let owner = WorkspaceConvergence::new(deps);
+
+    let snapshot = owner.snapshot().await.unwrap();
+
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("source-peer")]);
 }
 
 #[tokio::test]
@@ -6516,6 +6794,17 @@ fn admission_verification_fixture(
     uc_core::membership::MembershipEventV2,
     uc_core::membership::AdmissionSecurityCommitmentV1,
 ) {
+    admission_verification_fixture_for_lineage(attempt_id, "space-a")
+}
+
+fn admission_verification_fixture_for_lineage(
+    attempt_id: [u8; 32],
+    lineage_id: &str,
+) -> (
+    uc_core::membership::VersionedMembershipHistory,
+    uc_core::membership::MembershipEventV2,
+    uc_core::membership::AdmissionSecurityCommitmentV1,
+) {
     use sha2::Digest;
     use uc_core::membership::{
         AdmissionChangeFacts, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1,
@@ -6533,7 +6822,7 @@ fn admission_verification_fixture(
     let base_head = MembershipEventId::from_hex(&"82".repeat(32)).unwrap();
     let history = VersionedMembershipHistory::from_activation_baseline(
         MembershipActivationBaselineV2::FullyVerifiedMigration {
-            lineage_id: "space-a".to_owned(),
+            lineage_id: lineage_id.to_owned(),
             head_event_id: base_head,
             head_depth: 7,
             current_member_credentials: vec![(sponsor_member, sponsor_credential.clone())],
@@ -6548,8 +6837,8 @@ fn admission_verification_fixture(
     let key_catalog = admission_key_catalog();
     let commitment = AdmissionSecurityCommitmentV1::new(
         ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-        "space-a".to_owned(),
-        b"space-a".to_vec(),
+        lineage_id.to_owned(),
+        lineage_id.as_bytes().to_vec(),
         attempt_id,
         base_position.clone(),
         [0x85; 32],
@@ -6591,7 +6880,7 @@ fn admission_verification_fixture(
         .unwrap();
     let mut event = MembershipEventV2::new(
         MEMBERSHIP_EVENT_FORMAT_V2,
-        "space-a".to_owned(),
+        lineage_id.to_owned(),
         Some(base_head),
         8,
         [0x8d; 16],
@@ -6608,6 +6897,117 @@ fn admission_verification_fixture(
     event.signature = verifier.sign(&sponsor_credential, &event.signing_payload());
     let _: [u8; 32] = sha2::Sha256::digest(&event.signature).into();
     (history, event, commitment)
+}
+
+async fn seed_v2_scope_history(
+    repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    record_receipt: bool,
+    pending_local_join: bool,
+) {
+    seed_v2_scope_history_for_lineage(repository, SPACE, record_receipt, pending_local_join, None)
+        .await;
+}
+
+async fn seed_v2_scope_history_for_lineage(
+    repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    lineage_id: &str,
+    record_receipt: bool,
+    pending_local_join: bool,
+    cross_space_source: Option<&str>,
+) {
+    use uc_core::membership::{
+        AdmissionAttemptRoleStateV1, AdmissionAttemptV1, JoinerAdmissionStageV1,
+        SponsorAdmissionStageV1, SponsorAdmissionStateV1,
+    };
+
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x75; 32]);
+    let (mut history, event, commitment) =
+        admission_verification_fixture_for_lineage(*attempt_id.as_bytes(), lineage_id);
+    let uc_core::membership::MembershipOperationV2::AddDevice { admission } = &event.operation
+    else {
+        unreachable!("scope fixture always creates AddDevice")
+    };
+    history
+        .verify_and_receive_event(event.clone(), &DeterministicHistoricalVerifier)
+        .unwrap();
+    if record_receipt {
+        let mut receipt = uc_core::membership::AdmissionActivationReceipt::new(
+            1,
+            *attempt_id.as_bytes(),
+            event.event_id(),
+            event.resulting_members_digest,
+            commitment.security_commitment_id,
+            admission.facts.member_instance,
+            Vec::new(),
+        );
+        receipt.signature = DeterministicHistoricalVerifier
+            .sign(&admission.membership_credential, &receipt.signing_payload());
+        history
+            .verify_and_record_activation_receipt(receipt, &DeterministicHistoricalVerifier)
+            .unwrap();
+    }
+    let encoded = history.encode_persisted_v2().unwrap();
+    let mut attempt =
+        AdmissionAttemptV1::new_joiner(attempt_id, [0x76; 16], JoinerAdmissionStageV1::Initiated);
+    if pending_local_join {
+        attempt.local_join_ordinal = Some(0);
+        if let Some(source_space_id) = cross_space_source {
+            attempt.role_state = uc_core::membership::AdmissionAttemptRoleStateV1::Joiner(
+                uc_core::membership::JoinerAdmissionStateV1 {
+                    stage: uc_core::membership::JoinerAdmissionStageV1::Prepared,
+                },
+            );
+            attempt.lineage_id = Some(lineage_id.to_owned());
+            attempt.base_history_position = Some(b"base-position".to_vec());
+            attempt.candidate_event = Some(b"candidate-event".to_vec());
+            attempt.candidate_event_id = Some(*event.event_id().as_bytes());
+            attempt.candidate_key_package = Some(b"candidate-key-package".to_vec());
+            attempt.target_members_digest = Some(event.resulting_members_digest);
+            attempt.security_commitment = Some(b"security-commitment".to_vec());
+            attempt.security_commit = Some(b"security-commit".to_vec());
+            attempt.security_welcome = Some(b"security-welcome".to_vec());
+            attempt.target_protection_group_id = Some("target-group".to_owned());
+            attempt.target_key_catalog = Some(b"target-key-catalog".to_vec());
+            attempt.target_relationships = Some(Vec::new());
+            attempt.staged_security_state = Some(b"staged-security".to_vec());
+            attempt.base_membership_history = Some(encoded.clone());
+            attempt.verified_membership_history = Some(encoded.clone());
+            attempt.prepared_proof = Some(b"prepared-proof".to_vec());
+            attempt.target_access_state = Some(b"target-access".to_vec());
+            attempt.space_transition = uc_core::membership::AdmissionSpaceTransitionV2::CrossSpace(
+                uc_core::membership::CrossSpaceTransitionV2 {
+                    transition_format_version:
+                        uc_core::membership::CROSS_SPACE_TRANSITION_FORMAT_V2,
+                    attempt_id,
+                    source_space_id: source_space_id.to_owned(),
+                    source_generation: [0x7d; 16],
+                    source_backup_ref: b"source-backup".to_vec(),
+                    source_backup_digest: [0x7e; 32],
+                    source_revision_at_backup: 1,
+                    target_space_id: lineage_id.to_owned(),
+                    target_generation: [0x7f; 16],
+                    target_keyslot_ref: b"target-keyslot".to_vec(),
+                    target_workspace_ref: b"target-workspace".to_vec(),
+                    phase: uc_core::membership::CrossSpaceTransitionPhaseV2::TargetStaged,
+                    final_source_revision: None,
+                    final_manifest_digest: None,
+                    migrated_records: 0,
+                    preserved_unreadable_records: 0,
+                },
+            )
+            .encode();
+        }
+    } else {
+        attempt.join_id = None;
+        attempt.role_state = AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
+            stage: SponsorAdmissionStageV1::Accepted,
+        });
+        attempt.invitation_claim = Some(b"scope-invitation".to_vec());
+    }
+    repository
+        .create(&attempt, None, Some(&encoded))
+        .await
+        .unwrap();
 }
 
 fn durable_candidate_verification_fixture(
