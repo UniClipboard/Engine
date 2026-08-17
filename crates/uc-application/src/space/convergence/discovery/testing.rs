@@ -2620,7 +2620,7 @@ async fn scheduled_reconcile_uses_the_persisted_candidate_retry_deadline() {
 struct PendingGroupUpdateDelivery;
 
 #[async_trait]
-impl crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort
+impl crate::space::convergence::membership::group_update_delivery::GroupUpdateDeliveryPort
     for PendingGroupUpdateDelivery
 {
     async fn deliver_pending(

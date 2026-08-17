@@ -1392,8 +1392,8 @@ Candidate -> Complete、精确历史验签和当前成员接收者；再补每�
 
 ## Step 1: 固定失败测试和格式夹具
 
-**File:** `crates/uc-core/tests/`、`crates/uc-application/src/space/convergence/tests.rs`、
-`crates/uc-engine/tests/`
+**File:** `crates/uc-core/tests/`、`crates/uc-application/src/space/convergence/admission/tests.rs`、
+`crates/uc-application/src/space/convergence/membership/tests.rs`、`crates/uc-engine/tests/`
 
 **Change:** 增加 A 加 B、B 加 C、A 移除 B、C 加 D 的红测；保存当前 V1、可恢复公钥 V1、缺少已移除
 作者公钥 V1 和损坏 V1 的不可变夹具；四种可读 workspace layout 分别使用真实历史密文，不允许由当前 DTO

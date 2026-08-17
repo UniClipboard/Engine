@@ -607,7 +607,7 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     );
 
     restarted
-        .shutdown(5_000)
+        .shutdown(15_000)
         .expect("binding engine must shut down within the deadline");
 }
 

@@ -4,13 +4,13 @@ use tokio::sync::broadcast;
 
 use crate::facade::space_setup::SpaceFacade;
 use crate::space::convergence::assembly::SpaceConvergenceAssembly;
+use crate::space::convergence::connectivity::membership::{
+    start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
+};
 use crate::space::convergence::discovery::{
     MembershipConvergenceActivity, MembershipConvergenceRuntime,
 };
-use crate::space::convergence::legacy_upgrade::AutomaticLegacyUpgradeRuntime;
-use crate::space::convergence::membership_connectivity::{
-    start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
-};
+use crate::space::convergence::membership::legacy_upgrade::AutomaticLegacyUpgradeRuntime;
 use crate::space::convergence::{WorkspaceConvergenceActivity, WorkspaceConvergenceRuntime};
 use uc_core::ports::PresenceEvent;
 

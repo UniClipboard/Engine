@@ -49,10 +49,10 @@ use crate::space::admission::joiner::joiner_handshake::JoinerHandshakeCoordinato
 use crate::space::admission::redeem_invitation::RedeemPairingInvitationUseCase;
 use crate::space::admission::sponsor::orchestrator::PairingInboundOrchestrator;
 use crate::space::admission::sponsor::sponsor_handshake::SponsorHandshakeCoordinator;
-use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
-use crate::space::convergence::reachability::{
+use crate::space::convergence::connectivity::reachability::{
     EnsureReachableAllError, EnsureReachableAllReport, EnsureReachableAllUseCase,
 };
+use crate::space::convergence::membership::group_update_delivery::GroupUpdateDeliveryPort;
 use crate::space::lifecycle::initialize_space::InitializeSpaceUseCase;
 use crate::space::lifecycle::unlock_space::UnlockSpaceUseCase;
 use uc_core::ids::{DeviceId, SpaceId};
@@ -803,7 +803,7 @@ mod tests {
 
     use crate::deps::SpaceAccessPorts;
     use crate::space::convergence::assembly::SpaceConvergenceAssembly;
-    use crate::space::convergence::legacy_upgrade::AutomaticLegacyUpgradeDeps;
+    use crate::space::convergence::membership::legacy_upgrade::AutomaticLegacyUpgradeDeps;
     use crate::space::convergence::tests::MemoryWorkspaceRepository;
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;

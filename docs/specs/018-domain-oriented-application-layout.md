@@ -176,7 +176,7 @@ use uc_application::facade::...;
 | `usecases/clipboard_restore/` | `clipboard/restore/` | 恢复、纯文本和文件路径模式一起移动 |
 | `usecases/clipboard_sync/` | `clipboard/sync/` | 入站物化、编解码、发送、重发、接收门、活动状态与测试不再分散 |
 | `usecases/pairing/` | `space/admission/` | 与现有准入通信实现收成一个子域；它仍由空间收敛负责完整加入结果 |
-| `usecases/presence/` | `space/convergence/reachability.rs` | 可达性保证属于成员收敛，不形成独立 presence 领域 |
+| `usecases/presence/` | `space/convergence/connectivity/reachability.rs` | 可达性保证属于成员收敛，不形成独立 presence 领域 |
 | `usecases/setup/` | `space/lifecycle/` | 创建、解锁、切换、恢复和重置随空间生命周期收口 |
 | `usecases/search/` | `search/query.rs` | 查询与索引运行期、投影和维护同属搜索领域 |
 | `usecases/upgrade/` | `settings/upgrade/` | 检测、状态和确认一起移动 |
@@ -196,7 +196,7 @@ use uc_application::facade::...;
 | `content_tags.rs` | `search/tagging.rs` | 标签是搜索索引的业务事实 |
 | `file_transfer/` | `transfer/file/` | 文件时间线和错误模型与文件会话一起移动 |
 | `receive_reconciliation.rs` | `transfer/receive/reconciliation.rs` | 接收就绪、启动恢复、超时清理和接收尝试核对由传输完整负责 |
-| `group_update_delivery.rs` | `space/convergence/group_update_delivery.rs` | 不再由 Engine 构造并注入 |
+| `group_update_delivery.rs` | `space/convergence/membership/group_update_delivery.rs` | 不再由 Engine 构造并注入 |
 | `trusted_peer/` | 删除 | 不迁移应用层流程；保留 `uc-core` 的相关事实和端口 |
 | `file_sync/` | 删除 | 唯一配额函数未被调用且依赖失效缓存路径；需要新配额能力时从当前缓存模型重新设计 |
 | `proof.rs` | `uc-infra` 的 `security/admission_proof.rs` | `HmacProofAdapter` 是具体密码实现；Engine 从 `uc-infra` 组装为 `ProofPort`，应用层只依赖该端口 |

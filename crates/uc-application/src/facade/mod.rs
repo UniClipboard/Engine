@@ -25,11 +25,11 @@ pub mod storage;
 pub mod upgrade;
 
 pub use crate::space::admission::coordinator::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
-pub use crate::space::convergence::legacy_upgrade::{
-    AutomaticLegacyUpgrade, AutomaticLegacyUpgradeDeps, AutomaticLegacyUpgradeRuntime,
-};
-pub use crate::space::convergence::membership_connectivity::{
+pub use crate::space::convergence::connectivity::membership::{
     start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
+};
+pub use crate::space::convergence::membership::legacy_upgrade::{
+    AutomaticLegacyUpgrade, AutomaticLegacyUpgradeDeps, AutomaticLegacyUpgradeRuntime,
 };
 pub use crate::space::convergence::network_recovery::{
     NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,

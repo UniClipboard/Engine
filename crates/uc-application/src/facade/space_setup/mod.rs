@@ -36,6 +36,6 @@ pub(crate) fn legacy_space_id() -> uc_core::ids::SpaceId {
 
 // T10:CLI `members` 入口需要 report / error 类型才能展示 probe 摘要;
 // usecase 本身保持 `pub(crate)`(§11.4),此处只透出两个值对象。
-pub use crate::space::convergence::reachability::{
+pub use crate::space::convergence::connectivity::reachability::{
     EnsureReachableAllError, EnsureReachableAllReport,
 };

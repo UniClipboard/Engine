@@ -371,9 +371,9 @@ function checkCurrentPeerScopeOwnership() {
   const problems = []
   const scopedConsumers = [
     'crates/uc-application/src/facade/roster/facade.rs',
-    'crates/uc-application/src/space/convergence/reachability.rs',
-    'crates/uc-application/src/space/convergence/membership_connectivity.rs',
-    'crates/uc-application/src/space/convergence/legacy_upgrade.rs',
+    'crates/uc-application/src/space/convergence/connectivity/reachability.rs',
+    'crates/uc-application/src/space/convergence/connectivity/membership.rs',
+    'crates/uc-application/src/space/convergence/membership/legacy_upgrade.rs',
     'crates/uc-application/src/clipboard/sync/dispatch_entry/target_selector.rs',
     'crates/uc-application/src/clipboard/sync/active_state/fanout.rs',
     'crates/uc-application/src/clipboard/sync/resend_entry.rs',
@@ -396,7 +396,7 @@ function checkCurrentPeerScopeOwnership() {
     addProblem(problems, 'current peer scope', 'the superseded device visibility gate was restored')
   }
 
-  const convergence = read('crates/uc-application/src/space/convergence/mod.rs')
+  const convergence = read('crates/uc-application/src/space/convergence/projection/current_scope.rs')
   const implementationStart = convergence.indexOf(
     'impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence'
   )
@@ -420,8 +420,8 @@ function checkCurrentPeerScopeOwnership() {
   }
 
   const allowedPendingReadmissionConsumers = new Set([
-    'crates/uc-application/src/space/convergence/legacy_upgrade.rs',
-    'crates/uc-application/src/space/convergence/legacy_upgrade_tests.rs',
+    'crates/uc-application/src/space/convergence/membership/legacy_upgrade.rs',
+    'crates/uc-application/src/space/convergence/membership/legacy_upgrade_tests.rs',
   ])
   const applicationRoot = join(REPOSITORY_ROOT, 'crates/uc-application/src')
   const pendingDirectories = [applicationRoot]
@@ -444,6 +444,55 @@ function checkCurrentPeerScopeOwnership() {
           )
         }
       }
+    }
+  }
+  return problems
+}
+
+function checkWorkspaceConvergenceInternalBoundaries() {
+  const problems = []
+  const root = 'crates/uc-application/src/space/convergence'
+  const requiredDomainEntries = [
+    `${root}/admission/mod.rs`,
+    `${root}/membership/mod.rs`,
+    `${root}/projection/mod.rs`,
+    `${root}/connectivity/mod.rs`,
+  ]
+  for (const path of requiredDomainEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'workspace convergence boundaries', `missing domain entry: ${path}`)
+    }
+  }
+
+  const retiredFlatPaths = [
+    `${root}/admission_transaction.rs`,
+    `${root}/group_update_delivery.rs`,
+    `${root}/legacy_upgrade.rs`,
+    `${root}/membership_connectivity.rs`,
+    `${root}/reachability.rs`,
+    `${root}/tests.rs`,
+  ]
+  for (const path of retiredFlatPaths) {
+    if (existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'workspace convergence boundaries', `retired flat path remains: ${path}`)
+    }
+  }
+
+  const convergence = read(`${root}/mod.rs`)
+  const domainFlowMarkers = [
+    'impl ProfileWorkspaceConvergence',
+    'fn prepare_sponsor_candidate(',
+    'fn reconcile_membership_history(',
+    'fn decide_membership_removal_locked(',
+    'fn v2_current_peer_snapshot(',
+  ]
+  for (const marker of domainFlowMarkers) {
+    if (convergence.includes(marker)) {
+      addProblem(
+        problems,
+        'workspace convergence boundaries',
+        `domain flow remains in convergence/mod.rs: ${marker}`
+      )
     }
   }
   return problems
@@ -474,6 +523,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkBindingProvenance(metadata, sources),
     ...checkLanIsolation(metadata, sources),
     ...checkCurrentPeerScopeOwnership(),
+    ...checkWorkspaceConvergenceInternalBoundaries(),
     ...(includePlaintext ? checkPlaintextScanner() : []),
   ]
 }

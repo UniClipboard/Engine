@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uc_core::membership::{GroupRevocationPort, GroupUpdateDispatchPort, KeyEpochError};
 
-use super::{ReconciliationPeerRole, WorkspaceConvergence, WorkspaceConvergenceError};
+use super::super::{ReconciliationPeerRole, WorkspaceConvergence, WorkspaceConvergenceError};
 
 #[async_trait]
 pub trait GroupUpdateDeliveryPort: Send + Sync {

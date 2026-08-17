@@ -23,7 +23,9 @@ use uc_core::membership::{
 use uc_core::ports::space::GroupAdmissionPort;
 use uc_core::space_access::PreparedGroupJoin;
 
-use super::{CurrentJoinStatus, JoinedSpace, PendingInboundMember, WorkspaceConvergenceError};
+use super::super::{
+    CurrentJoinStatus, JoinedSpace, PendingInboundMember, WorkspaceConvergenceError,
+};
 
 /// Owns durable admission progression. Network and product callers never
 /// construct or advance the stored state directly.

@@ -920,6 +920,9 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-08-18：完成规格 024 的成员收敛内部职责整理。`WorkspaceConvergence` 继续是唯一完整负责人，主文件只保留负责人定义、公开类型、共享状态保存和必要协调；准入、成员关系、状态投影和连接维护分别归入对应领域目录，旧平铺路径和单一大测试文件已删除。测试随完整工作归位，仅无业务含义的公共夹具留在受限测试支持位置；公开行为、持久化、网络格式和运行顺序不变。
+- 2026-08-17：采纳 ADR-021，明确成员收敛内部按准入与完成恢复、成员历史核对、移除与用户决定、当前成员范围与状态查询、旧数据兼容与启动恢复划分职责。`WorkspaceConvergence` 继续是唯一完整负责人；主文件只保留稳定入口和必要协调，调用方不获得逐步流程。该决定指导后续整理，不改变当前运行行为。
+- 2026-08-17：新增并修订规格 024，将 ADR-021 细化为可逐项执行的成员收敛内部整理顺序、领域子模块目录、并发与重启边界及验证要求。加入、成员关系、状态投影和连接维护分别收口，避免拆成平铺同级文件；该规格不改变公开动作、成员规则或持久化格式，仅定义后续实现如何保持唯一负责人并删除旧位置。
 - 2026-08-17：将规格 023 接入最新主线时，保留旧升级后已移除设备不得重新获得普通资格的修正，并删除一项仍依赖已退役成员历史入口的重复测试；主线宿主验收同步核对新建空间后的本机信任记录，以及移除本机与不存在设备的稳定失败分类。现行历史范围和真实加密重启验收继续覆盖同一规则，无架构变化。
 - 2026-08-16：修复旧升级标记残留导致已移除设备重新出现在普通列表，并同步修订 `CONTEXT.md` 的旧空间安全提升定义。只要已应用成员历史存在，普通范围立即且永久以该历史为准，旧迁移标记在启动时自动清理；未完成的旧空间安全提升只处理持久记录中明确等待重新接纳的设备，不读取成员资料表扩大候选。历史资料继续保留，公开操作不变。验收覆盖真实加密旧状态的首次启动、自动修正和再次启动，并确认旧成员资料仍在但不再恢复普通资格。
 - 2026-08-17：同步规格 023 完成后的领域词表。成员候选、历史验证凭据和成员准入激活不再标记为待实施；补充空间加入的三类稳定结果、提交前取消、可恢复空间切换、普通重置门禁和彻底重置的本机销毁边界。仅修正文档与当前行为的一致性。
@@ -1187,8 +1190,10 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/adr/018-domain-oriented-application-layout.md`：应用层按业务领域收口的所有权和目录边界。
 - `docs/adr/019-device-specific-convergence-waiting-status.md`：已由 ADR-020 取代的等待设备状态记录。
 - `docs/adr/020-membership-reconciliation-and-user-decisions.md`：设备上线成员核对、未确认移除决定和分叉关系隔离规则。
+- `docs/adr/021-workspace-convergence-internal-boundaries.md`：成员收敛保持唯一负责人时的内部职责边界和整理规则。
 - `docs/specs/015-offline-first-member-removal.md`：已由 ADR-020 取代的成员移除说明记录。
 - `docs/specs/016-workspace-wide-convergence.md`：已由 ADR-020 取代的工作空间收敛说明记录。
 - `docs/specs/021-device-trust-reconciliation-product-contract.md`：设备信任完整查询、决定和产品动作边界。
 - `docs/specs/022-current-member-runtime-scope.md`：当前成员运行范围、历史身份与普通授权的一致性规则。
 - `docs/specs/023-durable-membership-proof-and-admission-activation.md`：历史验证材料、准入正式提交、激活门禁、恢复和旧数据迁移规则。
+- `docs/specs/024-workspace-convergence-internal-boundaries.md`：成员收敛内部职责边界的实施顺序、验证与回归要求。

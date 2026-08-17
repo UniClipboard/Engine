@@ -1,3 +1,5 @@
+//! Legacy-upgrade workflow tests.
+
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{

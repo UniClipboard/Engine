@@ -23,7 +23,7 @@ use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ClockPort, ContentHashPort, DeviceIdentityPort, PeerAddressRepositoryPort};
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
-use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
+use crate::space::convergence::membership::group_update_delivery::GroupUpdateDeliveryPort;
 
 mod candidates;
 mod exchange;

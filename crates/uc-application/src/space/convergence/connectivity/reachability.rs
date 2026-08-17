@@ -1,3 +1,5 @@
+//! Current-member reachability refresh.
+//!
 //! Slice 2 Phase 1 · T6 — `EnsureReachableAllUseCase`.
 //!
 //! F1 钩子:`SpaceFacade::auto_start_network` 在 `start_network` 成功

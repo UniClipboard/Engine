@@ -669,39 +669,39 @@ mod tests {
             None,
             vec![0x45; 64],
         );
-        let candidate =
-            crate::space::convergence::admission_transaction::DurableAdmissionCandidateV1 {
-                lineage_id: "space-xyz".to_owned(),
-                base_history_position: Vec::new(),
-                candidate_event: postcard::to_stdvec(&event).unwrap(),
-                candidate_event_id: *event.event_id().as_bytes(),
-                candidate_key_package: vec![1],
-                resume_public_key: vec![2],
-                target_members_digest: [0x43; 32],
-                security_commitment: vec![3],
-                security_commit: vec![4],
-                security_welcome: vec![5],
-                target_protection_group_id: "target-group".to_owned(),
-                target_key_catalog: vec![6],
-                target_relationships: vec![AdmissionChangeFacts {
-                    member_instance: sponsor_member,
-                    device_id: sponsor_device,
-                    device_name: "sponsor's laptop".to_owned(),
-                    identity_fingerprint: sponsor_fp(),
-                    transport_public_key: vec![7],
-                    transport_address_blob: Vec::new(),
-                    identity_signature: vec![8],
-                }],
-                existing_member_deliveries: Vec::new(),
-                staged_security_state: vec![9],
-                identity_binding: vec![10],
-            };
-        let payload = crate::space::convergence::admission_transaction::DurableAdmissionCandidatePayloadV1::new(
-            Vec::new(),
-            candidate,
-        )
-        .encode()
-        .unwrap();
+        let candidate = crate::space::convergence::admission::DurableAdmissionCandidateV1 {
+            lineage_id: "space-xyz".to_owned(),
+            base_history_position: Vec::new(),
+            candidate_event: postcard::to_stdvec(&event).unwrap(),
+            candidate_event_id: *event.event_id().as_bytes(),
+            candidate_key_package: vec![1],
+            resume_public_key: vec![2],
+            target_members_digest: [0x43; 32],
+            security_commitment: vec![3],
+            security_commit: vec![4],
+            security_welcome: vec![5],
+            target_protection_group_id: "target-group".to_owned(),
+            target_key_catalog: vec![6],
+            target_relationships: vec![AdmissionChangeFacts {
+                member_instance: sponsor_member,
+                device_id: sponsor_device,
+                device_name: "sponsor's laptop".to_owned(),
+                identity_fingerprint: sponsor_fp(),
+                transport_public_key: vec![7],
+                transport_address_blob: Vec::new(),
+                identity_signature: vec![8],
+            }],
+            existing_member_deliveries: Vec::new(),
+            staged_security_state: vec![9],
+            identity_binding: vec![10],
+        };
+        let payload =
+            crate::space::convergence::admission::DurableAdmissionCandidatePayloadV1::new(
+                Vec::new(),
+                candidate,
+            )
+            .encode()
+            .unwrap();
         durable_frame(
             uc_core::pairing::DurableAdmissionMessageKind::Candidate,
             payload,

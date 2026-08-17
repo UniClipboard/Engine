@@ -55,7 +55,7 @@ use uc_core::ports::space::{PrepareAdmissionOfferPort, ProofPort};
 use uc_core::ports::SetupStatusPort;
 use uc_core::space_access::domain::{ProofDerivedKey, SpaceAccessProofArtifact};
 
-use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
+use crate::space::convergence::membership::group_update_delivery::GroupUpdateDeliveryPort;
 
 /// Facts about the verified joiner, handed to the orchestrator so it can
 /// drive admit + trust use cases without re-parsing the `JoinerRequest`.

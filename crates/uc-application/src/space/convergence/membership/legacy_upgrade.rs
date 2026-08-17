@@ -16,7 +16,7 @@ use uc_core::membership::{
 };
 use uc_core::ports::{DeviceIdentityPort, PresenceEvent, PresencePort, ReachabilityState};
 
-use super::WorkspaceConvergence;
+use super::super::WorkspaceConvergence;
 
 const DISCOVERY_GRACE: Duration = Duration::from_secs(15);
 const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(5);

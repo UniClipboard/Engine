@@ -1,3 +1,5 @@
+//! Maintains connections for the accepted current-member scope.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

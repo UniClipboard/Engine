@@ -3,7 +3,7 @@
 //! 对 UI / CLI 暴露已配对成员的列表,并给每条成员打上 presence 状态
 //! (online / offline / unknown)和本机标记 (`is_local`)。是个典型的 thin
 //! facade——不主动拨号、不管 rename / revoke、不做跨 use case 编排。主动
-//! 拨号由 `space::convergence::reachability::EnsureReachableAllUseCase`
+//! 拨号由 `space::convergence::connectivity::reachability::EnsureReachableAllUseCase`
 //! 负责,在 `SpaceFacade` 的 F1 hook 成功后一次性触发。
 //!
 //! ## 为什么 `list_with_presence` 不拨号

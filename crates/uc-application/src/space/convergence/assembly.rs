@@ -24,10 +24,10 @@ use crate::space::convergence::discovery::{
     build_membership_convergence, MembershipConvergence, MembershipConvergenceDeps,
     MembershipConvergenceRuntime,
 };
-use crate::space::convergence::group_update_delivery::{
+use crate::space::convergence::membership::group_update_delivery::{
     GroupUpdateDelivery, GroupUpdateDeliveryPort,
 };
-use crate::space::convergence::legacy_upgrade::{
+use crate::space::convergence::membership::legacy_upgrade::{
     AutomaticLegacyUpgrade, AutomaticLegacyUpgradeDeps, AutomaticLegacyUpgradeRuntime,
 };
 use crate::space::convergence::WorkspaceConvergence;
@@ -74,7 +74,7 @@ impl SpaceConvergenceAssembly {
             GroupUpdateDelivery::new(
                 group_revocation,
                 group_update_dispatch,
-                Arc::clone(&workspace) as Arc<dyn crate::space::convergence::group_update_delivery::GroupUpdateRecipientPreparationPort>,
+                Arc::clone(&workspace) as Arc<dyn crate::space::convergence::membership::group_update_delivery::GroupUpdateRecipientPreparationPort>,
             ),
         );
         membership.install_group_update_delivery(Arc::clone(&group_update_delivery));

@@ -96,9 +96,9 @@ Relationship: 当前被多个流程直接枚举，形成并列的事实来源；
 ```text
 Component: Ordinary peer consumers
 Path: crates/uc-application/src/facade/roster/facade.rs
-Path: crates/uc-application/src/space/convergence/reachability.rs
-Path: crates/uc-application/src/space/convergence/membership_connectivity.rs
-Path: crates/uc-application/src/space/convergence/legacy_upgrade.rs
+Path: crates/uc-application/src/space/convergence/connectivity/reachability.rs
+Path: crates/uc-application/src/space/convergence/connectivity/membership.rs
+Path: crates/uc-application/src/space/convergence/membership/legacy_upgrade.rs
 Path: crates/uc-application/src/clipboard/sync/
 Responsibility: 展示当前设备，主动拨号，运行升级、成员核对、内容发送和恢复任务。
 Relationship: 分别从成员表、可信关系或地址表取得候选，再由部分路径追加不同门禁。
@@ -294,7 +294,7 @@ Engine 入口。内部错误按现有稳定类别映射；列表和后台任务�
 
 ## Step 1: 建立失败测试和使用方清单
 
-**File:** `crates/uc-application/src/space/convergence/tests.rs`
+**File:** `crates/uc-application/src/space/convergence/projection/tests.rs`
 **File:** `crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs`
 **Change:** 先增加接受移除后当前范围、公开列表、主动拨号和旧升级均排除目标的失败测试；用仓库搜索
 固定所有 `member_repo.list()`、`trusted_peer_repo.list()` 和 `peer_addr_repo.list()` 的生产枚举点。
@@ -310,14 +310,14 @@ Engine 入口。内部错误按现有稳定类别映射；列表和后台任务�
 
 ## Step 3: 在唯一负责人中派生范围
 
-**File:** `crates/uc-application/src/space/convergence/mod.rs`
+**File:** `crates/uc-application/src/space/convergence/projection/current_scope.rs`
 **Change:** 由已应用成员历史实现当前范围；明确旧模式判断；删除“读取失败回退旧成员表”的可能路径。
 **Risk:** 首次旧空间升级仍需要旧范围，必须通过明确模式测试保留，而不是用历史为空推断。
 
 ## Step 4: 合并成员事件效果执行
 
 **File:** `crates/uc-core/src/membership/workspace_convergence.rs`
-**File:** `crates/uc-application/src/space/convergence/mod.rs`
+**File:** `crates/uc-application/src/space/convergence/membership/effects.rs`
 **File:** `crates/uc-infra/src/db/repositories/workspace_convergence_store.rs`
 **Change:** 增加加密保存的未完成效果状态；把本地决定和远端事件两处循环替换为一个按序、幂等、可恢复
 的执行入口；重复事件不得重复产生决定或非幂等效果。
@@ -327,9 +327,9 @@ Engine 入口。内部错误按现有稳定类别映射；列表和后台任务�
 
 **File:** `crates/uc-application/src/facade/roster/facade.rs`
 **File:** `crates/uc-application/src/facade/space_setup/facade.rs`
-**File:** `crates/uc-application/src/space/convergence/reachability.rs`
-**File:** `crates/uc-application/src/space/convergence/membership_connectivity.rs`
-**File:** `crates/uc-application/src/space/convergence/legacy_upgrade.rs`
+**File:** `crates/uc-application/src/space/convergence/connectivity/reachability.rs`
+**File:** `crates/uc-application/src/space/convergence/connectivity/membership.rs`
+**File:** `crates/uc-application/src/space/convergence/membership/legacy_upgrade.rs`
 **File:** `crates/uc-application/src/clipboard/sync/`
 **Change:** 每个流程先取得范围快照，再与资料仓储相交；删除直接把某个仓储列表解释为当前成员的注释和
 逻辑。

@@ -644,7 +644,7 @@ mod tests {
     use crate::space::admission::invitation::holder::InMemoryPairingInvitationHolder;
     use crate::space::convergence::WorkspaceConvergenceError;
 
-    use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
+    use crate::space::convergence::membership::group_update_delivery::GroupUpdateDeliveryPort;
 
     // ── fakes ────────────────────────────────────────────────────────────
 
