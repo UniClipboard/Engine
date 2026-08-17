@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ids::DeviceId;
 
-use super::versioned_membership_history::{MembershipHistoryExchangeV2, MembershipHistoryV2Ack};
+use super::versioned_membership_history::{MembershipHistoryPageV2, MembershipHistoryV2Ack};
 use super::{AdmissionChangeFacts, MemberInstanceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -294,14 +294,10 @@ impl PendingRemovalFacts {
     }
 }
 
-/// The fixed maximum number of signed events carried by one reconciliation
-/// response. Larger histories are fetched by subsequent requests.
-pub const MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE: usize = 64;
-
 /// Versioned reconciliation messages carried on the authenticated member channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MembershipHistoryMessage {
-    HistoryV2(MembershipHistoryExchangeV2),
+    HistoryPageV2(MembershipHistoryPageV2),
     AckV2(MembershipHistoryV2Ack),
 }
 

@@ -7,10 +7,11 @@ use uc_core::membership::{
     LegacyCheckpointAttestationV2, LegacyPrefixCheckpointV2, MembershipActivationBaselineV2,
     MembershipAdmissionV2, MembershipCredential, MembershipDecision, MembershipDecisionV1Evidence,
     MembershipDecisionV2, MembershipEvent, MembershipEventId, MembershipEventV1Evidence,
-    MembershipEventV2, MembershipOperation, MembershipOperationV2, RemovalDecision,
-    VersionedMembershipDecision, VersionedMembershipEvent, VersionedMembershipHistory,
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
-    LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2, LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
+    MembershipEventV2, MembershipHistoryMessage, MembershipOperation, MembershipOperationV2,
+    RemovalDecision, VersionedMembershipDecision, VersionedMembershipEvent,
+    VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1, LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2,
+    LEGACY_PREFIX_CHECKPOINT_FORMAT_V2, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
     MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 
@@ -100,6 +101,47 @@ fn event(
         [operation_byte.saturating_add(1); 32],
         vec![operation_byte],
         Some([operation_byte.saturating_add(2); 32]),
+        Vec::new(),
+    );
+    event.signature = verifier.sign(
+        &author_admission.membership_credential,
+        &event.signing_payload(),
+    );
+    event
+}
+
+fn numbered_event(
+    history: &VersionedMembershipHistory,
+    parent_event_id: Option<MembershipEventId>,
+    author_admission: &MembershipAdmissionV2,
+    operation: MembershipOperationV2,
+    operation_number: u16,
+    verifier: &DeterministicSignatureVerifier,
+) -> MembershipEventV2 {
+    let resulting_members_digest = history
+        .expected_resulting_members_digest(parent_event_id, &operation)
+        .expect("test event extends known history");
+    let mut operation_id = [0; 16];
+    operation_id[..2].copy_from_slice(&operation_number.to_be_bytes());
+    let marker = operation_number.to_be_bytes()[1];
+    let mut event = MembershipEventV2::new(
+        MEMBERSHIP_EVENT_FORMAT_V2,
+        LINEAGE.to_owned(),
+        parent_event_id,
+        parent_event_id
+            .map(|parent| history.depth(parent).expect("known parent") + 1)
+            .unwrap_or(0),
+        operation_id,
+        author_admission.facts.member_instance,
+        author_admission.membership_credential.credential_id,
+        author_admission
+            .membership_credential
+            .signature_algorithm_version,
+        operation,
+        resulting_members_digest,
+        [marker; 32],
+        vec![marker],
+        Some([marker.wrapping_add(1); 32]),
         Vec::new(),
     );
     event.signature = verifier.sign(
@@ -391,13 +433,16 @@ fn runtime_exchange_carries_only_the_senders_decisions() {
     let mut sender_facts = a.facts.clone();
     sender_facts.identity_signature =
         verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
-    let exchange = history
-        .export_reconciliation_exchange_v2(sender_facts)
+    let pages = history
+        .export_reconciliation_pages_v2(sender_facts)
         .expect("A exports a self-authorized runtime view");
-    let imported = VersionedMembershipHistory::import_exchange_v2(&exchange, &verifier)
+    let imported = VersionedMembershipHistory::import_exchange_pages_v2(&pages, &verifier)
         .expect("the runtime view remains self-consistent and verifiable");
 
-    assert_eq!(imported.current_position().unwrap(), exchange.position);
+    let imported_position = imported.current_position().unwrap();
+    let full_position = history.current_position().unwrap();
+    assert_eq!(imported_position.event_id, full_position.event_id);
+    assert_eq!(imported_position.depth, full_position.depth);
     assert_eq!(
         imported.decision_for(removal.event_id(), b.facts.member_instance),
         None
@@ -411,16 +456,239 @@ fn runtime_exchange_carries_only_the_senders_decisions() {
         &b.membership_credential,
         &removed_sender_facts.signing_payload(),
     );
-    let removed_sender_exchange = history
-        .export_reconciliation_exchange_v2(removed_sender_facts)
+    let removed_sender_pages = history
+        .export_reconciliation_pages_v2(removed_sender_facts)
         .expect("removed B may deliver B's own decision");
     let removed_sender_view =
-        VersionedMembershipHistory::import_exchange_v2(&removed_sender_exchange, &verifier)
+        VersionedMembershipHistory::import_exchange_pages_v2(&removed_sender_pages, &verifier)
             .expect("B's restricted decision view verifies");
     assert_eq!(
         removed_sender_view.decision_for(removal.event_id(), b.facts.member_instance),
         history.decision_for(removal.event_id(), b.facts.member_instance)
     );
+}
+
+#[test]
+fn history_exchange_pages_require_one_complete_unique_transfer() {
+    let verifier = DeterministicSignatureVerifier;
+    let (history, a, _b, _genesis, _add_b) = history_with_a_and_b(true);
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+
+    let pages = history
+        .export_reconciliation_pages_v2(sender_facts)
+        .expect("history exports bounded pages");
+    assert!(!pages.is_empty());
+    assert!(pages.iter().all(|page| {
+        let counts = page.record_counts();
+        counts.events <= 256 && counts.activation_receipts <= 256 && counts.decisions <= 256
+    }));
+    assert_eq!(
+        VersionedMembershipHistory::import_exchange_pages_v2(&pages, &verifier)
+            .expect("complete pages verify"),
+        history
+    );
+
+    assert!(VersionedMembershipHistory::import_exchange_pages_v2(&[], &verifier).is_err());
+    let mut duplicated = pages.clone();
+    duplicated.push(pages[0].clone());
+    assert!(VersionedMembershipHistory::import_exchange_pages_v2(&duplicated, &verifier).is_err());
+}
+
+#[test]
+fn history_exchange_splits_the_256_event_boundary_without_losing_verification() {
+    let verifier = DeterministicSignatureVerifier;
+    let a = admission("device-a", credential(1));
+    let mut history = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    let genesis = numbered_event(
+        &history,
+        None,
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: a.clone(),
+        },
+        1,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(genesis.clone(), &verifier)
+        .expect("genesis verifies");
+    let mut head = genesis.event_id();
+    for index in 0..128u16 {
+        let joining = admission(
+            &format!("device-page-{index}"),
+            credential(u8::try_from(index + 10).expect("fixture credential fits")),
+        );
+        let add = numbered_event(
+            &history,
+            Some(head),
+            &a,
+            MembershipOperationV2::AddDevice {
+                admission: joining.clone(),
+            },
+            2 + index * 2,
+            &verifier,
+        );
+        history
+            .verify_and_receive_event(add.clone(), &verifier)
+            .expect("paged add verifies");
+        history
+            .verify_and_record_activation_receipt(
+                activation_receipt(&add, &joining, &verifier),
+                &verifier,
+            )
+            .expect("paged activation verifies");
+        let remove = numbered_event(
+            &history,
+            Some(add.event_id()),
+            &a,
+            MembershipOperationV2::RemoveDevice {
+                member: joining.facts.member_instance,
+            },
+            3 + index * 2,
+            &verifier,
+        );
+        history
+            .verify_and_receive_event(remove.clone(), &verifier)
+            .expect("paged removal verifies");
+        head = remove.event_id();
+    }
+
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+    let pages = history
+        .export_reconciliation_pages_v2(sender_facts)
+        .expect("large history exports");
+
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].record_counts().events, 256);
+    assert_eq!(pages[1].record_counts().events, 1);
+    assert_eq!(
+        VersionedMembershipHistory::import_exchange_pages_v2(&pages, &verifier)
+            .expect("large paged history verifies"),
+        history
+    );
+}
+
+#[test]
+fn history_exchange_splits_pages_before_the_encoded_frame_limit() {
+    let verifier = DeterministicSignatureVerifier;
+    let a = admission("device-a", credential(1));
+    let mut history = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    let genesis = event(
+        &history,
+        None,
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: a.clone(),
+        },
+        1,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(genesis.clone(), &verifier)
+        .expect("genesis verifies");
+
+    let b = admission(
+        "device-large-b",
+        MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![2; 2_100_000]),
+    );
+    let add_b = event(
+        &history,
+        Some(genesis.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: b },
+        2,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(add_b.clone(), &verifier)
+        .expect("large B addition verifies");
+
+    let c = admission(
+        "device-large-c",
+        MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![3; 2_100_000]),
+    );
+    let add_c = event(
+        &history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: c },
+        3,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(add_c, &verifier)
+        .expect("large C addition verifies");
+
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+    let pages = history
+        .export_reconciliation_pages_v2(sender_facts)
+        .expect("large records export into bounded frames");
+
+    assert_eq!(pages.len(), 2);
+    assert!(pages.iter().all(|page| {
+        let frame = postcard::to_stdvec(&MembershipHistoryMessage::HistoryPageV2(page.clone()))
+            .expect("history frame encodes");
+        frame.len() + 1 <= MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
+    }));
+    assert_eq!(
+        VersionedMembershipHistory::import_exchange_pages_v2(&pages, &verifier)
+            .expect("size-bounded pages remain verifiable"),
+        history
+    );
+}
+
+#[test]
+fn history_exchange_rejects_a_record_larger_than_one_frame() {
+    let verifier = DeterministicSignatureVerifier;
+    let a = admission("device-a", credential(1));
+    let mut history = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    let genesis = event(
+        &history,
+        None,
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: a.clone(),
+        },
+        1,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(genesis.clone(), &verifier)
+        .expect("genesis verifies");
+
+    let oversized = admission(
+        "device-oversized",
+        MembershipCredential::new(
+            ED25519_SIGNATURE_ALGORITHM_V1,
+            vec![2; MAX_MEMBERSHIP_HISTORY_FRAME_SIZE],
+        ),
+    );
+    let add_oversized = event(
+        &history,
+        Some(genesis.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: oversized,
+        },
+        2,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(add_oversized, &verifier)
+        .expect("the history may verify before transport sizing");
+
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+    assert!(history
+        .export_reconciliation_pages_v2(sender_facts)
+        .is_err());
 }
 
 #[test]

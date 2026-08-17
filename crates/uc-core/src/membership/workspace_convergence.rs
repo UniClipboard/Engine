@@ -13,6 +13,7 @@ use super::member_instance::MemberInstanceId;
 use super::membership_history::{
     MembershipDecision, MembershipEventId, MembershipHistoryRelationship, MembershipReconciliation,
 };
+use super::versioned_membership_history::MembershipHistoryPageV2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingAppliedMembershipEffect {
@@ -25,6 +26,13 @@ pub struct PendingAppliedMembershipEffect {
 pub struct PendingMembershipDecisionDelivery {
     pub recipient: DeviceId,
     pub decision: MembershipDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMembershipHistoryTransferV2 {
+    pub transfer_id: [u8; 32],
+    pub page_count: u32,
+    pub pages: Vec<MembershipHistoryPageV2>,
 }
 
 /// Facts required to save a member's local roster and transport record.
@@ -172,6 +180,9 @@ pub struct WorkspaceConvergenceState {
     pub pending_applied_membership_effects: Vec<PendingAppliedMembershipEffect>,
     #[serde(default)]
     pub pending_membership_decision_deliveries: Vec<PendingMembershipDecisionDelivery>,
+    #[serde(default)]
+    pub pending_membership_history_transfers:
+        BTreeMap<DeviceId, PendingMembershipHistoryTransferV2>,
     pub pending_admissions: BTreeMap<PairingSessionId, PendingAdmissionRecord>,
     pub phase: WorkspacePhase,
     pub failure_category: Option<WorkspaceFailureCategory>,
@@ -194,6 +205,7 @@ impl Default for WorkspaceConvergenceState {
             membership_reconciliation: None,
             pending_applied_membership_effects: Vec::new(),
             pending_membership_decision_deliveries: Vec::new(),
+            pending_membership_history_transfers: BTreeMap::new(),
             pending_admissions: BTreeMap::new(),
             phase: WorkspacePhase::LocallyApplied,
             failure_category: None,

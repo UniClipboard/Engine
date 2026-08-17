@@ -70,7 +70,7 @@ pub use membership_history::{
     MembershipDecision, MembershipDecisionId, MembershipEvent, MembershipEventId,
     MembershipHistoryError, MembershipHistoryMessage, MembershipHistoryRelationship,
     MembershipOperation, MembershipReconciliation, MembershipReconciliationOutcome,
-    PendingRemovalFacts, RemovalDecision, MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE,
+    PendingRemovalFacts, RemovalDecision,
 };
 pub use ports::{
     ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
@@ -121,18 +121,20 @@ pub use versioned_membership_history::{
     MembershipActivationReceiptStoreOutcome, MembershipAdmissionV2, MembershipCredential,
     MembershipCredentialId, MembershipDecisionStoreOutcome, MembershipDecisionV1Evidence,
     MembershipDecisionV2, MembershipEventV1Evidence, MembershipEventV2,
-    MembershipHistoryExchangeV2, MembershipHistoryV2Ack, MembershipHistoryV2Error,
-    MembershipHistoryV2Message, MembershipHistoryV2ReceiveOutcome, MembershipOperationV2,
+    MembershipHistoryPageRecordCountsV2, MembershipHistoryPageV2, MembershipHistoryV2Ack,
+    MembershipHistoryV2Error, MembershipHistoryV2ReceiveOutcome, MembershipOperationV2,
     PreparedAdmissionProofV1, VersionedMembershipDecision, VersionedMembershipEvent,
     VersionedMembershipHistory, ADMISSION_COMPLETION_FORMAT_V1,
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2, LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
+    MAX_MEMBERSHIP_HISTORY_FRAME_SIZE, MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE,
     MEMBERSHIP_CREDENTIAL_FORMAT_V1, MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
     MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2, PREPARED_ADMISSION_PROOF_FORMAT_V1,
 };
 pub use workspace_convergence::{
     AdmissionChangeFacts, AdmissionSavedFacts, PendingAdmissionRecord,
-    PendingAppliedMembershipEffect, PendingMembershipDecisionDelivery, WorkspaceConvergenceError,
-    WorkspaceConvergenceEvent, WorkspaceConvergenceState, WorkspaceDigest, WorkspaceEffect,
-    WorkspaceFailureCategory, WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
+    PendingAppliedMembershipEffect, PendingMembershipDecisionDelivery,
+    PendingMembershipHistoryTransferV2, WorkspaceConvergenceError, WorkspaceConvergenceEvent,
+    WorkspaceConvergenceState, WorkspaceDigest, WorkspaceEffect, WorkspaceFailureCategory,
+    WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
 };

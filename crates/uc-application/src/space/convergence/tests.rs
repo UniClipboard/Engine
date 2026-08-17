@@ -46,6 +46,27 @@ struct DeferredAdmissionDelivery;
 
 struct ConfirmingAdmissionDelivery;
 
+struct LoopbackHistoryExchange {
+    receiver: Arc<WorkspaceConvergence>,
+    source_device_id: DeviceId,
+    sent_pages: AtomicUsize,
+}
+
+#[async_trait]
+impl uc_core::membership::MembershipHistoryExchangePort for LoopbackHistoryExchange {
+    async fn exchange_membership_history(
+        &self,
+        _recipient: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, uc_core::membership::MembershipHistoryExchangeError> {
+        self.sent_pages.fetch_add(1, Ordering::SeqCst);
+        self.receiver
+            .handle_membership_history(&self.source_device_id, message)
+            .await
+            .map_err(|_| uc_core::membership::MembershipHistoryExchangeError::Rejected)
+    }
+}
+
 #[derive(Default)]
 struct RecordingLegacyMigrationRecovery {
     calls: AtomicUsize,
@@ -3779,7 +3800,10 @@ async fn persisted_v2_removal_decision_is_retried_after_restart_for_a_diverged_a
     let sent = exchange.history_sent.lock().unwrap();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, DeviceId::new("sponsor"));
-    assert!(matches!(sent[0].1, MembershipHistoryMessage::HistoryV2(_)));
+    assert!(matches!(
+        sent[0].1,
+        MembershipHistoryMessage::HistoryPageV2(_)
+    ));
 }
 
 #[tokio::test]
@@ -3835,9 +3859,11 @@ async fn unknown_v2_member_may_introduce_a_complete_activated_extension() {
         &admission.membership_credential,
         &sender_facts.signing_payload(),
     );
-    let exchange = incoming.export_exchange_v2(sender_facts).unwrap();
-    let imported = uc_core::membership::VersionedMembershipHistory::import_exchange_v2(
-        &exchange,
+    let pages = incoming
+        .export_reconciliation_pages_v2(sender_facts)
+        .unwrap();
+    let imported = uc_core::membership::VersionedMembershipHistory::import_exchange_pages_v2(
+        &pages,
         &DeterministicHistoricalVerifier,
     )
     .unwrap();
@@ -3846,7 +3872,7 @@ async fn unknown_v2_member_may_introduce_a_complete_activated_extension() {
     let response = owner
         .handle_membership_history(
             &admission.facts.device_id,
-            MembershipHistoryMessage::HistoryV2(exchange),
+            MembershipHistoryMessage::HistoryPageV2(pages[0].clone()),
         )
         .await
         .unwrap();
@@ -3866,6 +3892,432 @@ async fn unknown_v2_member_may_introduce_a_complete_activated_extension() {
         )
         .unwrap()
     );
+}
+
+fn paged_runtime_history_fixture(
+    final_credential_number: u16,
+) -> (
+    uc_core::membership::VersionedMembershipHistory,
+    uc_core::membership::VersionedMembershipHistory,
+    Vec<uc_core::membership::MembershipHistoryPageV2>,
+    uc_core::membership::MembershipCredential,
+    uc_core::membership::MembershipCredential,
+) {
+    use uc_core::membership::{
+        AdmissionActivationReceipt, MembershipAdmissionV2, MembershipCredential, MembershipEventId,
+        MembershipEventV2, MembershipOperationV2, VersionedMembershipHistory,
+        ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
+    };
+
+    fn admission(device: &str, credential_number: u16) -> MembershipAdmissionV2 {
+        let credential = MembershipCredential::new(
+            ED25519_SIGNATURE_ALGORITHM_V1,
+            credential_number.to_be_bytes().repeat(16),
+        );
+        let device_id = DeviceId::new(device);
+        let member_instance = credential.member_instance_id(&device_id);
+        let marker = credential_number.to_be_bytes()[1];
+        MembershipAdmissionV2 {
+            facts: admission_facts_for(member_instance, &device_id),
+            membership_credential: credential,
+            resume_public_key_digest: [marker.wrapping_add(1); 32],
+            security_commitment_id: [marker.wrapping_add(2); 32],
+        }
+    }
+
+    fn event(
+        history: &VersionedMembershipHistory,
+        parent: Option<MembershipEventId>,
+        author: &MembershipAdmissionV2,
+        operation: MembershipOperationV2,
+        operation_number: u16,
+    ) -> MembershipEventV2 {
+        let resulting_members_digest = history
+            .expected_resulting_members_digest(parent, &operation)
+            .unwrap();
+        let mut operation_id = [0; 16];
+        operation_id[..2].copy_from_slice(&operation_number.to_be_bytes());
+        let marker = operation_number.to_be_bytes()[1];
+        let mut event = MembershipEventV2::new(
+            MEMBERSHIP_EVENT_FORMAT_V2,
+            SPACE.to_owned(),
+            parent,
+            parent
+                .map(|event_id| history.depth(event_id).unwrap().saturating_add(1))
+                .unwrap_or(0),
+            operation_id,
+            author.facts.member_instance,
+            author.membership_credential.credential_id,
+            author.membership_credential.signature_algorithm_version,
+            operation,
+            resulting_members_digest,
+            [marker; 32],
+            vec![marker],
+            Some([marker.wrapping_add(1); 32]),
+            Vec::new(),
+        );
+        event.signature = DeterministicHistoricalVerifier
+            .sign(&author.membership_credential, &event.signing_payload());
+        event
+    }
+
+    fn activate(
+        history: &mut VersionedMembershipHistory,
+        event: &MembershipEventV2,
+        admission: &MembershipAdmissionV2,
+    ) {
+        let mut receipt = AdmissionActivationReceipt::new(
+            1,
+            [event.operation_id[1]; 32],
+            event.event_id(),
+            event.resulting_members_digest,
+            admission.security_commitment_id,
+            admission.facts.member_instance,
+            Vec::new(),
+        );
+        receipt.signature = DeterministicHistoricalVerifier
+            .sign(&admission.membership_credential, &receipt.signing_payload());
+        history
+            .verify_and_record_activation_receipt(receipt, &DeterministicHistoricalVerifier)
+            .unwrap();
+    }
+
+    let sponsor = admission("sponsor", 1);
+    let joiner = admission("joiner", 2);
+    let mut history = VersionedMembershipHistory::new(SPACE.to_owned());
+    let genesis = event(
+        &history,
+        None,
+        &sponsor,
+        MembershipOperationV2::AddDevice {
+            admission: sponsor.clone(),
+        },
+        1,
+    );
+    history
+        .verify_and_receive_event(genesis.clone(), &DeterministicHistoricalVerifier)
+        .unwrap();
+    let add_joiner = event(
+        &history,
+        Some(genesis.event_id()),
+        &sponsor,
+        MembershipOperationV2::AddDevice {
+            admission: joiner.clone(),
+        },
+        2,
+    );
+    history
+        .verify_and_receive_event(add_joiner.clone(), &DeterministicHistoricalVerifier)
+        .unwrap();
+    activate(&mut history, &add_joiner, &joiner);
+    let base_history = history.clone();
+    let mut head = add_joiner.event_id();
+    for index in 0..254u16 {
+        let joining = admission(&format!("paged-device-{index}"), index + 20);
+        let add = event(
+            &history,
+            Some(head),
+            &sponsor,
+            MembershipOperationV2::AddDevice {
+                admission: joining.clone(),
+            },
+            3 + index,
+        );
+        history
+            .verify_and_receive_event(add.clone(), &DeterministicHistoricalVerifier)
+            .unwrap();
+        activate(&mut history, &add, &joining);
+        head = add.event_id();
+    }
+    let final_member = admission("paged-final", final_credential_number);
+    let final_add = event(
+        &history,
+        Some(head),
+        &sponsor,
+        MembershipOperationV2::AddDevice {
+            admission: final_member.clone(),
+        },
+        257,
+    );
+    history
+        .verify_and_receive_event(final_add.clone(), &DeterministicHistoricalVerifier)
+        .unwrap();
+    activate(&mut history, &final_add, &final_member);
+    let mut sender_facts = sponsor.facts.clone();
+    sender_facts.identity_signature = DeterministicHistoricalVerifier.sign(
+        &sponsor.membership_credential,
+        &sender_facts.signing_payload(),
+    );
+    let pages = history
+        .export_reconciliation_pages_v2(sender_facts)
+        .unwrap();
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].record_counts().events, 256);
+    assert_eq!(pages[1].record_counts().events, 1);
+    (
+        base_history,
+        history,
+        pages,
+        sponsor.membership_credential,
+        joiner.membership_credential,
+    )
+}
+
+fn paged_receiver(
+    workspace_repository: MemoryWorkspaceRepository,
+    admission_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    joiner_credential: uc_core::membership::MembershipCredential,
+) -> Arc<WorkspaceConvergence> {
+    let mut deps = test_deps(Arc::new(workspace_repository), "joiner", Vec::new());
+    deps.admission_attempts = admission_repository;
+    deps.member_signatures = Arc::new(CredentialBackedSigner {
+        device_id: DeviceId::new("joiner"),
+        credential: joiner_credential,
+    });
+    deps.membership_identity = Arc::new(FixedMembershipIdentity {
+        space: SpaceId::from_str(SPACE),
+        device_id: DeviceId::new("joiner"),
+    });
+    deps.own_device = DeviceId::new("joiner");
+    WorkspaceConvergence::new(deps)
+}
+
+// 流程：第二页先到时不改正式历史；第一页保存后重启，重复页保持幂等，最后一页才完成替换。
+#[tokio::test]
+async fn paged_history_resumes_after_restart_and_applies_only_when_complete() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0xb1; 16]);
+    let (base, incoming, pages, _sponsor_credential, joiner_credential) =
+        paged_runtime_history_fixture(0x3c1);
+    let base_bytes = base.encode_persisted_v2().unwrap();
+    admission_repository
+        .compare_and_replace_membership_history_v2(None, &base_bytes)
+        .await
+        .unwrap();
+    let workspace_repository = MemoryWorkspaceRepository::default();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(joiner_credential.member_instance_id(&DeviceId::new("joiner")));
+    workspace_repository.save_state(&state).await.unwrap();
+    let receiver = paged_receiver(
+        workspace_repository.clone(),
+        admission_repository.clone(),
+        joiner_credential.clone(),
+    );
+
+    let early = receiver
+        .handle_membership_history(
+            &DeviceId::new("sponsor"),
+            MembershipHistoryMessage::HistoryPageV2(pages[1].clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        early,
+        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Continue {
+            transfer_id: pages[0].transfer_id(),
+            next_page_index: 0,
+        })
+    );
+    assert_eq!(
+        admission_repository
+            .load_membership_history_v2()
+            .await
+            .unwrap(),
+        Some(base_bytes.clone())
+    );
+
+    let first = receiver
+        .handle_membership_history(
+            &DeviceId::new("sponsor"),
+            MembershipHistoryMessage::HistoryPageV2(pages[0].clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Continue {
+            transfer_id: pages[0].transfer_id(),
+            next_page_index: 1,
+        })
+    );
+    drop(receiver);
+
+    let restarted = paged_receiver(
+        workspace_repository.clone(),
+        admission_repository.clone(),
+        joiner_credential,
+    );
+    let duplicate = restarted
+        .handle_membership_history(
+            &DeviceId::new("sponsor"),
+            MembershipHistoryMessage::HistoryPageV2(pages[0].clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate, first);
+    assert_eq!(
+        admission_repository
+            .load_membership_history_v2()
+            .await
+            .unwrap(),
+        Some(base_bytes)
+    );
+
+    let completed = restarted
+        .handle_membership_history(
+            &DeviceId::new("sponsor"),
+            MembershipHistoryMessage::HistoryPageV2(pages[1].clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        completed,
+        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::UpdatesApplied)
+    );
+    assert_eq!(
+        admission_repository
+            .load_membership_history_v2()
+            .await
+            .unwrap(),
+        Some(incoming.encode_persisted_v2().unwrap())
+    );
+    assert!(workspace_repository
+        .load_state()
+        .await
+        .unwrap()
+        .unwrap()
+        .pending_membership_history_transfers
+        .is_empty());
+}
+
+// 流程：同一来源混入另一轮第一页时拒绝整轮资料，并保留原来的正式历史。
+#[tokio::test]
+async fn paged_history_rejects_a_conflicting_transfer_and_clears_progress() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0xb2; 16]);
+    let (base, _incoming, pages, _sponsor_credential, joiner_credential) =
+        paged_runtime_history_fixture(0x3c2);
+    let (_, _, conflicting_pages, _, _) = paged_runtime_history_fixture(0x3c3);
+    let base_bytes = base.encode_persisted_v2().unwrap();
+    admission_repository
+        .compare_and_replace_membership_history_v2(None, &base_bytes)
+        .await
+        .unwrap();
+    let workspace_repository = MemoryWorkspaceRepository::default();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(joiner_credential.member_instance_id(&DeviceId::new("joiner")));
+    workspace_repository.save_state(&state).await.unwrap();
+    let receiver = paged_receiver(
+        workspace_repository.clone(),
+        admission_repository.clone(),
+        joiner_credential,
+    );
+    receiver
+        .handle_membership_history(
+            &DeviceId::new("sponsor"),
+            MembershipHistoryMessage::HistoryPageV2(pages[0].clone()),
+        )
+        .await
+        .unwrap();
+
+    let response = receiver
+        .handle_membership_history(
+            &DeviceId::new("sponsor"),
+            MembershipHistoryMessage::HistoryPageV2(conflicting_pages[0].clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response,
+        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Invalid)
+    );
+    assert_eq!(
+        admission_repository
+            .load_membership_history_v2()
+            .await
+            .unwrap(),
+        Some(base_bytes)
+    );
+    assert!(workspace_repository
+        .load_state()
+        .await
+        .unwrap()
+        .unwrap()
+        .pending_membership_history_transfers
+        .is_empty());
+}
+
+// 流程：发送方通过唯一分页入口传完 257 条记录，接收方回执后双方保存相同历史。
+#[tokio::test]
+async fn paged_history_transfers_257_events_end_to_end() {
+    let receiver_directory = tempfile::tempdir().unwrap();
+    let receiver_admission = durable_admission_repository(&receiver_directory, [0xb3; 16]);
+    let (base, incoming, _pages, sponsor_credential, joiner_credential) =
+        paged_runtime_history_fixture(0x3c4);
+    receiver_admission
+        .compare_and_replace_membership_history_v2(None, &base.encode_persisted_v2().unwrap())
+        .await
+        .unwrap();
+    let receiver_workspace = MemoryWorkspaceRepository::default();
+    let mut receiver_state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    receiver_state.own_instance =
+        Some(joiner_credential.member_instance_id(&DeviceId::new("joiner")));
+    receiver_workspace
+        .save_state(&receiver_state)
+        .await
+        .unwrap();
+    let receiver = paged_receiver(
+        receiver_workspace,
+        receiver_admission.clone(),
+        joiner_credential,
+    );
+    let loopback = Arc::new(LoopbackHistoryExchange {
+        receiver,
+        source_device_id: DeviceId::new("sponsor"),
+        sent_pages: AtomicUsize::new(0),
+    });
+
+    let sender_directory = tempfile::tempdir().unwrap();
+    let sender_admission = durable_admission_repository(&sender_directory, [0xb4; 16]);
+    sender_admission
+        .compare_and_replace_membership_history_v2(None, &incoming.encode_persisted_v2().unwrap())
+        .await
+        .unwrap();
+    let sender_workspace = MemoryWorkspaceRepository::default();
+    let mut sender_state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    sender_state.own_instance =
+        Some(sponsor_credential.member_instance_id(&DeviceId::new("sponsor")));
+    sender_workspace.save_state(&sender_state).await.unwrap();
+    let mut sender_deps = test_deps(Arc::new(sender_workspace), "sponsor", Vec::new());
+    sender_deps.admission_attempts = sender_admission.clone();
+    sender_deps.member_signatures = Arc::new(CredentialBackedSigner {
+        device_id: DeviceId::new("sponsor"),
+        credential: sponsor_credential,
+    });
+    sender_deps.membership_identity = Arc::new(FixedMembershipIdentity {
+        space: SpaceId::from_str(SPACE),
+        device_id: DeviceId::new("sponsor"),
+    });
+    sender_deps.announcement_material = Arc::new(ConfiguredAnnouncementMaterial {
+        device_id: DeviceId::new("sponsor"),
+    });
+    sender_deps.membership_history_exchange = loopback.clone();
+    sender_deps.own_device = DeviceId::new("sponsor");
+    let sender = WorkspaceConvergence::new(sender_deps);
+
+    sender
+        .reconcile_membership_history_with_peer(&DeviceId::new("joiner"))
+        .await
+        .unwrap();
+
+    assert_eq!(loopback.sent_pages.load(Ordering::SeqCst), 2);
+    let sender_history = sender_admission.load_membership_history_v2().await.unwrap();
+    let receiver_history = receiver_admission
+        .load_membership_history_v2()
+        .await
+        .unwrap();
+    assert_eq!(receiver_history, sender_history);
 }
 
 // 流程：A 与 B 已经分叉；A 请求 B 的旧 Space 成员资料，B 必须拒绝，不再继续交换旧分支。

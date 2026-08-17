@@ -2463,8 +2463,8 @@ impl WorkspaceConvergence {
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
         let response = match message {
-            MembershipHistoryMessage::HistoryV2(exchange) => {
-                self.receive_membership_history_v2(&mut state, source_device_id, exchange, now_ms)
+            MembershipHistoryMessage::HistoryPageV2(page) => {
+                self.receive_membership_history_v2(&mut state, source_device_id, page, now_ms)
                     .await?
             }
             MembershipHistoryMessage::AckV2(ack) => MembershipHistoryMessage::AckV2(ack),
@@ -2572,7 +2572,7 @@ impl WorkspaceConvergence {
         peer: &DeviceId,
         peer_role: ReconciliationPeerRole,
     ) -> Result<(), WorkspaceConvergenceError> {
-        let initial = {
+        let pages = {
             let _guard = self.state_lock.lock().await;
             let state = self.load_state().await?;
             let restricted_decision_delivery = matches!(
@@ -2618,63 +2618,177 @@ impl WorkspaceConvergence {
                         .map_err(|_| WorkspaceConvergenceError::Unavailable)?,
                 ))
                 .await?;
-            MembershipHistoryMessage::HistoryV2(
-                history
-                    .export_reconciliation_exchange_v2(own_admission)
-                    .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?,
-            )
+            history
+                .export_reconciliation_pages_v2(own_admission)
+                .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?
         };
-
-        let reply = self
-            .deps
-            .membership_history_exchange
-            .exchange_membership_history(peer, initial)
-            .await
-            .map_err(|error| match error {
-                MembershipHistoryExchangeError::Offline
-                | MembershipHistoryExchangeError::Transport => {
-                    WorkspaceConvergenceError::Unavailable
-                }
-                MembershipHistoryExchangeError::Rejected => {
-                    WorkspaceConvergenceError::Inconsistent(
-                        "membership history exchange rejected".to_owned(),
-                    )
-                }
+        let transfer_id = pages
+            .first()
+            .map(|page| page.transfer_id())
+            .ok_or_else(|| {
+                WorkspaceConvergenceError::Inconsistent(
+                    "membership history page export was empty".to_owned(),
+                )
             })?;
-        let MembershipHistoryMessage::AckV2(ack) = reply else {
-            return Err(WorkspaceConvergenceError::Inconsistent(
-                "membership history exchange returned an invalid response".to_owned(),
-            ));
-        };
-        tracing::debug!(?ack, "membership history V2 exchange completed");
-        if matches!(
-            ack,
-            uc_core::membership::MembershipHistoryV2Ack::Consistent
+        let mut next_page_index = 0u32;
+        for _ in 0..=pages.len() {
+            let page = pages
+                .get(next_page_index as usize)
+                .cloned()
+                .ok_or_else(|| {
+                    WorkspaceConvergenceError::Inconsistent(
+                        "membership history requested an invalid page".to_owned(),
+                    )
+                })?;
+            let reply = self
+                .deps
+                .membership_history_exchange
+                .exchange_membership_history(peer, MembershipHistoryMessage::HistoryPageV2(page))
+                .await
+                .map_err(|error| match error {
+                    MembershipHistoryExchangeError::Offline
+                    | MembershipHistoryExchangeError::Transport => {
+                        WorkspaceConvergenceError::Unavailable
+                    }
+                    MembershipHistoryExchangeError::Rejected => {
+                        WorkspaceConvergenceError::Inconsistent(
+                            "membership history exchange rejected".to_owned(),
+                        )
+                    }
+                })?;
+            let MembershipHistoryMessage::AckV2(ack) = reply else {
+                return Err(WorkspaceConvergenceError::Inconsistent(
+                    "membership history exchange returned an invalid response".to_owned(),
+                ));
+            };
+            match ack {
+                uc_core::membership::MembershipHistoryV2Ack::Continue {
+                    transfer_id: acknowledged_transfer,
+                    next_page_index: requested_page,
+                } if acknowledged_transfer == transfer_id
+                    && (requested_page as usize) < pages.len() =>
+                {
+                    next_page_index = requested_page;
+                }
+                uc_core::membership::MembershipHistoryV2Ack::Consistent
                 | uc_core::membership::MembershipHistoryV2Ack::UpdatesApplied
-        ) {
-            self.record_current_peer_confirmation(peer).await?;
+                    if next_page_index as usize + 1 == pages.len() =>
+                {
+                    self.record_current_peer_confirmation(peer).await?;
+                    return Ok(());
+                }
+                uc_core::membership::MembershipHistoryV2Ack::Diverged
+                | uc_core::membership::MembershipHistoryV2Ack::Invalid => return Ok(()),
+                _ => {
+                    return Err(WorkspaceConvergenceError::Inconsistent(
+                        "membership history acknowledgement is inconsistent".to_owned(),
+                    ))
+                }
+            }
         }
-        Ok(())
+        Err(WorkspaceConvergenceError::Inconsistent(
+            "membership history paging did not advance".to_owned(),
+        ))
     }
 
     async fn receive_membership_history_v2(
         &self,
         state: &mut WorkspaceConvergenceState,
         source_device_id: &DeviceId,
-        exchange: uc_core::membership::MembershipHistoryExchangeV2,
+        page: uc_core::membership::MembershipHistoryPageV2,
         now_ms: i64,
     ) -> Result<MembershipHistoryMessage, WorkspaceConvergenceError> {
-        use uc_core::membership::{MembershipHistoryV2Ack, VersionedMembershipHistory};
+        use uc_core::membership::{
+            MembershipHistoryV2Ack, PendingMembershipHistoryTransferV2, VersionedMembershipHistory,
+        };
 
-        let incoming = match VersionedMembershipHistory::import_exchange_v2(
-            &exchange,
+        let transfer_id = page.transfer_id();
+        let page_count = page.page_count();
+        let page_index = page.page_index();
+        if page.validate_envelope().is_err() {
+            return Ok(MembershipHistoryMessage::AckV2(
+                MembershipHistoryV2Ack::Invalid,
+            ));
+        }
+        let pending = state
+            .pending_membership_history_transfers
+            .entry(source_device_id.clone())
+            .or_insert_with(|| PendingMembershipHistoryTransferV2 {
+                transfer_id,
+                page_count,
+                pages: Vec::new(),
+            });
+        if pending.transfer_id != transfer_id || pending.page_count != page_count {
+            state
+                .pending_membership_history_transfers
+                .remove(source_device_id);
+            self.persist(state).await?;
+            return Ok(MembershipHistoryMessage::AckV2(
+                MembershipHistoryV2Ack::Invalid,
+            ));
+        }
+        let expected_index = u32::try_from(pending.pages.len()).map_err(|_| {
+            WorkspaceConvergenceError::Inconsistent(
+                "membership history page count exceeds the protocol range".to_owned(),
+            )
+        })?;
+        if page_index < expected_index {
+            if pending.pages.get(page_index as usize) != Some(&page) {
+                state
+                    .pending_membership_history_transfers
+                    .remove(source_device_id);
+                self.persist(state).await?;
+                return Ok(MembershipHistoryMessage::AckV2(
+                    MembershipHistoryV2Ack::Invalid,
+                ));
+            }
+        } else if page_index == expected_index {
+            pending.pages.push(page);
+        } else {
+            return Ok(MembershipHistoryMessage::AckV2(
+                MembershipHistoryV2Ack::Continue {
+                    transfer_id,
+                    next_page_index: expected_index,
+                },
+            ));
+        }
+        self.persist(state).await?;
+        let received_count = state
+            .pending_membership_history_transfers
+            .get(source_device_id)
+            .map(|transfer| transfer.pages.len())
+            .unwrap_or_default();
+        if received_count < page_count as usize {
+            let next_page_index = u32::try_from(received_count).map_err(|_| {
+                WorkspaceConvergenceError::Inconsistent(
+                    "membership history page count exceeds the protocol range".to_owned(),
+                )
+            })?;
+            return Ok(MembershipHistoryMessage::AckV2(
+                MembershipHistoryV2Ack::Continue {
+                    transfer_id,
+                    next_page_index,
+                },
+            ));
+        }
+        let pages = state
+            .pending_membership_history_transfers
+            .get(source_device_id)
+            .map(|transfer| transfer.pages.clone())
+            .unwrap_or_default();
+        let incoming = match VersionedMembershipHistory::import_exchange_pages_v2(
+            &pages,
             self.deps.historical_membership_signatures.as_ref(),
         ) {
             Ok(history) if history.lineage_id() == state.space_lineage => history,
             _ => {
+                state
+                    .pending_membership_history_transfers
+                    .remove(source_device_id);
+                self.persist(state).await?;
                 return Ok(MembershipHistoryMessage::AckV2(
                     MembershipHistoryV2Ack::Invalid,
-                ))
+                ));
             }
         };
         let candidates = [source_device_id.clone()];
@@ -2692,10 +2806,15 @@ impl WorkspaceConvergence {
             .map_err(admission_transaction::map_repository_error)?;
         if current_encoded.as_deref()
             == Some(
-                VersionedMembershipHistory::encoded_exchange_history(&exchange)
-                    .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?,
+                incoming
+                    .encode_persisted_v2()
+                    .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?
+                    .as_slice(),
             )
         {
+            state
+                .pending_membership_history_transfers
+                .remove(source_device_id);
             self.update_peer_history_relationship(
                 state,
                 source_device_id.clone(),
@@ -2727,6 +2846,10 @@ impl WorkspaceConvergence {
             },
         );
         if !source_is_allowed {
+            state
+                .pending_membership_history_transfers
+                .remove(source_device_id);
+            self.persist(state).await?;
             return Ok(MembershipHistoryMessage::AckV2(
                 MembershipHistoryV2Ack::Invalid,
             ));
@@ -2778,6 +2901,9 @@ impl WorkspaceConvergence {
             relationship,
             now_ms,
         )?;
+        state
+            .pending_membership_history_transfers
+            .remove(source_device_id);
         self.persist(state).await?;
         self.publish(state);
         self.notify();

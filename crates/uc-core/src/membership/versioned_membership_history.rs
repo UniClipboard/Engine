@@ -21,6 +21,9 @@ pub const ADMISSION_SECURITY_COMMITMENT_FORMAT_V1: u16 = 1;
 pub const PREPARED_ADMISSION_PROOF_FORMAT_V1: u16 = 1;
 pub const ADMISSION_COMPLETION_FORMAT_V1: u16 = 1;
 pub const MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2: u16 = 2;
+pub const MAX_MEMBERSHIP_HISTORY_FRAME_SIZE: usize = 4 * 1024 * 1024;
+pub const MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE: usize = 256;
+const MEMBERSHIP_HISTORY_PAGE_FRAME_OVERHEAD: usize = 2;
 const ACTIVATION_RECEIPT_FORMAT_V1: u16 = 1;
 const ACTIVATION_RECEIPT_RECORD_FORMAT_V1: u16 = 1;
 
@@ -953,36 +956,99 @@ pub enum MembershipDecisionStoreOutcome {
     AlreadyKnown,
 }
 
-/// One bounded, self-verifying V2 history image exchanged between already
-/// authenticated workspace members. Transport adapters cannot inspect or
-/// construct the encoded history body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipHistoryExchangeV2 {
-    pub exchange_format_version: u16,
-    pub lineage_id: String,
-    pub position: BaseMembershipHistoryPositionV1,
-    pub sender_admission: AdmissionChangeFacts,
-    encoded_history: Vec<u8>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembershipHistoryPageRecordCountsV2 {
+    pub events: usize,
+    pub activation_receipts: usize,
+    pub decisions: usize,
 }
 
-impl MembershipHistoryExchangeV2 {
-    pub fn encoded_len(&self) -> usize {
-        self.encoded_history.len()
+impl MembershipHistoryPageRecordCountsV2 {
+    fn total(self) -> usize {
+        self.events + self.activation_receipts + self.decisions
+    }
+}
+
+/// One deterministic, bounded fragment of a complete V2 history image.
+/// Pages remain untrusted until the complete transfer is reassembled and
+/// verified through [`VersionedMembershipHistory::import_exchange_pages_v2`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipHistoryPageV2 {
+    exchange_format_version: u16,
+    transfer_id: [u8; 32],
+    page_index: u32,
+    page_count: u32,
+    lineage_id: String,
+    position: BaseMembershipHistoryPositionV1,
+    sender_admission: AdmissionChangeFacts,
+    events: Vec<MembershipEventV2>,
+    activation_receipts: Vec<AdmissionActivationReceipt>,
+    decisions: Vec<MembershipDecisionV2>,
+    activation_baseline: Option<PersistedActivationBaselineV2>,
+    known_head: Option<MembershipEventId>,
+}
+
+impl MembershipHistoryPageV2 {
+    pub fn validate_envelope(&self) -> Result<(), MembershipHistoryV2Error> {
+        let counts = self.record_counts();
+        if self.exchange_format_version != MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2 {
+            return Err(MembershipHistoryV2Error::UpgradeRequired);
+        }
+        if self.page_count == 0
+            || self.page_index >= self.page_count
+            || counts.events > MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE
+            || counts.activation_receipts > MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE
+            || counts.decisions > MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE
+            || self.encoded_frame_size()? > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
+            || (self.page_index != 0
+                && (self.activation_baseline.is_some() || self.known_head.is_some()))
+        {
+            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        }
+        Ok(())
+    }
+
+    fn encoded_frame_size(&self) -> Result<usize, MembershipHistoryV2Error> {
+        postcard::to_stdvec(self)
+            .map(|page| page.len() + MEMBERSHIP_HISTORY_PAGE_FRAME_OVERHEAD)
+            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)
+    }
+
+    pub fn transfer_id(&self) -> [u8; 32] {
+        self.transfer_id
+    }
+
+    pub fn page_index(&self) -> u32 {
+        self.page_index
+    }
+
+    pub fn page_count(&self) -> u32 {
+        self.page_count
+    }
+
+    pub fn sender_admission(&self) -> &AdmissionChangeFacts {
+        &self.sender_admission
+    }
+
+    pub fn record_counts(&self) -> MembershipHistoryPageRecordCountsV2 {
+        MembershipHistoryPageRecordCountsV2 {
+            events: self.events.len(),
+            activation_receipts: self.activation_receipts.len(),
+            decisions: self.decisions.len(),
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MembershipHistoryV2Ack {
+    Continue {
+        transfer_id: [u8; 32],
+        next_page_index: u32,
+    },
     Consistent,
     UpdatesApplied,
     Diverged,
     Invalid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MembershipHistoryV2Message {
-    History(MembershipHistoryExchangeV2),
-    Ack(MembershipHistoryV2Ack),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1166,10 +1232,10 @@ impl VersionedMembershipHistory {
             .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)
     }
 
-    pub fn export_exchange_v2(
+    fn validate_exchange_sender(
         &self,
-        sender_admission: AdmissionChangeFacts,
-    ) -> Result<MembershipHistoryExchangeV2, MembershipHistoryV2Error> {
+        sender_admission: &AdmissionChangeFacts,
+    ) -> Result<BaseMembershipHistoryPositionV1, MembershipHistoryV2Error> {
         let sender_member_instance_id = sender_admission.member_instance;
         let credential = self
             .credential_for(sender_member_instance_id)
@@ -1180,42 +1246,122 @@ impl VersionedMembershipHistory {
         {
             return Err(MembershipHistoryV2Error::UnauthorizedAuthor);
         }
-        Ok(MembershipHistoryExchangeV2 {
-            exchange_format_version: MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2,
-            lineage_id: self.lineage_id.clone(),
-            position: self.current_position()?,
-            sender_admission,
-            encoded_history: self.encode_persisted_v2()?,
-        })
+        self.current_position()
     }
 
-    pub fn export_reconciliation_exchange_v2(
+    pub fn export_reconciliation_pages_v2(
         &self,
         sender_admission: AdmissionChangeFacts,
-    ) -> Result<MembershipHistoryExchangeV2, MembershipHistoryV2Error> {
+    ) -> Result<Vec<MembershipHistoryPageV2>, MembershipHistoryV2Error> {
         let sender_member = sender_admission.member_instance;
         let mut exchange_history = self.clone();
         exchange_history
             .peer_decisions
             .retain(|_, decision| decision.decided_by_member_instance_id == sender_member);
-        exchange_history.export_exchange_v2(sender_admission)
+        exchange_history.export_pages_v2(sender_admission)
     }
 
-    pub fn import_exchange_v2(
-        exchange: &MembershipHistoryExchangeV2,
+    fn export_pages_v2(
+        &self,
+        sender_admission: AdmissionChangeFacts,
+    ) -> Result<Vec<MembershipHistoryPageV2>, MembershipHistoryV2Error> {
+        let position = self.validate_exchange_sender(&sender_admission)?;
+        let persisted_bytes = self.encode_persisted_v2()?;
+        let transfer_id = history_transfer_id(&persisted_bytes);
+        let persisted: PersistedMembershipHistoryV2 = postcard::from_bytes(&persisted_bytes)
+            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        let metadata = MembershipHistoryPageMetadata {
+            transfer_id,
+            lineage_id: &persisted.lineage_id,
+            position: &position,
+            sender_admission: &sender_admission,
+            activation_baseline: persisted.activation_baseline.as_ref(),
+            known_head: persisted.known_head,
+        };
+        let mut pages = vec![empty_history_page(&metadata, 0)?];
+        for record in persisted
+            .events
+            .iter()
+            .map(MembershipHistoryPageRecord::Event)
+            .chain(
+                persisted
+                    .activation_receipts
+                    .iter()
+                    .map(MembershipHistoryPageRecord::ActivationReceipt),
+            )
+            .chain(
+                persisted
+                    .peer_decisions
+                    .iter()
+                    .map(MembershipHistoryPageRecord::Decision),
+            )
+        {
+            append_history_page_record(&mut pages, &metadata, record)?;
+        }
+        let page_count = u32::try_from(pages.len())
+            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        for page in &mut pages {
+            page.page_count = page_count;
+            page.validate_envelope()?;
+        }
+        Ok(pages)
+    }
+
+    pub fn import_exchange_pages_v2(
+        pages: &[MembershipHistoryPageV2],
         verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     ) -> Result<Self, MembershipHistoryV2Error> {
-        if exchange.exchange_format_version != MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2 {
-            return Err(MembershipHistoryV2Error::UpgradeRequired);
+        let first = pages
+            .first()
+            .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        if first.page_count == 0 || pages.len() != first.page_count as usize {
+            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
         }
-        let history = Self::decode_persisted_v2(&exchange.encoded_history, verifier)?;
-        let sender_member = exchange.sender_admission.member_instance;
+        let mut ordered = pages.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|page| page.page_index);
+        for (expected_index, page) in ordered.iter().enumerate() {
+            page.validate_envelope()?;
+            if page.page_index as usize != expected_index
+                || page.page_count != first.page_count
+                || page.transfer_id != first.transfer_id
+                || page.lineage_id != first.lineage_id
+                || page.position != first.position
+                || page.sender_admission != first.sender_admission
+            {
+                return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            }
+        }
+        let mut persisted = PersistedMembershipHistoryV2 {
+            format_version: PERSISTED_MEMBERSHIP_HISTORY_FORMAT_V2,
+            lineage_id: first.lineage_id.clone(),
+            events: Vec::new(),
+            activation_receipts: Vec::new(),
+            peer_decisions: Vec::new(),
+            activation_baseline: first.activation_baseline.clone(),
+            known_head: first.known_head,
+        };
+        for page in ordered {
+            persisted.events.extend(page.events.iter().cloned());
+            persisted
+                .activation_receipts
+                .extend(page.activation_receipts.iter().cloned());
+            persisted
+                .peer_decisions
+                .extend(page.decisions.iter().cloned());
+        }
+        let encoded = postcard::to_stdvec(&persisted)
+            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        if history_transfer_id(&encoded) != first.transfer_id {
+            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        }
+        let history = Self::decode_persisted_v2(&encoded, verifier)?;
+        let sender_member = first.sender_admission.member_instance;
         let sender_credential = history
             .credential_for(sender_member)
             .ok_or(MembershipHistoryV2Error::InvalidCredential)?;
-        if history.lineage_id != exchange.lineage_id
-            || history.current_position()? != exchange.position
-            || sender_credential.member_instance_id(&exchange.sender_admission.device_id)
+        if history.lineage_id != first.lineage_id
+            || history.current_position()? != first.position
+            || sender_credential.member_instance_id(&first.sender_admission.device_id)
                 != sender_member
             || (!history.active_members().contains(&sender_member)
                 && !history.has_removal_decision_by(sender_member))
@@ -1225,19 +1371,10 @@ impl VersionedMembershipHistory {
         verify_signature(
             verifier,
             sender_credential,
-            &exchange.sender_admission.signing_payload(),
-            &exchange.sender_admission.identity_signature,
+            &first.sender_admission.signing_payload(),
+            &first.sender_admission.identity_signature,
         )?;
         Ok(history)
-    }
-
-    pub fn encoded_exchange_history(
-        exchange: &MembershipHistoryExchangeV2,
-    ) -> Result<&[u8], MembershipHistoryV2Error> {
-        if exchange.exchange_format_version != MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2 {
-            return Err(MembershipHistoryV2Error::UpgradeRequired);
-        }
-        Ok(&exchange.encoded_history)
     }
 
     pub fn is_complete_extension_of(&self, previous: &Self) -> bool {
@@ -2198,6 +2335,128 @@ fn verify_signature(
             Err(MembershipHistoryV2Error::UpgradeRequired)
         }
     }
+}
+
+struct MembershipHistoryPageMetadata<'a> {
+    transfer_id: [u8; 32],
+    lineage_id: &'a str,
+    position: &'a BaseMembershipHistoryPositionV1,
+    sender_admission: &'a AdmissionChangeFacts,
+    activation_baseline: Option<&'a PersistedActivationBaselineV2>,
+    known_head: Option<MembershipEventId>,
+}
+
+#[derive(Clone, Copy)]
+enum MembershipHistoryPageRecord<'a> {
+    Event(&'a MembershipEventV2),
+    ActivationReceipt(&'a AdmissionActivationReceipt),
+    Decision(&'a MembershipDecisionV2),
+}
+
+impl MembershipHistoryPageRecord<'_> {
+    fn count_in(self, page: &MembershipHistoryPageV2) -> usize {
+        match self {
+            Self::Event(_) => page.events.len(),
+            Self::ActivationReceipt(_) => page.activation_receipts.len(),
+            Self::Decision(_) => page.decisions.len(),
+        }
+    }
+
+    fn push_onto(self, page: &mut MembershipHistoryPageV2) {
+        match self {
+            Self::Event(event) => page.events.push(event.clone()),
+            Self::ActivationReceipt(receipt) => page.activation_receipts.push(receipt.clone()),
+            Self::Decision(decision) => page.decisions.push(decision.clone()),
+        }
+    }
+
+    fn pop_from(self, page: &mut MembershipHistoryPageV2) {
+        match self {
+            Self::Event(_) => {
+                page.events.pop();
+            }
+            Self::ActivationReceipt(_) => {
+                page.activation_receipts.pop();
+            }
+            Self::Decision(_) => {
+                page.decisions.pop();
+            }
+        }
+    }
+}
+
+fn empty_history_page(
+    metadata: &MembershipHistoryPageMetadata<'_>,
+    page_index: usize,
+) -> Result<MembershipHistoryPageV2, MembershipHistoryV2Error> {
+    let page_index =
+        u32::try_from(page_index).map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+    let page = MembershipHistoryPageV2 {
+        exchange_format_version: MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2,
+        transfer_id: metadata.transfer_id,
+        page_index,
+        page_count: u32::MAX,
+        lineage_id: metadata.lineage_id.to_owned(),
+        position: metadata.position.clone(),
+        sender_admission: metadata.sender_admission.clone(),
+        events: Vec::new(),
+        activation_receipts: Vec::new(),
+        decisions: Vec::new(),
+        activation_baseline: (page_index == 0)
+            .then(|| metadata.activation_baseline.cloned())
+            .flatten(),
+        known_head: (page_index == 0).then_some(metadata.known_head).flatten(),
+    };
+    if page.encoded_frame_size()? > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
+        return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+    }
+    Ok(page)
+}
+
+fn append_history_page_record(
+    pages: &mut Vec<MembershipHistoryPageV2>,
+    metadata: &MembershipHistoryPageMetadata<'_>,
+    record: MembershipHistoryPageRecord<'_>,
+) -> Result<(), MembershipHistoryV2Error> {
+    let current = pages
+        .last_mut()
+        .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+    if record.count_in(current) == MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE {
+        let next_page_index = pages.len();
+        pages.push(empty_history_page(metadata, next_page_index)?);
+    }
+
+    let current = pages
+        .last_mut()
+        .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+    record.push_onto(current);
+    if current.encoded_frame_size()? <= MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
+        return Ok(());
+    }
+    record.pop_from(current);
+    if current.record_counts().total() == 0 {
+        return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+    }
+
+    let next_page_index = pages.len();
+    pages.push(empty_history_page(metadata, next_page_index)?);
+    let current = pages
+        .last_mut()
+        .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+    record.push_onto(current);
+    if current.encoded_frame_size()? > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
+        record.pop_from(current);
+        return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+    }
+    Ok(())
+}
+
+fn history_transfer_id(encoded_history: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/membership-history-transfer/v2\0");
+    hasher.update((encoded_history.len() as u64).to_be_bytes());
+    hasher.update(encoded_history);
+    hasher.finalize().into()
 }
 
 fn apply_membership_operation(

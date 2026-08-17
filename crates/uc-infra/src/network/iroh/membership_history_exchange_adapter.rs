@@ -10,7 +10,7 @@ use iroh::{Endpoint, EndpointAddr};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     MemberRepositoryPort, MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
-    MembershipHistoryExchangePort, MembershipHistoryMessage,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
@@ -19,7 +19,6 @@ use super::connect_with_staggered_retry;
 
 pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/2";
 
-const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 const WIRE_VERSION: u8 = 2;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPTED: u8 = 1;
@@ -177,7 +176,7 @@ fn encode_message(
     payload.extend(
         postcard::to_stdvec(message).map_err(|_| MembershipHistoryExchangeError::Transport)?,
     );
-    if payload.len() > MAX_MESSAGE_SIZE {
+    if payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
         return Err(MembershipHistoryExchangeError::Transport);
     }
     Ok(payload)
@@ -189,14 +188,17 @@ fn decode_message(
     let Some((&version, body)) = payload.split_first() else {
         return Err(MembershipHistoryExchangeError::Transport);
     };
-    if version != WIRE_VERSION || body.is_empty() || payload.len() > MAX_MESSAGE_SIZE {
+    if version != WIRE_VERSION
+        || body.is_empty()
+        || payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
+    {
         return Err(MembershipHistoryExchangeError::Transport);
     }
     let message: MembershipHistoryMessage =
         postcard::from_bytes(body).map_err(|_| MembershipHistoryExchangeError::Transport)?;
     if matches!(
         message,
-        MembershipHistoryMessage::HistoryV2(_) | MembershipHistoryMessage::AckV2(_)
+        MembershipHistoryMessage::HistoryPageV2(_) | MembershipHistoryMessage::AckV2(_)
     ) {
         Ok(message)
     } else {
@@ -246,11 +248,11 @@ fn introduced_device(
     message: &MembershipHistoryMessage,
     fingerprint: &uc_core::security::IdentityFingerprint,
 ) -> Option<DeviceId> {
-    let MembershipHistoryMessage::HistoryV2(exchange) = message else {
+    let MembershipHistoryMessage::HistoryPageV2(page) = message else {
         return None;
     };
-    (exchange.sender_admission.identity_fingerprint == *fingerprint)
-        .then(|| exchange.sender_admission.device_id.clone())
+    (page.sender_admission().identity_fingerprint == *fingerprint)
+        .then(|| page.sender_admission().device_id.clone())
 }
 
 async fn write_message(
@@ -298,7 +300,7 @@ async fn read_message(
 }
 
 fn checked_message_length(length: usize) -> Result<usize, MembershipHistoryExchangeError> {
-    if length == 0 || length > MAX_MESSAGE_SIZE {
+    if length == 0 || length > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
         return Err(MembershipHistoryExchangeError::Transport);
     }
     Ok(length)
@@ -317,7 +319,8 @@ mod tests {
         AdmissionChangeFacts, HistoricalMembershipSignatureError,
         HistoricalMembershipSignatureVerifier, MembershipAdmissionV2, MembershipCredential,
         MembershipEventV2, MembershipHistoryMessage, MembershipHistoryV2Ack, MembershipOperationV2,
-        VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
+        VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
+        MAX_MEMBERSHIP_HISTORY_FRAME_SIZE, MEMBERSHIP_EVENT_FORMAT_V2,
     };
     use uc_core::security::IdentityFingerprint;
 
@@ -330,11 +333,11 @@ mod tests {
     fn history_frame_length_accepts_the_boundary_and_rejects_oversize_before_allocation() {
         assert_eq!(checked_message_length(1), Ok(1));
         assert_eq!(
-            checked_message_length(super::MAX_MESSAGE_SIZE),
-            Ok(super::MAX_MESSAGE_SIZE)
+            checked_message_length(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE),
+            Ok(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE)
         );
         assert!(checked_message_length(0).is_err());
-        assert!(checked_message_length(super::MAX_MESSAGE_SIZE + 1).is_err());
+        assert!(checked_message_length(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE + 1).is_err());
     }
 
     #[test]
@@ -435,10 +438,11 @@ mod tests {
         history
             .verify_and_receive_event(event, &verifier)
             .expect("genesis verifies");
-        MembershipHistoryMessage::HistoryV2(
+        MembershipHistoryMessage::HistoryPageV2(
             history
-                .export_exchange_v2(admission.facts)
-                .expect("history exports"),
+                .export_reconciliation_pages_v2(admission.facts)
+                .expect("history exports")
+                .remove(0),
         )
     }
 

@@ -73,6 +73,7 @@ impl From<UnversionedCurrentWorkspaceState> for WorkspaceConvergenceState {
             pending_applied_membership_effects: state.pending_applied_membership_effects,
             pending_membership_decision_deliveries: state.pending_membership_decision_deliveries,
             pending_admissions: state.pending_admissions,
+            pending_membership_history_transfers: std::collections::BTreeMap::new(),
             phase: state.phase,
             failure_category: state.failure_category,
             revision: state.revision,
@@ -97,6 +98,7 @@ impl From<DeviceTrustInitialWorkspaceState> for WorkspaceConvergenceState {
             pending_applied_membership_effects: Vec::new(),
             pending_membership_decision_deliveries: Vec::new(),
             pending_admissions: state.pending_admissions,
+            pending_membership_history_transfers: std::collections::BTreeMap::new(),
             phase: state.phase,
             failure_category: state.failure_category,
             revision: state.revision,
@@ -280,6 +282,7 @@ impl LegacyWorkspaceConvergenceState {
             pending_applied_membership_effects: Vec::new(),
             pending_membership_decision_deliveries: Vec::new(),
             pending_admissions: self.pending_admissions,
+            pending_membership_history_transfers: std::collections::BTreeMap::new(),
             phase: WorkspacePhase::Converging,
             failure_category: None,
             revision: self.revision,
@@ -884,9 +887,11 @@ mod tests {
     use tempfile::{tempdir, TempDir};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
-        AdmissionChangeFacts, MemberInstanceId, MembershipEvent, MembershipHistoryRelationship,
-        MembershipOperation, MembershipReconciliation, PendingAdmissionRecord,
-        WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState, WorkspacePhase,
+        AdmissionChangeFacts, MemberInstanceId, MembershipActivationBaselineV2,
+        MembershipCredential, MembershipEvent, MembershipHistoryRelationship, MembershipOperation,
+        MembershipReconciliation, PendingAdmissionRecord, PendingMembershipHistoryTransferV2,
+        VersionedMembershipHistory, WorkspaceConvergenceRepositoryPort,
+        WorkspaceConvergenceState, WorkspacePhase, ED25519_SIGNATURE_ALGORITHM_V1,
     };
 
     use super::DieselWorkspaceConvergenceStore;
@@ -981,6 +986,43 @@ mod tests {
         ));
         state.phase = WorkspacePhase::Converging;
         state.updated_at_ms = 123;
+        let source_device = DeviceId::new("history-page-source");
+        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x61; 32]);
+        let source_member = credential.member_instance_id(&source_device);
+        let source_facts = AdmissionChangeFacts {
+            member_instance: source_member,
+            device_id: source_device.clone(),
+            device_name: String::from_utf8(SENSITIVE_MARKER.to_vec()).unwrap(),
+            identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
+                "ABCD-EFGH-IJKL-MNOP",
+            )
+            .unwrap(),
+            transport_public_key: vec![0x62; 32],
+            transport_address_blob: vec![0x63; 16],
+            identity_signature: vec![0x64; 64],
+        };
+        let history = VersionedMembershipHistory::from_activation_baseline(
+            MembershipActivationBaselineV2::FullyVerifiedMigration {
+                lineage_id: SPACE.to_owned(),
+                head_event_id: uc_core::membership::MembershipEventId::from_hex(&"65".repeat(32))
+                    .unwrap(),
+                head_depth: 7,
+                current_members: vec![(source_facts.clone(), credential)],
+            },
+        )
+        .unwrap();
+        let page = history
+            .export_reconciliation_pages_v2(source_facts)
+            .unwrap()
+            .remove(0);
+        state.pending_membership_history_transfers.insert(
+            source_device,
+            PendingMembershipHistoryTransferV2 {
+                transfer_id: page.transfer_id(),
+                page_count: page.page_count(),
+                pages: vec![page],
+            },
+        );
         state
     }
 
