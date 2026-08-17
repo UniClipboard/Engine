@@ -5,19 +5,19 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, DecideDeviceTrustChangeInput,
-    DeviceTrustChoiceSummary, Engine, EngineConfig, EngineError, EngineEvent, EngineState,
-    EventStream, ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput,
-    Operation, OperationResult, OperationTerminal, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput,
-    SendReportSummary, SendTextInput,
+    CancelJoinSpaceInput, ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput,
+    DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary, Engine, EngineConfig, EngineError,
+    EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
+    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
+    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
+    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport, OhSessionRecovery, OhSpaceCreated,
-    OhSpaceJoined, OhWorkspaceConvergence,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport,
+    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -228,7 +228,7 @@ impl OhEngine {
         device_name: Option<String>,
         passphrase: String,
         preserve_unreadable_history: bool,
-    ) -> napi::Result<OhSpaceJoined> {
+    ) -> napi::Result<OhJoinSpaceStatus> {
         let invitation_code = Zeroizing::new(invitation_code);
         let passphrase = Zeroizing::new(passphrase);
         let result = self
@@ -241,27 +241,17 @@ impl OhEngine {
             }))
             .await
             .map_err(engine_error)?;
-        match result {
-            OperationResult::SpaceJoined {
-                sponsor_device_id,
-                sponsor_identity_fingerprint,
-                space_id,
-                self_device_id,
-                self_identity_fingerprint,
-                migrated_records,
-                preserved_unreadable_records,
-            } => Ok(OhSpaceJoined {
-                sponsor_device_id,
-                sponsor_identity_fingerprint,
-                space_id,
-                self_device_id,
-                self_identity_fingerprint,
-                migrated_records: migrated_records.map(|count| count.to_string()),
-                preserved_unreadable_records: preserved_unreadable_records
-                    .map(|count| count.to_string()),
-            }),
-            _ => Err(unexpected_result()),
-        }
+        join_space_status(result)
+    }
+
+    #[napi]
+    pub async fn cancel_join_space(&self, join_id: String) -> napi::Result<OhJoinSpaceStatus> {
+        let result = self
+            .engine
+            .execute(Operation::CancelJoinSpace(CancelJoinSpaceInput { join_id }))
+            .await
+            .map_err(engine_error)?;
+        join_space_status(result)
     }
 
     #[napi]
@@ -500,6 +490,92 @@ fn workspace_convergence(
 
 fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Result<String> {
     serde_json::to_string(&summary).map_err(|_| unexpected_result())
+}
+
+fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus> {
+    let OperationResult::JoinSpace(status) = result else {
+        return Err(unexpected_result());
+    };
+    Ok(match status {
+        uc_engine::JoinSpaceStatusSummary::Active {
+            join_id,
+            joined_space,
+        } => OhJoinSpaceStatus {
+            status: "active".to_owned(),
+            join_id,
+            joined_space: Some(OhJoinedSpace {
+                sponsor_device_id: joined_space.sponsor_device_id,
+                sponsor_identity_fingerprint: joined_space.sponsor_identity_fingerprint,
+                space_id: joined_space.space_id,
+                self_device_id: joined_space.self_device_id,
+                self_identity_fingerprint: joined_space.self_identity_fingerprint,
+                migrated_records: joined_space.migrated_records.map(|count| count.to_string()),
+                preserved_unreadable_records: joined_space
+                    .preserved_unreadable_records
+                    .map(|count| count.to_string()),
+            }),
+            target_space_id: None,
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: None,
+            rejection_reason: None,
+        },
+        uc_engine::JoinSpaceStatusSummary::Pending {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            cancel_requested,
+        } => OhJoinSpaceStatus {
+            status: "pending".to_owned(),
+            join_id,
+            joined_space: None,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            cancel_requested: Some(cancel_requested),
+            rejection_reason: None,
+        },
+        uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => OhJoinSpaceStatus {
+            status: "rejected".to_owned(),
+            join_id,
+            joined_space: None,
+            target_space_id: None,
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: None,
+            rejection_reason: Some(
+                match reason {
+                    uc_engine::JoinSpaceRejectionReasonSummary::InvitationUnavailable => {
+                        "invitation_unavailable"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::AuthenticationRejected => {
+                        "authentication_rejected"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::IdentityConflict => {
+                        "identity_conflict"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::BaseHistoryChanged => {
+                        "base_history_changed"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::JoinerHistoryAhead => {
+                        "joiner_history_ahead"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::HistoryConflict => {
+                        "history_conflict"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::PeerUpgradeRequired => {
+                        "peer_upgrade_required"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::Cancelled => "cancelled",
+                    uc_engine::JoinSpaceRejectionReasonSummary::RemovedBeforeActivation => {
+                        "removed_before_activation"
+                    }
+                }
+                .to_owned(),
+            ),
+        },
+    })
 }
 
 fn engine_error(error: EngineError) -> napi::Error {

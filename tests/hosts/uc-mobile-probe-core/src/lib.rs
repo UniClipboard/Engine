@@ -590,8 +590,8 @@ fn operation_response(result: OperationResult) -> Value {
         OperationResult::SpaceCreated { space_id, .. } => {
             json!({"ok": true, "kind": "space_created", "space_id": space_id})
         }
-        OperationResult::SpaceJoined { space_id, .. } => {
-            json!({"ok": true, "kind": "space_joined", "space_id": space_id})
+        OperationResult::JoinSpace(status) => {
+            json!({"ok": true, "kind": "join_space", "result": status})
         }
         OperationResult::SpaceUnlocked { space_id } => {
             json!({"ok": true, "kind": "space_unlocked", "space_id": space_id})
@@ -622,12 +622,6 @@ fn operation_response(result: OperationResult) -> Value {
             "has_completed": state.has_completed,
             "has_current_invitation": state.current_invitation.is_some(),
             "has_device_name": state.device_name.is_some(),
-        }),
-        OperationResult::MigrationProgress(progress) => json!({
-            "ok": true,
-            "kind": "migration_progress",
-            "has_phase": progress.phase.is_some(),
-            "backup_record_count": progress.backup_record_count,
         }),
         OperationResult::StorageStats(stats) => json!({
             "ok": true,
@@ -1594,19 +1588,40 @@ mod tests {
 
     #[test]
     fn operation_response_exposes_stable_result_without_debug_output() {
-        let response = operation_response(OperationResult::SpaceJoined {
-            sponsor_device_id: "sponsor-1".into(),
-            sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
-            space_id: "space-1".into(),
-            self_device_id: "device-1".into(),
-            self_identity_fingerprint: "self-fingerprint".into(),
-            migrated_records: None,
-            preserved_unreadable_records: None,
-        });
+        let response = operation_response(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Active {
+                join_id: "join-id".into(),
+                joined_space: uc_engine::JoinedSpaceSummary {
+                    sponsor_device_id: "sponsor-1".into(),
+                    sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
+                    space_id: "space-1".into(),
+                    self_device_id: "device-1".into(),
+                    self_identity_fingerprint: "self-fingerprint".into(),
+                    migrated_records: None,
+                    preserved_unreadable_records: None,
+                },
+            },
+        ));
 
         assert_eq!(
             response,
-            json!({"ok": true, "kind": "space_joined", "space_id": "space-1"})
+            json!({
+                "ok": true,
+                "kind": "join_space",
+                "result": {
+                    "status": "active",
+                    "join_id": "join-id",
+                    "joined_space": {
+                        "sponsor_device_id": "sponsor-1",
+                        "sponsor_identity_fingerprint": "sponsor-fingerprint",
+                        "space_id": "space-1",
+                        "self_device_id": "device-1",
+                        "self_identity_fingerprint": "self-fingerprint",
+                        "migrated_records": null,
+                        "preserved_unreadable_records": null
+                    }
+                }
+            })
         );
 
         let resend = operation_response(OperationResult::EntryResent(

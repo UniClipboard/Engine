@@ -360,6 +360,51 @@ pub enum InvitationAvailability {
     SameLocalNetwork,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinedSpaceSummary {
+    pub sponsor_device_id: String,
+    pub sponsor_identity_fingerprint: String,
+    pub space_id: String,
+    pub self_device_id: String,
+    pub self_identity_fingerprint: String,
+    pub migrated_records: Option<u64>,
+    pub preserved_unreadable_records: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinSpaceRejectionReasonSummary {
+    InvitationUnavailable,
+    AuthenticationRejected,
+    IdentityConflict,
+    BaseHistoryChanged,
+    JoinerHistoryAhead,
+    HistoryConflict,
+    PeerUpgradeRequired,
+    Cancelled,
+    RemovedBeforeActivation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum JoinSpaceStatusSummary {
+    Active {
+        join_id: String,
+        joined_space: JoinedSpaceSummary,
+    },
+    Pending {
+        join_id: String,
+        target_space_id: Option<String>,
+        sponsor_device_id: Option<String>,
+        sponsor_identity_fingerprint: Option<String>,
+        cancel_requested: bool,
+    },
+    Rejected {
+        join_id: String,
+        reason: JoinSpaceRejectionReasonSummary,
+    },
+}
+
 impl fmt::Debug for InvitationAvailability {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -376,15 +421,7 @@ pub enum OperationResult {
         self_device_id: String,
         identity_fingerprint: String,
     },
-    SpaceJoined {
-        sponsor_device_id: String,
-        sponsor_identity_fingerprint: String,
-        space_id: String,
-        self_device_id: String,
-        self_identity_fingerprint: String,
-        migrated_records: Option<u64>,
-        preserved_unreadable_records: Option<u64>,
-    },
+    JoinSpace(JoinSpaceStatusSummary),
     SpaceUnlocked {
         space_id: String,
     },
@@ -401,7 +438,6 @@ pub enum OperationResult {
     SpaceReset,
     SpaceFactoryReset,
     SetupState(SetupStateSummary),
-    MigrationProgress(MigrationProgressSummary),
     StorageStats(StorageStatsSummary),
     StorageCacheCleared {
         freed_bytes: u64,
@@ -507,7 +543,7 @@ impl fmt::Debug for OperationResult {
         let mut debug = formatter.debug_struct("OperationResult");
         match self {
             Self::SpaceCreated { .. } => debug.field("kind", &"space_created"),
-            Self::SpaceJoined { .. } => debug.field("kind", &"space_joined"),
+            Self::JoinSpace(status) => debug.field("kind", &"join_space").field("status", status),
             Self::SpaceUnlocked { .. } => debug.field("kind", &"space_unlocked"),
             Self::SessionRecovered { unlocked, resumed } => debug
                 .field("kind", &"session_recovered")
@@ -518,9 +554,6 @@ impl fmt::Debug for OperationResult {
             Self::SpaceReset => debug.field("kind", &"space_reset"),
             Self::SpaceFactoryReset => debug.field("kind", &"space_factory_reset"),
             Self::SetupState(state) => debug.field("kind", &"setup_state").field("state", state),
-            Self::MigrationProgress(progress) => debug
-                .field("kind", &"migration_progress")
-                .field("progress", progress),
             Self::StorageStats(stats) => {
                 debug.field("kind", &"storage_stats").field("stats", stats)
             }
@@ -792,19 +825,6 @@ impl fmt::Debug for SetupStateSummary {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MigrationPhaseSummary {
-    Prepared,
-    HandshakeDone,
-    Swapped,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationProgressSummary {
-    pub phase: Option<MigrationPhaseSummary>,
-    pub backup_record_count: u64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageStatsSummary {
     pub total_bytes: u64,
@@ -1000,11 +1020,19 @@ pub struct DeviceTrustRelationshipSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingInboundMemberSummary {
+    pub device_id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceTrustSnapshotSummary {
     pub revision: u64,
     pub local_device_id: String,
     pub local_membership: DeviceMembershipSummary,
     pub current_change: Option<DeviceTrustChangeSummary>,
+    pub current_join: Option<JoinSpaceStatusSummary>,
+    pub pending_inbound_member: Option<PendingInboundMemberSummary>,
     pub devices: Vec<DeviceTrustRelationshipSummary>,
     pub recovery: DeviceTrustRecoverySummary,
     pub allowed_actions: Vec<DeviceTrustActionSummary>,
@@ -1019,6 +1047,8 @@ impl DeviceTrustSnapshotSummary {
             local_device_id,
             local_membership: DeviceMembershipSummary::Unavailable,
             current_change: None,
+            current_join: None,
+            pending_inbound_member: None,
             devices: Vec::new(),
             recovery: DeviceTrustRecoverySummary::NotAvailableInThisVersion,
             allowed_actions: Vec::new(),

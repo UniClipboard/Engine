@@ -74,16 +74,16 @@ use uc_infra::security::{
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::{
-    FileAppVersionStateRepository, FileFirstSyncStateRepository, FileMigrationStateRepository,
-    FileSetupStatusRepository, SystemClock,
+    FileAppVersionStateRepository, FileFirstSyncStateRepository, FileSetupStatusRepository,
+    SystemClock,
 };
 use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 
 #[cfg(feature = "lan-compat")]
 use crate::assembly::deps::DaemonRuntimeDeps;
 use crate::assembly::deps::{
-    BackgroundRuntimeDeps, SharedRuntimeDeps, SyncEngineDeps, WiredDependencies, WiringError,
-    WiringResult,
+    BackgroundRuntimeDeps, ProfileResetDeps, SharedRuntimeDeps, SyncEngineDeps, WiredDependencies,
+    WiringError, WiringResult,
 };
 use crate::assembly::platform::{create_platform_layer, SystemClipboardLayer};
 use infra::*;
@@ -110,9 +110,6 @@ struct InfraLayer {
     // Slice 3 Phase 1:明文 hash → 密文 digest 去重缓存。
     blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,
 
-    // Switch-space migration ports — see WiredDependencies docs for
-    // life-cycle / consumer details.
-    migration_state: Arc<dyn uc_core::ports::setup::MigrationStatePort>,
     blob_migration_repo: Arc<dyn uc_core::ports::clipboard::BlobMigrationRepoPort>,
 
     // Blob storage
@@ -217,12 +214,16 @@ pub fn wire_dependencies_from_inputs(
         analytics_facade,
         host_event_emitter,
     } = inputs;
+    let profile_reset_paths = paths.clone();
+    let profile_reset_profile_id = profile_id.inner().to_owned();
+    let profile_reset_secure_storage = Arc::clone(&secure_storage);
+    let profile_reset_identity_dir = iroh_identity_dir.clone();
     let legacy_db_path = paths.db_path;
     let vault_path = paths.vault_dir;
     let settings_path = paths.settings_path;
     let app_data_root = paths.app_data_root_dir.clone();
     let generation_root = app_data_root.join("space-generations");
-    let profile_lifecycle = ProfileLifecycleManager::new(Arc::clone(&secure_storage));
+    let profile_lifecycle = Arc::new(ProfileLifecycleManager::new(Arc::clone(&secure_storage)));
     let profile_marker = profile_lifecycle
         .load_or_initialize()
         .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
@@ -234,9 +235,13 @@ pub fn wire_dependencies_from_inputs(
         vault_path.clone(),
         Arc::clone(&admission_keys),
     ));
-    let active_manifest = active_manifest_store
-        .load_sync()
-        .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
+    let active_manifest = if profile_marker.factory_reset_phase == FactoryResetPhaseV1::None {
+        active_manifest_store
+            .load_sync()
+            .map_err(|error| WiringError::DatabaseInit(error.to_string()))?
+    } else {
+        None
+    };
     let (db_path, blob_store_dir) = match active_manifest.as_ref() {
         Some(manifest) => {
             let directory = space_generation_directory(
@@ -256,6 +261,7 @@ pub fn wire_dependencies_from_inputs(
     };
 
     let db_pool = create_db_pool(&db_path)?;
+    let db_pool_for_profile_reset = db_pool.clone();
     let db_pool_for_space_transition = db_pool.clone();
     // Clone pool before infra layer consumes it — search bundle needs the same pool.
     let db_pool_for_search = db_pool.clone();
@@ -563,6 +569,22 @@ pub fn wire_dependencies_from_inputs(
     let key_migration_for_wiring: Arc<dyn uc_core::ports::security::KeyMigrationPort> = Arc::new(
         uc_infra::security::DefaultKeyMigrationAdapter::new(Arc::clone(&platform.secure_storage)),
     );
+    let profile_reset = ProfileResetDeps {
+        lifecycle: profile_lifecycle,
+        keys: Arc::new(uc_infra::security::ProfileKeyWiper::new(
+            admission_keys.as_ref().clone(),
+            profile_reset_secure_storage,
+            vault_path.clone(),
+            profile_reset_profile_id,
+            profile_reset_paths.vault_dir.join("keyslot.json"),
+            profile_reset_identity_dir,
+        )),
+        state: Arc::new(uc_infra::security::ProfileStateCleaner::new(
+            db_pool_for_profile_reset,
+            profile_reset_paths,
+            db_path.clone(),
+        )),
+    };
     let legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort> =
         Arc::new(uc_infra::FileLegacyMigrationRecovery::with_defaults(
             vault_path.clone(),
@@ -702,6 +724,7 @@ pub fn wire_dependencies_from_inputs(
 
     let wired = WiredDependencies {
         deps,
+        profile_reset,
         sync_engine: SyncEngineDeps {
             iroh_identity_storage,
             legacy_protection,
@@ -721,9 +744,6 @@ pub fn wire_dependencies_from_inputs(
             admission_space_transition,
             legacy_migration_recovery,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
-            blob_migration_repo: Arc::clone(&infra.blob_migration_repo),
-            migration_state: Arc::clone(&infra.migration_state),
-            key_migration: key_migration_for_wiring,
             iroh_blob_store_dir: iroh_blob_store_dir_for_wiring,
             analytics_facade,
         },

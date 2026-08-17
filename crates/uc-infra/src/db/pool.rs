@@ -40,6 +40,22 @@ impl DbPool {
         Ok(())
     }
 
+    pub fn detach_to_ephemeral_database(&self) -> Result<()> {
+        let manager = ConnectionManager::<SqliteConnection>::new(":memory:");
+        let replacement = Pool::builder()
+            .max_size(1)
+            .connection_customizer(Box::new(SqlitePragmaCustomizer))
+            .build(manager)
+            .map_err(|error| anyhow::anyhow!("Failed to create ephemeral database: {error}"))?;
+        run_migrations_raw(&replacement)?;
+        install_revision_triggers_raw(&replacement)?;
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement;
+        Ok(())
+    }
+
     pub fn persistent_revision(&self) -> Result<u64> {
         let row =
             diesel::sql_query("SELECT revision FROM uc_database_revision WHERE singleton_id = 1")

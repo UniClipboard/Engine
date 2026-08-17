@@ -74,13 +74,13 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `CreateSpace` | 创建空间、设备身份和加密存储 |
 | `UnlockSpace` | 使用口令恢复当前空间会话 |
 | `RecoverSession` | 按宿主策略从系统安全存储恢复加密与空间会话 |
-| `JoinSpace` | 首次设备加入空间；已设置设备保留历史并切换空间 |
+| `JoinSpace` | 发起或继续同一次空间加入，返回 Active、Pending 或 Rejected，并携带稳定 `join_id` |
+| `CancelJoinSpace` | 请求取消指定的本机加入；只与发起方正式提交点竞争 |
 | `IssueInvitation` | 签发一次配对邀请 |
 | `CancelInvitation` | 取消当前尚未兑换的配对邀请 |
 | `ResetSpace` | 清除当前空间设置和未消费邀请，保留可恢复密钥材料 |
 | `FactoryResetSpace` | 停止旧运行入口后依次清除密钥材料、空间状态和邀请，使设备可重新初始化 |
 | `QuerySetupState` | 查询设置是否完成、当前邀请和已保存设备名 |
-| `QueryMigrationProgress` | 查询空间切换所处阶段和已备份记录数量 |
 | `QueryStorageStats` | 查询数据库、密钥库、缓存和日志占用大小，不返回本机目录 |
 | `ClearStorageCache` | 清理核心缓存并返回实际释放的字节数 |
 | `QueryLocalDevice` | 返回本机设备编号和按设置解析后的显示名 |
@@ -145,42 +145,40 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 
 `RecoverSession` 的 `allow_secure_storage_unlock` 由宿主根据当前运行环境决定。值为 `false` 时核心不得尝试从系统安全存储恢复密钥；值为 `true` 时，核心统一完成加密会话、空间会话、搜索和接收能力恢复。
 
-`CancelInvitation` 在没有待取消邀请时返回冲突错误。当前 `ResetSpace` 只清除当前空间设置和未消费邀请，
-不向宿主暴露底层存储步骤，也不删除 keyslot。`FactoryResetSpace` 则先暂停活动并清除密钥材料，再清除
-空间设置、关系和待处理邀请；密钥清除失败时不得提前清除设置，成功后必须关闭接收入口。
-`QuerySetupState` 不返回内部服务状态；`QueryMigrationProgress` 只返回准备、握手完成、切换完成三个稳定
-阶段，不公开内部运行编号或目标空间。
+`CancelInvitation` 在没有待取消邀请时返回冲突错误。`ResetSpace` 不是取消加入：profile 仍有未结束加入、
+待确认发送、恢复、切换或清理时返回冲突且不改变加入、设置或邀请；静止时只清除当前空间设置和未消费
+邀请，并隐藏此前公开的加入结果，不删除终态、防重放事实或可恢复密钥材料。`FactoryResetSpace` 则停止
+全部旧运行入口，先清除并确认密钥材料不存在，再清除数据库、空间世代、设置、邀请、关系、准入记录、
+导入暂存和受管缓存。完成后旧 Engine 会话失效，宿主必须重新创建 Engine；启动遇到未完成清理时会续完
+清理并返回可重试的 unavailable，宿主随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。
 
-规格 023 尚未实施。实施时，`JoinSpace` 改为 Active、Pending、Rejected 三类结果并公开稳定 `join_id`，
-新增 `CancelJoinSpace(join_id)`，待激活候选继续使用现有 `RemoveMember(device_id)`。现有
+规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Rejected 三类结果并公开稳定
+`join_id`，`CancelJoinSpace(join_id)` 负责本机取消，待激活候选继续使用现有 `RemoveMember(device_id)`。现有
 `DeviceTrustSnapshot` 增加 `current_join` 和 `pending_inbound_member`；现有 `DeviceTrustChanged { revision }`
 继续只提醒重新查询，revision 在同一 profile 内跨 Space 单调递增。不新增按 join id 查询任意历史操作、
 入站取消、待激活专用移除或第二份完整快照；`QueryWorkspaceConvergence` 及其事件继续只用于 dev-tools。
-这里限制的是直接诊断查询和事件；规格实施前，现有正式成员操作仍可能返回同名内部快照类型，不能据此
-删除或改写现有生产返回值。规格 023 实施时按其迁移计划统一收口。
 对端因自己的另一项准入而暂时忙碌时，当前 JoinSpace 保持同一 Pending 并由 Engine 重试，不变成 Rejected。
 取消请求只与发起方正式提交竞争：取消先保存时返回 Rejected 且没有成员新增；正式提交先保存时取消已经
 太晚，同一请求继续保持 Pending 直到 Active，不自动生成成员移除。用户仍要退出时从另一台当前成员设备
 另行使用现有明确移除。
-届时删除 `QueryMigrationProgress` 及其操作、结果、路由、绑定和宿主探针，空间切换只表现为同一 JoinSpace
-Pending。`QuerySetupState` 继续只负责设置、设备名和邀请。具体目标以
-[规格 023](023-durable-membership-proof-and-admission-activation.md) 为准，当前运行契约在实现合入前保持不变。
+公开的旧空间迁移进度操作已经删除，空间切换只表现为同一 JoinSpace Pending。`QuerySetupState` 继续只负责
+设置、设备名和邀请。profile 级负责人已经在没有活动 Space 时常驻，保存和恢复加入、取消、终态、revision
+与 ordinal，并组合零或一个完整活动 Space；Engine 只路由产品动作，不保存内部阶段。同一 profile 的入站
+和本机加入共享一个准入槽，Fresh Pending 没有活动 Space 时仍能执行彻底重置。
 
-规格 023 实施后，现有 ResetSpace 不是取消命令。只要 profile 仍有未结束加入、待确认发送、恢复或清理，
-它必须用现有 unavailable code 返回冲突且不改变任何状态；静止时仍只执行现有设置和未消费邀请清理，
-同时隐藏此前公开的加入结果，但保留终态、已消费邀请、防重放、单调编号、永久激活回执和 profile 准入密钥，
-旧请求仍能幂等重放。FactoryResetSpace 是唯一允许在等待加入时强制销毁本机状态的现有入口：先锁定
-profile、停止旧运行入口并在系统安全存储保存独立恢复阶段，再清除全部活动、暂存和 profile 准入密钥；确认密钥不存在
-后才从固定 profile 根清设置、关系、准入密文、邀请、搜索文件及受管 cache/blob 实际文件。任一文件失败
-保留清理阶段；全部命名空间为空后才成功。任一步中断都只向前恢复，不向远端伪造拒绝、取消或成员回滚；
-完成后旧会话和订阅失效。
+生产加入统一使用 Candidate、Prepared、Commit、Applied、Complete。加入方先验证并保存完整历史和目标
+安全状态，邀请方随后正式提交；双方保存同一应用回执后，邀请方发送 Complete，加入方完成本机激活后
+返回 CompleteAck。跨 Space 时 JoinSpace 先返回 Pending，Engine 排空来源会话、完成前向切换并重建同一
+CompleteAck；发送失败不回滚 Active，下次启动继续发送。
 
-实现规格 023 时，assembly 还必须在没有活动 Space 的 Fresh profile 中完整构造应用层 profile 级
-`WorkspaceConvergence`，由它保存和恢复加入、取消、终态、revision 与 ordinal，并组合零或一个完整活动
-Space `AppFacade` 的设备关系。Engine 只路由 Join、Cancel、QueryDeviceTrust、现有 ResetSpace 和
-FactoryResetSpace；它不保存内部阶段，也不用空 AppFacade 补齐缺失能力。同一 profile 的入站和本机加入
-共享一个准入槽；非终态、共享写前恢复、Space 切换或改变活动世代的清理收束后释放，业务终态后的隔离
-消息重发与压缩继续恢复但不占槽。Fresh Pending 没有活动 Space 时仍能执行彻底重置。
+同一 Space 重新加入时，邀请方历史可以比本机已保存历史更新，但必须完整包含本机已经确认的连续历史；
+缺少记录、倒退或分叉都返回 Rejected，不覆盖本机事实。普通成员上线只交换新版完整历史，不再发送旧版
+问候、分页或单独决定消息。双方保存的成员决定可以不同，合并时保留并集，但对端只能新增自己签署的决定。
+
+`JoinSpace.preserve_unreadable_history` 只影响跨 Space 来源历史。值为 `false` 且本地发现不可读密文时，
+Engine 在联系邀请方前返回 `1292` 冲突，不创建新的加入尝试。值为 `true` 时，同一选择随加入记录保存；
+不可读密文保留原字节并隔离，Active 结果的 `preserved_unreadable_records` 返回数量。该选择一旦进入同一
+Pending 加入便不能在重试中更改。
 
 `QueryStorageStats` 和 `ClearStorageCache` 由核心执行。宿主只能看到分类后的字节数和实际释放量，不能取得数据库、密钥库、缓存或日志的本机路径。
 

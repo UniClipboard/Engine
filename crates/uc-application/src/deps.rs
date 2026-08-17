@@ -158,7 +158,13 @@ pub struct SpaceAccessPorts {
     pub derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
     pub prepare_admission_offer: Arc<dyn PrepareAdmissionOfferPort>,
     pub derive_admission_proof_key: Arc<dyn DeriveAdmissionProofKeyPort>,
+    pub prepare_admission_target_access:
+        Arc<dyn uc_core::ports::space::PrepareAdmissionTargetAccessPort>,
     pub group_admission: Arc<dyn GroupAdmissionPort>,
+    pub prepare_sponsor_admission_security:
+        Arc<dyn uc_core::membership::PrepareSponsorAdmissionSecurityPort>,
+    pub activate_sponsor_admission_security:
+        Arc<dyn uc_core::membership::ActivateSponsorAdmissionSecurityPort>,
     pub group_revocation: Arc<dyn GroupRevocationPort>,
     pub group_bootstrap: Arc<dyn uc_core::membership::GroupBootstrapPort>,
     pub space_protection: Arc<dyn uc_core::membership::SpaceProtectionStatusPort>,
@@ -180,7 +186,10 @@ impl SpaceAccessPorts {
             + DeriveSpaceSubkeyPort
             + PrepareAdmissionOfferPort
             + DeriveAdmissionProofKeyPort
+            + uc_core::ports::space::PrepareAdmissionTargetAccessPort
             + GroupAdmissionPort
+            + uc_core::membership::PrepareSponsorAdmissionSecurityPort
+            + uc_core::membership::ActivateSponsorAdmissionSecurityPort
             + GroupRevocationPort
             + uc_core::membership::GroupBootstrapPort
             + uc_core::membership::SpaceProtectionStatusPort
@@ -197,7 +206,10 @@ impl SpaceAccessPorts {
             derive_subkey: adapter.clone(),
             prepare_admission_offer: adapter.clone(),
             derive_admission_proof_key: adapter.clone(),
+            prepare_admission_target_access: adapter.clone(),
             group_admission: adapter.clone(),
+            prepare_sponsor_admission_security: adapter.clone(),
+            activate_sponsor_admission_security: adapter.clone(),
             group_revocation: adapter.clone(),
             group_bootstrap: adapter.clone(),
             space_protection: adapter,

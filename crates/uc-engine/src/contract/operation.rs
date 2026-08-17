@@ -18,6 +18,7 @@ use crate::{
 pub enum OperationKind {
     CreateSpace,
     JoinSpace,
+    CancelJoinSpace,
     UnlockSpace,
     RecoverSession,
     IssueInvitation,
@@ -25,7 +26,6 @@ pub enum OperationKind {
     ResetSpace,
     FactoryResetSpace,
     QuerySetupState,
-    QueryMigrationProgress,
     QueryStorageStats,
     ClearStorageCache,
     QueryLocalDevice,
@@ -116,6 +116,7 @@ impl fmt::Display for OperationKind {
         let value = match self {
             Self::CreateSpace => "create_space",
             Self::JoinSpace => "join_space",
+            Self::CancelJoinSpace => "cancel_join_space",
             Self::UnlockSpace => "unlock_space",
             Self::RecoverSession => "recover_session",
             Self::IssueInvitation => "issue_invitation",
@@ -123,7 +124,6 @@ impl fmt::Display for OperationKind {
             Self::ResetSpace => "reset_space",
             Self::FactoryResetSpace => "factory_reset_space",
             Self::QuerySetupState => "query_setup_state",
-            Self::QueryMigrationProgress => "query_migration_progress",
             Self::QueryStorageStats => "query_storage_stats",
             Self::ClearStorageCache => "clear_storage_cache",
             Self::QueryLocalDevice => "query_local_device",
@@ -247,6 +247,7 @@ mod tests {
 pub enum Operation {
     CreateSpace(CreateSpaceInput),
     JoinSpace(JoinSpaceInput),
+    CancelJoinSpace(CancelJoinSpaceInput),
     UnlockSpace(UnlockSpaceInput),
     RecoverSession(RecoverSessionInput),
     IssueInvitation,
@@ -254,7 +255,6 @@ pub enum Operation {
     ResetSpace,
     FactoryResetSpace,
     QuerySetupState,
-    QueryMigrationProgress,
     QueryStorageStats,
     ClearStorageCache,
     QueryLocalDevice,
@@ -345,6 +345,7 @@ impl Operation {
         match self {
             Self::CreateSpace(_) => OperationKind::CreateSpace,
             Self::JoinSpace(_) => OperationKind::JoinSpace,
+            Self::CancelJoinSpace(_) => OperationKind::CancelJoinSpace,
             Self::UnlockSpace(_) => OperationKind::UnlockSpace,
             Self::RecoverSession(_) => OperationKind::RecoverSession,
             Self::IssueInvitation => OperationKind::IssueInvitation,
@@ -352,7 +353,6 @@ impl Operation {
             Self::ResetSpace => OperationKind::ResetSpace,
             Self::FactoryResetSpace => OperationKind::FactoryResetSpace,
             Self::QuerySetupState => OperationKind::QuerySetupState,
-            Self::QueryMigrationProgress => OperationKind::QueryMigrationProgress,
             Self::QueryStorageStats => OperationKind::QueryStorageStats,
             Self::ClearStorageCache => OperationKind::ClearStorageCache,
             Self::QueryLocalDevice => OperationKind::QueryLocalDevice,
@@ -473,6 +473,11 @@ pub struct JoinSpaceInput {
     pub device_name: Option<String>,
     pub passphrase: SecretString,
     pub preserve_unreadable_history: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelJoinSpaceInput {
+    pub join_id: String,
 }
 
 impl fmt::Debug for JoinSpaceInput {

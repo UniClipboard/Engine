@@ -105,14 +105,15 @@ pub use crate::search::live_index::{
 pub use crate::space::convergence::assembly::{SpaceConvergenceAssembly, SpaceConvergenceDeps};
 pub use crate::space::convergence::discovery::MembershipConvergenceDeps;
 pub use crate::space::convergence::{
-    ActionUnavailableReason, DeviceCompatibility, DeviceMembership, DeviceTrustAction,
-    DeviceTrustChange, DeviceTrustChoice, DeviceTrustDecisionResult, DeviceTrustImpact,
-    DeviceTrustRelationship, DeviceTrustSnapshot, GroupRelationship, RecoveryAvailability,
+    ActionUnavailableReason, CurrentJoinStatus, DeviceCompatibility, DeviceMembership,
+    DeviceTrustAction, DeviceTrustChange, DeviceTrustChoice, DeviceTrustDecisionResult,
+    DeviceTrustImpact, DeviceTrustRelationship, DeviceTrustSnapshot, GroupRelationship,
+    JoinedSpace, PendingInboundMember, PendingJoinerCompleteAck, RecoveryAvailability,
     SyncRelationship,
 };
 pub use crate::space::convergence::{
-    SpaceTransitionRecoveryPort, WorkspaceConvergenceDeps, WorkspaceConvergenceError,
-    WorkspaceConvergenceStateOrigin,
+    ProfileWorkspaceConvergence, SpaceTransitionRecoveryPort, WorkspaceConvergence,
+    WorkspaceConvergenceDeps, WorkspaceConvergenceError, WorkspaceConvergenceStateOrigin,
 };
 pub use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,

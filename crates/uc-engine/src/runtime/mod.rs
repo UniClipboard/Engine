@@ -18,7 +18,6 @@ use tokio::sync::Mutex;
 use tracing::{error, warn};
 use uc_application::facade::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent};
-use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
@@ -49,6 +48,8 @@ const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 pub(crate) struct ProductionRuntime {
     app_version: String,
     session_supervisor: Arc<SessionSupervisor>,
+    profile_convergence: Arc<uc_application::facade::ProfileWorkspaceConvergence>,
+    profile_reset: Arc<uc_application::facade::ProfileFactoryReset>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     task_registry: Arc<TaskRegistry>,
     #[cfg(feature = "lan-compat")]
@@ -73,6 +74,7 @@ struct SessionFactory {
     iroh_bind_port_override: Option<u16>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     recovery_generation: Arc<AtomicU64>,
+    profile_convergence: Arc<uc_application::facade::ProfileWorkspaceConvergence>,
 }
 
 struct ProductionSession {
@@ -84,6 +86,26 @@ struct ProductionSession {
     clipboard: ClipboardRuntime,
     sync_engine: SyncEngineAssembly,
     tasks: Arc<TaskRegistry>,
+}
+
+struct ProductionProfileRuntimeStopper {
+    session_supervisor: Arc<SessionSupervisor>,
+    tasks: Arc<TaskRegistry>,
+}
+
+#[async_trait::async_trait]
+impl uc_core::ports::StopProfileRuntimePort for ProductionProfileRuntimeStopper {
+    async fn stop_profile_runtime(
+        &self,
+    ) -> Result<(), uc_core::ports::ProfileFactoryResetCapabilityError> {
+        self.session_supervisor
+            .suspend()
+            .await
+            .map_err(|_| uc_core::ports::ProfileFactoryResetCapabilityError)?;
+        self.session_supervisor.clear_factory();
+        self.tasks.shutdown(Duration::from_millis(500)).await;
+        Ok(())
+    }
 }
 
 impl ProductionSession {
@@ -120,14 +142,12 @@ fn engine_event_for_active_clipboard(
     })
 }
 
-fn engine_event_for_workspace_convergence(snapshot: WorkspaceSnapshot) -> crate::EngineEvent {
-    crate::EngineEvent::DeviceTrustChanged {
-        revision: snapshot.revision,
-    }
+fn engine_event_for_workspace_convergence(revision: u64) -> crate::EngineEvent {
+    crate::EngineEvent::DeviceTrustChanged { revision }
 }
 
-async fn spawn_workspace_convergence_events(
-    mut changes: tokio::sync::broadcast::Receiver<WorkspaceSnapshot>,
+async fn spawn_profile_workspace_events(
+    mut changes: tokio::sync::broadcast::Receiver<u64>,
     tasks: &Arc<TaskRegistry>,
     events: EventSender,
 ) {
@@ -137,7 +157,7 @@ async fn spawn_workspace_convergence_events(
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     change = changes.recv() => match change {
-                        Ok(change) => events.send(engine_event_for_workspace_convergence(change)),
+                        Ok(revision) => events.send(engine_event_for_workspace_convergence(revision)),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             events.send(crate::EngineEvent::RefreshRequired {
                                 reason: crate::RefreshReason::ConsumerLagged,
@@ -266,10 +286,39 @@ impl ProductionRuntime {
             .map_err(|error| startup_error("dependency wiring", error))?;
 
         let session = Arc::new(Mutex::new(None));
+        let profile_convergence = uc_application::facade::ProfileWorkspaceConvergence::new(
+            Arc::clone(&wired.sync_engine.admission_attempt_repository),
+            wired.deps.device.device_identity.current_device_id(),
+            Arc::clone(&wired.deps.system.clock),
+        );
         let session_supervisor = Arc::new(SessionSupervisor::new(
             Arc::clone(&session),
             Arc::clone(&wired.shared.file_transfer_facade),
         ));
+        let task_registry = Arc::new(TaskRegistry::new());
+        let profile_runtime: Arc<dyn uc_core::ports::StopProfileRuntimePort> =
+            Arc::new(ProductionProfileRuntimeStopper {
+                session_supervisor: Arc::clone(&session_supervisor),
+                tasks: Arc::clone(&task_registry),
+            });
+        let profile_reset = Arc::new(uc_application::facade::ProfileFactoryReset::new(
+            Arc::clone(&wired.profile_reset.lifecycle),
+            profile_runtime,
+            Arc::clone(&wired.profile_reset.keys),
+            Arc::clone(&wired.profile_reset.state),
+        ));
+        if profile_reset
+            .recover_if_needed()
+            .await
+            .map_err(crate::operations::space::factory_reset::map_profile_factory_reset_error)?
+            .is_some()
+        {
+            return Err(EngineError::new(
+                crate::error_codes::FACTORY_RESET_UNAVAILABLE_CODE,
+                EngineErrorCategory::Unavailable,
+                true,
+            ));
+        }
         let recovery_port: Arc<dyn uc_application::facade::RebuildNetworkSessionPort> =
             Arc::clone(&session_supervisor)
                 as Arc<dyn uc_application::facade::RebuildNetworkSessionPort>;
@@ -286,12 +335,18 @@ impl ProductionRuntime {
             iroh_bind_port_override,
             network_recovery: Arc::clone(&network_recovery),
             recovery_generation: Arc::new(AtomicU64::new(0)),
+            profile_convergence: Arc::clone(&profile_convergence),
         });
         session_supervisor.configure_factory(Arc::clone(&session_factory));
         session_supervisor.resume().await?;
-        let task_registry = Arc::new(TaskRegistry::new());
         spawn_network_recovery_events(network_recovery.subscribe(), &task_registry, events.clone())
             .await;
+        spawn_profile_workspace_events(
+            profile_convergence.subscribe(),
+            &task_registry,
+            events.clone(),
+        )
+        .await;
         let blob_ports = BlobProcessingPorts::from_app_deps(&wired.deps);
         spawn_blob_processing_tasks(background, blob_ports, &task_registry).await;
         let clipboard_change_runtime = HostClipboardChangeRuntime {
@@ -324,6 +379,8 @@ impl ProductionRuntime {
         Ok(Self {
             app_version,
             session_supervisor,
+            profile_convergence,
+            profile_reset,
             network_recovery,
             task_registry,
             #[cfg(feature = "lan-compat")]
@@ -428,12 +485,6 @@ impl ProductionRuntime {
             &tasks,
         )
         .await;
-        spawn_workspace_convergence_events(
-            facade.subscribe_workspace_convergence(),
-            &tasks,
-            events.clone(),
-        )
-        .await;
         let history_maintenance = facade.start_history_maintenance().await;
         spawn_peer_presence_event_task(Arc::clone(&facade), &tasks, events.clone()).await;
         let blob_transfer = Arc::clone(&sync_engine.blob);
@@ -451,6 +502,11 @@ impl ProductionRuntime {
                     handle.abort();
                 }
             })
+            .await;
+
+        factory
+            .profile_convergence
+            .attach_active(Some(sync_engine.workspace_convergence()))
             .await;
 
         Ok(ProductionSession {
@@ -597,23 +653,8 @@ mod tests {
         let (changes, change_stream) = tokio::sync::broadcast::channel(8);
         let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
         let tasks = Arc::new(TaskRegistry::new());
-        let snapshot = uc_core::membership::WorkspaceSnapshot {
-            phase: uc_core::membership::WorkspacePhase::Converging,
-            revision: 1,
-            history_event_count: 1,
-            effective_member_count: 2,
-            pending_removal_decision_device_ids: Vec::new(),
-            pending_removal_decision_event_id: None,
-            diverged_peer_device_ids: Vec::new(),
-            upgrade_required_peer_device_ids: Vec::new(),
-            convergence_digest: None,
-            removed: false,
-            updated_at_ms: 42,
-            failure_category: None,
-        };
-
-        spawn_workspace_convergence_events(change_stream, &tasks, events).await;
-        changes.send(snapshot.clone()).unwrap();
+        spawn_profile_workspace_events(change_stream, &tasks, events).await;
+        changes.send(1).unwrap();
 
         assert_eq!(
             event_stream.next().await,
@@ -628,24 +669,9 @@ mod tests {
         let (changes, change_stream) = tokio::sync::broadcast::channel(1);
         let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
         let tasks = Arc::new(TaskRegistry::new());
-        let snapshot = uc_core::membership::WorkspaceSnapshot {
-            phase: uc_core::membership::WorkspacePhase::LocallyApplied,
-            revision: 1,
-            history_event_count: 0,
-            effective_member_count: 1,
-            pending_removal_decision_device_ids: Vec::new(),
-            pending_removal_decision_event_id: None,
-            diverged_peer_device_ids: Vec::new(),
-            upgrade_required_peer_device_ids: Vec::new(),
-            convergence_digest: None,
-            removed: false,
-            updated_at_ms: 42,
-            failure_category: None,
-        };
-
-        spawn_workspace_convergence_events(change_stream, &tasks, events).await;
-        changes.send(snapshot.clone()).unwrap();
-        changes.send(snapshot).unwrap();
+        spawn_profile_workspace_events(change_stream, &tasks, events).await;
+        changes.send(1).unwrap();
+        changes.send(2).unwrap();
 
         assert_eq!(
             event_stream.next().await,

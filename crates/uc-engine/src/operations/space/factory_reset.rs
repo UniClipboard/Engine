@@ -3,25 +3,26 @@
 use crate::error_codes::*;
 
 use tracing::error;
-use uc_application::facade::{AppFacade, FactoryResetError};
+use uc_application::facade::{ProfileFactoryReset, ProfileFactoryResetError};
 
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 pub async fn execute_factory_reset_space(
-    facade: &AppFacade,
+    reset: &ProfileFactoryReset,
 ) -> Result<OperationResult, EngineError> {
-    facade
-        .factory_reset_space()
+    reset
+        .factory_reset()
         .await
-        .map_err(map_factory_reset_error)?;
+        .map_err(map_profile_factory_reset_error)?;
     Ok(OperationResult::SpaceFactoryReset)
 }
 
-fn map_factory_reset_error(error: FactoryResetError) -> EngineError {
+pub(crate) fn map_profile_factory_reset_error(error: ProfileFactoryResetError) -> EngineError {
     let code = match error {
-        FactoryResetError::KeyMaterialWipeFailed(_) => FACTORY_RESET_KEY_MATERIAL_FAILED_CODE,
-        FactoryResetError::StorageFailed(_) => FACTORY_RESET_STORAGE_FAILED_CODE,
-        FactoryResetError::Internal(_) => FACTORY_RESET_FAILED_CODE,
+        ProfileFactoryResetError::StopRuntime => FACTORY_RESET_UNAVAILABLE_CODE,
+        ProfileFactoryResetError::WipeKeys => FACTORY_RESET_KEY_MATERIAL_FAILED_CODE,
+        ProfileFactoryResetError::ClearState => FACTORY_RESET_STORAGE_FAILED_CODE,
+        ProfileFactoryResetError::Lifecycle(_) => FACTORY_RESET_FAILED_CODE,
     };
     error!(code, error = %error, "factory reset space failed");
     EngineError::new(code, EngineErrorCategory::Internal, false)
@@ -33,13 +34,11 @@ mod tests {
 
     #[test]
     fn factory_reset_failures_keep_distinct_stable_codes() {
-        let key_material = map_factory_reset_error(FactoryResetError::KeyMaterialWipeFailed(
-            "private detail".into(),
+        let key_material = map_profile_factory_reset_error(ProfileFactoryResetError::WipeKeys);
+        let storage = map_profile_factory_reset_error(ProfileFactoryResetError::ClearState);
+        let internal = map_profile_factory_reset_error(ProfileFactoryResetError::Lifecycle(
+            uc_core::ports::ProfileLifecycleError::Corrupt,
         ));
-        let storage =
-            map_factory_reset_error(FactoryResetError::StorageFailed("private detail".into()));
-        let internal =
-            map_factory_reset_error(FactoryResetError::Internal("private detail".into()));
 
         assert_ne!(key_material.code(), storage.code());
         assert_ne!(storage.code(), internal.code());

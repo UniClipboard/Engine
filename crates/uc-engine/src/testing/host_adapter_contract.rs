@@ -2902,6 +2902,114 @@ async fn engine_repairs_an_encrypted_stale_removed_device_state_across_restart()
     assert_ne!(local_device_id, removed_device_id);
 }
 
+#[tokio::test]
+async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new_session() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let secure_storage = MemoryHostSecureStorage::default();
+    let directories = || {
+        HostDirectories::new(
+            private.clone(),
+            temp.path().join("cache"),
+            temp.path().join("temporary"),
+            temp.path().join("logs"),
+        )
+    };
+    let host = HostCapabilities::new(
+        directories(),
+        Box::new(secure_storage.clone()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Interrupted Reset Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap();
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+    drop(engine);
+
+    let lifecycle_storage =
+        crate::assembly::host::adapt_secure_storage(Box::new(secure_storage.clone()));
+    let lifecycle = uc_infra::security::ProfileLifecycleManager::new(lifecycle_storage);
+    let initial = lifecycle.load_or_initialize().unwrap();
+    lifecycle
+        .begin_factory_reset(initial.profile_generation)
+        .unwrap();
+
+    let recovering_host = HostCapabilities::new(
+        directories(),
+        Box::new(secure_storage.clone()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let recovery_error = match Engine::start(EngineConfig::new("1.2.3"), recovering_host).await {
+        Ok(_) => panic!("interrupted factory reset must not expose the retired session"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        recovery_error.code(),
+        crate::error_codes::FACTORY_RESET_UNAVAILABLE_CODE
+    );
+    assert_eq!(
+        recovery_error.category(),
+        crate::EngineErrorCategory::Unavailable
+    );
+    assert!(recovery_error.is_retryable());
+    assert!(!private.join("uniclipboard.db").exists());
+
+    let fresh_host = HostCapabilities::new(
+        directories(),
+        Box::new(secure_storage),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (fresh, _events) = Engine::start(EngineConfig::new("1.2.3"), fresh_host)
+        .await
+        .unwrap();
+    let setup = fresh
+        .execute(crate::Operation::QuerySetupState)
+        .await
+        .unwrap();
+    assert!(matches!(
+        setup,
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            has_completed: false,
+            current_invitation: None,
+            ..
+        })
+    ));
+    fresh
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
 #[cfg(not(feature = "lan-compat"))]
 #[tokio::test]
 async fn engine_rejects_lan_operations_without_lan_compatibility() {

@@ -261,10 +261,6 @@ impl SpaceSessionCoordinator {
         })
     }
 
-    pub(crate) async fn resume_after_space_change(&self) -> Result<(), SpaceSessionError> {
-        self.activities.resume_after_session_ready().await
-    }
-
     pub(crate) async fn factory_reset(&self) -> Result<(), FactoryResetError> {
         self.activities
             .pause_for_lock()

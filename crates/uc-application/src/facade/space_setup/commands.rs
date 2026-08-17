@@ -121,6 +121,7 @@ pub struct IssuePairingInvitationResult {
 pub struct RedeemPairingInvitationInput {
     pub code: String,
     pub passphrase: String,
+    pub preserve_unreadable_history: bool,
 }
 
 /// Internal command for [`crate::space::admission::redeem_invitation::RedeemPairingInvitationUseCase`].
@@ -135,6 +136,7 @@ pub(crate) struct RedeemPairingInvitationCommand {
     pub code: InvitationCode,
     /// Same passphrase the sponsor used in A1 `InitializeSpace`.
     pub passphrase: Passphrase,
+    pub preserve_unreadable_history: bool,
 }
 
 impl From<RedeemPairingInvitationInput> for RedeemPairingInvitationCommand {
@@ -142,6 +144,7 @@ impl From<RedeemPairingInvitationInput> for RedeemPairingInvitationCommand {
         Self {
             code: InvitationCode::new(input.code),
             passphrase: Passphrase::new(input.passphrase),
+            preserve_unreadable_history: input.preserve_unreadable_history,
         }
     }
 }
@@ -202,96 +205,4 @@ pub struct RedeemPairingInvitationResult {
     pub self_device_id: DeviceId,
     /// This device's stable identity fingerprint.
     pub self_identity_fingerprint: IdentityFingerprint,
-}
-
-// ---------------------------------------------------------------------------
-// SwitchSpace (joiner that has already completed setup)
-// ---------------------------------------------------------------------------
-
-/// Public application input for switching this device to another sponsor's
-/// space while preserving local clipboard history (4-phase re-encryption
-/// migration). Mirrors [`RedeemPairingInvitationInput`] shape on purpose:
-/// the UI flow only differs in pre-conditions (already-setup device).
-#[derive(Debug)]
-pub struct SwitchSpaceInput {
-    pub code: String,
-    pub new_passphrase: String,
-    pub unreadable_history_policy: UnreadableHistoryPolicy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum UnreadableHistoryPolicy {
-    #[default]
-    Reject,
-    PreserveAndContinue,
-}
-
-/// Internal command for [`crate::space::lifecycle::switch_space::SwitchSpaceUseCase`].
-#[derive(Debug)]
-pub(crate) struct SwitchSpaceCommand {
-    pub code: InvitationCode,
-    pub new_passphrase: Passphrase,
-    pub unreadable_history_policy: UnreadableHistoryPolicy,
-}
-
-impl From<SwitchSpaceInput> for SwitchSpaceCommand {
-    fn from(input: SwitchSpaceInput) -> Self {
-        Self {
-            code: InvitationCode::new(input.code),
-            new_passphrase: Passphrase::new(input.new_passphrase),
-            unreadable_history_policy: input.unreadable_history_policy,
-        }
-    }
-}
-
-/// Output of a successful switch-space migration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchSpaceResult {
-    pub sponsor_device_id: DeviceId,
-    pub sponsor_identity_fingerprint: IdentityFingerprint,
-    pub space_id: SpaceId,
-    pub self_device_id: DeviceId,
-    pub self_identity_fingerprint: IdentityFingerprint,
-    /// 实际被重加密回写的 representation 行数，用于 UI 显示"迁移了 N 条历史"。
-    pub migrated_records: u64,
-    /// 原始密文被保留、但不再向正常读取路径暴露的 representation 行数。
-    pub preserved_unreadable_records: u64,
-}
-
-// ---------------------------------------------------------------------------
-// Switch-space progress query (polling endpoint)
-// ---------------------------------------------------------------------------
-
-/// 4 阶段迁移当前所处的粗粒度状态。比 `MigrationPhase` 简洁——不暴露
-/// `run_id` / `target_space_id` 这些 UI 不该感知的内部细节。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MigrationPhaseKind {
-    Prepared,
-    HandshakeDone,
-    Swapped,
-}
-
-impl From<&uc_core::setup::MigrationPhase> for MigrationPhaseKind {
-    fn from(phase: &uc_core::setup::MigrationPhase) -> Self {
-        match phase {
-            uc_core::setup::MigrationPhase::Prepared { .. } => Self::Prepared,
-            uc_core::setup::MigrationPhase::HandshakeDone { .. } => Self::HandshakeDone,
-            uc_core::setup::MigrationPhase::Swapped { .. } => Self::Swapped,
-        }
-    }
-}
-
-/// Read-only snapshot of switch-space progress for UI polling.
-///
-/// 粗粒度——不写"x of N records"这种 phase 3 实时进度。phase 3 在
-/// `SwitchSpaceUseCase::execute` 内部流式跑完，期间
-/// 不暴露增量计数器；UI 看到 `phase = HandshakeDone` 就知道"还在跑
-/// phase 3"，看到 `phase = Swapped` 就知道"快做完了"。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationProgress {
-    /// `None` 表示当前没有进行中的迁移（空闲态 / 已完成）。
-    pub phase: Option<MigrationPhaseKind>,
-    /// `clipboard_migration_backup` 表里当前存的条目数；phase 1 完成后
-    /// 等同于"待回写到主表的总条数"，phase 4 cleanup 后回到 0。
-    pub backup_record_count: u64,
 }

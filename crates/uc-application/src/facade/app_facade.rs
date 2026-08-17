@@ -37,11 +37,9 @@ use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
 use crate::facade::space_setup::{EnsureReachableAllError, EnsureReachableAllReport};
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
-    IssuePairingInvitationResult, MigrationProgress, PairingInvitationAddressCandidate,
-    QueryMigrationProgressError, QuerySetupStateError, RedeemPairingInvitationError,
-    RedeemPairingInvitationInput, RedeemPairingInvitationResult, SetupStateView, SwitchSpaceError,
-    SwitchSpaceInput, SwitchSpaceResult, TryResumeSessionError, UnlockSpaceError, UnlockSpaceInput,
-    UnlockSpaceResult,
+    IssuePairingInvitationResult, PairingInvitationAddressCandidate, QuerySetupStateError,
+    RedeemPairingInvitationError, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
+    SetupStateView, TryResumeSessionError, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 use crate::facade::upgrade::UpgradeFacade;
 use crate::facade::{
@@ -306,22 +304,14 @@ impl AppFacade {
         &self,
         input: crate::facade::JoinSpaceInput,
     ) -> Result<crate::facade::JoinSpaceResult, crate::facade::JoinSpaceError> {
-        let result = self.space_admission.join_space(input).await?;
-        match &result {
-            crate::facade::JoinSpaceResult::Fresh(_) => {
-                self.space_session
-                    .recover_session(true)
-                    .await
-                    .map_err(|error| crate::facade::JoinSpaceError::Activity(error.to_string()))?;
-            }
-            crate::facade::JoinSpaceResult::Switched(_) => {
-                self.space_session
-                    .resume_after_space_change()
-                    .await
-                    .map_err(|error| crate::facade::JoinSpaceError::Activity(error.to_string()))?;
-            }
-        }
-        Ok(result)
+        self.space_admission.join_space(input).await
+    }
+
+    pub async fn deliver_join_completion_ack(
+        &self,
+        pending: crate::facade::PendingJoinerCompleteAck,
+    ) -> Result<(), RedeemPairingInvitationError> {
+        self.space.deliver_join_completion_ack(pending).await
     }
 
     /// Read setup state through the top-level application facade.
@@ -413,22 +403,6 @@ impl AppFacade {
                 RedeemPairingInvitationError::Internal(format!("activate paired space: {error}"))
             })?;
         Ok(result)
-    }
-
-    /// 已 setup 设备加入另一个 sponsor 空间，4 阶段重加密迁移。详见
-    /// `usecases::setup::switch_space` 模块文档。
-    pub async fn switch_space(
-        &self,
-        input: SwitchSpaceInput,
-    ) -> Result<SwitchSpaceResult, SwitchSpaceError> {
-        self.space_admission.switch_space(input).await
-    }
-
-    /// 查询当前 switch-space 迁移进度（粗粒度——只返回阶段和备份表条目数）。
-    pub async fn query_migration_progress(
-        &self,
-    ) -> Result<MigrationProgress, QueryMigrationProgressError> {
-        self.space.query_migration_progress().await
     }
 
     pub async fn cancel_invitation(&self) -> Result<(), crate::facade::CancelInvitationError> {

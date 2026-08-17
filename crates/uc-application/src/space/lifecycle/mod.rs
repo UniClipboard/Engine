@@ -13,5 +13,4 @@ pub(crate) mod initialize_space;
 pub mod profile_reset;
 pub(crate) mod session;
 pub(crate) mod setup_status;
-pub(crate) mod switch_space;
 pub(crate) mod unlock_space;

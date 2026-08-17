@@ -14,7 +14,9 @@
 //!    exists; `ensure()` returns that existing fingerprint idempotently.
 //! 5. `DeviceIdentityPort::current_device_id` — local UUID.
 //! 6. Persist the owner `SpaceMember` record.
-//! 7. Mark `SetupStatus.has_completed = true`.
+//! 7. Initialize the one-device protection group and trustworthy membership
+//!    starting point.
+//! 8. Mark `SetupStatus.has_completed = true`.
 //!
 //! The use case is atomic in intent (all-or-nothing) but relies on
 //! port-level idempotency (space access `AlreadyInitialized`, identity
@@ -25,6 +27,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tracing::{debug, info, instrument, warn};
 
@@ -43,11 +46,28 @@ use uc_observability_contract::analytics::{
 use crate::facade::space_setup::commands::InitializeSpaceCommand;
 use crate::facade::space_setup::{InitializeSpaceError, InitializeSpaceResult};
 
+#[async_trait]
+pub(crate) trait NewSpaceMembershipInitializer: Send + Sync {
+    async fn initialize_new_space_membership(
+        &self,
+    ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError>;
+}
+
+#[async_trait]
+impl NewSpaceMembershipInitializer for crate::space::convergence::WorkspaceConvergence {
+    async fn initialize_new_space_membership(
+        &self,
+    ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+        self.initialize_new_space_membership().await
+    }
+}
+
 pub(crate) struct InitializeSpaceUseCase {
     space_access: Arc<dyn InitializeSpacePort>,
     local_identity: Arc<dyn LocalIdentityPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
+    membership_initializer: Arc<dyn NewSpaceMembershipInitializer>,
     setup_status: Arc<dyn SetupStatusPort>,
     settings: Arc<dyn SettingsPort>,
     clock: Arc<dyn ClockPort>,
@@ -65,6 +85,7 @@ impl InitializeSpaceUseCase {
         local_identity: Arc<dyn LocalIdentityPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
+        membership_initializer: Arc<dyn NewSpaceMembershipInitializer>,
         setup_status: Arc<dyn SetupStatusPort>,
         settings: Arc<dyn SettingsPort>,
         clock: Arc<dyn ClockPort>,
@@ -75,6 +96,7 @@ impl InitializeSpaceUseCase {
             local_identity,
             device_identity,
             member_repo,
+            membership_initializer,
             setup_status,
             settings,
             clock,
@@ -164,7 +186,16 @@ impl InitializeSpaceUseCase {
             .map_err(|e| InitializeSpaceError::StorageFailed(e.to_string()))?;
         debug!(%device_id, "owner SpaceMember persisted");
 
-        // 7. Mark setup as completed — and persist the minted
+        // 7. A successful A1 must already be ready to sponsor the first durable
+        //    admission. Keep the security-group creation and trusted-history
+        //    baseline behind the convergence owner rather than exposing those
+        //    steps to this lifecycle use case.
+        self.membership_initializer
+            .initialize_new_space_membership()
+            .await
+            .map_err(|error| InitializeSpaceError::Internal(error.to_string()))?;
+
+        // 8. Mark setup as completed — and persist the minted
         //    `space_id` so A2 unlock / sponsor handshake / peer views
         //    all observe the same canonical id across process
         //    boundaries. Without this, every later process would mint
@@ -398,6 +429,28 @@ mod tests {
     struct InMemorySetupStatus {
         status: Mutex<SetupStatus>,
     }
+
+    struct FakeMembershipInitializer {
+        setup_status: Arc<InMemorySetupStatus>,
+        calls: Mutex<u32>,
+        observed_completed: Mutex<Vec<bool>>,
+        fail: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl NewSpaceMembershipInitializer for FakeMembershipInitializer {
+        async fn initialize_new_space_membership(
+            &self,
+        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+            *self.calls.lock().unwrap() += 1;
+            let has_completed = self.setup_status.get_status().await.unwrap().has_completed;
+            self.observed_completed.lock().unwrap().push(has_completed);
+            if *self.fail.lock().unwrap() {
+                return Err(crate::space::convergence::WorkspaceConvergenceError::Unavailable);
+            }
+            Ok(())
+        }
+    }
     #[async_trait]
     impl SetupStatusPort for InMemorySetupStatus {
         async fn get_status(&self) -> anyhow::Result<SetupStatus> {
@@ -595,6 +648,7 @@ mod tests {
         local_identity: Arc<FakeLocalIdentity>,
         member_repo: Arc<InMemoryMemberRepo>,
         setup_status: Arc<InMemorySetupStatus>,
+        membership_initializer: Arc<FakeMembershipInitializer>,
         settings: Arc<InMemorySettings>,
         analytics: Arc<CapturingAnalyticsSink>,
         analytics_identity: Arc<FakeAnalyticsIdentity>,
@@ -608,6 +662,12 @@ mod tests {
         });
         let member_repo = Arc::new(InMemoryMemberRepo::default());
         let setup_status = Arc::new(InMemorySetupStatus::default());
+        let membership_initializer = Arc::new(FakeMembershipInitializer {
+            setup_status: Arc::clone(&setup_status),
+            calls: Mutex::new(0),
+            observed_completed: Mutex::new(Vec::new()),
+            fail: Mutex::new(false),
+        });
         let settings = Arc::new(InMemorySettings::default());
         let clock: Arc<dyn ClockPort> = Arc::new(FixedClock(1_700_000_000_000));
         let analytics = Arc::new(CapturingAnalyticsSink::default());
@@ -628,6 +688,7 @@ mod tests {
             local_identity.clone(),
             device_identity,
             member_repo.clone(),
+            membership_initializer.clone(),
             setup_status.clone(),
             settings.clone(),
             clock,
@@ -639,6 +700,7 @@ mod tests {
             local_identity,
             member_repo,
             setup_status,
+            membership_initializer,
             settings,
             analytics,
             analytics_identity,
@@ -682,6 +744,12 @@ mod tests {
 
         let status = h.setup_status.get_status().await.unwrap();
         assert!(status.has_completed);
+        assert_eq!(*h.membership_initializer.calls.lock().unwrap(), 1);
+        assert_eq!(
+            *h.membership_initializer.observed_completed.lock().unwrap(),
+            vec![false],
+            "membership must be initialized before setup is marked complete"
+        );
 
         let settings = h.settings.load().await.unwrap();
         assert_eq!(settings.general.device_name.as_deref(), Some("My Mac"));
@@ -718,6 +786,17 @@ mod tests {
             }
             other => panic!("expected SetupCompleted, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn membership_initialization_failure_leaves_setup_incomplete() {
+        let h = build_harness();
+        *h.membership_initializer.fail.lock().unwrap() = true;
+
+        let error = h.uc.execute(ok_cmd(Some("My Mac"))).await.unwrap_err();
+
+        assert!(matches!(error, InitializeSpaceError::Internal(_)));
+        assert!(!h.setup_status.get_status().await.unwrap().has_completed);
     }
 
     #[tokio::test]

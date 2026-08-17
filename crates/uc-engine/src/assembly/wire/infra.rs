@@ -363,13 +363,8 @@ pub(super) fn create_infra_layer(
         FileFirstSyncStateRepository::with_defaults(app_data_root.clone()),
     );
 
-    // Switch-space 4 阶段迁移的状态持久化点；与 setup_status 同目录。
-    let migration_state: Arc<dyn uc_core::ports::setup::MigrationStatePort> = Arc::new(
-        FileMigrationStateRepository::with_defaults(vault_path.clone()),
-    );
-
     // Switch-space backup 表 + 主表 inline_data 批量 IO；常态业务代码不
-    // 应触碰，由 SpaceFacade::switch_space 内部使用。
+    // Legacy migration recovery consumes these only through profile convergence.
     let blob_migration_repo: Arc<dyn uc_core::ports::clipboard::BlobMigrationRepoPort> =
         Arc::new(DieselBlobMigrationRepository::new(Arc::clone(&db_executor)));
 
@@ -414,7 +409,6 @@ pub(super) fn create_infra_layer(
         representation_repo,
         selection_repo,
         blob_reference_repo,
-        migration_state,
         blob_migration_repo,
         blob_repository,
         thumbnail_repo,

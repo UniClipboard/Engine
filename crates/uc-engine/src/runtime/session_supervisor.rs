@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use super::{operation_error_with_code, ProductionRuntime, ProductionSession, SessionFactory};
 use crate::EngineError;
@@ -63,6 +64,14 @@ impl SessionSupervisor {
         *slot = Some(factory);
     }
 
+    pub(super) fn clear_factory(&self) {
+        let mut slot = self
+            .factory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = None;
+    }
+
     pub(super) async fn acquire_operation(&self) -> Result<SessionOperationLease, EngineError> {
         self.operations.acquire()
     }
@@ -72,7 +81,7 @@ impl SessionSupervisor {
         self.operations.close_and_wait(None).await?;
         self.stop_current_session(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
             .await?;
-        self.install_new_session().await
+        self.install_new_session(false).await
     }
 
     pub(super) async fn transition_session(
@@ -97,7 +106,7 @@ impl SessionSupervisor {
             .recover_after_session_drain()
             .await
             .map_err(|error| operation_error_with_code(1103, "recover space transition", error))?;
-        self.install_new_session().await
+        self.install_new_session(true).await
     }
 
     pub(super) async fn suspend(&self) -> Result<(), EngineError> {
@@ -112,7 +121,7 @@ impl SessionSupervisor {
         if self.session.lock().await.is_some() {
             return Ok(());
         }
-        self.install_new_session().await
+        self.install_new_session(false).await
     }
 
     pub(super) async fn close_file_transfers(&self) -> Result<(), EngineError> {
@@ -139,7 +148,7 @@ impl SessionSupervisor {
         Ok(())
     }
 
-    async fn install_new_session(&self) -> Result<(), EngineError> {
+    async fn install_new_session(&self, resume_space_activities: bool) -> Result<(), EngineError> {
         let factory = self
             .factory
             .lock()
@@ -147,6 +156,7 @@ impl SessionSupervisor {
             .clone()
             .ok_or_else(super::operation_unavailable_error)?;
         let mut session = ProductionRuntime::build_session(&factory).await?;
+        let mut resume_space_activities = resume_space_activities;
         let convergence = session.sync_engine.space_transition_recovery();
         if convergence
             .requires_session_transition()
@@ -165,6 +175,35 @@ impl SessionSupervisor {
                     operation_error_with_code(1103, "recover pending space transition", error)
                 })?;
             session = ProductionRuntime::build_session(&factory).await?;
+            resume_space_activities = true;
+        }
+        if resume_space_activities {
+            let recovered = session
+                .facade
+                .recover_space_session(true)
+                .await
+                .map_err(|error| {
+                    operation_error_with_code(1103, "activate transitioned space session", error)
+                })?;
+            if !recovered.unlocked {
+                return Err(operation_error_with_code(
+                    1103,
+                    "activate transitioned space session",
+                    "the transitioned space could not be unlocked",
+                ));
+            }
+        }
+        if let Some(pending) = factory
+            .profile_convergence
+            .pending_joiner_complete_ack()
+            .await
+            .map_err(|error| {
+                operation_error_with_code(1103, "rebuild join completion acknowledgment", error)
+            })?
+        {
+            if let Err(error) = session.facade.deliver_join_completion_ack(pending).await {
+                warn!(error = %error, "join completion acknowledgment delivery deferred");
+            }
         }
         *self.session.lock().await = Some(session);
         self.operations.reopen();

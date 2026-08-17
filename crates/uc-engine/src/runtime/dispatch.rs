@@ -9,8 +9,8 @@ use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
-    execute_decide_device_trust_change, execute_list_devices, execute_query_device_trust,
-    execute_query_legacy_bootstrap, execute_query_member_sync_preferences,
+    execute_decide_device_trust_change, execute_list_devices, execute_query_legacy_bootstrap,
+    execute_query_member_sync_preferences, execute_query_profile_device_trust,
     execute_query_space_protection, execute_remove_member, execute_update_member_sync_preferences,
 };
 #[cfg(feature = "dev-tools")]
@@ -47,7 +47,6 @@ use crate::operations::settings::diagnostics::{
 use crate::operations::settings::encryption::{
     execute_lock_encryption, execute_query_encryption_state, execute_verify_secure_storage_access,
 };
-use crate::operations::settings::migration_progress::execute_query_migration_progress;
 use crate::operations::settings::settings::{
     execute_probe_relay, execute_query_relay_credential, execute_query_settings,
     execute_save_relay, execute_update_settings,
@@ -59,10 +58,11 @@ use crate::operations::settings::upgrade::{
     execute_acknowledge_upgrade, execute_query_upgrade_status,
 };
 use crate::operations::space::cancel_invitation::execute_cancel_invitation;
+use crate::operations::space::cancel_join_space::execute_cancel_join_space;
 use crate::operations::space::create_space::execute_create_space;
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
-use crate::operations::space::join_space::execute_join_space;
+use crate::operations::space::join_space::{current_join_result, execute_join_space};
 use crate::operations::space::reset_space::execute_reset_space;
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
@@ -80,6 +80,15 @@ impl EngineRuntime for ProductionRuntime {
         cancellation: CancellationToken,
     ) -> Result<OperationResult, EngineError> {
         match operation {
+            Operation::QueryDeviceTrust => {
+                return execute_query_profile_device_trust(self.profile_convergence.as_ref()).await;
+            }
+            Operation::CancelJoinSpace(input) => {
+                return execute_cancel_join_space(self.profile_convergence.as_ref(), input).await;
+            }
+            Operation::FactoryResetSpace => {
+                return execute_factory_reset_space(self.profile_reset.as_ref()).await;
+            }
             Operation::RecoverNetwork => {
                 return self
                     .network_recovery
@@ -139,7 +148,12 @@ impl EngineRuntime for ProductionRuntime {
                     execute_recover_session(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::JoinSpace(input) => {
-                    execute_join_space(self.current_facade().await?.as_ref(), input).await
+                    execute_join_space(
+                        self.current_facade().await?.as_ref(),
+                        self.profile_convergence.as_ref(),
+                        input,
+                    )
+                    .await
                 }
                 Operation::IssueInvitation => {
                     execute_issue_invitation(self.current_facade().await?.as_ref()).await
@@ -148,16 +162,14 @@ impl EngineRuntime for ProductionRuntime {
                     execute_cancel_invitation(self.current_facade().await?.as_ref()).await
                 }
                 Operation::ResetSpace => {
-                    execute_reset_space(self.current_facade().await?.as_ref()).await
-                }
-                Operation::FactoryResetSpace => {
-                    execute_factory_reset_space(self.current_facade().await?.as_ref()).await
+                    execute_reset_space(
+                        self.profile_convergence.as_ref(),
+                        self.current_facade().await?.as_ref(),
+                    )
+                    .await
                 }
                 Operation::QuerySetupState => {
                     execute_query_setup_state(self.current_facade().await?.as_ref()).await
-                }
-                Operation::QueryMigrationProgress => {
-                    execute_query_migration_progress(self.current_facade().await?.as_ref()).await
                 }
                 Operation::QueryStorageStats => {
                     execute_query_storage_stats(self.current_facade().await?.as_ref()).await
@@ -312,9 +324,9 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::QueryWorkspaceConvergence => {
                     execute_query_workspace_convergence(self.current_facade().await?.as_ref()).await
                 }
-                Operation::QueryDeviceTrust => {
-                    execute_query_device_trust(self.current_facade().await?.as_ref()).await
-                }
+                Operation::QueryDeviceTrust
+                | Operation::CancelJoinSpace(_)
+                | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
                 Operation::DecideDeviceTrustChange(input) => {
                     execute_decide_device_trust_change(self.current_facade().await?.as_ref(), input)
                         .await
@@ -477,7 +489,7 @@ impl EngineRuntime for ProductionRuntime {
                 self.session_supervisor
                     .transition_session(session_lease)
                     .await?;
-                return result;
+                return current_join_result(self.profile_convergence.as_ref()).await;
             }
         }
         drop(session_lease);
@@ -599,6 +611,7 @@ impl EngineRuntime for ProductionRuntime {
     async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
         self.network_recovery.shutdown().await;
         self.suspend().await?;
+        self.session_supervisor.clear_factory();
         self.session_supervisor.close_file_transfers().await?;
         self.task_registry.shutdown(deadline).await;
         if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {

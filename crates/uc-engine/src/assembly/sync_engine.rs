@@ -62,7 +62,10 @@ use uc_application::facade::{
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferDirection, OutboundProgressStatus,
 };
-use uc_core::membership::LegacyUpgradeDispatchPort;
+use uc_core::membership::{
+    CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort, CurrentWorkspacePeerSnapshot,
+    LegacyUpgradeDispatchPort,
+};
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::space::ProofPort;
 use uc_core::ports::{
@@ -88,6 +91,30 @@ use uc_infra::security::DefaultMembershipSecurityUpdateAdapter;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 
 struct DeferredAdmissionOutboxDelivery;
+
+#[derive(Default)]
+struct DeferredCurrentWorkspacePeerScope {
+    delegate: tokio::sync::RwLock<Option<Arc<dyn CurrentWorkspacePeerScopePort>>>,
+}
+
+impl DeferredCurrentWorkspacePeerScope {
+    async fn install(&self, delegate: Arc<dyn CurrentWorkspacePeerScopePort>) {
+        *self.delegate.write().await = Some(delegate);
+    }
+}
+
+#[async_trait::async_trait]
+impl CurrentWorkspacePeerScopePort for DeferredCurrentWorkspacePeerScope {
+    async fn snapshot(
+        &self,
+    ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
+        let delegate = self.delegate.read().await.clone();
+        match delegate {
+            Some(delegate) => delegate.snapshot().await,
+            None => Err(CurrentWorkspacePeerScopeError::Unavailable),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl uc_core::membership::AdmissionOutboxDeliveryPort for DeferredAdmissionOutboxDelivery {
@@ -263,6 +290,12 @@ impl SyncEngineAssembly {
         &self,
     ) -> Arc<dyn uc_application::facade::SpaceTransitionRecoveryPort> {
         self.convergence_assembly.space_transition_recovery()
+    }
+
+    pub(crate) fn workspace_convergence(
+        &self,
+    ) -> Arc<uc_application::facade::WorkspaceConvergence> {
+        self.convergence_assembly.workspace_convergence()
     }
 
     /// Coordinated teardown. Order matters:
@@ -627,12 +660,14 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&space_setup.peer_admission),
         Arc::clone(&deps.security.fingerprint),
     );
+    let group_update_recovery_scope = Arc::new(DeferredCurrentWorkspacePeerScope::default());
     let GroupUpdateHandlers {
         dispatch: group_update_dispatch,
     } = builder.install_group_updates(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&deps.device.member_repo),
         Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&group_update_recovery_scope) as Arc<dyn CurrentWorkspacePeerScopePort>,
         Arc::clone(&deps.security.fingerprint),
         Arc::clone(&deps.security.space_access_ports.group_revocation),
     )?;
@@ -663,6 +698,18 @@ pub async fn build_sync_engine_assembly(
             admission_security_transition: Arc::new(
                 uc_infra::security::AdmissionSecurityTransitionAdapter,
             ),
+            prepare_sponsor_admission_security: Arc::clone(
+                &deps
+                    .security
+                    .space_access_ports
+                    .prepare_sponsor_admission_security,
+            ),
+            activate_sponsor_admission_security: Arc::clone(
+                &deps
+                    .security
+                    .space_access_ports
+                    .activate_sponsor_admission_security,
+            ),
             admission_space_transition: Arc::clone(&space_setup.admission_space_transition),
             admission_outbox_delivery: Arc::new(DeferredAdmissionOutboxDelivery),
             legacy_migration_recovery: Arc::clone(&space_setup.legacy_migration_recovery),
@@ -683,6 +730,7 @@ pub async fn build_sync_engine_assembly(
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             presence: Arc::clone(&presence),
             space_protection: Arc::clone(&deps.security.space_access_ports.space_protection),
+            group_bootstrap: Arc::clone(&deps.security.space_access_ports.group_bootstrap),
             own_device: deps.device.device_identity.current_device_id(),
         },
         membership: MembershipConvergenceDeps {
@@ -720,6 +768,9 @@ pub async fn build_sync_engine_assembly(
             presence: Arc::clone(&presence),
         },
     });
+    group_update_recovery_scope
+        .install(convergence_assembly.current_peer_scope())
+        .await;
     builder.install_membership_handler(
         &membership_attestation,
         convergence_assembly.membership_attestation_endpoint(),
@@ -897,10 +948,6 @@ pub async fn build_sync_engine_assembly(
         transition: SpaceTransitionDeps {
             relationship_reset: Arc::clone(&space_setup.relationship_reset),
             space_security_reset: Arc::clone(&space_setup.space_security_reset),
-            migration_state: Arc::clone(&space_setup.migration_state),
-            key_migration: Arc::clone(&space_setup.key_migration),
-            blob_migration_repo: Arc::clone(&space_setup.blob_migration_repo),
-            blob_cipher: Arc::clone(&deps.security.blob_cipher),
         },
     }));
 
