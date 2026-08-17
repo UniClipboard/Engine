@@ -35,6 +35,8 @@ use uc_core::pairing::{
 use uc_core::ports::pairing::PairingSessionId;
 use uc_core::security::IdentityFingerprint;
 
+pub(crate) const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
+
 /// Wire 版本号。
 ///
 /// 升版历史：
@@ -151,6 +153,9 @@ enum WireRejectReason {
 pub enum WireEncodeError {
     #[error("postcard encode failed: {0}")]
     Postcard(#[from] postcard::Error),
+
+    #[error("pairing frame length {len} exceeds maximum {max}")]
+    FrameTooLarge { len: usize, max: usize },
 }
 
 #[derive(Debug, Error)]
@@ -172,6 +177,9 @@ pub enum WireDecodeError {
 
     #[error("invalid durable join request: {0}")]
     InvalidDurableJoinRequest(String),
+
+    #[error("pairing frame length {len} exceeds maximum {max}")]
+    FrameTooLarge { len: usize, max: usize },
 }
 
 impl From<postcard::Error> for WireDecodeError {
@@ -188,12 +196,24 @@ impl From<postcard::Error> for WireDecodeError {
 pub fn encode(message: &PairingSessionMessage) -> Result<Vec<u8>, WireEncodeError> {
     let mut encoded = vec![WIRE_VERSION];
     encoded.extend(postcard::to_allocvec(&to_wire(message))?);
+    if encoded.len() > MAX_FRAME_SIZE {
+        return Err(WireEncodeError::FrameTooLarge {
+            len: encoded.len(),
+            max: MAX_FRAME_SIZE,
+        });
+    }
     Ok(encoded)
 }
 
 /// Deserialize a [`PairingSessionMessage`] from bytes produced by
 /// [`encode`] (or a peer running a compatible version).
 pub fn decode(bytes: &[u8]) -> Result<PairingSessionMessage, WireDecodeError> {
+    if bytes.len() > MAX_FRAME_SIZE {
+        return Err(WireDecodeError::FrameTooLarge {
+            len: bytes.len(),
+            max: MAX_FRAME_SIZE,
+        });
+    }
     let Some((&version, body)) = bytes.split_first() else {
         let error =
             postcard::from_bytes::<WireBody>(&[]).expect_err("empty postcard body must fail");
@@ -588,6 +608,29 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(encoded[0], 10, "V10 must be readable before body decoding");
+    }
+
+    #[test]
+    fn pairing_wire_rejects_frames_over_four_mibibytes() {
+        use uc_core::pairing::{DurableAdmissionFrame, DurableAdmissionMessageKind};
+
+        let oversized = PairingSessionMessage::DurableAdmission(DurableAdmissionFrame {
+            attempt_id: [0x71; 32],
+            kind: DurableAdmissionMessageKind::Candidate,
+            message_id: [0x72; 32],
+            predecessor_message_id: None,
+            payload: vec![0x73; super::MAX_FRAME_SIZE],
+        });
+        assert!(matches!(
+            encode(&oversized),
+            Err(WireEncodeError::FrameTooLarge { .. })
+        ));
+
+        let encoded = vec![0u8; super::MAX_FRAME_SIZE + 1];
+        assert!(matches!(
+            decode(&encoded),
+            Err(WireDecodeError::FrameTooLarge { .. })
+        ));
     }
 
     #[test]

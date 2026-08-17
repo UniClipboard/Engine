@@ -133,8 +133,11 @@ impl<E: DbExecutor> DieselAdmissionAttemptStore<E> {
         let state: AdmissionRepositoryStateV1 = postcard::from_bytes(&plaintext)
             .map_err(|_| AdmissionAttemptRepositoryError::Corrupt)?;
         if state.format_version != REPOSITORY_FORMAT_V1
+            || state.metadata.format_version
+                != uc_core::membership::ADMISSION_PROFILE_METADATA_FORMAT_V1
             || state.metadata.profile_generation != self.keys.profile_generation()
             || state.metadata.join_projection_floor_ordinal > state.metadata.next_local_join_ordinal
+            || state.metadata.device_trust_revision < state.metadata.next_local_join_ordinal
         {
             return Err(AdmissionAttemptRepositoryError::Corrupt);
         }
@@ -1068,6 +1071,244 @@ mod tests {
         attempt.prepared_proof = Some(b"prepared-proof".to_vec());
         attempt.target_access_state = Some(b"target-access".to_vec());
         attempt
+    }
+
+    #[tokio::test]
+    async fn unknown_profile_metadata_version_fails_closed() {
+        let directory = tempdir().unwrap();
+        let database_path = directory
+            .path()
+            .join("admission-metadata-validation.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let generation = [0xaf; 16];
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            AdmissionKeyManager::new(secure_storage, generation),
+        );
+
+        let mut connection = pool.get().unwrap();
+        let mut state = store.load_state_on(&mut connection).unwrap();
+        state.metadata.format_version += 1;
+        let plaintext = postcard::to_stdvec(&state).unwrap();
+        let encrypted = store
+            .keys
+            .seal_profile_payload(super::REPOSITORY_PAYLOAD_PURPOSE, &plaintext)
+            .unwrap();
+        diesel::sql_query(
+            "INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, ?) \
+             ON CONFLICT(singleton_id) DO UPDATE SET encrypted_payload = excluded.encrypted_payload",
+        )
+        .bind::<diesel::sql_types::Binary, _>(encrypted)
+        .execute(&mut connection)
+        .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            store.profile_metadata().await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_counter_corruption_fails_closed() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("admission-counter-corruption.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let generation = [0xb0; 16];
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            AdmissionKeyManager::new(secure_storage, generation),
+        );
+
+        let mut connection = pool.get().unwrap();
+        let mut state = store.load_state_on(&mut connection).unwrap();
+        state.metadata.next_local_join_ordinal = 1;
+        state.metadata.device_trust_revision = 0;
+        let plaintext = postcard::to_stdvec(&state).unwrap();
+        let encrypted = store
+            .keys
+            .seal_profile_payload(super::REPOSITORY_PAYLOAD_PURPOSE, &plaintext)
+            .unwrap();
+        diesel::sql_query(
+            "INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, ?) \
+             ON CONFLICT(singleton_id) DO UPDATE SET encrypted_payload = excluded.encrypted_payload",
+        )
+        .bind::<diesel::sql_types::Binary, _>(encrypted)
+        .execute(&mut connection)
+        .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            store.profile_metadata().await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+        );
+
+        let mut state = super::AdmissionRepositoryStateV1::fresh(generation);
+        state.metadata.join_projection_floor_ordinal = 1;
+        state.metadata.device_trust_revision = 1;
+        let plaintext = postcard::to_stdvec(&state).unwrap();
+        let encrypted = store
+            .keys
+            .seal_profile_payload(super::REPOSITORY_PAYLOAD_PURPOSE, &plaintext)
+            .unwrap();
+        let mut connection = pool.get().unwrap();
+        diesel::sql_query(
+            "UPDATE admission_repository_state SET encrypted_payload = ? WHERE singleton_id = 1",
+        )
+        .bind::<diesel::sql_types::Binary, _>(encrypted)
+        .execute(&mut connection)
+        .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            store.profile_metadata().await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_revision_and_counter_overflow_leave_profile_state_unchanged() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("admission-counter-rollback.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let generation = [0xb1; 16];
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            AdmissionKeyManager::new(secure_storage, generation),
+        );
+
+        let initial = store.profile_metadata().await.unwrap();
+        assert_eq!(
+            store.advance_projection_floor(1).await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::VersionConflict)
+        );
+        assert_eq!(store.profile_metadata().await.unwrap(), initial);
+
+        let mut connection = pool.get().unwrap();
+        let mut state = store.load_state_on(&mut connection).unwrap();
+        state.metadata.device_trust_revision = u64::MAX;
+        let plaintext = postcard::to_stdvec(&state).unwrap();
+        let encrypted = store
+            .keys
+            .seal_profile_payload(super::REPOSITORY_PAYLOAD_PURPOSE, &plaintext)
+            .unwrap();
+        diesel::sql_query(
+            "INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, ?) \
+             ON CONFLICT(singleton_id) DO UPDATE SET encrypted_payload = excluded.encrypted_payload",
+        )
+        .bind::<diesel::sql_types::Binary, _>(encrypted)
+        .execute(&mut connection)
+        .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            store
+                .compare_and_replace_membership_history_v2(None, b"target-space-history")
+                .await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+        );
+        assert_eq!(
+            store
+                .profile_metadata()
+                .await
+                .unwrap()
+                .device_trust_revision,
+            u64::MAX
+        );
+        assert_eq!(store.load_membership_history_v2().await.unwrap(), None);
+
+        let mut state = super::AdmissionRepositoryStateV1::fresh(generation);
+        state.metadata.next_local_join_ordinal = u64::MAX;
+        state.metadata.device_trust_revision = u64::MAX;
+        let plaintext = postcard::to_stdvec(&state).unwrap();
+        let encrypted = store
+            .keys
+            .seal_profile_payload(super::REPOSITORY_PAYLOAD_PURPOSE, &plaintext)
+            .unwrap();
+        let mut connection = pool.get().unwrap();
+        diesel::sql_query(
+            "UPDATE admission_repository_state SET encrypted_payload = ? WHERE singleton_id = 1",
+        )
+        .bind::<diesel::sql_types::Binary, _>(encrypted)
+        .execute(&mut connection)
+        .unwrap();
+        drop(connection);
+
+        let attempt_id = AdmissionAttemptId::from_bytes([0xb3; 32]);
+        let mut attempt = AdmissionAttemptV1::new_joiner(
+            attempt_id,
+            [0xb4; 16],
+            JoinerAdmissionStageV1::Initiated,
+        );
+        attempt.local_join_ordinal = Some(u64::MAX);
+        assert_eq!(
+            store.create(&attempt, None, None).await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+        );
+        assert_eq!(store.load(attempt_id).await.unwrap(), None);
+        let metadata = store.profile_metadata().await.unwrap();
+        assert_eq!(metadata.next_local_join_ordinal, u64::MAX);
+        assert_eq!(metadata.device_trust_revision, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn profile_revision_remains_monotonic_during_cross_space_transition() {
+        let directory = tempdir().unwrap();
+        let database_path = directory
+            .path()
+            .join("admission-cross-space-revision.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0xb2; 16]),
+        );
+
+        let attempt_id = AdmissionAttemptId::from_bytes([0xb5; 32]);
+        let mut initiated = AdmissionAttemptV1::new_joiner(
+            attempt_id,
+            [0xb6; 16],
+            JoinerAdmissionStageV1::Initiated,
+        );
+        initiated.local_join_ordinal = Some(0);
+        initiated.candidate_key_package = Some(b"key-package".to_vec());
+        let source = store
+            .create(&initiated, None, Some(b"source-space-history"))
+            .await
+            .unwrap();
+
+        let mut target_staged = prepared_joiner(attempt_id);
+        target_staged.record_version = 1;
+        target_staged.join_id = initiated.join_id;
+        target_staged.local_join_ordinal = initiated.local_join_ordinal;
+        target_staged.candidate_key_package = initiated.candidate_key_package.clone();
+        target_staged.space_transition = AdmissionSpaceTransitionV2::CrossSpace(
+            cross_space_transition(attempt_id, CrossSpaceTransitionPhaseV2::TargetStaged),
+        )
+        .encode();
+        let target = store
+            .compare_and_advance(attempt_id, 0, &target_staged)
+            .await
+            .unwrap();
+
+        let mut activation_started = target_staged;
+        activation_started.record_version = 2;
+        activation_started.space_transition = AdmissionSpaceTransitionV2::CrossSpace(
+            cross_space_transition(attempt_id, CrossSpaceTransitionPhaseV2::ActivationStarted),
+        )
+        .encode();
+        let staged = store
+            .compare_and_advance(attempt_id, 1, &activation_started)
+            .await
+            .unwrap();
+
+        assert_eq!(source.device_trust_revision, 1);
+        assert_eq!(target.device_trust_revision, 2);
+        assert_eq!(staged.device_trust_revision, 3);
+        assert_eq!(target.profile_generation, source.profile_generation);
+        assert_eq!(staged.profile_generation, source.profile_generation);
     }
 
     #[test]

@@ -378,7 +378,13 @@ impl IrohPairingSessionAdapter {
                 return;
             }
         }
-        let len = u32::from_be_bytes(len_buf) as usize;
+        let len = match validate_frame_length(u32::from_be_bytes(len_buf) as usize) {
+            Ok(len) => len,
+            Err(_) => {
+                warn!(remote = %remote, "pairing first-frame length rejected");
+                return;
+            }
+        };
         info!(
             remote = %remote,
             frame_len = len,
@@ -572,13 +578,14 @@ async fn read_next_frame(
         Err(iroh::endpoint::ReadExactError::FinishedEarly(0)) => return Ok(None),
         Err(err) => return Err(map_read_err(err)),
     }
-    let len = u32::from_be_bytes(len_buf) as usize;
+    let len = validate_frame_length(u32::from_be_bytes(len_buf) as usize)?;
 
     let mut payload = vec![0u8; len];
     recv.read_exact(&mut payload).await.map_err(map_read_err)?;
 
     wire::decode(&payload).map(Some).map_err(|err| match err {
         WireDecodeError::Postcard(_)
+        | WireDecodeError::FrameTooLarge { .. }
         | WireDecodeError::UnsupportedVersion { .. }
         | WireDecodeError::UnsupportedSecurityCapability(_)
         | WireDecodeError::UnsupportedDurableAdmissionKind(_)
@@ -587,6 +594,15 @@ async fn read_next_frame(
             SessionError::Internal(format!("wire decode: {err}"))
         }
     })
+}
+
+fn validate_frame_length(len: usize) -> Result<usize, SessionError> {
+    if len == 0 || len > wire::MAX_FRAME_SIZE {
+        return Err(SessionError::Internal(format!(
+            "invalid pairing frame length {len}"
+        )));
+    }
+    Ok(len)
 }
 
 // ============================================================================
@@ -928,6 +944,14 @@ mod tests {
     use uc_core::pairing::JoinerRequest;
     use uc_core::security::IdentityFingerprint;
     use wiremock::matchers::{method, path};
+
+    #[test]
+    fn pairing_frame_length_is_rejected_before_payload_allocation() {
+        assert!(validate_frame_length(1).is_ok());
+        assert!(validate_frame_length(wire::MAX_FRAME_SIZE).is_ok());
+        assert!(validate_frame_length(0).is_err());
+        assert!(validate_frame_length(wire::MAX_FRAME_SIZE + 1).is_err());
+    }
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);

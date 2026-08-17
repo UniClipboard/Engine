@@ -288,16 +288,20 @@ async fn read_message(
         .await
         .map_err(|_| MembershipHistoryExchangeError::Transport)?
         .map_err(|_| MembershipHistoryExchangeError::Transport)?;
-    let length = u32::from_be_bytes(length) as usize;
-    if length == 0 || length > MAX_MESSAGE_SIZE {
-        return Err(MembershipHistoryExchangeError::Transport);
-    }
+    let length = checked_message_length(u32::from_be_bytes(length) as usize)?;
     let mut payload = vec![0; length];
     tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut payload))
         .await
         .map_err(|_| MembershipHistoryExchangeError::Transport)?
         .map_err(|_| MembershipHistoryExchangeError::Transport)?;
     Ok(payload)
+}
+
+fn checked_message_length(length: usize) -> Result<usize, MembershipHistoryExchangeError> {
+    if length == 0 || length > MAX_MESSAGE_SIZE {
+        return Err(MembershipHistoryExchangeError::Transport);
+    }
+    Ok(length)
 }
 
 async fn reject(send: &mut iroh::endpoint::SendStream) {
@@ -318,8 +322,20 @@ mod tests {
     use uc_core::security::IdentityFingerprint;
 
     use super::{
-        decode_message, encode_message, introduced_device, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+        checked_message_length, decode_message, encode_message, introduced_device,
+        MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
     };
+
+    #[test]
+    fn history_frame_length_accepts_the_boundary_and_rejects_oversize_before_allocation() {
+        assert_eq!(checked_message_length(1), Ok(1));
+        assert_eq!(
+            checked_message_length(super::MAX_MESSAGE_SIZE),
+            Ok(super::MAX_MESSAGE_SIZE)
+        );
+        assert!(checked_message_length(0).is_err());
+        assert!(checked_message_length(super::MAX_MESSAGE_SIZE + 1).is_err());
+    }
 
     #[test]
     fn history_v2_wire_checks_version_before_decoding_the_body() {

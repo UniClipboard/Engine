@@ -65,6 +65,9 @@ impl MembershipCredential {
         if self.credential_format_version != MEMBERSHIP_CREDENTIAL_FORMAT_V1 {
             return Err(MembershipHistoryV2Error::UpgradeRequired);
         }
+        if self.signature_algorithm_version != ED25519_SIGNATURE_ALGORITHM_V1 {
+            return Err(MembershipHistoryV2Error::UpgradeRequired);
+        }
         if self.public_key.is_empty()
             || self.credential_id
                 != credential_id(
@@ -1825,6 +1828,9 @@ impl VersionedMembershipHistory {
         if event.event_format_version != MEMBERSHIP_EVENT_FORMAT_V2 {
             return Err(MembershipHistoryV2Error::UpgradeRequired);
         }
+        if event.author_signature_algorithm_version != ED25519_SIGNATURE_ALGORITHM_V1 {
+            return Err(MembershipHistoryV2Error::UpgradeRequired);
+        }
         if event.lineage_id != self.lineage_id {
             return Err(MembershipHistoryV2Error::InvalidLineage);
         }
@@ -1920,6 +1926,9 @@ impl VersionedMembershipHistory {
         verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     ) -> Result<MembershipDecisionStoreOutcome, MembershipHistoryV2Error> {
         if decision.decision_format_version != MEMBERSHIP_DECISION_FORMAT_V2 {
+            return Err(MembershipHistoryV2Error::UpgradeRequired);
+        }
+        if decision.signature_algorithm_version != ED25519_SIGNATURE_ALGORITHM_V1 {
             return Err(MembershipHistoryV2Error::UpgradeRequired);
         }
         if decision.lineage_id != self.lineage_id {
@@ -2186,7 +2195,7 @@ fn verify_signature(
             Err(MembershipHistoryV2Error::InvalidSignature)
         }
         Err(HistoricalMembershipSignatureError::UnsupportedAlgorithm) => {
-            Err(MembershipHistoryV2Error::UnsupportedSignatureAlgorithm)
+            Err(MembershipHistoryV2Error::UpgradeRequired)
         }
     }
 }

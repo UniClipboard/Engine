@@ -1057,6 +1057,86 @@ fn parent_authorization_rejects_unactivated_removed_and_wrong_credential_authors
 }
 
 #[test]
+fn unknown_event_decision_receipt_and_signature_versions_require_upgrade() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut event_history, a, b, _genesis, add_b) = history_with_a_and_b(true);
+
+    let mut future_event = event(
+        &event_history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        0xa1,
+        &verifier,
+    );
+    future_event.event_format_version = MEMBERSHIP_EVENT_FORMAT_V2 + 1;
+    assert_eq!(
+        event_history.verify_and_receive_event(future_event, &verifier),
+        Err(uc_core::membership::MembershipHistoryV2Error::UpgradeRequired)
+    );
+
+    let mut unsupported_algorithm = event(
+        &event_history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        0xa2,
+        &verifier,
+    );
+    unsupported_algorithm.author_signature_algorithm_version = ED25519_SIGNATURE_ALGORITHM_V1 + 1;
+    unsupported_algorithm.signature = vec![0xa3; 32];
+    assert_eq!(
+        event_history.verify_and_receive_event(unsupported_algorithm, &verifier),
+        Err(uc_core::membership::MembershipHistoryV2Error::UpgradeRequired)
+    );
+
+    let remove_b = event(
+        &event_history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        0xa4,
+        &verifier,
+    );
+    event_history
+        .verify_and_receive_event(remove_b.clone(), &verifier)
+        .expect("removal verifies");
+    let mut future_decision = MembershipDecisionV2::new(
+        MEMBERSHIP_DECISION_FORMAT_V2 + 1,
+        LINEAGE.to_owned(),
+        remove_b.event_id(),
+        b.facts.member_instance,
+        b.membership_credential.credential_id,
+        ED25519_SIGNATURE_ALGORITHM_V1,
+        RemovalDecision::Accept,
+        Some(add_b.event_id()),
+        remove_b.resulting_members_digest,
+        [0xa5; 16],
+        Vec::new(),
+    );
+    future_decision.signature =
+        verifier.sign(&b.membership_credential, &future_decision.signing_payload());
+    assert_eq!(
+        event_history.verify_and_record_peer_decision(future_decision, &verifier),
+        Err(uc_core::membership::MembershipHistoryV2Error::UpgradeRequired)
+    );
+
+    let (mut receipt_history, _a, b, _genesis, add_b) = history_with_a_and_b(false);
+    let mut future_receipt = activation_receipt(&add_b, &b, &verifier);
+    future_receipt.receipt_format_version += 1;
+    assert_eq!(
+        receipt_history.verify_and_record_activation_receipt(future_receipt, &verifier),
+        Err(uc_core::membership::MembershipHistoryV2Error::UpgradeRequired)
+    );
+}
+
+#[test]
 fn history_rejects_self_removal_replay_and_altered_result_digest() {
     let verifier = DeterministicSignatureVerifier;
     let (mut history, a, b, _genesis, add_b) = history_with_a_and_b(true);
