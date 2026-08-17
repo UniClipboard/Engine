@@ -446,6 +446,18 @@ impl MlsGroupEngine {
         Ok(stored.signer_public)
     }
 
+    pub(crate) fn sign_pending_member_payload(
+        client_state: &MlsClientState,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        if stored.group_id.is_some() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        let signer = restore_signer(&provider, &stored)?;
+        signer.sign(payload).map_err(|_| MlsGroupError::Protocol)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn derive_public_admission_commitment(
         client_state: &MlsClientState,
@@ -480,10 +492,7 @@ impl MlsGroupEngine {
             let credential =
                 MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, public_key.to_vec());
             members.push((
-                uc_core::membership::MemberInstanceId::derive(
-                    device_id,
-                    credential.credential_id.as_bytes(),
-                ),
+                credential.member_instance_id(&uc_core::ids::DeviceId::new(device_id)),
                 credential.credential_id,
             ));
         }
@@ -962,6 +971,26 @@ mod tests {
                 &signature,
             ),
             Ok(false)
+        );
+    }
+
+    #[test]
+    fn prepared_join_signer_proves_facts_without_activating_a_group() {
+        let pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let public_key = MlsGroupEngine::signing_public_key(&pending.client_state).unwrap();
+        let payload = b"pre-admission-member-facts";
+        let signature =
+            MlsGroupEngine::sign_pending_member_payload(&pending.client_state, payload).unwrap();
+
+        assert!(MlsGroupEngine::sign_member_payload(&pending.client_state, payload).is_err());
+        assert_eq!(
+            OpenMlsHistoricalSignatureVerifier.verify(
+                ED25519_SIGNATURE_ALGORITHM_V1,
+                &public_key,
+                payload,
+                &signature,
+            ),
+            Ok(true)
         );
     }
 

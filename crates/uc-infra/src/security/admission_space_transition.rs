@@ -94,6 +94,7 @@ struct TargetWorkspaceGenerationV1 {
     content_key_catalog: Vec<u8>,
     local_device_id: DeviceId,
     relationships: Vec<uc_core::membership::AdmissionChangeFacts>,
+    relayed_group_updates: Vec<uc_core::membership::PendingGroupUpdate>,
 }
 
 #[derive(serde::Serialize)]
@@ -107,6 +108,27 @@ struct TargetPersistedContentKeyEntryV2 {
     content_key_id: String,
     epoch: u64,
     key: Vec<u8>,
+}
+
+fn valid_relayed_group_updates(
+    updates: &[uc_core::membership::PendingGroupUpdate],
+    local_device_id: &DeviceId,
+    relationships: &[uc_core::membership::AdmissionChangeFacts],
+) -> bool {
+    let relationship_devices = relationships
+        .iter()
+        .map(|facts| &facts.device_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut update_ids = std::collections::BTreeSet::new();
+    let mut recipients = std::collections::BTreeSet::new();
+    updates.iter().all(|update| {
+        update.recipient() != local_device_id
+            && relationship_devices.contains(update.recipient())
+            && !update.update_id().is_empty()
+            && !update.payload().is_empty()
+            && update_ids.insert(update.update_id())
+            && recipients.insert(update.recipient())
+    })
 }
 
 impl DurableAdmissionSpaceTransition {
@@ -220,6 +242,11 @@ impl DurableAdmissionSpaceTransition {
                 .target_relationships
                 .iter()
                 .any(|facts| facts.device_id == input.local_device_id)
+            || !valid_relayed_group_updates(
+                &input.relayed_group_updates,
+                &input.local_device_id,
+                &input.target_relationships,
+            )
         {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
         }
@@ -241,6 +268,7 @@ impl DurableAdmissionSpaceTransition {
             content_key_catalog: input.target_key_catalog.clone(),
             local_device_id: input.local_device_id.clone(),
             relationships: input.target_relationships.clone(),
+            relayed_group_updates: input.relayed_group_updates.clone(),
         };
         let plaintext =
             postcard::to_stdvec(&state).map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
@@ -303,6 +331,11 @@ impl DurableAdmissionSpaceTransition {
                 .relationships
                 .iter()
                 .any(|facts| facts.device_id == state.local_device_id)
+            || !valid_relayed_group_updates(
+                &state.relayed_group_updates,
+                &state.local_device_id,
+                &state.relationships,
+            )
             || state.security_commitment.lineage_id != target_space_id
         {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
@@ -489,8 +522,7 @@ impl DurableAdmissionSpaceTransition {
                     &transition.target_workspace_ref,
                     self.session.as_ref(),
                 )?;
-                self.validate_same_space_key_history(&target_workspace)
-                    .await?;
+                let target_material = self.same_space_key_material(&target_workspace).await?;
                 let directory = self.target_generation_directory(
                     &transition.target_space_id,
                     &transition.target_generation,
@@ -503,9 +535,9 @@ impl DurableAdmissionSpaceTransition {
                 let target_database = directory.join("target.sqlite");
                 write_new_file(&target_database, &source_bytes)
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
-                self.install_and_reopen_target_security(
+                self.install_and_reopen_security_material(
                     &target_database,
-                    &target_workspace,
+                    &target_material,
                     self.session.as_ref(),
                 )
                 .await?;
@@ -572,6 +604,16 @@ impl DurableAdmissionSpaceTransition {
         target_session: &InMemorySession,
     ) -> Result<(), AdmissionSpaceTransitionError> {
         let material = Self::target_space_material(target_workspace)?;
+        self.install_and_reopen_security_material(target_database, &material, target_session)
+            .await
+    }
+
+    async fn install_and_reopen_security_material(
+        &self,
+        target_database: &Path,
+        material: &SpaceKeyMaterial,
+        target_session: &InMemorySession,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
         let target_pool = init_db_pool(
             target_database
                 .to_str()
@@ -584,15 +626,15 @@ impl DurableAdmissionSpaceTransition {
             target_session.clone(),
         );
         repository
-            .save_space_material(&material)
+            .save_space_material(material)
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
         let reopened = repository
-            .load_space_material(&SpaceId::from_str(&target_workspace.target_space_id))
+            .load_space_material(material.state().space_id())
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?
             .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
-        if reopened != material {
+        if &reopened != material {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
         }
         target_session
@@ -600,10 +642,10 @@ impl DurableAdmissionSpaceTransition {
             .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)
     }
 
-    async fn validate_same_space_key_history(
+    async fn same_space_key_material(
         &self,
         target_workspace: &TargetWorkspaceGenerationV1,
-    ) -> Result<(), AdmissionSpaceTransitionError> {
+    ) -> Result<SpaceKeyMaterial, AdmissionSpaceTransitionError> {
         let catalog = AdmissionContentKeyCatalogV1::decode(&target_workspace.content_key_catalog)
             .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
         let legacy = self
@@ -622,21 +664,18 @@ impl DurableAdmissionSpaceTransition {
             Arc::new(DieselSqliteExecutor::new(self.source_pool.clone())),
             self.session.as_ref().clone(),
         );
+        let incoming = Self::target_space_material(target_workspace)?;
         if let Some(previous) = current_repository
             .load_space_material(&SpaceId::from_str(&target_workspace.target_space_id))
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?
         {
-            let incoming = Self::target_space_material(target_workspace)?;
-            let merged = self
+            return self
                 .session
-                .merge_space_material_history(&previous, incoming.clone())
-                .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
-            if merged != incoming {
-                return Err(AdmissionSpaceTransitionError::Inconsistent);
-            }
+                .merge_space_material_history(&previous, incoming)
+                .map_err(|_| AdmissionSpaceTransitionError::Inconsistent);
         }
-        Ok(())
+        Ok(incoming)
     }
 
     fn target_space_material(
@@ -675,12 +714,14 @@ impl DurableAdmissionSpaceTransition {
         };
         let key_catalog = serde_json::to_vec(&persisted_catalog)
             .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
-        Ok(SpaceKeyMaterial::new(
+        let mut material = SpaceKeyMaterial::new(
             state,
             target_workspace.security_state.clone(),
             key_catalog,
             0,
-        ))
+        );
+        material.add_pending_group_updates(target_workspace.relayed_group_updates.clone(), 0);
+        Ok(material)
     }
 
     fn install_target_security_in_session(
@@ -844,6 +885,22 @@ impl DurableAdmissionSpaceTransition {
 
 #[async_trait]
 impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
+    async fn preflight_source_history(
+        &self,
+        preserve_unreadable_history: bool,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        let Some(source_space) = self.session.current_space_id().ok() else {
+            return Ok(());
+        };
+        preflight_source_inline_history(
+            &self.source_pool,
+            &source_space,
+            Arc::clone(&self.session),
+            preserve_unreadable_history,
+        )
+        .await
+    }
+
     async fn prepare_if_needed(
         &self,
         input: &AdmissionSpaceTransitionPreparationV2,
@@ -945,6 +1002,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 final_manifest_digest: None,
                 migrated_records: 0,
                 preserved_unreadable_records: 0,
+                preserve_unreadable_history: input.preserve_unreadable_history,
             },
         ))
     }
@@ -1020,6 +1078,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                         &SpaceId::from_str(&transition.target_space_id),
                         target_session,
                         transition.target_generation,
+                        transition.preserve_unreadable_history,
                     )
                     .await
                     .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
@@ -1033,6 +1092,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 let mut next = transition.clone();
                 next.phase = CrossSpaceTransitionPhaseV2::DataRewrapped;
                 next.migrated_records = finalized.migrated_records;
+                next.preserved_unreadable_records = finalized.preserved_unreadable_records;
                 transition
                     .can_advance_to(&next)
                     .then_some(AdmissionSpaceTransitionStepV2::Advanced(
@@ -1309,6 +1369,7 @@ pub(crate) struct FinalizedSpaceGeneration {
     pub(crate) source_digest: [u8; 32],
     pub(crate) target_digest: [u8; 32],
     pub(crate) migrated_records: u64,
+    pub(crate) preserved_unreadable_records: u64,
 }
 
 pub(crate) struct FinalSourceGeneration {
@@ -1376,6 +1437,7 @@ impl SqliteSpaceGenerationStore {
             target_space,
             target_session,
             target_generation,
+            false,
         )
         .await
     }
@@ -1409,6 +1471,7 @@ impl SqliteSpaceGenerationStore {
         target_space: &SpaceId,
         target_session: Arc<InMemorySession>,
         target_generation: [u8; 16],
+        preserve_unreadable_history: bool,
     ) -> Result<FinalizedSpaceGeneration, String> {
         let source_bytes = std::fs::read(&finalized_source.database_path)
             .map_err(|_| "read final source generation".to_owned())?;
@@ -1430,18 +1493,28 @@ impl SqliteSpaceGenerationStore {
         let source_cipher = BlobCipherAdapter::new(Arc::clone(&source_session));
         let target_cipher = BlobCipherAdapter::new(Arc::clone(&target_session));
         let mut rewrapped = Vec::with_capacity(rows.len());
+        let mut preserved = Vec::new();
         for row in rows {
             let event_id = EventId::from_string(row.event_id.clone());
             let representation_id = RepresentationId::from(row.id.clone());
             let associated_data = Aad::from(aad::for_inline(&event_id, &representation_id));
-            let plaintext = source_cipher
+            let plaintext = match source_cipher
                 .decrypt(
                     &ActiveSpace::new(source_space.clone()),
                     &Ciphertext::new(row.inline_data),
                     &associated_data,
                 )
                 .await
-                .map_err(|_| "decrypt source representation".to_owned())?;
+            {
+                Ok(plaintext) => plaintext,
+                Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext)
+                    if preserve_unreadable_history =>
+                {
+                    preserved.push(row.id);
+                    continue;
+                }
+                Err(_) => return Err("decrypt source representation".to_owned()),
+            };
             let ciphertext = target_cipher
                 .encrypt(
                     &ActiveSpace::new(target_space.clone()),
@@ -1453,6 +1526,7 @@ impl SqliteSpaceGenerationStore {
             rewrapped.push((row.id, ciphertext.into_bytes()));
         }
         save_rewrapped_inline_rows(&target_pool, &rewrapped)?;
+        mark_preserved_inline_rows(&target_pool, &preserved)?;
         let derived_records = rewrap_derived_payloads(
             &target_pool,
             &self.profile_salt,
@@ -1467,7 +1541,8 @@ impl SqliteSpaceGenerationStore {
                 Arc::clone(&target_session),
             )
             .await?;
-        verify_rewrapped_inline_rows(&target_pool, target_space, target_session).await?;
+        verify_rewrapped_inline_rows(&target_pool, target_space, target_session, &preserved)
+            .await?;
         drop(target_pool);
         let target_bytes = std::fs::read(&target_path)
             .map_err(|_| "read verified target generation".to_owned())?;
@@ -1476,6 +1551,7 @@ impl SqliteSpaceGenerationStore {
             source_digest: finalized_source.digest,
             target_digest: digest(&target_bytes),
             migrated_records: rewrapped.len() as u64 + derived_records + blob_records,
+            preserved_unreadable_records: preserved.len() as u64,
         })
     }
 
@@ -2009,6 +2085,39 @@ fn load_inline_rows(pool: &DbPool) -> Result<Vec<InlineGenerationRow>, String> {
     .map_err(|_| "load target representations".to_owned())
 }
 
+async fn preflight_source_inline_history(
+    pool: &DbPool,
+    source_space: &SpaceId,
+    source_session: Arc<InMemorySession>,
+    preserve_unreadable_history: bool,
+) -> Result<(), AdmissionSpaceTransitionError> {
+    let rows = load_inline_rows(pool).map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+    let source_cipher = BlobCipherAdapter::new(source_session);
+    for row in rows {
+        let event_id = EventId::from_string(row.event_id);
+        let representation_id = RepresentationId::from(row.id);
+        let associated_data = Aad::from(aad::for_inline(&event_id, &representation_id));
+        match source_cipher
+            .decrypt(
+                &ActiveSpace::new(source_space.clone()),
+                &Ciphertext::new(row.inline_data),
+                &associated_data,
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext)
+                if !preserve_unreadable_history =>
+            {
+                return Err(AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation);
+            }
+            Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext) => {}
+            Err(_) => return Err(AdmissionSpaceTransitionError::Storage),
+        }
+    }
+    Ok(())
+}
+
 fn save_rewrapped_inline_rows(pool: &DbPool, rows: &[(String, Vec<u8>)]) -> Result<(), String> {
     let mut connection = pool
         .get()
@@ -2028,13 +2137,38 @@ fn save_rewrapped_inline_rows(pool: &DbPool, rows: &[(String, Vec<u8>)]) -> Resu
         .map_err(|_| "save target representations".to_owned())
 }
 
+fn mark_preserved_inline_rows(pool: &DbPool, ids: &[String]) -> Result<(), String> {
+    let mut connection = pool
+        .get()
+        .map_err(|_| "open target database for preservation".to_owned())?;
+    connection
+        .transaction::<_, diesel::result::Error, _>(|connection| {
+            for id in ids {
+                diesel::sql_query(
+                    "UPDATE clipboard_snapshot_representation \
+                     SET payload_state = 'Lost', \
+                         last_error = 'unreadable encrypted payload preserved during space switch' \
+                     WHERE id = ?",
+                )
+                .bind::<diesel::sql_types::Text, _>(id)
+                .execute(connection)?;
+            }
+            Ok(())
+        })
+        .map_err(|_| "mark preserved target representations".to_owned())
+}
+
 async fn verify_rewrapped_inline_rows(
     pool: &DbPool,
     target_space: &SpaceId,
     target_session: Arc<InMemorySession>,
+    preserved_ids: &[String],
 ) -> Result<(), String> {
     let cipher = BlobCipherAdapter::new(target_session);
     for row in load_inline_rows(pool)? {
+        if preserved_ids.contains(&row.id) {
+            continue;
+        }
         let event_id = EventId::from_string(row.event_id);
         let representation_id = RepresentationId::from(row.id);
         cipher
@@ -2152,8 +2286,8 @@ mod tests {
         AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionResultV2,
         AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionV2,
         BaseMembershipHistoryPositionV1, ContentKeyPurpose, CrossSpaceTransitionPhaseV2,
-        MembershipCredential, RevocationRepositoryPort, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-        ED25519_SIGNATURE_ALGORITHM_V1,
+        MembershipCredential, PendingGroupUpdate, RevocationRepositoryPort,
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::ports::security::current_profile::CurrentProfilePort;
     use uc_core::ports::security::BlobCipherPort;
@@ -2417,6 +2551,10 @@ mod tests {
             Arc::clone(&access),
             Arc::clone(&session),
         );
+        let relayed_update = PendingGroupUpdate::persistent(
+            DeviceId::new("target-peer"),
+            b"sealed-existing-member-update".to_vec(),
+        );
         let input = AdmissionSpaceTransitionPreparationV2 {
             attempt_id: AdmissionAttemptId::from_bytes([0x72; 32]),
             target_space_id: target_space.as_ref().to_owned(),
@@ -2427,7 +2565,9 @@ mod tests {
             target_key_catalog: test_content_key_catalog().encode().unwrap(),
             local_device_id: DeviceId::new("target-local"),
             target_relationships: test_relationships(),
+            relayed_group_updates: vec![relayed_update.clone()],
             target_access_state: target_access.into_bytes(),
+            preserve_unreadable_history: false,
         };
         let mut transition = transitioner.prepare_if_needed(&input).await.unwrap();
         let AdmissionSpaceTransitionV2::CrossSpace(cross_space) = &transition else {
@@ -2483,6 +2623,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(material.state().epoch().value(), 1);
+        assert_eq!(material.pending_group_updates(), &[relayed_update]);
         assert_eq!(
             material.state().current_content_key_id().as_str(),
             "target-content-key"
@@ -2632,7 +2773,9 @@ mod tests {
             target_key_catalog: test_content_key_catalog().encode().unwrap(),
             local_device_id: DeviceId::new("target-local"),
             target_relationships: test_relationships(),
+            relayed_group_updates: Vec::new(),
             target_access_state: target_access.into_bytes(),
+            preserve_unreadable_history: false,
         };
 
         let mut transition = transitioner.prepare_if_needed(&input).await.unwrap();
@@ -2795,7 +2938,9 @@ mod tests {
             target_key_catalog: same_space_catalog.encode().unwrap(),
             local_device_id: DeviceId::new("target-local"),
             target_relationships: test_relationships(),
+            relayed_group_updates: Vec::new(),
             target_access_state: target_access.into_bytes(),
+            preserve_unreadable_history: false,
         };
 
         let mut transition = transitioner.prepare_if_needed(&input).await.unwrap();
@@ -2847,6 +2992,110 @@ mod tests {
         assert_eq!(
             manifest_store.load().await.unwrap().unwrap().space_id,
             "same-space"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_history_preflight_requires_confirmation_before_transition_preparation() {
+        let directory = tempdir().unwrap();
+        let source_path = directory.path().join("source.sqlite");
+        let pool = init_db_pool(source_path.to_str().unwrap()).unwrap();
+        let source_space = SpaceId::from_str("source-space");
+        let source_session = session(&source_space, 0x50);
+        let event_id = EventId::from_string("unreadable-preflight-event".to_owned());
+        let representation_id = RepresentationId::from("unreadable-preflight-representation");
+        insert_inline(
+            &mut pool.get().unwrap(),
+            &event_id,
+            &representation_id,
+            b"invalid-source-ciphertext",
+        );
+
+        assert!(matches!(
+            super::preflight_source_inline_history(
+                &pool,
+                &source_space,
+                Arc::clone(&source_session),
+                false,
+            )
+            .await,
+            Err(
+                uc_core::membership::AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation
+            )
+        ));
+        super::preflight_source_inline_history(&pool, &source_space, source_session, true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn confirmed_unreadable_history_is_preserved_and_counted_during_rewrap() {
+        #[derive(diesel::QueryableByName)]
+        struct PreservedRow {
+            #[diesel(sql_type = diesel::sql_types::Binary)]
+            inline_data: Vec<u8>,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            payload_state: String,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            last_error: Option<String>,
+        }
+
+        let directory = tempdir().unwrap();
+        let source_path = directory.path().join("source.sqlite");
+        let pool = init_db_pool(source_path.to_str().unwrap()).unwrap();
+        let source_space = SpaceId::from_str("source-space");
+        let target_space = SpaceId::from_str("target-space");
+        let source_session = session(&source_space, 0x51);
+        let target_session = session(&target_space, 0x52);
+        let event_id = EventId::from_string("unreadable-event".to_owned());
+        let representation_id = RepresentationId::from("unreadable-representation");
+        let unreadable_ciphertext = b"preserved-unreadable-ciphertext".to_vec();
+        insert_inline(
+            &mut pool.get().unwrap(),
+            &event_id,
+            &representation_id,
+            &unreadable_ciphertext,
+        );
+        let store = SqliteSpaceGenerationStore::new(
+            pool,
+            directory.path().join("source-blobs"),
+            directory.path().join("generations"),
+            b"default".to_vec(),
+        );
+        let prepared = store.prepare_source([0x53; 32], [0x54; 16]).unwrap();
+        let finalized_source = store
+            .finalize_source(prepared, &target_space, [0x55; 16])
+            .unwrap();
+
+        let finalized = store
+            .rewrap_finalized_source(
+                finalized_source,
+                &source_space,
+                source_session,
+                &target_space,
+                target_session,
+                [0x55; 16],
+                true,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(finalized.migrated_records, 0);
+        assert_eq!(finalized.preserved_unreadable_records, 1);
+        let row = diesel::sql_query(
+            "SELECT inline_data, payload_state, last_error \
+             FROM clipboard_snapshot_representation WHERE id = ?",
+        )
+        .bind::<diesel::sql_types::Text, _>(representation_id.as_ref())
+        .get_result::<PreservedRow>(
+            &mut SqliteConnection::establish(finalized.database_path.to_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(row.inline_data, unreadable_ciphertext);
+        assert_eq!(row.payload_state, "Lost");
+        assert_eq!(
+            row.last_error.as_deref(),
+            Some("unreadable encrypted payload preserved during space switch")
         );
     }
 

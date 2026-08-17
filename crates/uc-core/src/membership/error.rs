@@ -90,6 +90,8 @@ pub enum AdmissionSecurityTransitionError {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum AdmissionSpaceTransitionError {
+    #[error("unreadable history requires explicit confirmation")]
+    UnreadableHistoryRequiresConfirmation,
     #[error("profile is locked")]
     Locked,
     #[error("space transition is unavailable")]

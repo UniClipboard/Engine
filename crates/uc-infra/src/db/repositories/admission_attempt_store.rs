@@ -296,6 +296,7 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
             || attempt.target_protection_group_id.is_none()
             || attempt.target_key_catalog.is_none()
             || attempt.target_relationships.is_none()
+            || attempt.existing_member_security_deliveries.is_none()
             || attempt.staged_security_state.is_none())
     {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
@@ -360,12 +361,30 @@ fn validate_attempt_update(
     {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
+    let access_is_filled_during_joiner_preparation = current.target_access_state.is_none()
+        && next.target_access_state.is_some()
+        && matches!(
+            current.role_state,
+            AdmissionAttemptRoleStateV1::Joiner(uc_core::membership::JoinerAdmissionStateV1 {
+                stage: JoinerAdmissionStageV1::Initiated,
+            })
+        )
+        && matches!(
+            next.role_state,
+            AdmissionAttemptRoleStateV1::Joiner(uc_core::membership::JoinerAdmissionStateV1 {
+                stage: JoinerAdmissionStageV1::Prepared,
+            })
+        );
     let access_is_valid = current.target_access_state == next.target_access_state
+        || access_is_filled_during_joiner_preparation
         || (current_transition.is_some()
             && next_transition.is_none()
             && next.terminal_result == Some(AdmissionTerminalResultV1::Rejected)
             && next.target_access_state.is_none());
     if !access_is_valid {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    if current.identity_binding.is_some() && current.identity_binding != next.identity_binding {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
     Ok(())
@@ -377,7 +396,7 @@ fn validate_terminal_delivery_update(
 ) -> Result<(), AdmissionAttemptRepositoryError> {
     if next.cleanup_pending != current.cleanup_pending
         || !next.inbox_dedup.starts_with(&current.inbox_dedup)
-        || next.outboxes.len() != current.outboxes.len()
+        || next.outboxes.len() < current.outboxes.len()
     {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
@@ -400,6 +419,24 @@ fn validate_terminal_delivery_update(
                 || current.predecessor_message_id != next.predecessor_message_id
                 || current.payload != next.payload
                 || (current.superseded && !next.superseded)
+        })
+    {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    let complete_id = current
+        .outboxes
+        .iter()
+        .find(|message| message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::Complete)
+        .map(|message| message.message_id);
+    let appended = &next.outboxes[current.outboxes.len()..];
+    if (!appended.is_empty() && complete_id.is_none())
+        || appended.iter().any(|message| {
+            !matches!(
+                message.purpose,
+                uc_core::membership::AdmissionOutboxPurposeV1::ExistingMemberSecurityUpdate
+                    | uc_core::membership::AdmissionOutboxPurposeV1::HistoryOrReceiptBatch
+            ) || message.predecessor_message_id != complete_id
+                || message.superseded
         })
     {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
@@ -680,6 +717,43 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
             .map_err(executor_error)
     }
 
+    async fn compare_and_replace_membership_history_v2(
+        &self,
+        expected_membership_history_v2: Option<&[u8]>,
+        membership_history_v2: &[u8],
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        if membership_history_v2.is_empty() {
+            return Err(AdmissionAttemptRepositoryError::Corrupt);
+        }
+        let expected_membership_history_v2 = expected_membership_history_v2.map(ToOwned::to_owned);
+        let membership_history_v2 = membership_history_v2.to_vec();
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_on(conn)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    if state.membership_history_v2.as_deref()
+                        != expected_membership_history_v2.as_deref()
+                    {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::VersionConflict
+                        ));
+                    }
+                    state.membership_history_v2 = Some(membership_history_v2);
+                    state.metadata.device_trust_revision = state
+                        .metadata
+                        .device_trust_revision
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    self.save_state_on(conn, &state)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    Ok(state.metadata)
+                })
+            })
+            .map_err(executor_error)
+    }
+
     async fn load_membership_history_v2(
         &self,
     ) -> Result<Option<Vec<u8>>, AdmissionAttemptRepositoryError> {
@@ -740,10 +814,12 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                     let terminal_result = attempt
                         .terminal_result
                         .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
-                    let identity_binding = attempt
-                        .identity_binding
-                        .clone()
-                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    let identity_binding = attempt.identity_binding.clone();
+                    if terminal_result != AdmissionTerminalResultV1::Rejected
+                        && identity_binding.is_none()
+                    {
+                        return Err(anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt));
+                    }
                     if attempt.outboxes.iter().any(|message| !message.superseded)
                         || attempt.write_ahead_recovery.is_some()
                         || attempt.cleanup_pending
@@ -962,6 +1038,7 @@ mod tests {
             final_manifest_digest: finalized.then_some([0xb4; 32]),
             migrated_records: 3,
             preserved_unreadable_records: 1,
+            preserve_unreadable_history: true,
         }
     }
 
@@ -984,6 +1061,7 @@ mod tests {
         attempt.target_protection_group_id = Some("target-protection-group".to_owned());
         attempt.target_key_catalog = Some(b"target-key-catalog".to_vec());
         attempt.target_relationships = Some(Vec::new());
+        attempt.existing_member_security_deliveries = Some(Vec::new());
         attempt.staged_security_state = Some(b"staged-security".to_vec());
         attempt.base_membership_history = Some(b"base-history".to_vec());
         attempt.verified_membership_history = Some(b"verified-history".to_vec());
@@ -1033,6 +1111,35 @@ mod tests {
         replaced_access.record_version += 1;
         replaced_access.target_access_state = Some(b"other-target-access".to_vec());
         assert!(super::validate_attempt_update(&current, &replaced_access).is_err());
+    }
+
+    #[test]
+    fn joiner_target_access_is_filled_once_and_then_immutable() {
+        let attempt_id = AdmissionAttemptId::from_bytes([0xc0; 32]);
+        let mut initiated = AdmissionAttemptV1::new_joiner(
+            attempt_id,
+            [0xc1; 16],
+            JoinerAdmissionStageV1::Initiated,
+        );
+        initiated.local_join_ordinal = Some(0);
+        initiated.candidate_key_package = Some(b"key-package".to_vec());
+
+        let mut prepared = prepared_joiner(attempt_id);
+        prepared.record_version = 1;
+        prepared.join_id = initiated.join_id;
+        prepared.local_join_ordinal = initiated.local_join_ordinal;
+        prepared.candidate_key_package = initiated.candidate_key_package.clone();
+
+        assert!(super::validate_attempt_update(&initiated, &prepared).is_ok());
+
+        let mut replay = prepared.clone();
+        replay.record_version += 1;
+        assert!(super::validate_attempt_update(&prepared, &replay).is_ok());
+
+        let mut replaced = replay.clone();
+        replaced.record_version += 1;
+        replaced.target_access_state = Some(b"different-target-access".to_vec());
+        assert!(super::validate_attempt_update(&replay, &replaced).is_err());
     }
 
     #[test]
@@ -1102,6 +1209,7 @@ mod tests {
         prepared.target_protection_group_id = Some("target-protection-group-private".to_owned());
         prepared.target_key_catalog = Some(b"target-key-catalog-private".to_vec());
         prepared.target_relationships = Some(Vec::new());
+        prepared.existing_member_security_deliveries = Some(Vec::new());
         prepared.staged_security_state = Some(b"staged-mls-private-state".to_vec());
         prepared.base_membership_history = Some(b"base-history-private".to_vec());
         prepared.verified_membership_history = Some(b"verified-history-private".to_vec());
@@ -1289,12 +1397,12 @@ mod tests {
         rejected.rejection_reason =
             Some(uc_core::membership::AdmissionRejectionReasonV1::Cancelled);
         rejected.cancel_outcome = Some(b"cancelled-before-commit".to_vec());
-        rejected.identity_binding = Some(b"joiner-and-sponsor-binding".to_vec());
         store
             .compare_and_advance(attempt_id, 0, &rejected)
             .await
             .unwrap();
         let terminal = store.compact_terminal(attempt_id, 1).await.unwrap();
+        assert!(terminal.identity_binding.is_none());
         assert!(store.load(attempt_id).await.unwrap().is_none());
         assert_eq!(
             store.load_terminal(attempt_id).await.unwrap(),

@@ -5,8 +5,7 @@ use crate::facade::settings::{GeneralSettingsPatch, SettingsFacade, SettingsPatc
 use crate::facade::space_setup::{
     CancelInvitationError, IssuePairingInvitationError, IssuePairingInvitationResult,
     PairingInvitationAddressCandidate, RedeemPairingInvitationError, RedeemPairingInvitationInput,
-    RedeemPairingInvitationResult, SpaceFacade, SwitchSpaceError, SwitchSpaceInput,
-    SwitchSpaceResult, UnreadableHistoryPolicy,
+    RedeemPairingInvitationResult, SpaceFacade,
 };
 
 pub struct JoinSpaceInput {
@@ -16,10 +15,7 @@ pub struct JoinSpaceInput {
     pub preserve_unreadable_history: bool,
 }
 
-pub enum JoinSpaceResult {
-    Fresh(RedeemPairingInvitationResult),
-    Switched(SwitchSpaceResult),
-}
+pub type JoinSpaceResult = RedeemPairingInvitationResult;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JoinSpaceError {
@@ -27,58 +23,18 @@ pub enum JoinSpaceError {
     DeviceNameRequired,
     #[error("failed to save device name: {0}")]
     Settings(String),
-    #[error("failed to query setup state: {0}")]
-    Setup(String),
     #[error(transparent)]
-    Fresh(#[from] RedeemPairingInvitationError),
-    #[error(transparent)]
-    Switch(#[from] SwitchSpaceError),
-    #[error("failed to restore space activities: {0}")]
-    Activity(String),
-}
-
-pub(crate) struct SpaceTransitionCoordinator {
-    setup: Arc<SpaceFacade>,
-}
-
-impl SpaceTransitionCoordinator {
-    fn new(setup: Arc<SpaceFacade>) -> Self {
-        Self { setup }
-    }
-
-    async fn switch_space(
-        &self,
-        invitation_code: String,
-        passphrase: String,
-        preserve_unreadable_history: bool,
-    ) -> Result<SwitchSpaceResult, SwitchSpaceError> {
-        self.setup
-            .switch_space(SwitchSpaceInput {
-                code: invitation_code,
-                new_passphrase: passphrase,
-                unreadable_history_policy: if preserve_unreadable_history {
-                    UnreadableHistoryPolicy::PreserveAndContinue
-                } else {
-                    UnreadableHistoryPolicy::Reject
-                },
-            })
-            .await
-    }
+    Admission(#[from] RedeemPairingInvitationError),
 }
 
 pub(crate) struct SpaceAdmissionCoordinator {
     setup: Arc<SpaceFacade>,
     settings: Arc<SettingsFacade>,
-    transition: SpaceTransitionCoordinator,
 }
 
 impl SpaceAdmissionCoordinator {
     pub(crate) fn new(setup: Arc<SpaceFacade>, settings: Arc<SettingsFacade>) -> Self {
-        Self {
-            transition: SpaceTransitionCoordinator::new(Arc::clone(&setup)),
-            setup,
-            settings,
-        }
+        Self { setup, settings }
     }
 
     pub(crate) async fn join_space(
@@ -89,32 +45,14 @@ impl SpaceAdmissionCoordinator {
             self.save_device_name(device_name).await?;
         }
 
-        let setup = self
-            .setup
-            .query_setup_state()
-            .await
-            .map_err(|error| JoinSpaceError::Setup(error.to_string()))?;
-        if setup.has_completed {
-            return self
-                .transition
-                .switch_space(
-                    input.invitation_code,
-                    input.passphrase,
-                    input.preserve_unreadable_history,
-                )
-                .await
-                .map(JoinSpaceResult::Switched)
-                .map_err(JoinSpaceError::Switch);
-        }
-
         self.setup
             .redeem_pairing_invitation(RedeemPairingInvitationInput {
                 code: input.invitation_code,
                 passphrase: input.passphrase,
+                preserve_unreadable_history: input.preserve_unreadable_history,
             })
             .await
-            .map(JoinSpaceResult::Fresh)
-            .map_err(JoinSpaceError::Fresh)
+            .map_err(JoinSpaceError::Admission)
     }
 
     pub(crate) async fn issue_invitation(
@@ -147,13 +85,6 @@ impl SpaceAdmissionCoordinator {
 
     pub(crate) async fn cancel_invitation(&self) -> Result<(), CancelInvitationError> {
         self.setup.cancel_invitation().await
-    }
-
-    pub(crate) async fn switch_space(
-        &self,
-        input: SwitchSpaceInput,
-    ) -> Result<SwitchSpaceResult, SwitchSpaceError> {
-        self.setup.switch_space(input).await
     }
 
     async fn save_device_name(&self, device_name: String) -> Result<(), JoinSpaceError> {

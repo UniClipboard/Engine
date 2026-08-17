@@ -70,7 +70,11 @@ impl SpaceConvergenceAssembly {
         let workspace = WorkspaceConvergence::new(workspace);
         let membership = build_membership_convergence(membership);
         let group_update_delivery: Arc<dyn GroupUpdateDeliveryPort> = Arc::new(
-            GroupUpdateDelivery::new(group_revocation, group_update_dispatch),
+            GroupUpdateDelivery::new(
+                group_revocation,
+                group_update_dispatch,
+                Arc::clone(&workspace) as Arc<dyn crate::space::convergence::group_update_delivery::GroupUpdateRecipientPreparationPort>,
+            ),
         );
         membership.install_group_update_delivery(Arc::clone(&group_update_delivery));
         let legacy_upgrade = Arc::new(
@@ -97,6 +101,10 @@ impl SpaceConvergenceAssembly {
 
     pub fn current_peer_scope(&self) -> Arc<dyn CurrentWorkspacePeerScopePort> {
         Arc::clone(&self.workspace) as Arc<dyn CurrentWorkspacePeerScopePort>
+    }
+
+    pub fn workspace_convergence(&self) -> Arc<crate::space::convergence::WorkspaceConvergence> {
+        Arc::clone(&self.workspace)
     }
 
     /// Membership attestation endpoint installed on the shared node.

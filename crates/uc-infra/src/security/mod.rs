@@ -23,6 +23,7 @@ mod membership_security_update_adapter;
 pub(crate) mod mls_group;
 mod peer_admission_adapter;
 mod profile_lifecycle;
+mod profile_reset;
 mod scope_identifier;
 mod secrets;
 mod session;
@@ -64,6 +65,7 @@ pub use peer_admission_adapter::MlsPeerAdmissionAdapter;
 pub use profile_lifecycle::{
     FactoryResetPhaseV1, ProfileLifecycleError, ProfileLifecycleManager, ProfileLifecycleMarkerV1,
 };
+pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
 pub(crate) use secrets::MasterKey;
 pub use session::InMemorySession;
 pub use space_access_adapter::DefaultSpaceAccessAdapter;

@@ -1,27 +1,18 @@
 //! B2 · `RedeemPairingInvitationUseCase` (joiner side).
 //!
 //! Internal communication half of workspace admission (ADR-017): delegates
-//! wire + crypto to [`JoinerHandshakeCoordinator`], then hands every save
-//! boundary to the workspace owner:
-//!
-//! 1. the joiner's local readiness facts are saved by the owner
-//!    (`record_local_readiness`) before the readiness reply is sent;
-//! 2. the sponsor's saved member-history reply is recorded by
-//!    the owner (`record_admission_saved`) once received, together with
-//!    the sponsor's member facts.
+//! wire + crypto to [`JoinerHandshakeCoordinator`]. Every durable admission
+//! boundary is owned and saved by workspace convergence before its message is
+//! sent.
 //!
 //! ## Ordering: owner saves before declaring success
 //!
-//! Mirrors sponsor-side ADR-017 cleanup: `record_local_readiness` →
-//! `setup_status.set_status(completed)` land **before** the readiness
-//! reply, and `record_admission_saved` lands before `execute` returns
-//! `Ok`. The caller never gets a success result that isn't backed by fully
-//! committed local state. Join success is not the result of the pairing
-//! handshake: it is the fact that the workspace has saved the member
-//! change, which the joiner only learns from the admission-saved
-//! confirmation.
+//! The caller never gets a result that is not backed by the saved workspace
+//! state. Active joins mark setup complete and resume the target session;
+//! Cross-Space joins remain Pending until the Engine drains the source
+//! session and resumes the saved transition.
 //!
-//! `setup_status` is flipped after the readiness facts landed, because
+//! `setup_status` is flipped only after local activation, because
 //! `has_completed=true` is the marker `UnlockSpaceUseCase` keys off on the
 //! next launch.
 //!
@@ -45,7 +36,6 @@ use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::facade::space_setup::commands::RedeemPairingInvitationCommand;
 use crate::facade::space_setup::{RedeemPairingInvitationError, RedeemPairingInvitationResult};
-use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::admission::joiner::joiner_handshake::{
     JoinerHandshakeCoordinator, JoinerHandshakeOutcome,
 };
@@ -60,9 +50,6 @@ pub(crate) struct RedeemPairingInvitationUseCase {
     /// All calls are fire-and-forget; the gate inside the facade
     /// implementation keeps them off the hot path.
     analytics: Arc<dyn AnalyticsFacade>,
-    /// The workspace owner behind the admission seam. Never `None`: the
-    /// assembly layer guarantees the owner always exists.
-    workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
 }
 
 impl RedeemPairingInvitationUseCase {
@@ -71,14 +58,12 @@ impl RedeemPairingInvitationUseCase {
         setup_status: Arc<dyn SetupStatusPort>,
         resume_session: Arc<dyn ResumeSpaceSessionPort>,
         analytics: Arc<dyn AnalyticsFacade>,
-        workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
     ) -> Self {
         Self {
             handshake,
             setup_status,
             resume_session,
             analytics,
-            workspace_convergence,
         }
     }
 
@@ -93,28 +78,37 @@ impl RedeemPairingInvitationUseCase {
             method: PairingMethod::Code,
         });
         let result = async {
-            let mut pending = self.handshake.handshake(&cmd.code, &cmd.passphrase).await?;
-            let channel = pending.outcome().discovery_channel;
-            self.handshake
-                .install_group_join(&mut pending, &cmd.passphrase)
+            let pending = self
+                .handshake
+                .handshake_with_history_policy(
+                    &cmd.code,
+                    &cmd.passphrase,
+                    cmd.preserve_unreadable_history,
+                )
                 .await?;
-            let persisted = match self.persist(pending.outcome().clone()).await {
+            let channel = pending.outcome().discovery_channel;
+            let requires_session_transition = pending.requires_session_transition();
+            let persisted = match self
+                .persist(pending.outcome().clone(), requires_session_transition)
+                .await
+            {
                 Ok(persisted) => persisted,
                 Err(error) => {
                     self.handshake.abort(pending, &error.to_string()).await;
                     return Err(error);
                 }
             };
-            if self
-                .resume_session
-                .try_resume_session(&persisted.space_id)
-                .await
-                .map_err(|error| {
-                    RedeemPairingInvitationError::Internal(format!(
-                        "activate paired space: {error}"
-                    ))
-                })?
-                .is_none()
+            if !requires_session_transition
+                && self
+                    .resume_session
+                    .try_resume_session(&persisted.space_id)
+                    .await
+                    .map_err(|error| {
+                        RedeemPairingInvitationError::Internal(format!(
+                            "activate paired space: {error}"
+                        ))
+                    })?
+                    .is_none()
             {
                 self.handshake
                     .abort(pending, "paired space could not be activated")
@@ -123,38 +117,6 @@ impl RedeemPairingInvitationUseCase {
                     "activate paired space: persisted session was unavailable".into(),
                 ));
             }
-            // The joiner's local readiness facts (own member instance and
-            // readiness record) are saved by the owner before the readiness
-            // reply leaves this device. The member instance is the one
-            // derived from this admission's fresh credential so a rejoining
-            // device is never identified by a stale instance.
-            let admission = self
-                .workspace_convergence
-                .local_admission_facts(pending.outcome().member_instance)
-                .await
-                .map_err(|error| {
-                    RedeemPairingInvitationError::Internal(format!(
-                        "prepare workspace admission: {error}"
-                    ))
-                })?;
-            self.workspace_convergence
-                .record_local_readiness(admission.member_instance)
-                .await
-                .map_err(|error| {
-                    RedeemPairingInvitationError::Internal(format!("save local readiness: {error}"))
-                })?;
-            let committed = self.handshake.complete(pending, admission).await?;
-            // The sponsor saved the admission history; the joiner records
-            // the sponsor's member facts with the owner before reporting
-            // success.
-            self.workspace_convergence
-                .record_admission_saved(committed.facts)
-                .await
-                .map_err(|error| {
-                    RedeemPairingInvitationError::Internal(format!(
-                        "record admission saved: {error}"
-                    ))
-                })?;
             Ok((persisted, channel))
         }
         .await;
@@ -174,22 +136,25 @@ impl RedeemPairingInvitationUseCase {
     async fn persist(
         &self,
         outcome: JoinerHandshakeOutcome,
+        requires_session_transition: bool,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
-        // Mark setup complete (ordering rationale: see module doc).
-        self.setup_status
-            .set_status(&SetupStatus {
-                has_completed: true,
-                space_id: Some(outcome.space_id.clone()),
-            })
-            .await
-            .map_err(|e| {
-                RedeemPairingInvitationError::Internal(format!("setup_status.set_status: {e}"))
-            })?;
+        if !requires_session_transition {
+            self.setup_status
+                .set_status(&SetupStatus {
+                    has_completed: true,
+                    space_id: Some(outcome.space_id.clone()),
+                })
+                .await
+                .map_err(|e| {
+                    RedeemPairingInvitationError::Internal(format!("setup_status.set_status: {e}"))
+                })?;
+        }
 
         info!(
             sponsor_device_id = %outcome.sponsor_device_id.as_str(),
             space_id = %outcome.space_id,
-            "joiner local setup complete; space ready"
+            requires_session_transition,
+            "joiner admission result persisted"
         );
 
         Ok(RedeemPairingInvitationResult {
@@ -233,11 +198,17 @@ fn map_redeem_error_to_pairing_failure_reason(
         RedeemPairingInvitationError::DeviceNameRequired => {
             PairingFailureReason::DeviceNameRequired
         }
+        RedeemPairingInvitationError::UnreadableHistoryRequiresConfirmation => {
+            PairingFailureReason::Internal
+        }
         RedeemPairingInvitationError::SponsorRejectedInvitation => {
             PairingFailureReason::SponsorRejectedInvitation
         }
         RedeemPairingInvitationError::SponsorAdmissionUnavailable => {
             PairingFailureReason::SponsorInternal
+        }
+        RedeemPairingInvitationError::SponsorAdmissionConflict => {
+            PairingFailureReason::SponsorAdmissionConflict
         }
         RedeemPairingInvitationError::SponsorDeclined => PairingFailureReason::SponsorDeclined,
         RedeemPairingInvitationError::SponsorTimedOut => PairingFailureReason::SponsorTimedOut,
@@ -268,13 +239,11 @@ mod tests {
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
     use uc_core::membership::{
-        AdmissionChangeFacts, AdmissionSavedFacts, MemberInstanceId, MembershipAdmissionDecision,
-        WorkspacePhase, WorkspaceSnapshot,
+        AdmissionChangeFacts, MemberInstanceId, MembershipAdmissionDecision,
     };
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::session_message::{
         PairingReject, PairingRejectReason, PairingSessionMessage, SponsorAdmissionOffer,
-        SponsorAdmissionSaved, SponsorConfirm,
     };
     use uc_core::ports::pairing::{
         DialError, DialOutcome, DiscoveryChannel, PairingSessionId, PairingSessionPort,
@@ -295,6 +264,7 @@ mod tests {
         SpaceAccessProofArtifact,
     };
 
+    use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
     use crate::space::convergence::WorkspaceConvergenceError;
 
     // ── wire fakes (produce a happy-path outcome) ─────────────────────────
@@ -308,19 +278,25 @@ mod tests {
     impl HappySession {
         fn primed() -> Self {
             let me = Self::default();
-            me.push_offer_and_confirm();
+            me.push_offer_and_candidate();
             me.recv
                 .lock()
                 .unwrap()
-                .push_back(PairingSessionMessage::AdmissionSaved(
-                    SponsorAdmissionSaved {
-                        facts: saved_facts(),
-                    },
-                ));
+                .push_back(PairingSessionMessage::DurableAdmission(durable_frame(
+                    uc_core::pairing::DurableAdmissionMessageKind::Commit,
+                    Vec::new(),
+                )));
+            me.recv
+                .lock()
+                .unwrap()
+                .push_back(PairingSessionMessage::DurableAdmission(durable_frame(
+                    uc_core::pairing::DurableAdmissionMessageKind::Complete,
+                    Vec::new(),
+                )));
             me
         }
 
-        fn push_offer_and_confirm(&self) {
+        fn push_offer_and_candidate(&self) {
             self.recv
                 .lock()
                 .unwrap()
@@ -335,18 +311,7 @@ mod tests {
             self.recv
                 .lock()
                 .unwrap()
-                .push_back(PairingSessionMessage::Confirm(SponsorConfirm {
-                    space_id: SpaceId::from_str("space-xyz"),
-                    sender_device_id: DeviceId::new("sponsor-device"),
-                    sender_device_name: "sponsor's laptop".into(),
-                    sender_identity_fingerprint: sponsor_fp(),
-                    transport_address_blob: Vec::new(),
-                    sponsor_space_person_id: None,
-                    welcome: vec![1],
-                    encrypted_key_catalog: vec![2],
-                    group_epoch: 2,
-                    membership_history_event_count: 0,
-                }));
+                .push_back(PairingSessionMessage::DurableAdmission(candidate_frame()));
         }
     }
     #[async_trait]
@@ -374,6 +339,10 @@ mod tests {
         async fn close(&self, _: &PairingSessionId, _: Option<String>) {
             *self.closed.lock().unwrap() += 1;
         }
+
+        async fn local_transport_public_key(&self) -> Option<Vec<u8>> {
+            Some(vec![5; 32])
+        }
     }
 
     mockall::mock! {
@@ -389,6 +358,14 @@ mod tests {
                 pairing_session_id: &SessionId,
             ) -> Result<ProofDerivedKey, SpaceAccessError>;
         }
+        #[async_trait]
+        impl uc_core::ports::space::PrepareAdmissionTargetAccessPort for SpaceAccess {
+            async fn prepare_target_access(
+                &self,
+                target_space_id: &SpaceId,
+                passphrase: &Passphrase,
+            ) -> Result<uc_core::space_access::PreparedAdmissionTargetAccess, SpaceAccessError>;
+        }
 
         #[async_trait]
         impl GroupAdmissionPort for SpaceAccess {
@@ -396,6 +373,15 @@ mod tests {
                 &self,
                 device_id: &DeviceId,
             ) -> Result<PreparedGroupJoin, SpaceAccessError>;
+            async fn prepared_join_membership_credential(
+                &self,
+                pending: &PreparedGroupJoin,
+            ) -> Result<uc_core::membership::MembershipCredential, SpaceAccessError>;
+            async fn sign_prepared_join_payload(
+                &self,
+                pending: &PreparedGroupJoin,
+                payload: &[u8],
+            ) -> Result<Vec<u8>, SpaceAccessError>;
             async fn admit_group_member(
                 &self,
                 space_id: &SpaceId,
@@ -418,10 +404,23 @@ mod tests {
 
     fn happy_space_access() -> Arc<MockSpaceAccess> {
         let mut mock = MockSpaceAccess::new();
-        mock.expect_prepare_group_join()
-            .returning(|_| Ok(PreparedGroupJoin::new(vec![1, 2, 3], vec![4, 5, 6])));
+        mock.expect_prepare_group_join().returning(|device_id| {
+            Ok(PreparedGroupJoin::new(vec![1, 2, 3], vec![4, 5, 6])
+                .with_member_instance(joiner_credential().member_instance_id(device_id)))
+        });
+        mock.expect_prepared_join_membership_credential()
+            .returning(|_| Ok(joiner_credential()));
+        mock.expect_sign_prepared_join_payload()
+            .returning(|_, _| Ok(vec![6; 64]));
         mock.expect_derive_admission_proof_key()
             .returning(|_, _, _, _| Ok(ProofDerivedKey::from_bytes([0xCC; 32])));
+        mock.expect_prepare_target_access().returning(|_, _| {
+            Ok(
+                uc_core::space_access::PreparedAdmissionTargetAccess::from_bytes(
+                    b"target-access".to_vec(),
+                ),
+            )
+        });
         mock.expect_install_group_join()
             .returning(|_, _, _, _, _, _| Ok(()));
         Arc::new(mock)
@@ -537,12 +536,36 @@ mod tests {
     #[derive(Default)]
     struct RecordingOwner {
         calls: StdMutex<Vec<&'static str>>,
-        fail_readiness: StdMutex<bool>,
-        fail_committed: StdMutex<bool>,
-        committed_facts: StdMutex<Option<AdmissionSavedFacts>>,
+        requires_session_transition: bool,
     }
     #[async_trait]
     impl WorkspaceAdmissionOwnerPort for RecordingOwner {
+        async fn prepare_local_join_before_network(
+            &self,
+            preparation: &(dyn GroupAdmissionPort + Send + Sync),
+            local_device_id: &DeviceId,
+            _sponsor: &[u8],
+            _stable_request_binding: &[u8],
+            _preserve_unreadable_history: bool,
+        ) -> Result<
+            crate::space::admission::adapter::DurableLocalJoinPreparation,
+            WorkspaceConvergenceError,
+        > {
+            let prepared_group_join = preparation
+                .prepare_group_join(local_device_id)
+                .await
+                .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
+            Ok(
+                crate::space::admission::adapter::DurableLocalJoinPreparation {
+                    attempt_id: [0x31; 32],
+                    join_id: [0x32; 16],
+                    request_message_id: [0x33; 32],
+                    resume_public_key: vec![0x34; 32],
+                    prepared_group_join,
+                },
+            )
+        }
+
         async fn admission_decision_for_joiner(
             &self,
             _: u64,
@@ -554,103 +577,135 @@ mod tests {
             Ok(())
         }
 
-        async fn begin_admission(
+        async fn prepare_joiner_candidate(
             &self,
-            _: &PairingSessionId,
-            _: &DeviceId,
-            _: u64,
-        ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-            unimplemented!("sponsor-side method not exercised in joiner tests")
+            _frame: &uc_core::pairing::DurableAdmissionFrame,
+            _proof_signer: &(dyn GroupAdmissionPort + Send + Sync),
+            _target_access: &(dyn uc_core::ports::space::PrepareAdmissionTargetAccessPort
+                  + Send
+                  + Sync),
+            _passphrase: &Passphrase,
+        ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+            self.calls.lock().unwrap().push("prepare_joiner_candidate");
+            Ok(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::Prepared,
+                Vec::new(),
+            ))
         }
-        async fn commit_joiner_admission(
+
+        async fn apply_joiner_commit(
             &self,
-            _: &PairingSessionId,
-            _: AdmissionChangeFacts,
-            _security_update_payload: Vec<u8>,
-        ) -> Result<AdmissionSavedFacts, WorkspaceConvergenceError> {
-            unimplemented!("sponsor-side method not exercised in joiner tests")
+            _frame: &uc_core::pairing::DurableAdmissionFrame,
+            _receipt_signer: &(dyn GroupAdmissionPort + Send + Sync),
+        ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+            self.calls.lock().unwrap().push("apply_joiner_commit");
+            Ok(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::Applied,
+                Vec::new(),
+            ))
         }
-        async fn local_admission_facts(
+
+        async fn activate_joiner_complete(
             &self,
-            _member_instance: Option<MemberInstanceId>,
-        ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError> {
-            self.calls.lock().unwrap().push("local_admission_facts");
-            Ok(joiner_facts())
-        }
-        async fn record_local_readiness(
-            &self,
-            own_instance: MemberInstanceId,
-        ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-            self.calls.lock().unwrap().push("record_local_readiness");
-            if *self.fail_readiness.lock().unwrap() {
-                return Err(WorkspaceConvergenceError::Unavailable);
+            _frame: &uc_core::pairing::DurableAdmissionFrame,
+        ) -> Result<
+            crate::space::admission::adapter::DurableJoinerCompletion,
+            WorkspaceConvergenceError,
+        > {
+            self.calls.lock().unwrap().push("activate_joiner_complete");
+            if self.requires_session_transition {
+                Ok(crate::space::admission::adapter::DurableJoinerCompletion::SpaceTransitionRequired)
+            } else {
+                Ok(
+                    crate::space::admission::adapter::DurableJoinerCompletion::Active(
+                        durable_frame(
+                            uc_core::pairing::DurableAdmissionMessageKind::CompleteAck,
+                            Vec::new(),
+                        ),
+                    ),
+                )
             }
-            assert_eq!(own_instance, MemberInstanceId::from_bytes([7; 32]));
-            Ok(snapshot())
-        }
-        async fn record_admission_saved(
-            &self,
-            confirmation: AdmissionSavedFacts,
-        ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-            self.calls.lock().unwrap().push("record_admission_saved");
-            if *self.fail_committed.lock().unwrap() {
-                return Err(WorkspaceConvergenceError::Unavailable);
-            }
-            *self.committed_facts.lock().unwrap() = Some(confirmation);
-            Ok(snapshot())
-        }
-        async fn pending_admission(
-            &self,
-            _session: &uc_core::ports::pairing::PairingSessionId,
-        ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>
-        {
-            Ok(None)
         }
     }
 
-    fn saved_facts() -> AdmissionSavedFacts {
-        AdmissionSavedFacts {
-            history_digest: [0x11; 32],
-            history_event_count: 2,
-            sponsor_facts: AdmissionChangeFacts {
-                member_instance: MemberInstanceId::from_bytes([9; 32]),
-                device_id: DeviceId::new("sponsor-device"),
-                device_name: "sponsor's laptop".into(),
-                identity_fingerprint: sponsor_fp(),
-                transport_public_key: vec![3; 32],
-                transport_address_blob: Vec::new(),
-                identity_signature: vec![4; 64],
+    fn durable_frame(
+        kind: uc_core::pairing::DurableAdmissionMessageKind,
+        payload: Vec<u8>,
+    ) -> uc_core::pairing::DurableAdmissionFrame {
+        uc_core::pairing::DurableAdmissionFrame {
+            attempt_id: [0x31; 32],
+            kind,
+            message_id: [kind as u8; 32],
+            predecessor_message_id: Some([0x33; 32]),
+            payload,
+        }
+    }
+
+    fn candidate_frame() -> uc_core::pairing::DurableAdmissionFrame {
+        use uc_core::membership::{
+            MembershipCredential, MembershipEventV2, MembershipOperationV2,
+            ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
+        };
+
+        let sponsor_device = DeviceId::new("sponsor-device");
+        let sponsor_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x81; 32]);
+        let sponsor_member = sponsor_credential.member_instance_id(&sponsor_device);
+        let event = MembershipEventV2::new(
+            MEMBERSHIP_EVENT_FORMAT_V2,
+            "space-xyz".to_owned(),
+            None,
+            0,
+            [0x41; 16],
+            sponsor_member,
+            sponsor_credential.credential_id,
+            sponsor_credential.signature_algorithm_version,
+            MembershipOperationV2::RemoveDevice {
+                member: MemberInstanceId::from_bytes([0x42; 32]),
             },
-        }
-    }
-
-    fn joiner_facts() -> AdmissionChangeFacts {
-        AdmissionChangeFacts {
-            member_instance: MemberInstanceId::from_bytes([7; 32]),
-            device_id: DeviceId::new("joiner-device"),
-            device_name: "joiner-laptop".into(),
-            identity_fingerprint: joiner_fp(),
-            transport_public_key: vec![5; 32],
-            transport_address_blob: Vec::new(),
-            identity_signature: vec![6; 64],
-        }
-    }
-
-    fn snapshot() -> WorkspaceSnapshot {
-        WorkspaceSnapshot {
-            phase: WorkspacePhase::LocallyApplied,
-            revision: 1,
-            history_event_count: 0,
-            effective_member_count: 1,
-            pending_removal_decision_device_ids: Vec::new(),
-            pending_removal_decision_event_id: None,
-            diverged_peer_device_ids: Vec::new(),
-            upgrade_required_peer_device_ids: Vec::new(),
-            convergence_digest: None,
-            removed: false,
-            updated_at_ms: fixed_now_ms(),
-            failure_category: None,
-        }
+            [0x43; 32],
+            [0x44; 32],
+            Vec::new(),
+            None,
+            vec![0x45; 64],
+        );
+        let candidate =
+            crate::space::convergence::admission_transaction::DurableAdmissionCandidateV1 {
+                lineage_id: "space-xyz".to_owned(),
+                base_history_position: Vec::new(),
+                candidate_event: postcard::to_stdvec(&event).unwrap(),
+                candidate_event_id: *event.event_id().as_bytes(),
+                candidate_key_package: vec![1],
+                resume_public_key: vec![2],
+                target_members_digest: [0x43; 32],
+                security_commitment: vec![3],
+                security_commit: vec![4],
+                security_welcome: vec![5],
+                target_protection_group_id: "target-group".to_owned(),
+                target_key_catalog: vec![6],
+                target_relationships: vec![AdmissionChangeFacts {
+                    member_instance: sponsor_member,
+                    device_id: sponsor_device,
+                    device_name: "sponsor's laptop".to_owned(),
+                    identity_fingerprint: sponsor_fp(),
+                    transport_public_key: vec![7],
+                    transport_address_blob: Vec::new(),
+                    identity_signature: vec![8],
+                }],
+                existing_member_deliveries: Vec::new(),
+                staged_security_state: vec![9],
+                identity_binding: vec![10],
+            };
+        let payload = crate::space::convergence::admission_transaction::DurableAdmissionCandidatePayloadV1::new(
+            Vec::new(),
+            candidate,
+        )
+        .encode()
+        .unwrap();
+        durable_frame(
+            uc_core::pairing::DurableAdmissionMessageKind::Candidate,
+            payload,
+        )
     }
 
     // ── fixtures ─────────────────────────────────────────────────────────
@@ -661,13 +716,14 @@ mod tests {
     fn joiner_fp() -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string("AAAAAAAAAAAAAAAA").unwrap()
     }
-    fn fixed_now_ms() -> i64 {
-        1775119200000
+    fn joiner_credential() -> uc_core::membership::MembershipCredential {
+        uc_core::membership::MembershipCredential::new(1, vec![0x72; 32])
     }
     fn cmd(code: &str) -> RedeemPairingInvitationCommand {
         RedeemPairingInvitationCommand {
             code: InvitationCode::new(code),
             passphrase: Passphrase::new("hunter22hunter22"),
+            preserve_unreadable_history: false,
         }
     }
 
@@ -703,11 +759,13 @@ mod tests {
             let handshake = JoinerHandshakeCoordinator::new(
                 session.clone(),
                 space_access.clone(),
+                space_access.clone(),
                 space_access,
                 Arc::new(FixedProof),
                 Arc::new(FixedLocal(joiner_fp())),
                 Arc::new(FixedDevice(DeviceId::new("joiner-device"))),
                 Arc::new(NamedSettings("joiner-laptop".into())),
+                owner.clone() as Arc<dyn WorkspaceAdmissionOwnerPort>,
                 Duration::from_secs(30),
             );
             let analytics = Arc::new(CapturingAnalyticsSink::default());
@@ -723,7 +781,6 @@ mod tests {
                 setup_status.clone(),
                 Arc::new(ReadyResume),
                 facade,
-                owner.clone() as Arc<dyn WorkspaceAdmissionOwnerPort>,
             );
             (
                 uc,
@@ -748,7 +805,7 @@ mod tests {
     // ── tests ────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn happy_path_saves_readiness_before_ready_and_committed_before_return() {
+    async fn active_join_persists_setup_after_durable_completion() {
         let (uc, h) = Harness::happy();
         let out = uc.execute(cmd("CODE-1")).await.unwrap();
         assert_eq!(out.sponsor_device_id.as_str(), "sponsor-device");
@@ -757,34 +814,21 @@ mod tests {
         assert_eq!(out.self_device_id.as_str(), "joiner-device");
         assert_eq!(out.self_identity_fingerprint, joiner_fp());
 
-        // 顺序：本机就绪事实由负责人保存 → 就绪回复发出 → 确认由负责人记录。
         let calls = h.owner.calls.lock().unwrap().clone();
         assert_eq!(
             calls,
             vec![
-                "local_admission_facts",
-                "record_local_readiness",
-                "record_admission_saved",
+                "prepare_joiner_candidate",
+                "apply_joiner_commit",
+                "activate_joiner_complete",
             ]
         );
         let sent = h.session.sent.lock().unwrap().clone();
-        let ready_index = sent
-            .iter()
-            .position(|m| matches!(m, PairingSessionMessage::Ready(_)))
-            .expect("readiness reply must be sent");
-        assert_eq!(
-            calls.iter().position(|c| *c == "record_local_readiness"),
-            Some(0).and(Some(1)),
-            "readiness saved before the reply leaves"
-        );
-        assert!(
-            calls
-                .iter()
-                .position(|c| *c == "record_local_readiness")
-                .unwrap()
-                < ready_index,
-            "record_local_readiness must precede the Ready frame"
-        );
+        assert!(sent.iter().any(|message| matches!(
+            message,
+            PairingSessionMessage::DurableAdmission(frame)
+                if frame.kind == uc_core::pairing::DurableAdmissionMessageKind::CompleteAck
+        )));
         assert_eq!(
             *h.setup_status.set_calls.lock().unwrap(),
             vec![true],
@@ -797,55 +841,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_save_failure_aborts_without_sending_ready() {
-        let owner = Arc::new(RecordingOwner::default());
-        *owner.fail_readiness.lock().unwrap() = true;
+    async fn cross_space_completion_stays_pending_without_changing_setup() {
+        let owner = Arc::new(RecordingOwner {
+            requires_session_transition: true,
+            ..Default::default()
+        });
         let (uc, h) = Harness::build(
             Arc::new(HappySession::primed()),
             owner,
             Arc::new(RecordingSetupStatus::ok()),
         );
-        let err = uc.execute(cmd("X")).await.unwrap_err();
-        match err {
-            RedeemPairingInvitationError::Internal(m) => {
-                assert!(m.contains("save local readiness"), "msg = {m}")
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        let result = uc.execute(cmd("X")).await.unwrap();
+        assert_eq!(result.space_id.inner(), "space-xyz");
+        assert!(h.setup_status.set_calls.lock().unwrap().is_empty());
         let sent = h.session.sent.lock().unwrap().clone();
-        assert!(
-            !sent
-                .iter()
-                .any(|m| matches!(m, PairingSessionMessage::Ready(_))),
-            "no readiness reply after a failed readiness save"
-        );
+        assert!(sent.iter().all(|message| !matches!(
+            message,
+            PairingSessionMessage::DurableAdmission(frame)
+                if frame.kind == uc_core::pairing::DurableAdmissionMessageKind::CompleteAck
+        )));
         let events = h.analytics.snapshot();
-        assert_eq!(events.len(), 2, "expected [PairingStarted, PairingFailed]");
-        assert!(matches!(events[1], Event::PairingFailed { .. }));
+        assert_eq!(events.len(), 1, "pending is not a pairing failure");
     }
 
     #[tokio::test]
-    async fn committed_record_failure_surfaces_internal() {
-        let owner = Arc::new(RecordingOwner::default());
-        *owner.fail_committed.lock().unwrap() = true;
-        let (uc, _h) = Harness::build(
-            Arc::new(HappySession::primed()),
-            owner,
-            Arc::new(RecordingSetupStatus::ok()),
-        );
-        let err = uc.execute(cmd("X")).await.unwrap_err();
-        match err {
-            RedeemPairingInvitationError::Internal(m) => {
-                assert!(m.contains("record admission saved"), "msg = {m}")
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn sponsor_reject_after_ready_surfaces_reject() {
+    async fn sponsor_reject_after_candidate_surfaces_reject() {
         let session = Arc::new(HappySession::default());
-        session.push_offer_and_confirm();
+        session.push_offer_and_candidate();
         session
             .recv
             .lock()
@@ -901,6 +923,7 @@ mod tests {
             (E::CorruptedKeyMaterial, R::CorruptedKeyMaterial),
             (E::DeviceNameRequired, R::DeviceNameRequired),
             (E::SponsorRejectedInvitation, R::SponsorRejectedInvitation),
+            (E::SponsorAdmissionConflict, R::SponsorAdmissionConflict),
             (E::SponsorDeclined, R::SponsorDeclined),
             (E::SponsorTimedOut, R::SponsorTimedOut),
             (E::SponsorInternal("boom".into()), R::SponsorInternal),

@@ -15,9 +15,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use rand::RngCore;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
+use uc_core::ports::security::MigrationRunId;
 use uc_core::ports::security::{KeyMigrationError, KeyMigrationPort};
 use uc_core::ports::SecureStoragePort;
-use uc_core::setup::MigrationRunId;
 
 use super::crypto_model::EncryptedBlob;
 use super::secrets::MasterKey;
@@ -44,7 +44,7 @@ impl DefaultKeyMigrationAdapter {
         }
     }
 
-    fn keyring_name(run_id: &MigrationRunId) -> String {
+    pub(super) fn keyring_name(run_id: &MigrationRunId) -> String {
         format!("{KEYRING_PREFIX}{}", run_id.as_str())
     }
 

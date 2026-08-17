@@ -7085,6 +7085,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dirs",
+ "ed25519-dalek 2.2.0",
  "futures",
  "hex",
  "hmac",
@@ -7093,6 +7094,7 @@ dependencies = [
  "mockall 0.13.1",
  "moka",
  "postcard",
+ "rand 0.9.4",
  "semver",
  "serde",
  "serde_json",
@@ -7158,6 +7160,7 @@ version = "1.1.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "cargo_metadata",
  "chrono",
  "diesel",

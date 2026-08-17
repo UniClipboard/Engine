@@ -20,13 +20,14 @@ mod workspace_convergence;
 pub use active_space_manifest::{ActiveSpaceManifestV2, ACTIVE_SPACE_MANIFEST_FORMAT_V2};
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
 pub use admission_attempt::{
-    AdmissionAttemptId, AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionInboxRecordV1,
+    AdmissionAttemptId, AdmissionAttemptRoleStateV1, AdmissionAttemptV1,
+    AdmissionIdentityBindingError, AdmissionIdentityBindingV1, AdmissionInboxRecordV1,
     AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1, AdmissionProfileMetadataV1,
     AdmissionRejectionReasonV1, AdmissionTerminalResultV1, CompletionHelperAdmissionStageV1,
     CompletionHelperAdmissionStateV1, CurrentLocalJoinProjectionV1, JoinerAdmissionStageV1,
     JoinerAdmissionStateV1, SponsorAdmissionStageV1, SponsorAdmissionStateV1,
-    TerminalAdmissionAttemptV1, ADMISSION_ATTEMPT_FORMAT_V1, ADMISSION_PROFILE_METADATA_FORMAT_V1,
-    TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
+    TerminalAdmissionAttemptV1, ADMISSION_ATTEMPT_FORMAT_V1, ADMISSION_IDENTITY_BINDING_FORMAT_V1,
+    ADMISSION_PROFILE_METADATA_FORMAT_V1, TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
 };
 pub use admission_content_key_catalog::{
     AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1,
@@ -67,13 +68,12 @@ pub use member::SpaceMember;
 pub use member_instance::MemberInstanceId;
 pub use membership_history::{
     MembershipDecision, MembershipDecisionId, MembershipEvent, MembershipEventId,
-    MembershipEventsRequest, MembershipEventsResponse, MembershipHistoryAck,
-    MembershipHistoryError, MembershipHistoryHello, MembershipHistoryMessage,
-    MembershipHistoryProtocolError, MembershipHistoryRelationship, MembershipOperation,
-    MembershipReconciliation, MembershipReconciliationOutcome, PendingRemovalFacts,
-    RemovalDecision, MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE,
+    MembershipHistoryError, MembershipHistoryMessage, MembershipHistoryRelationship,
+    MembershipOperation, MembershipReconciliation, MembershipReconciliationOutcome,
+    PendingRemovalFacts, RemovalDecision, MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE,
 };
 pub use ports::{
+    ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
     AdmissionAttemptRepositoryPort, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1,
     AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
     AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
@@ -89,8 +89,10 @@ pub use ports::{
     MembershipAttestationPort, MembershipCandidateRepositoryPort, MembershipGossipEndpointPort,
     MembershipGossipTransportPort, MembershipHistoryExchangeEndpointPort,
     MembershipHistoryExchangePort, MembershipOutboxRepositoryPort, MembershipSecurityState,
-    MembershipSecurityUpdatePort, RelationshipStateResetPort, RevocationRepositoryPort,
-    SpaceSecurityStateResetPort, SponsorPreparedSecurityTransition, VerifiedPeerPromotionPort,
+    MembershipSecurityUpdatePort, PrepareSponsorAdmissionSecurityPort, RelationshipStateResetPort,
+    RevocationRepositoryPort, SpaceSecurityStateResetPort, SponsorAdmissionSecurityDelivery,
+    SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
+    SponsorPreparedAdmissionSecurity, SponsorPreparedSecurityTransition, VerifiedPeerPromotionPort,
     WorkspaceConvergenceRepositoryPort,
 };
 pub use preferences::MemberSyncPreferences;
@@ -112,18 +114,21 @@ pub use upgrade::{
     LegacyUpgradeResponse, LegacyUpgradeResponseKind, ProtectionGroupAdmission, ProtectionGroupId,
 };
 pub use versioned_membership_history::{
-    AdmissionActivationReceipt, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1,
-    HistoricalMembershipSignatureError, HistoricalMembershipSignatureVerifier,
-    LegacyCheckpointAttestationV2, LegacyPrefixCheckpointV2, MembershipActivationBaselineV2,
-    MembershipActivationReceiptRecord, MembershipActivationReceiptStoreOutcome,
-    MembershipAdmissionV2, MembershipCredential, MembershipCredentialId,
-    MembershipDecisionStoreOutcome, MembershipDecisionV1Evidence, MembershipDecisionV2,
-    MembershipEventV1Evidence, MembershipEventV2, MembershipHistoryV2Error,
-    MembershipHistoryV2ReceiveOutcome, MembershipOperationV2, VersionedMembershipDecision,
-    VersionedMembershipEvent, VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-    ED25519_SIGNATURE_ALGORITHM_V1, LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2,
-    LEGACY_PREFIX_CHECKPOINT_FORMAT_V2, MEMBERSHIP_CREDENTIAL_FORMAT_V1,
-    MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
+    AdmissionActivationReceipt, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,
+    BaseMembershipHistoryPositionV1, HistoricalMembershipSignatureError,
+    HistoricalMembershipSignatureVerifier, LegacyCheckpointAttestationV2, LegacyPrefixCheckpointV2,
+    MembershipActivationBaselineV2, MembershipActivationReceiptRecord,
+    MembershipActivationReceiptStoreOutcome, MembershipAdmissionV2, MembershipCredential,
+    MembershipCredentialId, MembershipDecisionStoreOutcome, MembershipDecisionV1Evidence,
+    MembershipDecisionV2, MembershipEventV1Evidence, MembershipEventV2,
+    MembershipHistoryExchangeV2, MembershipHistoryV2Ack, MembershipHistoryV2Error,
+    MembershipHistoryV2Message, MembershipHistoryV2ReceiveOutcome, MembershipOperationV2,
+    PreparedAdmissionProofV1, VersionedMembershipDecision, VersionedMembershipEvent,
+    VersionedMembershipHistory, ADMISSION_COMPLETION_FORMAT_V1,
+    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+    LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2, LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
+    MEMBERSHIP_CREDENTIAL_FORMAT_V1, MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
+    MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2, PREPARED_ADMISSION_PROOF_FORMAT_V1,
 };
 pub use workspace_convergence::{
     AdmissionChangeFacts, AdmissionSavedFacts, PendingAdmissionRecord,

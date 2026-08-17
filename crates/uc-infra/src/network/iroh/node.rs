@@ -37,8 +37,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
     ContentExchangeGatePort, CurrentMemberSignaturePort, CurrentMembershipIdentityPort,
-    GroupRevocationPort, GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
-    MembershipAttestationEndpointPort, MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
+    CurrentWorkspacePeerScopePort, GroupRevocationPort, GroupUpdateDispatchPort,
+    LegacyUpgradeEndpointPort, MemberRepositoryPort, MembershipAttestationEndpointPort,
+    MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
@@ -966,6 +967,7 @@ impl IrohNodeBuilder {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
+        current_peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         group_revocation: Arc<dyn GroupRevocationPort>,
     ) -> Result<GroupUpdateHandlers, IrohNodeError> {
@@ -974,6 +976,7 @@ impl IrohNodeBuilder {
             peer_addr_repo,
             member_repo,
             peer_admission,
+            current_peer_scope,
             fingerprint_factory,
             group_revocation,
         ));

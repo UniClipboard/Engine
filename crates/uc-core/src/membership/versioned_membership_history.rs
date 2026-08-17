@@ -18,6 +18,9 @@ pub const MEMBERSHIP_DECISION_FORMAT_V2: u16 = 2;
 pub const LEGACY_PREFIX_CHECKPOINT_FORMAT_V2: u16 = 2;
 pub const LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2: u16 = 2;
 pub const ADMISSION_SECURITY_COMMITMENT_FORMAT_V1: u16 = 1;
+pub const PREPARED_ADMISSION_PROOF_FORMAT_V1: u16 = 1;
+pub const ADMISSION_COMPLETION_FORMAT_V1: u16 = 1;
+pub const MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2: u16 = 2;
 const ACTIVATION_RECEIPT_FORMAT_V1: u16 = 1;
 const ACTIVATION_RECEIPT_RECORD_FORMAT_V1: u16 = 1;
 
@@ -55,7 +58,7 @@ impl MembershipCredential {
     }
 
     pub fn member_instance_id(&self, device_id: &DeviceId) -> MemberInstanceId {
-        MemberInstanceId::derive(device_id.as_str(), self.credential_id.as_bytes())
+        MemberInstanceId::derive(device_id.as_str(), &self.public_key)
     }
 
     fn validate(&self) -> Result<(), MembershipHistoryV2Error> {
@@ -405,7 +408,7 @@ pub enum MembershipActivationBaselineV2 {
         lineage_id: String,
         head_event_id: MembershipEventId,
         head_depth: u64,
-        current_member_credentials: Vec<(MemberInstanceId, MembershipCredential)>,
+        current_members: Vec<(AdmissionChangeFacts, MembershipCredential)>,
     },
     LegacyAccepted {
         checkpoint: LegacyPrefixCheckpointV2,
@@ -433,13 +436,19 @@ impl MembershipActivationBaselineV2 {
         }
     }
 
-    fn current_member_credentials(&self) -> &[(MemberInstanceId, MembershipCredential)] {
+    fn current_member_ids(&self) -> BTreeSet<MemberInstanceId> {
         match self {
             Self::FullyVerifiedMigration {
-                current_member_credentials,
-                ..
-            } => current_member_credentials,
-            Self::LegacyAccepted { checkpoint } => &checkpoint.continuing_member_credentials,
+                current_members, ..
+            } => current_members
+                .iter()
+                .map(|(facts, _)| facts.member_instance)
+                .collect(),
+            Self::LegacyAccepted { checkpoint } => checkpoint
+                .continuing_member_credentials
+                .iter()
+                .map(|(member, _)| *member)
+                .collect(),
         }
     }
 }
@@ -622,6 +631,50 @@ impl MembershipEventV2 {
         append_optional_digest(&mut bytes, self.admission_bundle_digest);
         bytes
     }
+
+    /// Stable candidate input shared by sponsor security preparation and
+    /// joiner verification. Security outputs and the final signature are
+    /// deliberately excluded so the commitment can be formed without a
+    /// circular event-id dependency.
+    pub fn admission_candidate_core_digest(
+        &self,
+        attempt_id: [u8; 32],
+        candidate_key_package: &[u8],
+    ) -> Result<[u8; 32], MembershipHistoryV2Error> {
+        let MembershipOperationV2::AddDevice { admission } = &self.operation else {
+            return Err(MembershipHistoryV2Error::InvalidOperation);
+        };
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"uniclipboard/admission-candidate-core/v1\0");
+        bytes.extend_from_slice(&attempt_id);
+        bytes.extend_from_slice(&self.event_format_version.to_be_bytes());
+        append_field(&mut bytes, self.lineage_id.as_bytes());
+        append_optional_event_id(&mut bytes, self.parent_event_id);
+        bytes.extend_from_slice(&self.parent_depth.to_be_bytes());
+        bytes.extend_from_slice(&self.operation_id);
+        bytes.extend_from_slice(self.author_member_instance_id.as_bytes());
+        bytes.extend_from_slice(self.author_credential_id.as_bytes());
+        bytes.extend_from_slice(&self.author_signature_algorithm_version.to_be_bytes());
+        append_field(&mut bytes, &admission.facts.signing_payload());
+        bytes.extend_from_slice(
+            &admission
+                .membership_credential
+                .credential_format_version
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(
+            &admission
+                .membership_credential
+                .signature_algorithm_version
+                .to_be_bytes(),
+        );
+        append_field(&mut bytes, &admission.membership_credential.public_key);
+        bytes.extend_from_slice(admission.membership_credential.credential_id.as_bytes());
+        bytes.extend_from_slice(&admission.resume_public_key_digest);
+        bytes.extend_from_slice(&self.resulting_members_digest);
+        append_field(&mut bytes, candidate_key_package);
+        Ok(Sha256::digest(bytes).into())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -689,6 +742,120 @@ impl MembershipDecisionV2 {
         append_optional_event_id(&mut bytes, self.observed_applied_head);
         bytes.extend_from_slice(&self.resulting_members_digest);
         bytes.extend_from_slice(&self.decision_nonce);
+        bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedAdmissionProofV1 {
+    pub proof_format_version: u16,
+    pub attempt_id: [u8; 32],
+    pub lineage_id: String,
+    pub base_history_position: BaseMembershipHistoryPositionV1,
+    pub candidate_event_id: MembershipEventId,
+    pub target_members_digest: [u8; 32],
+    pub security_commitment_id: [u8; 32],
+    pub joiner_member_instance_id: MemberInstanceId,
+    pub joiner_credential_id: MembershipCredentialId,
+    pub signature: Vec<u8>,
+}
+
+impl PreparedAdmissionProofV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        attempt_id: [u8; 32],
+        lineage_id: String,
+        base_history_position: BaseMembershipHistoryPositionV1,
+        candidate_event_id: MembershipEventId,
+        target_members_digest: [u8; 32],
+        security_commitment_id: [u8; 32],
+        joiner_member_instance_id: MemberInstanceId,
+        joiner_credential_id: MembershipCredentialId,
+        signature: Vec<u8>,
+    ) -> Self {
+        Self {
+            proof_format_version: PREPARED_ADMISSION_PROOF_FORMAT_V1,
+            attempt_id,
+            lineage_id,
+            base_history_position,
+            candidate_event_id,
+            target_members_digest,
+            security_commitment_id,
+            joiner_member_instance_id,
+            joiner_credential_id,
+            signature,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"uniclipboard/prepared-admission-proof/v1\0");
+        bytes.extend_from_slice(&self.proof_format_version.to_be_bytes());
+        bytes.extend_from_slice(&self.attempt_id);
+        append_field(&mut bytes, self.lineage_id.as_bytes());
+        append_optional_event_id(&mut bytes, self.base_history_position.event_id);
+        bytes.extend_from_slice(&self.base_history_position.depth.to_be_bytes());
+        bytes.extend_from_slice(&self.base_history_position.history_digest);
+        bytes.extend_from_slice(self.candidate_event_id.as_bytes());
+        bytes.extend_from_slice(&self.target_members_digest);
+        bytes.extend_from_slice(&self.security_commitment_id);
+        bytes.extend_from_slice(self.joiner_member_instance_id.as_bytes());
+        bytes.extend_from_slice(self.joiner_credential_id.as_bytes());
+        bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionCompletionV1 {
+    pub completion_format_version: u16,
+    pub attempt_id: [u8; 32],
+    pub event_id: MembershipEventId,
+    pub activation_receipt_digest: [u8; 32],
+    pub security_commitment_id: [u8; 32],
+    pub completed_by_member_instance_id: MemberInstanceId,
+    pub completed_by_credential_id: MembershipCredentialId,
+    pub completed_history_position: BaseMembershipHistoryPositionV1,
+    pub signature: Vec<u8>,
+}
+
+impl AdmissionCompletionV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        attempt_id: [u8; 32],
+        event_id: MembershipEventId,
+        activation_receipt_digest: [u8; 32],
+        security_commitment_id: [u8; 32],
+        completed_by_member_instance_id: MemberInstanceId,
+        completed_by_credential_id: MembershipCredentialId,
+        completed_history_position: BaseMembershipHistoryPositionV1,
+        signature: Vec<u8>,
+    ) -> Self {
+        Self {
+            completion_format_version: ADMISSION_COMPLETION_FORMAT_V1,
+            attempt_id,
+            event_id,
+            activation_receipt_digest,
+            security_commitment_id,
+            completed_by_member_instance_id,
+            completed_by_credential_id,
+            completed_history_position,
+            signature,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"uniclipboard/admission-completion/v1\0");
+        bytes.extend_from_slice(&self.completion_format_version.to_be_bytes());
+        bytes.extend_from_slice(&self.attempt_id);
+        bytes.extend_from_slice(self.event_id.as_bytes());
+        bytes.extend_from_slice(&self.activation_receipt_digest);
+        bytes.extend_from_slice(&self.security_commitment_id);
+        bytes.extend_from_slice(self.completed_by_member_instance_id.as_bytes());
+        bytes.extend_from_slice(self.completed_by_credential_id.as_bytes());
+        append_optional_event_id(&mut bytes, self.completed_history_position.event_id);
+        bytes.extend_from_slice(&self.completed_history_position.depth.to_be_bytes());
+        bytes.extend_from_slice(&self.completed_history_position.history_digest);
         bytes
     }
 }
@@ -781,6 +948,38 @@ pub enum MembershipActivationReceiptStoreOutcome {
 pub enum MembershipDecisionStoreOutcome {
     Stored,
     AlreadyKnown,
+}
+
+/// One bounded, self-verifying V2 history image exchanged between already
+/// authenticated workspace members. Transport adapters cannot inspect or
+/// construct the encoded history body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipHistoryExchangeV2 {
+    pub exchange_format_version: u16,
+    pub lineage_id: String,
+    pub position: BaseMembershipHistoryPositionV1,
+    pub sender_admission: AdmissionChangeFacts,
+    encoded_history: Vec<u8>,
+}
+
+impl MembershipHistoryExchangeV2 {
+    pub fn encoded_len(&self) -> usize {
+        self.encoded_history.len()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MembershipHistoryV2Ack {
+    Consistent,
+    UpdatesApplied,
+    Diverged,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MembershipHistoryV2Message {
+    History(MembershipHistoryExchangeV2),
+    Ack(MembershipHistoryV2Ack),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -883,7 +1082,7 @@ enum PersistedActivationBaselineV2 {
         lineage_id: String,
         head_event_id: MembershipEventId,
         head_depth: u64,
-        current_member_credentials: Vec<(MemberInstanceId, MembershipCredential)>,
+        current_members: Vec<(AdmissionChangeFacts, MembershipCredential)>,
     },
     LegacyAccepted(LegacyPrefixCheckpointV2),
 }
@@ -895,12 +1094,12 @@ impl From<MembershipActivationBaselineV2> for PersistedActivationBaselineV2 {
                 lineage_id,
                 head_event_id,
                 head_depth,
-                current_member_credentials,
+                current_members,
             } => Self::FullyVerifiedMigration {
                 lineage_id,
                 head_event_id,
                 head_depth,
-                current_member_credentials,
+                current_members,
             },
             MembershipActivationBaselineV2::LegacyAccepted { checkpoint } => {
                 Self::LegacyAccepted(checkpoint)
@@ -916,12 +1115,12 @@ impl From<PersistedActivationBaselineV2> for MembershipActivationBaselineV2 {
                 lineage_id,
                 head_event_id,
                 head_depth,
-                current_member_credentials,
+                current_members,
             } => Self::FullyVerifiedMigration {
                 lineage_id,
                 head_event_id,
                 head_depth,
-                current_member_credentials,
+                current_members,
             },
             PersistedActivationBaselineV2::LegacyAccepted(checkpoint) => {
                 Self::LegacyAccepted { checkpoint }
@@ -964,6 +1163,152 @@ impl VersionedMembershipHistory {
             .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)
     }
 
+    pub fn export_exchange_v2(
+        &self,
+        sender_admission: AdmissionChangeFacts,
+    ) -> Result<MembershipHistoryExchangeV2, MembershipHistoryV2Error> {
+        let sender_member_instance_id = sender_admission.member_instance;
+        let credential = self
+            .credential_for(sender_member_instance_id)
+            .ok_or(MembershipHistoryV2Error::InvalidCredential)?;
+        if credential.member_instance_id(&sender_admission.device_id) != sender_member_instance_id
+            || (!self.active_members().contains(&sender_member_instance_id)
+                && !self.has_removal_decision_by(sender_member_instance_id))
+        {
+            return Err(MembershipHistoryV2Error::UnauthorizedAuthor);
+        }
+        Ok(MembershipHistoryExchangeV2 {
+            exchange_format_version: MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2,
+            lineage_id: self.lineage_id.clone(),
+            position: self.current_position()?,
+            sender_admission,
+            encoded_history: self.encode_persisted_v2()?,
+        })
+    }
+
+    pub fn export_reconciliation_exchange_v2(
+        &self,
+        sender_admission: AdmissionChangeFacts,
+    ) -> Result<MembershipHistoryExchangeV2, MembershipHistoryV2Error> {
+        let sender_member = sender_admission.member_instance;
+        let mut exchange_history = self.clone();
+        exchange_history
+            .peer_decisions
+            .retain(|_, decision| decision.decided_by_member_instance_id == sender_member);
+        exchange_history.export_exchange_v2(sender_admission)
+    }
+
+    pub fn import_exchange_v2(
+        exchange: &MembershipHistoryExchangeV2,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
+    ) -> Result<Self, MembershipHistoryV2Error> {
+        if exchange.exchange_format_version != MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2 {
+            return Err(MembershipHistoryV2Error::UpgradeRequired);
+        }
+        let history = Self::decode_persisted_v2(&exchange.encoded_history, verifier)?;
+        let sender_member = exchange.sender_admission.member_instance;
+        let sender_credential = history
+            .credential_for(sender_member)
+            .ok_or(MembershipHistoryV2Error::InvalidCredential)?;
+        if history.lineage_id != exchange.lineage_id
+            || history.current_position()? != exchange.position
+            || sender_credential.member_instance_id(&exchange.sender_admission.device_id)
+                != sender_member
+            || (!history.active_members().contains(&sender_member)
+                && !history.has_removal_decision_by(sender_member))
+        {
+            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        }
+        verify_signature(
+            verifier,
+            sender_credential,
+            &exchange.sender_admission.signing_payload(),
+            &exchange.sender_admission.identity_signature,
+        )?;
+        Ok(history)
+    }
+
+    pub fn encoded_exchange_history(
+        exchange: &MembershipHistoryExchangeV2,
+    ) -> Result<&[u8], MembershipHistoryV2Error> {
+        if exchange.exchange_format_version != MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2 {
+            return Err(MembershipHistoryV2Error::UpgradeRequired);
+        }
+        Ok(&exchange.encoded_history)
+    }
+
+    pub fn is_complete_extension_of(&self, previous: &Self) -> bool {
+        if self.lineage_id != previous.lineage_id
+            || self.activation_baseline != previous.activation_baseline
+            || !previous
+                .events
+                .iter()
+                .all(|(id, event)| self.events.get(id) == Some(event))
+            || !previous
+                .activation_receipts
+                .iter()
+                .all(|(id, receipt)| self.activation_receipts.get(id) == Some(receipt))
+            || !previous
+                .peer_decisions
+                .iter()
+                .all(|(id, decision)| self.peer_decisions.get(id) == Some(decision))
+        {
+            return false;
+        }
+        let Some(previous_head) = previous.known_head else {
+            return true;
+        };
+        let mut cursor = self.known_head;
+        while let Some(event_id) = cursor {
+            if event_id == previous_head {
+                return true;
+            }
+            cursor = self
+                .events
+                .get(&event_id)
+                .and_then(|event| event.parent_event_id);
+        }
+        false
+    }
+
+    pub fn is_authorized_active_member_extension_of(
+        &self,
+        previous: &Self,
+        source_member: MemberInstanceId,
+    ) -> bool {
+        if self.lineage_id != previous.lineage_id
+            || self.activation_baseline != previous.activation_baseline
+            || !previous
+                .events
+                .iter()
+                .all(|(id, event)| self.events.get(id) == Some(event))
+            || !previous
+                .activation_receipts
+                .iter()
+                .all(|(id, receipt)| self.activation_receipts.get(id) == Some(receipt))
+            || self.peer_decisions.iter().any(|(id, decision)| {
+                previous.peer_decisions.get(id) != Some(decision)
+                    && decision.decided_by_member_instance_id != source_member
+            })
+        {
+            return false;
+        }
+        let Some(previous_head) = previous.known_head else {
+            return true;
+        };
+        let mut cursor = self.known_head;
+        while let Some(event_id) = cursor {
+            if event_id == previous_head {
+                return true;
+            }
+            cursor = self
+                .events
+                .get(&event_id)
+                .and_then(|event| event.parent_event_id);
+        }
+        false
+    }
+
     pub fn decode_persisted_v2(
         bytes: &[u8],
         verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
@@ -977,20 +1322,33 @@ impl VersionedMembershipHistory {
             Some(baseline) => Self::from_activation_baseline(baseline.into())?,
             None => Self::new(persisted.lineage_id.clone()),
         };
+        history.verify_activation_baseline_signatures(verifier)?;
         if history.lineage_id != persisted.lineage_id {
             return Err(MembershipHistoryV2Error::InvalidLineage);
         }
         persisted
             .events
             .sort_by_key(|event| (event.parent_depth, event.event_id()));
-        for event in persisted.events {
-            history.verify_and_receive_event(event, verifier)?;
-        }
-        persisted
-            .activation_receipts
-            .sort_by_key(|receipt| receipt.event_id);
+        let mut receipts_by_event = BTreeMap::<_, Vec<_>>::new();
         for receipt in persisted.activation_receipts {
-            history.verify_and_record_activation_receipt(receipt, verifier)?;
+            receipts_by_event
+                .entry(receipt.event_id)
+                .or_default()
+                .push(receipt);
+        }
+        for event in persisted.events {
+            let event_id = event.event_id();
+            history.verify_and_receive_event(event, verifier)?;
+            if let Some(receipts) = receipts_by_event.remove(&event_id) {
+                for receipt in receipts {
+                    history.verify_and_record_activation_receipt(receipt, verifier)?;
+                }
+            }
+        }
+        for receipts in receipts_by_event.into_values() {
+            for receipt in receipts {
+                history.verify_and_record_activation_receipt(receipt, verifier)?;
+            }
         }
         persisted
             .peer_decisions
@@ -1032,31 +1390,38 @@ impl VersionedMembershipHistory {
         mut activation_baseline: MembershipActivationBaselineV2,
     ) -> Result<Self, MembershipHistoryV2Error> {
         let lineage_id = activation_baseline.lineage_id().to_owned();
-        let credentials = match &mut activation_baseline {
+        let mut credential_index = BTreeMap::new();
+        match &mut activation_baseline {
             MembershipActivationBaselineV2::FullyVerifiedMigration {
-                current_member_credentials,
-                ..
+                current_members, ..
             } => {
-                current_member_credentials.sort_by(|left, right| left.0.cmp(&right.0));
-                current_member_credentials
+                current_members
+                    .sort_by(|left, right| left.0.member_instance.cmp(&right.0.member_instance));
+                for (facts, credential) in current_members.iter() {
+                    credential.validate()?;
+                    if facts.member_instance != credential.member_instance_id(&facts.device_id)
+                        || credential_index
+                            .insert(facts.member_instance, credential.clone())
+                            .is_some()
+                    {
+                        return Err(MembershipHistoryV2Error::CredentialConflict);
+                    }
+                }
             }
             MembershipActivationBaselineV2::LegacyAccepted { checkpoint } => {
                 checkpoint.validate()?;
-                &mut checkpoint.continuing_member_credentials
+                for (member, credential) in &checkpoint.continuing_member_credentials {
+                    if credential_index
+                        .insert(*member, credential.clone())
+                        .is_some()
+                    {
+                        return Err(MembershipHistoryV2Error::CredentialConflict);
+                    }
+                }
             }
-        };
-        if lineage_id.is_empty() || credentials.is_empty() {
-            return Err(MembershipHistoryV2Error::InvalidActivationBaseline);
         }
-        let mut credential_index = BTreeMap::new();
-        for (member, credential) in credentials.iter() {
-            credential.validate()?;
-            if credential_index
-                .insert(*member, credential.clone())
-                .is_some()
-            {
-                return Err(MembershipHistoryV2Error::CredentialConflict);
-            }
+        if lineage_id.is_empty() || credential_index.is_empty() {
+            return Err(MembershipHistoryV2Error::InvalidActivationBaseline);
         }
         let (head, _) = activation_baseline.head_and_depth();
         let mut history = Self {
@@ -1088,6 +1453,47 @@ impl VersionedMembershipHistory {
 
     pub fn credential_for(&self, member: MemberInstanceId) -> Option<&MembershipCredential> {
         self.credentials.get(&member)
+    }
+
+    pub fn admission_facts_for(&self, member: MemberInstanceId) -> Option<&AdmissionChangeFacts> {
+        self.events
+            .values()
+            .find_map(|event| match &event.operation {
+                MembershipOperationV2::AddDevice { admission }
+                    if admission.facts.member_instance == member =>
+                {
+                    Some(&admission.facts)
+                }
+                MembershipOperationV2::AddDevice { .. }
+                | MembershipOperationV2::RemoveDevice { .. } => None,
+            })
+            .or_else(|| match self.activation_baseline.as_ref()? {
+                MembershipActivationBaselineV2::FullyVerifiedMigration {
+                    current_members, ..
+                } => current_members
+                    .iter()
+                    .find_map(|(facts, _)| (facts.member_instance == member).then_some(facts)),
+                MembershipActivationBaselineV2::LegacyAccepted { .. } => None,
+            })
+    }
+
+    pub fn current_position(
+        &self,
+    ) -> Result<BaseMembershipHistoryPositionV1, MembershipHistoryV2Error> {
+        let event_id = self.known_head;
+        let depth = event_id
+            .and_then(|head| self.depth(head))
+            .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        let encoded = self.encode_persisted_v2()?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"uniclipboard/membership-history-position/v1\0");
+        hasher.update((encoded.len() as u64).to_be_bytes());
+        hasher.update(encoded);
+        Ok(BaseMembershipHistoryPositionV1 {
+            event_id,
+            depth,
+            history_digest: hasher.finalize().into(),
+        })
     }
 
     pub fn effective_members(&self) -> BTreeSet<MemberInstanceId> {
@@ -1134,12 +1540,262 @@ impl VersionedMembershipHistory {
             })
     }
 
+    pub fn has_admitted_device(
+        &self,
+        device_id: &DeviceId,
+        candidate_devices: &[DeviceId],
+    ) -> bool {
+        self.credentials.keys().any(|member| {
+            self.device_for_member(member, candidate_devices).as_ref() == Some(device_id)
+        })
+    }
+
+    pub fn member_for_device(
+        &self,
+        device_id: &DeviceId,
+        candidate_devices: &[DeviceId],
+    ) -> Option<MemberInstanceId> {
+        self.credentials.keys().copied().find(|member| {
+            self.device_for_member(member, candidate_devices).as_ref() == Some(device_id)
+        })
+    }
+
+    pub fn is_restricted_removed_member_extension_of(
+        &self,
+        previous: &Self,
+        source_member: MemberInstanceId,
+    ) -> bool {
+        !previous.active_members().contains(&source_member)
+            && self.is_authorized_decision_delivery_of(previous, source_member)
+    }
+
+    pub fn is_authorized_decision_delivery_of(
+        &self,
+        previous: &Self,
+        source_member: MemberInstanceId,
+    ) -> bool {
+        self.lineage_id == previous.lineage_id
+            && self.activation_baseline == previous.activation_baseline
+            && (previous.active_members().contains(&source_member)
+                || self.has_removal_decision_by(source_member))
+            && self
+                .events
+                .iter()
+                .all(|(id, event)| previous.events.get(id) == Some(event))
+            && self
+                .activation_receipts
+                .iter()
+                .all(|(id, receipt)| previous.activation_receipts.get(id) == Some(receipt))
+            && self.peer_decisions.iter().all(|(id, decision)| {
+                previous.peer_decisions.get(id) == Some(decision)
+                    || decision.decided_by_member_instance_id == source_member
+            })
+    }
+
+    fn has_removal_decision_by(&self, member: MemberInstanceId) -> bool {
+        self.peer_decisions.values().any(|decision| {
+            decision.decided_by_member_instance_id == member
+                && self
+                    .events
+                    .get(&decision.removal_event_id)
+                    .is_some_and(|event| {
+                        matches!(event.operation, MembershipOperationV2::RemoveDevice { .. })
+                    })
+        })
+    }
+
     pub fn decision_for(
         &self,
         removal_event_id: MembershipEventId,
         decided_by: MemberInstanceId,
     ) -> Option<&MembershipDecisionV2> {
         self.peer_decisions.get(&(removal_event_id, decided_by))
+    }
+
+    pub fn latest_decision_on_removal_authored_by(
+        &self,
+        author: MemberInstanceId,
+        decided_by: MemberInstanceId,
+    ) -> Option<RemovalDecision> {
+        self.peer_decisions
+            .values()
+            .filter_map(|decision| {
+                let event = self.events.get(&decision.removal_event_id)?;
+                (event.author_member_instance_id == author
+                    && decision.decided_by_member_instance_id == decided_by)
+                    .then_some((event.parent_depth, decision.decision))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, decision)| decision)
+    }
+
+    pub fn removal_decision_recipients_for(
+        &self,
+        decided_by: MemberInstanceId,
+    ) -> BTreeSet<MemberInstanceId> {
+        let mut recipients = BTreeSet::new();
+        for decision in self
+            .peer_decisions
+            .values()
+            .filter(|decision| decision.decided_by_member_instance_id == decided_by)
+        {
+            let Some(parent) = self
+                .events
+                .get(&decision.removal_event_id)
+                .and_then(|event| event.parent_event_id)
+            else {
+                continue;
+            };
+            if let Some(snapshot) = self.snapshots.get(&parent) {
+                recipients.extend(snapshot.members.iter().copied());
+            }
+        }
+        recipients.remove(&decided_by);
+        recipients
+    }
+
+    pub fn removal_choices_diverge(&self, left: MemberInstanceId, right: MemberInstanceId) -> bool {
+        self.events.values().any(|event| {
+            if !matches!(event.operation, MembershipOperationV2::RemoveDevice { .. }) {
+                return false;
+            }
+            let choice = |member| {
+                if event.author_member_instance_id == member {
+                    Some(RemovalDecision::Accept)
+                } else {
+                    self.decision_for(event.event_id(), member)
+                        .map(|decision| decision.decision)
+                }
+            };
+            matches!((choice(left), choice(right)), (Some(left), Some(right)) if left != right)
+        })
+    }
+
+    pub fn current_head(&self) -> Option<MembershipEventId> {
+        self.known_head
+    }
+
+    pub fn event(&self, event_id: MembershipEventId) -> Option<&MembershipEventV2> {
+        self.events.get(&event_id)
+    }
+
+    pub fn members_digest_at(&self, event_id: MembershipEventId) -> Option<[u8; 32]> {
+        self.snapshots
+            .get(&event_id)
+            .map(|snapshot| members_digest(&snapshot.members))
+    }
+
+    pub fn pending_removal_decision(
+        &self,
+        local_member: MemberInstanceId,
+    ) -> Option<MembershipEventId> {
+        let current_head = self.known_head?;
+        let current_members = self.snapshots.get(&current_head)?;
+        if !current_members.members.contains(&local_member) {
+            return None;
+        }
+        self.events
+            .iter()
+            .filter(|(_, event)| {
+                event.parent_event_id == Some(current_head)
+                    && event.author_member_instance_id != local_member
+                    && matches!(event.operation, MembershipOperationV2::RemoveDevice { .. })
+            })
+            .map(|(event_id, _)| *event_id)
+            .find(|event_id| !self.peer_decisions.contains_key(&(*event_id, local_member)))
+    }
+
+    pub fn verify_and_record_local_decision(
+        &mut self,
+        decision: MembershipDecisionV2,
+        local_member: MemberInstanceId,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
+    ) -> Result<MembershipDecisionStoreOutcome, MembershipHistoryV2Error> {
+        if decision.decided_by_member_instance_id != local_member {
+            return Err(MembershipHistoryV2Error::InvalidDecision);
+        }
+        let removal = self
+            .events
+            .get(&decision.removal_event_id)
+            .ok_or(MembershipHistoryV2Error::UnknownRemoval)?;
+        if self
+            .peer_decisions
+            .get(&(decision.removal_event_id, local_member))
+            == Some(&decision)
+        {
+            return Ok(MembershipDecisionStoreOutcome::AlreadyKnown);
+        }
+        if removal.parent_event_id != self.known_head {
+            return Err(MembershipHistoryV2Error::InvalidDecision);
+        }
+        let removal_event_id = decision.removal_event_id;
+        let choice = decision.decision;
+        let outcome = self.verify_and_record_peer_decision(decision, verifier)?;
+        if choice == RemovalDecision::Accept {
+            self.known_head = Some(removal_event_id);
+        }
+        self.rebuild_snapshots()?;
+        Ok(outcome)
+    }
+
+    pub fn merge_remote_history(
+        &mut self,
+        incoming: &Self,
+        local_member: MemberInstanceId,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
+    ) -> Result<bool, MembershipHistoryV2Error> {
+        if self.lineage_id != incoming.lineage_id
+            || self.activation_baseline != incoming.activation_baseline
+        {
+            return Err(MembershipHistoryV2Error::InvalidLineage);
+        }
+        let mut changed = false;
+        let mut events = incoming.events.values().cloned().collect::<Vec<_>>();
+        events.sort_by_key(|event| (event.parent_depth, event.event_id()));
+        for event in events {
+            let event_id = event.event_id();
+            if let Some(existing) = self.events.get(&event_id) {
+                if existing != &event {
+                    return Err(MembershipHistoryV2Error::InvalidSignature);
+                }
+            } else {
+                let previous_head = self.known_head;
+                let waits_for_local_decision = event.parent_event_id == previous_head
+                    && event.author_member_instance_id != local_member
+                    && matches!(event.operation, MembershipOperationV2::RemoveDevice { .. })
+                    && previous_head
+                        .and_then(|head| self.snapshots.get(&head))
+                        .is_some_and(|snapshot| snapshot.members.contains(&local_member));
+                self.verify_and_receive_event(event, verifier)?;
+                if waits_for_local_decision {
+                    self.known_head = previous_head;
+                    self.rebuild_snapshots()?;
+                }
+                changed = true;
+            }
+            if let Some(record) = incoming.activation_receipts.get(&event_id) {
+                match self.verify_and_record_activation_receipt(
+                    record.activation_receipt.clone(),
+                    verifier,
+                )? {
+                    MembershipActivationReceiptStoreOutcome::Stored => changed = true,
+                    MembershipActivationReceiptStoreOutcome::AlreadyKnown => {}
+                }
+            }
+        }
+        let mut decisions = incoming
+            .peer_decisions
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        decisions.sort_by_key(MembershipDecisionV2::decision_id);
+        for decision in decisions {
+            match self.verify_and_record_peer_decision(decision, verifier)? {
+                MembershipDecisionStoreOutcome::Stored => changed = true,
+                MembershipDecisionStoreOutcome::AlreadyKnown => {}
+            }
+        }
+        Ok(changed)
     }
 
     pub fn expected_resulting_members_digest(
@@ -1449,11 +2105,7 @@ impl VersionedMembershipHistory {
         let mut snapshots = BTreeMap::new();
         if let Some(baseline) = &self.activation_baseline {
             let (head, _) = baseline.head_and_depth();
-            let members = baseline
-                .current_member_credentials()
-                .iter()
-                .map(|(member, _)| *member)
-                .collect::<BTreeSet<_>>();
+            let members = baseline.current_member_ids();
             snapshots.insert(
                 head,
                 MembershipHistorySnapshot {
@@ -1492,6 +2144,27 @@ impl VersionedMembershipHistory {
             snapshots.insert(event.event_id(), snapshot);
         }
         self.snapshots = snapshots;
+        Ok(())
+    }
+
+    fn verify_activation_baseline_signatures(
+        &self,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
+    ) -> Result<(), MembershipHistoryV2Error> {
+        let Some(MembershipActivationBaselineV2::FullyVerifiedMigration {
+            current_members, ..
+        }) = &self.activation_baseline
+        else {
+            return Ok(());
+        };
+        for (facts, credential) in current_members {
+            verify_signature(
+                verifier,
+                credential,
+                &facts.signing_payload(),
+                &facts.identity_signature,
+            )?;
+        }
         Ok(())
     }
 }

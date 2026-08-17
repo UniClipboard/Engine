@@ -2617,6 +2617,35 @@ async fn scheduled_reconcile_uses_the_persisted_candidate_retry_deadline() {
     );
 }
 
+struct PendingGroupUpdateDelivery;
+
+#[async_trait]
+impl crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort
+    for PendingGroupUpdateDelivery
+{
+    async fn deliver_pending(
+        &self,
+        _now_ms: i64,
+    ) -> Result<usize, uc_core::membership::KeyEpochError> {
+        Ok(0)
+    }
+
+    async fn has_pending(&self) -> Result<bool, uc_core::membership::KeyEpochError> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn pending_group_update_limits_the_next_reconcile_delay() {
+    let gossip = gossip(Arc::new(InMemoryCandidateRepository::default()), 1_000);
+    gossip.install_group_update_delivery(Arc::new(PendingGroupUpdateDelivery));
+
+    assert_eq!(
+        gossip.next_reconcile_delay().await,
+        Duration::from_millis(30_000)
+    );
+}
+
 fn verified_peer_b() -> VerifiedMembershipPeer {
     VerifiedMembershipPeer {
         space_id: SpaceId::from("space-a"),

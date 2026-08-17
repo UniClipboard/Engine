@@ -242,13 +242,10 @@ impl RendezvousPairingInvitationAdapter {
     /// Starts a window-scoped mDNS publisher and stores its handle so
     /// `consume_invitation` can drop it later.
     ///
-    /// The mDNS ticket is encoded as `hex(postcard(EndpointAddr))`, not
-    /// reusing the JSON form fed to the cloud channel: a single TXT
-    /// attribute can carry at most 254 bytes including the key prefix,
-    /// and JSON-encoded endpoints with 4+ candidate addresses overflow
-    /// that limit (observed in the LAN-only e2e test). postcard cuts
-    /// the byte count by ~60% and hex doubling still keeps room for
-    /// realistic NodeId + LAN IPs.
+    /// The mDNS ticket is encoded as `hex(postcard(EndpointAddr))`, then
+    /// split into ordered bounded TXT attributes by the publisher. This
+    /// preserves every dialable address without exceeding DNS-SD's
+    /// per-attribute limit.
     async fn start_mdns_publisher(
         &self,
         code: &InvitationCode,
@@ -262,8 +259,8 @@ impl RendezvousPairingInvitationAdapter {
         self.gc_expired_publishers(Utc::now()).await;
 
         // Re-encode the EndpointAddr in the cloud-channel JSON ticket
-        // into postcard+hex so it fits in a single TXT attribute. See
-        // [`start_mdns_publisher`] doc for the size analysis.
+        // into postcard+hex before the publisher splits it into bounded
+        // TXT attributes.
         let ticket_hex = encode_mdns_ticket(ticket_json)?;
         // Pick the iroh endpoint's UDP port for the announce. The LAN IPs
         // we publish come from `if-addrs` inside the publisher, not from
@@ -307,9 +304,7 @@ impl RendezvousPairingInvitationAdapter {
 }
 
 /// Re-encode the cloud-channel JSON ticket as `hex(postcard(EndpointAddr))`
-/// for mDNS publishing. Compact enough to fit in a single TXT attribute
-/// (under 254 bytes total including the `tk=` key) for realistic
-/// EndpointAddrs (up to ~4 IPs + relay URL).
+/// for bounded mDNS publishing.
 fn encode_mdns_ticket(ticket_json: &str) -> Result<String, String> {
     let addr: EndpointAddr = serde_json::from_str(ticket_json)
         .map_err(|err| format!("ticket JSON decode for mDNS re-encode: {err}"))?;

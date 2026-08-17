@@ -31,7 +31,8 @@ use tokio::runtime::Handle;
 use tracing::{debug, info, warn};
 
 use super::discovery_constants::{
-    compute_code_hash, PAIR_SERVICE_NAME, TXT_CODE_HASH, TXT_EXPIRES_AT_MS, TXT_NODE_ID, TXT_TICKET,
+    compute_code_hash, ticket_txt_attributes, PAIR_SERVICE_NAME, TXT_CODE_HASH, TXT_EXPIRES_AT_MS,
+    TXT_NODE_ID,
 };
 
 /// Default mDNS query/announce cadence for pairing. Tighter than the
@@ -120,6 +121,18 @@ impl MdnsPairingPublisher {
             "starting mDNS pairing publisher",
         );
 
+        let mut txt_attributes = vec![
+            (TXT_CODE_HASH.to_string(), Some(code_hash.clone())),
+            (TXT_NODE_ID.to_string(), Some(actor_id.clone())),
+            (
+                TXT_EXPIRES_AT_MS.to_string(),
+                Some(expires_at_ms.to_string()),
+            ),
+        ];
+        txt_attributes.extend(ticket_txt_attributes(ticket_hex).ok_or_else(|| {
+            MdnsPublisherError::TxtTooLong("endpoint ticket exceeds the bounded TXT format".into())
+        })?);
+
         let discoverer = Discoverer::new(PAIR_SERVICE_NAME.to_string(), actor_id.clone())
             .with_addrs(port, addrs)
             .with_cadence(PAIR_CADENCE)
@@ -134,15 +147,7 @@ impl MdnsPairingPublisher {
             // not the full hex NodeId — that already lives inside the
             // ticket. Resolver compares its own derived id against this
             // field to skip self-announces.
-            .with_txt_attributes(vec![
-                (TXT_CODE_HASH.to_string(), Some(code_hash.clone())),
-                (TXT_NODE_ID.to_string(), Some(actor_id.clone())),
-                (TXT_TICKET.to_string(), Some(ticket_hex.to_string())),
-                (
-                    TXT_EXPIRES_AT_MS.to_string(),
-                    Some(expires_at_ms.to_string()),
-                ),
-            ])?;
+            .with_txt_attributes(txt_attributes)?;
 
         let guard = discoverer.spawn(handle)?;
 

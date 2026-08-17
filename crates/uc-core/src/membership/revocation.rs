@@ -373,6 +373,19 @@ impl PendingGroupUpdate {
         }
     }
 
+    pub fn for_admission(attempt_id: [u8; 32], recipient: DeviceId, payload: Vec<u8>) -> Self {
+        let attempt_id = attempt_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Self {
+            update_id: format!("admission:{attempt_id}:{}", recipient.as_str()),
+            revocation_id: None,
+            recipient,
+            payload,
+        }
+    }
+
     pub fn for_generation(
         revocation_id: RevocationId,
         generation: GroupEpoch,

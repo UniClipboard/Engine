@@ -3,22 +3,53 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uc_core::membership::{GroupRevocationPort, GroupUpdateDispatchPort, KeyEpochError};
 
+use super::{ReconciliationPeerRole, WorkspaceConvergence, WorkspaceConvergenceError};
+
 #[async_trait]
 pub trait GroupUpdateDeliveryPort: Send + Sync {
     async fn deliver_pending(&self, now_ms: i64) -> Result<usize, KeyEpochError>;
+
+    async fn has_pending(&self) -> Result<bool, KeyEpochError> {
+        Ok(false)
+    }
+}
+
+#[async_trait]
+pub(crate) trait GroupUpdateRecipientPreparationPort: Send + Sync {
+    async fn prepare_recipient(
+        &self,
+        recipient: &uc_core::DeviceId,
+    ) -> Result<(), WorkspaceConvergenceError>;
+}
+
+#[async_trait]
+impl GroupUpdateRecipientPreparationPort for WorkspaceConvergence {
+    async fn prepare_recipient(
+        &self,
+        recipient: &uc_core::DeviceId,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        self.reconcile_membership_history_serialized(recipient, ReconciliationPeerRole::RuntimePeer)
+            .await
+    }
 }
 
 pub struct GroupUpdateDelivery {
     outbox: Arc<dyn GroupRevocationPort>,
     dispatch: Arc<dyn GroupUpdateDispatchPort>,
+    recipient_preparation: Arc<dyn GroupUpdateRecipientPreparationPort>,
 }
 
 impl GroupUpdateDelivery {
     pub fn new(
         outbox: Arc<dyn GroupRevocationPort>,
         dispatch: Arc<dyn GroupUpdateDispatchPort>,
+        recipient_preparation: Arc<dyn GroupUpdateRecipientPreparationPort>,
     ) -> Self {
-        Self { outbox, dispatch }
+        Self {
+            outbox,
+            dispatch,
+            recipient_preparation,
+        }
     }
 }
 
@@ -29,6 +60,14 @@ impl GroupUpdateDeliveryPort for GroupUpdateDelivery {
         let mut delivered = 0;
         let mut acknowledgement_error = None;
         for update in updates {
+            if self
+                .recipient_preparation
+                .prepare_recipient(update.recipient())
+                .await
+                .is_err()
+            {
+                continue;
+            }
             if self.dispatch.dispatch_group_update(&update).await.is_ok() {
                 match self
                     .outbox
@@ -43,6 +82,10 @@ impl GroupUpdateDeliveryPort for GroupUpdateDelivery {
         }
         acknowledgement_error.map_or(Ok(delivered), Err)
     }
+
+    async fn has_pending(&self) -> Result<bool, KeyEpochError> {
+        Ok(!self.outbox.pending_space_group_updates().await?.is_empty())
+    }
 }
 
 #[cfg(test)]
@@ -53,6 +96,8 @@ mod tests {
         GroupUpdateDispatchPort, KeyEpochError, PendingGroupUpdate, RevocationId,
     };
     use uc_core::DeviceId;
+
+    use crate::space::convergence::WorkspaceConvergenceError;
 
     mockall::mock! {
         Outbox {}
@@ -110,10 +155,68 @@ mod tests {
         }
     }
 
+    mockall::mock! {
+        RecipientPreparation {}
+
+        #[async_trait]
+        impl super::GroupUpdateRecipientPreparationPort for RecipientPreparation {
+            async fn prepare_recipient(
+                &self,
+                recipient: &DeviceId,
+            ) -> Result<(), WorkspaceConvergenceError>;
+        }
+    }
+
+    #[tokio::test]
+    async fn prepares_recipient_history_before_dispatching_and_acknowledging_update() {
+        let update = PendingGroupUpdate::persistent(DeviceId::new("recipient"), vec![1]);
+        let update_id = update.update_id().to_owned();
+        let mut sequence = mockall::Sequence::new();
+
+        let mut outbox = MockOutbox::new();
+        outbox
+            .expect_pending_space_group_updates()
+            .times(1)
+            .return_once(move || Ok(vec![update]));
+
+        let mut preparation = MockRecipientPreparation::new();
+        preparation
+            .expect_prepare_recipient()
+            .times(1)
+            .withf(|recipient| recipient == &DeviceId::new("recipient"))
+            .in_sequence(&mut sequence)
+            .returning(|_| Ok(()));
+
+        let mut dispatch = MockDispatch::new();
+        dispatch
+            .expect_dispatch_group_update()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .returning(|_| Ok(()));
+        outbox
+            .expect_acknowledge_space_group_update()
+            .times(1)
+            .withf(move |candidate, now_ms| candidate == update_id && *now_ms == 123)
+            .in_sequence(&mut sequence)
+            .returning(|_, _| Ok(true));
+
+        let delivery = super::GroupUpdateDelivery::new(
+            std::sync::Arc::new(outbox),
+            std::sync::Arc::new(dispatch),
+            std::sync::Arc::new(preparation),
+        );
+
+        let count = super::GroupUpdateDeliveryPort::deliver_pending(&delivery, 123)
+            .await
+            .unwrap();
+
+        assert_eq!(count, 1);
+    }
+
     fn delivery_mocks(
         delivered: PendingGroupUpdate,
         retained: PendingGroupUpdate,
-    ) -> (MockOutbox, MockDispatch) {
+    ) -> (MockOutbox, MockDispatch, MockRecipientPreparation) {
         let delivered_id = delivered.update_id().to_string();
         let mut outbox = MockOutbox::new();
         outbox
@@ -137,18 +240,24 @@ mod tests {
                     Ok(())
                 }
             });
-        (outbox, dispatch)
+        let mut preparation = MockRecipientPreparation::new();
+        preparation
+            .expect_prepare_recipient()
+            .times(2)
+            .returning(|_| Ok(()));
+        (outbox, dispatch, preparation)
     }
 
     #[tokio::test]
     async fn acknowledges_only_updates_that_were_delivered() {
         let delivered = PendingGroupUpdate::persistent(DeviceId::new("online"), vec![1]);
         let retained = PendingGroupUpdate::persistent(DeviceId::new("offline"), vec![2]);
-        let (outbox, dispatch) = delivery_mocks(delivered, retained);
+        let (outbox, dispatch, preparation) = delivery_mocks(delivered, retained);
 
         let delivery = super::GroupUpdateDelivery::new(
             std::sync::Arc::new(outbox),
             std::sync::Arc::new(dispatch),
+            std::sync::Arc::new(preparation),
         );
         let count = super::GroupUpdateDeliveryPort::deliver_pending(&delivery, 123)
             .await
@@ -186,9 +295,15 @@ mod tests {
             .expect_dispatch_group_update()
             .times(2)
             .returning(|_| Ok(()));
+        let mut preparation = MockRecipientPreparation::new();
+        preparation
+            .expect_prepare_recipient()
+            .times(2)
+            .returning(|_| Ok(()));
         let delivery = super::GroupUpdateDelivery::new(
             std::sync::Arc::new(outbox),
             std::sync::Arc::new(dispatch),
+            std::sync::Arc::new(preparation),
         );
 
         let error = super::GroupUpdateDeliveryPort::deliver_pending(&delivery, 123)

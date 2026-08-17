@@ -61,7 +61,8 @@ pub struct PendingAdmissionRecord {
     pub created_at_ms: i64,
 }
 
-/// Facts returned after the sponsor has saved the signed membership event.
+/// Facts retained by legacy protection upgrade recovery after a membership
+/// change has been saved. This is not a pairing wire success message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionSavedFacts {
     pub history_digest: [u8; 32],

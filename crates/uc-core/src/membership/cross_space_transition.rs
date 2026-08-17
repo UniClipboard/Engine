@@ -205,6 +205,8 @@ pub struct CrossSpaceTransitionV2 {
     pub final_manifest_digest: Option<[u8; 32]>,
     pub migrated_records: u64,
     pub preserved_unreadable_records: u64,
+    #[serde(default)]
+    pub preserve_unreadable_history: bool,
 }
 
 impl std::fmt::Debug for CrossSpaceTransitionV2 {
@@ -273,6 +275,7 @@ impl CrossSpaceTransitionV2 {
             && self.target_workspace_ref == next.target_workspace_ref
             && next.migrated_records >= self.migrated_records
             && next.preserved_unreadable_records >= self.preserved_unreadable_records
+            && self.preserve_unreadable_history == next.preserve_unreadable_history
             && (self.final_source_revision.is_none()
                 || self.final_source_revision == next.final_source_revision)
             && (self.final_manifest_digest.is_none()
@@ -461,6 +464,7 @@ mod tests {
             final_manifest_digest: finalized.then_some([0x15; 32]),
             migrated_records: 3,
             preserved_unreadable_records: 1,
+            preserve_unreadable_history: false,
         }
     }
 

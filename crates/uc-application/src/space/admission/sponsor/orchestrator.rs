@@ -39,7 +39,7 @@ use uc_observability_contract::FlowId;
 use uc_core::membership::MembershipAdmissionDecision;
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::pairing::session_message::{
-    JoinerReady, JoinerRequest, PairingRejectReason, PairingSessionMessage,
+    JoinerRequest, PairingRejectReason, PairingSessionMessage,
 };
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionEvent, PairingSessionId};
 use uc_core::ports::{ClockPort, ConsumeInvitationError, PairingInvitationPort};
@@ -47,13 +47,12 @@ use uc_observability_contract::analytics::{
     AnalyticsFacade, Event, PairingFailureReason, PairingMethod,
 };
 
+use super::sponsor_handshake::{JoinerFacts, SponsorHandshakeCoordinator, Verdict};
 use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::admission::invitation::holder::{
     InMemoryPairingInvitationHolder, TakeMatchingError,
 };
 use crate::space::convergence::WorkspaceConvergenceError;
-
-use super::sponsor_handshake::{JoinerFacts, SponsorHandshakeCoordinator, Verdict};
 
 /// Drives sponsor-side inbound pairing events.
 pub(crate) struct PairingInboundOrchestrator {
@@ -75,11 +74,6 @@ pub(crate) struct PairingInboundOrchestrator {
     /// guaranteed because every entry is removed at terminal (success or
     /// any post-match failure).
     handshake_started_at: Arc<StdMutex<HashMap<PairingSessionId, Instant>>>,
-    pending_joiner_ready: Arc<StdMutex<HashMap<PairingSessionId, JoinerFacts>>>,
-    /// Admission generation the matched invitation was bound to, parked per
-    /// session so the owner can save the in-flight admission record with the
-    /// correct generation once the challenge passes.
-    pending_generation: Arc<StdMutex<HashMap<PairingSessionId, u64>>>,
 }
 
 impl PairingInboundOrchestrator {
@@ -102,8 +96,6 @@ impl PairingInboundOrchestrator {
             workspace_convergence,
             analytics,
             handshake_started_at: Arc::new(StdMutex::new(HashMap::new())),
-            pending_joiner_ready: Arc::new(StdMutex::new(HashMap::new())),
-            pending_generation: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -123,10 +115,6 @@ impl PairingInboundOrchestrator {
         // Drop any started_at entry parked at on_incoming so the map stays
         // bounded even on the failure paths.
         let _ = self.take_started_at(session);
-        self.pending_generation
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(session);
         self.analytics.capture(Event::PairingFailed {
             method: PairingMethod::Code,
             failure_reason: reason,
@@ -202,6 +190,12 @@ impl PairingInboundOrchestrator {
             message_kind = incoming_variant,
             "inbound pairing event received"
         );
+        if let PairingSessionMessage::DurableAdmission(frame) = message.clone() {
+            if frame.kind == uc_core::pairing::DurableAdmissionMessageKind::CompleteAck {
+                self.handle_durable_admission(&session, frame).await;
+                return;
+            }
+        }
         let request = match message {
             PairingSessionMessage::Request(req) => req,
             other => {
@@ -229,11 +223,26 @@ impl PairingInboundOrchestrator {
             "inbound pairing Request received; matching invitation"
         );
 
-        let Some((invitation_code, generation)) = self.match_invitation(&session, &request).await
+        if let Err(error) = self
+            .workspace_convergence
+            .validate_join_request(&request)
+            .await
+        {
+            warn!(session = %session, error = %error, "invalid durable join request");
+            self.handshake
+                .reject(
+                    &session,
+                    PairingRejectReason::Internal("invalid durable join request".into()),
+                )
+                .await;
+            self.emit_failure(&session, PairingFailureReason::Internal);
+            return;
+        }
+
+        let Some((_invitation_code, _generation)) = self.match_invitation(&session, &request).await
         else {
             return;
         };
-        self.notify_consume(&invitation_code).await;
 
         // Slice 8b' · stamp the per-session start time so the verified
         // path can compute handshake duration. Idempotent on re-entry:
@@ -257,13 +266,6 @@ impl PairingInboundOrchestrator {
                 "inbound pairing failed while sending AdmissionOffer"
             ),
         }
-        // The verified joiner's admission record is saved by the owner
-        // once the challenge passes; the generation is stashed per session
-        // for `finalise_verified`.
-        self.pending_generation
-            .lock()
-            .unwrap()
-            .insert(session.clone(), generation);
     }
 
     /// Returns the matched invitation code and its admission generation on
@@ -376,8 +378,8 @@ impl PairingInboundOrchestrator {
             message_kind = message_variant,
             "inbound pairing follow-up message received"
         );
-        if let PairingSessionMessage::Ready(ready) = message {
-            self.complete_after_joiner_ready(&session, ready).await;
+        if let PairingSessionMessage::DurableAdmission(frame) = message {
+            self.handle_durable_admission(&session, frame).await;
             return;
         }
         let PairingSessionMessage::ChallengeResponse(response) = message else {
@@ -413,9 +415,86 @@ impl PairingInboundOrchestrator {
         }
     }
 
-    /// Verified branch: the owner saves the in-flight admission record,
-    /// then the channel sends `Confirm`. Any owner error short-circuits to
-    /// `Reject(Internal)` so the joiner never sees a false Confirm.
+    async fn handle_durable_admission(
+        &self,
+        session: &PairingSessionId,
+        frame: uc_core::pairing::DurableAdmissionFrame,
+    ) {
+        match frame.kind {
+            uc_core::pairing::DurableAdmissionMessageKind::Prepared => {
+                match self
+                    .workspace_convergence
+                    .commit_sponsor_prepared(&frame)
+                    .await
+                {
+                    Ok(commit) => {
+                        if let Err(error) = self.handshake.send_durable_frame(session, commit).await
+                        {
+                            warn!(session = %session, error = %error, "Commit send failed after durable save");
+                        }
+                    }
+                    Err(error) => {
+                        warn!(session = %session, error = %error, "Prepared verification failed");
+                        self.handshake
+                            .reject(
+                                session,
+                                PairingRejectReason::Internal(format!(
+                                    "commit_sponsor_prepared: {error}"
+                                )),
+                            )
+                            .await;
+                    }
+                }
+            }
+            uc_core::pairing::DurableAdmissionMessageKind::Applied => {
+                match self
+                    .workspace_convergence
+                    .complete_sponsor_applied(&frame)
+                    .await
+                {
+                    Ok(complete) => {
+                        if let Err(error) =
+                            self.handshake.send_durable_frame(session, complete).await
+                        {
+                            warn!(session = %session, error = %error, "Complete send failed after durable save");
+                        }
+                    }
+                    Err(error) => {
+                        warn!(session = %session, error = %error, "Applied verification failed");
+                        self.handshake
+                            .reject(
+                                session,
+                                PairingRejectReason::Internal(format!(
+                                    "complete_sponsor_applied: {error}"
+                                )),
+                            )
+                            .await;
+                    }
+                }
+            }
+            uc_core::pairing::DurableAdmissionMessageKind::CompleteAck => {
+                match self
+                    .workspace_convergence
+                    .confirm_sponsor_complete_ack(&frame)
+                    .await
+                {
+                    Ok(()) => {
+                        self.handshake.complete(session).await;
+                        info!(session = %session, "durable admission completed on both devices");
+                    }
+                    Err(error) => {
+                        warn!(session = %session, error = %error, "CompleteAck verification failed");
+                    }
+                }
+            }
+            other => {
+                warn!(session = %session, ?other, "unexpected durable admission frame at sponsor");
+            }
+        }
+    }
+
+    /// Verified branch: the owner saves the complete Candidate before the
+    /// channel sends it. A retry therefore replays the same durable message.
     async fn finalise_verified(&self, session: &PairingSessionId, facts: JoinerFacts) {
         // Pre-admission chain synchronization: pull the local chain head up
         // to the newest known member so the admission change is appended to
@@ -429,175 +508,47 @@ impl PairingInboundOrchestrator {
                 "pre-admission chain synchronization incomplete; proceeding best-effort"
             );
         }
-        let generation = self
-            .pending_generation
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(session)
-            .unwrap_or(0);
-        let admission_snapshot = match self
+        let candidate = match self
             .workspace_convergence
-            .begin_admission(session, &facts.device_id, generation)
+            .prepare_sponsor_candidate(&facts.request)
             .await
         {
-            Ok(snapshot) => snapshot,
+            Ok(candidate) => candidate,
             Err(error) => {
                 warn!(
                     session = %session,
                     error = %error,
-                    "begin_admission failed; rejecting with Internal"
+                    "durable Candidate preparation failed; rejecting"
                 );
-                self.handshake
-                    .reject(
-                        session,
-                        PairingRejectReason::Internal(format!("begin_admission: {error}")),
-                    )
-                    .await;
-                self.emit_failure(session, PairingFailureReason::Internal);
-                return;
-            }
-        };
-
-        let security_update_payload = match self
-            .handshake
-            .confirm(session, admission_snapshot.history_event_count as u64)
-            .await
-        {
-            Ok(payload) => payload,
-            Err(err) => {
-                warn!(
-                    session = %session,
-                    error = %err,
-                    "Confirm wire send failed after the admission record was saved"
-                );
-                // The in-flight admission record already landed — the owner
-                // will re-await the same joiner's readiness after a restart.
-                // `handshake.confirm` has already removed ctx + closed on the
-                // happy path; on this Err path the coordinator did not close
-                // (it short-circuited on the settings/send failure). We
-                // deliberately do not send a Reject here because the joiner's
-                // local store may have already advanced; let the natural
-                // timeout take care of it.
-                self.emit_failure(session, PairingFailureReason::ConnectionLost);
-                return;
-            }
-        };
-        let mut facts = facts;
-        facts.security_update_payload = security_update_payload;
-        self.pending_joiner_ready
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(session.clone(), facts);
-    }
-
-    async fn complete_after_joiner_ready(&self, session: &PairingSessionId, ready: JoinerReady) {
-        let joiner_device_id = ready.admission.device_id.clone();
-        let facts = self
-            .pending_joiner_ready
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(session);
-        let facts_valid = match &facts {
-            Some(facts) => {
-                ready.admission.device_id == facts.device_id
-                    && ready.admission.device_name == facts.device_name
-                    && ready.admission.identity_fingerprint == facts.identity_fingerprint
-            }
-            None => {
-                // The sponsor restarted after `begin_admission` saved the
-                // in-flight record: re-await the same joiner's readiness
-                // from the persisted record instead of rejecting it. Only
-                // the device id can be re-verified from that record.
-                let Ok(Some(record)) = self.workspace_convergence.pending_admission(session).await
-                else {
-                    self.handshake
-                        .reject(
-                            session,
-                            PairingRejectReason::Internal("unexpected joiner readiness".into()),
+                let (reason, failure) =
+                    if matches!(error, WorkspaceConvergenceError::AdmissionConflict) {
+                        (
+                            PairingRejectReason::AdmissionConflict,
+                            PairingFailureReason::SponsorAdmissionConflict,
                         )
-                        .await;
-                    return;
-                };
-                if record.joiner_device_id != ready.admission.device_id {
-                    self.handshake
-                        .reject(
-                            session,
-                            PairingRejectReason::Internal("joiner readiness facts mismatch".into()),
+                    } else {
+                        (
+                            PairingRejectReason::Internal(format!(
+                                "prepare_sponsor_candidate: {error}"
+                            )),
+                            PairingFailureReason::Internal,
                         )
-                        .await;
-                    self.emit_failure(session, PairingFailureReason::Internal);
-                    return;
-                }
-                debug!(
-                    session = %session,
-                    joiner_device_id = %ready.admission.device_id.as_str(),
-                    "restored in-flight admission record after sponsor restart"
-                );
-                true
-            }
-        };
-        if !facts_valid {
-            self.handshake
-                .reject(
-                    session,
-                    PairingRejectReason::Internal("joiner readiness facts mismatch".into()),
-                )
-                .await;
-            self.emit_failure(session, PairingFailureReason::Internal);
-            return;
-        }
-        let security_update_payload = facts
-            .as_ref()
-            .map_or_else(Vec::new, |facts| facts.security_update_payload.clone());
-        let committed = match self
-            .workspace_convergence
-            .commit_joiner_admission(session, ready.admission, security_update_payload)
-            .await
-        {
-            Ok(committed) => committed,
-            Err(WorkspaceConvergenceError::AdmissionGenerationAdvanced) => {
-                self.handshake
-                    .reject(session, PairingRejectReason::AdmissionUnavailable)
-                    .await;
-                self.emit_failure(session, PairingFailureReason::Internal);
-                return;
-            }
-            Err(error) => {
-                warn!(
-                    session = %session,
-                    error = %error,
-                    "could not commit the joiner admission in workspace convergence"
-                );
-                self.handshake
-                    .reject(
-                        session,
-                        PairingRejectReason::Internal(format!("commit_joiner_admission: {error}")),
-                    )
-                    .await;
-                self.emit_failure(session, PairingFailureReason::Internal);
+                    };
+                self.handshake.reject(session, reason).await;
+                self.emit_failure(session, failure);
                 return;
             }
         };
         if let Err(error) = self
             .handshake
-            .send_committed(
-                session,
-                uc_core::pairing::SponsorAdmissionSaved { facts: committed },
-            )
+            .send_durable_candidate(session, candidate)
             .await
         {
-            warn!(session = %session, error = %error, "could not send the admission-saved confirmation");
-            // The change is already saved; the joiner stays locally ready
-            // and recovers via the workspace handoff/restricted channel.
-            self.handshake.complete(session).await;
+            warn!(session = %session, error = %error, "Candidate send failed after durable save");
+            self.emit_failure(session, PairingFailureReason::ConnectionLost);
             return;
         }
-        self.handshake.complete(session).await;
-        info!(
-            session = %session,
-            joiner_device_id = %joiner_device_id.as_str(),
-            "joiner admission change saved and confirmed"
-        );
+        self.notify_consume(&facts.request.invitation_code).await;
     }
 
     async fn notify_consume(&self, code: &InvitationCode) {
@@ -642,9 +593,7 @@ fn variant_name(message: &PairingSessionMessage) -> &'static str {
         PairingSessionMessage::Request(_) => "Request",
         PairingSessionMessage::AdmissionOffer(_) => "AdmissionOffer",
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
-        PairingSessionMessage::Confirm(_) => "Confirm",
-        PairingSessionMessage::Ready(_) => "Ready",
-        PairingSessionMessage::AdmissionSaved(_) => "AdmissionSaved",
+        PairingSessionMessage::DurableAdmission(_) => "DurableAdmission",
         PairingSessionMessage::Reject(_) => "Reject",
     }
 }
@@ -672,29 +621,20 @@ mod tests {
     use chrono::{DateTime, Duration, Utc};
 
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
-    use uc_core::membership::{
-        AdmissionChangeFacts, AdmissionSavedFacts, MemberInstanceId, MemberRepositoryPort,
-        MembershipAdmissionDecision, MembershipError, SpaceMember, WorkspacePhase,
-        WorkspaceSnapshot,
-    };
+    use uc_core::membership::{AdmissionChangeFacts, MembershipAdmissionDecision};
     use uc_core::pairing::invitation::{InvitationCode, PairingInvitation};
     use uc_core::pairing::session_message::{
-        JoinerChallengeResponse, JoinerReady, PairingReject, PairingSecurityCapability,
+        JoinerChallengeResponse, PairingReject, PairingSecurityCapability,
     };
     use uc_core::ports::pairing::{DialError, DialOutcome, PairingSessionPort, SessionError};
     use uc_core::ports::pairing_invitation::{InvitationError, IssuedInvitation};
-    use uc_core::ports::space::{
-        GroupAdmissionPort, PrepareAdmissionOfferPort, ProofPort, SpaceAccessError,
-    };
+    use uc_core::ports::space::{PrepareAdmissionOfferPort, ProofPort, SpaceAccessError};
     use uc_core::ports::{
-        ClockPort, ConsumeInvitationError, DeviceIdentityPort, LocalIdentityError,
-        LocalIdentityPort, PairingInvitationPort, SettingsPort, SetupStatusPort,
+        ClockPort, ConsumeInvitationError, PairingInvitationPort, SetupStatusPort,
     };
     use uc_core::security::IdentityFingerprint;
-    use uc_core::settings::model::Settings;
     use uc_core::space_access::domain::{
-        GroupAdmission, PreparedAdmissionOffer, PreparedGroupJoin, ProofDerivedKey,
-        SpaceAccessProofArtifact,
+        PreparedAdmissionOffer, ProofDerivedKey, SpaceAccessProofArtifact,
     };
     use uc_observability_contract::analytics::{
         AnalyticsFacade, AnalyticsPort, DefaultAnalyticsFacade, NoopAnalyticsIdentity,
@@ -735,16 +675,14 @@ mod tests {
     struct RecordingOwner {
         calls: StdMutex<Vec<&'static str>>,
         decision: MembershipAdmissionDecision,
-        fail_begin: bool,
-        fail_commit: bool,
+        fail_validate: bool,
     }
     impl RecordingOwner {
         fn allowed() -> Self {
             Self {
                 calls: StdMutex::new(Vec::new()),
                 decision: MembershipAdmissionDecision::Allowed,
-                fail_begin: false,
-                fail_commit: false,
+                fail_validate: false,
             }
         }
         fn with_decision(decision: MembershipAdmissionDecision) -> Self {
@@ -753,15 +691,9 @@ mod tests {
                 ..Self::allowed()
             }
         }
-        fn with_fail_begin() -> Self {
+        fn with_fail_validate() -> Self {
             Self {
-                fail_begin: true,
-                ..Self::allowed()
-            }
-        }
-        fn with_fail_commit() -> Self {
-            Self {
-                fail_commit: true,
+                fail_validate: true,
                 ..Self::allowed()
             }
         }
@@ -771,6 +703,20 @@ mod tests {
     }
     #[async_trait]
     impl WorkspaceAdmissionOwnerPort for RecordingOwner {
+        async fn validate_join_request(
+            &self,
+            request: &JoinerRequest,
+        ) -> Result<(), WorkspaceConvergenceError> {
+            request
+                .validate_durable_identity()
+                .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_owned()))?;
+            if self.fail_validate {
+                self.calls.lock().unwrap().push("validate_join_request");
+                return Err(WorkspaceConvergenceError::InvalidConfirmation);
+            }
+            Ok(())
+        }
+
         async fn admission_decision_for_joiner(
             &self,
             _: u64,
@@ -780,83 +726,61 @@ mod tests {
             self.decision
         }
         async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
+            self.calls.lock().unwrap().push("synchronize_chain");
             Ok(())
         }
 
-        async fn begin_admission(
+        async fn prepare_sponsor_candidate(
             &self,
-            session: &PairingSessionId,
-            joiner_device_id: &DeviceId,
-            invitation_generation: u64,
-        ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-            self.calls.lock().unwrap().push("begin_admission");
-            assert_eq!(joiner_device_id.as_str(), "joiner-device");
-            assert_eq!(invitation_generation, 0);
-            assert_eq!(session.as_str(), "session-1");
-            if self.fail_begin {
-                return Err(WorkspaceConvergenceError::Unavailable);
-            }
-            Ok(owner_snapshot())
+            _request: &JoinerRequest,
+        ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+            self.calls.lock().unwrap().push("prepare_sponsor_candidate");
+            Ok(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::Candidate,
+            ))
         }
-        async fn commit_joiner_admission(
+
+        async fn commit_sponsor_prepared(
             &self,
-            session: &PairingSessionId,
-            joiner: AdmissionChangeFacts,
-            _security_update_payload: Vec<u8>,
-        ) -> Result<AdmissionSavedFacts, WorkspaceConvergenceError> {
-            self.calls.lock().unwrap().push("commit_joiner_admission");
-            assert_eq!(session.as_str(), "session-1");
-            assert_eq!(joiner.device_id.as_str(), "joiner-device");
-            if self.fail_commit {
-                return Err(WorkspaceConvergenceError::Unavailable);
-            }
-            Ok(AdmissionSavedFacts {
-                history_digest: [0x11; 32],
-                history_event_count: 2,
-                sponsor_facts: joiner_facts(),
-            })
+            _frame: &uc_core::pairing::DurableAdmissionFrame,
+        ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+            self.calls.lock().unwrap().push("commit_sponsor_prepared");
+            Ok(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::Commit,
+            ))
         }
-        async fn local_admission_facts(
+
+        async fn complete_sponsor_applied(
             &self,
-            _member_instance: Option<MemberInstanceId>,
-        ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError> {
-            unimplemented!("joiner-side method not exercised in sponsor tests")
+            _frame: &uc_core::pairing::DurableAdmissionFrame,
+        ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+            self.calls.lock().unwrap().push("complete_sponsor_applied");
+            Ok(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::Complete,
+            ))
         }
-        async fn pending_admission(
+
+        async fn confirm_sponsor_complete_ack(
             &self,
-            _session: &uc_core::ports::pairing::PairingSessionId,
-        ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>
-        {
-            Ok(None)
-        }
-        async fn record_local_readiness(
-            &self,
-            _: MemberInstanceId,
-        ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-            unimplemented!("joiner-side method not exercised in sponsor tests")
-        }
-        async fn record_admission_saved(
-            &self,
-            _: AdmissionSavedFacts,
-        ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-            unimplemented!("joiner-side method not exercised in sponsor tests")
+            _frame: &uc_core::pairing::DurableAdmissionFrame,
+        ) -> Result<(), WorkspaceConvergenceError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("confirm_sponsor_complete_ack");
+            Ok(())
         }
     }
 
-    fn owner_snapshot() -> WorkspaceSnapshot {
-        WorkspaceSnapshot {
-            phase: WorkspacePhase::LocallyApplied,
-            revision: 1,
-            history_event_count: 0,
-            effective_member_count: 1,
-            pending_removal_decision_device_ids: Vec::new(),
-            pending_removal_decision_event_id: None,
-            diverged_peer_device_ids: Vec::new(),
-            upgrade_required_peer_device_ids: Vec::new(),
-            convergence_digest: None,
-            removed: false,
-            updated_at_ms: fixed_now_ms(),
-            failure_category: None,
+    fn durable_frame(
+        kind: uc_core::pairing::DurableAdmissionMessageKind,
+    ) -> uc_core::pairing::DurableAdmissionFrame {
+        uc_core::pairing::DurableAdmissionFrame {
+            attempt_id: [0x31; 32],
+            kind,
+            message_id: [kind as u8; 32],
+            predecessor_message_id: Some([0x32; 32]),
+            payload: vec![kind as u8],
         }
     }
 
@@ -952,30 +876,6 @@ mod tests {
             ) -> Result<PreparedAdmissionOffer, SpaceAccessError>;
         }
 
-        #[async_trait]
-        impl GroupAdmissionPort for SpaceAccess {
-            async fn prepare_group_join(
-                &self,
-                device_id: &DeviceId,
-            ) -> Result<PreparedGroupJoin, SpaceAccessError>;
-            async fn admit_group_member(
-                &self,
-                space_id: &SpaceId,
-                sponsor_device_id: &DeviceId,
-                joiner_device_id: &DeviceId,
-                existing_member_ids: &[DeviceId],
-                key_package: &[u8],
-            ) -> Result<GroupAdmission, SpaceAccessError>;
-            async fn install_group_join(
-                &self,
-                space_id: &SpaceId,
-                passphrase: &uc_core::crypto::domain::Passphrase,
-                pending: PreparedGroupJoin,
-                welcome: &[u8],
-                encrypted_key_catalog: &[u8],
-                group_epoch: u64,
-            ) -> Result<(), SpaceAccessError>;
-        }
     }
 
     fn noop_delivery() -> Arc<MockGroupUpdateDelivery> {
@@ -994,14 +894,6 @@ mod tests {
                     challenge_nonce: [0x42; 32],
                 },
                 verification_key: ProofDerivedKey::from_bytes([0x55; 32]),
-            })
-        });
-        mock.expect_admit_group_member().returning(|_, _, _, _, _| {
-            Ok(GroupAdmission {
-                welcome: vec![1],
-                encrypted_key_catalog: vec![2],
-                existing_member_updates: Vec::new(),
-                group_epoch: 2,
             })
         });
         Arc::new(mock)
@@ -1029,42 +921,6 @@ mod tests {
         }
     }
 
-    struct FixedLocal(IdentityFingerprint);
-    #[async_trait]
-    impl LocalIdentityPort for FixedLocal {
-        async fn create(&self) -> Result<IdentityFingerprint, LocalIdentityError> {
-            Ok(self.0.clone())
-        }
-        async fn ensure(&self) -> Result<IdentityFingerprint, LocalIdentityError> {
-            Ok(self.0.clone())
-        }
-        async fn get_current_fingerprint(
-            &self,
-        ) -> Result<Option<IdentityFingerprint>, LocalIdentityError> {
-            Ok(Some(self.0.clone()))
-        }
-    }
-
-    struct FixedDevice(DeviceId);
-    impl DeviceIdentityPort for FixedDevice {
-        fn current_device_id(&self) -> DeviceId {
-            self.0.clone()
-        }
-    }
-
-    struct NamedSettings(String);
-    #[async_trait]
-    impl SettingsPort for NamedSettings {
-        async fn load(&self) -> anyhow::Result<Settings> {
-            let mut s = Settings::default();
-            s.general.device_name = Some(self.0.clone());
-            Ok(s)
-        }
-        async fn save(&self, _: &Settings) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
     struct OrchestratorStubSetupStatus;
     #[async_trait]
     impl SetupStatusPort for OrchestratorStubSetupStatus {
@@ -1076,23 +932,6 @@ mod tests {
         }
         async fn set_status(&self, _s: &uc_core::setup::SetupStatus) -> anyhow::Result<()> {
             Ok(())
-        }
-    }
-
-    struct NoopMemberRepo;
-    #[async_trait]
-    impl MemberRepositoryPort for NoopMemberRepo {
-        async fn get(&self, _: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
-            Ok(None)
-        }
-        async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
-            Ok(Vec::new())
-        }
-        async fn save(&self, _: &SpaceMember) -> Result<(), MembershipError> {
-            Ok(())
-        }
-        async fn remove(&self, _: &DeviceId) -> Result<bool, MembershipError> {
-            Ok(false)
         }
     }
 
@@ -1109,10 +948,6 @@ mod tests {
     fn joiner_fp() -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string("AAAAAAAAAAAAAAAA").unwrap()
     }
-    fn sponsor_fp() -> IdentityFingerprint {
-        IdentityFingerprint::from_raw_string("BBBBBBBBBBBBBBBB").unwrap()
-    }
-
     fn pending(code: &str) -> PairingInvitation {
         let issued = fixed_now();
         let expires = issued + Duration::minutes(5);
@@ -1126,7 +961,11 @@ mod tests {
         inv
     }
     fn joiner_request(code: &str) -> JoinerRequest {
+        let admission = joiner_facts();
         JoinerRequest {
+            attempt_id: [1; 32],
+            join_id: [2; 16],
+            request_message_id: [3; 32],
             invitation_code: InvitationCode::new(code),
             device_id: DeviceId::new("joiner-device"),
             device_name: "joiner's laptop".into(),
@@ -1135,24 +974,27 @@ mod tests {
             transport_address_blob: vec![],
             security_capability: PairingSecurityCapability::ReliableGroupEpochV1,
             key_package: vec![1, 2, 3],
+            member_instance: admission.member_instance,
+            membership_credential: joiner_credential(),
+            resume_public_key: vec![3; 32],
+            admission,
         }
     }
 
+    fn joiner_credential() -> uc_core::membership::MembershipCredential {
+        uc_core::membership::MembershipCredential::new(1, vec![4; 32])
+    }
+
     fn joiner_facts() -> AdmissionChangeFacts {
+        let device_id = DeviceId::new("joiner-device");
         AdmissionChangeFacts {
-            member_instance: MemberInstanceId::from_bytes([7; 32]),
-            device_id: DeviceId::new("joiner-device"),
+            member_instance: joiner_credential().member_instance_id(&device_id),
+            device_id,
             device_name: "joiner's laptop".into(),
             identity_fingerprint: joiner_fp(),
             transport_public_key: vec![1; 32],
             transport_address_blob: vec![],
             identity_signature: vec![2; 64],
-        }
-    }
-
-    fn joiner_ready() -> JoinerReady {
-        JoinerReady {
-            admission: joiner_facts(),
         }
     }
 
@@ -1189,16 +1031,10 @@ mod tests {
             let space_access = sponsor_space_access();
             let handshake = SponsorHandshakeCoordinator::new(
                 self.session_port.clone() as Arc<dyn PairingSessionPort>,
-                space_access.clone(),
                 space_access,
                 noop_delivery(),
-                Arc::new(NoopMemberRepo),
                 Arc::new(ScriptedProof(StdMutex::new(self.proof_verdicts))),
-                Arc::new(FixedLocal(sponsor_fp())),
-                Arc::new(FixedDevice(DeviceId::new("sponsor-device"))),
-                Arc::new(NamedSettings("sponsor-mac".into())),
                 Arc::new(OrchestratorStubSetupStatus),
-                Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
                 std::time::Duration::from_secs(3600),
             );
             let orch = Arc::new(PairingInboundOrchestrator::new(
@@ -1220,7 +1056,40 @@ mod tests {
     // ── tests ────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn happy_path_saves_admission_then_confirms_and_commits() {
+    async fn invalid_durable_request_does_not_consume_the_invitation() {
+        let mut bundle = Bundle::happy();
+        bundle.owner = Arc::new(RecordingOwner::with_fail_validate());
+        bundle.holder.insert(pending("CODE-1")).await;
+        let holder = Arc::clone(&bundle.holder);
+        let invitation_port = Arc::clone(&bundle.invitation_port);
+        let (orch, session_port, owner) = bundle.build();
+        let session = PairingSessionId::new("session-1");
+
+        orch.handle_event(PairingSessionEvent::Incoming {
+            session,
+            message: PairingSessionMessage::Request(joiner_request("CODE-1")),
+        })
+        .await;
+
+        assert_eq!(owner.call_log(), vec!["validate_join_request"]);
+        assert!(invitation_port.consumed.lock().unwrap().is_empty());
+        assert!(matches!(
+            session_port.sent().last().map(|(_, message)| message),
+            Some(PairingSessionMessage::Reject(PairingReject {
+                reason: PairingRejectReason::Internal(_),
+            }))
+        ));
+        assert!(holder
+            .take_matching(
+                &InvitationCode::new("CODE-1"),
+                Utc.timestamp_millis_opt(fixed_now_ms()).single().unwrap(),
+            )
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn happy_path_saves_each_durable_stage_before_sending_the_next() {
         let bundle = Bundle::happy();
         bundle.holder.insert(pending("CODE-1")).await;
         let (orch, session_port, owner) = bundle.build();
@@ -1239,38 +1108,79 @@ mod tests {
         .await;
         orch.handle_event(PairingSessionEvent::MessageReceived {
             session: session.clone(),
-            message: PairingSessionMessage::Ready(joiner_ready()),
+            message: PairingSessionMessage::DurableAdmission(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::Prepared,
+            )),
+        })
+        .await;
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session: session.clone(),
+            message: PairingSessionMessage::DurableAdmission(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::Applied,
+            )),
+        })
+        .await;
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session: session.clone(),
+            message: PairingSessionMessage::DurableAdmission(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::CompleteAck,
+            )),
         })
         .await;
 
         let sent = session_port.sent();
-        let kinds = sent
+        assert!(matches!(
+            sent[0].1,
+            PairingSessionMessage::AdmissionOffer(_)
+        ));
+        let durable_kinds = sent
             .iter()
-            .map(|(_, m)| variant_name(m))
+            .filter_map(|(_, message)| match message {
+                PairingSessionMessage::DurableAdmission(frame) => Some(frame.kind),
+                _ => None,
+            })
             .collect::<Vec<_>>();
         assert_eq!(
-            kinds,
-            vec!["AdmissionOffer", "Confirm", "AdmissionSaved"],
-            "wire sequence: offer → confirm → admission-saved confirmation"
-        );
-        assert!(
-            matches!(
-                sent.last().map(|(_, m)| m),
-                Some(PairingSessionMessage::AdmissionSaved(_))
-            ),
-            "last wire frame must be the admission-saved confirmation"
+            durable_kinds,
+            vec![
+                uc_core::pairing::DurableAdmissionMessageKind::Candidate,
+                uc_core::pairing::DurableAdmissionMessageKind::Commit,
+                uc_core::pairing::DurableAdmissionMessageKind::Complete,
+            ]
         );
         assert_eq!(session_port.closed().len(), 1);
-        // The owner saw: decision → begin → commit.
         let calls = owner.call_log();
         assert_eq!(
             calls,
             vec![
                 "admission_decision",
-                "begin_admission",
-                "commit_joiner_admission"
+                "synchronize_chain",
+                "prepare_sponsor_candidate",
+                "commit_sponsor_prepared",
+                "complete_sponsor_applied",
+                "confirm_sponsor_complete_ack",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn reopened_admission_channel_accepts_complete_ack_as_its_first_message() {
+        let bundle = Bundle::happy();
+        let (orchestrator, session_port, owner) = bundle.build();
+        let session = PairingSessionId::new("continued-session");
+
+        orchestrator
+            .handle_event(PairingSessionEvent::Incoming {
+                session: session.clone(),
+                message: PairingSessionMessage::DurableAdmission(durable_frame(
+                    uc_core::pairing::DurableAdmissionMessageKind::CompleteAck,
+                )),
+            })
+            .await;
+
+        assert_eq!(owner.call_log(), vec!["confirm_sponsor_complete_ack"]);
+        assert!(session_port.sent().is_empty());
+        assert_eq!(session_port.closed().len(), 1);
     }
 
     #[tokio::test]
@@ -1300,124 +1210,6 @@ mod tests {
             owner.call_log(),
             vec!["admission_decision"],
             "no save boundary crossed on a rejected admission"
-        );
-    }
-
-    #[tokio::test]
-    async fn begin_admission_failure_rejects_with_internal() {
-        let mut bundle = Bundle::happy();
-        bundle.owner = Arc::new(RecordingOwner::with_fail_begin());
-        bundle.holder.insert(pending("CODE-1")).await;
-        let (orch, session_port, _owner) = bundle.build();
-        let session = PairingSessionId::new("session-1");
-        orch.handle_event(PairingSessionEvent::Incoming {
-            session: session.clone(),
-            message: PairingSessionMessage::Request(joiner_request("CODE-1")),
-        })
-        .await;
-        orch.handle_event(PairingSessionEvent::MessageReceived {
-            session: session.clone(),
-            message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
-                encrypted_challenge: vec![0xAB],
-            }),
-        })
-        .await;
-        let sent = session_port.sent();
-        assert!(
-            sent.iter().any(|(_, m)| matches!(
-                m,
-                PairingSessionMessage::Reject(PairingReject {
-                    reason: PairingRejectReason::Internal(_),
-                })
-            )),
-            "expected Internal reject after begin_admission failure, got {sent:?}"
-        );
-        assert!(
-            !sent
-                .iter()
-                .any(|(_, m)| matches!(m, PairingSessionMessage::Confirm(_))),
-            "no Confirm after a failed admission save"
-        );
-    }
-
-    #[tokio::test]
-    async fn commit_failure_rejects_and_never_sends_confirmation() {
-        let mut bundle = Bundle::happy();
-        bundle.owner = Arc::new(RecordingOwner::with_fail_commit());
-        bundle.holder.insert(pending("CODE-1")).await;
-        let (orch, session_port, _owner) = bundle.build();
-        let session = PairingSessionId::new("session-1");
-        orch.handle_event(PairingSessionEvent::Incoming {
-            session: session.clone(),
-            message: PairingSessionMessage::Request(joiner_request("CODE-1")),
-        })
-        .await;
-        orch.handle_event(PairingSessionEvent::MessageReceived {
-            session: session.clone(),
-            message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
-                encrypted_challenge: vec![0xAB],
-            }),
-        })
-        .await;
-        orch.handle_event(PairingSessionEvent::MessageReceived {
-            session: session.clone(),
-            message: PairingSessionMessage::Ready(joiner_ready()),
-        })
-        .await;
-        let sent = session_port.sent();
-        assert!(
-            !sent
-                .iter()
-                .any(|(_, m)| matches!(m, PairingSessionMessage::AdmissionSaved(_))),
-            "no admission-saved confirmation after a failed commit"
-        );
-        assert!(
-            sent.iter().any(|(_, m)| matches!(
-                m,
-                PairingSessionMessage::Reject(PairingReject {
-                    reason: PairingRejectReason::Internal(_),
-                })
-            )),
-            "expected Internal reject after commit failure"
-        );
-    }
-
-    #[tokio::test]
-    async fn ready_facts_mismatch_is_rejected_without_saving() {
-        let bundle = Bundle::happy();
-        bundle.holder.insert(pending("CODE-1")).await;
-        let (orch, session_port, owner) = bundle.build();
-        let session = PairingSessionId::new("session-1");
-        orch.handle_event(PairingSessionEvent::Incoming {
-            session: session.clone(),
-            message: PairingSessionMessage::Request(joiner_request("CODE-1")),
-        })
-        .await;
-        orch.handle_event(PairingSessionEvent::MessageReceived {
-            session: session.clone(),
-            message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
-                encrypted_challenge: vec![0xAB],
-            }),
-        })
-        .await;
-        let mut mismatched = joiner_ready();
-        mismatched.admission.device_id = DeviceId::new("other-device");
-        orch.handle_event(PairingSessionEvent::MessageReceived {
-            session: session.clone(),
-            message: PairingSessionMessage::Ready(mismatched),
-        })
-        .await;
-        assert_eq!(
-            owner.call_log(),
-            vec!["admission_decision", "begin_admission"],
-            "a readiness mismatch must not reach commit_joiner_admission"
-        );
-        assert!(
-            !session_port
-                .sent()
-                .iter()
-                .any(|(_, m)| matches!(m, PairingSessionMessage::AdmissionSaved(_))),
-            "no confirmation on a readiness mismatch"
         );
     }
 
@@ -1464,7 +1256,23 @@ mod tests {
         .await;
         orch.handle_event(PairingSessionEvent::MessageReceived {
             session: session.clone(),
-            message: PairingSessionMessage::Ready(joiner_ready()),
+            message: PairingSessionMessage::DurableAdmission(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::Prepared,
+            )),
+        })
+        .await;
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session: session.clone(),
+            message: PairingSessionMessage::DurableAdmission(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::Applied,
+            )),
+        })
+        .await;
+        orch.handle_event(PairingSessionEvent::MessageReceived {
+            session,
+            message: PairingSessionMessage::DurableAdmission(durable_frame(
+                uc_core::pairing::DurableAdmissionMessageKind::CompleteAck,
+            )),
         })
         .await;
         assert!(

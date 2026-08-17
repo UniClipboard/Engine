@@ -136,6 +136,18 @@ pub trait PairingSessionPort: Send + Sync {
     /// [`send`](Self::send).
     async fn dial_by_invitation(&self, code: &InvitationCode) -> Result<DialOutcome, DialError>;
 
+    /// Reopen the restricted admission channel after a local Space
+    /// transition. The opaque address uses the same adapter-owned encoding
+    /// as [`crate::ports::PeerAddressRecord::addr_blob`].
+    async fn dial_admission_continuation(
+        &self,
+        _address_blob: &[u8],
+    ) -> Result<PairingSessionId, DialError> {
+        Err(DialError::Internal(
+            "admission continuation is unavailable".to_owned(),
+        ))
+    }
+
     /// Send a pairing message on an existing session. Used by both sides
     /// throughout the handshake.
     async fn send(
@@ -159,8 +171,8 @@ pub trait PairingSessionPort: Send + Sync {
 
     /// 返回本地传输地址的不透明编码（Slice 2 Phase 1 · T5）。
     ///
-    /// 供 handshake coordinator 在发送 `JoinerRequest` / `SponsorConfirm`
-    /// 前填充 `transport_address_blob` 字段使用。adapter 自己决定编码格式
+    /// 供 handshake coordinator 在发送 `JoinerRequest` 前填充
+    /// `transport_address_blob` 字段使用。adapter 自己决定编码格式
     /// （iroh adapter 用 postcard 编码 `EndpointAddr`），core/application
     /// 只把字节透传给对端。
     ///
@@ -169,6 +181,12 @@ pub trait PairingSessionPort: Send + Sync {
     /// 接到空 blob 后会跳过 `peer_addr_repo.upsert`，由 `ensure_reachable_all`
     /// 下次重试兜底。
     async fn local_transport_address_blob(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Return the public transport identity used by this pairing endpoint.
+    /// Private transport identity material never crosses this boundary.
+    async fn local_transport_public_key(&self) -> Option<Vec<u8>> {
         None
     }
 }

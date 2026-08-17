@@ -1,10 +1,142 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
+
+use crate::ids::DeviceId;
+use crate::security::IdentityFingerprint;
+
+use super::{AdmissionChangeFacts, MemberInstanceId, MembershipEventId};
 
 pub const ADMISSION_ATTEMPT_FORMAT_V1: u16 = 1;
 pub const ADMISSION_PROFILE_METADATA_FORMAT_V1: u16 = 1;
 pub const TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1: u16 = 1;
+pub const ADMISSION_IDENTITY_BINDING_FORMAT_V1: u16 = 1;
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionIdentityBindingV1 {
+    pub format_version: u16,
+    pub lineage_id: String,
+    pub candidate_event_id: MembershipEventId,
+    pub sponsor_member_instance: MemberInstanceId,
+    pub sponsor_device_id: DeviceId,
+    pub sponsor_identity_fingerprint: IdentityFingerprint,
+    pub joiner_member_instance: MemberInstanceId,
+    pub joiner_device_id: DeviceId,
+    pub joiner_identity_fingerprint: IdentityFingerprint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionIdentityBindingError {
+    Invalid,
+    UpgradeRequired,
+}
+
+impl fmt::Display for AdmissionIdentityBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Invalid => "admission identity binding is invalid",
+            Self::UpgradeRequired => "admission identity binding requires a newer engine",
+        })
+    }
+}
+
+impl std::error::Error for AdmissionIdentityBindingError {}
+
+impl fmt::Debug for AdmissionIdentityBindingV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmissionIdentityBindingV1")
+            .field("format_version", &self.format_version)
+            .field("identities", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl AdmissionIdentityBindingV1 {
+    pub fn new(
+        lineage_id: String,
+        candidate_event_id: MembershipEventId,
+        sponsor: &AdmissionChangeFacts,
+        joiner: &AdmissionChangeFacts,
+    ) -> Result<Self, AdmissionIdentityBindingError> {
+        let binding = Self {
+            format_version: ADMISSION_IDENTITY_BINDING_FORMAT_V1,
+            lineage_id,
+            candidate_event_id,
+            sponsor_member_instance: sponsor.member_instance,
+            sponsor_device_id: sponsor.device_id.clone(),
+            sponsor_identity_fingerprint: sponsor.identity_fingerprint.clone(),
+            joiner_member_instance: joiner.member_instance,
+            joiner_device_id: joiner.device_id.clone(),
+            joiner_identity_fingerprint: joiner.identity_fingerprint.clone(),
+        };
+        binding.validate_shape()?;
+        Ok(binding)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, AdmissionIdentityBindingError> {
+        self.validate_shape()?;
+        postcard::to_stdvec(self).map_err(|_| AdmissionIdentityBindingError::Invalid)
+    }
+
+    pub fn decode(encoded: &[u8]) -> Result<Self, AdmissionIdentityBindingError> {
+        let binding: Self =
+            postcard::from_bytes(encoded).map_err(|_| AdmissionIdentityBindingError::Invalid)?;
+        if binding.format_version != ADMISSION_IDENTITY_BINDING_FORMAT_V1 {
+            return Err(AdmissionIdentityBindingError::UpgradeRequired);
+        }
+        binding.validate_shape()?;
+        Ok(binding)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_and_validate(
+        encoded: &[u8],
+        lineage_id: &str,
+        candidate_event_id: MembershipEventId,
+        sponsor_member_instance: MemberInstanceId,
+        joiner: &AdmissionChangeFacts,
+        relationships: &[AdmissionChangeFacts],
+    ) -> Result<Self, AdmissionIdentityBindingError> {
+        let binding = Self::decode(encoded)?;
+        let sponsor_matches = relationships
+            .iter()
+            .filter(|facts| facts.member_instance == sponsor_member_instance)
+            .collect::<Vec<_>>();
+        let joiner_matches = relationships
+            .iter()
+            .filter(|facts| facts.member_instance == joiner.member_instance)
+            .collect::<Vec<_>>();
+        if binding.lineage_id != lineage_id
+            || binding.candidate_event_id != candidate_event_id
+            || binding.sponsor_member_instance != sponsor_member_instance
+            || binding.joiner_member_instance != joiner.member_instance
+            || sponsor_matches.len() != 1
+            || joiner_matches.len() != 1
+            || binding.sponsor_device_id != sponsor_matches[0].device_id
+            || binding.sponsor_identity_fingerprint != sponsor_matches[0].identity_fingerprint
+            || binding.joiner_device_id != joiner.device_id
+            || binding.joiner_identity_fingerprint != joiner.identity_fingerprint
+            || joiner_matches[0] != joiner
+        {
+            return Err(AdmissionIdentityBindingError::Invalid);
+        }
+        Ok(binding)
+    }
+
+    fn validate_shape(&self) -> Result<(), AdmissionIdentityBindingError> {
+        if self.lineage_id.is_empty()
+            || self.sponsor_device_id.as_str().is_empty()
+            || self.joiner_device_id.as_str().is_empty()
+            || self.sponsor_member_instance == self.joiner_member_instance
+            || self.sponsor_device_id == self.joiner_device_id
+        {
+            return Err(AdmissionIdentityBindingError::Invalid);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AdmissionAttemptId([u8; 32]);
@@ -197,6 +329,12 @@ pub struct AdmissionAttemptV1 {
     pub cleanup_pending: bool,
     #[serde(default)]
     pub target_access_state: Option<Vec<u8>>,
+    #[serde(default)]
+    pub joiner_member_instance: Option<MemberInstanceId>,
+    #[serde(default)]
+    pub existing_member_security_deliveries: Option<Vec<super::SponsorAdmissionSecurityDelivery>>,
+    #[serde(default)]
+    pub preserve_unreadable_history: bool,
 }
 
 impl std::fmt::Debug for AdmissionAttemptV1 {
@@ -264,6 +402,9 @@ impl AdmissionAttemptV1 {
             write_ahead_recovery: None,
             cleanup_pending: false,
             target_access_state: None,
+            joiner_member_instance: None,
+            existing_member_security_deliveries: None,
+            preserve_unreadable_history: false,
         }
     }
 
@@ -397,7 +538,7 @@ pub struct TerminalAdmissionAttemptV1 {
     pub join_id: Option<[u8; 16]>,
     pub local_join_ordinal: Option<u64>,
     pub invitation_digest: Option<[u8; 32]>,
-    pub identity_binding: Vec<u8>,
+    pub identity_binding: Option<Vec<u8>>,
     pub terminal_result: AdmissionTerminalResultV1,
     pub rejection_reason: Option<AdmissionRejectionReasonV1>,
     pub candidate_event_id: Option<[u8; 32]>,
@@ -414,5 +555,59 @@ impl std::fmt::Debug for TerminalAdmissionAttemptV1 {
             .field("attempt_id", &self.attempt_id)
             .field("terminal_result", &self.terminal_result)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ids::DeviceId;
+    use crate::membership::{AdmissionChangeFacts, MemberInstanceId, MembershipEventId};
+    use crate::security::IdentityFingerprint;
+
+    use super::AdmissionIdentityBindingV1;
+
+    fn facts(instance: u8, device_id: &str, fingerprint: &str) -> AdmissionChangeFacts {
+        AdmissionChangeFacts {
+            member_instance: MemberInstanceId::from_bytes([instance; 32]),
+            device_id: DeviceId::new(device_id),
+            device_name: device_id.to_owned(),
+            identity_fingerprint: IdentityFingerprint::from_display_string(fingerprint).unwrap(),
+            transport_public_key: vec![instance],
+            transport_address_blob: vec![instance.wrapping_add(1)],
+            identity_signature: vec![instance.wrapping_add(2)],
+        }
+    }
+
+    #[test]
+    fn admission_identity_binding_round_trips_and_validates_exact_relationships() {
+        let sponsor = facts(1, "sponsor", "QRST-UVWX-YZ23-4567");
+        let joiner = facts(2, "joiner", "ABCD-EFGH-IJKL-MNOP");
+        let event_id = MembershipEventId::from_bytes([3; 32]);
+        let binding =
+            AdmissionIdentityBindingV1::new("space-a".to_owned(), event_id, &sponsor, &joiner)
+                .unwrap();
+
+        let encoded = binding.encode().unwrap();
+        let decoded = AdmissionIdentityBindingV1::decode_and_validate(
+            &encoded,
+            "space-a",
+            event_id,
+            sponsor.member_instance,
+            &joiner,
+            &[sponsor.clone(), joiner.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(decoded, binding);
+        assert!(!format!("{decoded:?}").contains("sponsor"));
+        assert!(AdmissionIdentityBindingV1::decode_and_validate(
+            &encoded,
+            "space-b",
+            event_id,
+            sponsor.member_instance,
+            &joiner,
+            &[sponsor, joiner.clone()],
+        )
+        .is_err());
     }
 }

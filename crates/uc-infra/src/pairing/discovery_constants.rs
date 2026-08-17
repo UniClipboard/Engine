@@ -37,12 +37,15 @@ pub const TXT_CODE_HASH: &str = "ch";
 /// resolver coexist in the same process during tests.
 pub const TXT_NODE_ID: &str = "id";
 
-/// TXT key carrying the postcard+hex-encoded sponsor ticket
-/// (`iroh::EndpointAddr`). The joiner decodes this directly into a
-/// dialable address. Encoding is hex of the postcard bytes to keep the
-/// TXT value ASCII (mDNS TXT records are technically binary-safe but
-/// hickory and routers along the path are happier with printable values).
-pub const TXT_TICKET: &str = "tk";
+/// TXT key carrying the number of ordered sponsor-ticket chunks.
+pub const TXT_TICKET_CHUNK_COUNT: &str = "tn";
+
+/// Maximum postcard+hex ticket size accepted from an mDNS announcement.
+pub const MAX_TICKET_HEX_LEN: usize = 1_200;
+
+const TXT_TICKET_CHUNK_PREFIX: &str = "t";
+const TXT_TICKET_CHUNK_VALUE_LEN: usize = 240;
+const MAX_TICKET_CHUNKS: usize = MAX_TICKET_HEX_LEN.div_ceil(TXT_TICKET_CHUNK_VALUE_LEN);
 
 /// TXT key carrying the code's `expires_at_ms` as a decimal string.
 /// Joiner uses this to filter out stale announces that linger past the
@@ -58,6 +61,89 @@ pub const TXT_EXPIRES_AT_MS: &str = "ex";
 pub fn compute_code_hash(code: &str) -> String {
     let digest = blake3::hash(code.as_bytes());
     hex::encode(&digest.as_bytes()[..8])
+}
+
+/// Splits an ASCII hex endpoint ticket into bounded DNS-SD TXT attributes.
+pub fn ticket_txt_attributes(ticket_hex: &str) -> Option<Vec<(String, Option<String>)>> {
+    if ticket_hex.is_empty()
+        || ticket_hex.len() > MAX_TICKET_HEX_LEN
+        || !ticket_hex.len().is_multiple_of(2)
+        || !ticket_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+
+    let chunks = ticket_hex.as_bytes().chunks(TXT_TICKET_CHUNK_VALUE_LEN);
+    let count = chunks.len();
+    if count == 0 || count > MAX_TICKET_CHUNKS {
+        return None;
+    }
+
+    let mut attributes = Vec::with_capacity(count + 1);
+    attributes.push((TXT_TICKET_CHUNK_COUNT.to_string(), Some(count.to_string())));
+    for (index, chunk) in chunks.enumerate() {
+        attributes.push((
+            format!("{TXT_TICKET_CHUNK_PREFIX}{index}"),
+            Some(std::str::from_utf8(chunk).ok()?.to_string()),
+        ));
+    }
+    Some(attributes)
+}
+
+/// Reassembles a complete endpoint ticket from bounded DNS-SD TXT attributes.
+pub fn ticket_from_txt_attributes<'a>(
+    attributes: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) -> Option<String> {
+    let mut expected_count = None;
+    let mut chunks = [None; MAX_TICKET_CHUNKS];
+
+    for (key, value) in attributes {
+        if key == TXT_TICKET_CHUNK_COUNT {
+            if expected_count.is_some() {
+                return None;
+            }
+            let value = value?;
+            let count = value.parse::<usize>().ok()?;
+            if count == 0 || count > MAX_TICKET_CHUNKS || count.to_string() != value {
+                return None;
+            }
+            expected_count = Some(count);
+            continue;
+        }
+
+        let Some(index_text) = key.strip_prefix(TXT_TICKET_CHUNK_PREFIX) else {
+            continue;
+        };
+        if index_text.is_empty() || !index_text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let index = index_text.parse::<usize>().ok()?;
+        if index >= MAX_TICKET_CHUNKS || index.to_string() != index_text || chunks[index].is_some()
+        {
+            return None;
+        }
+        let chunk = value?;
+        if chunk.is_empty() || chunk.len() > TXT_TICKET_CHUNK_VALUE_LEN {
+            return None;
+        }
+        chunks[index] = Some(chunk);
+    }
+
+    let expected_count = expected_count?;
+    if chunks[expected_count..].iter().any(Option::is_some) {
+        return None;
+    }
+    let mut ticket = String::new();
+    for chunk in chunks[..expected_count].iter() {
+        ticket.push_str(chunk.as_ref()?);
+    }
+    if ticket.len() > MAX_TICKET_HEX_LEN
+        || !ticket.len().is_multiple_of(2)
+        || !ticket.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(ticket)
 }
 
 #[cfg(test)]
@@ -83,5 +169,54 @@ mod tests {
             compute_code_hash("ABCD-1234"),
             compute_code_hash("ABCD-1235"),
         );
+    }
+
+    #[test]
+    fn ticket_txt_attributes_split_and_restore_a_long_ticket() {
+        let ticket = "ab".repeat(360);
+
+        let attributes = ticket_txt_attributes(&ticket).expect("ticket attributes");
+        assert!(attributes.len() > 2, "ticket must be split across fields");
+        assert!(attributes
+            .iter()
+            .all(|(key, value)| { key.len() + value.as_deref().map_or(0, str::len) <= 254 }));
+
+        assert_eq!(
+            ticket_from_txt_attributes(
+                attributes
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_deref()))
+            ),
+            Some(ticket)
+        );
+    }
+
+    #[test]
+    fn ticket_txt_attributes_reject_missing_or_out_of_range_chunks() {
+        let ticket = "cd".repeat(300);
+        let attributes = ticket_txt_attributes(&ticket).expect("ticket attributes");
+
+        let missing = attributes
+            .iter()
+            .filter(|(key, _)| key != "t1")
+            .map(|(key, value)| (key.as_str(), value.as_deref()));
+        assert_eq!(ticket_from_txt_attributes(missing), None);
+
+        let mut out_of_range = attributes.clone();
+        out_of_range.push(("t9".to_string(), Some("ab".to_string())));
+        assert_eq!(
+            ticket_from_txt_attributes(
+                out_of_range
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_deref()))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn ticket_txt_attributes_enforce_the_total_ticket_limit() {
+        let oversized = "ef".repeat((MAX_TICKET_HEX_LEN / 2) + 1);
+        assert_eq!(ticket_txt_attributes(&oversized), None);
     }
 }

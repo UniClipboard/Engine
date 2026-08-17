@@ -26,7 +26,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use super::discovery_constants::{
-    compute_code_hash, PAIR_SERVICE_NAME, TXT_CODE_HASH, TXT_EXPIRES_AT_MS, TXT_TICKET,
+    compute_code_hash, ticket_from_txt_attributes, PAIR_SERVICE_NAME, TXT_CODE_HASH,
+    TXT_EXPIRES_AT_MS,
 };
 
 /// Errors raised while starting / running a resolver. Timeout is
@@ -117,14 +118,13 @@ impl MdnsPairingResolver {
                 if peer_id == self_id_for_cb {
                     return;
                 }
-                // Extract code_hash + ticket from TXT.
+                // Filter by the invitation hash before reconstructing the
+                // larger endpoint ticket.
                 let saw_hash = peer
                     .txt_attribute(TXT_CODE_HASH)
                     .flatten()
                     .map(str::to_string);
-                let saw_ticket = peer.txt_attribute(TXT_TICKET).flatten().map(str::to_string);
-
-                let (Some(saw_hash), Some(saw_ticket)) = (saw_hash, saw_ticket) else {
+                let Some(saw_hash) = saw_hash else {
                     // Announcement is missing required fields. Either a
                     // different protocol on the same service name or a
                     // partially-built publisher mid-update — skip.
@@ -154,6 +154,10 @@ impl MdnsPairingResolver {
                 if expires_at_ms <= now_ms {
                     return;
                 }
+
+                let Some(saw_ticket) = ticket_from_txt_attributes(peer.txt_attributes()) else {
+                    return;
+                };
 
                 // Take the sender exactly once. Subsequent matches
                 // become no-ops. Wrapped in `spawn_supervised` so a panic

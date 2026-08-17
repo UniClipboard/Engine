@@ -18,8 +18,8 @@ use tracing::{debug, debug_span};
 use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
-    ContentKeyId, ContentKeyPurpose, GroupEpoch, LegacyUpgradeId, ProtectionGroupId,
-    SpaceKeyMaterial, SpaceSecurityMode,
+    AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, ContentKeyId, ContentKeyPurpose,
+    GroupEpoch, LegacyUpgradeId, ProtectionGroupId, SpaceKeyMaterial, SpaceSecurityMode,
 };
 
 use super::secrets::MasterKey;
@@ -360,7 +360,8 @@ impl InMemorySession {
             incoming.group_state().to_vec(),
             key_catalog,
             incoming.updated_at_ms(),
-        ))
+        )
+        .with_pending_group_updates_from(&incoming))
     }
 
     pub(crate) fn rotate_space_material(
@@ -396,6 +397,30 @@ impl InMemorySession {
             SpaceKeyMaterial::new(state, group_state, key_catalog, updated_at_ms)
                 .with_pending_group_updates_from(material),
         )
+    }
+
+    pub(crate) fn export_admission_content_key_catalog(
+        material: &SpaceKeyMaterial,
+    ) -> Result<AdmissionContentKeyCatalogV1, EncryptionError> {
+        let catalog: PersistedContentKeyCatalog = serde_json::from_slice(material.key_catalog())
+            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        if catalog.version != 2 {
+            return Err(EncryptionError::UnsupportedVersion);
+        }
+        let entries = catalog
+            .entries
+            .into_iter()
+            .map(|entry| {
+                AdmissionContentKeyEntryV1::new(entry.content_key_id, entry.epoch, entry.key)
+                    .map_err(|_| EncryptionError::KeyMaterialCorrupt)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        AdmissionContentKeyCatalogV1::new(
+            material.state().current_content_key_id().as_str(),
+            material.state().epoch().value(),
+            entries,
+        )
+        .map_err(|_| EncryptionError::KeyMaterialCorrupt)
     }
 
     pub(crate) fn snapshot(&self) -> SessionSnapshot {

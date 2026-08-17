@@ -178,6 +178,320 @@ fn history_with_a_and_b(
 }
 
 #[test]
+fn remote_v2_removal_waits_for_the_local_decision_and_preserves_each_branch() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut author_history, a, b, _, add_b) = history_with_a_and_b(true);
+    let removal = event(
+        &author_history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        3,
+        &verifier,
+    );
+    author_history
+        .verify_and_receive_event(removal.clone(), &verifier)
+        .expect("the author applies its own removal");
+
+    let mut accepting_history = VersionedMembershipHistory::decode_persisted_v2(
+        &history_with_a_and_b(true).0.encode_persisted_v2().unwrap(),
+        &verifier,
+    )
+    .unwrap();
+    accepting_history
+        .merge_remote_history(&author_history, b.facts.member_instance, &verifier)
+        .expect("the remote removal verifies");
+    assert_eq!(
+        accepting_history.pending_removal_decision(b.facts.member_instance),
+        Some(removal.event_id())
+    );
+    assert!(accepting_history
+        .effective_members()
+        .contains(&b.facts.member_instance));
+    let reopened_pending = VersionedMembershipHistory::decode_persisted_v2(
+        &accepting_history.encode_persisted_v2().unwrap(),
+        &verifier,
+    )
+    .expect("pending removal survives reopening");
+    assert_eq!(
+        reopened_pending.pending_removal_decision(b.facts.member_instance),
+        Some(removal.event_id())
+    );
+
+    let mut acceptance = MembershipDecisionV2::new(
+        MEMBERSHIP_DECISION_FORMAT_V2,
+        LINEAGE.to_owned(),
+        removal.event_id(),
+        b.facts.member_instance,
+        b.membership_credential.credential_id,
+        b.membership_credential.signature_algorithm_version,
+        RemovalDecision::Accept,
+        Some(add_b.event_id()),
+        removal.resulting_members_digest,
+        [4; 16],
+        Vec::new(),
+    );
+    acceptance.signature = verifier.sign(&b.membership_credential, &acceptance.signing_payload());
+    accepting_history
+        .verify_and_record_local_decision(acceptance, b.facts.member_instance, &verifier)
+        .expect("acceptance advances the local branch");
+    assert!(!accepting_history
+        .effective_members()
+        .contains(&b.facts.member_instance));
+    let reopened_acceptance = VersionedMembershipHistory::decode_persisted_v2(
+        &accepting_history.encode_persisted_v2().unwrap(),
+        &verifier,
+    )
+    .expect("accepted removal survives reopening");
+    assert!(!reopened_acceptance
+        .effective_members()
+        .contains(&b.facts.member_instance));
+
+    let mut rejecting_history = history_with_a_and_b(true).0;
+    rejecting_history
+        .merge_remote_history(&author_history, b.facts.member_instance, &verifier)
+        .expect("the same removal verifies on the rejecting branch");
+    let mut rejection = MembershipDecisionV2::new(
+        MEMBERSHIP_DECISION_FORMAT_V2,
+        LINEAGE.to_owned(),
+        removal.event_id(),
+        b.facts.member_instance,
+        b.membership_credential.credential_id,
+        b.membership_credential.signature_algorithm_version,
+        RemovalDecision::Reject,
+        Some(add_b.event_id()),
+        add_b.resulting_members_digest,
+        [5; 16],
+        Vec::new(),
+    );
+    rejection.signature = verifier.sign(&b.membership_credential, &rejection.signing_payload());
+    rejecting_history
+        .verify_and_record_local_decision(rejection, b.facts.member_instance, &verifier)
+        .expect("rejection preserves the local branch");
+    assert!(rejecting_history
+        .effective_members()
+        .contains(&b.facts.member_instance));
+    assert_eq!(
+        rejecting_history.pending_removal_decision(b.facts.member_instance),
+        None
+    );
+    let reopened_rejection = VersionedMembershipHistory::decode_persisted_v2(
+        &rejecting_history.encode_persisted_v2().unwrap(),
+        &verifier,
+    )
+    .expect("rejected removal survives reopening");
+    assert!(reopened_rejection
+        .effective_members()
+        .contains(&b.facts.member_instance));
+    assert_eq!(
+        rejecting_history.removal_decision_recipients_for(b.facts.member_instance),
+        [a.facts.member_instance].into()
+    );
+    assert!(
+        rejecting_history.removal_choices_diverge(a.facts.member_instance, b.facts.member_instance)
+    );
+}
+
+#[test]
+fn active_sender_may_omit_receiver_decisions_but_cannot_carry_anothers_new_decision() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut sender_history, a, b, _, add_b) = history_with_a_and_b(true);
+    let removal = event(
+        &sender_history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        3,
+        &verifier,
+    );
+    sender_history
+        .verify_and_receive_event(removal.clone(), &verifier)
+        .expect("removal verifies");
+
+    let mut receiver_history = sender_history.clone();
+    let mut b_decision = MembershipDecisionV2::new(
+        MEMBERSHIP_DECISION_FORMAT_V2,
+        LINEAGE.to_owned(),
+        removal.event_id(),
+        b.facts.member_instance,
+        b.membership_credential.credential_id,
+        b.membership_credential.signature_algorithm_version,
+        RemovalDecision::Accept,
+        Some(add_b.event_id()),
+        removal.resulting_members_digest,
+        [6; 16],
+        Vec::new(),
+    );
+    b_decision.signature = verifier.sign(&b.membership_credential, &b_decision.signing_payload());
+    receiver_history
+        .verify_and_record_peer_decision(b_decision.clone(), &verifier)
+        .expect("receiver stores B's decision");
+
+    assert!(sender_history
+        .is_authorized_active_member_extension_of(&receiver_history, a.facts.member_instance));
+    let mut merged = receiver_history.clone();
+    assert!(!merged
+        .merge_remote_history(&sender_history, a.facts.member_instance, &verifier)
+        .expect("sender may omit a decision already held by the receiver"));
+    assert_eq!(
+        merged.decision_for(removal.event_id(), b.facts.member_instance),
+        Some(&b_decision)
+    );
+
+    let previous_without_decision = sender_history.clone();
+    let mut smuggled = sender_history;
+    smuggled
+        .verify_and_record_peer_decision(b_decision, &verifier)
+        .expect("the decision is cryptographically valid");
+    assert!(!smuggled.is_authorized_active_member_extension_of(
+        &previous_without_decision,
+        a.facts.member_instance
+    ));
+}
+
+#[test]
+fn runtime_exchange_carries_only_the_senders_decisions() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut history, a, b, _, add_b) = history_with_a_and_b(true);
+    let removal = event(
+        &history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        3,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(removal.clone(), &verifier)
+        .expect("removal verifies");
+    let mut b_decision = MembershipDecisionV2::new(
+        MEMBERSHIP_DECISION_FORMAT_V2,
+        LINEAGE.to_owned(),
+        removal.event_id(),
+        b.facts.member_instance,
+        b.membership_credential.credential_id,
+        b.membership_credential.signature_algorithm_version,
+        RemovalDecision::Accept,
+        Some(add_b.event_id()),
+        removal.resulting_members_digest,
+        [7; 16],
+        Vec::new(),
+    );
+    b_decision.signature = verifier.sign(&b.membership_credential, &b_decision.signing_payload());
+    history
+        .verify_and_record_peer_decision(b_decision, &verifier)
+        .expect("A stores B's decision");
+
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+    let exchange = history
+        .export_reconciliation_exchange_v2(sender_facts)
+        .expect("A exports a self-authorized runtime view");
+    let imported = VersionedMembershipHistory::import_exchange_v2(&exchange, &verifier)
+        .expect("the runtime view remains self-consistent and verifiable");
+
+    assert_eq!(imported.current_position().unwrap(), exchange.position);
+    assert_eq!(
+        imported.decision_for(removal.event_id(), b.facts.member_instance),
+        None
+    );
+    assert!(history
+        .decision_for(removal.event_id(), b.facts.member_instance)
+        .is_some());
+
+    let mut removed_sender_facts = b.facts.clone();
+    removed_sender_facts.identity_signature = verifier.sign(
+        &b.membership_credential,
+        &removed_sender_facts.signing_payload(),
+    );
+    let removed_sender_exchange = history
+        .export_reconciliation_exchange_v2(removed_sender_facts)
+        .expect("removed B may deliver B's own decision");
+    let removed_sender_view =
+        VersionedMembershipHistory::import_exchange_v2(&removed_sender_exchange, &verifier)
+            .expect("B's restricted decision view verifies");
+    assert_eq!(
+        removed_sender_view.decision_for(removal.event_id(), b.facts.member_instance),
+        history.decision_for(removal.event_id(), b.facts.member_instance)
+    );
+}
+
+#[test]
+fn active_rejecting_member_can_deliver_its_decision_to_the_accepted_branch() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut base, a, b, _, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let add_c = event(
+        &base,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: c.clone(),
+        },
+        3,
+        &verifier,
+    );
+    base.verify_and_receive_event(add_c.clone(), &verifier)
+        .expect("C admission verifies");
+    base.verify_and_record_activation_receipt(activation_receipt(&add_c, &c, &verifier), &verifier)
+        .expect("C activation verifies");
+    let removal = event(
+        &base,
+        Some(add_c.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        4,
+        &verifier,
+    );
+
+    let mut accepted = base.clone();
+    accepted
+        .verify_and_receive_event(removal.clone(), &verifier)
+        .expect("A applies its removal");
+
+    let mut rejected = base;
+    rejected
+        .merge_remote_history(&accepted, c.facts.member_instance, &verifier)
+        .expect("C receives the pending removal");
+    let mut rejection = MembershipDecisionV2::new(
+        MEMBERSHIP_DECISION_FORMAT_V2,
+        LINEAGE.to_owned(),
+        removal.event_id(),
+        c.facts.member_instance,
+        c.membership_credential.credential_id,
+        c.membership_credential.signature_algorithm_version,
+        RemovalDecision::Reject,
+        Some(add_c.event_id()),
+        add_c.resulting_members_digest,
+        [8; 16],
+        Vec::new(),
+    );
+    rejection.signature = verifier.sign(&c.membership_credential, &rejection.signing_payload());
+    rejected
+        .verify_and_record_local_decision(rejection.clone(), c.facts.member_instance, &verifier)
+        .expect("C keeps the parent branch");
+
+    assert!(rejected.is_authorized_decision_delivery_of(&accepted, c.facts.member_instance));
+    assert!(accepted
+        .merge_remote_history(&rejected, a.facts.member_instance, &verifier)
+        .expect("A stores C's decision without moving its accepted head"));
+    assert_eq!(
+        accepted.decision_for(removal.event_id(), c.facts.member_instance),
+        Some(&rejection)
+    );
+    assert_eq!(accepted.current_head(), Some(removal.event_id()));
+}
+
+#[test]
 fn removed_members_credential_still_verifies_its_past_events_for_a_new_device() {
     let verifier = DeterministicSignatureVerifier;
     let a = admission("device-a", credential(1));
@@ -612,13 +926,17 @@ fn verified_and_legacy_migrations_create_explicit_activation_baselines() {
         (a.facts.member_instance, a.membership_credential.clone()),
         (c.facts.member_instance, c.membership_credential.clone()),
     ];
+    let current_members = vec![
+        (a.facts.clone(), a.membership_credential.clone()),
+        (c.facts.clone(), c.membership_credential.clone()),
+    ];
 
     let mut fully_verified = VersionedMembershipHistory::from_activation_baseline(
         MembershipActivationBaselineV2::FullyVerifiedMigration {
             lineage_id: LINEAGE.to_owned(),
             head_event_id: head,
             head_depth: 7,
-            current_member_credentials: current_credentials.clone(),
+            current_members,
         },
     )
     .expect("fully verified migration baseline is valid");
@@ -939,6 +1257,67 @@ fn verified_history_persistence_round_trip_preserves_authority_and_receipts() {
     assert_eq!(reopened, history);
     assert!(reopened.active_members().contains(&b.facts.member_instance));
     assert_eq!(reopened.depth(add_b.event_id()), Some(1));
+}
+
+#[test]
+fn persisted_history_reopens_when_an_activated_joiner_authors_the_next_admission() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut history, _a, b, _genesis, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let add_c = event(
+        &history,
+        Some(add_b.event_id()),
+        &b,
+        MembershipOperationV2::AddDevice {
+            admission: c.clone(),
+        },
+        3,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(add_c.clone(), &verifier)
+        .expect("activated B may admit C");
+    history
+        .verify_and_record_activation_receipt(activation_receipt(&add_c, &c, &verifier), &verifier)
+        .expect("C activation receipt verifies");
+
+    let encoded = history.encode_persisted_v2().unwrap();
+    let reopened = VersionedMembershipHistory::decode_persisted_v2(&encoded, &verifier)
+        .expect("saved activation receipts authorize later event authors after reopen");
+
+    assert_eq!(reopened, history);
+    assert!(reopened.active_members().contains(&c.facts.member_instance));
+}
+
+#[test]
+fn remote_history_merge_applies_activation_before_later_events_by_that_member() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut incoming, a, b, genesis, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let add_c = event(
+        &incoming,
+        Some(add_b.event_id()),
+        &b,
+        MembershipOperationV2::AddDevice {
+            admission: c.clone(),
+        },
+        3,
+        &verifier,
+    );
+    incoming
+        .verify_and_receive_event(add_c, &verifier)
+        .expect("activated B may admit C");
+
+    let mut local = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    local
+        .verify_and_receive_event(genesis, &verifier)
+        .expect("local genesis verifies");
+
+    assert!(local
+        .merge_remote_history(&incoming, a.facts.member_instance, &verifier)
+        .expect("incoming activation authorizes B's later event"));
+    assert!(local.active_members().contains(&b.facts.member_instance));
+    assert!(local.effective_members().contains(&c.facts.member_instance));
 }
 
 #[test]
