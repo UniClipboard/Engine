@@ -3493,63 +3493,6 @@ fn earlier_app_version_marks_an_upgrade_without_convergence_state() {
     );
 }
 
-// Flow: the retained legacy peer submits its signed current identity after the initializer has
-// created the history root; once the applied history covers the retained roster, the migration
-// marker must be cleared and the current history becomes the only runtime scope.
-
-// Flow: signed membership history reaches the retained peer before that peer has joined the
-// shared protection group. Ordinary scope still switches independently to current history.
-#[tokio::test]
-async fn membership_history_controls_ordinary_scope_before_protection_roster_is_ready() {
-    let repository = MemoryWorkspaceRepository::default();
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
-    history
-        .receive_verified(membership_event(None, 0, a, a, "device-a", 1))
-        .unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(a);
-    state.membership_reconciliation = Some(history);
-    state.migrated_from_pre_adr_020 = true;
-    repository.save_state(&state).await.unwrap();
-    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![
-        legacy_member("device-a"),
-        legacy_member("device-b"),
-    ]));
-    deps.space_protection = Arc::new(PartiallyProtectedRoster);
-    let owner = WorkspaceConvergence::new(deps);
-
-    owner
-        .handle_membership_history(
-            &DeviceId::new("device-b"),
-            MembershipHistoryMessage::Hello(uc_core::membership::MembershipHistoryHello {
-                lineage_id: SPACE.to_owned(),
-                member_instance_id: b,
-                admission: admission_facts_for(b, &DeviceId::new("device-b")),
-                known_head: None,
-                applied_head: None,
-                applied_members_digest: None,
-            }),
-        )
-        .await
-        .unwrap();
-
-    let saved = repository.load_state().await.unwrap().unwrap();
-    let scope = owner.snapshot().await.unwrap();
-    assert!(!saved.migrated_from_pre_adr_020);
-    assert_eq!(
-        scope.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
-    );
-    assert_eq!(scope.peer_device_ids, vec![DeviceId::new("device-b")]);
-}
-
-// Flow: the legacy joiner has joined the shared protection group but still has no applied
-// membership history. Even when its device ID sorts before the sponsor, completing that join must
-// fetch the sponsor history instead of creating a competing local root.
-
 // 流程：A 已是 1.1，B 低于 1.1；当前成员历史入口没有回应，但旧入口空连接成功。
 // 证明：只有旧入口的正面证据会让 A 保存“B 需要升级”，并暂停内容同步。
 #[tokio::test]

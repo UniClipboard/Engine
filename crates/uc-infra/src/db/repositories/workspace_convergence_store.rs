@@ -890,8 +890,8 @@ mod tests {
         AdmissionChangeFacts, MemberInstanceId, MembershipActivationBaselineV2,
         MembershipCredential, MembershipEvent, MembershipHistoryRelationship, MembershipOperation,
         MembershipReconciliation, PendingAdmissionRecord, PendingMembershipHistoryTransferV2,
-        VersionedMembershipHistory, WorkspaceConvergenceRepositoryPort,
-        WorkspaceConvergenceState, WorkspacePhase, ED25519_SIGNATURE_ALGORITHM_V1,
+        VersionedMembershipHistory, WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState,
+        WorkspacePhase, ED25519_SIGNATURE_ALGORITHM_V1,
     };
 
     use super::DieselWorkspaceConvergenceStore;
