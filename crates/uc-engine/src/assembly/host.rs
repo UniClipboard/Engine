@@ -834,6 +834,10 @@ mod tests {
             .sync_engine_assembly
             .membership_history_exchange_is_reachable_for_test()
             .await;
+        let admission_completion_recovery_reachable = lifecycle
+            .sync_engine_assembly
+            .admission_completion_recovery_is_reachable_for_test()
+            .await;
         let legacy_upgrade_reachable = lifecycle
             .sync_engine_assembly
             .legacy_upgrade_is_reachable_for_test()
@@ -854,6 +858,10 @@ mod tests {
         assert!(
             membership_history_reachable,
             "membership history exchange was not installed"
+        );
+        assert!(
+            admission_completion_recovery_reachable,
+            "admission completion recovery was not installed"
         );
         assert!(
             legacy_upgrade_reachable,

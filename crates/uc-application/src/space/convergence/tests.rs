@@ -43,6 +43,7 @@ struct ScriptedExchange {
 struct RejectingExchange;
 
 struct DeferredAdmissionDelivery;
+struct UnusedAdmissionCompletionRecovery;
 
 struct ConfirmingAdmissionDelivery;
 
@@ -50,6 +51,35 @@ struct LoopbackHistoryExchange {
     receiver: Arc<WorkspaceConvergence>,
     source_device_id: DeviceId,
     sent_pages: AtomicUsize,
+}
+
+#[async_trait]
+impl uc_core::membership::AdmissionCompletionRecoveryPort for UnusedAdmissionCompletionRecovery {
+    async fn request_completion_recovery_challenge(
+        &self,
+        _helper: &DeviceId,
+        _route: &[u8],
+        _hello: uc_core::membership::AdmissionCompletionRecoveryHelloV1,
+        _joiner_last_message_id: [u8; 32],
+    ) -> Result<
+        uc_core::membership::AdmissionCompletionRecoveryChallengeV1,
+        uc_core::membership::AdmissionCompletionRecoveryTransportError,
+    > {
+        Err(uc_core::membership::AdmissionCompletionRecoveryTransportError::Offline)
+    }
+
+    async fn submit_completion_recovery_response(
+        &self,
+        _helper: &DeviceId,
+        _route: &[u8],
+        _hello: uc_core::membership::AdmissionCompletionRecoveryHelloV1,
+        _response: uc_core::membership::AdmissionCompletionRecoveryResponseV1,
+    ) -> Result<
+        uc_core::pairing::DurableAdmissionFrame,
+        uc_core::membership::AdmissionCompletionRecoveryTransportError,
+    > {
+        Err(uc_core::membership::AdmissionCompletionRecoveryTransportError::Offline)
+    }
 }
 
 #[async_trait]
@@ -896,6 +926,18 @@ impl uc_core::membership::ActivateSponsorAdmissionSecurityPort
 }
 
 #[async_trait]
+impl uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort
+    for UnavailableSponsorAdmissionSecurity
+{
+    async fn activate_completion_helper_admission_security(
+        &self,
+        _request: uc_core::membership::ActivateCompletionHelperAdmissionSecurityRequest,
+    ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError> {
+        Err(uc_core::membership::AdmissionSecurityTransitionError::InvalidState)
+    }
+}
+
+#[async_trait]
 impl uc_core::membership::ActivateSponsorAdmissionSecurityPort
     for RecordingSponsorAdmissionSecurity
 {
@@ -908,10 +950,28 @@ impl uc_core::membership::ActivateSponsorAdmissionSecurityPort
     }
 }
 
+#[async_trait]
+impl uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort
+    for RecordingSponsorAdmissionSecurity
+{
+    async fn activate_completion_helper_admission_security(
+        &self,
+        request: uc_core::membership::ActivateCompletionHelperAdmissionSecurityRequest,
+    ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError> {
+        self.helper_activation_requests
+            .lock()
+            .unwrap()
+            .push(request);
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct RecordingSponsorAdmissionSecurity {
     requests: Mutex<Vec<uc_core::membership::SponsorAdmissionSecurityRequest>>,
     activation_requests: Mutex<Vec<uc_core::membership::ActivateSponsorAdmissionSecurityRequest>>,
+    helper_activation_requests:
+        Mutex<Vec<uc_core::membership::ActivateCompletionHelperAdmissionSecurityRequest>>,
 }
 
 #[async_trait]
@@ -1106,8 +1166,12 @@ pub(crate) fn test_deps(
         admission_security_transition: Arc::new(EchoAdmissionSecurityTransition::default()),
         prepare_sponsor_admission_security: Arc::new(UnavailableSponsorAdmissionSecurity),
         activate_sponsor_admission_security: Arc::new(UnavailableSponsorAdmissionSecurity),
+        activate_completion_helper_admission_security: Arc::new(
+            UnavailableSponsorAdmissionSecurity,
+        ),
         admission_space_transition: Arc::new(NoAdmissionSpaceTransition),
         admission_outbox_delivery: Arc::new(DeferredAdmissionDelivery),
+        admission_completion_recovery: Arc::new(UnusedAdmissionCompletionRecovery),
         legacy_migration_recovery: Arc::new(RecordingLegacyMigrationRecovery::default()),
         member_signatures: Arc::new(FixedSigner),
         member_repo: Arc::new(uc_application_test_member_repo()),
@@ -6436,6 +6500,339 @@ async fn cross_space_rejection_discards_target_only_before_activation() {
     assert_eq!(
         prepared.purpose,
         uc_core::membership::AdmissionOutboxPurposeV1::Prepared
+    );
+}
+
+#[tokio::test]
+async fn third_member_completion_keeps_joiner_pending_until_helper_applies_its_update() {
+    use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
+    use uc_core::membership::{
+        AdmissionActivationReceipt, AdmissionAttemptV1, AdmissionIdentityBindingV1,
+        AdmissionOutboxPurposeV1, AdmissionSecurityCommitmentV1, AdmissionTerminalResultV1,
+        JoinerAdmissionStageV1, MembershipActivationBaselineV2, MembershipAdmissionV2,
+        MembershipCredential, MembershipEventId, MembershipEventV2, MembershipOperationV2,
+        SponsorAdmissionSecurityDelivery, VersionedMembershipHistory,
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+        MEMBERSHIP_EVENT_FORMAT_V2,
+    };
+
+    let verifier = DeterministicHistoricalVerifier;
+    let sponsor_device = DeviceId::new("sponsor");
+    let helper_device = DeviceId::new("helper");
+    let joiner_device = DeviceId::new("joiner");
+    let sponsor_credential =
+        MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0xc1; 32]);
+    let helper_credential =
+        MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0xc2; 32]);
+    let joiner_credential =
+        MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0xc3; 32]);
+    let sponsor_instance = sponsor_credential.member_instance_id(&sponsor_device);
+    let helper_instance = helper_credential.member_instance_id(&helper_device);
+    let joiner_instance = joiner_credential.member_instance_id(&joiner_device);
+    let mut sponsor_facts = admission_facts_for(sponsor_instance, &sponsor_device);
+    sponsor_facts.identity_signature =
+        verifier.sign(&sponsor_credential, &sponsor_facts.signing_payload());
+    let mut helper_facts = admission_facts_for(helper_instance, &helper_device);
+    helper_facts.transport_public_key = vec![0x35; 32];
+    helper_facts.transport_address_blob = b"helper-recovery-route".to_vec();
+    helper_facts.identity_signature =
+        verifier.sign(&helper_credential, &helper_facts.signing_payload());
+    let base_head = MembershipEventId::from_hex(&"c4".repeat(32)).unwrap();
+    let base_history = VersionedMembershipHistory::from_activation_baseline(
+        MembershipActivationBaselineV2::FullyVerifiedMigration {
+            lineage_id: SPACE.to_owned(),
+            head_event_id: base_head,
+            head_depth: 4,
+            current_members: vec![
+                (sponsor_facts.clone(), sponsor_credential.clone()),
+                (helper_facts.clone(), helper_credential.clone()),
+            ],
+        },
+    )
+    .unwrap();
+    let base_position = base_history.current_position().unwrap();
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xc5; 32]);
+    let resume_private = [0xc6; 32];
+    let resume_public = SigningKey::from_bytes(&resume_private)
+        .verifying_key()
+        .to_bytes()
+        .to_vec();
+    let key_catalog = admission_key_catalog();
+    let commitment = AdmissionSecurityCommitmentV1::new(
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+        SPACE.to_owned(),
+        SPACE.as_bytes().to_vec(),
+        *attempt_id.as_bytes(),
+        base_position.clone(),
+        [0xc7; 32],
+        1,
+        3,
+        4,
+        [0xc8; 32],
+        [0xc9; 32],
+        [0xca; 32],
+        key_catalog.digest(),
+        [0xcb; 32],
+    )
+    .unwrap();
+    let mut joiner_facts = admission_facts_for(joiner_instance, &joiner_device);
+    joiner_facts.transport_public_key = vec![0x36; 32];
+    joiner_facts.identity_signature =
+        verifier.sign(&joiner_credential, &joiner_facts.signing_payload());
+    let operation = MembershipOperationV2::AddDevice {
+        admission: MembershipAdmissionV2 {
+            facts: joiner_facts.clone(),
+            membership_credential: joiner_credential.clone(),
+            resume_public_key_digest: super::admission_resume_public_key_digest(&resume_public),
+            security_commitment_id: commitment.security_commitment_id,
+        },
+    };
+    let resulting_members_digest = base_history
+        .expected_resulting_members_digest(Some(base_head), &operation)
+        .unwrap();
+    let mut event = MembershipEventV2::new(
+        MEMBERSHIP_EVENT_FORMAT_V2,
+        SPACE.to_owned(),
+        Some(base_head),
+        5,
+        [0xcc; 16],
+        sponsor_instance,
+        sponsor_credential.credential_id,
+        sponsor_credential.signature_algorithm_version,
+        operation,
+        resulting_members_digest,
+        [0xcd; 32],
+        vec![0xce],
+        Some(commitment.admission_bundle_digest),
+        Vec::new(),
+    );
+    event.signature = verifier.sign(&sponsor_credential, &event.signing_payload());
+    let mut completed_history = base_history.clone();
+    completed_history
+        .verify_and_receive_event(event.clone(), &verifier)
+        .unwrap();
+    let mut receipt = AdmissionActivationReceipt::new(
+        1,
+        *attempt_id.as_bytes(),
+        event.event_id(),
+        event.resulting_members_digest,
+        commitment.security_commitment_id,
+        joiner_instance,
+        Vec::new(),
+    );
+    receipt.signature = verifier.sign(&joiner_credential, &receipt.signing_payload());
+    completed_history
+        .verify_and_record_activation_receipt(receipt.clone(), &verifier)
+        .unwrap();
+    let base_history_bytes = base_history.encode_persisted_v2().unwrap();
+    let completed_history_bytes = completed_history.encode_persisted_v2().unwrap();
+    let event_bytes = postcard::to_stdvec(&event).unwrap();
+    let commitment_bytes = postcard::to_stdvec(&commitment).unwrap();
+    let receipt_bytes = postcard::to_stdvec(&receipt).unwrap();
+    let delivery = SponsorAdmissionSecurityDelivery {
+        recipient: helper_device.clone(),
+        credential_id: helper_credential.credential_id,
+        payload: b"helper-security-update".to_vec(),
+    };
+
+    let joiner_directory = tempfile::tempdir().unwrap();
+    let joiner_repository = durable_admission_repository(&joiner_directory, [0xcf; 16]);
+    let mut joiner_attempt =
+        AdmissionAttemptV1::new_joiner(attempt_id, [0xd0; 16], JoinerAdmissionStageV1::Applied);
+    joiner_attempt.local_join_ordinal = Some(0);
+    joiner_attempt.lineage_id = Some(SPACE.to_owned());
+    joiner_attempt.base_history_position = Some(postcard::to_stdvec(&base_position).unwrap());
+    joiner_attempt.candidate_event = Some(event_bytes.clone());
+    joiner_attempt.candidate_event_id = Some(*event.event_id().as_bytes());
+    joiner_attempt.candidate_key_package = Some(b"joiner-key-package".to_vec());
+    joiner_attempt.target_members_digest = Some(resulting_members_digest);
+    joiner_attempt.security_commitment = Some(commitment_bytes.clone());
+    joiner_attempt.security_commit = Some(b"security-commit".to_vec());
+    joiner_attempt.security_welcome = Some(b"security-welcome".to_vec());
+    joiner_attempt.target_protection_group_id = Some("target-protection-group".to_owned());
+    joiner_attempt.target_key_catalog = Some(key_catalog.encode().unwrap());
+    joiner_attempt.target_relationships = Some(vec![
+        sponsor_facts.clone(),
+        helper_facts.clone(),
+        joiner_facts.clone(),
+    ]);
+    joiner_attempt.existing_member_security_deliveries = Some(vec![delivery]);
+    joiner_attempt.staged_security_state = Some(b"joiner-staged-security".to_vec());
+    joiner_attempt.joiner_pending_security_state = Some(b"joiner-pending-security".to_vec());
+    joiner_attempt.base_membership_history = Some(base_history_bytes);
+    joiner_attempt.verified_membership_history = Some(completed_history_bytes.clone());
+    joiner_attempt.prepared_proof = Some(b"prepared-proof".to_vec());
+    joiner_attempt.activation_receipt = Some(receipt_bytes);
+    joiner_attempt.resume_public_key = Some(resume_public.clone());
+    joiner_attempt.resume_private_key = Some(resume_private.to_vec());
+    joiner_attempt.target_access_state = Some(b"target-access".to_vec());
+    joiner_attempt.identity_binding = Some(
+        AdmissionIdentityBindingV1::new(
+            SPACE.to_owned(),
+            event.event_id(),
+            &sponsor_facts,
+            &joiner_facts,
+        )
+        .unwrap()
+        .encode()
+        .unwrap(),
+    );
+    joiner_attempt
+        .outboxes
+        .push(super::admission_transaction::durable_admission_message(
+            attempt_id,
+            AdmissionOutboxPurposeV1::Applied,
+            b"sponsor",
+            Some([0xd1; 32]),
+            b"applied",
+        ));
+    joiner_repository
+        .create(&joiner_attempt, None, Some(&completed_history_bytes))
+        .await
+        .unwrap();
+
+    let helper_directory = tempfile::tempdir().unwrap();
+    let helper_repository = durable_admission_repository(&helper_directory, [0xd2; 16]);
+    helper_repository
+        .compare_and_replace_membership_history_v2(None, &completed_history_bytes)
+        .await
+        .unwrap();
+
+    let mut joiner_deps = test_deps(
+        Arc::new(MemoryWorkspaceRepository::default()),
+        "joiner",
+        Vec::new(),
+    );
+    joiner_deps.admission_attempts = Arc::clone(&joiner_repository);
+    joiner_deps.historical_membership_signatures = Arc::new(DeterministicHistoricalVerifier);
+    let joiner = WorkspaceConvergence::new(joiner_deps);
+
+    let mut blocked_helper_deps = test_deps(
+        Arc::new(MemoryWorkspaceRepository::default()),
+        "helper",
+        Vec::new(),
+    );
+    blocked_helper_deps.admission_attempts = Arc::clone(&helper_repository);
+    blocked_helper_deps.historical_membership_signatures =
+        Arc::new(DeterministicHistoricalVerifier);
+    blocked_helper_deps.member_signatures = Arc::new(CredentialBackedSigner {
+        device_id: helper_device.clone(),
+        credential: helper_credential.clone(),
+    });
+    blocked_helper_deps.announcement_material = Arc::new(ConfiguredAnnouncementMaterial {
+        device_id: helper_device.clone(),
+    });
+    let blocked_helper = WorkspaceConvergence::new(blocked_helper_deps);
+
+    let hello = joiner
+        .prepare_completion_recovery_hello(*attempt_id.as_bytes(), helper_instance)
+        .await
+        .unwrap();
+    let transport_binding = uc_core::membership::AdmissionCompletionRecoveryTransportBindingV1 {
+        joiner_transport_identity_digest: Sha256::digest(&joiner_facts.transport_public_key).into(),
+        helper_transport_identity_digest: Sha256::digest(&helper_facts.transport_public_key).into(),
+    };
+    let joiner_applied_message_id = joiner_repository
+        .load(attempt_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .outboxes
+        .iter()
+        .find(|message| message.purpose == AdmissionOutboxPurposeV1::Applied)
+        .unwrap()
+        .message_id;
+    let mut changed_transport_binding = transport_binding;
+    changed_transport_binding.helper_transport_identity_digest = [0xff; 32];
+    assert!(blocked_helper
+        .challenge_completion_recovery(
+            &hello,
+            changed_transport_binding,
+            joiner_applied_message_id,
+            [0xd4; 32],
+        )
+        .await
+        .is_err());
+    let challenge = blocked_helper
+        .challenge_completion_recovery(
+            &hello,
+            transport_binding,
+            joiner_applied_message_id,
+            [0xd4; 32],
+        )
+        .await
+        .unwrap();
+    let response = joiner
+        .respond_to_completion_recovery(&hello, &challenge)
+        .await
+        .unwrap();
+
+    assert!(blocked_helper
+        .complete_recovered_admission(&hello, &response)
+        .await
+        .is_err());
+    let blocked = helper_repository.load(attempt_id).await.unwrap().unwrap();
+    assert_eq!(blocked.stage_rank(), Some(5));
+    assert_eq!(blocked.terminal_result, None);
+
+    let helper_activation = Arc::new(RecordingSponsorAdmissionSecurity::default());
+    let mut resumed_helper_deps = test_deps(
+        Arc::new(MemoryWorkspaceRepository::default()),
+        "helper",
+        Vec::new(),
+    );
+    resumed_helper_deps.admission_attempts = Arc::clone(&helper_repository);
+    resumed_helper_deps.historical_membership_signatures =
+        Arc::new(DeterministicHistoricalVerifier);
+    resumed_helper_deps.member_signatures = Arc::new(CredentialBackedSigner {
+        device_id: helper_device.clone(),
+        credential: helper_credential,
+    });
+    resumed_helper_deps.announcement_material = Arc::new(ConfiguredAnnouncementMaterial {
+        device_id: helper_device,
+    });
+    resumed_helper_deps.activate_completion_helper_admission_security = helper_activation.clone();
+    let resumed_helper = WorkspaceConvergence::new(resumed_helper_deps);
+    let complete = resumed_helper
+        .complete_recovered_admission(&hello, &response)
+        .await
+        .unwrap();
+    let replayed_complete = resumed_helper
+        .complete_recovered_admission(&hello, &response)
+        .await
+        .unwrap();
+    assert_eq!(replayed_complete, complete);
+    assert_eq!(
+        helper_activation
+            .helper_activation_requests
+            .lock()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        helper_repository
+            .load(attempt_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminal_result,
+        Some(AdmissionTerminalResultV1::Completed)
+    );
+
+    assert!(matches!(
+        joiner.activate_joiner_complete(&complete).await.unwrap(),
+        crate::space::admission::adapter::DurableJoinerCompletion::Active(_)
+    ));
+    assert_eq!(
+        joiner_repository
+            .load_terminal(attempt_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminal_result,
+        AdmissionTerminalResultV1::Active
     );
 }
 

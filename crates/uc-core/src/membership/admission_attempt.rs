@@ -2,16 +2,314 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::ids::DeviceId;
 use crate::security::IdentityFingerprint;
 
-use super::{AdmissionChangeFacts, MemberInstanceId, MembershipEventId};
+use super::{
+    AdmissionChangeFacts, BaseMembershipHistoryPositionV1, MemberInstanceId,
+    MembershipCredentialId, MembershipEventId, SponsorAdmissionSecurityDelivery,
+};
 
 pub const ADMISSION_ATTEMPT_FORMAT_V1: u16 = 1;
 pub const ADMISSION_PROFILE_METADATA_FORMAT_V1: u16 = 1;
 pub const TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1: u16 = 1;
 pub const ADMISSION_IDENTITY_BINDING_FORMAT_V1: u16 = 1;
+pub const ADMISSION_COMPLETION_RECOVERY_FORMAT_V1: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionCompletionRecoveryValidationError {
+    Invalid,
+    UpgradeRequired,
+}
+
+impl fmt::Display for AdmissionCompletionRecoveryValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Invalid => "admission completion recovery message is invalid",
+            Self::UpgradeRequired => "admission completion recovery requires a newer engine",
+        })
+    }
+}
+
+impl std::error::Error for AdmissionCompletionRecoveryValidationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionCompletionRecoveryHelloV1 {
+    pub format_version: u16,
+    pub attempt_id: AdmissionAttemptId,
+    pub lineage_id: String,
+    pub event_id: MembershipEventId,
+    pub sponsor_member_instance: MemberInstanceId,
+    pub joiner_member_instance: MemberInstanceId,
+    pub helper_member_instance: MemberInstanceId,
+    pub resume_public_key: Vec<u8>,
+}
+
+impl AdmissionCompletionRecoveryHelloV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        attempt_id: AdmissionAttemptId,
+        lineage_id: String,
+        event_id: MembershipEventId,
+        sponsor_member_instance: MemberInstanceId,
+        joiner_member_instance: MemberInstanceId,
+        helper_member_instance: MemberInstanceId,
+        resume_public_key: Vec<u8>,
+    ) -> Result<Self, AdmissionCompletionRecoveryValidationError> {
+        let hello = Self {
+            format_version: ADMISSION_COMPLETION_RECOVERY_FORMAT_V1,
+            attempt_id,
+            lineage_id,
+            event_id,
+            sponsor_member_instance,
+            joiner_member_instance,
+            helper_member_instance,
+            resume_public_key,
+        };
+        hello.validate()?;
+        Ok(hello)
+    }
+
+    pub fn validate(&self) -> Result<(), AdmissionCompletionRecoveryValidationError> {
+        if self.format_version != ADMISSION_COMPLETION_RECOVERY_FORMAT_V1 {
+            return Err(AdmissionCompletionRecoveryValidationError::UpgradeRequired);
+        }
+        if self.lineage_id.is_empty()
+            || self.resume_public_key.len() != 32
+            || self.sponsor_member_instance == self.joiner_member_instance
+            || self.sponsor_member_instance == self.helper_member_instance
+            || self.joiner_member_instance == self.helper_member_instance
+        {
+            return Err(AdmissionCompletionRecoveryValidationError::Invalid);
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"uniclipboard/admission-completion-recovery-hello/v1\0");
+        hasher.update(self.format_version.to_be_bytes());
+        hasher.update(self.attempt_id.as_bytes());
+        append_recovery_field(&mut hasher, self.lineage_id.as_bytes());
+        hasher.update(self.event_id.as_bytes());
+        hasher.update(self.sponsor_member_instance.as_bytes());
+        hasher.update(self.joiner_member_instance.as_bytes());
+        hasher.update(self.helper_member_instance.as_bytes());
+        append_recovery_field(&mut hasher, &self.resume_public_key);
+        hasher.finalize().into()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionCompletionRecoveryTransportBindingV1 {
+    pub joiner_transport_identity_digest: [u8; 32],
+    pub helper_transport_identity_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionCompletionRecoveryChallengeV1 {
+    pub format_version: u16,
+    pub hello_digest: [u8; 32],
+    pub transport_binding: AdmissionCompletionRecoveryTransportBindingV1,
+    pub challenge_counter: u64,
+    pub nonce: [u8; 32],
+    pub joiner_last_message_id: [u8; 32],
+    pub helper_last_message_id: [u8; 32],
+    pub helper_credential_id: MembershipCredentialId,
+    pub helper_history_position: BaseMembershipHistoryPositionV1,
+    pub signature: Vec<u8>,
+}
+
+impl AdmissionCompletionRecoveryChallengeV1 {
+    pub fn new(
+        hello: &AdmissionCompletionRecoveryHelloV1,
+        transport_binding: AdmissionCompletionRecoveryTransportBindingV1,
+        challenge_counter: u64,
+        nonce: [u8; 32],
+        joiner_last_message_id: [u8; 32],
+        helper_last_message_id: [u8; 32],
+        helper_credential_id: MembershipCredentialId,
+        helper_history_position: BaseMembershipHistoryPositionV1,
+    ) -> Result<Self, AdmissionCompletionRecoveryValidationError> {
+        hello.validate()?;
+        if challenge_counter == 0
+            || nonce == [0; 32]
+            || joiner_last_message_id == [0; 32]
+            || helper_last_message_id == [0; 32]
+        {
+            return Err(AdmissionCompletionRecoveryValidationError::Invalid);
+        }
+        Ok(Self {
+            format_version: ADMISSION_COMPLETION_RECOVERY_FORMAT_V1,
+            hello_digest: hello.digest(),
+            transport_binding,
+            challenge_counter,
+            nonce,
+            joiner_last_message_id,
+            helper_last_message_id,
+            helper_credential_id,
+            helper_history_position,
+            signature: Vec::new(),
+        })
+    }
+
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut bytes = b"uniclipboard/admission-completion-recovery-challenge/v1\0".to_vec();
+        bytes.extend_from_slice(&self.format_version.to_be_bytes());
+        bytes.extend_from_slice(&self.hello_digest);
+        bytes.extend_from_slice(&self.transport_binding.joiner_transport_identity_digest);
+        bytes.extend_from_slice(&self.transport_binding.helper_transport_identity_digest);
+        bytes.extend_from_slice(&self.challenge_counter.to_be_bytes());
+        bytes.extend_from_slice(&self.nonce);
+        bytes.extend_from_slice(&self.joiner_last_message_id);
+        bytes.extend_from_slice(&self.helper_last_message_id);
+        bytes.extend_from_slice(self.helper_credential_id.as_bytes());
+        if let Some(event_id) = self.helper_history_position.event_id {
+            bytes.push(1);
+            bytes.extend_from_slice(event_id.as_bytes());
+        } else {
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(&self.helper_history_position.depth.to_be_bytes());
+        bytes.extend_from_slice(&self.helper_history_position.history_digest);
+        bytes
+    }
+
+    pub fn validate(&self) -> Result<(), AdmissionCompletionRecoveryValidationError> {
+        if self.format_version != ADMISSION_COMPLETION_RECOVERY_FORMAT_V1 {
+            return Err(AdmissionCompletionRecoveryValidationError::UpgradeRequired);
+        }
+        if self.challenge_counter == 0
+            || self.nonce == [0; 32]
+            || self.joiner_last_message_id == [0; 32]
+            || self.helper_last_message_id == [0; 32]
+        {
+            return Err(AdmissionCompletionRecoveryValidationError::Invalid);
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.signing_payload());
+        append_recovery_field(&mut hasher, &self.signature);
+        hasher.finalize().into()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionCompletionRecoveryBundleV1 {
+    pub format_version: u16,
+    pub candidate_event: Vec<u8>,
+    pub candidate_key_package: Vec<u8>,
+    pub security_commitment: Vec<u8>,
+    pub security_commit: Vec<u8>,
+    pub security_welcome: Vec<u8>,
+    pub target_protection_group_id: String,
+    pub target_key_catalog: Vec<u8>,
+    pub existing_member_deliveries: Vec<SponsorAdmissionSecurityDelivery>,
+    pub activation_receipt: Vec<u8>,
+    pub resume_public_key: Vec<u8>,
+}
+
+impl AdmissionCompletionRecoveryBundleV1 {
+    pub fn validate(&self) -> Result<(), AdmissionCompletionRecoveryValidationError> {
+        if self.format_version != ADMISSION_COMPLETION_RECOVERY_FORMAT_V1 {
+            return Err(AdmissionCompletionRecoveryValidationError::UpgradeRequired);
+        }
+        if self.candidate_event.is_empty()
+            || self.candidate_key_package.is_empty()
+            || self.security_commitment.is_empty()
+            || self.security_commit.is_empty()
+            || self.security_welcome.is_empty()
+            || self.target_protection_group_id.is_empty()
+            || self.target_key_catalog.is_empty()
+            || self.existing_member_deliveries.len() > 256
+            || self.activation_receipt.is_empty()
+            || self.resume_public_key.len() != 32
+        {
+            return Err(AdmissionCompletionRecoveryValidationError::Invalid);
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<[u8; 32], AdmissionCompletionRecoveryValidationError> {
+        self.validate()?;
+        let encoded = postcard::to_stdvec(self)
+            .map_err(|_| AdmissionCompletionRecoveryValidationError::Invalid)?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"uniclipboard/admission-completion-recovery-bundle/v1\0");
+        append_recovery_field(&mut hasher, &encoded);
+        Ok(hasher.finalize().into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionCompletionRecoveryResponseV1 {
+    pub format_version: u16,
+    pub hello_digest: [u8; 32],
+    pub challenge_digest: [u8; 32],
+    pub bundle: AdmissionCompletionRecoveryBundleV1,
+    pub resume_signature: Vec<u8>,
+}
+
+impl AdmissionCompletionRecoveryResponseV1 {
+    pub fn new(
+        hello_digest: [u8; 32],
+        challenge_digest: [u8; 32],
+        bundle: AdmissionCompletionRecoveryBundleV1,
+    ) -> Result<Self, AdmissionCompletionRecoveryValidationError> {
+        bundle.validate()?;
+        Ok(Self {
+            format_version: ADMISSION_COMPLETION_RECOVERY_FORMAT_V1,
+            hello_digest,
+            challenge_digest,
+            bundle,
+            resume_signature: Vec::new(),
+        })
+    }
+
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut bytes = b"uniclipboard/admission-completion-recovery-response/v1\0".to_vec();
+        bytes.extend_from_slice(&self.format_version.to_be_bytes());
+        bytes.extend_from_slice(&self.hello_digest);
+        bytes.extend_from_slice(&self.challenge_digest);
+        match self.bundle.digest() {
+            Ok(digest) => bytes.extend_from_slice(&digest),
+            Err(_) => bytes.extend_from_slice(&[0; 32]),
+        }
+        bytes
+    }
+
+    pub fn validate(&self) -> Result<(), AdmissionCompletionRecoveryValidationError> {
+        if self.format_version != ADMISSION_COMPLETION_RECOVERY_FORMAT_V1 {
+            return Err(AdmissionCompletionRecoveryValidationError::UpgradeRequired);
+        }
+        self.bundle.validate()
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.signing_payload());
+        append_recovery_field(&mut hasher, &self.resume_signature);
+        hasher.finalize().into()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionCompletionRecoveryPeerV1 {
+    pub format_version: u16,
+    pub hello: AdmissionCompletionRecoveryHelloV1,
+    pub challenge: AdmissionCompletionRecoveryChallengeV1,
+    pub response_digest: Option<[u8; 32]>,
+}
+
+fn append_recovery_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionIdentityBindingV1 {
@@ -353,6 +651,17 @@ impl std::fmt::Debug for AdmissionAttemptV1 {
 }
 
 impl AdmissionAttemptV1 {
+    pub fn new_completion_helper(attempt_id: AdmissionAttemptId) -> Self {
+        let mut attempt = Self::new_joiner(attempt_id, [0; 16], JoinerAdmissionStageV1::Initiated);
+        attempt.join_id = None;
+        attempt.local_join_ordinal = None;
+        attempt.role_state =
+            AdmissionAttemptRoleStateV1::CompletionHelper(CompletionHelperAdmissionStateV1 {
+                stage: CompletionHelperAdmissionStageV1::Applied,
+            });
+        attempt
+    }
+
     pub fn new_joiner(
         attempt_id: AdmissionAttemptId,
         join_id: [u8; 16],
@@ -486,6 +795,8 @@ pub struct AdmissionProfileMetadataV1 {
     pub join_projection_floor_ordinal: u64,
     pub device_trust_revision: u64,
     pub consumed_invitation_attempts: BTreeMap<[u8; 32], AdmissionAttemptId>,
+    #[serde(default)]
+    pub completion_recovery_challenges: BTreeMap<AdmissionAttemptId, Vec<u8>>,
 }
 
 impl std::fmt::Debug for AdmissionProfileMetadataV1 {
@@ -517,6 +828,7 @@ impl AdmissionProfileMetadataV1 {
             join_projection_floor_ordinal: 0,
             device_trust_revision: 0,
             consumed_invitation_attempts: BTreeMap::new(),
+            completion_recovery_challenges: BTreeMap::new(),
         }
     }
 }

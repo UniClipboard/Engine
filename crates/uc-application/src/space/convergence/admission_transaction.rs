@@ -6,6 +6,7 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionActivationReceipt, AdmissionAttemptId, AdmissionAttemptRepositoryError,
     AdmissionAttemptRepositoryPort, AdmissionAttemptRoleStateV1, AdmissionAttemptV1,
+    AdmissionCompletionRecoveryChallengeV1, AdmissionCompletionRecoveryResponseV1,
     AdmissionContentKeyCatalogV1, AdmissionIdentityBindingV1, AdmissionInboxRecordV1,
     AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1, AdmissionOutboxMessageV1,
     AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1, AdmissionSecurityCommitmentV1,
@@ -13,6 +14,7 @@ use uc_core::membership::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionResultV2,
     AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionV2, AdmissionTerminalResultV1,
+    CompletionHelperAdmissionStageV1, CompletionHelperAdmissionStateV1,
     HistoricalMembershipSignatureVerifier, InvitationConsumeDeliveryResultV1,
     JoinerAdmissionStageV1, JoinerAdmissionStateV1, MembershipEventV2,
     MembershipHistoryV2ReceiveOutcome, MembershipOperationV2, SponsorAdmissionStageV1,
@@ -265,6 +267,34 @@ impl DurableAdmissionCandidatePayloadV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CompletionRecoveryRouteV1 {
+    pub member_instance: uc_core::membership::MemberInstanceId,
+    pub device_id: DeviceId,
+    pub transport_public_key: Vec<u8>,
+    pub transport_address_blob: Vec<u8>,
+}
+
+impl From<&uc_core::membership::AdmissionChangeFacts> for CompletionRecoveryRouteV1 {
+    fn from(facts: &uc_core::membership::AdmissionChangeFacts) -> Self {
+        Self {
+            member_instance: facts.member_instance,
+            device_id: facts.device_id,
+            transport_public_key: facts.transport_public_key.clone(),
+            transport_address_blob: facts.transport_address_blob.clone(),
+        }
+    }
+}
+
+pub(crate) fn completion_recovery_routes(
+    relationships: &[uc_core::membership::AdmissionChangeFacts],
+) -> Vec<CompletionRecoveryRouteV1> {
+    relationships
+        .iter()
+        .map(CompletionRecoveryRouteV1::from)
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DurableAdmissionCommitPayloadV1 {
     pub format_version: u16,
     pub candidate_event_id: [u8; 32],
@@ -272,6 +302,7 @@ pub(crate) struct DurableAdmissionCommitPayloadV1 {
     pub prepared_proof: Vec<u8>,
     pub resume_public_key: Vec<u8>,
     pub existing_member_deliveries: Vec<uc_core::membership::SponsorAdmissionSecurityDelivery>,
+    pub completion_recovery_routes: Vec<CompletionRecoveryRouteV1>,
 }
 
 impl DurableAdmissionCommitPayloadV1 {
@@ -2388,6 +2419,103 @@ impl DurableAdmissionTransaction {
             .map_err(map_repository_error)
     }
 
+    pub(crate) async fn save_completion_recovery_challenge(
+        &self,
+        attempt_id: AdmissionAttemptId,
+        challenge: &AdmissionCompletionRecoveryChallengeV1,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        let encoded = postcard::to_stdvec(challenge).map_err(admission_storage)?;
+        self.repository
+            .save_completion_recovery_challenge(attempt_id, &encoded)
+            .await
+            .map_err(map_repository_error)?;
+        Ok(())
+    }
+
+    pub(crate) async fn load_completion_recovery_challenge(
+        &self,
+        attempt_id: AdmissionAttemptId,
+    ) -> Result<Option<AdmissionCompletionRecoveryChallengeV1>, WorkspaceConvergenceError> {
+        self.repository
+            .load_completion_recovery_challenge(attempt_id)
+            .await
+            .map_err(map_repository_error)?
+            .map(|encoded| postcard::from_bytes(&encoded).map_err(admission_storage))
+            .transpose()
+    }
+
+    pub(crate) async fn create_completion_helper(
+        &self,
+        attempt_id: AdmissionAttemptId,
+        challenge: &AdmissionCompletionRecoveryChallengeV1,
+        response: &AdmissionCompletionRecoveryResponseV1,
+        lineage_id: &str,
+        event_id: [u8; 32],
+        target_members_digest: [u8; 32],
+    ) -> Result<AdmissionAttemptV1, WorkspaceConvergenceError> {
+        let challenge_bytes = postcard::to_stdvec(challenge).map_err(admission_storage)?;
+        let response_bytes = postcard::to_stdvec(response).map_err(admission_storage)?;
+        let mut attempt = AdmissionAttemptV1::new_completion_helper(attempt_id);
+        attempt.lineage_id = Some(lineage_id.to_owned());
+        attempt.base_history_position = Some(
+            postcard::to_stdvec(&challenge.helper_history_position).map_err(admission_storage)?,
+        );
+        attempt.candidate_event = Some(response.bundle.candidate_event.clone());
+        attempt.candidate_event_id = Some(event_id);
+        attempt.candidate_key_package = Some(response.bundle.candidate_key_package.clone());
+        attempt.target_members_digest = Some(target_members_digest);
+        attempt.security_commitment = Some(response.bundle.security_commitment.clone());
+        attempt.security_commit = Some(response.bundle.security_commit.clone());
+        attempt.security_welcome = Some(response.bundle.security_welcome.clone());
+        attempt.target_protection_group_id =
+            Some(response.bundle.target_protection_group_id.clone());
+        attempt.target_key_catalog = Some(response.bundle.target_key_catalog.clone());
+        attempt.existing_member_security_deliveries =
+            Some(response.bundle.existing_member_deliveries.clone());
+        attempt.activation_receipt = Some(response.bundle.activation_receipt.clone());
+        attempt.resume_public_key = Some(response.bundle.resume_public_key.clone());
+        attempt.resume_peers.push(challenge_bytes.clone());
+        attempt.completion_recovery_deliveries.push(response_bytes);
+        self.repository
+            .create_completion_helper(&attempt, &challenge_bytes)
+            .await
+            .map_err(map_repository_error)?;
+        Ok(attempt)
+    }
+
+    pub(crate) async fn complete_as_helper(
+        &self,
+        mut attempt: AdmissionAttemptV1,
+        completion: &[u8],
+        recipient: &[u8],
+        joiner_last_message_id: [u8; 32],
+    ) -> Result<AdmissionOutboxMessageV1, WorkspaceConvergenceError> {
+        if !matches!(
+            attempt.role_state,
+            AdmissionAttemptRoleStateV1::CompletionHelper(CompletionHelperAdmissionStateV1 {
+                stage: CompletionHelperAdmissionStageV1::Applied,
+            })
+        ) {
+            return Err(inconsistent("completion helper is not awaiting completion"));
+        }
+        let message = outbound_message(
+            attempt.attempt_id,
+            AdmissionOutboxPurposeV1::Complete,
+            recipient,
+            Some(joiner_last_message_id),
+            completion,
+        );
+        attempt.completion = Some(completion.to_vec());
+        attempt.outboxes.push(message.clone());
+        attempt.terminal_result = Some(AdmissionTerminalResultV1::Completed);
+        attempt.role_state =
+            AdmissionAttemptRoleStateV1::CompletionHelper(CompletionHelperAdmissionStateV1 {
+                stage: CompletionHelperAdmissionStageV1::Completed,
+            });
+        self.persist_advance(attempt).await?;
+        Ok(message)
+    }
+
     async fn required_attempt(
         &self,
         attempt_id: AdmissionAttemptId,
@@ -2665,6 +2793,11 @@ fn record_activation_receipt(
 }
 
 fn apply_candidate(attempt: &mut AdmissionAttemptV1, candidate: DurableAdmissionCandidateV1) {
+    attempt.completion_recovery_routes = candidate
+        .target_relationships
+        .iter()
+        .map(|facts| facts.transport_address_blob.clone())
+        .collect();
     attempt.lineage_id = Some(candidate.lineage_id);
     attempt.base_history_position = Some(candidate.base_history_position);
     attempt.candidate_event = Some(candidate.candidate_event);
@@ -2922,4 +3055,40 @@ fn admission_storage(error: impl std::fmt::Display) -> WorkspaceConvergenceError
 
 fn inconsistent(message: impl Into<String>) -> WorkspaceConvergenceError {
     WorkspaceConvergenceError::Inconsistent(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompletionRecoveryRouteV1;
+    use uc_core::ids::DeviceId;
+    use uc_core::membership::{AdmissionChangeFacts, MemberInstanceId};
+    use uc_core::security::IdentityFingerprint;
+
+    #[test]
+    fn completion_recovery_route_excludes_unneeded_member_profile_data() {
+        let facts = AdmissionChangeFacts {
+            member_instance: MemberInstanceId::from_bytes([0x11; 32]),
+            device_id: DeviceId::new("helper-device"),
+            device_name: "private-device-name-sentinel".to_owned(),
+            identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+                .unwrap(),
+            transport_public_key: vec![0x22; 32],
+            transport_address_blob: vec![0x33; 64],
+            identity_signature: b"private-signature-sentinel".to_vec(),
+        };
+
+        let route = CompletionRecoveryRouteV1::from(&facts);
+        let encoded = postcard::to_stdvec(&route).unwrap();
+
+        assert_eq!(route.member_instance, facts.member_instance);
+        assert_eq!(route.device_id, facts.device_id);
+        assert_eq!(route.transport_public_key, facts.transport_public_key);
+        assert_eq!(route.transport_address_blob, facts.transport_address_blob);
+        assert!(!encoded
+            .windows(facts.device_name.len())
+            .any(|window| window == facts.device_name.as_bytes()));
+        assert!(!encoded
+            .windows(facts.identity_signature.len())
+            .any(|window| window == facts.identity_signature));
+    }
 }

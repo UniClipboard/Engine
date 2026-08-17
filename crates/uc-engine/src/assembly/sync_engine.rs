@@ -238,6 +238,13 @@ impl SyncEngineAssembly {
     }
 
     #[cfg(test)]
+    pub(crate) async fn admission_completion_recovery_is_reachable_for_test(&self) -> bool {
+        self.iroh_node
+            .accepts_protocol_for_test(uc_infra::network::iroh::ADMISSION_COMPLETION_RECOVERY_ALPN)
+            .await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn legacy_upgrade_is_reachable_for_test(&self) -> bool {
         self.iroh_node
             .accepts_protocol_for_test(uc_infra::network::iroh::LEGACY_UPGRADE_ALPN)
@@ -651,6 +658,8 @@ pub async fn build_sync_engine_assembly(
     );
     let membership_history_exchange_adapter =
         builder.build_membership_history_exchange_adapter(Arc::clone(&space_setup.peer_addr_repo));
+    let admission_completion_recovery_adapter = builder
+        .build_admission_completion_recovery_adapter(Arc::clone(&space_setup.peer_addr_repo));
     let membership_transport = builder.build_membership_gossip_transport(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&deps.device.device_identity),
@@ -710,8 +719,15 @@ pub async fn build_sync_engine_assembly(
                     .space_access_ports
                     .activate_sponsor_admission_security,
             ),
+            activate_completion_helper_admission_security: Arc::clone(
+                &deps
+                    .security
+                    .space_access_ports
+                    .activate_completion_helper_admission_security,
+            ),
             admission_space_transition: Arc::clone(&space_setup.admission_space_transition),
             admission_outbox_delivery: Arc::new(DeferredAdmissionOutboxDelivery),
+            admission_completion_recovery: admission_completion_recovery_adapter.clone(),
             legacy_migration_recovery: Arc::clone(&space_setup.legacy_migration_recovery),
             member_signatures: Arc::clone(&space_setup.current_member_signatures),
             member_repo: Arc::clone(&deps.device.member_repo),
@@ -782,6 +798,10 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.device.member_repo),
         Arc::clone(&deps.security.fingerprint),
         convergence_assembly.membership_history_exchange(),
+    )?;
+    builder.install_admission_completion_recovery(
+        &admission_completion_recovery_adapter,
+        convergence_assembly.admission_completion_recovery(),
     )?;
     builder.install_legacy_upgrade_handler(
         legacy_upgrade_adapter.as_ref(),

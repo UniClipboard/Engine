@@ -165,6 +165,8 @@ pub struct SpaceAccessPorts {
         Arc<dyn uc_core::membership::PrepareSponsorAdmissionSecurityPort>,
     pub activate_sponsor_admission_security:
         Arc<dyn uc_core::membership::ActivateSponsorAdmissionSecurityPort>,
+    pub activate_completion_helper_admission_security:
+        Arc<dyn uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort>,
     pub group_revocation: Arc<dyn GroupRevocationPort>,
     pub group_bootstrap: Arc<dyn uc_core::membership::GroupBootstrapPort>,
     pub space_protection: Arc<dyn uc_core::membership::SpaceProtectionStatusPort>,
@@ -190,6 +192,7 @@ impl SpaceAccessPorts {
             + GroupAdmissionPort
             + uc_core::membership::PrepareSponsorAdmissionSecurityPort
             + uc_core::membership::ActivateSponsorAdmissionSecurityPort
+            + uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort
             + GroupRevocationPort
             + uc_core::membership::GroupBootstrapPort
             + uc_core::membership::SpaceProtectionStatusPort
@@ -210,6 +213,7 @@ impl SpaceAccessPorts {
             group_admission: adapter.clone(),
             prepare_sponsor_admission_security: adapter.clone(),
             activate_sponsor_admission_security: adapter.clone(),
+            activate_completion_helper_admission_security: adapter.clone(),
             group_revocation: adapter.clone(),
             group_bootstrap: adapter.clone(),
             space_protection: adapter,

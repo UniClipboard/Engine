@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::ids::DeviceId;
+use crate::ids::{DeviceId, SpaceId};
 
 use super::admission_attempt::{
     AdmissionAttemptId, AdmissionAttemptV1, AdmissionInboxRecordV1, AdmissionOutboxMessageV1,
@@ -33,7 +33,6 @@ use super::versioned_membership_history::{
     AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1, MembershipCredential,
     MembershipCredentialId,
 };
-use crate::ids::SpaceId;
 use crate::ports::PeerAddressRecord;
 use crate::security::IdentityFingerprint;
 use crate::trusted_peer::TrustedPeer;
@@ -267,6 +266,35 @@ pub trait AdmissionAttemptRepositoryPort: Send + Sync {
         attempt_id: AdmissionAttemptId,
     ) -> Result<Option<AdmissionAttemptV1>, AdmissionAttemptRepositoryError>;
 
+    async fn save_completion_recovery_challenge(
+        &self,
+        _attempt_id: AdmissionAttemptId,
+        _challenge: &[u8],
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        Err(AdmissionAttemptRepositoryError::Repository(
+            "completion recovery challenge storage is unavailable".to_owned(),
+        ))
+    }
+
+    async fn load_completion_recovery_challenge(
+        &self,
+        _attempt_id: AdmissionAttemptId,
+    ) -> Result<Option<Vec<u8>>, AdmissionAttemptRepositoryError> {
+        Err(AdmissionAttemptRepositoryError::Repository(
+            "completion recovery challenge storage is unavailable".to_owned(),
+        ))
+    }
+
+    async fn create_completion_helper(
+        &self,
+        _attempt: &AdmissionAttemptV1,
+        _expected_challenge: &[u8],
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        Err(AdmissionAttemptRepositoryError::Repository(
+            "completion helper storage is unavailable".to_owned(),
+        ))
+    }
+
     async fn compare_and_advance(
         &self,
         attempt_id: AdmissionAttemptId,
@@ -343,6 +371,56 @@ pub trait AdmissionOutboxDeliveryPort: Send + Sync {
         attempt_id: AdmissionAttemptId,
         message: &AdmissionOutboxMessageV1,
     ) -> Result<AdmissionOutboxDeliveryResultV1, AdmissionOutboxDeliveryError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionCompletionRecoveryTransportError {
+    Offline,
+    Transport,
+    Rejected,
+}
+
+#[async_trait]
+pub trait AdmissionCompletionRecoveryPort: Send + Sync {
+    async fn request_completion_recovery_challenge(
+        &self,
+        helper: &DeviceId,
+        route: &[u8],
+        hello: super::AdmissionCompletionRecoveryHelloV1,
+        joiner_last_message_id: [u8; 32],
+    ) -> Result<
+        super::AdmissionCompletionRecoveryChallengeV1,
+        AdmissionCompletionRecoveryTransportError,
+    >;
+
+    async fn submit_completion_recovery_response(
+        &self,
+        helper: &DeviceId,
+        route: &[u8],
+        hello: super::AdmissionCompletionRecoveryHelloV1,
+        response: super::AdmissionCompletionRecoveryResponseV1,
+    ) -> Result<crate::pairing::DurableAdmissionFrame, AdmissionCompletionRecoveryTransportError>;
+}
+
+#[async_trait]
+pub trait AdmissionCompletionRecoveryEndpointPort: Send + Sync {
+    async fn handle_completion_recovery_hello(
+        &self,
+        hello: super::AdmissionCompletionRecoveryHelloV1,
+        transport_binding: super::AdmissionCompletionRecoveryTransportBindingV1,
+        joiner_last_message_id: [u8; 32],
+        helper_last_message_id: [u8; 32],
+    ) -> Result<
+        super::AdmissionCompletionRecoveryChallengeV1,
+        AdmissionCompletionRecoveryTransportError,
+    >;
+
+    async fn handle_completion_recovery_response(
+        &self,
+        hello: super::AdmissionCompletionRecoveryHelloV1,
+        response: super::AdmissionCompletionRecoveryResponseV1,
+        transport_binding: super::AdmissionCompletionRecoveryTransportBindingV1,
+    ) -> Result<crate::pairing::DurableAdmissionFrame, AdmissionCompletionRecoveryTransportError>;
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -590,6 +668,38 @@ pub trait ActivateSponsorAdmissionSecurityPort: Send + Sync {
     async fn activate_sponsor_admission_security(
         &self,
         request: ActivateSponsorAdmissionSecurityRequest,
+    ) -> Result<(), AdmissionSecurityTransitionError>;
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ActivateCompletionHelperAdmissionSecurityRequest {
+    pub space_id: SpaceId,
+    pub attempt_id: [u8; 32],
+    pub helper_device_id: DeviceId,
+    pub helper_credential_id: MembershipCredentialId,
+    pub candidate_core_digest: [u8; 32],
+    pub security_commit: Vec<u8>,
+    pub security_welcome: Vec<u8>,
+    pub target_key_catalog: Vec<u8>,
+    pub existing_member_deliveries: Vec<SponsorAdmissionSecurityDelivery>,
+    pub expected_commitment: AdmissionSecurityCommitmentV1,
+}
+
+impl std::fmt::Debug for ActivateCompletionHelperAdmissionSecurityRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActivateCompletionHelperAdmissionSecurityRequest")
+            .field("space_id", &self.space_id)
+            .field("delivery_count", &self.existing_member_deliveries.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+pub trait ActivateCompletionHelperAdmissionSecurityPort: Send + Sync {
+    async fn activate_completion_helper_admission_security(
+        &self,
+        request: ActivateCompletionHelperAdmissionSecurityRequest,
     ) -> Result<(), AdmissionSecurityTransitionError>;
 }
 

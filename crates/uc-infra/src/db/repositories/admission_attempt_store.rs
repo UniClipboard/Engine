@@ -285,8 +285,40 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
     {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
+    if helper {
+        let helper_material_is_complete = attempt.lineage_id.is_some()
+            && attempt.base_history_position.is_some()
+            && attempt.candidate_event.is_some()
+            && attempt.candidate_event_id.is_some()
+            && attempt.candidate_key_package.is_some()
+            && attempt.target_members_digest.is_some()
+            && attempt.security_commitment.is_some()
+            && attempt.security_commit.is_some()
+            && attempt.security_welcome.is_some()
+            && attempt.target_protection_group_id.is_some()
+            && attempt.target_key_catalog.is_some()
+            && attempt.existing_member_security_deliveries.is_some()
+            && attempt.activation_receipt.is_some()
+            && attempt.resume_public_key.is_some()
+            && !attempt.resume_peers.is_empty()
+            && !attempt.completion_recovery_deliveries.is_empty();
+        let helper_has_forbidden_material = attempt.invitation_claim.is_some()
+            || attempt.space_transition.is_some()
+            || attempt.space_transition_result.is_some()
+            || attempt.prepared_proof.is_some()
+            || attempt.cancel_request.is_some()
+            || attempt.cancel_outcome.is_some()
+            || attempt.resume_private_key.is_some()
+            || attempt.joiner_pending_security_state.is_some()
+            || attempt.staged_security_state.is_some()
+            || attempt.target_access_state.is_some();
+        if !helper_material_is_complete || helper_has_forbidden_material {
+            return Err(AdmissionAttemptRepositoryError::Corrupt);
+        }
+    }
     if rank >= 2
         && !rejected
+        && !helper
         && (attempt.lineage_id.is_none()
             || attempt.base_history_position.is_none()
             || attempt.candidate_event.is_none()
@@ -304,7 +336,7 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
     {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
-    if rank >= 2 && !rejected && attempt.base_membership_history.is_none() {
+    if rank >= 2 && !rejected && !helper && attempt.base_membership_history.is_none() {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
     if rank >= 3 && !rejected && !helper && attempt.prepared_proof.is_none() {
@@ -581,6 +613,145 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                     .map(|stored| self.open_attempt(attempt_id, stored))
                     .transpose()
                     .map_err(|error| anyhow::anyhow!(error))
+            })
+            .map_err(executor_error)
+    }
+
+    async fn save_completion_recovery_challenge(
+        &self,
+        attempt_id: AdmissionAttemptId,
+        challenge: &[u8],
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        if challenge.is_empty() {
+            return Err(AdmissionAttemptRepositoryError::Corrupt);
+        }
+        let challenge = challenge.to_vec();
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_on(conn)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    if state.attempts.contains_key(&attempt_id)
+                        || state.terminals.contains_key(&attempt_id)
+                    {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::AlreadyExists
+                        ));
+                    }
+                    if let Some(existing) = state
+                        .metadata
+                        .completion_recovery_challenges
+                        .get(&attempt_id)
+                    {
+                        if existing == &challenge {
+                            return Ok(state.metadata);
+                        }
+                    }
+                    state
+                        .metadata
+                        .completion_recovery_challenges
+                        .insert(attempt_id, challenge);
+                    state.metadata.device_trust_revision = state
+                        .metadata
+                        .device_trust_revision
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    self.save_state_on(conn, &state)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    Ok(state.metadata)
+                })
+            })
+            .map_err(executor_error)
+    }
+
+    async fn load_completion_recovery_challenge(
+        &self,
+        attempt_id: AdmissionAttemptId,
+    ) -> Result<Option<Vec<u8>>, AdmissionAttemptRepositoryError> {
+        self.executor
+            .run(|conn| {
+                self.load_state_on(conn)
+                    .map(|state| {
+                        state
+                            .metadata
+                            .completion_recovery_challenges
+                            .get(&attempt_id)
+                            .cloned()
+                    })
+                    .map_err(|error| anyhow::anyhow!(error))
+            })
+            .map_err(executor_error)
+    }
+
+    async fn create_completion_helper(
+        &self,
+        attempt: &AdmissionAttemptV1,
+        expected_challenge: &[u8],
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        if expected_challenge.is_empty()
+            || !matches!(
+                attempt.role_state,
+                AdmissionAttemptRoleStateV1::CompletionHelper(_)
+            )
+        {
+            return Err(AdmissionAttemptRepositoryError::Corrupt);
+        }
+        let attempt = attempt.clone();
+        let expected_challenge = expected_challenge.to_vec();
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_on(conn)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    if state.attempts.contains_key(&attempt.attempt_id)
+                        || state.terminals.contains_key(&attempt.attempt_id)
+                    {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::AlreadyExists
+                        ));
+                    }
+                    if state
+                        .metadata
+                        .completion_recovery_challenges
+                        .get(&attempt.attempt_id)
+                        != Some(&expected_challenge)
+                    {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::VersionConflict
+                        ));
+                    }
+                    for (persisted_id, persisted) in &state.attempts {
+                        let persisted = self
+                            .open_attempt(*persisted_id, persisted)
+                            .map_err(|error| anyhow::anyhow!(error))?;
+                        if !persisted.is_terminal()
+                            || persisted.write_ahead_recovery.is_some()
+                            || persisted.cleanup_pending
+                        {
+                            return Err(anyhow::anyhow!(
+                                AdmissionAttemptRepositoryError::VersionConflict
+                            ));
+                        }
+                    }
+                    let wrapped = self
+                        .keys
+                        .create_wrapped_attempt_key(*attempt.attempt_id.as_bytes())
+                        .map_err(|error| anyhow::anyhow!(map_key_error(error)))?;
+                    let stored = self
+                        .seal_attempt(&attempt, wrapped, None)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    state.attempts.insert(attempt.attempt_id, stored);
+                    state.metadata.device_trust_revision = state
+                        .metadata
+                        .device_trust_revision
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    self.save_state_on(conn, &state)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    Ok(state.metadata)
+                })
             })
             .map_err(executor_error)
     }
@@ -1073,6 +1244,31 @@ mod tests {
         attempt
     }
 
+    fn applied_completion_helper(attempt_id: AdmissionAttemptId) -> AdmissionAttemptV1 {
+        let mut attempt = AdmissionAttemptV1::new_completion_helper(attempt_id);
+        attempt.lineage_id = Some("target-space".to_owned());
+        attempt.base_history_position = Some(b"helper-position".to_vec());
+        attempt.candidate_event = Some(b"candidate-event".to_vec());
+        attempt.candidate_event_id = Some([0xd3; 32]);
+        attempt.candidate_key_package = Some(b"candidate-key-package".to_vec());
+        attempt.target_members_digest = Some([0xd4; 32]);
+        attempt.security_commitment = Some(b"security-commitment".to_vec());
+        attempt.security_commit = Some(b"security-commit".to_vec());
+        attempt.security_welcome = Some(b"security-welcome".to_vec());
+        attempt.target_protection_group_id = Some("target-protection-group".to_owned());
+        attempt.target_key_catalog = Some(b"target-key-catalog".to_vec());
+        attempt.existing_member_security_deliveries = Some(Vec::new());
+        attempt.activation_receipt = Some(b"activation-receipt".to_vec());
+        attempt.resume_public_key = Some(vec![0xd5; 32]);
+        attempt
+            .resume_peers
+            .push(b"saved-signed-challenge".to_vec());
+        attempt
+            .completion_recovery_deliveries
+            .push(b"authenticated-response".to_vec());
+        attempt
+    }
+
     #[tokio::test]
     async fn unknown_profile_metadata_version_fails_closed() {
         let directory = tempdir().unwrap();
@@ -1473,6 +1669,79 @@ mod tests {
             AdmissionKeyManager::new(secure_storage, generation),
         );
         assert_eq!(reopened.load(attempt_id).await.unwrap(), Some(prepared));
+    }
+
+    #[tokio::test]
+    async fn completion_recovery_challenge_is_durable_before_helper_creation() {
+        let directory = tempdir().unwrap();
+        let database_path = directory
+            .path()
+            .join("completion-recovery-challenge.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let generation = [0xd1; 16];
+        let attempt_id = AdmissionAttemptId::from_bytes([0xd2; 32]);
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            AdmissionKeyManager::new(secure_storage.clone(), generation),
+        );
+        let challenge = b"signed-completion-recovery-challenge";
+
+        store
+            .save_completion_recovery_challenge(attempt_id, challenge)
+            .await
+            .unwrap();
+
+        let reopened = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(secure_storage, generation),
+        );
+        assert_eq!(
+            reopened
+                .load_completion_recovery_challenge(attempt_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(challenge.as_slice())
+        );
+        assert_eq!(reopened.load(attempt_id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn completion_helper_creation_requires_the_exact_saved_challenge() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("completion-helper.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0xd6; 16]),
+        );
+        let attempt_id = AdmissionAttemptId::from_bytes([0xd7; 32]);
+        let challenge = b"saved-challenge";
+        store
+            .save_completion_recovery_challenge(attempt_id, challenge)
+            .await
+            .unwrap();
+        let helper = applied_completion_helper(attempt_id);
+
+        assert!(store
+            .create_completion_helper(&helper, b"different-challenge")
+            .await
+            .is_err());
+        store
+            .create_completion_helper(&helper, challenge)
+            .await
+            .unwrap();
+
+        assert_eq!(store.load(attempt_id).await.unwrap(), Some(helper));
+        assert_eq!(
+            store
+                .load_completion_recovery_challenge(attempt_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(challenge.as_slice())
+        );
     }
 
     #[tokio::test]

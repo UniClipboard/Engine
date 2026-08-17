@@ -937,6 +937,13 @@ mod tests {
             ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError>;
         }
         #[async_trait]
+        impl uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort for SpaceAccess {
+            async fn activate_completion_helper_admission_security(
+                &self,
+                request: uc_core::membership::ActivateCompletionHelperAdmissionSecurityRequest,
+            ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError>;
+        }
+        #[async_trait]
         impl uc_core::membership::GroupRevocationPort for SpaceAccess {
             async fn revoke_group_member(
                 &self,

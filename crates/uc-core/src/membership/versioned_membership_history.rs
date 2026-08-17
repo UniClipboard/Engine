@@ -1650,6 +1650,20 @@ impl VersionedMembershipHistory {
             .unwrap_or_default()
     }
 
+    pub fn effective_members_at(&self, event_id: MembershipEventId) -> BTreeSet<MemberInstanceId> {
+        self.snapshots
+            .get(&event_id)
+            .map(|snapshot| snapshot.members.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn active_members_at(&self, event_id: MembershipEventId) -> BTreeSet<MemberInstanceId> {
+        self.snapshots
+            .get(&event_id)
+            .map(|snapshot| snapshot.active_members.clone())
+            .unwrap_or_default()
+    }
+
     pub fn contains_event_id(&self, event_id: &[u8; 32]) -> bool {
         self.events
             .keys()

@@ -13,9 +13,10 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use uc_core::membership::{
-    ContentExchangeGatePort, CurrentWorkspacePeerScopePort, GroupRevocationPort,
-    GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MembershipAttestationEndpointPort,
-    MembershipGossipEndpointPort, MembershipHistoryExchangeEndpointPort,
+    AdmissionCompletionRecoveryEndpointPort, ContentExchangeGatePort,
+    CurrentWorkspacePeerScopePort, GroupRevocationPort, GroupUpdateDispatchPort,
+    LegacyUpgradeEndpointPort, MembershipAttestationEndpointPort, MembershipGossipEndpointPort,
+    MembershipHistoryExchangeEndpointPort,
 };
 use uc_core::ports::PresenceEvent;
 
@@ -91,6 +92,12 @@ impl SpaceConvergenceAssembly {
     /// Member-history endpoint installed on the authenticated member channel.
     pub fn membership_history_exchange(&self) -> Arc<dyn MembershipHistoryExchangeEndpointPort> {
         Arc::clone(&self.workspace) as Arc<dyn MembershipHistoryExchangeEndpointPort>
+    }
+
+    pub fn admission_completion_recovery(
+        &self,
+    ) -> Arc<dyn AdmissionCompletionRecoveryEndpointPort> {
+        Arc::clone(&self.workspace) as Arc<dyn AdmissionCompletionRecoveryEndpointPort>
     }
 
     /// Removal gate used by clipboard / keepalive callers to self-filter
