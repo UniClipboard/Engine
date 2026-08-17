@@ -39,6 +39,9 @@ pub use crate::space::lifecycle::device::{DeviceFacade, DeviceFacadeError, Local
 pub use crate::space::lifecycle::encryption::{
     EncryptionFacade, EncryptionFacadeDeps, EncryptionFacadeError, EncryptionStateView,
 };
+pub use crate::space::lifecycle::profile_reset::{
+    ProfileFactoryReset, ProfileFactoryResetError, ProfileFactoryResetResult,
+};
 pub use crate::space::lifecycle::session::{
     RecoverSpaceSessionResult, SpaceActivityError, SpaceSessionAccessDeps,
     SpaceSessionActivityDeps, SpaceSessionError,
@@ -102,12 +105,14 @@ pub use crate::search::live_index::{
 pub use crate::space::convergence::assembly::{SpaceConvergenceAssembly, SpaceConvergenceDeps};
 pub use crate::space::convergence::discovery::MembershipConvergenceDeps;
 pub use crate::space::convergence::{
-    ActionUnavailableReason, DeviceCompatibility, DeviceMembership, DeviceTrustAction,
-    DeviceTrustChange, DeviceTrustChoice, DeviceTrustDecisionResult, DeviceTrustImpact,
-    DeviceTrustRelationship, DeviceTrustSnapshot, GroupRelationship, RecoveryAvailability,
+    ActionUnavailableReason, CurrentJoinStatus, DeviceCompatibility, DeviceMembership,
+    DeviceTrustAction, DeviceTrustChange, DeviceTrustChoice, DeviceTrustDecisionResult,
+    DeviceTrustImpact, DeviceTrustRelationship, DeviceTrustSnapshot, GroupRelationship,
+    JoinedSpace, PendingInboundMember, PendingJoinerCompleteAck, RecoveryAvailability,
     SyncRelationship,
 };
 pub use crate::space::convergence::{
+    ProfileWorkspaceConvergence, SpaceTransitionRecoveryPort, WorkspaceConvergence,
     WorkspaceConvergenceDeps, WorkspaceConvergenceError, WorkspaceConvergenceStateOrigin,
 };
 pub use crate::transfer::receive::reconciliation::{

@@ -378,7 +378,13 @@ impl IrohPairingSessionAdapter {
                 return;
             }
         }
-        let len = u32::from_be_bytes(len_buf) as usize;
+        let len = match validate_frame_length(u32::from_be_bytes(len_buf) as usize) {
+            Ok(len) => len,
+            Err(_) => {
+                warn!(remote = %remote, "pairing first-frame length rejected");
+                return;
+            }
+        };
         info!(
             remote = %remote,
             frame_len = len,
@@ -572,20 +578,31 @@ async fn read_next_frame(
         Err(iroh::endpoint::ReadExactError::FinishedEarly(0)) => return Ok(None),
         Err(err) => return Err(map_read_err(err)),
     }
-    let len = u32::from_be_bytes(len_buf) as usize;
+    let len = validate_frame_length(u32::from_be_bytes(len_buf) as usize)?;
 
     let mut payload = vec![0u8; len];
     recv.read_exact(&mut payload).await.map_err(map_read_err)?;
 
     wire::decode(&payload).map(Some).map_err(|err| match err {
         WireDecodeError::Postcard(_)
+        | WireDecodeError::FrameTooLarge { .. }
         | WireDecodeError::UnsupportedVersion { .. }
         | WireDecodeError::UnsupportedSecurityCapability(_)
-        | WireDecodeError::InvalidFingerprint(_)
-        | WireDecodeError::InvalidSpacePersonId(_) => {
+        | WireDecodeError::UnsupportedDurableAdmissionKind(_)
+        | WireDecodeError::InvalidDurableJoinRequest(_)
+        | WireDecodeError::InvalidFingerprint(_) => {
             SessionError::Internal(format!("wire decode: {err}"))
         }
     })
+}
+
+fn validate_frame_length(len: usize) -> Result<usize, SessionError> {
+    if len == 0 || len > wire::MAX_FRAME_SIZE {
+        return Err(SessionError::Internal(format!(
+            "invalid pairing frame length {len}"
+        )));
+    }
+    Ok(len)
 }
 
 // ============================================================================
@@ -699,6 +716,28 @@ impl PairingSessionPort for IrohPairingSessionAdapter {
         })
     }
 
+    async fn dial_admission_continuation(
+        &self,
+        address_blob: &[u8],
+    ) -> Result<PairingSessionId, DialError> {
+        let sponsor_addr: EndpointAddr = postcard::from_bytes(address_blob).map_err(|_| {
+            DialError::Internal("invalid admission continuation address".to_owned())
+        })?;
+        let connection = connect_with_staggered_retry(
+            Arc::clone(&self.endpoint),
+            sponsor_addr,
+            PAIRING_ALPN,
+            "admission-continuation",
+        )
+        .await
+        .map_err(|_| DialError::SponsorUnreachable)?;
+        let (send, recv) = connection
+            .open_bi()
+            .await
+            .map_err(|_| DialError::SponsorUnreachable)?;
+        Ok(self.register_session(connection, send, recv).await)
+    }
+
     #[instrument(skip_all, fields(session = %session))]
     async fn send(
         &self,
@@ -768,8 +807,8 @@ impl PairingSessionPort for IrohPairingSessionAdapter {
     }
 
     /// Slice 2 Phase 1 · T5：返回本端 [`EndpointAddr`] 的 postcard 不透明
-    /// 字节。handshake coordinator 在发出 `JoinerRequest` / `SponsorConfirm`
-    /// 前调用此方法填充 `transport_address_blob`，对端接到后直接写入
+    /// 字节。handshake coordinator 在发出 `JoinerRequest` 前调用此方法填充
+    /// `transport_address_blob`，对端接到后直接写入
     /// `PeerAddressRepositoryPort`。
     ///
     /// `endpoint.addr()` 当下观察值里包含 magicsock 这次进程绑定的随机
@@ -795,6 +834,10 @@ impl PairingSessionPort for IrohPairingSessionAdapter {
             }
         }
     }
+
+    async fn local_transport_public_key(&self) -> Option<Vec<u8>> {
+        Some(self.endpoint.id().as_bytes().to_vec())
+    }
 }
 
 fn message_kind(message: &PairingSessionMessage) -> &'static str {
@@ -802,9 +845,7 @@ fn message_kind(message: &PairingSessionMessage) -> &'static str {
         PairingSessionMessage::Request(_) => "Request",
         PairingSessionMessage::AdmissionOffer(_) => "AdmissionOffer",
         PairingSessionMessage::ChallengeResponse(_) => "ChallengeResponse",
-        PairingSessionMessage::Confirm(_) => "Confirm",
-        PairingSessionMessage::Ready(_) => "Ready",
-        PairingSessionMessage::AdmissionSaved(_) => "AdmissionSaved",
+        PairingSessionMessage::DurableAdmission(_) => "DurableAdmission",
         PairingSessionMessage::Reject(_) => "Reject",
     }
 }
@@ -903,6 +944,14 @@ mod tests {
     use uc_core::pairing::JoinerRequest;
     use uc_core::security::IdentityFingerprint;
     use wiremock::matchers::{method, path};
+
+    #[test]
+    fn pairing_frame_length_is_rejected_before_payload_allocation() {
+        assert!(validate_frame_length(1).is_ok());
+        assert!(validate_frame_length(wire::MAX_FRAME_SIZE).is_ok());
+        assert!(validate_frame_length(0).is_err());
+        assert!(validate_frame_length(wire::MAX_FRAME_SIZE + 1).is_err());
+    }
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1070,15 +1119,33 @@ mod tests {
     }
 
     fn sample_request() -> PairingSessionMessage {
+        let device_id = DeviceId::new("joiner-1");
+        let credential = uc_core::membership::MembershipCredential::new(1, vec![4; 32]);
+        let member_instance = credential.member_instance_id(&device_id);
         PairingSessionMessage::Request(JoinerRequest {
+            attempt_id: [1; 32],
+            join_id: [2; 16],
+            request_message_id: [3; 32],
             invitation_code: InvitationCode::new("CODE-9999"),
-            device_id: DeviceId::new("joiner-1"),
+            device_id: device_id.clone(),
             device_name: "Joiner".into(),
             identity_fingerprint: sample_fingerprint(),
             nonce: vec![7; 8],
             transport_address_blob: vec![],
             security_capability: uc_core::pairing::PairingSecurityCapability::ReliableGroupEpochV1,
             key_package: vec![1, 2, 3],
+            member_instance,
+            membership_credential: credential,
+            resume_public_key: vec![5; 32],
+            admission: uc_core::membership::AdmissionChangeFacts {
+                member_instance,
+                device_id,
+                device_name: "Joiner".into(),
+                identity_fingerprint: sample_fingerprint(),
+                transport_public_key: vec![6; 32],
+                transport_address_blob: vec![],
+                identity_signature: vec![7; 64],
+            },
         })
     }
 
@@ -1127,6 +1194,39 @@ mod tests {
         match adapter.send(&session, sample_request()).await {
             Err(SessionError::NotFound(id)) => assert_eq!(id.as_str(), session.as_str()),
             other => panic!("expected NotFound after close, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_continuation_dials_saved_address_without_an_invitation() {
+        let sponsor_endpoint = bound_endpoint().await;
+        wait_for_direct_addrs(&sponsor_endpoint).await;
+        let address_blob = postcard::to_stdvec(&sponsor_endpoint.addr()).unwrap();
+        let _echo = spawn_echo_sponsor(sponsor_endpoint);
+        let joiner_endpoint = bound_endpoint().await;
+        wait_for_direct_addrs(&joiner_endpoint).await;
+        let adapter = adapter_no_rendezvous(joiner_endpoint);
+
+        let session = adapter
+            .dial_admission_continuation(&address_blob)
+            .await
+            .unwrap();
+        let message =
+            PairingSessionMessage::DurableAdmission(uc_core::pairing::DurableAdmissionFrame {
+                attempt_id: [0x31; 32],
+                kind: uc_core::pairing::DurableAdmissionMessageKind::CompleteAck,
+                message_id: [0x32; 32],
+                predecessor_message_id: Some([0x33; 32]),
+                payload: vec![0x34],
+            });
+        adapter.send(&session, message.clone()).await.unwrap();
+        let echoed = adapter.recv_next(&session).await.unwrap().unwrap();
+        match (message, echoed) {
+            (
+                PairingSessionMessage::DurableAdmission(expected),
+                PairingSessionMessage::DurableAdmission(actual),
+            ) => assert_eq!(actual, expected),
+            other => panic!("unexpected continuation echo: {other:?}"),
         }
     }
 

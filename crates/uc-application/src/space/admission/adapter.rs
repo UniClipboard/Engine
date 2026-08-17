@@ -18,19 +18,87 @@
 use async_trait::async_trait;
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::{
-    AdmissionChangeFacts, AdmissionSavedFacts, MemberInstanceId, MembershipAdmissionDecision,
-    WorkspaceSnapshot,
-};
-use uc_core::ports::pairing::PairingSessionId;
+use uc_core::membership::MembershipAdmissionDecision;
+use uc_core::pairing::JoinerRequest;
+use uc_core::ports::space::GroupAdmissionPort;
+use uc_core::space_access::PreparedGroupJoin;
 
 use crate::space::convergence::{WorkspaceConvergence, WorkspaceConvergenceError};
+
+pub(crate) fn stable_join_request_binding(
+    device_id: &DeviceId,
+    identity_fingerprint: &uc_core::security::IdentityFingerprint,
+) -> Vec<u8> {
+    let mut binding = b"uniclipboard/join-request-binding/v1\0".to_vec();
+    let device = device_id.as_str().as_bytes();
+    binding.extend_from_slice(&(device.len() as u64).to_be_bytes());
+    binding.extend_from_slice(device);
+    let fingerprint = identity_fingerprint.as_display().as_bytes();
+    binding.extend_from_slice(&(fingerprint.len() as u64).to_be_bytes());
+    binding.extend_from_slice(fingerprint);
+    binding
+}
+
+#[derive(Debug)]
+pub(crate) struct DurableLocalJoinPreparation {
+    pub attempt_id: [u8; 32],
+    pub join_id: [u8; 16],
+    pub request_message_id: [u8; 32],
+    pub resume_public_key: Vec<u8>,
+    pub prepared_group_join: PreparedGroupJoin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DurableJoinerCompletion {
+    Active(uc_core::pairing::DurableAdmissionFrame),
+    SpaceTransitionRequired,
+}
 
 /// The workspace-owner side of the admission seam. Implemented by
 /// [`WorkspaceConvergence`]; consumed only by the pairing channel inside
 /// this module.
 #[async_trait]
 pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
+    async fn preflight_local_join_source(
+        &self,
+        _preserve_unreadable_history: bool,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        Ok(())
+    }
+
+    /// Validate the exact J0 member identity before an invitation is consumed.
+    async fn validate_join_request(
+        &self,
+        request: &JoinerRequest,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        request
+            .validate_durable_identity()
+            .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_owned()))
+    }
+
+    /// Persist or reopen the exact local member material before the first
+    /// JoinRequest is sent. Implementations that do not own the durable
+    /// profile admission store must fail closed.
+    async fn prepare_local_join_before_network(
+        &self,
+        _preparation: &(dyn GroupAdmissionPort + Send + Sync),
+        _local_device_id: &DeviceId,
+        _sponsor: &[u8],
+        _stable_request_binding: &[u8],
+        _preserve_unreadable_history: bool,
+    ) -> Result<DurableLocalJoinPreparation, WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
+
+    /// Save an explicit sponsor rejection before the durable Candidate exists.
+    async fn reject_local_join_before_candidate(
+        &self,
+        _attempt_id: [u8; 32],
+        _reason: uc_core::membership::AdmissionRejectionReasonV1,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
+
     /// Whether the workspace currently allows this device to join through
     /// an invitation bound to the given generation.
     async fn admission_decision_for_joiner(
@@ -44,61 +112,106 @@ pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
     /// continue on the local head when the sync cannot complete.
     async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError>;
 
-    /// Save the in-flight sponsor admission record before waiting for the
-    /// joiner's readiness.
-    async fn begin_admission(
+    /// Build and durably save the exact Candidate before the channel sends it.
+    async fn prepare_sponsor_candidate(
         &self,
-        session: &PairingSessionId,
-        joiner_device_id: &DeviceId,
-        invitation_generation: u64,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError>;
+        _request: &JoinerRequest,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
 
-    /// The sponsor's saved in-flight admission record for a pairing
-    /// session. Used after a restart to re-await the same joiner's
-    /// readiness instead of saving a second member instance.
-    async fn pending_admission(
+    async fn prepare_joiner_candidate(
         &self,
-        session: &PairingSessionId,
-    ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>;
+        _frame: &uc_core::pairing::DurableAdmissionFrame,
+        _proof_signer: &(dyn GroupAdmissionPort + Send + Sync),
+        _target_access: &(dyn uc_core::ports::space::PrepareAdmissionTargetAccessPort
+              + Send
+              + Sync),
+        _passphrase: &uc_core::crypto::domain::Passphrase,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
 
-    /// Commit the readiness-confirmed joiner facts in one save commit and
-    /// return the confirmation material for the "admission change saved"
-    /// reply. `security_update_payload` is the group-epoch update produced
-    /// by the admission; it is carried by the admission change so lagging
-    /// members recover the security state together with the chain.
-    async fn commit_joiner_admission(
+    async fn commit_sponsor_prepared(
         &self,
-        session: &PairingSessionId,
-        joiner: AdmissionChangeFacts,
-        security_update_payload: Vec<u8>,
-    ) -> Result<AdmissionSavedFacts, WorkspaceConvergenceError>;
+        _frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
 
-    /// Locally signed facts the joiner returns after its group session is
-    /// active. `member_instance` overrides the security-view resolution:
-    /// a rejoining device must identify itself by the instance derived from
-    /// this admission's fresh credential, not by a possibly stale view.
-    async fn local_admission_facts(
+    async fn apply_joiner_commit(
         &self,
-        member_instance: Option<MemberInstanceId>,
-    ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError>;
+        _frame: &uc_core::pairing::DurableAdmissionFrame,
+        _receipt_signer: &(dyn GroupAdmissionPort + Send + Sync),
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
 
-    /// Save the joiner's local readiness facts before it sends its
-    /// readiness reply.
-    async fn record_local_readiness(
+    async fn complete_sponsor_applied(
         &self,
-        own_instance: MemberInstanceId,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError>;
+        _frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
 
-    /// Save the sponsor's member facts once the joiner received its saved
-    /// member-history reply.
-    async fn record_admission_saved(
+    async fn activate_joiner_complete(
         &self,
-        confirmation: AdmissionSavedFacts,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError>;
+        _frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<DurableJoinerCompletion, WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
+
+    async fn confirm_sponsor_complete_ack(
+        &self,
+        _frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
 }
 
 #[async_trait]
 impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
+    async fn preflight_local_join_source(
+        &self,
+        preserve_unreadable_history: bool,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        WorkspaceConvergence::preflight_local_join_source(self, preserve_unreadable_history).await
+    }
+
+    async fn validate_join_request(
+        &self,
+        request: &JoinerRequest,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        WorkspaceConvergence::validate_join_request(self, request).await
+    }
+
+    async fn prepare_local_join_before_network(
+        &self,
+        preparation: &(dyn GroupAdmissionPort + Send + Sync),
+        local_device_id: &DeviceId,
+        sponsor: &[u8],
+        stable_request_binding: &[u8],
+        preserve_unreadable_history: bool,
+    ) -> Result<DurableLocalJoinPreparation, WorkspaceConvergenceError> {
+        WorkspaceConvergence::prepare_local_join_before_network(
+            self,
+            preparation,
+            local_device_id,
+            sponsor,
+            stable_request_binding,
+            preserve_unreadable_history,
+        )
+        .await
+    }
+
+    async fn reject_local_join_before_candidate(
+        &self,
+        attempt_id: [u8; 32],
+        reason: uc_core::membership::AdmissionRejectionReasonV1,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        WorkspaceConvergence::reject_local_join_before_candidate(self, attempt_id, reason).await
+    }
+
     async fn admission_decision_for_joiner(
         &self,
         invitation_generation: u64,
@@ -116,62 +229,63 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         WorkspaceConvergence::synchronize_chain(self).await
     }
 
-    async fn begin_admission(
+    async fn prepare_sponsor_candidate(
         &self,
-        session: &PairingSessionId,
-        joiner_device_id: &DeviceId,
-        invitation_generation: u64,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        WorkspaceConvergence::begin_admission(
+        request: &JoinerRequest,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        WorkspaceConvergence::prepare_sponsor_candidate(self, request).await
+    }
+
+    async fn prepare_joiner_candidate(
+        &self,
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+        proof_signer: &(dyn GroupAdmissionPort + Send + Sync),
+        target_access: &(dyn uc_core::ports::space::PrepareAdmissionTargetAccessPort + Send + Sync),
+        passphrase: &uc_core::crypto::domain::Passphrase,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        WorkspaceConvergence::prepare_joiner_candidate(
             self,
-            session,
-            joiner_device_id,
-            invitation_generation,
+            frame,
+            proof_signer,
+            target_access,
+            passphrase,
         )
         .await
     }
 
-    async fn pending_admission(
+    async fn commit_sponsor_prepared(
         &self,
-        session: &PairingSessionId,
-    ) -> Result<Option<uc_core::membership::PendingAdmissionRecord>, WorkspaceConvergenceError>
-    {
-        WorkspaceConvergence::pending_admission(self, session).await
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        WorkspaceConvergence::commit_sponsor_prepared(self, frame).await
     }
 
-    async fn commit_joiner_admission(
+    async fn apply_joiner_commit(
         &self,
-        session: &PairingSessionId,
-        joiner: AdmissionChangeFacts,
-        security_update_payload: Vec<u8>,
-    ) -> Result<AdmissionSavedFacts, WorkspaceConvergenceError> {
-        WorkspaceConvergence::commit_joiner_admission(
-            self,
-            session,
-            joiner,
-            security_update_payload,
-        )
-        .await
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+        receipt_signer: &(dyn GroupAdmissionPort + Send + Sync),
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        WorkspaceConvergence::apply_joiner_commit(self, frame, receipt_signer).await
     }
 
-    async fn local_admission_facts(
+    async fn complete_sponsor_applied(
         &self,
-        member_instance: Option<MemberInstanceId>,
-    ) -> Result<AdmissionChangeFacts, WorkspaceConvergenceError> {
-        WorkspaceConvergence::local_admission_facts(self, member_instance).await
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        WorkspaceConvergence::complete_sponsor_applied(self, frame).await
     }
 
-    async fn record_local_readiness(
+    async fn activate_joiner_complete(
         &self,
-        own_instance: MemberInstanceId,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        WorkspaceConvergence::record_local_readiness(self, own_instance).await
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<DurableJoinerCompletion, WorkspaceConvergenceError> {
+        WorkspaceConvergence::activate_joiner_complete(self, frame).await
     }
 
-    async fn record_admission_saved(
+    async fn confirm_sponsor_complete_ack(
         &self,
-        confirmation: AdmissionSavedFacts,
-    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        WorkspaceConvergence::record_admission_saved(self, confirmation).await
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        WorkspaceConvergence::confirm_sponsor_complete_ack(self, frame).await
     }
 }

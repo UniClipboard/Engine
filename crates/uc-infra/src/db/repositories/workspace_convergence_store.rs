@@ -12,6 +12,8 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{BigInt, Binary, Text};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use uc_core::crypto::EncryptionError;
 use uc_core::ids::SpaceId;
@@ -71,6 +73,7 @@ impl From<UnversionedCurrentWorkspaceState> for WorkspaceConvergenceState {
             pending_applied_membership_effects: state.pending_applied_membership_effects,
             pending_membership_decision_deliveries: state.pending_membership_decision_deliveries,
             pending_admissions: state.pending_admissions,
+            pending_membership_history_transfers: std::collections::BTreeMap::new(),
             phase: state.phase,
             failure_category: state.failure_category,
             revision: state.revision,
@@ -95,6 +98,7 @@ impl From<DeviceTrustInitialWorkspaceState> for WorkspaceConvergenceState {
             pending_applied_membership_effects: Vec::new(),
             pending_membership_decision_deliveries: Vec::new(),
             pending_admissions: state.pending_admissions,
+            pending_membership_history_transfers: std::collections::BTreeMap::new(),
             phase: state.phase,
             failure_category: state.failure_category,
             revision: state.revision,
@@ -278,6 +282,7 @@ impl LegacyWorkspaceConvergenceState {
             pending_applied_membership_effects: Vec::new(),
             pending_membership_decision_deliveries: Vec::new(),
             pending_admissions: self.pending_admissions,
+            pending_membership_history_transfers: std::collections::BTreeMap::new(),
             phase: WorkspacePhase::Converging,
             failure_category: None,
             revision: self.revision,
@@ -295,6 +300,33 @@ use crate::security::{v1_aead, InMemorySession, MasterKey};
 use super::space_security_store::space_lookup_token;
 
 const WORKSPACE_STATE_V2_PREFIX: &[u8] = b"uc-workspace-convergence-state-v2\0";
+const WORKSPACE_STATE_V3_PREFIX: &[u8] = b"uc-workspace-convergence-state-v3\0";
+const WORKSPACE_STATE_V3_GUARD_PREFIX: &[u8] = b"uc-workspace-convergence-v3-guard\0";
+const WORKSPACE_STATE_V3_STORAGE_VERSION: u16 = 3;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkspaceConvergenceStateV3 {
+    storage_version: u16,
+    state: WorkspaceConvergenceState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum WorkspaceConvergenceMigrationV3Phase {
+    Staging,
+    TargetVerified,
+    Activated,
+    CleanupPending,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceConvergenceMigrationV3 {
+    storage_version: u16,
+    source_encrypted_payload: Vec<u8>,
+    source_ciphertext_digest: [u8; 32],
+    target_slot_id: String,
+    phase: WorkspaceConvergenceMigrationV3Phase,
+    target_plaintext_digest: Option<[u8; 32]>,
+}
 
 fn repository_error(error: impl std::fmt::Display) -> WorkspaceConvergenceRepositoryError {
     WorkspaceConvergenceRepositoryError::Repository(error.to_string())
@@ -313,14 +345,15 @@ fn workspace_state_aad(space_id: &str) -> Vec<u8> {
     format!("uc-workspace-convergence-state-v1|{space_id}").into_bytes()
 }
 
-fn seal_workspace_payload<T: Serialize>(
+fn seal_prefixed_payload<T: Serialize>(
     master_key: &MasterKey,
+    prefix: &[u8],
     value: &T,
     aad: &[u8],
 ) -> Result<Vec<u8>, WorkspaceConvergenceRepositoryError> {
     let encoded = postcard::to_stdvec(value).map_err(repository_error)?;
-    let mut plaintext = Vec::with_capacity(WORKSPACE_STATE_V2_PREFIX.len() + encoded.len());
-    plaintext.extend_from_slice(WORKSPACE_STATE_V2_PREFIX);
+    let mut plaintext = Vec::with_capacity(prefix.len() + encoded.len());
+    plaintext.extend_from_slice(prefix);
     plaintext.extend_from_slice(&encoded);
     let encrypted =
         v1_aead::encrypt_blob_xchacha(master_key, &plaintext, aad).map_err(repository_error)?;
@@ -357,6 +390,43 @@ struct WorkspaceStateRow {
     updated_at_ms: i64,
 }
 
+#[derive(QueryableByName)]
+struct WorkspaceV3ActiveRow {
+    #[diesel(sql_type = Text)]
+    slot_id: String,
+    #[diesel(sql_type = BigInt)]
+    generation: i64,
+}
+
+#[derive(QueryableByName)]
+struct WorkspaceV3SlotRow {
+    #[diesel(sql_type = Binary)]
+    encrypted_payload: Vec<u8>,
+    #[diesel(sql_type = BigInt)]
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum WorkspaceTransactionError {
+    #[error(transparent)]
+    Diesel(#[from] diesel::result::Error),
+    #[error(transparent)]
+    Workspace(WorkspaceConvergenceRepositoryError),
+}
+
+fn run_workspace_transaction<T>(
+    conn: &mut SqliteConnection,
+    operation: impl FnOnce(&mut SqliteConnection) -> Result<T, WorkspaceConvergenceRepositoryError>,
+) -> Result<T, WorkspaceConvergenceRepositoryError> {
+    conn.immediate_transaction::<_, WorkspaceTransactionError, _>(|conn| {
+        operation(conn).map_err(WorkspaceTransactionError::Workspace)
+    })
+    .map_err(|error| match error {
+        WorkspaceTransactionError::Diesel(error) => repository_error(error),
+        WorkspaceTransactionError::Workspace(error) => error,
+    })
+}
+
 pub struct DieselWorkspaceConvergenceStore<E> {
     executor: E,
     session: InMemorySession,
@@ -390,12 +460,310 @@ fn validate_current_space(
     Ok(())
 }
 
+fn workspace_v3_slot_aad(space_id: &str, slot_id: &str) -> Vec<u8> {
+    format!("uc-workspace-convergence-v3-slot|{space_id}|{slot_id}").into_bytes()
+}
+
+fn workspace_v3_migration_aad(space_id: &str, migration_id: &str) -> Vec<u8> {
+    format!("uc-workspace-convergence-v3-migration|{space_id}|{migration_id}").into_bytes()
+}
+
+fn open_v3_slot_payload(
+    master_key: &MasterKey,
+    space_id: &SpaceId,
+    slot_id: &str,
+    row: &WorkspaceV3SlotRow,
+) -> Result<(WorkspaceConvergenceState, [u8; 32]), WorkspaceConvergenceRepositoryError> {
+    let plaintext = open_workspace_plaintext(
+        master_key,
+        &row.encrypted_payload,
+        &workspace_v3_slot_aad(space_id.as_ref(), slot_id),
+    )?;
+    let encoded = plaintext
+        .strip_prefix(WORKSPACE_STATE_V3_PREFIX)
+        .ok_or(WorkspaceConvergenceRepositoryError::Corrupt)?;
+    let stored: WorkspaceConvergenceStateV3 =
+        postcard::from_bytes(encoded).map_err(|_| WorkspaceConvergenceRepositoryError::Corrupt)?;
+    if stored.storage_version != WORKSPACE_STATE_V3_STORAGE_VERSION {
+        return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+    }
+    validate_loaded_state(&stored.state, space_id, row.updated_at_ms)?;
+    Ok((stored.state, Sha256::digest(&plaintext).into()))
+}
+
+fn load_v3_state_on(
+    conn: &mut SqliteConnection,
+    master_key: &MasterKey,
+    space_id: &SpaceId,
+    lookup_token: &str,
+) -> Result<Option<WorkspaceConvergenceState>, WorkspaceConvergenceRepositoryError> {
+    let active = sql_query(
+        "SELECT slot_id, generation FROM workspace_convergence_v3_active \
+         WHERE space_lookup_token = ?",
+    )
+    .bind::<Text, _>(lookup_token)
+    .get_result::<WorkspaceV3ActiveRow>(conn)
+    .optional()
+    .map_err(repository_error)?;
+    let Some(active) = active else {
+        return Ok(None);
+    };
+    if active.generation <= 0 {
+        return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+    }
+    let slot = sql_query(
+        "SELECT encrypted_payload, updated_at_ms FROM workspace_convergence_v3_slots \
+         WHERE space_lookup_token = ? AND slot_id = ?",
+    )
+    .bind::<Text, _>(lookup_token)
+    .bind::<Text, _>(&active.slot_id)
+    .get_result::<WorkspaceV3SlotRow>(conn)
+    .optional()
+    .map_err(repository_error)?
+    .ok_or(WorkspaceConvergenceRepositoryError::Corrupt)?;
+    open_v3_slot_payload(master_key, space_id, &active.slot_id, &slot).map(|(state, _)| Some(state))
+}
+
+fn recover_v3_storage_on(
+    conn: &mut SqliteConnection,
+    master_key: &MasterKey,
+    space_id: &SpaceId,
+    lookup_token: &str,
+) -> Result<(), WorkspaceConvergenceRepositoryError> {
+    let active = sql_query(
+        "SELECT slot_id, generation FROM workspace_convergence_v3_active \
+         WHERE space_lookup_token = ?",
+    )
+    .bind::<Text, _>(lookup_token)
+    .get_result::<WorkspaceV3ActiveRow>(conn)
+    .optional()
+    .map_err(repository_error)?;
+    if let Some(active) = active {
+        if active.generation <= 0 {
+            return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+        }
+        let row = sql_query(
+            "SELECT encrypted_payload, updated_at_ms FROM workspace_convergence_v3_slots \
+             WHERE space_lookup_token = ? AND slot_id = ?",
+        )
+        .bind::<Text, _>(lookup_token)
+        .bind::<Text, _>(&active.slot_id)
+        .get_result::<WorkspaceV3SlotRow>(conn)
+        .optional()
+        .map_err(repository_error)?
+        .ok_or(WorkspaceConvergenceRepositoryError::Corrupt)?;
+        let _ = open_v3_slot_payload(master_key, space_id, &active.slot_id, &row)?;
+        sql_query(
+            "DELETE FROM workspace_convergence_v3_slots \
+             WHERE space_lookup_token = ? AND slot_id <> ?",
+        )
+        .bind::<Text, _>(lookup_token)
+        .bind::<Text, _>(&active.slot_id)
+        .execute(conn)
+        .map_err(repository_error)?;
+    } else {
+        sql_query("DELETE FROM workspace_convergence_v3_slots WHERE space_lookup_token = ?")
+            .bind::<Text, _>(lookup_token)
+            .execute(conn)
+            .map_err(repository_error)?;
+    }
+    sql_query("DELETE FROM workspace_convergence_v3_migrations WHERE space_lookup_token = ?")
+        .bind::<Text, _>(lookup_token)
+        .execute(conn)
+        .map_err(repository_error)?;
+    Ok(())
+}
+
+fn write_v3_migration_phase(
+    conn: &mut SqliteConnection,
+    master_key: &MasterKey,
+    space_id: &SpaceId,
+    lookup_token: &str,
+    migration_id: &str,
+    migration: &WorkspaceConvergenceMigrationV3,
+    updated_at_ms: i64,
+) -> Result<(), WorkspaceConvergenceRepositoryError> {
+    let encrypted = seal_prefixed_payload(
+        master_key,
+        WORKSPACE_STATE_V3_PREFIX,
+        migration,
+        &workspace_v3_migration_aad(space_id.as_ref(), migration_id),
+    )?;
+    sql_query(
+        "INSERT INTO workspace_convergence_v3_migrations \
+         (space_lookup_token, migration_id, encrypted_payload, updated_at_ms) \
+         VALUES (?, ?, ?, ?) ON CONFLICT(space_lookup_token, migration_id) DO UPDATE SET \
+         encrypted_payload = excluded.encrypted_payload, updated_at_ms = excluded.updated_at_ms",
+    )
+    .bind::<Text, _>(lookup_token)
+    .bind::<Text, _>(migration_id)
+    .bind::<Binary, _>(encrypted)
+    .bind::<BigInt, _>(updated_at_ms)
+    .execute(conn)
+    .map_err(repository_error)?;
+    Ok(())
+}
+
+fn save_v3_state_on(
+    conn: &mut SqliteConnection,
+    master_key: &MasterKey,
+    state: &WorkspaceConvergenceState,
+    source_encrypted_payload: Option<Vec<u8>>,
+) -> Result<(), WorkspaceConvergenceRepositoryError> {
+    let space_id = SpaceId::from_str(state.space_lineage.as_str());
+    let lookup_token = space_lookup_token(master_key, &space_id).map_err(repository_error)?;
+    let slot_id = Uuid::new_v4().to_string();
+    let migration_id = source_encrypted_payload
+        .as_ref()
+        .map(|_| Uuid::new_v4().to_string());
+    let mut migration = source_encrypted_payload.map(|source| WorkspaceConvergenceMigrationV3 {
+        storage_version: WORKSPACE_STATE_V3_STORAGE_VERSION,
+        source_ciphertext_digest: Sha256::digest(&source).into(),
+        source_encrypted_payload: source,
+        target_slot_id: slot_id.clone(),
+        phase: WorkspaceConvergenceMigrationV3Phase::Staging,
+        target_plaintext_digest: None,
+    });
+    if let (Some(migration_id), Some(migration)) = (&migration_id, &migration) {
+        write_v3_migration_phase(
+            conn,
+            master_key,
+            &space_id,
+            &lookup_token,
+            migration_id,
+            migration,
+            state.updated_at_ms,
+        )?;
+    }
+
+    let stored = WorkspaceConvergenceStateV3 {
+        storage_version: WORKSPACE_STATE_V3_STORAGE_VERSION,
+        state: state.clone(),
+    };
+    let encrypted_slot = seal_prefixed_payload(
+        master_key,
+        WORKSPACE_STATE_V3_PREFIX,
+        &stored,
+        &workspace_v3_slot_aad(space_id.as_ref(), &slot_id),
+    )?;
+    sql_query(
+        "INSERT INTO workspace_convergence_v3_slots \
+         (space_lookup_token, slot_id, encrypted_payload, updated_at_ms) VALUES (?, ?, ?, ?)",
+    )
+    .bind::<Text, _>(&lookup_token)
+    .bind::<Text, _>(&slot_id)
+    .bind::<Binary, _>(&encrypted_slot)
+    .bind::<BigInt, _>(state.updated_at_ms)
+    .execute(conn)
+    .map_err(repository_error)?;
+
+    let inserted = sql_query(
+        "SELECT encrypted_payload, updated_at_ms FROM workspace_convergence_v3_slots \
+         WHERE space_lookup_token = ? AND slot_id = ?",
+    )
+    .bind::<Text, _>(&lookup_token)
+    .bind::<Text, _>(&slot_id)
+    .get_result::<WorkspaceV3SlotRow>(conn)
+    .map_err(repository_error)?;
+    let (reopened, verified_digest) =
+        open_v3_slot_payload(master_key, &space_id, &slot_id, &inserted)?;
+    if reopened != *state {
+        return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+    }
+    if let (Some(migration_id), Some(migration)) = (&migration_id, &mut migration) {
+        migration.phase = WorkspaceConvergenceMigrationV3Phase::TargetVerified;
+        migration.target_plaintext_digest = Some(verified_digest);
+        write_v3_migration_phase(
+            conn,
+            master_key,
+            &space_id,
+            &lookup_token,
+            migration_id,
+            migration,
+            state.updated_at_ms,
+        )?;
+    }
+
+    let next_generation = sql_query(
+        "SELECT slot_id, generation FROM workspace_convergence_v3_active \
+         WHERE space_lookup_token = ?",
+    )
+    .bind::<Text, _>(&lookup_token)
+    .get_result::<WorkspaceV3ActiveRow>(conn)
+    .optional()
+    .map_err(repository_error)?
+    .map_or(Ok(1_i64), |active| {
+        active
+            .generation
+            .checked_add(1)
+            .ok_or(WorkspaceConvergenceRepositoryError::Corrupt)
+    })?;
+    sql_query(
+        "INSERT INTO workspace_convergence_v3_active (space_lookup_token, slot_id, generation) \
+         VALUES (?, ?, ?) ON CONFLICT(space_lookup_token) DO UPDATE SET \
+         slot_id = excluded.slot_id, generation = excluded.generation",
+    )
+    .bind::<Text, _>(&lookup_token)
+    .bind::<Text, _>(&slot_id)
+    .bind::<BigInt, _>(next_generation)
+    .execute(conn)
+    .map_err(repository_error)?;
+
+    let guard = seal_prefixed_payload(
+        master_key,
+        WORKSPACE_STATE_V3_GUARD_PREFIX,
+        &WORKSPACE_STATE_V3_STORAGE_VERSION,
+        &workspace_state_aad(space_id.as_ref()),
+    )?;
+    sql_query(
+        "INSERT INTO workspace_convergence_state \
+         (space_lookup_token, encrypted_payload, updated_at_ms) VALUES (?, ?, ?) \
+         ON CONFLICT(space_lookup_token) DO UPDATE SET encrypted_payload = excluded.encrypted_payload, \
+         updated_at_ms = excluded.updated_at_ms",
+    )
+    .bind::<Text, _>(&lookup_token)
+    .bind::<Binary, _>(guard)
+    .bind::<BigInt, _>(state.updated_at_ms)
+    .execute(conn)
+    .map_err(repository_error)?;
+
+    if let (Some(migration_id), Some(migration)) = (&migration_id, &mut migration) {
+        migration.phase = WorkspaceConvergenceMigrationV3Phase::Activated;
+        write_v3_migration_phase(
+            conn,
+            master_key,
+            &space_id,
+            &lookup_token,
+            migration_id,
+            migration,
+            state.updated_at_ms,
+        )?;
+        migration.phase = WorkspaceConvergenceMigrationV3Phase::CleanupPending;
+        write_v3_migration_phase(
+            conn,
+            master_key,
+            &space_id,
+            &lookup_token,
+            migration_id,
+            migration,
+            state.updated_at_ms,
+        )?;
+    }
+    Ok(())
+}
+
 fn load_state_on(
     conn: &mut SqliteConnection,
     master_key: &MasterKey,
     space_id: &SpaceId,
 ) -> Result<Option<WorkspaceConvergenceState>, WorkspaceConvergenceRepositoryError> {
     let lookup_token = space_lookup_token(master_key, space_id).map_err(repository_error)?;
+    run_workspace_transaction(conn, |conn| {
+        recover_v3_storage_on(conn, master_key, space_id, &lookup_token)
+    })?;
+    if let Some(state) = load_v3_state_on(conn, master_key, space_id, &lookup_token)? {
+        return Ok(Some(state));
+    }
     let row = sql_query(
         "SELECT space_lookup_token, encrypted_payload, updated_at_ms \
          FROM workspace_convergence_state WHERE space_lookup_token = ?",
@@ -415,6 +783,10 @@ fn load_state_on(
     if plaintext.starts_with(WORKSPACE_STATE_V2_PREFIX) {
         let state: WorkspaceConvergenceState = decode_current_workspace_payload(&plaintext)?;
         validate_loaded_state(&state, space_id, row.updated_at_ms)?;
+        let source = row.encrypted_payload;
+        run_workspace_transaction(conn, |conn| {
+            save_v3_state_on(conn, master_key, &state, Some(source))
+        })?;
         return Ok(Some(state));
     }
 
@@ -428,7 +800,10 @@ fn load_state_on(
     ] {
         if let Some(state) = state {
             if validate_loaded_state(&state, space_id, row.updated_at_ms).is_ok() {
-                save_state_on(conn, master_key, &state)?;
+                let source = row.encrypted_payload.clone();
+                run_workspace_transaction(conn, |conn| {
+                    save_v3_state_on(conn, master_key, &state, Some(source))
+                })?;
                 return Ok(Some(state));
             }
         }
@@ -441,7 +816,9 @@ fn load_state_on(
     }
     let state = legacy.into_current();
     validate_loaded_state(&state, space_id, row.updated_at_ms)?;
-    save_state_on(conn, master_key, &state)?;
+    run_workspace_transaction(conn, |conn| {
+        save_v3_state_on(conn, master_key, &state, Some(row.encrypted_payload))
+    })?;
     Ok(Some(state))
 }
 
@@ -461,23 +838,7 @@ fn save_state_on(
     master_key: &MasterKey,
     state: &WorkspaceConvergenceState,
 ) -> Result<(), WorkspaceConvergenceRepositoryError> {
-    let space_id = SpaceId::from_str(state.space_lineage.as_str());
-    let lookup_token = space_lookup_token(master_key, &space_id).map_err(repository_error)?;
-    let encrypted =
-        seal_workspace_payload(master_key, state, &workspace_state_aad(space_id.as_ref()))?;
-    sql_query(
-        "INSERT INTO workspace_convergence_state \
-         (space_lookup_token, encrypted_payload, updated_at_ms) VALUES (?, ?, ?) \
-         ON CONFLICT(space_lookup_token) DO UPDATE SET \
-         encrypted_payload = excluded.encrypted_payload, \
-         updated_at_ms = excluded.updated_at_ms",
-    )
-    .bind::<Text, _>(lookup_token)
-    .bind::<Binary, _>(encrypted)
-    .bind::<BigInt, _>(state.updated_at_ms)
-    .execute(conn)
-    .map_err(repository_error)?;
-    Ok(())
+    save_v3_state_on(conn, master_key, state, None)
 }
 
 #[async_trait]
@@ -526,9 +887,11 @@ mod tests {
     use tempfile::{tempdir, TempDir};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
-        AdmissionChangeFacts, MemberInstanceId, MembershipEvent, MembershipHistoryRelationship,
-        MembershipOperation, MembershipReconciliation, PendingAdmissionRecord,
-        WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState, WorkspacePhase,
+        AdmissionChangeFacts, MemberInstanceId, MembershipActivationBaselineV2,
+        MembershipCredential, MembershipEvent, MembershipHistoryRelationship, MembershipOperation,
+        MembershipReconciliation, PendingAdmissionRecord, PendingMembershipHistoryTransferV2,
+        VersionedMembershipHistory, WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState,
+        WorkspacePhase, ED25519_SIGNATURE_ALGORITHM_V1,
     };
 
     use super::DieselWorkspaceConvergenceStore;
@@ -543,6 +906,12 @@ mod tests {
     struct EncryptedPayloadRow {
         #[diesel(sql_type = Binary)]
         encrypted_payload: Vec<u8>,
+    }
+
+    #[derive(QueryableByName)]
+    struct CountRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
     }
 
     #[derive(serde::Serialize)]
@@ -617,6 +986,43 @@ mod tests {
         ));
         state.phase = WorkspacePhase::Converging;
         state.updated_at_ms = 123;
+        let source_device = DeviceId::new("history-page-source");
+        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x61; 32]);
+        let source_member = credential.member_instance_id(&source_device);
+        let source_facts = AdmissionChangeFacts {
+            member_instance: source_member,
+            device_id: source_device.clone(),
+            device_name: String::from_utf8(SENSITIVE_MARKER.to_vec()).unwrap(),
+            identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
+                "ABCD-EFGH-IJKL-MNOP",
+            )
+            .unwrap(),
+            transport_public_key: vec![0x62; 32],
+            transport_address_blob: vec![0x63; 16],
+            identity_signature: vec![0x64; 64],
+        };
+        let history = VersionedMembershipHistory::from_activation_baseline(
+            MembershipActivationBaselineV2::FullyVerifiedMigration {
+                lineage_id: SPACE.to_owned(),
+                head_event_id: uc_core::membership::MembershipEventId::from_hex(&"65".repeat(32))
+                    .unwrap(),
+                head_depth: 7,
+                current_members: vec![(source_facts.clone(), credential)],
+            },
+        )
+        .unwrap();
+        let page = history
+            .export_reconciliation_pages_v2(source_facts)
+            .unwrap()
+            .remove(0);
+        state.pending_membership_history_transfers.insert(
+            source_device,
+            PendingMembershipHistoryTransferV2 {
+                transfer_id: page.transfer_id(),
+                page_count: page.page_count(),
+                pages: vec![page],
+            },
+        );
         state
     }
 
@@ -970,5 +1376,115 @@ mod tests {
             store.load_state().await,
             Err(uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt)
         );
+    }
+
+    #[tokio::test]
+    async fn v2_state_is_side_written_verified_and_guarded_before_v3_activation() {
+        let (store, pool, _directory) = make_store();
+        let state = persisted_state();
+        let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
+        plaintext.extend(postcard::to_stdvec(&state).unwrap());
+        insert_encrypted_plaintext(&pool, &plaintext, state.updated_at_ms);
+
+        assert_eq!(store.load_state().await.unwrap(), Some(state.clone()));
+
+        let mut connection = pool.get().unwrap();
+        for table in [
+            "workspace_convergence_v3_slots",
+            "workspace_convergence_v3_active",
+            "workspace_convergence_v3_migrations",
+        ] {
+            let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+                .get_result::<CountRow>(&mut connection)
+                .unwrap()
+                .count;
+            assert_eq!(count, 1, "{table} must have one durable row");
+        }
+
+        let guarded =
+            diesel::sql_query("SELECT encrypted_payload FROM workspace_convergence_state LIMIT 1")
+                .get_result::<EncryptedPayloadRow>(&mut connection)
+                .unwrap();
+        let master_key = MasterKey::from_bytes(&[0x57; 32]).unwrap();
+        let guard_plaintext = super::open_workspace_plaintext(
+            &master_key,
+            &guarded.encrypted_payload,
+            &super::workspace_state_aad(SPACE),
+        )
+        .unwrap();
+        assert!(guard_plaintext.starts_with(super::WORKSPACE_STATE_V3_GUARD_PREFIX));
+
+        let reopened = reopen_store(pool);
+        assert_eq!(reopened.load_state().await.unwrap(), Some(state));
+    }
+
+    #[tokio::test]
+    async fn failed_v3_reopen_keeps_original_v2_ciphertext_and_no_active_pointer() {
+        let (store, pool, _directory) = make_store();
+        let state = persisted_state();
+        let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
+        plaintext.extend(postcard::to_stdvec(&state).unwrap());
+        insert_encrypted_plaintext(&pool, &plaintext, state.updated_at_ms);
+        let original = {
+            let mut connection = pool.get().unwrap();
+            let row = diesel::sql_query(
+                "SELECT encrypted_payload FROM workspace_convergence_state LIMIT 1",
+            )
+            .get_result::<EncryptedPayloadRow>(&mut connection)
+            .unwrap();
+            diesel::sql_query(
+                "CREATE TRIGGER corrupt_workspace_v3_slot AFTER INSERT ON \
+                 workspace_convergence_v3_slots BEGIN UPDATE workspace_convergence_v3_slots \
+                 SET encrypted_payload = X'00' WHERE slot_id = NEW.slot_id; END",
+            )
+            .execute(&mut connection)
+            .unwrap();
+            row.encrypted_payload
+        };
+
+        assert_eq!(
+            store.load_state().await,
+            Err(uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt)
+        );
+
+        let mut connection = pool.get().unwrap();
+        let after =
+            diesel::sql_query("SELECT encrypted_payload FROM workspace_convergence_state LIMIT 1")
+                .get_result::<EncryptedPayloadRow>(&mut connection)
+                .unwrap()
+                .encrypted_payload;
+        assert_eq!(after, original);
+        let active =
+            diesel::sql_query("SELECT COUNT(*) AS count FROM workspace_convergence_v3_active")
+                .get_result::<CountRow>(&mut connection)
+                .unwrap()
+                .count;
+        assert_eq!(active, 0);
+    }
+
+    #[tokio::test]
+    async fn reopen_finishes_v3_cleanup_without_changing_the_active_state() {
+        let (store, pool, _directory) = make_store();
+        let state = persisted_state();
+        let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
+        plaintext.extend(postcard::to_stdvec(&state).unwrap());
+        insert_encrypted_plaintext(&pool, &plaintext, state.updated_at_ms);
+        assert_eq!(store.load_state().await.unwrap(), Some(state.clone()));
+
+        let reopened = reopen_store(pool.clone());
+        assert_eq!(reopened.load_state().await.unwrap(), Some(state));
+        let mut connection = pool.get().unwrap();
+        let migrations =
+            diesel::sql_query("SELECT COUNT(*) AS count FROM workspace_convergence_v3_migrations")
+                .get_result::<CountRow>(&mut connection)
+                .unwrap()
+                .count;
+        let slots =
+            diesel::sql_query("SELECT COUNT(*) AS count FROM workspace_convergence_v3_slots")
+                .get_result::<CountRow>(&mut connection)
+                .unwrap()
+                .count;
+        assert_eq!(migrations, 0);
+        assert_eq!(slots, 1);
     }
 }

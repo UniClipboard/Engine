@@ -21,11 +21,9 @@
 //! [`PairingSessionPort`]: crate::ports::pairing::PairingSessionPort
 //! [`PairingEventPort`]: crate::ports::pairing::PairingEventPort
 
-use uuid::Uuid;
-
 use super::invitation::InvitationCode;
 use crate::ids::{DeviceId, SpaceId};
-use crate::membership::{AdmissionChangeFacts, AdmissionSavedFacts};
+use crate::membership::{AdmissionChangeFacts, MemberInstanceId, MembershipCredential};
 use crate::ports::pairing::PairingSessionId;
 use crate::security::IdentityFingerprint;
 
@@ -35,10 +33,27 @@ pub enum PairingSessionMessage {
     Request(JoinerRequest),
     AdmissionOffer(SponsorAdmissionOffer),
     ChallengeResponse(JoinerChallengeResponse),
-    Confirm(SponsorConfirm),
-    Ready(JoinerReady),
-    AdmissionSaved(SponsorAdmissionSaved),
+    DurableAdmission(DurableAdmissionFrame),
     Reject(PairingReject),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableAdmissionMessageKind {
+    Candidate,
+    Prepared,
+    Commit,
+    Applied,
+    Complete,
+    CompleteAck,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableAdmissionFrame {
+    pub attempt_id: [u8; 32],
+    pub kind: DurableAdmissionMessageKind,
+    pub message_id: [u8; 32],
+    pub predecessor_message_id: Option<[u8; 32]>,
+    pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +64,13 @@ pub enum PairingSecurityCapability {
 /// Joiner → sponsor. First message on the bi-stream (B2 step 5).
 #[derive(Debug, Clone)]
 pub struct JoinerRequest {
+    /// Stable private admission attempt identity, persisted before this
+    /// request is sent.
+    pub attempt_id: [u8; 32],
+    /// Stable public join identity returned by product queries and cancel.
+    pub join_id: [u8; 16],
+    /// Identity of the durable JoinRequest record this frame delivers.
+    pub request_message_id: [u8; 32],
     /// Code the joiner redeemed. Sponsor orchestrator matches it against
     /// the in-memory pending invitation (Q-B1-3 / F-041).
     pub invitation_code: InvitationCode,
@@ -76,6 +98,52 @@ pub struct JoinerRequest {
     pub security_capability: PairingSecurityCapability,
     /// MLS KeyPackage. The matching private state never leaves the joiner.
     pub key_package: Vec<u8>,
+    /// Exact member identity derived from the credential in this request.
+    pub member_instance: MemberInstanceId,
+    /// Public historical-verification credential for the proposed member.
+    pub membership_credential: MembershipCredential,
+    /// Public half of the durable retry identity saved with J0.
+    pub resume_public_key: Vec<u8>,
+    /// Member-signed facts that bind the request identity to the transport.
+    pub admission: AdmissionChangeFacts,
+}
+
+impl JoinerRequest {
+    pub fn validate_durable_identity(&self) -> Result<(), &'static str> {
+        let canonical_credential = MembershipCredential::new(
+            self.membership_credential.signature_algorithm_version,
+            self.membership_credential.public_key.clone(),
+        );
+        if canonical_credential != self.membership_credential {
+            return Err("membership credential is invalid");
+        }
+        if self
+            .membership_credential
+            .member_instance_id(&self.device_id)
+            != self.member_instance
+        {
+            return Err("member instance does not match credential and device");
+        }
+        if self.admission.member_instance != self.member_instance
+            || self.admission.device_id != self.device_id
+            || self.admission.device_name != self.device_name
+            || self.admission.identity_fingerprint != self.identity_fingerprint
+            || self.admission.transport_address_blob != self.transport_address_blob
+        {
+            return Err("admission facts do not match request identity");
+        }
+        if self.attempt_id == [0; 32]
+            || self.join_id == [0; 16]
+            || self.request_message_id == [0; 32]
+            || self.key_package.is_empty()
+            || self.resume_public_key.len() != 32
+            || self.admission.transport_public_key.is_empty()
+            || self.admission.identity_signature.is_empty()
+        {
+            return Err("durable join request material is incomplete");
+        }
+        Ok(())
+    }
 }
 
 /// Sponsor → joiner. Hands the joiner an offer they can unseal with the
@@ -105,65 +173,6 @@ pub struct JoinerChallengeResponse {
     pub encrypted_challenge: Vec<u8>,
 }
 
-/// Sponsor → joiner. Final success message + sponsor identity facts the
-/// joiner persists as a `SpaceMember` + `TrustedPeer` (B2 step 9/10).
-#[derive(Debug, Clone)]
-pub struct SponsorConfirm {
-    pub space_id: SpaceId,
-    pub sender_device_id: DeviceId,
-    pub sender_device_name: String,
-    pub sender_identity_fingerprint: IdentityFingerprint,
-    /// 不透明传输地址 blob（Slice 2 Phase 1 · T5）。
-    ///
-    /// sponsor 端 adapter 填入自身的 transport 编码（iroh adapter 为
-    /// postcard 编码的 `EndpointAddr`）。joiner 端只把字节直传
-    /// [`PeerAddressRepositoryPort`]。空 `Vec` 表示 sponsor adapter
-    /// 尚未发布 direct addrs，joiner 端降级为跳过 upsert，留待下轮
-    /// `ensure_reachable_all` 从 rendezvous 再拉取。
-    ///
-    /// [`PeerAddressRepositoryPort`]: crate::ports::PeerAddressRepositoryPort
-    pub transport_address_blob: Vec<u8>,
-    /// Sponsor 派发给 joiner 的 telemetry person 标识（Phase 098）。
-    ///
-    /// Sponsor 在 setup 完成时已生成本机的 `space_person_id` 并落盘；将其
-    /// 通过 pairing 加密通道传给 joiner，joiner 持久化后用同一 ID 上报
-    /// telemetry，实现"同 Space 多设备聚合为同一 person"。
-    ///
-    /// `None` 表示 sponsor 端尚未持久化 `space_person_id`（v1 老 sponsor
-    /// 与 v2 joiner 互操作场景）。joiner 端在收到 `None` 时退回 Solo 状态，
-    /// 等待下次有新设备 pairing 时再统一切换。
-    ///
-    /// 不携带 PII；仅在 telemetry 隐私边界内使用。
-    pub sponsor_space_person_id: Option<Uuid>,
-    pub welcome: Vec<u8>,
-    pub encrypted_key_catalog: Vec<u8>,
-    pub group_epoch: u64,
-    /// Number of member-history events held by the sponsor before admitting
-    /// this joiner. A configured same-Space joiner uses it to reject a
-    /// sponsor that is behind its current branch.
-    pub membership_history_event_count: u64,
-}
-
-/// Joiner → sponsor. Sent only after the joiner has durably recorded the
-/// sponsor relationship and activated its local session. The sponsor must not
-/// start delivery of pre-existing member records before this acknowledgement.
-#[derive(Debug, Clone)]
-pub struct JoinerReady {
-    /// The joiner signs these facts only after its local group session is
-    /// active. The sponsor commits them to the workspace change chain.
-    pub admission: AdmissionChangeFacts,
-}
-
-/// Sponsor → joiner. Sent only after the sponsor durably saved the joiner's
-/// signed member-history event. The joiner saves the sponsor's member facts
-/// before it reports that admission completed locally.
-#[derive(Debug, Clone)]
-pub struct SponsorAdmissionSaved {
-    /// The admission-saved history progress and the sponsor's own member
-    /// facts generated at the same save point.
-    pub facts: AdmissionSavedFacts,
-}
-
 /// Either side → other. Terminal message with a structured reason so the
 /// orchestrator can pick the right UI error / `PairingError` variant.
 #[derive(Debug, Clone)]
@@ -179,6 +188,9 @@ pub enum PairingRejectReason {
     /// Sponsor: this space currently cannot admit a member. The reason is
     /// intentionally not exposed on the pairing channel.
     AdmissionUnavailable,
+    /// Sponsor: the request conflicts with the sponsor's current durable
+    /// membership history and cannot succeed by retrying the same request.
+    AdmissionConflict,
     /// Sponsor: joiner's challenge response didn't decrypt — wrong
     /// passphrase.
     PassphraseMismatch,

@@ -63,8 +63,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    type DbPool =
-        diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::sqlite::SqliteConnection>>;
+    type DbPool = crate::db::pool::DbPool;
 
     /// Space passphrase used to initialize the fixture. The KEK is derived from
     /// it, so this same passphrase opens the exported bundle.

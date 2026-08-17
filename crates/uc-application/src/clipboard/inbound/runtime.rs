@@ -391,7 +391,14 @@ impl InboundProcessor {
 
 async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
     match settings.load().await {
-        Ok(settings) => settings.sync.sync_enabled,
+        Ok(settings) if settings.sync.sync_enabled => true,
+        Ok(_) => {
+            info!(
+                reason = "sync_disabled",
+                "clipboard inbound: delivery rejected by global sync setting"
+            );
+            false
+        }
         Err(_) => {
             warn!(
                 error_kind = "settings_load",
@@ -939,6 +946,32 @@ mod tests {
     fn runtime_has_one_complete_start_entry() {
         let _: fn(ClipboardInboundRuntimeDeps) -> ClipboardInboundRuntime =
             ClipboardInboundRuntime::start;
+    }
+
+    #[test]
+    fn disabled_global_sync_records_the_rejection_reason() {
+        let writer = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(writer.clone())
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!runtime.block_on(inbound_sync_enabled(&FixedSettings {
+                sync_enabled: false,
+            })));
+        });
+
+        assert!(
+            writer.output().contains("reason=\"sync_disabled\""),
+            "disabled sync must expose a non-sensitive rejection reason; logs={}",
+            writer.output()
+        );
     }
 
     #[tokio::test]

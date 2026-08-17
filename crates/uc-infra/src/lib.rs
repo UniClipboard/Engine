@@ -27,6 +27,6 @@ pub mod time;
 pub use app_version_state::FileAppVersionStateRepository;
 pub use file_secure_storage::FileSecureStorage;
 pub use first_sync_state::FileFirstSyncStateRepository;
-pub use migration_state::FileMigrationStateRepository;
-pub use setup_status::FileSetupStatusRepository;
+pub use migration_state::FileLegacyMigrationRecovery;
+pub use setup_status::{FileSetupStatusRepository, ManifestProjectingSetupStatusRepository};
 pub use time::{SystemClock, Timer};

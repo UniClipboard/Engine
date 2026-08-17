@@ -18,10 +18,11 @@ use async_trait::async_trait;
 
 use crate::crypto::domain::{ActiveSpace, Passphrase};
 use crate::ids::{DeviceId, SessionId, SpaceId};
+use crate::membership::MembershipCredential;
 use crate::pairing::InvitationCode;
 use crate::space_access::{
-    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer, PreparedGroupJoin,
-    ProofDerivedKey,
+    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
+    PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
 };
 
 /// 业务语义级的空间访问失败。
@@ -207,6 +208,16 @@ pub trait InitializeSpacePort: Send + Sync {
     ) -> Result<ActiveSpace, SpaceAccessError>;
 }
 
+/// Prepare target-local access material without changing the active space.
+#[async_trait]
+pub trait PrepareAdmissionTargetAccessPort: Send + Sync {
+    async fn prepare_target_access(
+        &self,
+        target_space_id: &SpaceId,
+        passphrase: &Passphrase,
+    ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError>;
+}
+
 /// Unlock an already-initialized space with its passphrase.
 #[async_trait]
 pub trait UnlockSpacePort: Send + Sync {
@@ -374,6 +385,29 @@ pub trait GroupAdmissionPort: Send + Sync {
         &self,
         device_id: &DeviceId,
     ) -> Result<PreparedGroupJoin, SpaceAccessError>;
+
+    /// Read the public membership credential bound to a prepared join. The
+    /// private signer remains inside the opaque prepared state.
+    async fn prepared_join_membership_credential(
+        &self,
+        _pending: &PreparedGroupJoin,
+    ) -> Result<MembershipCredential, SpaceAccessError> {
+        Err(SpaceAccessError::Internal(
+            "prepared join credential is unavailable".to_owned(),
+        ))
+    }
+
+    /// Sign pre-admission facts with the exact member signer stored in the
+    /// prepared join. This does not activate a group or install a Space.
+    async fn sign_prepared_join_payload(
+        &self,
+        _pending: &PreparedGroupJoin,
+        _payload: &[u8],
+    ) -> Result<Vec<u8>, SpaceAccessError> {
+        Err(SpaceAccessError::Internal(
+            "prepared join signing is unavailable".to_owned(),
+        ))
+    }
 
     async fn admit_group_member(
         &self,

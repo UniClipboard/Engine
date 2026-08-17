@@ -6,8 +6,6 @@
 //! `uc-application::setup`, since `uc-core/AGENTS.md` §9.1 puts setup
 //! flow orchestration outside core.
 
-pub mod migration;
 pub mod status;
 
-pub use migration::{MigrationPhase, MigrationRunId};
 pub use status::SetupStatus;

@@ -16,16 +16,14 @@ mod facade;
 
 pub use commands::{
     CurrentInvitation, InitializeSpaceInput, InitializeSpaceResult, InvitationAvailability,
-    IssuePairingInvitationResult, MigrationPhaseKind, MigrationProgress,
-    PairingInvitationAddressCandidate, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
-    SetupStateView, SwitchSpaceInput, SwitchSpaceResult, UnlockSpaceInput, UnlockSpaceResult,
-    UnreadableHistoryPolicy,
+    IssuePairingInvitationResult, PairingInvitationAddressCandidate, RedeemPairingInvitationInput,
+    RedeemPairingInvitationResult, SetupStateView, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps};
 pub use errors::{
     CancelInvitationError, FactoryResetError, InitializeSpaceError, IssuePairingInvitationError,
-    QueryMigrationProgressError, QuerySetupStateError, RedeemPairingInvitationError,
-    ResetSpaceError, SwitchSpaceError, TryResumeSessionError, UnlockSpaceError,
+    QuerySetupStateError, RedeemPairingInvitationError, ResetSpaceError, TryResumeSessionError,
+    UnlockSpaceError,
 };
 pub use facade::SpaceFacade;
 pub use uc_observability_contract::analytics::PairingFailureReason;

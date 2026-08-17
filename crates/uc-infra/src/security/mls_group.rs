@@ -7,7 +7,13 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_memory_storage::MemoryStorage;
 use openmls_rust_crypto::RustCrypto;
 use openmls_traits::{
-    crypto::OpenMlsCrypto, signatures::Signer, types::SignatureScheme, OpenMlsProvider,
+    crypto::OpenMlsCrypto, signatures::Signer, storage::StorageProvider, types::SignatureScheme,
+    OpenMlsProvider,
+};
+use sha2::{Digest, Sha256};
+use uc_core::membership::{
+    AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1, MembershipCredential,
+    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 
 use super::secrets::MasterKey;
@@ -430,6 +436,108 @@ impl MlsGroupEngine {
         signer.sign(payload).map_err(|_| MlsGroupError::Protocol)
     }
 
+    pub(crate) fn signing_public_key(
+        client_state: &MlsClientState,
+    ) -> Result<Vec<u8>, MlsGroupError> {
+        let (_, stored) = restore(client_state)?;
+        if stored.signer_public.is_empty() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        Ok(stored.signer_public)
+    }
+
+    pub(crate) fn sign_pending_member_payload(
+        client_state: &MlsClientState,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        if stored.group_id.is_some() {
+            return Err(MlsGroupError::InvalidState);
+        }
+        let signer = restore_signer(&provider, &stored)?;
+        signer.sign(payload).map_err(|_| MlsGroupError::Protocol)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn derive_public_admission_commitment(
+        client_state: &MlsClientState,
+        attempt_id: [u8; 32],
+        base_history_position: BaseMembershipHistoryPositionV1,
+        candidate_core_digest: [u8; 32],
+        commit: &[u8],
+        key_catalog_digest: [u8; 32],
+        admission_bundle_digest: [u8; 32],
+    ) -> Result<AdmissionSecurityCommitmentV1, MlsGroupError> {
+        let local_signer_public = Self::signing_public_key(client_state)?;
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        if !group.is_active() {
+            return Err(MlsGroupError::InvalidState);
+        }
+
+        let mut members = Vec::new();
+        let mut contains_local_signer = false;
+        for member in group.members() {
+            let identity = BasicCredential::try_from(member.credential)
+                .map_err(|_| MlsGroupError::InvalidState)?
+                .identity()
+                .to_vec();
+            let device_id =
+                std::str::from_utf8(&identity).map_err(|_| MlsGroupError::IdentityMismatch)?;
+            let public_key = member.signature_key.as_slice();
+            contains_local_signer |= public_key == local_signer_public;
+            let credential =
+                MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, public_key.to_vec());
+            members.push((
+                credential.member_instance_id(&uc_core::ids::DeviceId::new(device_id)),
+                credential.credential_id,
+            ));
+        }
+        if !contains_local_signer {
+            return Err(MlsGroupError::InvalidState);
+        }
+        members.sort_unstable();
+        let mut member_bytes = Vec::with_capacity(members.len() * 64 + 8);
+        member_bytes.extend_from_slice(&(members.len() as u64).to_be_bytes());
+        for (member, credential) in members {
+            member_bytes.extend_from_slice(member.as_bytes());
+            member_bytes.extend_from_slice(credential.as_bytes());
+        }
+        let group_context: GroupContext = provider
+            .storage()
+            .group_context(&GroupId::from_slice(&group_id))
+            .map_err(|_| MlsGroupError::Protocol)?
+            .ok_or(MlsGroupError::InvalidState)?;
+        let group_context = group_context
+            .tls_serialize_detached()
+            .map_err(|_| MlsGroupError::Protocol)?;
+        let target_epoch = group.epoch().as_u64();
+        let base_epoch = target_epoch
+            .checked_sub(1)
+            .ok_or(MlsGroupError::InvalidState)?;
+
+        AdmissionSecurityCommitmentV1::new(
+            ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+            String::from_utf8(group_id.clone()).map_err(|_| MlsGroupError::IdentityMismatch)?,
+            group_id,
+            attempt_id,
+            base_history_position,
+            candidate_core_digest,
+            u16::from(group.ciphersuite()),
+            base_epoch,
+            target_epoch,
+            domain_digest(b"uniclipboard/mls-commit/v1\0", commit),
+            domain_digest(b"uniclipboard/mls-group-context/v1\0", &group_context),
+            domain_digest(b"uniclipboard/mls-member-credentials/v1\0", &member_bytes),
+            key_catalog_digest,
+            admission_bundle_digest,
+        )
+        .map_err(|_| MlsGroupError::InvalidState)
+    }
+
     pub(crate) fn current_epoch(client_state: &MlsClientState) -> Result<u64, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
         let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
@@ -577,6 +685,14 @@ impl MlsGroupEngine {
     }
 }
 
+fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+    hasher.finalize().into()
+}
+
 fn group_config() -> MlsGroupCreateConfig {
     MlsGroupCreateConfig::builder()
         .ciphersuite(CIPHERSUITE)
@@ -662,6 +778,11 @@ fn export_wrapping_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::OpenMlsHistoricalSignatureVerifier;
+    use uc_core::membership::{
+        BaseMembershipHistoryPositionV1, HistoricalMembershipSignatureVerifier, MembershipEventId,
+        ED25519_SIGNATURE_ALGORITHM_V1,
+    };
 
     #[test]
     fn sponsor_and_joiner_export_the_same_epoch_wrapping_key_after_cold_restore() {
@@ -823,5 +944,97 @@ mod tests {
             &signature,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn historical_signature_verification_uses_only_the_explicit_public_key() {
+        let state = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let payload = b"historical-membership-event";
+        let signature = MlsGroupEngine::sign_member_payload(&state, payload).unwrap();
+        let public_key = MlsGroupEngine::signing_public_key(&state).unwrap();
+        let verifier = OpenMlsHistoricalSignatureVerifier;
+
+        assert_eq!(
+            verifier.verify(
+                ED25519_SIGNATURE_ALGORITHM_V1,
+                &public_key,
+                payload,
+                &signature,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            verifier.verify(
+                ED25519_SIGNATURE_ALGORITHM_V1,
+                &public_key,
+                b"altered",
+                &signature,
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn prepared_join_signer_proves_facts_without_activating_a_group() {
+        let pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let public_key = MlsGroupEngine::signing_public_key(&pending.client_state).unwrap();
+        let payload = b"pre-admission-member-facts";
+        let signature =
+            MlsGroupEngine::sign_pending_member_payload(&pending.client_state, payload).unwrap();
+
+        assert!(MlsGroupEngine::sign_member_payload(&pending.client_state, payload).is_err());
+        assert_eq!(
+            OpenMlsHistoricalSignatureVerifier.verify(
+                ED25519_SIGNATURE_ALGORITHM_V1,
+                &public_key,
+                payload,
+                &signature,
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn sponsor_and_joiner_derive_the_same_public_admission_commitment() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let admission =
+            MlsGroupEngine::admit_member(&sponsor, b"bob", &pending.key_package).unwrap();
+        let joined =
+            MlsGroupEngine::complete_join(pending, b"space-a", &admission.welcome).unwrap();
+        assert_ne!(
+            admission.sponsor_state.as_bytes(),
+            joined.client_state.as_bytes()
+        );
+        let base = BaseMembershipHistoryPositionV1 {
+            event_id: Some(
+                MembershipEventId::from_hex(&"11".repeat(32)).expect("test event id is valid"),
+            ),
+            depth: 4,
+            history_digest: [2; 32],
+        };
+
+        let sponsor_commitment = MlsGroupEngine::derive_public_admission_commitment(
+            &admission.sponsor_state,
+            [3; 32],
+            base.clone(),
+            [4; 32],
+            &admission.commit,
+            [5; 32],
+            [6; 32],
+        )
+        .unwrap();
+        let joiner_commitment = MlsGroupEngine::derive_public_admission_commitment(
+            &joined.client_state,
+            [3; 32],
+            base,
+            [4; 32],
+            &admission.commit,
+            [5; 32],
+            [6; 32],
+        )
+        .unwrap();
+
+        assert_eq!(sponsor_commitment, joiner_commitment);
     }
 }

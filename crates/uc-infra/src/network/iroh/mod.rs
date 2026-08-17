@@ -6,6 +6,7 @@
 
 pub mod active_clipboard;
 mod addr_filter;
+pub mod admission_completion_recovery_adapter;
 pub mod blobs;
 pub mod clipboard_dispatch_adapter;
 pub mod clipboard_receiver_adapter;
@@ -48,6 +49,10 @@ pub use active_clipboard::{
     ACTIVE_CLIPBOARD_PULL_ALPN,
 };
 pub(crate) use addr_filter::filter_endpoint_addr;
+pub use admission_completion_recovery_adapter::{
+    IrohAdmissionCompletionRecoveryAdapter, IrohAdmissionCompletionRecoveryHandler,
+    ADMISSION_COMPLETION_RECOVERY_ALPN,
+};
 pub use blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 pub use clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALPN};
 pub use clipboard_receiver_adapter::{IrohClipboardReceiverAdapter, IrohClipboardReceiverHandler};

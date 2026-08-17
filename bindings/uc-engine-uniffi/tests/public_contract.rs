@@ -410,6 +410,8 @@ fn mobile_host_can_create_a_space_with_analytics_and_shutdown_through_the_bindin
 #[test]
 fn dropping_a_running_binding_stops_its_worker() {
     let _test_guard = engine_test_guard();
+    let (started, startup) = std::sync::mpsc::channel();
+    let (drop_engine, drop_requested) = std::sync::mpsc::channel();
     let (finished, completion) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
@@ -424,12 +426,22 @@ fn dropping_a_running_binding_stops_its_worker() {
         )
         .expect("binding engine must start");
 
+        let _ = started.send(());
+        drop_requested
+            .recv()
+            .expect("drop request must reach the binding owner");
         drop(engine);
         let _ = finished.send(());
     });
 
+    startup
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("binding engine must finish starting before drop is measured");
+    drop_engine
+        .send(())
+        .expect("binding owner must still be waiting for the drop request");
     completion
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(std::time::Duration::from_secs(6))
         .expect("dropping the binding must not leave its worker waiting on the event stream");
 }
 
@@ -507,7 +519,7 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
             app_version: "1.2.3".to_owned(),
             profile_id: "binding-space-management".to_owned(),
         },
-        host,
+        host.clone(),
     )
     .expect("binding engine must start");
     let created = engine
@@ -565,20 +577,36 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     engine
         .leave_space()
         .expect("binding must leave the local space");
-    let left = engine
+    assert!(matches!(
+        engine.query_space_state(),
+        Err(BindingError::Engine { code: 1103, .. })
+    ));
+    engine
+        .shutdown(5_000)
+        .expect("reset binding engine must shut down within the deadline");
+
+    let restarted = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-space-management".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must restart after leaving");
+    let left = restarted
         .query_space_state()
-        .expect("binding must query state after leaving");
+        .expect("restarted binding must query state after leaving");
     assert!(!left.has_completed);
     assert!(left.space_id.is_none());
     assert!(
-        engine
+        restarted
             .list_devices()
-            .expect("binding must list devices after leaving")
+            .expect("restarted binding must list devices after leaving")
             .is_empty(),
         "leaving a space must not retain its member roster"
     );
 
-    engine
+    restarted
         .shutdown(5_000)
         .expect("binding engine must shut down within the deadline");
 }

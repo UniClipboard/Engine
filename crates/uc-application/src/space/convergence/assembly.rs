@@ -13,9 +13,10 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use uc_core::membership::{
-    ContentExchangeGatePort, CurrentWorkspacePeerScopePort, GroupRevocationPort,
-    GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MembershipAttestationEndpointPort,
-    MembershipGossipEndpointPort, MembershipHistoryExchangeEndpointPort,
+    AdmissionCompletionRecoveryEndpointPort, ContentExchangeGatePort,
+    CurrentWorkspacePeerScopePort, GroupRevocationPort, GroupUpdateDispatchPort,
+    LegacyUpgradeEndpointPort, MembershipAttestationEndpointPort, MembershipGossipEndpointPort,
+    MembershipHistoryExchangeEndpointPort,
 };
 use uc_core::ports::PresenceEvent;
 
@@ -70,7 +71,11 @@ impl SpaceConvergenceAssembly {
         let workspace = WorkspaceConvergence::new(workspace);
         let membership = build_membership_convergence(membership);
         let group_update_delivery: Arc<dyn GroupUpdateDeliveryPort> = Arc::new(
-            GroupUpdateDelivery::new(group_revocation, group_update_dispatch),
+            GroupUpdateDelivery::new(
+                group_revocation,
+                group_update_dispatch,
+                Arc::clone(&workspace) as Arc<dyn crate::space::convergence::group_update_delivery::GroupUpdateRecipientPreparationPort>,
+            ),
         );
         membership.install_group_update_delivery(Arc::clone(&group_update_delivery));
         let legacy_upgrade = Arc::new(
@@ -89,6 +94,12 @@ impl SpaceConvergenceAssembly {
         Arc::clone(&self.workspace) as Arc<dyn MembershipHistoryExchangeEndpointPort>
     }
 
+    pub fn admission_completion_recovery(
+        &self,
+    ) -> Arc<dyn AdmissionCompletionRecoveryEndpointPort> {
+        Arc::clone(&self.workspace) as Arc<dyn AdmissionCompletionRecoveryEndpointPort>
+    }
+
     /// Removal gate used by clipboard / keepalive callers to self-filter
     /// removed devices.
     pub fn removal_gate(&self) -> Arc<dyn ContentExchangeGatePort> {
@@ -97,6 +108,10 @@ impl SpaceConvergenceAssembly {
 
     pub fn current_peer_scope(&self) -> Arc<dyn CurrentWorkspacePeerScopePort> {
         Arc::clone(&self.workspace) as Arc<dyn CurrentWorkspacePeerScopePort>
+    }
+
+    pub fn workspace_convergence(&self) -> Arc<crate::space::convergence::WorkspaceConvergence> {
+        Arc::clone(&self.workspace)
     }
 
     /// Membership attestation endpoint installed on the shared node.
@@ -117,6 +132,10 @@ impl SpaceConvergenceAssembly {
     /// Group-update delivery consumed by the sponsor handshake.
     pub fn group_update_delivery(&self) -> Arc<dyn GroupUpdateDeliveryPort> {
         Arc::clone(&self.group_update_delivery)
+    }
+
+    pub fn space_transition_recovery(&self) -> Arc<dyn crate::facade::SpaceTransitionRecoveryPort> {
+        Arc::clone(&self.workspace) as Arc<dyn crate::facade::SpaceTransitionRecoveryPort>
     }
 
     /// Start the event-driven workspace convergence runtime.

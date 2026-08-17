@@ -29,6 +29,7 @@ serde = { version = "1", features = ["derive"] }
 # 时需要 serde_json::Map / Value（与观测契约的 IdentifyPayload 同
 # 形态）。本 crate 此前不直接拼 JSON，故新增依赖。
 serde_json = "1"
+postcard = { version = "1", features = ["use-std"] }
 dirs = "6"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
@@ -39,6 +40,8 @@ futures = "0.3.31"
 tracing = "0.1.44"
 hmac = "0.12"
 sha2 = "0.10"
+rand = "0.9.2"
+ed25519-dalek = "2.2.0"
 blake3 = "1"
 hex = "0.4"
 # Slice 2 Phase 2: carry ciphertext bytes across use case / facade / port

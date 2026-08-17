@@ -137,6 +137,9 @@ pub enum RedeemPairingInvitationError {
     #[error("device name is required but not provided")]
     DeviceNameRequired,
 
+    #[error("unreadable history requires explicit confirmation")]
+    UnreadableHistoryRequiresConfirmation,
+
     /// sponsor 收到 `JoinerRequest` 后 code 未命中任何 pending 邀请，回
     /// `Reject(InvitationMismatch)`。多半 race：code 在 sponsor 这边已
     /// 过期或被别的 joiner 消费。
@@ -144,6 +147,8 @@ pub enum RedeemPairingInvitationError {
     SponsorRejectedInvitation,
     #[error("sponsor cannot admit a device at this time")]
     SponsorAdmissionUnavailable,
+    #[error("admission conflicts with the sponsor's current membership history")]
+    SponsorAdmissionConflict,
 
     /// sponsor UI 明确拒绝本次配对（Slice 1 未暴露审批 UI，保留语义位）。
     #[error("sponsor declined the pairing request")]
@@ -264,77 +269,6 @@ pub enum QuerySetupStateError {
     StorageFailed(String),
 
     /// Uncategorised infra / adapter failure.
-    #[error("internal error: {0}")]
-    Internal(String),
-}
-
-/// Failure modes of [`crate::facade::space_setup::SpaceFacade::switch_space`].
-///
-/// 已 setup 设备加入另一个空间的 4 阶段重加密流程的失败原因。语义粒度与
-/// `RedeemPairingInvitationError` 对齐——大部分变体是 redeem 错误的
-/// 1:1 映射，再加上 switch-space 特有的 pre-flight / migration 状态分支：
-///
-/// * `NotSetup` — 设备还没完成首次 setup，应该走 redeem 而不是 switch-space。
-/// * `PendingMigration` — 之前有迁移没跑完；UI 应让用户选择"恢复"或"放弃"。
-/// * `NotUnlocked` — session 还没解锁；调用 switch-space 前必须先 unlock。
-/// * `InvalidCiphertext` — 备份记录解密失败（一般是 daemon 重启后 keyring
-///   migration_key 被清掉导致）。
-/// * `Storage` / `Internal` — 持久化 / adapter 兜底。
-#[derive(Debug, Error)]
-pub enum SwitchSpaceError {
-    #[error("device is already an active member of the target space")]
-    AlreadyActiveMember,
-    #[error("device has not completed first-time setup yet")]
-    NotSetup,
-    #[error("a previous switch-space migration is still in flight")]
-    PendingMigration(uc_core::setup::MigrationPhase),
-    #[error("space session is locked; unlock before switching spaces")]
-    NotUnlocked,
-    #[error("invitation not found")]
-    InvitationNotFound,
-    #[error("invitation has expired")]
-    InvitationExpired,
-    #[error("sponsor is not reachable")]
-    SponsorUnreachable,
-    #[error("sponsor declined the pairing request")]
-    SponsorDeclined,
-    #[error("sponsor did not recognise the invitation code")]
-    SponsorRejectedInvitation,
-    #[error("sponsor cannot admit a device at this time")]
-    SponsorAdmissionUnavailable,
-    #[error("sponsor handshake timed out")]
-    Timeout,
-    #[error("connection lost mid-handshake")]
-    ConnectionLost,
-    #[error("wrong passphrase")]
-    PassphraseMismatch,
-    #[error("space key material corrupted")]
-    CorruptedKeyMaterial,
-    #[error("device name is required but not provided")]
-    DeviceNameRequired,
-    #[error("pairing invitation service unavailable")]
-    ServiceUnavailable,
-    #[error("sponsor must upgrade before pairing")]
-    SponsorUpgradeRequired,
-    #[error("unreadable local history requires explicit confirmation")]
-    UnreadableHistoryRequiresConfirmation,
-    #[error("backup record decryption failed (corrupted ciphertext)")]
-    InvalidCiphertext,
-    #[error("storage failure: {0}")]
-    Storage(String),
-    #[error("internal error: {0}")]
-    Internal(String),
-}
-
-/// Failure modes of [`crate::facade::space_setup::SpaceFacade::query_migration_progress`].
-///
-/// 进度查询是只读操作，唯一失败来源是底层持久化故障——粒度与
-/// `QuerySetupStateError` 对齐。
-#[derive(Debug, Error)]
-pub enum QueryMigrationProgressError {
-    #[error("failed to read migration state: {0}")]
-    StorageFailed(String),
-
     #[error("internal error: {0}")]
     Internal(String),
 }

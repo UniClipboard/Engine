@@ -22,7 +22,9 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 
 ## 启动与事件
 
-宿主调用 `Engine::start(config, host)`，成功后同时得到核心实例和一条持续有效的事件流。启动会打开当前资料空间的加密存储、恢复同一设备身份、启动完整 P2P 节点并启动核心后台任务。
+宿主调用 `Engine::start(config, host)`，成功后同时得到核心实例和一条持续有效的事件流。启动会在当前资料
+空间存在时打开其加密存储、恢复同一设备身份、启动完整 P2P 节点并启动核心后台任务；Fresh profile 不会
+为了满足接口而伪造一个活动 Space。
 
 事件流采用有限容量。消费者落后时不会收到伪造或不完整的数据，而是收到 `RefreshRequired(ConsumerLagged)`，随后应重新查询当前状态。
 
@@ -33,7 +35,8 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `StateChanged` | 生命周期状态已经改变 |
 | `IncomingEntry` | 收到一条具有完整摘要的新内容 |
 | `TransferProgress` | 文件传输进度发生变化 |
-| `WorkspaceConvergenceChanged` | 工作空间收敛状态发生变化，携带完整当前状态；加入与移除结果只经此表达（ADR-017，配对会话终态不再作为对外结果） |
+| `DeviceTrustChanged { revision }` | 正式设备信任状态已经变化；宿主重新调用 `QueryDeviceTrust` 读取完整事实 |
+| `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
 | `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |
@@ -71,13 +74,13 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `CreateSpace` | 创建空间、设备身份和加密存储 |
 | `UnlockSpace` | 使用口令恢复当前空间会话 |
 | `RecoverSession` | 按宿主策略从系统安全存储恢复加密与空间会话 |
-| `JoinSpace` | 首次设备加入空间；已设置设备保留历史并切换空间 |
+| `JoinSpace` | 发起或继续同一次空间加入，返回 Active、Pending 或 Rejected，并携带稳定 `join_id` |
+| `CancelJoinSpace` | 请求取消指定的本机加入；只与发起方正式提交点竞争 |
 | `IssueInvitation` | 签发一次配对邀请 |
 | `CancelInvitation` | 取消当前尚未兑换的配对邀请 |
-| `ResetSpace` | 清除当前空间设置，使设备回到未设置状态 |
-| `FactoryResetSpace` | 依次清除密钥材料、空间设置和待处理邀请，使设备可重新初始化 |
+| `ResetSpace` | 清除当前空间设置和未消费邀请，保留可恢复密钥材料 |
+| `FactoryResetSpace` | 停止旧运行入口后依次清除密钥材料、空间状态和邀请，使设备可重新初始化 |
 | `QuerySetupState` | 查询设置是否完成、当前邀请和已保存设备名 |
-| `QueryMigrationProgress` | 查询空间切换所处阶段和已备份记录数量 |
 | `QueryStorageStats` | 查询数据库、密钥库、缓存和日志占用大小，不返回本机目录 |
 | `ClearStorageCache` | 清理核心缓存并返回实际释放的字节数 |
 | `QueryLocalDevice` | 返回本机设备编号和按设置解析后的显示名 |
@@ -107,8 +110,10 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `QueryMemberSyncPreferences` | 查询指定成员的发送、接收和内容类型偏好 |
 | `UpdateMemberSyncPreferences` | 局部更新指定成员的同步偏好，未提供字段保持不变 |
 | `RemoveMember` | 追加一条签名成员历史移除，并立即停止向目标发送新内容 |
-| `DecideMembershipRemoval` | 对收到且尚未采用的成员移除选择接受或拒绝 |
-| `QueryWorkspaceConvergence` | 返回当前空间的完整工作空间收敛状态 |
+| `QueryDeviceTrust` | 返回当前设备关系、待决定变化、可用动作和稳定阻塞原因的完整正式快照 |
+| `DecideDeviceTrustChange` | 对完整设备信任快照中的当前变化作选择；本机将被移除时要求明确确认 |
+| `DecideMembershipRemoval` | 仅 `dev-tools`：直接对内部成员移除事件选择接受或拒绝 |
+| `QueryWorkspaceConvergence` | 仅 `dev-tools`：返回内部工作空间收敛诊断快照 |
 | `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引 |
 | `QuerySearchTags` | 查询当前索引中的标签和条目数量 |
 | `QuerySearchStatus` | 查询索引是否可用及最近重建时间 |
@@ -140,7 +145,40 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 
 `RecoverSession` 的 `allow_secure_storage_unlock` 由宿主根据当前运行环境决定。值为 `false` 时核心不得尝试从系统安全存储恢复密钥；值为 `true` 时，核心统一完成加密会话、空间会话、搜索和接收能力恢复。
 
-`CancelInvitation` 在没有待取消邀请时返回冲突错误。`ResetSpace` 只清除当前空间设置，不向宿主暴露底层存储步骤。`FactoryResetSpace` 则先清除密钥材料，再清除空间设置和待处理邀请；密钥清除失败时不得提前清除设置，成功后必须关闭接收入口。`QuerySetupState` 不返回内部服务状态；`QueryMigrationProgress` 只返回准备、握手完成、切换完成三个稳定阶段，不公开内部运行编号或目标空间。
+`CancelInvitation` 在没有待取消邀请时返回冲突错误。`ResetSpace` 不是取消加入：profile 仍有未结束加入、
+待确认发送、恢复、切换或清理时返回冲突且不改变加入、设置或邀请；静止时只清除当前空间设置和未消费
+邀请，并隐藏此前公开的加入结果，不删除终态、防重放事实或可恢复密钥材料。`FactoryResetSpace` 则停止
+全部旧运行入口，先清除并确认密钥材料不存在，再清除数据库、空间世代、设置、邀请、关系、准入记录、
+导入暂存和受管缓存。完成后旧 Engine 会话失效，宿主必须重新创建 Engine；启动遇到未完成清理时会续完
+清理并返回可重试的 unavailable，宿主随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。
+
+规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Rejected 三类结果并公开稳定
+`join_id`，`CancelJoinSpace(join_id)` 负责本机取消，待激活候选继续使用现有 `RemoveMember(device_id)`。现有
+`DeviceTrustSnapshot` 增加 `current_join` 和 `pending_inbound_member`；现有 `DeviceTrustChanged { revision }`
+继续只提醒重新查询，revision 在同一 profile 内跨 Space 单调递增。不新增按 join id 查询任意历史操作、
+入站取消、待激活专用移除或第二份完整快照；`QueryWorkspaceConvergence` 及其事件继续只用于 dev-tools。
+对端因自己的另一项准入而暂时忙碌时，当前 JoinSpace 保持同一 Pending 并由 Engine 重试，不变成 Rejected。
+取消请求只与发起方正式提交竞争：取消先保存时返回 Rejected 且没有成员新增；正式提交先保存时取消已经
+太晚，同一请求继续保持 Pending 直到 Active，不自动生成成员移除。用户仍要退出时从另一台当前成员设备
+另行使用现有明确移除。
+公开的旧空间迁移进度操作已经删除，空间切换只表现为同一 JoinSpace Pending。`QuerySetupState` 继续只负责
+设置、设备名和邀请。profile 级负责人已经在没有活动 Space 时常驻，保存和恢复加入、取消、终态、revision
+与 ordinal，并组合零或一个完整活动 Space；Engine 只路由产品动作，不保存内部阶段。同一 profile 的入站
+和本机加入共享一个准入槽，Fresh Pending 没有活动 Space 时仍能执行彻底重置。
+
+生产加入统一使用 Candidate、Prepared、Commit、Applied、Complete。加入方先验证并保存完整历史和目标
+安全状态，邀请方随后正式提交；双方保存同一应用回执后，邀请方发送 Complete，加入方完成本机激活后
+返回 CompleteAck。跨 Space 时 JoinSpace 先返回 Pending，Engine 排空来源会话、完成前向切换并重建同一
+CompleteAck；发送失败不回滚 Active，下次启动继续发送。
+
+同一 Space 重新加入时，邀请方历史可以比本机已保存历史更新，但必须完整包含本机已经确认的连续历史；
+缺少记录、倒退或分叉都返回 Rejected，不覆盖本机事实。普通成员上线只交换新版完整历史，不再发送旧版
+问候、分页或单独决定消息。双方保存的成员决定可以不同，合并时保留并集，但对端只能新增自己签署的决定。
+
+`JoinSpace.preserve_unreadable_history` 只影响跨 Space 来源历史。值为 `false` 且本地发现不可读密文时，
+Engine 在联系邀请方前返回 `1292` 冲突，不创建新的加入尝试。值为 `true` 时，同一选择随加入记录保存；
+不可读密文保留原字节并隔离，Active 结果的 `preserved_unreadable_records` 返回数量。该选择一旦进入同一
+Pending 加入便不能在重试中更改。
 
 `QueryStorageStats` 和 `ClearStorageCache` 由核心执行。宿主只能看到分类后的字节数和实际释放量，不能取得数据库、密钥库、缓存或日志的本机路径。
 
@@ -162,9 +200,18 @@ LAN 内容读写复用核心现有的加密历史、系统剪贴板写入、内�
 
 `QueryMemberSyncPreferences` 和 `UpdateMemberSyncPreferences` 只接受稳定设备编号。局部更新中未提供的开关和内容类型必须保持原值。
 
-工作空间收敛由核心完整负责。宿主只追加本机移除、对收到的移除作一次接受或拒绝、查询当前状态和订阅变化事件。`RemoveMember` 保存签名成员历史并立即限制本机向目标发送；`DecideMembershipRemoval` 只接受完整快照中的待决定编号。宿主不保存成员历史、不安排消息顺序，也不创建重试队列。
+工作空间收敛由核心完整负责。正式宿主只追加本机移除、通过 `QueryDeviceTrust` 读取完整设备关系、对
+`current_change` 作一次选择并订阅 `DeviceTrustChanged`。`RemoveMember` 保存签名成员历史并立即限制本机
+向目标发送；`DecideDeviceTrustChange` 只接受快照中的当前变化编号。宿主不保存成员历史、不安排消息顺序，
+也不创建重试队列。
 
-返回与 `WorkspaceConvergenceChanged` 事件使用同一份完整快照：
+`DeviceTrustSnapshot` 返回 revision、本机设备及成员状态、当前变化、完整设备关系、恢复可用性、允许动作、
+稳定阻塞原因和更新时间。设备关系包含用于产品展示的 device id 与 display name，但这些字段不得进入日志
+或调试输出。状态保存成功后发送 `DeviceTrustChanged { revision }`；事件消费者收到更新 revision 或
+`RefreshRequired` 后重新查询，相同或更小 revision 不覆盖已查询结果。iOS、Android 和 HarmonyOS 绑定
+必须公开相同字段、结果、错误和提醒。
+
+以下 `WorkspaceConvergence` 快照和变化事件只在显式 `dev-tools` 构建中用于内部验收：
 
 - `phase`：`locally_applied`、`converging`、`complete` 或 `recovery_required`；
 - `revision`：只随成功持久化状态变化递增的不透明版本；
@@ -184,7 +231,8 @@ LAN 内容读写复用核心现有的加密历史、系统剪贴板写入、内�
 
 `locally_applied` 表示本机已保存当前成员历史状态；`converging` 表示正在核对成员历史。网络发送成功或发起操作返回都不足以代表两台设备关系一致。收到此前未知但合法的成员历史后，状态重新进入 `converging`；连续性、空间、身份或摘要无法验证、发现不可自动解决的分叉或有效成员为空时进入 `recovery_required`，核心停止自动推进。普通离线、超时和重启不改变成员历史。
 
-工作空间收敛状态在本机保存成员历史或用户决定、收到成员历史、设备上线以及进入需要恢复时主动通知。事件消费者落后时按通用规则收到 `RefreshRequired`，随后调用 `QueryWorkspaceConvergence` 读取完整当前事实。iOS、Android 和 HarmonyOS 绑定必须公开相同字段、结果、错误、入口和通知。
+内部收敛状态在本机保存成员历史或用户决定、收到成员历史、设备上线以及进入需要恢复时更新。它不进入
+正式 iOS、Android 或 HarmonyOS 绑定，也不能代替 `QueryDeviceTrust` 的产品契约。
 
 搜索查询、标签、状态和重建都由核心执行。搜索结果可以正常返回预览、文件名、文件路径、链接和自定义标签，但这些用户内容不得出现在调试输出或日志中。加密会话锁定时，宿主不得读取搜索结果、标签或状态，也不得触发重建。
 

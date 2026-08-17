@@ -36,8 +36,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    ContentExchangeGatePort, CurrentMemberSignaturePort, CurrentMembershipIdentityPort,
-    GroupRevocationPort, GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
+    AdmissionCompletionRecoveryEndpointPort, ContentExchangeGatePort, CurrentMemberSignaturePort,
+    CurrentMembershipIdentityPort, CurrentWorkspacePeerScopePort, GroupRevocationPort,
+    GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
     MembershipAttestationEndpointPort, MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
@@ -63,6 +64,9 @@ use super::active_clipboard::{
     ACTIVE_CLIPBOARD_PULL_ALPN,
 };
 use super::addr_filter::{apply_addr_filter, enumerate_local_lan_v4};
+use super::admission_completion_recovery_adapter::{
+    IrohAdmissionCompletionRecoveryAdapter, ADMISSION_COMPLETION_RECOVERY_ALPN,
+};
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 #[cfg(test)]
 use super::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
@@ -966,6 +970,7 @@ impl IrohNodeBuilder {
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
+        current_peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         group_revocation: Arc<dyn GroupRevocationPort>,
     ) -> Result<GroupUpdateHandlers, IrohNodeError> {
@@ -974,6 +979,7 @@ impl IrohNodeBuilder {
             peer_addr_repo,
             member_repo,
             peer_admission,
+            current_peer_scope,
             fingerprint_factory,
             group_revocation,
         ));
@@ -993,6 +999,29 @@ impl IrohNodeBuilder {
         self.router_builder = Some(builder.accept(
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
             adapter.handler(member_repo, fingerprint_factory, endpoint),
+        ));
+        Ok(())
+    }
+
+    pub fn build_admission_completion_recovery_adapter(
+        &self,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    ) -> Arc<IrohAdmissionCompletionRecoveryAdapter> {
+        Arc::new(IrohAdmissionCompletionRecoveryAdapter::new(
+            Arc::clone(&self.endpoint),
+            peer_addr_repo,
+        ))
+    }
+
+    pub fn install_admission_completion_recovery(
+        &mut self,
+        adapter: &IrohAdmissionCompletionRecoveryAdapter,
+        endpoint: Arc<dyn AdmissionCompletionRecoveryEndpointPort>,
+    ) -> Result<(), IrohNodeError> {
+        let builder = self.take_router_builder()?;
+        self.router_builder = Some(builder.accept(
+            ADMISSION_COMPLETION_RECOVERY_ALPN,
+            adapter.handler(endpoint),
         ));
         Ok(())
     }
@@ -1801,7 +1830,7 @@ mod tests {
         assert_eq!(unknown_state, uc_core::ports::ReachabilityState::Unknown,);
 
         let node = builder.spawn();
-        assert!(node.accepts_protocol_for_test(CLIPBOARD_ALPN).await);
+        assert!(node.accepts_protocol_for_test(PRESENCE_ALPN).await);
         assert!(!node.accepts_protocol_for_test(LEGACY_CLIPBOARD_ALPN).await);
         node.shutdown().await;
     }

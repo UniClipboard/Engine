@@ -144,7 +144,7 @@ pub enum InvitationAvailability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct SpaceJoined {
+pub struct JoinedSpace {
     pub sponsor_device_id: String,
     pub sponsor_identity_fingerprint: String,
     pub space_id: String,
@@ -152,6 +152,38 @@ pub struct SpaceJoined {
     pub self_identity_fingerprint: String,
     pub migrated_records: Option<u64>,
     pub preserved_unreadable_records: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinSpaceRejectionReason {
+    InvitationUnavailable,
+    AuthenticationRejected,
+    IdentityConflict,
+    BaseHistoryChanged,
+    JoinerHistoryAhead,
+    HistoryConflict,
+    PeerUpgradeRequired,
+    Cancelled,
+    RemovedBeforeActivation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinSpaceStatus {
+    Active {
+        join_id: String,
+        joined_space: JoinedSpace,
+    },
+    Pending {
+        join_id: String,
+        target_space_id: Option<String>,
+        sponsor_device_id: Option<String>,
+        sponsor_identity_fingerprint: Option<String>,
+        cancel_requested: bool,
+    },
+    Rejected {
+        join_id: String,
+        reason: JoinSpaceRejectionReason,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -350,7 +382,11 @@ enum WorkerCommand {
         device_name: Option<String>,
         passphrase: Zeroizing<String>,
         preserve_unreadable_history: bool,
-        response: mpsc::Sender<Result<SpaceJoined, BindingError>>,
+        response: mpsc::Sender<Result<JoinSpaceStatus, BindingError>>,
+    },
+    CancelJoinSpace {
+        join_id: String,
+        response: mpsc::Sender<Result<JoinSpaceStatus, BindingError>>,
     },
     SendText {
         text: Zeroizing<String>,
@@ -860,7 +896,7 @@ impl MobileEngine {
         device_name: Option<String>,
         passphrase: String,
         preserve_unreadable_history: bool,
-    ) -> Result<SpaceJoined, BindingError> {
+    ) -> Result<JoinSpaceStatus, BindingError> {
         let commands = self.command_sender()?;
         let (response, result) = mpsc::channel();
         commands
@@ -871,6 +907,17 @@ impl MobileEngine {
                 preserve_unreadable_history,
                 response,
             })
+            .map_err(|_| BindingError::RuntimeUnavailable)?;
+        result
+            .recv()
+            .map_err(|_| BindingError::RuntimeUnavailable)?
+    }
+
+    pub fn cancel_join_space(&self, join_id: String) -> Result<JoinSpaceStatus, BindingError> {
+        let commands = self.command_sender()?;
+        let (response, result) = mpsc::channel();
+        commands
+            .send(WorkerCommand::CancelJoinSpace { join_id, response })
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
@@ -1476,7 +1523,17 @@ async fn run_worker_loop(
                     }))
                     .await
                     .map_err(BindingError::from)
-                    .and_then(map_space_joined);
+                    .and_then(map_join_space_status);
+                let _ = response.send(result);
+            }
+            WorkerCommand::CancelJoinSpace { join_id, response } => {
+                let result = engine
+                    .execute(Operation::CancelJoinSpace(
+                        uc_engine::CancelJoinSpaceInput { join_id },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_join_space_status);
                 let _ = response.send(result);
             }
             WorkerCommand::SendText {
@@ -1946,23 +2003,73 @@ fn map_invitation_issued(result: OperationResult) -> Result<InvitationIssued, Bi
     })
 }
 
-fn map_space_joined(result: OperationResult) -> Result<SpaceJoined, BindingError> {
-    unpack_operation!(result, OperationResult::SpaceJoined {
-        sponsor_device_id,
-        sponsor_identity_fingerprint,
-        space_id,
-        self_device_id,
-        self_identity_fingerprint,
-        migrated_records,
-        preserved_unreadable_records,
-    } => SpaceJoined {
-        sponsor_device_id,
-        sponsor_identity_fingerprint,
-        space_id,
-        self_device_id,
-        self_identity_fingerprint,
-        migrated_records,
-        preserved_unreadable_records,
+fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, BindingError> {
+    let OperationResult::JoinSpace(status) = result else {
+        return Err(BindingError::UnexpectedResult);
+    };
+    Ok(match status {
+        uc_engine::JoinSpaceStatusSummary::Active {
+            join_id,
+            joined_space,
+        } => JoinSpaceStatus::Active {
+            join_id,
+            joined_space: JoinedSpace {
+                sponsor_device_id: joined_space.sponsor_device_id,
+                sponsor_identity_fingerprint: joined_space.sponsor_identity_fingerprint,
+                space_id: joined_space.space_id,
+                self_device_id: joined_space.self_device_id,
+                self_identity_fingerprint: joined_space.self_identity_fingerprint,
+                migrated_records: joined_space.migrated_records,
+                preserved_unreadable_records: joined_space.preserved_unreadable_records,
+            },
+        },
+        uc_engine::JoinSpaceStatusSummary::Pending {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            cancel_requested,
+        } => JoinSpaceStatus::Pending {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            cancel_requested,
+        },
+        uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => {
+            JoinSpaceStatus::Rejected {
+                join_id,
+                reason: match reason {
+                    uc_engine::JoinSpaceRejectionReasonSummary::InvitationUnavailable => {
+                        JoinSpaceRejectionReason::InvitationUnavailable
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::AuthenticationRejected => {
+                        JoinSpaceRejectionReason::AuthenticationRejected
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::IdentityConflict => {
+                        JoinSpaceRejectionReason::IdentityConflict
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::BaseHistoryChanged => {
+                        JoinSpaceRejectionReason::BaseHistoryChanged
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::JoinerHistoryAhead => {
+                        JoinSpaceRejectionReason::JoinerHistoryAhead
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::HistoryConflict => {
+                        JoinSpaceRejectionReason::HistoryConflict
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::PeerUpgradeRequired => {
+                        JoinSpaceRejectionReason::PeerUpgradeRequired
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::Cancelled => {
+                        JoinSpaceRejectionReason::Cancelled
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::RemovedBeforeActivation => {
+                        JoinSpaceRejectionReason::RemovedBeforeActivation
+                    }
+                },
+            }
+        }
     })
 }
 
@@ -2432,20 +2539,29 @@ mod tests {
     }
 
     #[test]
-    fn space_joined_mapping_preserves_history_counts() {
-        let joined = map_space_joined(OperationResult::SpaceJoined {
-            sponsor_device_id: "sponsor".into(),
-            sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
-            space_id: "space".into(),
-            self_device_id: "self".into(),
-            self_identity_fingerprint: "self-fingerprint".into(),
-            migrated_records: Some(4),
-            preserved_unreadable_records: Some(2),
-        })
-        .expect("space-joined result must map");
+    fn join_space_mapping_preserves_history_counts() {
+        let joined = map_join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Active {
+                join_id: "join-id".into(),
+                joined_space: uc_engine::JoinedSpaceSummary {
+                    sponsor_device_id: "sponsor".into(),
+                    sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
+                    space_id: "space".into(),
+                    self_device_id: "self".into(),
+                    self_identity_fingerprint: "self-fingerprint".into(),
+                    migrated_records: Some(4),
+                    preserved_unreadable_records: Some(2),
+                },
+            },
+        ))
+        .expect("join-space result must map");
 
-        assert_eq!(joined.migrated_records, Some(4));
-        assert_eq!(joined.preserved_unreadable_records, Some(2));
+        assert!(matches!(
+            joined,
+            JoinSpaceStatus::Active { joined_space, .. }
+                if joined_space.migrated_records == Some(4)
+                    && joined_space.preserved_unreadable_records == Some(2)
+        ));
     }
 
     #[test]

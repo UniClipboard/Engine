@@ -1,4 +1,5 @@
 pub(crate) mod cancel_invitation;
+pub(crate) mod cancel_join_space;
 pub(crate) mod create_space;
 pub(crate) mod factory_reset;
 pub(crate) mod invitation;

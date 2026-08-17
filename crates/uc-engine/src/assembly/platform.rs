@@ -12,7 +12,9 @@ use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort
 use uc_core::ids::ProfileId;
 use uc_core::ports::clipboard::ClipboardRepresentationNormalizerPort;
 use uc_core::ports::*;
-use uc_infra::blob::{BlobRepositoryPort, BlobStorePort, BlobWriter, FilesystemBlobStore};
+use uc_infra::blob::{
+    BlobRepositoryPort, BlobStorePort, BlobWriter, SwitchableFilesystemBlobStore,
+};
 use uc_infra::clipboard::ClipboardRepresentationNormalizer;
 use uc_infra::config::ClipboardStorageConfig;
 use uc_infra::device::LocalDeviceIdentity;
@@ -41,6 +43,8 @@ pub struct PlatformLayer {
 
     // Blob store (encrypted) — exposed to use cases as a read-only port.
     pub blob_store: Arc<dyn BlobReaderPort>,
+
+    pub blob_generation_store: Arc<SwitchableFilesystemBlobStore>,
 
     // 进程内会话——uc-infra 内部 adapter (SpaceAccessAdapter / BlobCipherAdapter /
     // TransferCipherAdapter / EncryptedBlobStore) 共享同一份 Arc。具体类型,
@@ -72,6 +76,7 @@ pub fn create_platform_layer(
     secure_storage: Arc<dyn SecureStoragePort>,
     profile_id: ProfileId,
     config_dir: &PathBuf,
+    blob_store_dir: PathBuf,
     blob_repository: Arc<dyn BlobRepositoryPort>,
     clock: Arc<dyn ClockPort>,
     storage_config: Arc<ClipboardStorageConfig>,
@@ -81,8 +86,6 @@ pub fn create_platform_layer(
         WiringError::SettingsInit(format!("Failed to create device identity: {}", e))
     })?;
     let device_identity: Arc<dyn DeviceIdentityPort> = Arc::new(device_identity);
-
-    let blob_store_dir = config_dir.join("blobs");
 
     // Purge old blob files after V2 migration (old JSON format files are incompatible
     // with the new UCBL binary format). Uses a sentinel file so this only runs once.
@@ -146,7 +149,8 @@ pub fn create_platform_layer(
         }
     }
 
-    let blob_store: Arc<dyn BlobStorePort> = Arc::new(FilesystemBlobStore::new(blob_store_dir));
+    let blob_generation_store = Arc::new(SwitchableFilesystemBlobStore::new(blob_store_dir));
+    let blob_store: Arc<dyn BlobStorePort> = blob_generation_store.clone();
 
     let representation_normalizer: Arc<dyn ClipboardRepresentationNormalizerPort> =
         Arc::new(ClipboardRepresentationNormalizer::new(storage_config));
@@ -185,6 +189,7 @@ pub fn create_platform_layer(
         blob_writer,
         blob_content_ingest,
         blob_store: blob_store_reader,
+        blob_generation_store,
         session,
         current_profile,
     })

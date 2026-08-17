@@ -19,8 +19,9 @@ use async_trait::async_trait;
 use hkdf::Hkdf;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, info_span, warn, Instrument};
+use zeroize::Zeroize;
 
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
@@ -29,22 +30,28 @@ use super::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
 use super::secrets::{Kek, MasterKey};
 use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
 use uc_core::membership::{
-    AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId,
+    ActivateCompletionHelperAdmissionSecurityPort,
+    ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
+    ActivateSponsorAdmissionSecurityRequest, AdmissionReplayId, AdmissionSecurityTransitionError,
+    AdmissionSecurityTransitionInput, BeginRevocationOutcome, BootstrapError, BootstrapId,
     CurrentMemberSignatureError, CurrentMemberSignaturePort, GroupBootstrapPort,
     GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
     LegacyBootstrapProgress, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
     LegacyBootstrapStage, LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus,
-    PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId,
-    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
-    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError,
-    SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
+    MembershipCredential, PendingGroupUpdate, PrepareSponsorAdmissionSecurityPort,
+    PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId, RevocationId,
+    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
+    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError, SpaceProtectionMode,
+    SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
+    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRequest,
+    SponsorPreparedAdmissionSecurity,
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
 use uc_core::space_access::{
-    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer, PreparedGroupJoin,
-    ProofDerivedKey,
+    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
+    PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
 };
 
 use super::key_material::KeyMaterialStore;
@@ -215,13 +222,22 @@ struct AdmissionKdfOffer {
 }
 
 #[derive(Serialize, Deserialize)]
+struct AdmissionTargetAccessV1 {
+    version: u16,
+    target_space_id: String,
+    keyslot: KeySlot,
+    kek: Vec<u8>,
+    master_key: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub(crate) struct PortableKeyCatalog {
     version: u8,
     pub(crate) state: SpaceKeyState,
     pub(crate) key_catalog: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct GroupEpochUpdate {
     version: u8,
     group_epoch: u64,
@@ -325,6 +341,158 @@ fn derive_admission_proof_key(
 }
 
 impl DefaultSpaceAccessAdapter {
+    // Stage 4 keeps production admission fail-closed until the data generation
+    // owner can invoke this only after manifest verification.
+    #[allow(dead_code)]
+    fn decode_prepared_target_access(
+        target_space_id: &SpaceId,
+        scope: &KeyScope,
+        encoded: &[u8],
+    ) -> Result<(KeySlot, Kek, MasterKey), SpaceAccessError> {
+        let mut state: AdmissionTargetAccessV1 =
+            serde_json::from_slice(encoded).map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        if state.version != 1
+            || state.target_space_id != target_space_id.as_ref()
+            || &state.keyslot.scope != scope
+        {
+            state.kek.zeroize();
+            state.master_key.zeroize();
+            return Err(SpaceAccessError::CorruptedKeyMaterial);
+        }
+
+        let result = (|| {
+            let kek = Kek::from_bytes(&state.kek).map_err(map_encryption_error)?;
+            let master_key =
+                MasterKey::from_bytes(&state.master_key).map_err(map_encryption_error)?;
+            let wrapped = state
+                .keyslot
+                .wrapped_master_key
+                .as_ref()
+                .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+            let unwrapped = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob)
+                .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+            if unwrapped != master_key {
+                return Err(SpaceAccessError::CorruptedKeyMaterial);
+            }
+            Ok((state.keyslot.clone(), kek, master_key))
+        })();
+        state.kek.zeroize();
+        state.master_key.zeroize();
+        result
+    }
+
+    pub(crate) async fn prepared_target_session(
+        &self,
+        target_space_id: &SpaceId,
+        encoded: &[u8],
+    ) -> Result<Arc<InMemorySession>, SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let (_, _, master_key) =
+            Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(target_space_id.clone(), master_key);
+        Ok(session)
+    }
+
+    pub(crate) async fn resume_source_for_transition(
+        &self,
+        source_space_id: &SpaceId,
+    ) -> Result<(), SpaceAccessError> {
+        if self.session.current_space_id().ok().as_ref() == Some(source_space_id) {
+            return Ok(());
+        }
+        self.session.clear();
+        match SpaceAccessStore::try_resume_session(self, source_space_id).await? {
+            Some(_) => Ok(()),
+            None => Err(SpaceAccessError::NotInitialized),
+        }
+    }
+
+    pub(crate) async fn activate_prepared_target_access(
+        &self,
+        target_space_id: &SpaceId,
+        encoded: &[u8],
+    ) -> Result<(), SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let (keyslot, kek, master_key) =
+            Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
+        let previous = if self
+            .key_material
+            .keyslot_exists()
+            .await
+            .map_err(map_encryption_error)?
+        {
+            Some((
+                self.key_material
+                    .load_keyslot(&scope)
+                    .await
+                    .map_err(map_encryption_error)?,
+                self.key_material
+                    .load_kek(&scope)
+                    .await
+                    .map_err(map_encryption_error)?,
+            ))
+        } else {
+            None
+        };
+        let previous_session = self.session.snapshot();
+
+        if let Err(error) = self.key_material.store_kek(&scope, &kek).await {
+            return Err(map_encryption_error(error));
+        }
+        if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
+            self.restore_join_install(&scope, previous, previous_session)
+                .await;
+            return Err(map_encryption_error(error));
+        }
+        self.session
+            .set_master_key_for_space(target_space_id.clone(), master_key);
+        self.kek_observed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    async fn prepare_target_access(
+        &self,
+        target_space_id: &SpaceId,
+        passphrase: &DomainPassphrase,
+    ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError> {
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let scope = key_scope_from_profile(&profile);
+        let keyslot_draft = KeySlot::draft_v1(scope).map_err(map_encryption_error)?;
+        let legacy = LegacyPassphrase(passphrase.expose().to_string());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot_draft.salt, &keyslot_draft.kdf)
+            .map_err(|error| map_and_log_kdf_error(error, "prepare_target_access"))?;
+        let master_key = MasterKey::generate().map_err(map_encryption_error)?;
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        let mut state = AdmissionTargetAccessV1 {
+            version: 1,
+            target_space_id: target_space_id.as_ref().to_owned(),
+            keyslot: keyslot_draft.finalize(WrappedMasterKey { blob: wrapped }),
+            kek: kek.as_bytes().to_vec(),
+            master_key: master_key.as_bytes().to_vec(),
+        };
+        let encoded = serde_json::to_vec(&state)
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()));
+        state.kek.zeroize();
+        state.master_key.zeroize();
+        encoded.map(PreparedAdmissionTargetAccess::from_bytes)
+    }
+
     async fn prepare_admission_offer(
         &self,
         space_id: &SpaceId,
@@ -2011,9 +2179,22 @@ mod intent_ports {
     use uc_core::ports::space::{
         CurrentSessionProofKeyPort, DeriveAdmissionProofKeyPort, DeriveProofKeyPort,
         DeriveSpaceSubkeyPort, FactoryResetSpacePort, GroupAdmissionPort, InitializeSpacePort,
-        IsSpaceUnlockedPort, LockSpacePort, PrepareAdmissionOfferPort, PrepareJoinOfferPort,
-        ResumeSpaceSessionPort, UnlockSpacePort, VerifyKeychainAccessPort,
+        IsSpaceUnlockedPort, LockSpacePort, PrepareAdmissionOfferPort,
+        PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort, ResumeSpaceSessionPort,
+        UnlockSpacePort, VerifyKeychainAccessPort,
     };
+
+    #[async_trait]
+    impl PrepareAdmissionTargetAccessPort for DefaultSpaceAccessAdapter {
+        async fn prepare_target_access(
+            &self,
+            target_space_id: &SpaceId,
+            passphrase: &DomainPassphrase,
+        ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError> {
+            DefaultSpaceAccessAdapter::prepare_target_access(self, target_space_id, passphrase)
+                .await
+        }
+    }
 
     #[async_trait]
     impl InitializeSpacePort for DefaultSpaceAccessAdapter {
@@ -2162,6 +2343,32 @@ mod intent_ports {
             device_id: &DeviceId,
         ) -> Result<PreparedGroupJoin, SpaceAccessError> {
             DefaultSpaceAccessAdapter::prepare_group_join(self, device_id).await
+        }
+
+        async fn prepared_join_membership_credential(
+            &self,
+            pending: &PreparedGroupJoin,
+        ) -> Result<uc_core::membership::MembershipCredential, SpaceAccessError> {
+            let public_key = MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(
+                pending.private_state().to_vec(),
+            ))
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            Ok(uc_core::membership::MembershipCredential::new(
+                uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
+                public_key,
+            ))
+        }
+
+        async fn sign_prepared_join_payload(
+            &self,
+            pending: &PreparedGroupJoin,
+            payload: &[u8],
+        ) -> Result<Vec<u8>, SpaceAccessError> {
+            MlsGroupEngine::sign_pending_member_payload(
+                &MlsClientState::from_bytes(pending.private_state().to_vec()),
+                payload,
+            )
+            .map_err(|error| SpaceAccessError::Internal(error.to_string()))
         }
 
         async fn admit_group_member(
@@ -2622,6 +2829,26 @@ impl CurrentMemberSignaturePort for DefaultSpaceAccessAdapter {
         MlsGroupEngine::current_epoch(&group).map_err(|_| CurrentMemberSignatureError::InvalidState)
     }
 
+    async fn current_membership_credential(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<MembershipCredential, CurrentMemberSignatureError> {
+        let group = self.current_member_group_state().await?;
+        let public_key = MlsGroupEngine::signing_public_key(&group)
+            .map_err(|_| CurrentMemberSignatureError::InvalidState)?;
+        let credential = MembershipCredential::new(
+            uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
+            public_key,
+        );
+        let current_instance =
+            MlsGroupEngine::current_member_instance(&group, device_id.as_str().as_bytes())
+                .map_err(|_| CurrentMemberSignatureError::InvalidState)?;
+        if credential.member_instance_id(device_id) != current_instance {
+            return Err(CurrentMemberSignatureError::InvalidState);
+        }
+        Ok(credential)
+    }
+
     async fn current_member_instance(
         &self,
         device_id: &DeviceId,
@@ -2673,6 +2900,334 @@ impl CurrentMemberSignaturePort for DefaultSpaceAccessAdapter {
         )
         .map_err(|_| CurrentMemberSignatureError::InvalidState)
     }
+}
+
+#[async_trait]
+impl PrepareSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
+    async fn prepare_sponsor_admission_security(
+        &self,
+        mut request: SponsorAdmissionSecurityRequest,
+    ) -> Result<SponsorPreparedAdmissionSecurity, AdmissionSecurityTransitionError> {
+        let repository = self
+            .key_epoch_repository
+            .as_ref()
+            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        let current = repository
+            .load_space_material(&request.space_id)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        if current.state().mode() != SpaceSecurityMode::Ready || current.group_state().is_empty() {
+            return Err(AdmissionSecurityTransitionError::InvalidState);
+        }
+
+        request.existing_recipients.sort_by(|left, right| {
+            left.credential_id
+                .cmp(&right.credential_id)
+                .then_with(|| left.device_id.as_str().cmp(right.device_id.as_str()))
+        });
+        if request.existing_recipients.windows(2).any(|pair| {
+            pair[0].credential_id == pair[1].credential_id || pair[0].device_id == pair[1].device_id
+        }) {
+            return Err(AdmissionSecurityTransitionError::InvalidState);
+        }
+
+        let admission = MlsGroupEngine::admit_member(
+            &MlsClientState::from_bytes(current.group_state().to_vec()),
+            &request.candidate_identity,
+            &request.candidate_key_package,
+        )
+        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let target_epoch = GroupEpoch::new(admission.epoch);
+        let mut next = self
+            .session
+            .rotate_space_material(
+                &current,
+                admission.sponsor_state.as_bytes().to_vec(),
+                target_epoch,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let target_key_catalog = InMemorySession::export_admission_content_key_catalog(&next)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let encrypted_key_catalog = seal_group_catalog(&admission.wrapping_key, &next)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let group_update = GroupEpochUpdate {
+            version: 1,
+            group_epoch: admission.epoch,
+            commit: admission.commit.clone(),
+            encrypted_key_catalog,
+        };
+        let update_payload = serde_json::to_vec(&group_update)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let existing_member_deliveries = request
+            .existing_recipients
+            .iter()
+            .map(|recipient| SponsorAdmissionSecurityDelivery {
+                recipient: recipient.device_id.clone(),
+                credential_id: recipient.credential_id,
+                payload: update_payload.clone(),
+            })
+            .collect::<Vec<_>>();
+        next.add_pending_group_updates(
+            request.existing_recipients.iter().map(|recipient| {
+                PendingGroupUpdate::persistent(recipient.device_id.clone(), update_payload.clone())
+            }),
+            chrono::Utc::now().timestamp_millis(),
+        );
+        let target_key_catalog_bytes = target_key_catalog
+            .encode()
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let admission_bundle_digest = admission_bundle_digest(
+            request.candidate_core_digest,
+            &admission.welcome,
+            &target_key_catalog_bytes,
+            &existing_member_deliveries,
+        );
+        let transition_input = AdmissionSecurityTransitionInput {
+            attempt_id: request.attempt_id,
+            base_history_position: request.base_history_position,
+            candidate_core_digest: request.candidate_core_digest,
+            key_catalog_digest: target_key_catalog.digest(),
+            admission_bundle_digest,
+        };
+        let public_commitment = MlsGroupEngine::derive_public_admission_commitment(
+            &admission.sponsor_state,
+            transition_input.attempt_id,
+            transition_input.base_history_position,
+            transition_input.candidate_core_digest,
+            &admission.commit,
+            transition_input.key_catalog_digest,
+            transition_input.admission_bundle_digest,
+        )
+        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let target_protection_group_id = next
+            .state()
+            .protection_group_id()
+            .ok_or(AdmissionSecurityTransitionError::InvalidState)?
+            .as_str()
+            .to_owned();
+
+        Ok(SponsorPreparedAdmissionSecurity {
+            staged_state: postcard::to_stdvec(&next)
+                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+            commit: admission.commit,
+            welcome: admission.welcome,
+            public_commitment,
+            target_protection_group_id,
+            target_key_catalog,
+            existing_member_deliveries,
+        })
+    }
+}
+
+#[async_trait]
+impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
+    async fn activate_sponsor_admission_security(
+        &self,
+        request: ActivateSponsorAdmissionSecurityRequest,
+    ) -> Result<(), AdmissionSecurityTransitionError> {
+        let repository = self
+            .key_epoch_repository
+            .as_ref()
+            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        let staged: SpaceKeyMaterial = postcard::from_bytes(&request.staged_state)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if staged.state().space_id() != &request.space_id
+            || staged.state().epoch().value() != request.expected_commitment.target_epoch
+        {
+            return Err(AdmissionSecurityTransitionError::InvalidState);
+        }
+        let catalog = InMemorySession::export_admission_content_key_catalog(&staged)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        let expected = &request.expected_commitment;
+        let rederived = MlsGroupEngine::derive_public_admission_commitment(
+            &MlsClientState::from_bytes(staged.group_state().to_vec()),
+            expected.attempt_id,
+            expected.base_history_position.clone(),
+            expected.candidate_core_digest,
+            &request.commit,
+            catalog.digest(),
+            expected.admission_bundle_digest,
+        )
+        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if &rederived != expected {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+        if repository
+            .load_space_material(&request.space_id)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .as_ref()
+            .is_some_and(|current| current == &staged)
+        {
+            self.session
+                .install_space_material(&staged)
+                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            return Ok(());
+        }
+        repository
+            .save_space_material(&staged)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        self.session
+            .install_space_material(&staged)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)
+    }
+}
+
+#[async_trait]
+impl ActivateCompletionHelperAdmissionSecurityPort for DefaultSpaceAccessAdapter {
+    async fn activate_completion_helper_admission_security(
+        &self,
+        request: ActivateCompletionHelperAdmissionSecurityRequest,
+    ) -> Result<(), AdmissionSecurityTransitionError> {
+        let repository = self
+            .key_epoch_repository
+            .as_ref()
+            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        let delivery = request
+            .existing_member_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.recipient == request.helper_device_id
+                    && delivery.credential_id == request.helper_credential_id
+            })
+            .collect::<Vec<_>>();
+        if delivery.len() != 1 {
+            return Err(AdmissionSecurityTransitionError::InvalidState);
+        }
+        let expected = &request.expected_commitment;
+        let bundle_digest = admission_bundle_digest(
+            request.candidate_core_digest,
+            &request.security_welcome,
+            &request.target_key_catalog,
+            &request.existing_member_deliveries,
+        );
+        if expected.attempt_id != request.attempt_id
+            || expected.candidate_core_digest != request.candidate_core_digest
+            || expected.admission_bundle_digest != bundle_digest
+        {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+
+        let update: GroupEpochUpdate = serde_json::from_slice(&delivery[0].payload)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if update.version != 1
+            || update.group_epoch != expected.target_epoch
+            || update.commit != request.security_commit
+        {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+        let current = repository
+            .load_space_material(&request.space_id)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+        let target_epoch = GroupEpoch::new(expected.target_epoch);
+        let material = if current.state().epoch() == target_epoch {
+            current
+        } else {
+            if current
+                .state()
+                .epoch()
+                .next()
+                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+                != target_epoch
+                || current.group_state().is_empty()
+            {
+                return Err(AdmissionSecurityTransitionError::InvalidState);
+            }
+            let completed = MlsGroupEngine::apply_commit(
+                &MlsClientState::from_bytes(current.group_state().to_vec()),
+                request.space_id.as_ref().as_bytes(),
+                &update.commit,
+            )
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            if completed.epoch != expected.target_epoch {
+                return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+            }
+            let portable = open_group_catalog(
+                &completed.wrapping_key,
+                &request.space_id,
+                update.group_epoch,
+                &update.encrypted_key_catalog,
+            )
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            SpaceKeyMaterial::new(
+                portable.state,
+                completed.client_state.into_bytes(),
+                portable.key_catalog,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .with_pending_group_updates_from(&current)
+        };
+
+        let catalog = InMemorySession::export_admission_content_key_catalog(&material)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if catalog
+            .encode()
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            != request.target_key_catalog
+        {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+        let rederived = MlsGroupEngine::derive_public_admission_commitment(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            expected.attempt_id,
+            expected.base_history_position.clone(),
+            expected.candidate_core_digest,
+            &request.security_commit,
+            catalog.digest(),
+            bundle_digest,
+        )
+        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        if &rederived != expected {
+            return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
+        }
+
+        let validator = InMemorySession::new();
+        validator.set_master_key_for_space(
+            request.space_id.clone(),
+            self.session
+                .get_master_key()
+                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+        );
+        validator
+            .install_space_material(&material)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        repository
+            .save_space_material(&material)
+            .await
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        self.session
+            .install_space_material(&material)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)
+    }
+}
+
+fn admission_bundle_digest(
+    candidate_core_digest: [u8; 32],
+    welcome: &[u8],
+    target_key_catalog: &[u8],
+    deliveries: &[SponsorAdmissionSecurityDelivery],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/admission-bundle/v1\0");
+    hasher.update(candidate_core_digest);
+    append_digest_field(&mut hasher, welcome);
+    append_digest_field(&mut hasher, target_key_catalog);
+    hasher.update((deliveries.len() as u64).to_be_bytes());
+    for delivery in deliveries {
+        hasher.update(delivery.credential_id.as_bytes());
+        append_digest_field(&mut hasher, &delivery.payload);
+    }
+    hasher.finalize().into()
+}
+
+fn append_digest_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
 }
 
 impl DefaultSpaceAccessAdapter {
@@ -4252,16 +4807,215 @@ mod admission_tests {
         let payload = b"member-attestation-transcript";
 
         let signature = adapter.sign_current_member_payload(payload).await.unwrap();
+        let device_id = DeviceId::new("alice");
+        let credential = adapter
+            .current_membership_credential(&device_id)
+            .await
+            .unwrap();
 
         assert_eq!(adapter.current_member_epoch().await.unwrap(), 1);
+        assert_eq!(
+            credential.member_instance_id(&device_id),
+            adapter.current_member_instance(&device_id).await.unwrap()
+        );
         assert!(adapter
-            .verify_current_member_payload(&DeviceId::new("alice"), payload, &signature)
+            .verify_current_member_payload(&device_id, payload, &signature)
             .await
             .unwrap());
         assert!(!adapter
             .verify_current_member_payload(&DeviceId::new("missing"), payload, &signature)
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn sponsor_admission_preparation_is_complete_and_has_no_active_side_effect() {
+        use uc_core::membership::{
+            ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
+            BaseMembershipHistoryPositionV1, MembershipCredential,
+            PrepareSponsorAdmissionSecurityPort, SponsorAdmissionSecurityRecipient,
+            SponsorAdmissionSecurityRequest, ED25519_SIGNATURE_ALGORITHM_V1,
+        };
+
+        let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
+        let before = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let before_epoch = session
+            .current_content_key(&space_id, ContentKeyPurpose::Content)
+            .unwrap()
+            .epoch();
+        let joiner = DeviceId::new("joiner-device");
+        let pending = adapter.prepare_group_join(&joiner).await.unwrap();
+        let retained = DeviceId::new("retained-device");
+        let retained_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x61; 32]);
+
+        let prepared = adapter
+            .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
+                space_id: space_id.clone(),
+                attempt_id: [0x62; 32],
+                base_history_position: BaseMembershipHistoryPositionV1 {
+                    event_id: None,
+                    depth: 0,
+                    history_digest: [0x63; 32],
+                },
+                candidate_core_digest: [0x64; 32],
+                candidate_identity: joiner.as_str().as_bytes().to_vec(),
+                candidate_key_package: pending.key_package.clone(),
+                existing_recipients: vec![SponsorAdmissionSecurityRecipient {
+                    device_id: retained.clone(),
+                    credential_id: retained_credential.credential_id,
+                }],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(prepared.existing_member_deliveries.len(), 1);
+        assert_eq!(prepared.existing_member_deliveries[0].recipient, retained);
+        assert!(!prepared.existing_member_deliveries[0].payload.is_empty());
+        assert_eq!(
+            prepared.public_commitment.key_catalog_digest,
+            prepared.target_key_catalog.digest()
+        );
+        assert_eq!(
+            prepared.public_commitment.target_epoch,
+            before.state().epoch().value() + 1
+        );
+        assert_eq!(
+            repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            before_epoch
+        );
+
+        adapter
+            .activate_sponsor_admission_security(ActivateSponsorAdmissionSecurityRequest {
+                space_id: space_id.clone(),
+                staged_state: prepared.staged_state.clone(),
+                commit: prepared.commit.clone(),
+                expected_commitment: prepared.public_commitment.clone(),
+            })
+            .await
+            .unwrap();
+        let activated = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            activated.state().epoch().value(),
+            prepared.public_commitment.target_epoch
+        );
+        assert_eq!(activated.pending_group_updates().len(), 1);
+        assert_eq!(activated.pending_group_updates()[0].recipient(), &retained);
+        assert_eq!(
+            session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            GroupEpoch::new(prepared.public_commitment.target_epoch)
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_helper_applies_only_its_bound_admission_update() {
+        use uc_core::membership::{
+            ActivateCompletionHelperAdmissionSecurityPort,
+            ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
+            ActivateSponsorAdmissionSecurityRequest, BaseMembershipHistoryPositionV1,
+            MembershipCredential, PrepareSponsorAdmissionSecurityPort,
+            SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
+            ED25519_SIGNATURE_ALGORITHM_V1,
+        };
+
+        let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
+        let helper = DeviceId::new("completion-helper");
+        let helper_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x71; 32]);
+        let pending = adapter
+            .prepare_group_join(&DeviceId::new("joiner-device"))
+            .await
+            .unwrap();
+        let attempt_id = [0x72; 32];
+        let candidate_core_digest = [0x73; 32];
+        let prepared = adapter
+            .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
+                space_id: space_id.clone(),
+                attempt_id,
+                base_history_position: BaseMembershipHistoryPositionV1 {
+                    event_id: None,
+                    depth: 0,
+                    history_digest: [0x74; 32],
+                },
+                candidate_core_digest,
+                candidate_identity: b"joiner-device".to_vec(),
+                candidate_key_package: pending.key_package,
+                existing_recipients: vec![SponsorAdmissionSecurityRecipient {
+                    device_id: helper.clone(),
+                    credential_id: helper_credential.credential_id,
+                }],
+            })
+            .await
+            .unwrap();
+
+        adapter
+            .activate_sponsor_admission_security(ActivateSponsorAdmissionSecurityRequest {
+                space_id: space_id.clone(),
+                staged_state: prepared.staged_state.clone(),
+                commit: prepared.commit.clone(),
+                expected_commitment: prepared.public_commitment.clone(),
+            })
+            .await
+            .unwrap();
+
+        adapter
+            .activate_completion_helper_admission_security(
+                ActivateCompletionHelperAdmissionSecurityRequest {
+                    space_id: space_id.clone(),
+                    attempt_id,
+                    helper_device_id: helper,
+                    helper_credential_id: helper_credential.credential_id,
+                    candidate_core_digest,
+                    security_commit: prepared.commit,
+                    security_welcome: prepared.welcome,
+                    target_key_catalog: prepared.target_key_catalog.encode().unwrap(),
+                    existing_member_deliveries: prepared.existing_member_deliveries,
+                    expected_commitment: prepared.public_commitment.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state()
+                .epoch()
+                .value(),
+            prepared.public_commitment.target_epoch
+        );
+        assert_eq!(
+            session
+                .current_content_key(&space_id, ContentKeyPurpose::Content)
+                .unwrap()
+                .epoch(),
+            GroupEpoch::new(prepared.public_commitment.target_epoch)
+        );
     }
 
     #[tokio::test]
@@ -4615,6 +5369,93 @@ mod admission_tests {
                 .unwrap(),
             old_slot
         );
+    }
+
+    #[tokio::test]
+    async fn preparing_target_access_does_not_replace_the_active_space() {
+        use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
+
+        let directory = tempdir().unwrap();
+        let secure_storage = memory_secure_storage();
+        let key_material = local_key_material(&directory, secure_storage);
+        let session = Arc::new(InMemorySession::new());
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(key_material.clone(), session.clone(), repository);
+        let source_space = SpaceId::from("source-space");
+        SpaceAccessStore::initialize(
+            &adapter,
+            &source_space,
+            &Passphrase::new("source passphrase"),
+        )
+        .await
+        .unwrap();
+        let source_root = session.get_master_key().unwrap();
+        let scope = KeyScope {
+            profile_id: "default".into(),
+        };
+        let source_slot = key_material.load_keyslot(&scope).await.unwrap();
+        let source_kek = key_material.load_kek(&scope).await.unwrap();
+
+        let prepared = PrepareAdmissionTargetAccessPort::prepare_target_access(
+            &adapter,
+            &SpaceId::from("target-space"),
+            &Passphrase::new("target passphrase"),
+        )
+        .await
+        .unwrap();
+
+        assert!(!prepared.as_bytes().is_empty());
+        assert_eq!(session.current_space_id().unwrap(), source_space);
+        assert_eq!(session.get_master_key().unwrap(), source_root);
+        assert_eq!(
+            key_material.load_keyslot(&scope).await.unwrap(),
+            source_slot
+        );
+        assert_eq!(key_material.load_kek(&scope).await.unwrap(), source_kek);
+    }
+
+    #[tokio::test]
+    async fn prepared_target_access_changes_space_only_when_explicitly_activated() {
+        use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
+
+        let directory = tempdir().unwrap();
+        let secure_storage = memory_secure_storage();
+        let key_material = local_key_material(&directory, secure_storage);
+        let session = Arc::new(InMemorySession::new());
+        let (repository, _) = memory_revocation_repository(None);
+        let adapter = adapter(key_material.clone(), session.clone(), repository);
+        let source_space = SpaceId::from("source-space");
+        let target_space = SpaceId::from("target-space");
+        SpaceAccessStore::initialize(
+            &adapter,
+            &source_space,
+            &Passphrase::new("source passphrase"),
+        )
+        .await
+        .unwrap();
+        let prepared = PrepareAdmissionTargetAccessPort::prepare_target_access(
+            &adapter,
+            &target_space,
+            &Passphrase::new("target passphrase"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.current_space_id().unwrap(), source_space);
+
+        adapter
+            .activate_prepared_target_access(&target_space, prepared.as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(session.current_space_id().unwrap(), target_space);
+        let target_root = session.get_master_key().unwrap();
+
+        session.clear();
+        SpaceAccessStore::try_resume_session(&adapter, &target_space)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.current_space_id().unwrap(), target_space);
+        assert_eq!(session.get_master_key().unwrap(), target_root);
     }
 
     #[tokio::test]

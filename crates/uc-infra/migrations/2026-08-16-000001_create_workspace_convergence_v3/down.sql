@@ -1,0 +1,4 @@
+DROP TABLE admission_repository_state;
+DROP TABLE workspace_convergence_v3_migrations;
+DROP TABLE workspace_convergence_v3_active;
+DROP TABLE workspace_convergence_v3_slots;

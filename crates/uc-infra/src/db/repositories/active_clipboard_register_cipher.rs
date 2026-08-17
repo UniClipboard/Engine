@@ -20,7 +20,7 @@ macro_rules! consumable_label {
 }
 
 /// HKDF `info` input for deriving the envelope key (used by the repository).
-pub(super) const CONSUMABLE_HKDF_INFO: &[u8] = consumable_label!("hkdf");
+pub(crate) const CONSUMABLE_HKDF_INFO: &[u8] = consumable_label!("hkdf");
 const AAD: &[u8] = consumable_label!("aad");
 
 #[derive(Debug, Serialize, Deserialize)]

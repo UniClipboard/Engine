@@ -13,7 +13,7 @@ const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = MAGIC.len() + 1 + NONCE_LEN;
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum PublishLogCipherError {
+pub(crate) enum PublishLogCipherError {
     #[error("directory publish log envelope is truncated")]
     Truncated,
     #[error("directory publish log envelope magic mismatch")]
@@ -44,16 +44,16 @@ struct EncodedPath {
 }
 
 #[derive(Clone)]
-pub(super) struct DirectoryPublishLogCipher {
+pub(crate) struct DirectoryPublishLogCipher {
     key: [u8; 32],
 }
 
 impl DirectoryPublishLogCipher {
-    pub(super) fn new(key: [u8; 32]) -> Self {
+    pub(crate) fn new(key: [u8; 32]) -> Self {
         Self { key }
     }
 
-    pub(super) fn seal(
+    pub(crate) fn seal(
         &self,
         entry_id: &EntryId,
         attempt_id: &str,
@@ -79,7 +79,7 @@ impl DirectoryPublishLogCipher {
         Ok(envelope)
     }
 
-    pub(super) fn open(
+    pub(crate) fn open(
         &self,
         entry_id: &EntryId,
         attempt_id: &str,

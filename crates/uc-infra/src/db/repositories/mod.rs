@@ -1,15 +1,16 @@
-mod active_clipboard_register_cipher;
+pub(crate) mod active_clipboard_register_cipher;
 mod active_clipboard_register_repo;
+mod admission_attempt_store;
 mod blob_reference_repo;
 mod blob_repo;
 mod clipboard_entry_repo;
 mod clipboard_event_repo;
 mod clipboard_selection_repo;
-mod directory_publish_log_cipher;
+pub(crate) mod directory_publish_log_cipher;
 mod directory_publish_log_repo;
 mod entry_availability_repo;
 mod entry_delivery_repo;
-mod entry_file_set_cipher;
+pub(crate) mod entry_file_set_cipher;
 mod entry_file_set_repo;
 mod entry_receive_attempt_repo;
 mod entry_replace_repo;
@@ -23,7 +24,7 @@ mod migration_repo;
 #[cfg(feature = "lan-compat")]
 mod mobile_device_repo;
 mod peer_address_repo;
-mod receive_artifact_cipher;
+pub(crate) mod receive_artifact_cipher;
 mod receive_artifact_log_repo;
 mod relationship_store;
 mod representation_repo;
@@ -34,6 +35,7 @@ mod trusted_peer_repo;
 mod workspace_convergence_store;
 
 pub use active_clipboard_register_repo::*;
+pub use admission_attempt_store::DieselAdmissionAttemptStore;
 pub use blob_reference_repo::*;
 pub use blob_repo::*;
 pub use clipboard_entry_repo::*;

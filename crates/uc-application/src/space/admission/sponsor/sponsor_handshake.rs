@@ -45,19 +45,15 @@ use tokio::task::AbortHandle;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn};
 
-use uc_core::ids::{DeviceId, SessionId, SpaceId};
-use uc_core::membership::MemberRepositoryPort;
+use uc_core::ids::{SessionId, SpaceId};
 use uc_core::pairing::session_message::{
     JoinerChallengeResponse, JoinerRequest, PairingReject, PairingRejectReason,
-    PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer, SponsorAdmissionSaved,
-    SponsorConfirm,
+    PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer,
 };
 use uc_core::ports::pairing::{PairingSessionId, PairingSessionPort};
-use uc_core::ports::space::{GroupAdmissionPort, PrepareAdmissionOfferPort, ProofPort};
-use uc_core::ports::{DeviceIdentityPort, LocalIdentityPort, SettingsPort, SetupStatusPort};
-use uc_core::security::IdentityFingerprint;
+use uc_core::ports::space::{PrepareAdmissionOfferPort, ProofPort};
+use uc_core::ports::SetupStatusPort;
 use uc_core::space_access::domain::{ProofDerivedKey, SpaceAccessProofArtifact};
-use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
 
@@ -65,14 +61,7 @@ use crate::space::convergence::group_update_delivery::GroupUpdateDeliveryPort;
 /// drive admit + trust use cases without re-parsing the `JoinerRequest`.
 #[derive(Debug, Clone)]
 pub(crate) struct JoinerFacts {
-    pub device_id: DeviceId,
-    pub device_name: String,
-    pub identity_fingerprint: IdentityFingerprint,
-    /// The group-epoch update produced by the admission for existing
-    /// members. Carried by the admission change so lagging members recover
-    /// the security state with the chain; empty when there are no existing
-    /// members.
-    pub security_update_payload: Vec<u8>,
+    pub request: JoinerRequest,
 }
 
 /// Outcome of the joiner's `ChallengeResponse`.
@@ -94,7 +83,6 @@ struct SessionCtx {
     core_session_id: SessionId,
     verification_key: Arc<ProofDerivedKey>,
     joiner: JoinerFacts,
-    key_package: Vec<u8>,
     /// TTL 看门狗 task 的 abort handle；在 ctx 被正常终止
     /// (confirm / reject / session closed) 时 abort，让 task 不再 fire。
     /// `None` 仅出现在 timer spawn 前的极短窗口或 race（ctx 已被抢先
@@ -105,25 +93,13 @@ struct SessionCtx {
 pub(crate) struct SponsorHandshakeCoordinator {
     pairing_session: Arc<dyn PairingSessionPort>,
     space_access: Arc<dyn PrepareAdmissionOfferPort>,
-    group_admission: Arc<dyn GroupAdmissionPort>,
     group_update_delivery: Arc<dyn GroupUpdateDeliveryPort>,
-    member_repo: Arc<dyn MemberRepositoryPort>,
     proof_port: Arc<dyn ProofPort>,
-    local_identity: Arc<dyn LocalIdentityPort>,
-    device_identity: Arc<dyn DeviceIdentityPort>,
-    settings: Arc<dyn SettingsPort>,
     /// Source of the stable `SpaceId` persisted at A1 time. The earlier
     /// design minted a fresh UUID per handshake, which caused the joiner
     /// to adopt an id unrelated to the sponsor's original space — this
     /// port fixes that by giving `begin` access to the canonical value.
     setup_status: Arc<dyn SetupStatusPort>,
-    /// Read-side use of the analytics facade: when building
-    /// `SponsorConfirm` we look up the locally-persisted
-    /// `space_person_id` so we can issue it to the joiner. `None`
-    /// means this device hasn't minted or accepted one yet (v1→v2
-    /// upgrade case where the sponsor was never paired), in which
-    /// case the joiner stays Solo until a future re-pair converges.
-    analytics: Arc<dyn AnalyticsFacade>,
     sessions: Mutex<HashMap<PairingSessionId, SessionCtx>>,
     /// handshake TTL (max wait between begin and confirm/reject).
     handshake_ttl: Duration,
@@ -132,34 +108,21 @@ pub(crate) struct SponsorHandshakeCoordinator {
     self_weak: Weak<Self>,
 }
 
-#[allow(clippy::too_many_arguments)]
 impl SponsorHandshakeCoordinator {
     pub(crate) fn new(
         pairing_session: Arc<dyn PairingSessionPort>,
         space_access: Arc<dyn PrepareAdmissionOfferPort>,
-        group_admission: Arc<dyn GroupAdmissionPort>,
         group_update_delivery: Arc<dyn GroupUpdateDeliveryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
         proof_port: Arc<dyn ProofPort>,
-        local_identity: Arc<dyn LocalIdentityPort>,
-        device_identity: Arc<dyn DeviceIdentityPort>,
-        settings: Arc<dyn SettingsPort>,
         setup_status: Arc<dyn SetupStatusPort>,
-        analytics: Arc<dyn AnalyticsFacade>,
         handshake_ttl: Duration,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
             pairing_session,
             space_access,
-            group_admission,
             group_update_delivery,
-            member_repo,
             proof_port,
-            local_identity,
-            device_identity,
-            settings,
             setup_status,
-            analytics,
             sessions: Mutex::new(HashMap::new()),
             handshake_ttl,
             self_weak: weak.clone(),
@@ -250,13 +213,7 @@ impl SponsorHandshakeCoordinator {
             challenge_nonce: offer.offer.challenge_nonce,
             core_session_id,
             verification_key: Arc::new(offer.verification_key),
-            joiner: JoinerFacts {
-                device_id: request.device_id,
-                device_name: request.device_name,
-                identity_fingerprint: request.identity_fingerprint,
-                security_update_payload: Vec::new(),
-            },
-            key_package: request.key_package,
+            joiner: JoinerFacts { request },
             timer_abort: None,
         };
         // Park state *before* sending so a racing ChallengeResponse
@@ -391,129 +348,49 @@ impl SponsorHandshakeCoordinator {
         Some(if verified {
             info!(
                 session = %session,
-                joiner_device_id = %facts.device_id.as_str(),
+                joiner_device_id = %facts.request.device_id.as_str(),
                 "joiner proof verified"
             );
             Verdict::Verified(facts)
         } else {
             info!(
                 session = %session,
-                joiner_device_id = %facts.device_id.as_str(),
+                joiner_device_id = %facts.request.device_id.as_str(),
                 "joiner proof rejected"
             );
             Verdict::Rejected
         })
     }
 
-    /// Step 3a (verified branch): build + send `Confirm` and retain no
-    /// session state. Called by the orchestrator **after** the workspace
-    /// owner saved the in-flight admission record so we never confirm a
-    /// peer the owner has not recorded. Returns the group-epoch update
-    /// payload produced for existing members (empty when there are none).
-    pub(crate) async fn confirm(
+    pub(crate) async fn send_durable_candidate(
         &self,
         session: &PairingSessionId,
-        membership_history_event_count: u64,
-    ) -> Result<Vec<u8>, String> {
+        candidate: uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<(), String> {
         let ctx = self
             .sessions
             .lock()
             .await
             .remove(session)
-            .ok_or_else(|| "confirm called without parked ctx".to_string())?;
+            .ok_or_else(|| "candidate send called without parked ctx".to_owned())?;
         abort_timer(&ctx);
-
-        let sender_device_name = self
-            .settings
-            .load()
-            .await
-            .map_err(|e| format!("settings.load: {e}"))?
-            .general
-            .device_name
-            .filter(|n| !n.trim().is_empty())
-            .ok_or_else(|| "device_name missing from settings".to_string())?;
-        let sender_identity_fingerprint = self
-            .local_identity
-            .ensure()
-            .await
-            .map_err(|e| format!("local_identity.ensure: {e}"))?;
-
-        // Slice 2 Phase 1 · T5：把本机传输地址 blob 捎给 joiner，对端
-        // 交给工作空间负责人 best-effort upsert。adapter 不可用时兜底
-        // 空 Vec，不阻塞 Confirm 发送。
-        let transport_address_blob = self
-            .pairing_session
-            .local_transport_address_blob()
-            .await
-            .unwrap_or_default();
-        let transport_address_blob_len = transport_address_blob.len();
-        // Ship the local telemetry person id so the joiner can adopt
-        // it. `None` is a valid value (this device hasn't minted or
-        // accepted one yet); the joiner falls back to Solo.
-        let sponsor_space_person_id = self.analytics.current_space_person_id();
-        let sender_device_id = self.device_identity.current_device_id();
-        let existing_member_ids = self
-            .member_repo
-            .list()
-            .await
-            .map_err(|error| format!("member_repo.list: {error}"))?
-            .into_iter()
-            .map(|member| member.device_id)
-            .filter(|device_id| {
-                device_id != &sender_device_id && device_id != &ctx.joiner.device_id
-            })
-            .collect::<Vec<_>>();
-        let admission = self
-            .group_admission
-            .admit_group_member(
-                &ctx.space_id,
-                &sender_device_id,
-                &ctx.joiner.device_id,
-                &existing_member_ids,
-                &ctx.key_package,
-            )
-            .await
-            .map_err(|error| format!("admit_group_member: {error}"))?;
-        let confirm = PairingSessionMessage::Confirm(SponsorConfirm {
-            space_id: ctx.space_id,
-            sender_device_id,
-            sender_device_name,
-            sender_identity_fingerprint,
-            transport_address_blob,
-            sponsor_space_person_id,
-            welcome: admission.welcome,
-            encrypted_key_catalog: admission.encrypted_key_catalog,
-            group_epoch: admission.group_epoch,
-            membership_history_event_count,
-        });
         self.pairing_session
-            .send(session, confirm)
+            .send(session, PairingSessionMessage::DurableAdmission(candidate))
             .await
-            .map_err(|e| format!("send Confirm: {e}"))?;
-        info!(
-            session = %session,
-            transport_address_blob_len,
-            "Confirm sent to joiner; waiting for joiner readiness"
-        );
-        Ok(admission
-            .existing_member_updates
-            .first()
-            .map_or_else(Vec::new, |update| update.payload().to_vec()))
+            .map_err(|error| format!("send Candidate: {error}"))?;
+        info!(session = %session, "durable admission Candidate sent");
+        Ok(())
     }
 
-    /// Step 4b: send the sponsor's "admission change saved" confirmation
-    /// back to the joiner after the workspace owner committed the change.
-    pub(crate) async fn send_committed(
+    pub(crate) async fn send_durable_frame(
         &self,
         session: &PairingSessionId,
-        saved: SponsorAdmissionSaved,
+        frame: uc_core::pairing::DurableAdmissionFrame,
     ) -> Result<(), String> {
         self.pairing_session
-            .send(session, PairingSessionMessage::AdmissionSaved(saved))
+            .send(session, PairingSessionMessage::DurableAdmission(frame))
             .await
-            .map_err(|e| format!("send AdmissionSaved: {e}"))?;
-        info!(session = %session, "admission-saved confirmation sent to joiner");
-        Ok(())
+            .map_err(|error| format!("send durable admission frame: {error}"))
     }
 
     /// Step 4c: close the session after the admission change was committed
@@ -600,15 +477,14 @@ mod tests {
     use async_trait::async_trait;
 
     use uc_core::ids::DeviceId;
-    use uc_core::membership::{MemberRepositoryPort, MembershipError, SpaceMember};
+    use uc_core::membership::AdmissionChangeFacts;
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::ports::pairing::{DialError, DialOutcome, SessionError};
-    use uc_core::ports::space::{GroupAdmissionPort, PrepareAdmissionOfferPort, SpaceAccessError};
-    use uc_core::ports::LocalIdentityError;
+    use uc_core::ports::space::{PrepareAdmissionOfferPort, SpaceAccessError};
+    use uc_core::ports::SettingsPort;
+    use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
-    use uc_core::space_access::domain::{
-        GroupAdmission, PreparedAdmissionOffer, PreparedGroupJoin, ProofDerivedKey,
-    };
+    use uc_core::space_access::domain::{PreparedAdmissionOffer, ProofDerivedKey};
 
     // ── fakes ────────────────────────────────────────────────────────────
 
@@ -670,46 +546,6 @@ mod tests {
                 pairing_session_id: &SessionId,
             ) -> Result<PreparedAdmissionOffer, SpaceAccessError>;
         }
-
-        #[async_trait]
-        impl GroupAdmissionPort for SpaceAccess {
-            async fn prepare_group_join(
-                &self,
-                local_device_id: &DeviceId,
-            ) -> Result<PreparedGroupJoin, SpaceAccessError>;
-            async fn admit_group_member(
-                &self,
-                space_id: &SpaceId,
-                sponsor_device_id: &DeviceId,
-                new_device_id: &DeviceId,
-                existing_member_ids: &[DeviceId],
-                key_package: &[u8],
-            ) -> Result<GroupAdmission, SpaceAccessError>;
-            async fn install_group_join(
-                &self,
-                space_id: &SpaceId,
-                passphrase: &uc_core::crypto::domain::Passphrase,
-                prepared_join: PreparedGroupJoin,
-                welcome: &[u8],
-                encrypted_key_catalog: &[u8],
-                group_epoch: u64,
-            ) -> Result<(), SpaceAccessError>;
-        }
-    }
-
-    mockall::mock! {
-        MemberRepo {}
-
-        #[async_trait]
-        impl MemberRepositoryPort for MemberRepo {
-            async fn get(
-                &self,
-                device_id: &DeviceId,
-            ) -> Result<Option<SpaceMember>, MembershipError>;
-            async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError>;
-            async fn save(&self, member: &SpaceMember) -> Result<(), MembershipError>;
-            async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError>;
-        }
     }
 
     mockall::mock! {
@@ -724,37 +560,13 @@ mod tests {
         }
     }
 
-    fn member_repo_with(members: Vec<SpaceMember>) -> Arc<MockMemberRepo> {
-        let mut repo = MockMemberRepo::new();
-        repo.expect_list().return_once(move || Ok(members));
-        Arc::new(repo)
-    }
-
-    fn empty_member_repo() -> Arc<MockMemberRepo> {
-        let mut repo = MockMemberRepo::new();
-        repo.expect_list().returning(|| Ok(Vec::new()));
-        Arc::new(repo)
-    }
-
-    fn delivery_once() -> Arc<MockGroupUpdateDelivery> {
-        let mut delivery = MockGroupUpdateDelivery::new();
-        delivery
-            .expect_deliver_pending()
-            .times(1)
-            .returning(|_| Ok(1));
-        Arc::new(delivery)
-    }
-
     fn noop_delivery() -> Arc<MockGroupUpdateDelivery> {
         let mut delivery = MockGroupUpdateDelivery::new();
         delivery.expect_deliver_pending().returning(|_| Ok(0));
         Arc::new(delivery)
     }
 
-    fn space_access(
-        expected_existing_members: Option<Vec<DeviceId>>,
-        require_admission: bool,
-    ) -> Arc<MockSpaceAccess> {
+    fn space_access() -> Arc<MockSpaceAccess> {
         let mut access = MockSpaceAccess::new();
         access
             .expect_prepare_admission_offer()
@@ -769,35 +581,6 @@ mod tests {
                     verification_key: ProofDerivedKey::from_bytes([0x55; 32]),
                 })
             });
-
-        let admission = access.expect_admit_group_member();
-        if require_admission {
-            admission.times(1);
-        } else {
-            admission.times(0..=1);
-        }
-        let update_recipient = expected_existing_members
-            .as_ref()
-            .and_then(|members| members.first())
-            .copied();
-        if let Some(expected) = expected_existing_members {
-            admission.withf(move |_, _, _, actual, _| actual == expected.as_slice());
-        }
-        admission.returning(move |_, _, _, _, _| {
-            Ok(GroupAdmission {
-                welcome: vec![1],
-                encrypted_key_catalog: vec![2],
-                existing_member_updates: update_recipient
-                    .map(|recipient| {
-                        vec![uc_core::membership::PendingGroupUpdate::persistent(
-                            recipient,
-                            b"epoch-1-to-2".to_vec(),
-                        )]
-                    })
-                    .unwrap_or_default(),
-                group_epoch: 2,
-            })
-        });
         Arc::new(access)
     }
 
@@ -835,38 +618,12 @@ mod tests {
         }
     }
 
-    struct FixedLocal(IdentityFingerprint);
-    #[async_trait]
-    impl LocalIdentityPort for FixedLocal {
-        async fn create(&self) -> Result<IdentityFingerprint, LocalIdentityError> {
-            Ok(self.0.clone())
-        }
-        async fn ensure(&self) -> Result<IdentityFingerprint, LocalIdentityError> {
-            Ok(self.0.clone())
-        }
-        async fn get_current_fingerprint(
-            &self,
-        ) -> Result<Option<IdentityFingerprint>, LocalIdentityError> {
-            Ok(Some(self.0.clone()))
-        }
-    }
-
-    struct FixedDevice(DeviceId);
-    impl DeviceIdentityPort for FixedDevice {
-        fn current_device_id(&self) -> DeviceId {
-            self.0.clone()
-        }
-    }
-
     struct StubSettings(StdMutex<Settings>);
     impl StubSettings {
         fn named(n: &str) -> Self {
             let mut s = Settings::default();
             s.general.device_name = Some(n.into());
             Self(StdMutex::new(s))
-        }
-        fn blank() -> Self {
-            Self(StdMutex::new(Settings::default()))
         }
     }
     #[async_trait]
@@ -882,22 +639,37 @@ mod tests {
 
     // ── helpers ──────────────────────────────────────────────────────────
 
-    fn sponsor_fp() -> IdentityFingerprint {
-        IdentityFingerprint::from_raw_string("BBBBBBBBBBBBBBBB").unwrap()
-    }
     fn joiner_fp() -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string("AAAAAAAAAAAAAAAA").unwrap()
     }
     fn joiner_request() -> JoinerRequest {
+        let device_id = DeviceId::new("joiner-device");
+        let credential = uc_core::membership::MembershipCredential::new(1, vec![4; 32]);
+        let member_instance = credential.member_instance_id(&device_id);
         JoinerRequest {
+            attempt_id: [1; 32],
+            join_id: [2; 16],
+            request_message_id: [3; 32],
             invitation_code: InvitationCode::new("C"),
-            device_id: DeviceId::new("joiner-device"),
+            device_id: device_id.clone(),
             device_name: "joiner's laptop".into(),
             identity_fingerprint: joiner_fp(),
             nonce: vec![1, 2, 3, 4],
             transport_address_blob: vec![],
             security_capability: PairingSecurityCapability::ReliableGroupEpochV1,
             key_package: vec![1, 2, 3],
+            member_instance,
+            membership_credential: credential,
+            resume_public_key: vec![3; 32],
+            admission: AdmissionChangeFacts {
+                member_instance,
+                device_id,
+                device_name: "joiner's laptop".into(),
+                identity_fingerprint: joiner_fp(),
+                transport_public_key: vec![5; 32],
+                transport_address_blob: vec![],
+                identity_signature: vec![6; 64],
+            },
         }
     }
 
@@ -919,29 +691,20 @@ mod tests {
         session_port: Arc<RecordingSessionPort>,
         space_access: Arc<MockSpaceAccess>,
         proof: Arc<ScriptedProof>,
-        settings: Arc<StubSettings>,
+        _settings: Arc<StubSettings>,
         ttl: Duration,
     ) -> Arc<SponsorHandshakeCoordinator> {
         let delivery = noop_delivery();
         SponsorHandshakeCoordinator::new(
             session_port,
-            space_access.clone(),
             space_access,
             delivery,
-            empty_member_repo(),
             proof,
-            Arc::new(FixedLocal(sponsor_fp())),
-            Arc::new(FixedDevice(DeviceId::new("sponsor-device"))),
-            settings,
             // Tests don't care which space_id lands in the AdmissionOffer
             // — a stub that returns a fixed completed-but-no-id status
             // exercises the fallback branch, which is fine because
             // assertions compare against what the coordinator emits.
             Arc::new(StubSetupStatus),
-            // Sponsor handshake unit tests don't assert on the
-            // `sponsor_space_person_id` field; tests that exercise the
-            // populated path construct a facade with a real identity.
-            Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
             ttl,
         )
     }
@@ -968,21 +731,7 @@ mod tests {
     ) {
         (
             Arc::new(RecordingSessionPort::default()),
-            space_access(None, false),
-            Arc::new(ScriptedProof(StdMutex::new(vec![Ok(true)]))),
-            Arc::new(StubSettings::named("sponsor-mac")),
-        )
-    }
-
-    fn confirm_defaults() -> (
-        Arc<RecordingSessionPort>,
-        Arc<MockSpaceAccess>,
-        Arc<ScriptedProof>,
-        Arc<StubSettings>,
-    ) {
-        (
-            Arc::new(RecordingSessionPort::default()),
-            space_access(None, true),
+            space_access(),
             Arc::new(ScriptedProof(StdMutex::new(vec![Ok(true)]))),
             Arc::new(StubSettings::named("sponsor-mac")),
         )
@@ -1067,9 +816,9 @@ mod tests {
             .await;
         match v {
             Some(Verdict::Verified(f)) => {
-                assert_eq!(f.device_id.as_str(), "joiner-device");
-                assert_eq!(f.device_name, "joiner's laptop");
-                assert_eq!(f.identity_fingerprint, joiner_fp());
+                assert_eq!(f.request.device_id.as_str(), "joiner-device");
+                assert_eq!(f.request.device_name, "joiner's laptop");
+                assert_eq!(f.request.identity_fingerprint, joiner_fp());
             }
             other => panic!("expected Verified, got {other:?}"),
         }
@@ -1128,113 +877,6 @@ mod tests {
             )
             .await;
         assert!(v.is_none());
-    }
-
-    // ── confirm ────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn confirm_waits_for_readiness_before_closing() {
-        let (sp, sa, pr, st) = confirm_defaults();
-        let coord = happy_coordinator(sp.clone(), sa, pr, st);
-        let session = PairingSessionId::new("s7");
-        coord.begin(&session, joiner_request()).await.unwrap();
-        let _ = coord
-            .verify_challenge(
-                &session,
-                JoinerChallengeResponse {
-                    encrypted_challenge: vec![],
-                },
-            )
-            .await;
-        coord.confirm(&session, 0).await.unwrap();
-
-        let sent = sp.sent();
-        assert_eq!(sent.len(), 2, "AdmissionOffer + Confirm");
-        match &sent[1].1 {
-            PairingSessionMessage::Confirm(c) => {
-                assert_eq!(c.space_id.inner(), "space-xyz");
-                assert_eq!(c.sender_device_id.as_str(), "sponsor-device");
-                assert_eq!(c.sender_device_name, "sponsor-mac");
-                assert_eq!(c.sender_identity_fingerprint, sponsor_fp());
-            }
-            other => panic!("expected Confirm, got {other:?}"),
-        }
-        assert!(sp.closed().is_empty());
-        assert_eq!(coord.parked_sessions().await, 0);
-        coord.complete(&session).await;
-        assert_eq!(sp.closed().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn confirm_then_complete_closes_without_membership_backfill() {
-        let sp = Arc::new(RecordingSessionPort::default());
-        let sa = space_access(Some(vec![DeviceId::new("bob-device")]), true);
-        let pr = Arc::new(ScriptedProof(StdMutex::new(vec![Ok(true)])));
-        let st = Arc::new(StubSettings::named("sponsor-mac"));
-        let delivery = delivery_once();
-        let member = |device_id: &str| SpaceMember {
-            device_id: DeviceId::new(device_id),
-            device_name: device_id.to_string(),
-            identity_fingerprint: sponsor_fp(),
-            joined_at: chrono::Utc::now(),
-            sync_preferences: uc_core::MemberSyncPreferences::default(),
-        };
-        let coord = SponsorHandshakeCoordinator::new(
-            sp.clone(),
-            sa.clone(),
-            sa.clone(),
-            delivery.clone(),
-            member_repo_with(vec![
-                member("sponsor-device"),
-                member("bob-device"),
-                member("joiner-device"),
-            ]),
-            pr,
-            Arc::new(FixedLocal(sponsor_fp())),
-            Arc::new(FixedDevice(DeviceId::new("sponsor-device"))),
-            st,
-            Arc::new(StubSetupStatus),
-            Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
-            TEST_TTL,
-        );
-        let session = PairingSessionId::new("existing-members");
-        coord.begin(&session, joiner_request()).await.unwrap();
-
-        coord.confirm(&session, 0).await.unwrap();
-        coord.complete(&session).await;
-
-        let sent = sp.sent();
-        let PairingSessionMessage::Confirm(confirm) = &sent[1].1 else {
-            panic!("expected Confirm");
-        };
-        assert_eq!(confirm.group_epoch, 2);
-        // ADR-017: the channel no longer seeds or backfills old member
-        // material after readiness; it only closes the session.
-        assert_eq!(sp.closed().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn confirm_without_ctx_errors() {
-        let (sp, sa, pr, st) = happy_defaults();
-        let coord = happy_coordinator(sp, sa, pr, st);
-        let err = coord
-            .confirm(&PairingSessionId::new("ghost"), 0)
-            .await
-            .unwrap_err();
-        assert!(err.contains("without parked ctx"), "err = {err}");
-    }
-
-    #[tokio::test]
-    async fn confirm_missing_device_name_errors_without_wire_send() {
-        let (sp, sa, pr, _st) = happy_defaults();
-        let st = Arc::new(StubSettings::blank());
-        let coord = happy_coordinator(sp.clone(), sa, pr, st);
-        let session = PairingSessionId::new("s8");
-        coord.begin(&session, joiner_request()).await.unwrap();
-        let err = coord.confirm(&session, 0).await.unwrap_err();
-        assert!(err.contains("device_name"), "err = {err}");
-        // Only AdmissionOffer went out — Confirm was never attempted.
-        assert_eq!(sp.sent().len(), 1);
     }
 
     // ── reject ─────────────────────────────────────────────────────────
@@ -1339,11 +981,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn confirm_aborts_ttl_watchdog() {
-        let (sp, sa, pr, st) = confirm_defaults();
+    async fn candidate_send_aborts_ttl_watchdog() {
+        let (sp, sa, pr, st) = happy_defaults();
         let ttl = Duration::from_secs(30);
         let coord = happy_coordinator_with_ttl(sp.clone(), sa, pr, st, ttl);
-        let session = PairingSessionId::new("confirm-abort");
+        let session = PairingSessionId::new("candidate-abort");
         coord.begin(&session, joiner_request()).await.unwrap();
         let _ = coord
             .verify_challenge(
@@ -1353,20 +995,36 @@ mod tests {
                 },
             )
             .await;
-        coord.confirm(&session, 0).await.unwrap();
+        coord
+            .send_durable_candidate(
+                &session,
+                uc_core::pairing::DurableAdmissionFrame {
+                    attempt_id: [1; 32],
+                    kind: uc_core::pairing::DurableAdmissionMessageKind::Candidate,
+                    message_id: [2; 32],
+                    predecessor_message_id: Some([3; 32]),
+                    payload: vec![4],
+                },
+            )
+            .await
+            .unwrap();
         coord.complete(&session).await;
 
         // 时间跨过 TTL，任何没被 abort 的 watchdog 都会在这一步 fire。
         tokio::time::sleep(ttl * 2).await;
 
-        // 只应看到 AdmissionOffer + Confirm —— 绝不能多出 Reject。
+        // 只应看到 AdmissionOffer + Candidate —— 绝不能多出 Reject。
         let sent = sp.sent();
-        assert_eq!(sent.len(), 2, "AdmissionOffer + Confirm only");
+        assert_eq!(sent.len(), 2, "AdmissionOffer + Candidate only");
         assert!(matches!(
             sent[0].1,
             PairingSessionMessage::AdmissionOffer(_)
         ));
-        assert!(matches!(sent[1].1, PairingSessionMessage::Confirm(_)));
+        assert!(matches!(
+            sent[1].1,
+            PairingSessionMessage::DurableAdmission(ref frame)
+                if frame.kind == uc_core::pairing::DurableAdmissionMessageKind::Candidate
+        ));
         assert_eq!(sp.closed().len(), 1);
     }
 

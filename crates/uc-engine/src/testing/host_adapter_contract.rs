@@ -766,9 +766,12 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
         matches!(
             &status,
             crate::OperationResult::DeviceTrust(summary)
-                if summary.revision == 0
+                if summary.revision == 1
                     && summary.current_change.is_none()
                     && !summary.local_device_id.is_empty()
+                    && summary.devices.len() == 1
+                    && summary.devices[0].is_local
+                    && summary.devices[0].device_id == summary.local_device_id
         ),
         "unexpected device trust snapshot: {status:?}"
     );
@@ -1513,26 +1516,29 @@ async fn engine_start_builds_a_resumable_real_session() {
     let temp = tempfile::tempdir().unwrap();
     let private = temp.path().join("private");
     let host_files = Arc::new(RecordingHostFilesState::default());
-    let host = HostCapabilities::new(
-        HostDirectories::new(
-            private.clone(),
-            temp.path().join("cache"),
-            temp.path().join("temporary"),
-            temp.path().join("logs"),
-        ),
-        Box::new(MemoryHostSecureStorage::default()),
-        Box::new(StaticHostClipboard {
-            snapshot: HostClipboardSnapshot {
-                observed_at_ms: 0,
-                representations: Vec::new(),
-            },
-        }),
-        Box::new(RecordingHostFiles {
-            state: Arc::clone(&host_files),
-        }),
-    );
+    let secure_storage = MemoryHostSecureStorage::default();
+    let host = || {
+        HostCapabilities::new(
+            HostDirectories::new(
+                private.clone(),
+                temp.path().join("cache"),
+                temp.path().join("temporary"),
+                temp.path().join("logs"),
+            ),
+            Box::new(secure_storage.clone()),
+            Box::new(StaticHostClipboard {
+                snapshot: HostClipboardSnapshot {
+                    observed_at_ms: 0,
+                    representations: Vec::new(),
+                },
+            }),
+            Box::new(RecordingHostFiles {
+                state: Arc::clone(&host_files),
+            }),
+        )
+    };
 
-    let (engine, mut events) = Engine::start(EngineConfig::new("1.2.3"), host)
+    let (engine, mut events) = Engine::start(EngineConfig::new("1.2.3"), host())
         .await
         .unwrap();
 
@@ -2544,7 +2550,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         .unwrap_err();
     assert_eq!(
         local_member.category(),
-        crate::EngineErrorCategory::InvalidState
+        crate::EngineErrorCategory::InvalidInput
     );
     let missing_member = engine
         .execute(crate::Operation::RemoveMember(crate::RemoveMemberInput {
@@ -2554,7 +2560,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         .unwrap_err();
     assert_eq!(
         missing_member.category(),
-        crate::EngineErrorCategory::InvalidState
+        crate::EngineErrorCategory::NotFound
     );
 
     assert_eq!(
@@ -2571,8 +2577,39 @@ async fn engine_start_builds_a_resumable_real_session() {
             .unwrap(),
         crate::OperationResult::SpaceFactoryReset
     );
+    let invalidated = engine
+        .execute(crate::Operation::QueryEncryptionState)
+        .await
+        .unwrap_err();
+    assert_eq!(invalidated.code(), 1103);
     assert_eq!(
-        engine
+        invalidated.category(),
+        crate::EngineErrorCategory::Unavailable
+    );
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+
+    let mut retired_states = Vec::new();
+    while let Some(event) = events.next().await {
+        if let EngineEvent::StateChanged { state } = event {
+            retired_states.push(state);
+        }
+    }
+    assert_eq!(retired_states.last(), Some(&EngineState::Stopped));
+
+    let (fresh, mut fresh_events) = Engine::start(EngineConfig::new("1.2.3"), host())
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh_events.next().await,
+        Some(EngineEvent::StateChanged {
+            state: EngineState::Running,
+        })
+    );
+    assert_eq!(
+        fresh
             .execute(crate::Operation::QueryEncryptionState)
             .await
             .unwrap(),
@@ -2582,7 +2619,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         })
     );
     assert!(matches!(
-        engine
+        fresh
             .execute(crate::Operation::QuerySetupState)
             .await
             .unwrap(),
@@ -2593,7 +2630,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         })
     ));
     assert!(matches!(
-        engine
+        fresh
             .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
                 device_name: Some("Reset Device".into()),
                 passphrase: crate::SecretString::new("new correct horse"),
@@ -2604,15 +2641,15 @@ async fn engine_start_builds_a_resumable_real_session() {
         crate::OperationResult::SpaceCreated { .. }
     ));
 
-    engine.suspend().await.unwrap();
-    engine.resume().await.unwrap();
-    engine
+    fresh.suspend().await.unwrap();
+    fresh.resume().await.unwrap();
+    fresh
         .shutdown(std::time::Duration::from_secs(15))
         .await
         .unwrap();
 
     let mut states = Vec::new();
-    while let Some(event) = events.next().await {
+    while let Some(event) = fresh_events.next().await {
         if let EngineEvent::StateChanged { state } = event {
             states.push(state);
         }
@@ -2620,10 +2657,6 @@ async fn engine_start_builds_a_resumable_real_session() {
     assert_eq!(
         states,
         vec![
-            EngineState::Quiescing,
-            EngineState::Quiesced,
-            EngineState::Suspended,
-            EngineState::Running,
             EngineState::Quiescing,
             EngineState::Quiesced,
             EngineState::Suspended,
@@ -2902,6 +2935,114 @@ async fn engine_repairs_an_encrypted_stale_removed_device_state_across_restart()
     assert_ne!(local_device_id, removed_device_id);
 }
 
+#[tokio::test]
+async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new_session() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let secure_storage = MemoryHostSecureStorage::default();
+    let directories = || {
+        HostDirectories::new(
+            private.clone(),
+            temp.path().join("cache"),
+            temp.path().join("temporary"),
+            temp.path().join("logs"),
+        )
+    };
+    let host = HostCapabilities::new(
+        directories(),
+        Box::new(secure_storage.clone()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Interrupted Reset Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap();
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+    drop(engine);
+
+    let lifecycle_storage =
+        crate::assembly::host::adapt_secure_storage(Box::new(secure_storage.clone()));
+    let lifecycle = uc_infra::security::ProfileLifecycleManager::new(lifecycle_storage);
+    let initial = lifecycle.load_or_initialize().unwrap();
+    lifecycle
+        .begin_factory_reset(initial.profile_generation)
+        .unwrap();
+
+    let recovering_host = HostCapabilities::new(
+        directories(),
+        Box::new(secure_storage.clone()),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let recovery_error = match Engine::start(EngineConfig::new("1.2.3"), recovering_host).await {
+        Ok(_) => panic!("interrupted factory reset must not expose the retired session"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        recovery_error.code(),
+        crate::error_codes::FACTORY_RESET_UNAVAILABLE_CODE
+    );
+    assert_eq!(
+        recovery_error.category(),
+        crate::EngineErrorCategory::Unavailable
+    );
+    assert!(recovery_error.is_retryable());
+    assert!(!private.join("uniclipboard.db").exists());
+
+    let fresh_host = HostCapabilities::new(
+        directories(),
+        Box::new(secure_storage),
+        Box::new(StaticHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 0,
+                representations: Vec::new(),
+            },
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (fresh, _events) = Engine::start(EngineConfig::new("1.2.3"), fresh_host)
+        .await
+        .unwrap();
+    let setup = fresh
+        .execute(crate::Operation::QuerySetupState)
+        .await
+        .unwrap();
+    assert!(matches!(
+        setup,
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            has_completed: false,
+            current_invitation: None,
+            ..
+        })
+    ));
+    fresh
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
 #[cfg(not(feature = "lan-compat"))]
 #[tokio::test]
 async fn engine_rejects_lan_operations_without_lan_compatibility() {
@@ -2947,7 +3088,7 @@ async fn engine_rejects_lan_operations_without_lan_compatibility() {
     }
 
     engine
-        .shutdown(std::time::Duration::from_secs(5))
+        .shutdown(std::time::Duration::from_secs(15))
         .await
         .unwrap();
 }

@@ -8,12 +8,17 @@ use sha2::{Digest, Sha256};
 
 use crate::ids::DeviceId;
 
+use super::versioned_membership_history::{MembershipHistoryPageV2, MembershipHistoryV2Ack};
 use super::{AdmissionChangeFacts, MemberInstanceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MembershipEventId([u8; 32]);
 
 impl MembershipEventId {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -172,6 +177,16 @@ pub enum RemovalDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MembershipDecisionId([u8; 32]);
 
+impl MembershipDecisionId {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MembershipDecision {
     pub lineage_id: String,
@@ -260,119 +275,30 @@ pub struct PendingRemovalFacts {
 }
 
 impl PendingRemovalFacts {
+    pub fn new(
+        removal_event_id: MembershipEventId,
+        proposed_by_device_id: DeviceId,
+        target_device_ids: Vec<DeviceId>,
+        target_members: BTreeSet<MemberInstanceId>,
+    ) -> Self {
+        Self {
+            removal_event_id,
+            proposed_by_device_id,
+            target_device_ids,
+            target_members,
+        }
+    }
+
     pub fn includes_member(&self, member: MemberInstanceId) -> bool {
         self.target_members.contains(&member)
     }
 }
 
-/// The fixed maximum number of signed events carried by one reconciliation
-/// response. Larger histories are fetched by subsequent requests.
-pub const MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE: usize = 64;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipHistoryProtocolError {
-    InvalidLineage,
-    PageLimitExceeded,
-    EmptyResponse,
-    DiscontinuousResponse,
-}
-
-impl fmt::Display for MembershipHistoryProtocolError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidLineage => "membership history protocol lineage is invalid",
-            Self::PageLimitExceeded => "membership history page exceeds the protocol limit",
-            Self::EmptyResponse => "membership history response is empty",
-            Self::DiscontinuousResponse => "membership history response is not continuous",
-        })
-    }
-}
-
-impl std::error::Error for MembershipHistoryProtocolError {}
-
-/// Bounded greeting sent after an authenticated member connection is ready.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipHistoryHello {
-    pub lineage_id: String,
-    pub member_instance_id: MemberInstanceId,
-    pub admission: AdmissionChangeFacts,
-    pub known_head: Option<MembershipEventId>,
-    pub applied_head: Option<MembershipEventId>,
-    pub applied_members_digest: Option<[u8; 32]>,
-}
-
-/// Bounded request for the next continuous page after a known parent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipEventsRequest {
-    pub lineage_id: String,
-    pub after_event_id: Option<MembershipEventId>,
-    pub max_events: u16,
-}
-
-impl MembershipEventsRequest {
-    pub fn validate(&self) -> Result<(), MembershipHistoryProtocolError> {
-        if self.lineage_id.is_empty() || self.lineage_id.len() > 128 {
-            return Err(MembershipHistoryProtocolError::InvalidLineage);
-        }
-        if self.max_events == 0
-            || usize::from(self.max_events) > MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE
-        {
-            return Err(MembershipHistoryProtocolError::PageLimitExceeded);
-        }
-        Ok(())
-    }
-}
-
-/// One ordered page of signed history events.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipEventsResponse {
-    pub lineage_id: String,
-    pub after_event_id: Option<MembershipEventId>,
-    pub events: Vec<MembershipEvent>,
-}
-
-impl MembershipEventsResponse {
-    pub fn validate(&self) -> Result<(), MembershipHistoryProtocolError> {
-        if self.lineage_id.is_empty() || self.lineage_id.len() > 128 {
-            return Err(MembershipHistoryProtocolError::InvalidLineage);
-        }
-        if self.events.is_empty() {
-            return Err(MembershipHistoryProtocolError::EmptyResponse);
-        }
-        if self.events.len() > MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE {
-            return Err(MembershipHistoryProtocolError::PageLimitExceeded);
-        }
-        let mut parent = self.after_event_id;
-        for event in &self.events {
-            if event.lineage_id != self.lineage_id || event.parent_event_id != parent {
-                return Err(MembershipHistoryProtocolError::DiscontinuousResponse);
-            }
-            parent = Some(event.event_id());
-        }
-        Ok(())
-    }
-}
-
-/// Reconciliation-only messages carried on the authenticated member channel.
+/// Versioned reconciliation messages carried on the authenticated member channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MembershipHistoryMessage {
-    Hello(MembershipHistoryHello),
-    EventsRequest(MembershipEventsRequest),
-    EventsResponse(MembershipEventsResponse),
-    Decision(MembershipDecision),
-    Ack(MembershipHistoryAck),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MembershipHistoryAck {
-    Consistent,
-    UpdatesApplied,
-    RemovalDecisionRequired { removal_event_id: MembershipEventId },
-    RemovalAccepted { removal_event_id: MembershipEventId },
-    RemovalRejected { removal_event_id: MembershipEventId },
-    Diverged,
-    Invalid,
+    HistoryPageV2(MembershipHistoryPageV2),
+    AckV2(MembershipHistoryV2Ack),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

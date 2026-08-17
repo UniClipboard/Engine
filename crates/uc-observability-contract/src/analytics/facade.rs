@@ -71,8 +71,8 @@ pub trait AnalyticsFacade: Send + Sync {
     fn reset_identity(&self) -> Result<(), ResetIdentityError>;
 
     /// Locally-persisted `space_person_id`, or `None` when this device has
-    /// never accepted or minted one. Sponsor handshake reads this to fill
-    /// `SponsorConfirm.sponsor_space_person_id`.
+    /// never accepted or minted one. Durable admission includes this identity
+    /// in the activated Space result.
     fn current_space_person_id(&self) -> Option<Uuid>;
 }
 

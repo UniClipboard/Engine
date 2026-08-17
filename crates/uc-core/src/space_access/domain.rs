@@ -57,6 +57,31 @@ pub struct PreparedGroupJoin {
     member_instance: Option<MemberInstanceId>,
 }
 
+/// Opaque local access material prepared for a durable admission attempt.
+/// The infrastructure owns its format; the application only persists the
+/// bytes inside the encrypted admission record.
+pub struct PreparedAdmissionTargetAccess(Zeroizing<Vec<u8>>);
+
+impl PreparedAdmissionTargetAccess {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(self.0.as_mut())
+    }
+}
+
+impl fmt::Debug for PreparedAdmissionTargetAccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PreparedAdmissionTargetAccess([REDACTED])")
+    }
+}
+
 impl PreparedGroupJoin {
     pub fn new(key_package: Vec<u8>, private_state: Vec<u8>) -> Self {
         Self {

@@ -98,6 +98,24 @@ impl SpaceKeyState {
         }
     }
 
+    pub fn ready_for_admission(
+        space_id: SpaceId,
+        epoch: GroupEpoch,
+        current_content_key_id: ContentKeyId,
+        protection_group_id: ProtectionGroupId,
+    ) -> Result<Self, KeyEpochError> {
+        if epoch.value() == 0 || current_content_key_id == ContentKeyId::legacy_v1() {
+            return Err(KeyEpochError::SpaceNotReady);
+        }
+        Ok(Self {
+            space_id,
+            epoch,
+            current_content_key_id,
+            mode: SpaceSecurityMode::Ready,
+            protection_group_id: Some(protection_group_id),
+        })
+    }
+
     pub fn mark_migrating(&mut self) -> Result<(), KeyEpochError> {
         match self.mode {
             SpaceSecurityMode::Legacy => {
@@ -349,6 +367,19 @@ impl PendingGroupUpdate {
     pub fn persistent(recipient: DeviceId, payload: Vec<u8>) -> Self {
         Self {
             update_id: uuid::Uuid::new_v4().to_string(),
+            revocation_id: None,
+            recipient,
+            payload,
+        }
+    }
+
+    pub fn for_admission(attempt_id: [u8; 32], recipient: DeviceId, payload: Vec<u8>) -> Self {
+        let attempt_id = attempt_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Self {
+            update_id: format!("admission:{attempt_id}:{}", recipient.as_str()),
             revocation_id: None,
             recipient,
             payload,

@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use super::{operation_error_with_code, ProductionRuntime, ProductionSession, SessionFactory};
 use crate::EngineError;
@@ -63,21 +64,54 @@ impl SessionSupervisor {
         *slot = Some(factory);
     }
 
+    pub(super) fn clear_factory(&self) {
+        let mut slot = self
+            .factory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = None;
+    }
+
     pub(super) async fn acquire_operation(&self) -> Result<SessionOperationLease, EngineError> {
         self.operations.acquire()
     }
 
     pub(super) async fn rebuild_session(&self) -> Result<(), EngineError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.operations.close_and_wait().await;
+        self.operations.close_and_wait(None).await?;
         self.stop_current_session(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
             .await?;
-        self.install_new_session().await
+        self.install_new_session(false).await
+    }
+
+    pub(super) async fn transition_session(
+        &self,
+        current_operation: SessionOperationLease,
+    ) -> Result<(), EngineError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.operations
+            .close_and_wait(Some(current_operation))
+            .await?;
+        let session = self
+            .session
+            .lock()
+            .await
+            .take()
+            .ok_or_else(super::operation_unavailable_error)?;
+        let convergence = session.sync_engine.space_transition_recovery();
+        session
+            .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+            .await;
+        convergence
+            .recover_after_session_drain()
+            .await
+            .map_err(|error| operation_error_with_code(1103, "recover space transition", error))?;
+        self.install_new_session(true).await
     }
 
     pub(super) async fn suspend(&self) -> Result<(), EngineError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.operations.close_and_wait().await;
+        self.operations.close_and_wait(None).await?;
         self.stop_current_session(uc_core::FileTransferCancellationReason::Unknown)
             .await
     }
@@ -87,7 +121,7 @@ impl SessionSupervisor {
         if self.session.lock().await.is_some() {
             return Ok(());
         }
-        self.install_new_session().await
+        self.install_new_session(false).await
     }
 
     pub(super) async fn close_file_transfers(&self) -> Result<(), EngineError> {
@@ -114,14 +148,63 @@ impl SessionSupervisor {
         Ok(())
     }
 
-    async fn install_new_session(&self) -> Result<(), EngineError> {
+    async fn install_new_session(&self, resume_space_activities: bool) -> Result<(), EngineError> {
         let factory = self
             .factory
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .ok_or_else(super::operation_unavailable_error)?;
-        let session = ProductionRuntime::build_session(&factory).await?;
+        let mut session = ProductionRuntime::build_session(&factory).await?;
+        let mut resume_space_activities = resume_space_activities;
+        let convergence = session.sync_engine.space_transition_recovery();
+        if convergence
+            .requires_session_transition()
+            .await
+            .map_err(|error| {
+                operation_error_with_code(1103, "inspect pending space transition", error)
+            })?
+        {
+            session
+                .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+                .await;
+            convergence
+                .recover_after_session_drain()
+                .await
+                .map_err(|error| {
+                    operation_error_with_code(1103, "recover pending space transition", error)
+                })?;
+            session = ProductionRuntime::build_session(&factory).await?;
+            resume_space_activities = true;
+        }
+        if resume_space_activities {
+            let recovered = session
+                .facade
+                .recover_space_session(true)
+                .await
+                .map_err(|error| {
+                    operation_error_with_code(1103, "activate transitioned space session", error)
+                })?;
+            if !recovered.unlocked {
+                return Err(operation_error_with_code(
+                    1103,
+                    "activate transitioned space session",
+                    "the transitioned space could not be unlocked",
+                ));
+            }
+        }
+        if let Some(pending) = factory
+            .profile_convergence
+            .pending_joiner_complete_ack()
+            .await
+            .map_err(|error| {
+                operation_error_with_code(1103, "rebuild join completion acknowledgment", error)
+            })?
+        {
+            if let Err(error) = session.facade.deliver_join_completion_ack(pending).await {
+                warn!(error = %error, "join completion acknowledgment delivery deferred");
+            }
+        }
         *self.session.lock().await = Some(session);
         self.operations.reopen();
         Ok(())
@@ -184,7 +267,16 @@ impl SessionOperationGate {
         self.inner.changed.notify_waiters();
     }
 
-    async fn close_and_wait(&self) {
+    async fn close_and_wait(
+        &self,
+        current_operation: Option<SessionOperationLease>,
+    ) -> Result<(), EngineError> {
+        if current_operation
+            .as_ref()
+            .is_some_and(|lease| !Arc::ptr_eq(&lease.gate, &self.inner))
+        {
+            return Err(super::operation_unavailable_error());
+        }
         let cancellation = {
             let mut state = self
                 .inner
@@ -194,6 +286,7 @@ impl SessionOperationGate {
             state.open = false;
             state.cancellation.clone()
         };
+        drop(current_operation);
         let drained = tokio::time::timeout(SESSION_OPERATION_GRACE, self.wait_for_drain()).await;
         if drained.is_err() {
             cancellation.cancel();
@@ -207,6 +300,7 @@ impl SessionOperationGate {
                 );
             }
         }
+        Ok(())
     }
 
     async fn wait_for_drain(&self) {
@@ -257,7 +351,7 @@ mod tests {
         let lease = gate.acquire().expect("new gate accepts an operation");
         let closing = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.close_and_wait().await }
+            async move { gate.close_and_wait(None).await }
         });
         tokio::task::yield_now().await;
         assert!(gate.acquire().is_err());
@@ -265,7 +359,8 @@ mod tests {
 
         drop(lease);
         match closing.await {
-            Ok(()) => {}
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("operation gate close failed: {error}"),
             Err(error) => panic!("operation gate close task did not complete: {error}"),
         }
     }
@@ -278,9 +373,28 @@ mod tests {
 
         tokio::time::timeout(
             SESSION_OPERATION_GRACE.saturating_mul(2) + Duration::from_millis(1),
-            gate.close_and_wait(),
+            gate.close_and_wait(None),
         )
         .await
-        .expect("gate close must remain bounded after cancellation");
+        .expect("gate close must remain bounded after cancellation")
+        .expect("gate close must accept no current operation");
+    }
+
+    #[tokio::test]
+    async fn transition_operation_excludes_itself_but_waits_for_other_operations() {
+        let gate = Arc::new(SessionOperationGate::new_open());
+        let transition = gate.acquire().expect("transition acquires ordinary lease");
+        let other = gate.acquire().expect("concurrent operation acquires lease");
+        let closing = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move { gate.close_and_wait(Some(transition)).await }
+        });
+
+        tokio::task::yield_now().await;
+        assert!(gate.acquire().is_err());
+        assert!(!closing.is_finished());
+
+        drop(other);
+        closing.await.unwrap().unwrap();
     }
 }

@@ -14,7 +14,7 @@ const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = MAGIC.len() + 1 + NONCE_LEN;
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ReceiveArtifactCipherError {
+pub(crate) enum ReceiveArtifactCipherError {
     #[error("receive artifact envelope is truncated")]
     Truncated,
     #[error("receive artifact envelope magic mismatch")]
@@ -42,16 +42,16 @@ struct EncodedArtifact {
     ownership: u8,
 }
 
-pub(super) struct ReceiveArtifactCipher {
+pub(crate) struct ReceiveArtifactCipher {
     key: [u8; 32],
 }
 
 impl ReceiveArtifactCipher {
-    pub(super) fn new(key: [u8; 32]) -> Self {
+    pub(crate) fn new(key: [u8; 32]) -> Self {
         Self { key }
     }
 
-    pub(super) fn seal(
+    pub(crate) fn seal(
         &self,
         entry_id: &str,
         attempt_id: &str,
@@ -84,7 +84,7 @@ impl ReceiveArtifactCipher {
         Ok(envelope)
     }
 
-    pub(super) fn open(
+    pub(crate) fn open(
         &self,
         entry_id: &str,
         attempt_id: &str,

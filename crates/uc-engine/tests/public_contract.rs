@@ -1,16 +1,16 @@
 use uc_engine::{
-    ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
+    CancelJoinSpaceInput, ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
     EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
     EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
     JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary, LocalDeviceSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, MigrationPhaseSummary,
-    MigrationProgressSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
-    QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, ResendEntryInput, SearchEntriesInput, SearchPageSummary,
-    SearchResultSummary, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary, SpaceProtectionSummary,
-    StorageStatsSummary, UnlockSpaceInput, UpdateMemberSyncPreferencesInput,
-    WorkspaceConvergencePhaseSummary, WorkspaceConvergenceSummary,
+    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, Operation, OperationKind,
+    OperationResult, QueryHistoryInput, QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput,
+    RecoverSessionInput, RefreshReason, RemoveMemberInput, ResendEntryInput, SearchEntriesInput,
+    SearchPageSummary, SearchResultSummary, SecretString, SendFilesInput, SendImageInput,
+    SendTextInput, SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary,
+    SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
+    UpdateMemberSyncPreferencesInput, WorkspaceConvergencePhaseSummary,
+    WorkspaceConvergenceSummary,
 };
 
 use uc_engine::{
@@ -68,6 +68,12 @@ fn every_public_operation_has_a_stable_kind() {
             OperationKind::JoinSpace,
         ),
         (
+            Operation::CancelJoinSpace(CancelJoinSpaceInput {
+                join_id: "AQEBAQEBAQEBAQEBAQEBAQ".into(),
+            }),
+            OperationKind::CancelJoinSpace,
+        ),
+        (
             Operation::UnlockSpace(UnlockSpaceInput {
                 passphrase: SecretString::new("secret"),
             }),
@@ -87,10 +93,6 @@ fn every_public_operation_has_a_stable_kind() {
             OperationKind::FactoryResetSpace,
         ),
         (Operation::QuerySetupState, OperationKind::QuerySetupState),
-        (
-            Operation::QueryMigrationProgress,
-            OperationKind::QueryMigrationProgress,
-        ),
         (
             Operation::QueryStorageStats,
             OperationKind::QueryStorageStats,
@@ -1515,22 +1517,6 @@ fn setup_state_result_preserves_invitation_and_redacts_user_content() {
 }
 
 #[test]
-fn migration_progress_result_exposes_only_coarse_phase_and_count() {
-    let result = OperationResult::MigrationProgress(MigrationProgressSummary {
-        phase: Some(MigrationPhaseSummary::HandshakeDone),
-        backup_record_count: 42,
-    });
-
-    assert!(matches!(
-        result,
-        OperationResult::MigrationProgress(MigrationProgressSummary {
-            phase: Some(MigrationPhaseSummary::HandshakeDone),
-            backup_record_count: 42,
-        })
-    ));
-}
-
-#[test]
 fn sensitive_operation_debug_output_is_redacted() {
     let operation = Operation::SendText(SendTextInput {
         text: "never-print-this".into(),
@@ -1585,7 +1571,7 @@ fn create_space_contract_supports_saved_device_name_and_returns_identity() {
 }
 
 #[test]
-fn join_space_contract_supports_saved_device_name_and_returns_both_identities() {
+fn join_space_contract_returns_a_tagged_active_result_with_both_identities() {
     let input = JoinSpaceInput {
         invitation_code: "NEVER-SHOW".into(),
         device_name: None,
@@ -1595,30 +1581,31 @@ fn join_space_contract_supports_saved_device_name_and_returns_both_identities() 
     assert!(input.device_name.is_none());
     assert!(input.preserve_unreadable_history);
 
-    let result = OperationResult::SpaceJoined {
-        sponsor_device_id: "sponsor-1".into(),
-        sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
-        space_id: "space-1".into(),
-        self_device_id: "device-1".into(),
-        self_identity_fingerprint: "self-fingerprint".into(),
-        migrated_records: Some(42),
-        preserved_unreadable_records: Some(3),
-    };
-    assert!(matches!(
-        result,
-        OperationResult::SpaceJoined {
-            ref sponsor_device_id,
-            ref sponsor_identity_fingerprint,
-            ref space_id,
-            ref self_device_id,
-            ref self_identity_fingerprint,
+    let result = OperationResult::JoinSpace(uc_engine::JoinSpaceStatusSummary::Active {
+        join_id: "join-id".into(),
+        joined_space: uc_engine::JoinedSpaceSummary {
+            sponsor_device_id: "sponsor-1".into(),
+            sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
+            space_id: "space-1".into(),
+            self_device_id: "device-1".into(),
+            self_identity_fingerprint: "self-fingerprint".into(),
             migrated_records: Some(42),
             preserved_unreadable_records: Some(3),
-        } if sponsor_device_id == "sponsor-1"
-            && sponsor_identity_fingerprint == "sponsor-fingerprint"
-            && space_id == "space-1"
-            && self_device_id == "device-1"
-            && self_identity_fingerprint == "self-fingerprint"
+        },
+    });
+    assert!(matches!(
+        result,
+        OperationResult::JoinSpace(uc_engine::JoinSpaceStatusSummary::Active {
+            ref join_id,
+            ref joined_space,
+        }) if join_id == "join-id"
+            && joined_space.sponsor_device_id == "sponsor-1"
+            && joined_space.sponsor_identity_fingerprint == "sponsor-fingerprint"
+            && joined_space.space_id == "space-1"
+            && joined_space.self_device_id == "device-1"
+            && joined_space.self_identity_fingerprint == "self-fingerprint"
+            && joined_space.migrated_records == Some(42)
+            && joined_space.preserved_unreadable_records == Some(3)
     ));
 }
 

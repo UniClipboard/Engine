@@ -20,6 +20,7 @@
 - [按设备精确公开收敛等待状态](specs/019-device-specific-convergence-waiting-status.md)
 - [个人设备信任核对产品契约](specs/021-device-trust-reconciliation-product-contract.md)
 - [当前成员运行范围统一派生](specs/022-current-member-runtime-scope.md)
+- [可持续验证的成员历史与准入激活](specs/023-durable-membership-proof-and-admission-activation.md)
 - [Engine 仓库检查](specs/engine-repository-checks.md)
 - [Port 定义](specs/ports.md)
 - [uc-engine 跨平台核心接口](specs/uc-engine-interface.md)

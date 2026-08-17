@@ -47,7 +47,14 @@ fn ohos_binding_is_a_workspace_member_with_a_public_engine_boundary() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         dependencies,
-        BTreeSet::from(["napi", "napi-derive", "tokio", "uc-engine", "zeroize"])
+        BTreeSet::from([
+            "napi",
+            "napi-derive",
+            "serde_json",
+            "tokio",
+            "uc-engine",
+            "zeroize",
+        ])
     );
     for forbidden in ["uc-core", "uc-application", "uc-infra", "uc-bootstrap"] {
         assert!(

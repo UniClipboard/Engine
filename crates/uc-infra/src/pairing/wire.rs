@@ -26,58 +26,42 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use uc_core::ids::{DeviceId, SpaceId};
-use uc_core::membership::{AdmissionChangeFacts, AdmissionSavedFacts, MemberInstanceId};
+use uc_core::membership::{AdmissionChangeFacts, MemberInstanceId};
 use uc_core::pairing::{
-    InvitationCode, JoinerChallengeResponse, JoinerReady, JoinerRequest, PairingReject,
-    PairingRejectReason, PairingSecurityCapability, PairingSessionMessage, SponsorAdmissionOffer,
-    SponsorAdmissionSaved, SponsorConfirm,
+    DurableAdmissionFrame, DurableAdmissionMessageKind, InvitationCode, JoinerChallengeResponse,
+    JoinerRequest, PairingReject, PairingRejectReason, PairingSecurityCapability,
+    PairingSessionMessage, SponsorAdmissionOffer,
 };
 use uc_core::ports::pairing::PairingSessionId;
 use uc_core::security::IdentityFingerprint;
 
+pub(crate) const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
+
 /// Wire 版本号。
 ///
 /// 升版历史：
-/// - v1 → v2（Slice 2 Phase 1 · T5）：在 `JoinerRequest` 与 `SponsorConfirm`
-///   上新增 `transport_address_blob` 字段。
-/// - v2 → v3（Phase 098）：在 `SponsorConfirm` 上新增 `sponsor_space_person_id:
-///   Option<String>` 字段，把 sponsor 的 telemetry person 标识派给 joiner。
-///   字段是 `Option`：sponsor 端 telemetry 身份未确立时编为 `None`，joiner 端
-///   见 `None` 退回 Solo（schema doc §3.4 / task_plan §开放问题 2 决策 A）。
-///
-/// - v5 → v6：移除 `SponsorConfirm` 上的候选通讯录种子。已有设备资料改走
-///   可确认、可重试的成员收敛通道，避免最终确认承担无界资料。
-/// - v8 → v9（ADR-017）：新增 `AdmissionSaved` 消息——sponsor 在保存
-///   joiner 的准入变化后回送的"准入变化已保存"确认，携带变化摘要与
-///   sponsor 本机成员事实。
-///
 /// postcard 非 schema-兼容，每次新增字段都升版本号；旧 peer 发来的低版本帧会走
 /// [`WireDecodeError::UnsupportedVersion`] 分支显式拒连，让排障信号明确。
-const WIRE_VERSION: u8 = 9;
+const WIRE_VERSION: u8 = 10;
 
 // ============================================================================
 // Wire types (infra-local)
 // ============================================================================
 
 #[derive(Serialize, Deserialize, Debug)]
-struct WireEnvelope {
-    v: u8,
-    body: WireBody,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 enum WireBody {
     Request(WireJoinerRequest),
     AdmissionOffer(WireSponsorAdmissionOffer),
     ChallengeResponse(WireJoinerChallengeResponse),
-    Confirm(WireSponsorConfirm),
-    Ready(WireJoinerReady),
-    AdmissionSaved(WireSponsorAdmissionSaved),
+    DurableAdmission(WireDurableAdmissionFrame),
     Reject(WirePairingReject),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct WireJoinerRequest {
+    attempt_id: [u8; 32],
+    join_id: [u8; 16],
+    request_message_id: [u8; 32],
     invitation_code: String,
     device_id: String,
     device_name: String,
@@ -98,6 +82,27 @@ struct WireJoinerRequest {
     transport_address_blob: Vec<u8>,
     security_capability: u8,
     key_package: Vec<u8>,
+    member_instance: [u8; 32],
+    membership_credential: WireMembershipCredential,
+    resume_public_key: Vec<u8>,
+    admission: WireAdmissionFacts,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct WireMembershipCredential {
+    credential_format_version: u16,
+    signature_algorithm_version: u16,
+    public_key: Vec<u8>,
+    credential_id: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct WireDurableAdmissionFrame {
+    attempt_id: [u8; 32],
+    kind: u8,
+    message_id: [u8; 32],
+    predecessor_message_id: Option<[u8; 32]>,
+    payload: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -114,45 +119,6 @@ struct WireJoinerChallengeResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct WireSponsorConfirm {
-    space_id: String,
-    sender_device_id: String,
-    sender_device_name: String,
-    sender_identity_fingerprint: String,
-    /// Slice 2 Phase 1 · T5：sponsor 传输地址不透明字节。详见
-    /// [`WireJoinerRequest::transport_address_blob`] 的说明。
-    transport_address_blob: Vec<u8>,
-    /// Phase 098：sponsor 派发给 joiner 的 telemetry person 标识。
-    ///
-    /// 字段含义见 [`SponsorConfirm::sponsor_space_person_id`]。
-    /// 编为 `Option<String>`（postcard `Option` 占 1 byte tag）以支持 sponsor
-    /// 端尚未持久化 `space_person_id` 时（v1→v2 老用户升级未配对）的 `None`
-    /// 形态；joiner 端收到 `None` 退回 Solo。
-    ///
-    /// 用 String 而非 uuid 类型保持与 `space_id` / `sender_device_id` 字段统一
-    /// 的字符串形态，wire 层不引入额外类型依赖；core 端 `SponsorConfirm` 把它
-    /// 解析为 `Uuid`。
-    sponsor_space_person_id: Option<String>,
-    welcome: Vec<u8>,
-    encrypted_key_catalog: Vec<u8>,
-    group_epoch: u64,
-    membership_history_event_count: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct WireJoinerReady {
-    member_instance: [u8; 32],
-    device_id: String,
-    device_name: String,
-    identity_fingerprint: String,
-    transport_public_key: Vec<u8>,
-    transport_address_blob: Vec<u8>,
-    identity_signature: Vec<u8>,
-}
-
-/// `AdmissionChangeFacts` 的 wire 形态，与 `WireJoinerReady` 的字段布局一致。
-/// 由 `AdmissionSaved` 复用，避免重复定义成员事实的字段集。
-#[derive(Serialize, Deserialize, Debug)]
 struct WireAdmissionFacts {
     member_instance: [u8; 32],
     device_id: String,
@@ -164,13 +130,6 @@ struct WireAdmissionFacts {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct WireSponsorAdmissionSaved {
-    history_digest: [u8; 32],
-    history_event_count: u64,
-    sponsor_facts: WireAdmissionFacts,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 struct WirePairingReject {
     reason: WireRejectReason,
 }
@@ -179,6 +138,7 @@ struct WirePairingReject {
 enum WireRejectReason {
     InvitationMismatch,
     AdmissionUnavailable,
+    AdmissionConflict,
     PassphraseMismatch,
     UserRejected,
     Timeout,
@@ -193,6 +153,9 @@ enum WireRejectReason {
 pub enum WireEncodeError {
     #[error("postcard encode failed: {0}")]
     Postcard(#[from] postcard::Error),
+
+    #[error("pairing frame length {len} exceeds maximum {max}")]
+    FrameTooLarge { len: usize, max: usize },
 }
 
 #[derive(Debug, Error)]
@@ -206,14 +169,17 @@ pub enum WireDecodeError {
     #[error("invalid identity fingerprint on wire: {0}")]
     InvalidFingerprint(String),
 
-    /// Phase 098：sponsor 派发的 `space_person_id` 字符串无法解析为 UUID。
-    /// 不算致命错误（telemetry 字段而已）但仍会让整条 confirm 拒收，
-    /// 触发对端重连——避免在 wire 上接受半破损的字段。
-    #[error("invalid sponsor_space_person_id on wire: {0}")]
-    InvalidSpacePersonId(String),
-
     #[error("unsupported pairing security capability {0}")]
     UnsupportedSecurityCapability(u8),
+
+    #[error("unsupported durable admission message kind {0}")]
+    UnsupportedDurableAdmissionKind(u8),
+
+    #[error("invalid durable join request: {0}")]
+    InvalidDurableJoinRequest(String),
+
+    #[error("pairing frame length {len} exceeds maximum {max}")]
+    FrameTooLarge { len: usize, max: usize },
 }
 
 impl From<postcard::Error> for WireDecodeError {
@@ -228,24 +194,38 @@ impl From<postcard::Error> for WireDecodeError {
 
 /// Serialize a [`PairingSessionMessage`] for transport.
 pub fn encode(message: &PairingSessionMessage) -> Result<Vec<u8>, WireEncodeError> {
-    let envelope = WireEnvelope {
-        v: WIRE_VERSION,
-        body: to_wire(message),
-    };
-    Ok(postcard::to_allocvec(&envelope)?)
+    let mut encoded = vec![WIRE_VERSION];
+    encoded.extend(postcard::to_allocvec(&to_wire(message))?);
+    if encoded.len() > MAX_FRAME_SIZE {
+        return Err(WireEncodeError::FrameTooLarge {
+            len: encoded.len(),
+            max: MAX_FRAME_SIZE,
+        });
+    }
+    Ok(encoded)
 }
 
 /// Deserialize a [`PairingSessionMessage`] from bytes produced by
 /// [`encode`] (or a peer running a compatible version).
 pub fn decode(bytes: &[u8]) -> Result<PairingSessionMessage, WireDecodeError> {
-    let envelope: WireEnvelope = postcard::from_bytes(bytes)?;
-    if envelope.v != WIRE_VERSION {
+    if bytes.len() > MAX_FRAME_SIZE {
+        return Err(WireDecodeError::FrameTooLarge {
+            len: bytes.len(),
+            max: MAX_FRAME_SIZE,
+        });
+    }
+    let Some((&version, body)) = bytes.split_first() else {
+        let error =
+            postcard::from_bytes::<WireBody>(&[]).expect_err("empty postcard body must fail");
+        return Err(WireDecodeError::Postcard(error));
+    };
+    if version != WIRE_VERSION {
         return Err(WireDecodeError::UnsupportedVersion {
-            got: envelope.v,
+            got: version,
             expected: WIRE_VERSION,
         });
     }
-    from_wire(envelope.body)
+    from_wire(postcard::from_bytes(body)?)
 }
 
 // ============================================================================
@@ -255,6 +235,9 @@ pub fn decode(bytes: &[u8]) -> Result<PairingSessionMessage, WireDecodeError> {
 fn to_wire(msg: &PairingSessionMessage) -> WireBody {
     match msg {
         PairingSessionMessage::Request(r) => WireBody::Request(WireJoinerRequest {
+            attempt_id: r.attempt_id,
+            join_id: r.join_id,
+            request_message_id: r.request_message_id,
             invitation_code: r.invitation_code.as_str().to_string(),
             device_id: r.device_id.as_str().to_string(),
             device_name: r.device_name.clone(),
@@ -265,6 +248,23 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
                 PairingSecurityCapability::ReliableGroupEpochV1 => 1,
             },
             key_package: r.key_package.clone(),
+            member_instance: *r.member_instance.as_bytes(),
+            membership_credential: WireMembershipCredential {
+                credential_format_version: r.membership_credential.credential_format_version,
+                signature_algorithm_version: r.membership_credential.signature_algorithm_version,
+                public_key: r.membership_credential.public_key.clone(),
+                credential_id: *r.membership_credential.credential_id.as_bytes(),
+            },
+            resume_public_key: r.resume_public_key.clone(),
+            admission: WireAdmissionFacts {
+                member_instance: *r.admission.member_instance.as_bytes(),
+                device_id: r.admission.device_id.as_str().to_string(),
+                device_name: r.admission.device_name.clone(),
+                identity_fingerprint: r.admission.identity_fingerprint.as_display().to_string(),
+                transport_public_key: r.admission.transport_public_key.clone(),
+                transport_address_blob: r.admission.transport_address_blob.clone(),
+                identity_signature: r.admission.identity_signature.clone(),
+            },
         }),
         PairingSessionMessage::AdmissionOffer(o) => {
             WireBody::AdmissionOffer(WireSponsorAdmissionOffer {
@@ -279,55 +279,27 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
                 encrypted_challenge: c.encrypted_challenge.clone(),
             })
         }
-        PairingSessionMessage::Confirm(c) => WireBody::Confirm(WireSponsorConfirm {
-            space_id: c.space_id.inner().clone(),
-            sender_device_id: c.sender_device_id.as_str().to_string(),
-            sender_device_name: c.sender_device_name.clone(),
-            sender_identity_fingerprint: c.sender_identity_fingerprint.as_display().to_string(),
-            transport_address_blob: c.transport_address_blob.clone(),
-            sponsor_space_person_id: c.sponsor_space_person_id.map(|id| id.to_string()),
-            welcome: c.welcome.clone(),
-            encrypted_key_catalog: c.encrypted_key_catalog.clone(),
-            group_epoch: c.group_epoch,
-            membership_history_event_count: c.membership_history_event_count,
-        }),
-        PairingSessionMessage::Ready(ready) => WireBody::Ready(WireJoinerReady {
-            member_instance: *ready.admission.member_instance.as_bytes(),
-            device_id: ready.admission.device_id.as_str().to_owned(),
-            device_name: ready.admission.device_name.clone(),
-            identity_fingerprint: ready.admission.identity_fingerprint.as_display().to_owned(),
-            transport_public_key: ready.admission.transport_public_key.clone(),
-            transport_address_blob: ready.admission.transport_address_blob.clone(),
-            identity_signature: ready.admission.identity_signature.clone(),
-        }),
-        PairingSessionMessage::AdmissionSaved(saved) => {
-            WireBody::AdmissionSaved(WireSponsorAdmissionSaved {
-                history_digest: saved.facts.history_digest,
-                history_event_count: saved.facts.history_event_count,
-                sponsor_facts: WireAdmissionFacts {
-                    member_instance: *saved.facts.sponsor_facts.member_instance.as_bytes(),
-                    device_id: saved.facts.sponsor_facts.device_id.as_str().to_owned(),
-                    device_name: saved.facts.sponsor_facts.device_name.clone(),
-                    identity_fingerprint: saved
-                        .facts
-                        .sponsor_facts
-                        .identity_fingerprint
-                        .as_display()
-                        .to_owned(),
-                    transport_public_key: saved.facts.sponsor_facts.transport_public_key.clone(),
-                    transport_address_blob: saved
-                        .facts
-                        .sponsor_facts
-                        .transport_address_blob
-                        .clone(),
-                    identity_signature: saved.facts.sponsor_facts.identity_signature.clone(),
+        PairingSessionMessage::DurableAdmission(frame) => {
+            WireBody::DurableAdmission(WireDurableAdmissionFrame {
+                attempt_id: frame.attempt_id,
+                kind: match frame.kind {
+                    DurableAdmissionMessageKind::Candidate => 1,
+                    DurableAdmissionMessageKind::Prepared => 2,
+                    DurableAdmissionMessageKind::Commit => 3,
+                    DurableAdmissionMessageKind::Applied => 4,
+                    DurableAdmissionMessageKind::Complete => 5,
+                    DurableAdmissionMessageKind::CompleteAck => 6,
                 },
+                message_id: frame.message_id,
+                predecessor_message_id: frame.predecessor_message_id,
+                payload: frame.payload.clone(),
             })
         }
         PairingSessionMessage::Reject(r) => WireBody::Reject(WirePairingReject {
             reason: match &r.reason {
                 PairingRejectReason::InvitationMismatch => WireRejectReason::InvitationMismatch,
                 PairingRejectReason::AdmissionUnavailable => WireRejectReason::AdmissionUnavailable,
+                PairingRejectReason::AdmissionConflict => WireRejectReason::AdmissionConflict,
                 PairingRejectReason::PassphraseMismatch => WireRejectReason::PassphraseMismatch,
                 PairingRejectReason::UserRejected => WireRejectReason::UserRejected,
                 PairingRejectReason::Timeout => WireRejectReason::Timeout,
@@ -339,19 +311,53 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
 
 fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
     match body {
-        WireBody::Request(r) => Ok(PairingSessionMessage::Request(JoinerRequest {
-            invitation_code: InvitationCode::new(r.invitation_code),
-            device_id: DeviceId::new(r.device_id),
-            device_name: r.device_name,
-            identity_fingerprint: parse_fingerprint(&r.identity_fingerprint)?,
-            nonce: r.nonce,
-            transport_address_blob: r.transport_address_blob,
-            security_capability: match r.security_capability {
-                1 => PairingSecurityCapability::ReliableGroupEpochV1,
-                other => return Err(WireDecodeError::UnsupportedSecurityCapability(other)),
-            },
-            key_package: r.key_package,
-        })),
+        WireBody::Request(r) => {
+            let membership_credential = uc_core::membership::MembershipCredential::new(
+                r.membership_credential.signature_algorithm_version,
+                r.membership_credential.public_key,
+            );
+            if membership_credential.credential_format_version
+                != r.membership_credential.credential_format_version
+                || membership_credential.credential_id.as_bytes()
+                    != &r.membership_credential.credential_id
+            {
+                return Err(WireDecodeError::InvalidDurableJoinRequest(
+                    "membership credential is invalid".to_owned(),
+                ));
+            }
+            let request = JoinerRequest {
+                attempt_id: r.attempt_id,
+                join_id: r.join_id,
+                request_message_id: r.request_message_id,
+                invitation_code: InvitationCode::new(r.invitation_code),
+                device_id: DeviceId::new(r.device_id),
+                device_name: r.device_name,
+                identity_fingerprint: parse_fingerprint(&r.identity_fingerprint)?,
+                nonce: r.nonce,
+                transport_address_blob: r.transport_address_blob,
+                security_capability: match r.security_capability {
+                    1 => PairingSecurityCapability::ReliableGroupEpochV1,
+                    other => return Err(WireDecodeError::UnsupportedSecurityCapability(other)),
+                },
+                key_package: r.key_package,
+                member_instance: MemberInstanceId::from_bytes(r.member_instance),
+                membership_credential,
+                resume_public_key: r.resume_public_key,
+                admission: AdmissionChangeFacts {
+                    member_instance: MemberInstanceId::from_bytes(r.admission.member_instance),
+                    device_id: DeviceId::new(r.admission.device_id),
+                    device_name: r.admission.device_name,
+                    identity_fingerprint: parse_fingerprint(&r.admission.identity_fingerprint)?,
+                    transport_public_key: r.admission.transport_public_key,
+                    transport_address_blob: r.admission.transport_address_blob,
+                    identity_signature: r.admission.identity_signature,
+                },
+            };
+            request
+                .validate_durable_identity()
+                .map_err(|error| WireDecodeError::InvalidDurableJoinRequest(error.to_owned()))?;
+            Ok(PairingSessionMessage::Request(request))
+        }
         WireBody::AdmissionOffer(o) => Ok(PairingSessionMessage::AdmissionOffer(
             SponsorAdmissionOffer {
                 space_id: SpaceId::from_string(o.space_id),
@@ -365,61 +371,30 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
                 encrypted_challenge: c.encrypted_challenge,
             },
         )),
-        WireBody::Confirm(c) => Ok(PairingSessionMessage::Confirm(SponsorConfirm {
-            space_id: SpaceId::from_string(c.space_id),
-            sender_device_id: DeviceId::new(c.sender_device_id),
-            sender_device_name: c.sender_device_name,
-            sender_identity_fingerprint: parse_fingerprint(&c.sender_identity_fingerprint)?,
-            transport_address_blob: c.transport_address_blob,
-            sponsor_space_person_id: c
-                .sponsor_space_person_id
-                .map(|s| {
-                    uuid::Uuid::parse_str(&s).map_err(|e| {
-                        WireDecodeError::InvalidSpacePersonId(format!("{e} (got `{s}`)"))
-                    })
-                })
-                .transpose()?,
-            welcome: c.welcome,
-            encrypted_key_catalog: c.encrypted_key_catalog,
-            group_epoch: c.group_epoch,
-            membership_history_event_count: c.membership_history_event_count,
-        })),
-        WireBody::Ready(ready) => Ok(PairingSessionMessage::Ready(JoinerReady {
-            admission: AdmissionChangeFacts {
-                member_instance: MemberInstanceId::from_bytes(ready.member_instance),
-                device_id: DeviceId::new(ready.device_id),
-                device_name: ready.device_name,
-                identity_fingerprint: parse_fingerprint(&ready.identity_fingerprint)?,
-                transport_public_key: ready.transport_public_key,
-                transport_address_blob: ready.transport_address_blob,
-                identity_signature: ready.identity_signature,
-            },
-        })),
-        WireBody::AdmissionSaved(saved) => Ok(PairingSessionMessage::AdmissionSaved(
-            SponsorAdmissionSaved {
-                facts: AdmissionSavedFacts {
-                    history_digest: saved.history_digest,
-                    history_event_count: saved.history_event_count,
-                    sponsor_facts: AdmissionChangeFacts {
-                        member_instance: MemberInstanceId::from_bytes(
-                            saved.sponsor_facts.member_instance,
-                        ),
-                        device_id: DeviceId::new(saved.sponsor_facts.device_id),
-                        device_name: saved.sponsor_facts.device_name,
-                        identity_fingerprint: parse_fingerprint(
-                            &saved.sponsor_facts.identity_fingerprint,
-                        )?,
-                        transport_public_key: saved.sponsor_facts.transport_public_key,
-                        transport_address_blob: saved.sponsor_facts.transport_address_blob,
-                        identity_signature: saved.sponsor_facts.identity_signature,
-                    },
+        WireBody::DurableAdmission(frame) => Ok(PairingSessionMessage::DurableAdmission(
+            DurableAdmissionFrame {
+                attempt_id: frame.attempt_id,
+                kind: match frame.kind {
+                    1 => DurableAdmissionMessageKind::Candidate,
+                    2 => DurableAdmissionMessageKind::Prepared,
+                    3 => DurableAdmissionMessageKind::Commit,
+                    4 => DurableAdmissionMessageKind::Applied,
+                    5 => DurableAdmissionMessageKind::Complete,
+                    6 => DurableAdmissionMessageKind::CompleteAck,
+                    other => {
+                        return Err(WireDecodeError::UnsupportedDurableAdmissionKind(other));
+                    }
                 },
+                message_id: frame.message_id,
+                predecessor_message_id: frame.predecessor_message_id,
+                payload: frame.payload,
             },
         )),
         WireBody::Reject(r) => Ok(PairingSessionMessage::Reject(PairingReject {
             reason: match r.reason {
                 WireRejectReason::InvitationMismatch => PairingRejectReason::InvitationMismatch,
                 WireRejectReason::AdmissionUnavailable => PairingRejectReason::AdmissionUnavailable,
+                WireRejectReason::AdmissionConflict => PairingRejectReason::AdmissionConflict,
                 WireRejectReason::PassphraseMismatch => PairingRejectReason::PassphraseMismatch,
                 WireRejectReason::UserRejected => PairingRejectReason::UserRejected,
                 WireRejectReason::Timeout => PairingRejectReason::Timeout,
@@ -446,6 +421,42 @@ mod tests {
         IdentityFingerprint::from_raw_string("ABCDEFGHIJKLMNOP").unwrap()
     }
 
+    fn valid_wire_request() -> WireJoinerRequest {
+        let device_id = DeviceId::new("device-a");
+        let credential = uc_core::membership::MembershipCredential::new(1, vec![7; 32]);
+        let member_instance = credential.member_instance_id(&device_id);
+        WireJoinerRequest {
+            attempt_id: [1; 32],
+            join_id: [2; 16],
+            request_message_id: [3; 32],
+            invitation_code: "ABCDEFGH".into(),
+            device_id: device_id.as_str().to_string(),
+            device_name: "Device A".into(),
+            identity_fingerprint: sample_fingerprint().as_display().to_string(),
+            nonce: vec![1; 32],
+            transport_address_blob: vec![2],
+            security_capability: 1,
+            key_package: vec![3],
+            member_instance: *member_instance.as_bytes(),
+            membership_credential: WireMembershipCredential {
+                credential_format_version: credential.credential_format_version,
+                signature_algorithm_version: credential.signature_algorithm_version,
+                public_key: credential.public_key,
+                credential_id: *credential.credential_id.as_bytes(),
+            },
+            resume_public_key: vec![8; 32],
+            admission: WireAdmissionFacts {
+                member_instance: *member_instance.as_bytes(),
+                device_id: device_id.as_str().to_string(),
+                device_name: "Device A".into(),
+                identity_fingerprint: sample_fingerprint().as_display().to_string(),
+                transport_public_key: vec![9; 32],
+                transport_address_blob: vec![2],
+                identity_signature: vec![10; 64],
+            },
+        }
+    }
+
     fn round_trip(msg: PairingSessionMessage) -> PairingSessionMessage {
         let bytes = encode(&msg).expect("encode");
         decode(&bytes).expect("decode")
@@ -453,7 +464,22 @@ mod tests {
 
     #[test]
     fn request_round_trips() {
+        let membership_credential =
+            uc_core::membership::MembershipCredential::new(1, vec![0x41; 32]);
+        let member_instance = membership_credential.member_instance_id(&DeviceId::new("dev-001"));
+        let admission = AdmissionChangeFacts {
+            member_instance,
+            device_id: DeviceId::new("dev-001"),
+            device_name: "Alice's laptop".to_string(),
+            identity_fingerprint: sample_fingerprint(),
+            transport_public_key: vec![0x42; 32],
+            transport_address_blob: vec![0x9a, 0x01, 0x02],
+            identity_signature: vec![0x43; 64],
+        };
         let original = PairingSessionMessage::Request(JoinerRequest {
+            attempt_id: [0x11; 32],
+            join_id: [0x12; 16],
+            request_message_id: [0x13; 32],
             invitation_code: InvitationCode::new("CODE-1234"),
             device_id: DeviceId::new("dev-001"),
             device_name: "Alice's laptop".to_string(),
@@ -462,11 +488,18 @@ mod tests {
             transport_address_blob: vec![0x9a, 0x01, 0x02],
             security_capability: PairingSecurityCapability::ReliableGroupEpochV1,
             key_package: vec![0x44, 0x55],
+            member_instance,
+            membership_credential: membership_credential.clone(),
+            resume_public_key: vec![0x45; 32],
+            admission: admission.clone(),
         });
 
         let decoded = round_trip(original);
         match decoded {
             PairingSessionMessage::Request(r) => {
+                assert_eq!(r.attempt_id, [0x11; 32]);
+                assert_eq!(r.join_id, [0x12; 16]);
+                assert_eq!(r.request_message_id, [0x13; 32]);
                 assert_eq!(r.invitation_code.as_str(), "CODE-1234");
                 assert_eq!(r.device_id.as_str(), "dev-001");
                 assert_eq!(r.device_name, "Alice's laptop");
@@ -478,9 +511,126 @@ mod tests {
                     PairingSecurityCapability::ReliableGroupEpochV1
                 );
                 assert_eq!(r.key_package, vec![0x44, 0x55]);
+                assert_eq!(r.member_instance, member_instance);
+                assert_eq!(r.membership_credential, membership_credential);
+                assert_eq!(r.resume_public_key, vec![0x45; 32]);
+                assert_eq!(r.admission, admission);
             }
             other => panic!("expected Request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn request_rejects_member_instance_not_derived_from_credential() {
+        let credential = uc_core::membership::MembershipCredential::new(1, vec![0x51; 32]);
+        let device_id = DeviceId::new("dev-001");
+        let wrong_instance = credential.member_instance_id(&DeviceId::new("another-device"));
+        let body = WireBody::Request(WireJoinerRequest {
+            attempt_id: [0x11; 32],
+            join_id: [0x12; 16],
+            request_message_id: [0x13; 32],
+            invitation_code: "CODE-1234".to_string(),
+            device_id: device_id.as_str().to_string(),
+            device_name: "Alice's laptop".to_string(),
+            identity_fingerprint: sample_fingerprint().as_display().to_string(),
+            nonce: vec![],
+            transport_address_blob: vec![0x61],
+            security_capability: 1,
+            key_package: vec![0x62],
+            member_instance: *wrong_instance.as_bytes(),
+            membership_credential: WireMembershipCredential {
+                credential_format_version: credential.credential_format_version,
+                signature_algorithm_version: credential.signature_algorithm_version,
+                public_key: credential.public_key.clone(),
+                credential_id: *credential.credential_id.as_bytes(),
+            },
+            resume_public_key: vec![0x63; 32],
+            admission: WireAdmissionFacts {
+                member_instance: *wrong_instance.as_bytes(),
+                device_id: device_id.as_str().to_string(),
+                device_name: "Alice's laptop".to_string(),
+                identity_fingerprint: sample_fingerprint().as_display().to_string(),
+                transport_public_key: vec![0x64; 32],
+                transport_address_blob: vec![0x61],
+                identity_signature: vec![0x65; 64],
+            },
+        });
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend(postcard::to_stdvec(&body).unwrap());
+
+        assert!(matches!(
+            decode(&bytes),
+            Err(WireDecodeError::InvalidDurableJoinRequest(_))
+        ));
+    }
+
+    #[test]
+    fn durable_admission_business_messages_round_trip_on_v10() {
+        use uc_core::pairing::{DurableAdmissionFrame, DurableAdmissionMessageKind};
+
+        for kind in [
+            DurableAdmissionMessageKind::Candidate,
+            DurableAdmissionMessageKind::Prepared,
+            DurableAdmissionMessageKind::Commit,
+            DurableAdmissionMessageKind::Applied,
+            DurableAdmissionMessageKind::Complete,
+            DurableAdmissionMessageKind::CompleteAck,
+        ] {
+            let original = PairingSessionMessage::DurableAdmission(DurableAdmissionFrame {
+                attempt_id: [0x21; 32],
+                kind,
+                message_id: [0x22; 32],
+                predecessor_message_id: Some([0x23; 32]),
+                payload: vec![0x24, 0x25],
+            });
+
+            let decoded = round_trip(original);
+            match decoded {
+                PairingSessionMessage::DurableAdmission(frame) => {
+                    assert_eq!(frame.attempt_id, [0x21; 32]);
+                    assert_eq!(frame.kind, kind);
+                    assert_eq!(frame.message_id, [0x22; 32]);
+                    assert_eq!(frame.predecessor_message_id, Some([0x23; 32]));
+                    assert_eq!(frame.payload, vec![0x24, 0x25]);
+                }
+                other => panic!("expected DurableAdmission, got {other:?}"),
+            }
+        }
+
+        let encoded = encode(&PairingSessionMessage::DurableAdmission(
+            DurableAdmissionFrame {
+                attempt_id: [0x31; 32],
+                kind: DurableAdmissionMessageKind::Complete,
+                message_id: [0x32; 32],
+                predecessor_message_id: None,
+                payload: vec![0x33],
+            },
+        ))
+        .unwrap();
+        assert_eq!(encoded[0], 10, "V10 must be readable before body decoding");
+    }
+
+    #[test]
+    fn pairing_wire_rejects_frames_over_four_mibibytes() {
+        use uc_core::pairing::{DurableAdmissionFrame, DurableAdmissionMessageKind};
+
+        let oversized = PairingSessionMessage::DurableAdmission(DurableAdmissionFrame {
+            attempt_id: [0x71; 32],
+            kind: DurableAdmissionMessageKind::Candidate,
+            message_id: [0x72; 32],
+            predecessor_message_id: None,
+            payload: vec![0x73; super::MAX_FRAME_SIZE],
+        });
+        assert!(matches!(
+            encode(&oversized),
+            Err(WireEncodeError::FrameTooLarge { .. })
+        ));
+
+        let encoded = vec![0u8; super::MAX_FRAME_SIZE + 1];
+        assert!(matches!(
+            decode(&encoded),
+            Err(WireDecodeError::FrameTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -519,72 +669,11 @@ mod tests {
     }
 
     #[test]
-    fn confirm_round_trips() {
-        let space_person = uuid::Uuid::parse_str("018f0000-0000-7000-8000-00000000000a").unwrap();
-        let original = PairingSessionMessage::Confirm(SponsorConfirm {
-            space_id: SpaceId::from_str("space-99"),
-            sender_device_id: DeviceId::new("dev-sponsor"),
-            sender_device_name: "Bob's desktop".to_string(),
-            sender_identity_fingerprint: sample_fingerprint(),
-            transport_address_blob: vec![0xaa, 0xbb, 0xcc],
-            sponsor_space_person_id: Some(space_person),
-            welcome: vec![1, 2, 3],
-            encrypted_key_catalog: vec![4, 5, 6],
-            group_epoch: 7,
-            membership_history_event_count: 3,
-        });
-        let decoded = round_trip(original);
-        match decoded {
-            PairingSessionMessage::Confirm(c) => {
-                assert_eq!(c.space_id.inner(), "space-99");
-                assert_eq!(c.sender_device_id.as_str(), "dev-sponsor");
-                assert_eq!(c.sender_device_name, "Bob's desktop");
-                assert_eq!(c.sender_identity_fingerprint, sample_fingerprint());
-                assert_eq!(c.transport_address_blob, vec![0xaa, 0xbb, 0xcc]);
-                assert_eq!(c.sponsor_space_person_id, Some(space_person));
-                assert_eq!(c.welcome, vec![1, 2, 3]);
-                assert_eq!(c.encrypted_key_catalog, vec![4, 5, 6]);
-                assert_eq!(c.group_epoch, 7);
-                assert_eq!(c.membership_history_event_count, 3);
-            }
-            other => panic!("expected Confirm, got {other:?}"),
-        }
-    }
-
-    /// PR 5：sponsor 端尚未持久化 `space_person_id`（v1→v2 老用户升级未配对）
-    /// 时，Confirm 上的字段应为 `None`，wire round-trip 后保持 `None`，
-    /// joiner 端按 Solo 退化（task_plan §开放问题 2 决策 A）。
-    #[test]
-    fn confirm_round_trips_with_none_sponsor_space_person_id() {
-        let original = PairingSessionMessage::Confirm(SponsorConfirm {
-            space_id: SpaceId::from_str("space-99"),
-            sender_device_id: DeviceId::new("dev-sponsor"),
-            sender_device_name: "Bob's desktop".to_string(),
-            sender_identity_fingerprint: sample_fingerprint(),
-            transport_address_blob: vec![],
-            sponsor_space_person_id: None,
-            welcome: vec![1],
-            encrypted_key_catalog: vec![2],
-            group_epoch: 2,
-            membership_history_event_count: 0,
-        });
-        let decoded = round_trip(original);
-        match decoded {
-            PairingSessionMessage::Confirm(c) => {
-                assert_eq!(
-                    c.sponsor_space_person_id, None,
-                    "None 必须 round-trip 为 None，让 joiner 退回 Solo"
-                );
-            }
-            other => panic!("expected Confirm, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn reject_round_trips_all_reasons() {
         for reason in [
             PairingRejectReason::InvitationMismatch,
             PairingRejectReason::AdmissionUnavailable,
+            PairingRejectReason::AdmissionConflict,
             PairingRejectReason::PassphraseMismatch,
             PairingRejectReason::UserRejected,
             PairingRejectReason::Timeout,
@@ -606,19 +695,14 @@ mod tests {
         // Build a forged envelope at v = WIRE_VERSION + 1 to verify
         // rejection semantics survive future bumps without touching this
         // test's hardcoded numbers.
-        #[derive(Serialize)]
-        struct FutureEnvelope {
-            v: u8,
-            body: WireBody,
-        }
         let fake_version = WIRE_VERSION + 1;
-        let fake = FutureEnvelope {
-            v: fake_version,
-            body: WireBody::ChallengeResponse(WireJoinerChallengeResponse {
+        let mut bytes = vec![fake_version];
+        bytes.extend(
+            postcard::to_allocvec(&WireBody::ChallengeResponse(WireJoinerChallengeResponse {
                 encrypted_challenge: vec![],
-            }),
-        };
-        let bytes = postcard::to_allocvec(&fake).unwrap();
+            }))
+            .unwrap(),
+        );
 
         match decode(&bytes) {
             Err(WireDecodeError::UnsupportedVersion { got, expected }) => {
@@ -631,20 +715,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_unsupported_security_capability() {
-        let envelope = WireEnvelope {
-            v: WIRE_VERSION,
-            body: WireBody::Request(WireJoinerRequest {
-                invitation_code: "ABCDEFGH".into(),
-                device_id: "device-a".into(),
-                device_name: "Device A".into(),
-                identity_fingerprint: sample_fingerprint().as_display().to_string(),
-                nonce: vec![1; 32],
-                transport_address_blob: vec![2],
-                security_capability: 2,
-                key_package: vec![3],
-            }),
-        };
-        let bytes = postcard::to_allocvec(&envelope).unwrap();
+        let mut request = valid_wire_request();
+        request.security_capability = 2;
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend(postcard::to_allocvec(&WireBody::Request(request)).unwrap());
 
         assert!(matches!(
             decode(&bytes),
@@ -654,7 +728,8 @@ mod tests {
 
     #[test]
     fn decode_rejects_garbage_bytes() {
-        let garbage = vec![0xff; 16];
+        let mut garbage = vec![WIRE_VERSION];
+        garbage.extend([0xff; 15]);
         match decode(&garbage) {
             Err(WireDecodeError::Postcard(_)) => {}
             other => panic!("expected Postcard error, got {other:?}"),
@@ -664,20 +739,10 @@ mod tests {
     #[test]
     fn decode_rejects_invalid_fingerprint_format() {
         // Manually build a request with a too-short fingerprint on the wire.
-        let fake = WireEnvelope {
-            v: WIRE_VERSION,
-            body: WireBody::Request(WireJoinerRequest {
-                invitation_code: "x".to_string(),
-                device_id: "d".to_string(),
-                device_name: "n".to_string(),
-                identity_fingerprint: "TOO_SHORT".to_string(),
-                nonce: vec![],
-                transport_address_blob: vec![],
-                security_capability: 1,
-                key_package: vec![1],
-            }),
-        };
-        let bytes = postcard::to_allocvec(&fake).unwrap();
+        let mut request = valid_wire_request();
+        request.identity_fingerprint = "TOO_SHORT".to_string();
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend(postcard::to_allocvec(&WireBody::Request(request)).unwrap());
 
         match decode(&bytes) {
             Err(WireDecodeError::InvalidFingerprint(msg)) => {

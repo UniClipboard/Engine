@@ -1,4 +1,8 @@
+mod active_space_manifest_store;
+mod admission_key_manager;
 mod admission_proof;
+mod admission_security_transition;
+mod admission_space_transition;
 mod blob_cipher_adapter;
 pub mod crypto_model;
 mod decrypting_clipboard_event_repo;
@@ -7,7 +11,9 @@ mod default_current_profile;
 mod encrypted_blob_store;
 mod encrypting_clipboard_event_writer;
 mod encrypting_inbound_receive_commit;
+mod fail_closed_admission_space_transition;
 mod hashing;
+mod historical_signature_adapter;
 mod identity_fingerprint;
 pub(crate) mod key_epoch_aad;
 mod key_material;
@@ -16,6 +22,8 @@ pub(crate) mod legacy_upgrade;
 mod membership_security_update_adapter;
 pub(crate) mod mls_group;
 mod peer_admission_adapter;
+mod profile_lifecycle;
+mod profile_reset;
 mod scope_identifier;
 mod secrets;
 mod session;
@@ -24,7 +32,13 @@ pub(crate) mod v1_aead;
 
 use std::sync::Arc;
 
+pub use active_space_manifest_store::{ActiveSpaceManifestStore, ActiveSpaceManifestStoreError};
+pub use admission_key_manager::{
+    AdmissionKeyError, AdmissionKeyManager, WrappedAdmissionAttemptDataKey,
+};
 pub use admission_proof::HmacProofAdapter;
+pub use admission_security_transition::AdmissionSecurityTransitionAdapter;
+pub use admission_space_transition::{space_generation_directory, DurableAdmissionSpaceTransition};
 pub use blob_cipher_adapter::BlobCipherAdapter;
 pub use crypto_model::{
     EncryptedBlob, KdfParams, KdfParamsV1, KeyScope, KeySlot, KeySlotConvertError, KeySlotFile,
@@ -36,7 +50,9 @@ pub use default_current_profile::DefaultCurrentProfile;
 pub use encrypted_blob_store::EncryptedBlobStore;
 pub use encrypting_clipboard_event_writer::EncryptingClipboardEventWriter;
 pub use encrypting_inbound_receive_commit::EncryptingInboundReceiveCommit;
+pub use fail_closed_admission_space_transition::FailClosedAdmissionSpaceTransition;
 pub use hashing::{hash_pin, verify_pin, Argon2PinHasher, Blake3Hasher};
+pub use historical_signature_adapter::OpenMlsHistoricalSignatureVerifier;
 pub use identity_fingerprint::{
     FingerprintDerivationError, Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
     ShortCodeGenerator,
@@ -46,6 +62,10 @@ pub use key_migration_adapter::DefaultKeyMigrationAdapter;
 pub use legacy_upgrade::DefaultLegacyProtection;
 pub use membership_security_update_adapter::DefaultMembershipSecurityUpdateAdapter;
 pub use peer_admission_adapter::MlsPeerAdmissionAdapter;
+pub use profile_lifecycle::{
+    FactoryResetPhaseV1, ProfileLifecycleError, ProfileLifecycleManager, ProfileLifecycleMarkerV1,
+};
+pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
 pub(crate) use secrets::MasterKey;
 pub use session::InMemorySession;
 pub use space_access_adapter::DefaultSpaceAccessAdapter;

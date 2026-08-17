@@ -261,17 +261,30 @@ impl MembershipConvergence {
 
     async fn next_reconcile_delay(&self) -> Duration {
         let fallback = gossip_reconcile_delay(&self.deps.device_identity.current_device_id());
+        let group_update_delay = {
+            let delivery = self
+                .group_update_delivery
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            match delivery {
+                Some(delivery) if delivery.has_pending().await.unwrap_or(false) => {
+                    Duration::from_millis(INITIAL_RETRY_DELAY_MS as u64)
+                }
+                _ => fallback,
+            }
+        };
         let state = match self.deps.security_updates.current_state().await {
             Ok(state) => state,
-            Err(_) => return fallback,
+            Err(_) => return group_update_delay,
         };
         let candidates = match self.deps.candidate_repo.list(&state.space_id).await {
             Ok(candidates) => candidates,
-            Err(_) => return fallback,
+            Err(_) => return group_update_delay,
         };
         let outbox = match self.deps.outbox_repo.list_pending(&state.space_id).await {
             Ok(outbox) => outbox,
-            Err(_) => return fallback,
+            Err(_) => return group_update_delay,
         };
         let next_attempt_at_ms = candidates
             .iter()
@@ -289,11 +302,13 @@ impl MembershipConvergence {
             )
             .min();
         let Some(next_attempt_at_ms) = next_attempt_at_ms else {
-            return fallback;
+            return group_update_delay;
         };
         let remaining_ms = next_attempt_at_ms.saturating_sub(self.deps.clock.now_ms());
         let scheduled = Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX));
-        scheduled.max(MIN_SCHEDULED_RECONCILE_DELAY).min(fallback)
+        scheduled
+            .max(MIN_SCHEDULED_RECONCILE_DELAY)
+            .min(group_update_delay)
     }
 }
 

@@ -105,7 +105,7 @@ pub struct OhInvitationIssued {
 }
 
 #[napi(object)]
-pub struct OhSpaceJoined {
+pub struct OhJoinedSpace {
     pub sponsor_device_id: String,
     pub sponsor_identity_fingerprint: String,
     pub space_id: String,
@@ -113,6 +113,18 @@ pub struct OhSpaceJoined {
     pub self_identity_fingerprint: String,
     pub migrated_records: Option<String>,
     pub preserved_unreadable_records: Option<String>,
+}
+
+#[napi(object)]
+pub struct OhJoinSpaceStatus {
+    pub status: String,
+    pub join_id: String,
+    pub joined_space: Option<OhJoinedSpace>,
+    pub target_space_id: Option<String>,
+    pub sponsor_device_id: Option<String>,
+    pub sponsor_identity_fingerprint: Option<String>,
+    pub cancel_requested: Option<bool>,
+    pub rejection_reason: Option<String>,
 }
 
 #[napi(object)]

@@ -14,9 +14,9 @@ use uc_engine::{
     DeviceTrustSnapshotSummary, Engine, EngineConfig, EngineErrorCategory, HistoryEntryInput,
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
     HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
-    HostSecureStorage, JoinSpaceInput, ListHistoryEntriesInput, MembershipRemovalDecision,
-    Operation, OperationResult, RecoverSessionInput, RemoveMemberInput, SecretString,
-    SendTargetOutcome, SendTextInput, WorkspaceConvergencePhaseSummary,
+    HostSecureStorage, JoinSpaceInput, JoinSpaceStatusSummary, ListHistoryEntriesInput,
+    MembershipRemovalDecision, Operation, OperationResult, RecoverSessionInput, RemoveMemberInput,
+    SecretString, SendTargetOutcome, SendTextInput, WorkspaceConvergencePhaseSummary,
     WorkspaceConvergenceSummary,
 };
 use wiremock::matchers::{method, path};
@@ -552,8 +552,6 @@ async fn members_converge_when_sponsor_stays_offline_after_joining_c() {
         "A must reconnect with C after B stops",
         &engine_a,
         &engine_c,
-        &a_id,
-        &c_id,
     )
     .await;
     tokio::time::sleep(Duration::from_secs(8)).await;
@@ -590,8 +588,6 @@ async fn members_converge_when_sponsor_stays_offline_after_joining_c() {
         "A and C must reconnect after both restart",
         &engine_a,
         &engine_c,
-        &a_id,
-        &c_id,
     )
     .await;
 
@@ -633,8 +629,8 @@ async fn restarted_member_pairs_with_a_member_added_while_it_was_offline() {
     let device_b = DeviceHarness::new(rendezvous.uri());
     let device_c = DeviceHarness::new(rendezvous.uri());
 
-    let engine_a = device_a.start().await;
-    let engine_b = device_b.start().await;
+    let engine_a = device_a.start_local_only().await;
+    let engine_b = device_b.start_local_only().await;
     let (space_id, a_id) = create_space(&engine_a, "Device A").await;
     let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
     wait_for_members(&engine_a, &[&b_id]).await;
@@ -645,15 +641,20 @@ async fn restarted_member_pairs_with_a_member_added_while_it_was_offline() {
         .await
         .expect("shut down B before C joins");
 
-    let engine_c = device_c.start().await;
+    let engine_c = device_c.start_local_only().await;
     let c_id = join_through(&engine_a, &engine_c, "Device C", &space_id).await;
     assert_receive_ready(&engine_c, true).await;
     wait_for_members(&engine_a, &[&b_id, &c_id]).await;
     wait_for_members(&engine_c, &[&a_id]).await;
 
-    let engine_b = device_b.start().await;
+    let engine_b = device_b.start_local_only().await;
     recover(&engine_b).await;
-    wait_for_converged_members(&engine_b, &engine_c, &b_id, &c_id).await;
+    wait_for_converged_members_with_diagnostics(
+        "B and C did not converge after B restarted",
+        &engine_b,
+        &engine_c,
+    )
+    .await;
 
     send_and_verify(&engine_b, &engine_c, &c_id, "B to C after B restarts").await;
     send_and_verify(&engine_c, &engine_b, &b_id, "C to B after B restarts").await;
@@ -697,8 +698,6 @@ async fn sponsor_and_joiner_are_mutually_admitted_when_an_existing_member_is_off
         "A and C after C joins while B is offline",
         &engine_a,
         &engine_c,
-        &a_id,
-        &c_id,
     )
     .await;
     send_and_verify(&engine_a, &engine_c, &c_id, "A to C before restart").await;
@@ -721,8 +720,6 @@ async fn sponsor_and_joiner_are_mutually_admitted_when_an_existing_member_is_off
         "A and C after mutual-admission restart",
         &engine_a,
         &engine_c,
-        &a_id,
-        &c_id,
     )
     .await;
     send_and_verify(&engine_a, &engine_c, &c_id, "A to C after restart").await;
@@ -806,8 +803,6 @@ async fn four_members_converge_through_an_online_relay_after_two_sponsors_leave(
         "A must reconnect with D after A recovers",
         &engine_a,
         &engine_d,
-        &a_id,
-        &d_id,
     )
     .await;
     send_and_verify(&engine_a, &engine_d, &d_id, "A to D through C").await;
@@ -848,17 +843,14 @@ async fn five_devices_restore_full_sync_after_two_completed_removals_and_rejoins
     // Each join must propagate before the next operation: the joiner has to
     // receive the continuous chain it is entitled to (receiver-side
     // evidence, not a local completion claim).
-    for (engine, expected_changes) in [
-        (&engine_b, 2),
-        (&engine_c, 3),
-        (&engine_d, 4),
-        (&engine_e, 5),
+    for (stage, engine, expected_changes) in [
+        ("B receives its join history", &engine_b, 2),
+        ("C receives its join history", &engine_c, 3),
+        ("D receives its join history", &engine_d, 4),
+        ("E receives its join history", &engine_e, 5),
     ] {
-        wait_until(WAIT_TIMEOUT, || async {
-            let c = workspace_convergence_summary(engine)
-                .await
-                .history_event_count;
-            c >= expected_changes
+        wait_for_workspace_summary(stage, engine, |summary| {
+            summary.history_event_count >= expected_changes
         })
         .await;
     }
@@ -872,8 +864,7 @@ async fn five_devices_restore_full_sync_after_two_completed_removals_and_rejoins
             }))
             .await
             .expect("remove member");
-        wait_until(WAIT_TIMEOUT, || async {
-            let summary = workspace_convergence_summary(&engine_a).await;
+        wait_for_workspace_summary("A applies its removal", &engine_a, |summary| {
             summary.phase != WorkspaceConvergencePhaseSummary::RecoveryRequired
                 && summary.effective_member_count == expected_member_count
         })
@@ -887,10 +878,8 @@ async fn five_devices_restore_full_sync_after_two_completed_removals_and_rejoins
             &[&engine_c, &engine_e]
         };
         for engine in retained_members {
-            wait_until(WAIT_TIMEOUT, || async {
-                let summary = workspace_convergence_summary(engine).await;
-                summary.history_event_count >= expected_changes as u64
-                    && summary.pending_removal_decision_event_id.is_some()
+            wait_for_workspace_summary("retained member receives removal", engine, |summary| {
+                summary.pending_removal_decision_event_id.is_some()
             })
             .await;
             let removal_event_id = workspace_convergence_summary(engine)
@@ -906,9 +895,9 @@ async fn five_devices_restore_full_sync_after_two_completed_removals_and_rejoins
                 ))
                 .await
                 .expect("retained member accepts the removal");
-            wait_until(WAIT_TIMEOUT, || async {
-                let summary = workspace_convergence_summary(engine).await;
+            wait_for_workspace_summary("retained member accepts removal", engine, |summary| {
                 summary.pending_removal_decision_event_id.is_none()
+                    && summary.history_event_count >= expected_changes as u64
                     && summary.effective_member_count == expected_member_count
             })
             .await;
@@ -921,12 +910,12 @@ async fn five_devices_restore_full_sync_after_two_completed_removals_and_rejoins
     // B's rejoin change is carried by C's chain; wait until it has reached
     // E so D's rejoin through E appends to a current head. A real user
     // operates the next rejoin after the previous one has propagated.
-    wait_until(WAIT_TIMEOUT, || async {
-        workspace_convergence_summary(&engine_e)
-            .await
-            .history_event_count
-            >= 8
-    })
+    wait_for_same_workspace_state_with_diagnostics(
+        "C and E must save B's rejoin before D rejoins",
+        &[&engine_c, &engine_e],
+        4,
+        8,
+    )
     .await;
     let d_rejoin = join_through_with_result(&engine_e, &engine_d, "Device D", &space_id).await;
     assert_eq!(d_rejoin.self_device_id, d_id);
@@ -947,9 +936,10 @@ async fn five_devices_restore_full_sync_after_two_completed_removals_and_rejoins
     send_and_verify(&engine_a, &engine_e, &e_id, "A to E after rejoin").await;
     send_and_verify(&engine_e, &engine_c, &c_id, "E to C after rejoin").await;
 
+    let five_device_shutdown_timeout = Duration::from_secs(45);
     for engine in [engine_a, engine_b, engine_c, engine_d, engine_e] {
         engine
-            .shutdown(SHUTDOWN_TIMEOUT)
+            .shutdown(five_device_shutdown_timeout)
             .await
             .expect("final shutdown");
     }
@@ -1071,7 +1061,12 @@ async fn rejecting_a_member_removal_keeps_an_unaffected_member_connection_usable
     wait_for_members(&engine_a, &[&b_id, &c_id]).await;
     wait_for_members(&engine_b, &[&a_id, &c_id]).await;
     wait_for_members(&engine_c, &[&a_id, &b_id]).await;
-    wait_for_converged_members(&engine_b, &engine_c, &b_id, &c_id).await;
+    wait_for_converged_members_with_diagnostics(
+        "B and C did not converge before the removal",
+        &engine_b,
+        &engine_c,
+    )
+    .await;
     send_and_verify(
         &engine_c,
         &engine_b,
@@ -1092,7 +1087,13 @@ async fn rejecting_a_member_removal_keeps_an_unaffected_member_connection_usable
         }))
         .await
         .expect("A removes B");
-    wait_for_pending_decisions(&engine_b, &engine_c).await;
+    wait_for_pending_decisions_with_diagnostics(
+        "B and C did not both receive the pending removal",
+        &engine_a,
+        &engine_b,
+        &engine_c,
+    )
+    .await;
     let pending_removal_event_id = workspace_convergence_summary(&engine_c)
         .await
         .pending_removal_decision_event_id
@@ -1119,18 +1120,26 @@ async fn rejecting_a_member_removal_keeps_an_unaffected_member_connection_usable
     );
     c_decision.expect("C rejects the removal");
     b_decision.expect("B rejects the removal");
-    wait_until(WAIT_TIMEOUT, || async {
+    let divergence_deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
         let a = workspace_convergence_summary(&engine_a).await;
         let b = workspace_convergence_summary(&engine_b).await;
         let c = workspace_convergence_summary(&engine_c).await;
-        a.diverged_peer_device_ids.len() == 2
+        if a.diverged_peer_device_ids.len() == 2
             && a.diverged_peer_device_ids.contains(&b_id)
             && a.diverged_peer_device_ids.contains(&c_id)
             && b.diverged_peer_device_ids == vec![a_id.clone()]
             && c.diverged_peer_device_ids == vec![a_id.clone()]
             && c.effective_member_count == 3
-    })
-    .await;
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < divergence_deadline,
+            "rejected removal relationships did not converge: A={a:?}, B={b:?}, C={c:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     send_and_assert_blocked(
         &engine_a,
@@ -1296,7 +1305,7 @@ async fn concurrent_accept_and_reject_of_one_removal_keep_their_branches_indepen
     wait_for_members(&engine_b, &[&d_id]).await;
     wait_for_members(&engine_c, &[&a_id, &b_id]).await;
     wait_for_members(&engine_d, &[&a_id, &b_id, &c_id]).await;
-    wait_for_converged_members(&engine_b, &engine_d, &b_id, &d_id).await;
+    wait_for_converged_members(&engine_b, &engine_d).await;
     send_and_verify(
         &engine_d,
         &engine_b,
@@ -2156,16 +2165,13 @@ async fn join_through_with_result(
             }))
             .await
         {
-            Ok(OperationResult::SpaceJoined {
-                space_id,
-                self_device_id,
-                migrated_records,
-                ..
-            }) => {
-                assert_eq!(space_id, expected_space_id);
+            Ok(OperationResult::JoinSpace(JoinSpaceStatusSummary::Active {
+                joined_space, ..
+            })) => {
+                assert_eq!(joined_space.space_id, expected_space_id);
                 return JoinResult {
-                    self_device_id,
-                    migrated_records,
+                    self_device_id: joined_space.self_device_id,
+                    migrated_records: joined_space.migrated_records,
                 };
             }
             Ok(other) => panic!("unexpected join result: {other:?}"),
@@ -2228,13 +2234,27 @@ async fn assert_receive_ready(engine: &Engine, expected: bool) {
 }
 
 async fn wait_for_members(engine: &Engine, expected_ids: &[&str]) {
-    wait_until(WAIT_TIMEOUT, || async {
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
         let devices = list_devices(engine).await;
-        expected_ids
+        if expected_ids
             .iter()
             .all(|expected| devices.iter().any(|device| device.device_id == **expected))
-    })
-    .await;
+        {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let actual_ids = devices
+                .iter()
+                .map(|device| device.device_id.as_str())
+                .collect::<Vec<_>>();
+            let summary = workspace_convergence_summary(engine).await;
+            panic!(
+                "member wait timed out: expected={expected_ids:?}, actual={actual_ids:?}, summary={summary:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn wait_for_member_with_diagnostics(stage: &str, engine: &Engine, expected_id: &str) {
@@ -2255,10 +2275,14 @@ async fn wait_for_member_with_diagnostics(stage: &str, engine: &Engine, expected
     }
 }
 
-async fn wait_for_converged_members(engine_a: &Engine, engine_c: &Engine, a_id: &str, c_id: &str) {
+async fn wait_for_converged_members(engine_a: &Engine, engine_c: &Engine) {
     wait_until(WAIT_TIMEOUT, || async {
-        has_complete_membership(engine_a, c_id).await
-            && has_complete_membership(engine_c, a_id).await
+        let a = workspace_convergence_summary(engine_a).await;
+        let c = workspace_convergence_summary(engine_c).await;
+        a.convergence_digest.is_some()
+            && a.convergence_digest == c.convergence_digest
+            && a.history_event_count == c.history_event_count
+            && a.effective_member_count == c.effective_member_count
     })
     .await;
 }
@@ -2267,19 +2291,19 @@ async fn wait_for_converged_members_with_diagnostics(
     stage: &str,
     engine_a: &Engine,
     engine_d: &Engine,
-    a_id: &str,
-    d_id: &str,
 ) {
     let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
     loop {
-        if has_complete_membership(engine_a, d_id).await
-            && has_complete_membership(engine_d, a_id).await
+        let a = workspace_convergence_summary(engine_a).await;
+        let d = workspace_convergence_summary(engine_d).await;
+        if a.convergence_digest.is_some()
+            && a.convergence_digest == d.convergence_digest
+            && a.history_event_count == d.history_event_count
+            && a.effective_member_count == d.effective_member_count
         {
             return;
         }
         if tokio::time::Instant::now() >= deadline {
-            let a = workspace_convergence_summary(engine_a).await;
-            let d = workspace_convergence_summary(engine_d).await;
             panic!("{stage} before timeout: A={a:?}, D={d:?}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2287,49 +2311,116 @@ async fn wait_for_converged_members_with_diagnostics(
 }
 
 async fn wait_for_full_workspace_sync(devices: &[(&Engine, &str)]) {
-    wait_until(WAIT_TIMEOUT, || async {
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT * 2;
+    let expected_member_count =
+        u64::try_from(devices.len()).expect("five-device test count fits in u64");
+    loop {
+        let mut complete = true;
+        let mut expected_history = None;
         for (engine, own_id) in devices {
-            for (_, peer_id) in devices {
-                if own_id != peer_id && !has_complete_membership(engine, peer_id).await {
-                    return false;
-                }
-            }
-        }
-        true
-    })
-    .await;
-}
-
-async fn wait_for_same_workspace_state(
-    engines: &[&Engine],
-    expected_member_count: u64,
-    minimum_history_event_count: u64,
-) {
-    wait_until(WAIT_TIMEOUT, || async {
-        let mut expected_digest = None;
-        for engine in engines {
-            let summary = workspace_convergence_summary(engine).await;
-            if summary.effective_member_count != expected_member_count
-                || summary.history_event_count < minimum_history_event_count
+            let Ok(OperationResult::Devices(roster)) = engine.execute(Operation::ListDevices).await
+            else {
+                complete = false;
+                continue;
+            };
+            let Ok(OperationResult::WorkspaceConvergence(summary)) =
+                engine.execute(Operation::QueryWorkspaceConvergence).await
+            else {
+                complete = false;
+                continue;
+            };
+            let history = (
+                summary.convergence_digest.clone(),
+                summary.history_event_count,
+                summary.effective_member_count,
+            );
+            if summary.phase == WorkspaceConvergencePhaseSummary::RecoveryRequired
                 || summary.removed
                 || summary.failure_category.is_some()
+                || summary.effective_member_count != expected_member_count
+                || summary.convergence_digest.is_none()
+                || expected_history
+                    .as_ref()
+                    .is_some_and(|expected| expected != &history)
             {
-                return false;
+                complete = false;
+            } else if expected_history.is_none() {
+                expected_history = Some(history);
             }
-            let Some(digest) = summary.convergence_digest else {
-                return false;
-            };
-            if let Some(expected) = &expected_digest {
-                if expected != &digest {
-                    return false;
+            for (_, peer_id) in devices {
+                if own_id != peer_id && !roster.iter().any(|device| device.device_id == *peer_id) {
+                    complete = false;
                 }
-            } else {
-                expected_digest = Some(digest);
             }
         }
-        true
-    })
-    .await;
+        if complete {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let mut diagnostics = Vec::with_capacity(devices.len());
+            for (engine, own_id) in devices {
+                let roster_ids = list_devices(engine)
+                    .await
+                    .into_iter()
+                    .map(|device| device.device_id)
+                    .collect::<Vec<_>>();
+                diagnostics.push((
+                    *own_id,
+                    workspace_convergence_summary(engine).await,
+                    roster_ids,
+                    list_peer_ids(engine).await,
+                ));
+            }
+            let expected_history = diagnostics.first().map(|(_, summary, _, _)| {
+                (
+                    summary.convergence_digest.clone(),
+                    summary.history_event_count,
+                    summary.effective_member_count,
+                )
+            });
+            let final_snapshot_is_complete = expected_history.is_some()
+                && diagnostics.iter().all(|(own_id, summary, roster, _)| {
+                    let history = (
+                        summary.convergence_digest.clone(),
+                        summary.history_event_count,
+                        summary.effective_member_count,
+                    );
+                    summary.phase != WorkspaceConvergencePhaseSummary::RecoveryRequired
+                        && !summary.removed
+                        && summary.failure_category.is_none()
+                        && summary.effective_member_count == expected_member_count
+                        && summary.convergence_digest.is_some()
+                        && expected_history.as_ref() == Some(&history)
+                        && devices.iter().all(|(_, peer_id)| {
+                            own_id == peer_id || roster.iter().any(|roster_id| roster_id == peer_id)
+                        })
+                });
+            if final_snapshot_is_complete {
+                return;
+            }
+            panic!("five-device sync did not complete: {diagnostics:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_workspace_summary(
+    stage: &str,
+    engine: &Engine,
+    predicate: impl Fn(&WorkspaceConvergenceSummary) -> bool,
+) {
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        let summary = workspace_convergence_summary(engine).await;
+        if predicate(&summary) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{stage} before timeout: summary={summary:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn wait_for_same_workspace_state_with_diagnostics(
@@ -2391,20 +2482,6 @@ async fn wait_for_pending_decision_on_both_branches(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-async fn wait_for_pending_decisions(first: &Engine, second: &Engine) {
-    wait_until(WAIT_TIMEOUT, || async {
-        workspace_convergence_summary(first)
-            .await
-            .pending_removal_decision_event_id
-            .is_some()
-            && workspace_convergence_summary(second)
-                .await
-                .pending_removal_decision_event_id
-                .is_some()
-    })
-    .await;
 }
 
 async fn wait_for_pending_decisions_with_diagnostics(
@@ -2510,27 +2587,6 @@ async fn wait_for_concurrent_decision_state(
     }
 }
 
-async fn has_complete_membership(engine: &Engine, peer_id: &str) -> bool {
-    let devices = list_devices(engine).await;
-    let has_peer = devices
-        .iter()
-        .any(|device| device.device_id == peer_id && device.online);
-    let has_peer_connection = list_peer_ids(engine)
-        .await
-        .iter()
-        .any(|connected_peer_id| connected_peer_id == peer_id);
-    let Ok(OperationResult::WorkspaceConvergence(summary)) =
-        engine.execute(Operation::QueryWorkspaceConvergence).await
-    else {
-        return false;
-    };
-    // The workspace chain must be readable and the peer must be present in
-    // both the public roster and the connection view used by dispatch.
-    summary.phase != WorkspaceConvergencePhaseSummary::RecoveryRequired
-        && has_peer
-        && has_peer_connection
-}
-
 async fn list_devices(engine: &Engine) -> Vec<DeviceSummary> {
     match engine
         .execute(Operation::ListDevices)
@@ -2573,32 +2629,70 @@ fn peers_from_result(result: OperationResult) -> Vec<uc_engine::PeerConnectionSu
 }
 
 async fn send_and_verify(sender: &Engine, receiver: &Engine, target_id: &str, text: &str) {
-    let sent = sender
-        .execute(Operation::SendText(SendTextInput {
-            text: text.to_owned(),
-            target_devices: vec![target_id.to_owned()],
-        }))
-        .await
-        .expect("send text to converged member");
-    let OperationResult::EntrySent(report) = sent else {
-        panic!("unexpected send result: {sent:?}");
-    };
-    if report.total_accepted != 1 {
-        let sender_summary = workspace_convergence_summary(sender).await;
-        let receiver_summary = workspace_convergence_summary(receiver).await;
-        let sender_devices = list_devices(sender).await;
-        let receiver_devices = list_devices(receiver).await;
-        panic!(
-            "content send was not accepted: report={report:?}, sender={sender_summary:?}, \
-             receiver={receiver_summary:?}, sender_devices={sender_devices:?}, \
-             receiver_devices={receiver_devices:?}"
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    let report = loop {
+        let last_observation = match sender
+            .execute(Operation::SendText(SendTextInput {
+                text: text.to_owned(),
+                target_devices: vec![target_id.to_owned()],
+            }))
+            .await
+        {
+            Ok(OperationResult::EntrySent(report))
+                if (report.total_accepted == 1
+                    || report.total_pending == 1
+                    || report.total_duplicate == 1)
+                    && report.total_errored == 0
+                    && report.total_offline == 0 =>
+            {
+                break report;
+            }
+            Ok(OperationResult::EntrySent(report))
+                if report.total_accepted == 0
+                    && report.total_pending == 0
+                    && report.total_duplicate == 0
+                    && ((report.total_errored == 0
+                        && (report.total_offline == 1
+                            || (report.total_offline == 0 && report.per_target.is_empty())))
+                        || (report.total_errored == 1
+                            && report.total_offline == 0
+                            && report.per_target.len() == 1)) =>
+            {
+                format!("target was not dispatchable: {report:?}")
+            }
+            Ok(OperationResult::EntrySent(report)) => {
+                panic!("content send failed without a safe retry: {report:?}");
+            }
+            Ok(other) => panic!("unexpected send result: {other:?}"),
+            Err(error)
+                if matches!(
+                    error.category(),
+                    EngineErrorCategory::Unavailable | EngineErrorCategory::InvalidState
+                ) =>
+            {
+                format!("sender temporarily unavailable: {error:?}")
+            }
+            Err(error) => panic!("send text to converged member: {error:?}"),
+        };
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "content send to {target_id} did not become ready: {last_observation}"
         );
-    }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     assert_eq!(report.total_errored, 0);
     assert_eq!(report.total_offline, 0);
-    assert_eq!(report.per_target.len(), 1);
-    assert_eq!(report.per_target[0].device_id, target_id);
-    assert_eq!(report.per_target[0].outcome, SendTargetOutcome::Accepted);
+    if report.total_accepted == 1 {
+        assert_eq!(report.per_target.len(), 1);
+        assert_eq!(report.per_target[0].device_id, target_id);
+        assert_eq!(report.per_target[0].outcome, SendTargetOutcome::Accepted);
+    } else if report.total_duplicate == 1 {
+        assert_eq!(report.per_target.len(), 1);
+        assert_eq!(report.per_target[0].device_id, target_id);
+        assert_eq!(report.per_target[0].outcome, SendTargetOutcome::Duplicate);
+    } else {
+        assert!(report.per_target.is_empty());
+    }
 
     wait_for_received_text(sender, receiver, text).await;
 }

@@ -45,6 +45,7 @@ pub mod pairing;
 pub mod pairing_invitation;
 pub mod peer_address;
 pub mod presence;
+pub mod profile_lifecycle;
 pub mod receive_artifact_log;
 pub mod search;
 pub mod security;
@@ -126,6 +127,11 @@ pub use pairing_invitation::{
 };
 pub use peer_address::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
 pub use presence::{PresenceError, PresenceEvent, PresencePort, ReachabilityState};
+pub use profile_lifecycle::{
+    ClearProfileStatePort, FactoryResetPhaseV1, ProfileFactoryResetCapabilityError,
+    ProfileLifecycleError, ProfileLifecycleMarkerV1, ProfileLifecyclePort, StopProfileRuntimePort,
+    WipeProfileKeysPort, PROFILE_LIFECYCLE_MARKER_FORMAT_V1,
+};
 pub use receive_artifact_log::{
     CleanupReceiveArtifactsPort, GetReceiveArtifactRecordPort, ListUnsettledReceiveArtifactsPort,
     ReceiveArtifact, ReceiveArtifactLogError, ReceiveArtifactOwnership, ReceiveArtifactPhase,

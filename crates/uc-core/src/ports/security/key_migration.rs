@@ -1,9 +1,8 @@
 //! Switch-space 重加密迁移使用的临时密钥能力 port。
 //!
-//! 流程见 [`crate::setup::migration::MigrationPhase`] 的模块文档。本 port
-//! 把"按 `MigrationRunId` 生成 / 加解密 / 销毁一把临时 32 字节密钥"
-//! 抽象出来——具体存放在哪里（macOS Keychain / Windows Credential Manager /
-//! Linux secret-service / 测试用内存 fake）由 adapter 决定。
+//! 只服务旧版 switch-space 文件的一次性恢复。本 port 把“按
+//! `MigrationRunId` 生成 / 加解密 / 销毁一把临时 32 字节密钥”抽象出来；
+//! 新准入流程不会创建新的迁移密钥。
 //!
 //! 与 [`super::blob_cipher::BlobCipherPort`] 的边界：
 //! * `BlobCipherPort` 用"已解锁空间"的 master_key 加解密，是数据面常态路径。
@@ -16,7 +15,25 @@
 use async_trait::async_trait;
 
 use crate::crypto::domain::{Aad, Ciphertext, Plaintext};
-use crate::setup::migration::MigrationRunId;
+/// Stable identifier of a legacy one-shot migration key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct MigrationRunId(String);
+
+impl MigrationRunId {
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for MigrationRunId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
 /// `KeyMigrationPort` 操作失败原因。
 ///
@@ -57,8 +74,8 @@ pub enum KeyMigrationError {
 #[async_trait]
 pub trait KeyMigrationPort: Send + Sync {
     /// 准备一把新的 migration_key 并落盘到 secure storage。返回的
-    /// `MigrationRunId` 必须由调用方原样写进 `MigrationStatePort`，否则
-    /// 后续 `*_with_migration_key` 调用会找不到这把密钥。
+    /// `MigrationRunId` 必须由旧布局恢复器原样保存，否则后续
+    /// `*_with_migration_key` 调用会找不到这把密钥。
     async fn prepare_migration_key(&self) -> Result<MigrationRunId, KeyMigrationError>;
 
     /// 用 `run_id` 对应的 migration_key 加密一段明文。aad 透传给 AEAD。

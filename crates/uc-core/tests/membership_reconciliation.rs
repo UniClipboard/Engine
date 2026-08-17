@@ -1,30 +1,14 @@
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, MemberInstanceId, MembershipDecision, MembershipEvent, MembershipEventId,
-    MembershipEventsRequest, MembershipHistoryProtocolError, MembershipOperation,
-    MembershipReconciliation, MembershipReconciliationOutcome, RemovalDecision,
-    MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE,
+    MembershipOperation, MembershipReconciliation, MembershipReconciliationOutcome,
+    RemovalDecision,
 };
 
 const LINEAGE: &str = "space-lineage";
 
 fn member(byte: u8) -> MemberInstanceId {
     MemberInstanceId::from_bytes([byte; 32])
-}
-
-// 流程：对端请求超过协议上限的一页成员历史；本机拒绝请求，不返回无界数据。
-#[test]
-fn history_request_rejects_a_page_larger_than_the_protocol_limit() {
-    let request = MembershipEventsRequest {
-        lineage_id: LINEAGE.to_owned(),
-        after_event_id: None,
-        max_events: MAX_MEMBERSHIP_HISTORY_EVENTS_PER_PAGE.saturating_add(1) as u16,
-    };
-
-    assert_eq!(
-        request.validate(),
-        Err(MembershipHistoryProtocolError::PageLimitExceeded)
-    );
 }
 
 fn add_operation(member: MemberInstanceId) -> MembershipOperation {

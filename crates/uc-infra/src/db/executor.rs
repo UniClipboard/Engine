@@ -1,19 +1,15 @@
-use std::sync::Arc;
-
-use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::SqliteConnection;
 
+use crate::db::pool::DbPool;
 use crate::db::ports::DbExecutor;
 
 pub struct DieselSqliteExecutor {
-    pool: Arc<Pool<ConnectionManager<SqliteConnection>>>,
+    pool: DbPool,
 }
 
 impl DieselSqliteExecutor {
-    pub fn new(pool: Pool<ConnectionManager<SqliteConnection>>) -> Self {
-        Self {
-            pool: Arc::new(pool),
-        }
+    pub fn new(pool: DbPool) -> Self {
+        Self { pool }
     }
 }
 

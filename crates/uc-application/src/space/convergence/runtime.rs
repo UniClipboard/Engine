@@ -48,6 +48,9 @@ impl WorkspaceConvergence {
                     "workspace convergence: legacy migration marker recovery deferred"
                 );
             }
+            if let Err(error) = owner.recover_pending_admissions().await {
+                warn!(error = %error, "workspace convergence: pending admissions deferred");
+            }
             if let Err(error) = owner.recover_pending_membership_effects().await {
                 warn!(error = %error, "workspace convergence: pending membership effects deferred");
             }
@@ -72,6 +75,9 @@ impl WorkspaceConvergence {
                             let _ = completed.send(());
                             if owner.recover_legacy_migration_marker().await.is_err() {
                                 warn!(error_kind = "legacy_migration_marker_recovery", retryable = true, "workspace convergence: legacy migration marker recovery deferred after resume");
+                            }
+                            if let Err(error) = owner.recover_pending_admissions().await {
+                                warn!(error = %error, "workspace convergence: pending admissions deferred after resume");
                             }
                             if let Err(error) = owner.recover_pending_membership_effects().await {
                                 warn!(error = %error, "workspace convergence: pending membership effects deferred after resume");
@@ -111,6 +117,9 @@ impl WorkspaceConvergence {
                     _ = recovery_tick.tick(), if !paused => {
                         if owner.recover_legacy_migration_marker().await.is_err() {
                             warn!(error_kind = "legacy_migration_marker_recovery", retryable = true, "workspace convergence: periodic legacy migration marker recovery deferred");
+                        }
+                        if let Err(error) = owner.recover_pending_admissions().await {
+                            warn!(error = %error, "workspace convergence: periodic admission recovery deferred");
                         }
                         if let Err(error) = owner.recover_pending_membership_effects().await {
                             warn!(error = %error, "workspace convergence: periodic membership effect recovery deferred");

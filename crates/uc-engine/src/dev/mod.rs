@@ -3,8 +3,6 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Once;
 
-use tokio::sync::broadcast;
-
 /// Initialize the tracing subscriber for integration tests.
 ///
 /// Honors the `RUST_LOG` environment filter (default `warn`) and writes

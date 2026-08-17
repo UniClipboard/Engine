@@ -91,15 +91,12 @@ pub struct SyncEngineDeps {
     /// Encrypted persistence for the unified workspace convergence state.
     pub workspace_convergence_repository:
         Arc<dyn uc_core::membership::WorkspaceConvergenceRepositoryPort>,
+    /// Profile-scoped encrypted persistence for durable admission attempts.
+    pub admission_attempt_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    pub admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort>,
+    pub legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort>,
     /// plaintext-hash → ciphertext-digest dedupe cache (Slice 3 Phase 1).
     pub blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,
-    /// switch-space backup table + main-table inline_data batch IO.
-    pub blob_migration_repo: Arc<dyn uc_core::ports::clipboard::BlobMigrationRepoPort>,
-    /// switch-space re-encryption migration stage persistence
-    /// (`.migration_state` file alongside `.setup_status`).
-    pub migration_state: Arc<dyn uc_core::ports::setup::MigrationStatePort>,
-    /// switch-space one-shot migration_key keyring management.
-    pub key_migration: Arc<dyn uc_core::ports::security::KeyMigrationPort>,
     /// iroh-blobs store dir, used when assembling the iroh blob handler.
     pub iroh_blob_store_dir: PathBuf,
     /// Application-facing analytics entry point (pairing / switch-space events).
@@ -169,6 +166,13 @@ pub struct SharedRuntimeDeps {
     pub active_clipboard_sse_source: broadcast::Sender<ActiveClipboardState>,
 }
 
+#[derive(Clone)]
+pub struct ProfileResetDeps {
+    pub lifecycle: Arc<dyn uc_core::ports::ProfileLifecyclePort>,
+    pub keys: Arc<dyn uc_core::ports::WipeProfileKeysPort>,
+    pub state: Arc<dyn uc_core::ports::ClearProfileStatePort>,
+}
+
 /// 进程级一次性装配产出的"持久"部分:进程内常驻的 `deps` 与按消费者归类的
 /// 旁路 bundle(`sync_engine` / `daemon_runtime` / `shared`)。
 ///
@@ -190,6 +194,7 @@ pub struct WiredDependencies {
     pub deps: AppDeps,
     /// P2P / iroh sync-engine assembly inputs (see [`SyncEngineDeps`]).
     pub sync_engine: SyncEngineDeps,
+    pub profile_reset: ProfileResetDeps,
     /// daemon main-loop-only bypass deps (see [`DaemonRuntimeDeps`]).
     #[cfg(feature = "lan-compat")]
     pub daemon_runtime: DaemonRuntimeDeps,
