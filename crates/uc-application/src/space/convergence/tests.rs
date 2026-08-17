@@ -5874,7 +5874,7 @@ async fn durable_admission_becomes_complete_only_after_both_sides_save() {
         )
         .await
         .unwrap();
-    let replayed_commit = sponsor
+    let replayed_commit = durable_admission_owner(Arc::clone(&sponsor_repository))
         .sponsor_commit(
             attempt_id,
             &prepared_message,
@@ -5908,7 +5908,7 @@ async fn durable_admission_becomes_complete_only_after_both_sides_save() {
         )
         .await
         .unwrap();
-    let replayed_applied = joiner
+    let replayed_applied = durable_admission_owner(Arc::clone(&joiner_repository))
         .joiner_apply(
             attempt_id,
             &commit_message,
@@ -6003,7 +6003,7 @@ async fn durable_admission_becomes_complete_only_after_both_sides_save() {
         )
         .await
         .unwrap();
-    let replayed_complete = sponsor
+    let replayed_complete = durable_admission_owner(Arc::clone(&sponsor_repository))
         .sponsor_complete(
             attempt_id,
             &applied_message,
@@ -6059,16 +6059,23 @@ async fn durable_admission_becomes_complete_only_after_both_sides_save() {
             .unwrap(),
         super::admission_transaction::JoinerActivationOutcomeV1::SpaceTransitionRequired
     );
-    assert!(joiner.requires_session_transition().await.unwrap());
+    let restarted_joiner = durable_admission_owner(Arc::clone(&joiner_repository));
+    assert!(restarted_joiner
+        .requires_session_transition()
+        .await
+        .unwrap());
     assert_eq!(
-        joiner
+        restarted_joiner
             .recover_space_transitions_after_session_drain()
             .await
             .unwrap(),
         1
     );
-    assert!(!joiner.requires_session_transition().await.unwrap());
-    let complete_ack = match joiner
+    assert!(!restarted_joiner
+        .requires_session_transition()
+        .await
+        .unwrap());
+    let complete_ack = match restarted_joiner
         .joiner_activate(attempt_id, &complete_message, b"admission-completion")
         .await
         .unwrap()
@@ -6080,7 +6087,7 @@ async fn durable_admission_becomes_complete_only_after_both_sides_save() {
             panic!("completed activation must rebuild its acknowledgment")
         }
     };
-    let replayed_ack = joiner
+    let replayed_ack = durable_admission_owner(Arc::clone(&joiner_repository))
         .joiner_activate(attempt_id, &complete_message, b"admission-completion")
         .await
         .unwrap();
@@ -6182,6 +6189,100 @@ async fn durable_admission_becomes_complete_only_after_both_sides_save() {
         .sponsor_confirm_active(attempt_id, &complete_ack)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn out_of_order_durable_messages_leave_the_saved_stage_unchanged() {
+    use uc_core::membership::AdmissionOutboxPurposeV1;
+
+    let sponsor_dir = tempfile::tempdir().unwrap();
+    let joiner_dir = tempfile::tempdir().unwrap();
+    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0xc1; 16]);
+    let joiner_repository = durable_admission_repository(&joiner_dir, [0xc2; 16]);
+    let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
+    let joiner = durable_admission_owner(Arc::clone(&joiner_repository));
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xc3; 32]);
+    let initiated = joiner
+        .start_join(
+            attempt_id,
+            [0xc4; 16],
+            b"sponsor",
+            b"join-request",
+            b"joiner-pending-state",
+            b"joiner-key-package",
+            b"joiner-target-access",
+        )
+        .await
+        .unwrap();
+    let (candidate, history, event, commitment, receipt) =
+        durable_candidate_verification_fixture(attempt_id);
+    let fake_commit = super::admission_transaction::durable_admission_message(
+        attempt_id,
+        AdmissionOutboxPurposeV1::Commit,
+        b"joiner",
+        Some([0xc5; 32]),
+        b"early-commit",
+    );
+    let fake_complete = super::admission_transaction::durable_admission_message(
+        attempt_id,
+        AdmissionOutboxPurposeV1::Complete,
+        b"joiner",
+        Some([0xc6; 32]),
+        b"early-complete",
+    );
+    let joiner_before = joiner_repository.load(attempt_id).await.unwrap().unwrap();
+
+    assert!(joiner
+        .joiner_apply(attempt_id, &fake_commit, &receipt, b"sponsor", b"applied")
+        .await
+        .is_err());
+    assert!(joiner
+        .joiner_activate(attempt_id, &fake_complete, b"completion")
+        .await
+        .is_err());
+    assert_eq!(
+        joiner_repository.load(attempt_id).await.unwrap(),
+        Some(joiner_before)
+    );
+
+    sponsor
+        .sponsor_accept_and_offer(
+            attempt_id,
+            [0xc7; 32],
+            &initiated.outboxes[0],
+            candidate,
+            history,
+            &event,
+            &commitment,
+            b"joiner",
+            b"candidate",
+        )
+        .await
+        .unwrap();
+    let sponsor_before = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
+    let fake_applied = super::admission_transaction::durable_admission_message(
+        attempt_id,
+        AdmissionOutboxPurposeV1::Applied,
+        b"sponsor",
+        Some([0xc8; 32]),
+        b"early-applied",
+    );
+
+    assert!(sponsor
+        .sponsor_complete(
+            attempt_id,
+            &fake_applied,
+            &receipt,
+            b"completion",
+            b"joiner",
+            b"complete",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        sponsor_repository.load(attempt_id).await.unwrap(),
+        Some(sponsor_before)
+    );
 }
 
 #[tokio::test]

@@ -307,17 +307,27 @@ pub(crate) struct DurableAdmissionCommitPayloadV1 {
 
 impl DurableAdmissionCommitPayloadV1 {
     pub(crate) const FORMAT_V1: u16 = 1;
+    const MAX_COMPLETION_RECOVERY_ROUTES: usize = 256;
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>, WorkspaceConvergenceError> {
+        self.validate()?;
         postcard::to_stdvec(self).map_err(admission_storage)
     }
 
     pub(crate) fn decode(encoded: &[u8]) -> Result<Self, WorkspaceConvergenceError> {
         let payload: Self = postcard::from_bytes(encoded).map_err(admission_storage)?;
-        if payload.format_version != Self::FORMAT_V1 {
+        payload.validate()?;
+        Ok(payload)
+    }
+
+    fn validate(&self) -> Result<(), WorkspaceConvergenceError> {
+        if self.format_version != Self::FORMAT_V1 {
             return Err(inconsistent("unsupported durable commit payload"));
         }
-        Ok(payload)
+        if self.completion_recovery_routes.len() > Self::MAX_COMPLETION_RECOVERY_ROUTES {
+            return Err(inconsistent("too many completion recovery routes"));
+        }
+        Ok(())
     }
 }
 
@@ -3059,7 +3069,7 @@ fn inconsistent(message: impl Into<String>) -> WorkspaceConvergenceError {
 
 #[cfg(test)]
 mod tests {
-    use super::CompletionRecoveryRouteV1;
+    use super::{CompletionRecoveryRouteV1, DurableAdmissionCommitPayloadV1};
     use uc_core::ids::DeviceId;
     use uc_core::membership::{AdmissionChangeFacts, MemberInstanceId};
     use uc_core::security::IdentityFingerprint;
@@ -3090,5 +3100,32 @@ mod tests {
         assert!(!encoded
             .windows(facts.identity_signature.len())
             .any(|window| window == facts.identity_signature));
+    }
+
+    #[test]
+    fn durable_commit_accepts_256_recovery_routes_and_rejects_257() {
+        let route = CompletionRecoveryRouteV1 {
+            member_instance: MemberInstanceId::from_bytes([0x44; 32]),
+            device_id: DeviceId::new("helper-device"),
+            transport_public_key: vec![0x55; 32],
+            transport_address_blob: vec![0x66; 32],
+        };
+        let payload = |route_count| DurableAdmissionCommitPayloadV1 {
+            format_version: DurableAdmissionCommitPayloadV1::FORMAT_V1,
+            candidate_event_id: [0x77; 32],
+            security_commitment_id: [0x88; 32],
+            prepared_proof: vec![0x99],
+            resume_public_key: vec![0xaa; 32],
+            existing_member_deliveries: Vec::new(),
+            completion_recovery_routes: vec![route.clone(); route_count],
+        };
+
+        let boundary = payload(256).encode().unwrap();
+        assert!(DurableAdmissionCommitPayloadV1::decode(&boundary).is_ok());
+
+        let over_limit = payload(257);
+        assert!(over_limit.encode().is_err());
+        let untrusted_over_limit = postcard::to_stdvec(&over_limit).unwrap();
+        assert!(DurableAdmissionCommitPayloadV1::decode(&untrusted_over_limit).is_err());
     }
 }

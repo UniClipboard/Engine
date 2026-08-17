@@ -573,6 +573,113 @@ fn history_exchange_splits_the_256_event_boundary_without_losing_verification() 
 }
 
 #[test]
+fn history_exchange_splits_the_256_activation_receipt_boundary() {
+    let verifier = DeterministicSignatureVerifier;
+    let a = admission("device-a", credential(1));
+    let mut history = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    let genesis = numbered_event(
+        &history,
+        None,
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: a.clone(),
+        },
+        1,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(genesis.clone(), &verifier)
+        .expect("genesis verifies");
+    let mut head = genesis.event_id();
+    for index in 0..257u16 {
+        let joining = admission(
+            &format!("device-receipt-{index}"),
+            credential(u8::try_from(index % 240 + 10).expect("fixture credential fits")),
+        );
+        let add = numbered_event(
+            &history,
+            Some(head),
+            &a,
+            MembershipOperationV2::AddDevice {
+                admission: joining.clone(),
+            },
+            index + 2,
+            &verifier,
+        );
+        history
+            .verify_and_receive_event(add.clone(), &verifier)
+            .expect("paged add verifies");
+        history
+            .verify_and_record_activation_receipt(
+                activation_receipt(&add, &joining, &verifier),
+                &verifier,
+            )
+            .expect("paged activation verifies");
+        head = add.event_id();
+    }
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+
+    let pages = history
+        .export_reconciliation_pages_v2(sender_facts)
+        .expect("receipt-heavy history exports");
+
+    assert_eq!(
+        pages
+            .iter()
+            .map(|page| page.record_counts().activation_receipts)
+            .sum::<usize>(),
+        257
+    );
+    assert!(pages
+        .iter()
+        .all(|page| page.record_counts().activation_receipts <= 256));
+    assert!(pages
+        .iter()
+        .any(|page| page.record_counts().activation_receipts == 256));
+    assert_eq!(
+        VersionedMembershipHistory::import_exchange_pages_v2(&pages, &verifier)
+            .expect("bounded receipt pages verify"),
+        history
+    );
+}
+
+#[test]
+fn paged_exchange_applies_a_receipt_before_its_members_later_event() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut history, a, b, _genesis, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let add_c = event(
+        &history,
+        Some(add_b.event_id()),
+        &b,
+        MembershipOperationV2::AddDevice {
+            admission: c.clone(),
+        },
+        3,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(add_c, &verifier)
+        .expect("activated B may author the successor");
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+
+    let pages = history
+        .export_reconciliation_pages_v2(sender_facts)
+        .expect("dependent history exports");
+    let imported = VersionedMembershipHistory::import_exchange_pages_v2(&pages, &verifier)
+        .expect("the saved receipt is applied before B's later event is verified");
+
+    assert_eq!(imported, history);
+    assert!(imported
+        .effective_members()
+        .contains(&c.facts.member_instance));
+}
+
+#[test]
 fn history_exchange_splits_pages_before_the_encoded_frame_limit() {
     let verifier = DeterministicSignatureVerifier;
     let a = admission("device-a", credential(1));
