@@ -1,5 +1,7 @@
 # UniClipboardEngine
 
+[![Codecov](https://codecov.io/gh/UniClipboard/Engine/graph/badge.svg)](https://codecov.io/gh/UniClipboard/Engine)
+
 UniClipboardEngine 是 UniClipboard 在 macOS、Windows、Linux、iOS、Android 和 HarmonyOS 上共享的端到端加密 P2P 引擎。仓库统一维护设备身份、空间与配对、剪贴板同步、历史记录、加密搜索、文件传输、本地密文持久化、数据库迁移、跨平台绑定和发布产物。
 
 它不是一个可以直接运行的终端应用。桌面程序和移动应用把它作为核心能力接入，并负责提供系统目录、安全存储、系统剪贴板、文件选择与生命周期通知。
