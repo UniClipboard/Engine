@@ -134,7 +134,8 @@ impl ProfileWorkspaceConvergence {
                 Err(WorkspaceConvergenceError::Locked)
                 | Err(WorkspaceConvergenceError::Repository(
                     WorkspaceConvergenceRepositoryError::Locked,
-                )) => Ok(self.unavailable_device_trust_snapshot()),
+                )) => Ok(self
+                    .unavailable_device_trust_snapshot(self.admission.current_local_join().await?)),
                 Err(error) => Err(error),
             };
         }
@@ -158,13 +159,16 @@ impl ProfileWorkspaceConvergence {
         })
     }
 
-    fn unavailable_device_trust_snapshot(&self) -> DeviceTrustSnapshot {
+    fn unavailable_device_trust_snapshot(
+        &self,
+        current_join: Option<CurrentJoinStatus>,
+    ) -> DeviceTrustSnapshot {
         DeviceTrustSnapshot {
             revision: 0,
             local_device_id: self.own_device.clone(),
             local_membership: DeviceMembership::Unavailable,
             current_change: None,
-            current_join: None,
+            current_join,
             pending_inbound_member: None,
             devices: Vec::new(),
             recovery: RecoveryAvailability::NotAvailableInThisVersion,

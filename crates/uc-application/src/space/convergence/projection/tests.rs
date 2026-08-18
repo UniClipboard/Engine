@@ -144,6 +144,51 @@ async fn profile_device_trust_is_explicitly_unavailable_while_active_space_is_lo
 }
 
 #[tokio::test]
+async fn locked_active_space_preserves_the_durable_current_join_projection() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0x6e; 16]);
+    let admission = durable_admission_owner(Arc::clone(&admission_repository));
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x6f; 32]);
+    let join_id = [0x70; 16];
+    admission
+        .start_join(
+            attempt_id,
+            join_id,
+            b"sponsor",
+            b"join-request",
+            b"joiner-pending-state",
+            b"joiner-key-package",
+            b"joiner-target-access",
+        )
+        .await
+        .unwrap();
+    let mut deps = test_deps(Arc::new(LockedWorkspaceRepository), "joiner", Vec::new());
+    deps.admission_attempts = Arc::clone(&admission_repository)
+        as Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>;
+    let active = WorkspaceConvergence::new(deps);
+    let profile = super::ProfileWorkspaceConvergence::new(
+        admission_repository,
+        DeviceId::new("joiner"),
+        Arc::new(UnusedClock),
+    );
+    profile.attach_active(Some(active)).await;
+
+    let snapshot = profile.query_device_trust().await.unwrap();
+
+    assert!(matches!(
+        snapshot.current_join,
+        Some(super::CurrentJoinStatus::Pending {
+            join_id: projected_join_id,
+            ..
+        }) if projected_join_id == join_id
+    ));
+    assert_eq!(
+        snapshot.blocked_reason,
+        Some(super::ActionUnavailableReason::EngineUnavailable)
+    );
+}
+
+#[tokio::test]
 async fn pending_inbound_projection_shows_only_the_active_lineage_non_terminal_candidate() {
     use uc_core::membership::AdmissionRejectionReasonV1;
 
