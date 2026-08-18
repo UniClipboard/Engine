@@ -5,7 +5,8 @@ use tokio::sync::broadcast;
 use crate::facade::space_setup::SpaceFacade;
 use crate::space::convergence::assembly::SpaceConvergenceAssembly;
 use crate::space::convergence::connectivity::membership::{
-    start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
+    start_membership_connectivity, MembershipConnectivityActivity, MembershipConnectivityDeps,
+    MembershipConnectivityRuntime,
 };
 use crate::space::convergence::discovery::{
     MembershipConvergenceActivity, MembershipConvergenceRuntime,
@@ -29,6 +30,7 @@ impl SpaceApplicationHandle {
 pub struct SpaceMembershipActivity {
     membership: MembershipConvergenceActivity,
     workspace: WorkspaceConvergenceActivity,
+    connectivity: MembershipConnectivityActivity,
 }
 
 #[async_trait::async_trait]
@@ -44,6 +46,7 @@ impl crate::space::convergence::discovery::MembershipConvergenceActivityPort
     }
 
     async fn resume(&self) -> Result<(), String> {
+        self.connectivity.resume();
         self.membership
             .resume()
             .await
@@ -83,6 +86,7 @@ impl SpaceApplicationRuntime {
             activity: SpaceMembershipActivity {
                 membership: membership_runtime.activity(),
                 workspace: convergence_runtime.activity(),
+                connectivity: connectivity_runtime.activity(),
             },
         };
         Self {
