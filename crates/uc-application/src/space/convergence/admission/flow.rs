@@ -425,11 +425,6 @@ impl WorkspaceConvergence {
         }
         let _guard = self.state_lock.lock().await;
         let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
-        let attempt = self
-            .admission
-            .load(attempt_id)
-            .await?
-            .ok_or(WorkspaceConvergenceError::JoinNotFound)?;
         let candidate_message = transaction::durable_admission_message(
             attempt_id,
             AdmissionOutboxPurposeV1::Candidate,
@@ -440,6 +435,12 @@ impl WorkspaceConvergence {
         if candidate_message.message_id != frame.message_id {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         }
+        let Some(attempt) = self.admission.load(attempt_id).await? else {
+            if self.admission.is_compacted_superseded(attempt_id).await? {
+                return Err(WorkspaceConvergenceError::RecoveryRequired);
+            }
+            return Err(WorkspaceConvergenceError::JoinNotFound);
+        };
         if attempt.terminal_result
             == Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
         {
@@ -639,11 +640,6 @@ impl WorkspaceConvergence {
         }
         let _guard = self.state_lock.lock().await;
         let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
-        let attempt = self
-            .admission
-            .load(attempt_id)
-            .await?
-            .ok_or(WorkspaceConvergenceError::JoinNotFound)?;
         let commit = transaction::durable_admission_message(
             attempt_id,
             AdmissionOutboxPurposeV1::Commit,
@@ -654,6 +650,12 @@ impl WorkspaceConvergence {
         if commit.message_id != frame.message_id {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         }
+        let Some(attempt) = self.admission.load(attempt_id).await? else {
+            if self.admission.is_compacted_superseded(attempt_id).await? {
+                return Err(WorkspaceConvergenceError::RecoveryRequired);
+            }
+            return Err(WorkspaceConvergenceError::JoinNotFound);
+        };
         if attempt.terminal_result
             == Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
         {
@@ -944,11 +946,6 @@ impl WorkspaceConvergence {
         }
         let _guard = self.state_lock.lock().await;
         let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
-        let attempt = self
-            .admission
-            .load(attempt_id)
-            .await?
-            .ok_or(WorkspaceConvergenceError::JoinNotFound)?;
         let complete = transaction::durable_admission_message(
             attempt_id,
             AdmissionOutboxPurposeV1::Complete,
@@ -959,6 +956,12 @@ impl WorkspaceConvergence {
         if complete.message_id != frame.message_id {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         }
+        let Some(attempt) = self.admission.load(attempt_id).await? else {
+            if self.admission.is_compacted_superseded(attempt_id).await? {
+                return Err(WorkspaceConvergenceError::RecoveryRequired);
+            }
+            return Err(WorkspaceConvergenceError::JoinNotFound);
+        };
         if attempt.terminal_result
             == Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
         {

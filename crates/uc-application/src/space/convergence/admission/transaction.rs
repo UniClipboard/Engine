@@ -647,6 +647,11 @@ impl DurableAdmissionTransaction {
                     .iter()
                     .rev()
                     .find(|message| !message.superseded)
+                    .or_else(|| {
+                        previous.outboxes.iter().rev().find(|message| {
+                            message.purpose == AdmissionOutboxPurposeV1::JoinRequest
+                        })
+                    })
                     .map(|message| message.message_id);
                 let cleanup = outbound_message(
                     previous.attempt_id,
@@ -2525,6 +2530,20 @@ impl DurableAdmissionTransaction {
             .load(attempt_id)
             .await
             .map_err(map_repository_error)
+    }
+
+    pub(crate) async fn is_compacted_superseded(
+        &self,
+        attempt_id: AdmissionAttemptId,
+    ) -> Result<bool, WorkspaceConvergenceError> {
+        Ok(self
+            .repository
+            .load_terminal(attempt_id)
+            .await
+            .map_err(map_repository_error)?
+            .is_some_and(|terminal| {
+                terminal.terminal_result == AdmissionTerminalResultV1::SupersededByNewJoin
+            }))
     }
 
     pub(crate) async fn save_completion_recovery_challenge(

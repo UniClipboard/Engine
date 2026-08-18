@@ -468,19 +468,25 @@ mod tests {
         sender_seed: [u8; 32],
         receiver_addr: iroh::EndpointAddr,
         snapshot_hash: &str,
-    ) -> Result<PullResponse, super::pull_wire::PullWireError> {
+    ) -> Result<PullResponse, String> {
         let sender = bind_endpoint_with(sender_seed).await;
         wait_for_direct_addrs(&sender).await;
         let conn = sender
             .connect(receiver_addr, ACTIVE_CLIPBOARD_PULL_ALPN)
             .await
             .expect("dial serve");
-        let (mut send, mut recv) = conn.open_bi().await.expect("open_bi");
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .map_err(|err| format!("open stream: {err}"))?;
         write_request(&mut send, snapshot_hash)
             .await
-            .expect("write request");
-        send.finish().expect("finish");
-        let resp = read_response(&mut recv).await;
+            .map_err(|err| format!("write request: {err}"))?;
+        send.finish()
+            .map_err(|err| format!("finish request: {err}"))?;
+        let resp = read_response(&mut recv)
+            .await
+            .map_err(|err| format!("read response: {err}"));
         let _ = conn.closed().await;
         resp
     }

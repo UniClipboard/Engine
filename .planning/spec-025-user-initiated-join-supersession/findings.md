@@ -56,6 +56,17 @@
 | Memory registry contains no direct ADR-022 entry | Current workspace documents and source remain authoritative. |
 | Full workspace tests exposed UniFFI shutdown timeouts at five seconds, and two full serial reruns still fluctuated at 15 seconds | Use a shared 30-second deadline for all public-contract tests; production shutdown behavior remains unchanged. |
 | Full workspace tests exposed a host clipboard operation that could outlive session shutdown | Make the operation observe the same session cancellation signal as other Engine operations. |
+| The final workspace run exposed a race in a negative Iroh pull test: the peer could be rejected while opening the stream, but the helper only accepted rejection while reading the response | Let the test helper report transport failure at any request stage; positive cases still require a decoded response. |
+| Strict review found that an Initiated join became incorrectly non-supersedable after its JoinRequest delivery acknowledgment marked the outbox settled | Treat a valid saved initial request as the replay fact even after delivery settles, and use its message id as the cleanup predecessor when no active outbox remains. |
+| Second strict review found Candidate completeness omitted the persisted identity binding, and the negative pull helper would accept a failure to establish the connection | Require the candidate identity binding; keep the negative test's successful dial precondition and only accept rejection after connection establishment. |
+
+## Phase 9 Audit Findings
+
+- The specification's Fresh/Same-Space/Cross-Space regression claim is not directly established by the newly named generic supersession tests.
+- `automatic_recovery_keeps_the_same_join_identity` currently proves recovery-material identity after reopening only at the initial stage; it does not directly exercise every protocol stage or lost acknowledgements as the test table says.
+- The same-invitation integration test proves a new local attempt and join, but does not directly prove that sponsor invitation consumption stays bound to the original attempt.
+- Candidate, Commit, Complete, rejection cleanup, and multiple-cleanup recovery have focused tests; Rejected, Applied, delivery acknowledgement, compaction, and plaintext-at-rest coverage still require an exact evidence audit.
+- The Android two-device acceptance item remains skipped and cannot be converted into automated proof.
 
 ## Resources
 

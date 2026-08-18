@@ -829,11 +829,36 @@ impl AdmissionAttemptV1 {
         ) {
             return Err(SupersedeAdmissionAttemptError::UnsafeStage);
         }
+        let initial_join_request = self.outboxes.iter().rev().find(|message| {
+            message.purpose == AdmissionOutboxPurposeV1::JoinRequest
+                && message.predecessor_message_id.is_none()
+                && !message.recipient.is_empty()
+                && !message.payload.is_empty()
+                && message.message_id != [0; 32]
+        });
+        let candidate_material_is_complete = joiner.stage != JoinerAdmissionStageV1::Candidate
+            || (self.lineage_id.is_some()
+                && self.base_history_position.is_some()
+                && self.candidate_event.is_some()
+                && self.candidate_event_id.is_some()
+                && self.target_members_digest.is_some()
+                && self.security_commitment.is_some()
+                && self.security_commit.is_some()
+                && self.security_welcome.is_some()
+                && self.target_protection_group_id.is_some()
+                && self.target_key_catalog.is_some()
+                && self.target_relationships.is_some()
+                && self.existing_member_security_deliveries.is_some()
+                && self.staged_security_state.is_some()
+                && self.base_membership_history.is_some()
+                && self.identity_binding.is_some());
         if self.prepared_proof.is_some()
             || self.write_ahead_recovery.is_some()
             || self.space_transition.is_some()
             || self.space_transition_result.is_some()
             || self.cleanup_pending
+            || initial_join_request.is_none()
+            || !candidate_material_is_complete
             || self.join_id.is_none()
             || self.local_join_ordinal.is_none()
             || self.joiner_pending_security_state.is_none()
@@ -855,6 +880,7 @@ impl AdmissionAttemptV1 {
             .iter()
             .rev()
             .find(|message| !message.superseded)
+            .or(initial_join_request)
             .map(|message| message.message_id);
         if cleanup.purpose != AdmissionOutboxPurposeV1::CancelRequested
             || cleanup.recipient.is_empty()
@@ -1063,6 +1089,172 @@ mod tests {
             Err(SupersedeAdmissionAttemptError::RecoveryRequired)
         );
         assert_eq!(contradictory, original);
+    }
+
+    #[test]
+    fn join_without_a_valid_initial_request_cannot_be_superseded() {
+        let attempt_id = AdmissionAttemptId::from_bytes([13; 32]);
+        let mut attempt =
+            AdmissionAttemptV1::new_joiner(attempt_id, [14; 16], JoinerAdmissionStageV1::Initiated);
+        attempt.local_join_ordinal = Some(1);
+        attempt.joiner_pending_security_state = Some(vec![1]);
+        attempt.candidate_key_package = Some(vec![2]);
+        attempt.joiner_member_instance = Some(MemberInstanceId::from_bytes([3; 32]));
+        attempt.resume_public_key = Some(vec![4; 32]);
+        attempt.resume_private_key = Some(vec![5; 32]);
+
+        assert_eq!(
+            attempt.superseded_by_new_join(cancel_request(attempt_id)),
+            Err(SupersedeAdmissionAttemptError::RecoveryRequired)
+        );
+    }
+
+    #[test]
+    fn candidate_without_identity_binding_cannot_be_superseded() {
+        let attempt_id = AdmissionAttemptId::from_bytes([15; 32]);
+        let mut attempt =
+            AdmissionAttemptV1::new_joiner(attempt_id, [16; 16], JoinerAdmissionStageV1::Candidate);
+        attempt.local_join_ordinal = Some(1);
+        attempt.joiner_pending_security_state = Some(vec![1]);
+        attempt.candidate_key_package = Some(vec![2]);
+        attempt.joiner_member_instance = Some(MemberInstanceId::from_bytes([3; 32]));
+        attempt.resume_public_key = Some(vec![4; 32]);
+        attempt.resume_private_key = Some(vec![5; 32]);
+        attempt.outboxes.push(join_request(attempt_id));
+        attempt.lineage_id = Some("target-space".to_owned());
+        attempt.base_history_position = Some(vec![6]);
+        attempt.candidate_event = Some(vec![7]);
+        attempt.candidate_event_id = Some([8; 32]);
+        attempt.target_members_digest = Some([9; 32]);
+        attempt.security_commitment = Some(vec![10]);
+        attempt.security_commit = Some(vec![11]);
+        attempt.security_welcome = Some(vec![12]);
+        attempt.target_protection_group_id = Some("target-group".to_owned());
+        attempt.target_key_catalog = Some(vec![13]);
+        attempt.target_relationships = Some(Vec::new());
+        attempt.existing_member_security_deliveries = Some(Vec::new());
+        attempt.staged_security_state = Some(vec![14]);
+        attempt.base_membership_history = Some(vec![15]);
+
+        assert_eq!(
+            attempt.superseded_by_new_join(cancel_request(attempt_id)),
+            Err(SupersedeAdmissionAttemptError::RecoveryRequired)
+        );
+    }
+
+    #[test]
+    fn unsafe_roles_stages_and_recovery_states_cannot_be_superseded() {
+        let attempt_id = AdmissionAttemptId::from_bytes([17; 32]);
+        let mut base =
+            AdmissionAttemptV1::new_joiner(attempt_id, [18; 16], JoinerAdmissionStageV1::Initiated);
+        base.local_join_ordinal = Some(1);
+        base.joiner_pending_security_state = Some(vec![1]);
+        base.candidate_key_package = Some(vec![2]);
+        base.joiner_member_instance = Some(MemberInstanceId::from_bytes([3; 32]));
+        base.resume_public_key = Some(vec![4; 32]);
+        base.resume_private_key = Some(vec![5; 32]);
+        base.outboxes.push(join_request(attempt_id));
+
+        let mut sponsor = base.clone();
+        sponsor.join_id = None;
+        sponsor.local_join_ordinal = None;
+        sponsor.role_state =
+            super::AdmissionAttemptRoleStateV1::Sponsor(super::SponsorAdmissionStateV1 {
+                stage: super::SponsorAdmissionStageV1::Accepted,
+            });
+        assert_eq!(
+            sponsor.superseded_by_new_join(cancel_request(attempt_id)),
+            Err(SupersedeAdmissionAttemptError::NotJoiner)
+        );
+
+        let mut terminal = base.clone();
+        terminal.terminal_result = Some(AdmissionTerminalResultV1::Rejected);
+        assert_eq!(
+            terminal.superseded_by_new_join(cancel_request(attempt_id)),
+            Err(SupersedeAdmissionAttemptError::AlreadyTerminal)
+        );
+
+        for stage in [
+            JoinerAdmissionStageV1::Prepared,
+            JoinerAdmissionStageV1::Committed,
+            JoinerAdmissionStageV1::Applied,
+            JoinerAdmissionStageV1::Completed,
+            JoinerAdmissionStageV1::Rejected,
+            JoinerAdmissionStageV1::Superseded,
+        ] {
+            let mut unsafe_stage = base.clone();
+            unsafe_stage.role_state =
+                super::AdmissionAttemptRoleStateV1::Joiner(super::JoinerAdmissionStateV1 { stage });
+            assert_eq!(
+                unsafe_stage.superseded_by_new_join(cancel_request(attempt_id)),
+                Err(SupersedeAdmissionAttemptError::UnsafeStage)
+            );
+        }
+
+        let mut recovery_bound = Vec::new();
+        let mut write_ahead = base.clone();
+        write_ahead.write_ahead_recovery = Some(vec![1]);
+        recovery_bound.push(write_ahead);
+        let mut transition = base.clone();
+        transition.space_transition = Some(vec![1]);
+        recovery_bound.push(transition);
+        let mut transition_result = base.clone();
+        transition_result.space_transition_result = Some(vec![1]);
+        recovery_bound.push(transition_result);
+        let mut cleanup_pending = base.clone();
+        cleanup_pending.cleanup_pending = true;
+        recovery_bound.push(cleanup_pending);
+        let mut missing_member = base.clone();
+        missing_member.joiner_member_instance = None;
+        recovery_bound.push(missing_member);
+        let mut missing_resume_key = base;
+        missing_resume_key.resume_private_key = None;
+        recovery_bound.push(missing_resume_key);
+
+        for attempt in recovery_bound {
+            assert_eq!(
+                attempt.superseded_by_new_join(cancel_request(attempt_id)),
+                Err(SupersedeAdmissionAttemptError::RecoveryRequired)
+            );
+        }
+    }
+
+    #[test]
+    fn appended_join_stage_and_terminal_variants_keep_old_wire_values() {
+        #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+        enum PreviousTerminalResultV1 {
+            Active,
+            Completed,
+            Rejected,
+        }
+
+        let joiner_stages = [
+            JoinerAdmissionStageV1::Initiated,
+            JoinerAdmissionStageV1::Candidate,
+            JoinerAdmissionStageV1::Prepared,
+            JoinerAdmissionStageV1::Committed,
+            JoinerAdmissionStageV1::Applied,
+            JoinerAdmissionStageV1::Completed,
+            JoinerAdmissionStageV1::Rejected,
+            JoinerAdmissionStageV1::Superseded,
+        ];
+        for (index, stage) in joiner_stages.into_iter().enumerate() {
+            assert_eq!(postcard::to_stdvec(&stage).unwrap(), vec![index as u8]);
+        }
+
+        let terminal_results = [
+            AdmissionTerminalResultV1::Active,
+            AdmissionTerminalResultV1::Completed,
+            AdmissionTerminalResultV1::Rejected,
+            AdmissionTerminalResultV1::SupersededByNewJoin,
+        ];
+        for (index, terminal) in terminal_results.into_iter().enumerate() {
+            assert_eq!(postcard::to_stdvec(&terminal).unwrap(), vec![index as u8]);
+        }
+        for index in 0..3 {
+            assert!(postcard::from_bytes::<PreviousTerminalResultV1>(&[index]).is_ok());
+        }
+        assert!(postcard::from_bytes::<PreviousTerminalResultV1>(&[3]).is_err());
     }
 
     fn facts(instance: u8, device_id: &str, fingerprint: &str) -> AdmissionChangeFacts {

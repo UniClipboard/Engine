@@ -337,6 +337,113 @@ async fn superseded_late_complete_is_recorded_through_the_protocol_entry() {
 }
 
 #[tokio::test]
+async fn compacted_superseded_join_rejects_late_protocol_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xf7; 16]);
+    let transaction = durable_admission_owner(Arc::clone(&repository));
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+    let previous = repository.load(previous_id).await.unwrap().unwrap();
+    let cleanup = previous
+        .outboxes
+        .iter()
+        .find(|message| {
+            message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested
+                && !message.superseded
+        })
+        .unwrap();
+    transaction
+        .acknowledge_delivery(
+            previous_id,
+            &super::admission::admission_acknowledgment(cleanup),
+        )
+        .await
+        .unwrap();
+    transaction.compact_if_settled(previous_id).await.unwrap();
+
+    let mut deps = test_deps(
+        Arc::new(MemoryWorkspaceRepository::default()),
+        "device-1",
+        Vec::new(),
+    );
+    deps.admission_attempts = Arc::clone(&repository);
+    let owner = WorkspaceConvergence::new(deps);
+    let candidate = super::admission::durable_admission_message(
+        previous_id,
+        uc_core::membership::AdmissionOutboxPurposeV1::Candidate,
+        b"device-1",
+        Some([5; 32]),
+        b"late-candidate",
+    );
+    let candidate_frame = uc_core::pairing::DurableAdmissionFrame {
+        attempt_id: *previous_id.as_bytes(),
+        kind: uc_core::pairing::DurableAdmissionMessageKind::Candidate,
+        message_id: candidate.message_id,
+        predecessor_message_id: candidate.predecessor_message_id,
+        payload: candidate.payload,
+    };
+    assert!(matches!(
+        owner
+            .prepare_joiner_candidate(
+                &candidate_frame,
+                &FailingPreparation,
+                &FailingTargetAccess,
+                &uc_core::crypto::domain::Passphrase::new("passphrase"),
+            )
+            .await,
+        Err(WorkspaceConvergenceError::RecoveryRequired)
+    ));
+
+    let commit = super::admission::durable_admission_message(
+        previous_id,
+        uc_core::membership::AdmissionOutboxPurposeV1::Commit,
+        b"device-1",
+        Some([0xf8; 32]),
+        b"late-commit",
+    );
+    let commit_frame = uc_core::pairing::DurableAdmissionFrame {
+        attempt_id: *previous_id.as_bytes(),
+        kind: uc_core::pairing::DurableAdmissionMessageKind::Commit,
+        message_id: commit.message_id,
+        predecessor_message_id: commit.predecessor_message_id,
+        payload: commit.payload,
+    };
+    assert!(matches!(
+        owner
+            .apply_joiner_commit(&commit_frame, &FailingPreparation)
+            .await,
+        Err(WorkspaceConvergenceError::RecoveryRequired)
+    ));
+
+    let complete = super::admission::durable_admission_message(
+        previous_id,
+        uc_core::membership::AdmissionOutboxPurposeV1::Complete,
+        b"device-1",
+        Some([0xf9; 32]),
+        b"late-complete",
+    );
+    let complete_frame = uc_core::pairing::DurableAdmissionFrame {
+        attempt_id: *previous_id.as_bytes(),
+        kind: uc_core::pairing::DurableAdmissionMessageKind::Complete,
+        message_id: complete.message_id,
+        predecessor_message_id: complete.predecessor_message_id,
+        payload: complete.payload,
+    };
+    assert!(matches!(
+        owner.activate_joiner_complete(&complete_frame).await,
+        Err(WorkspaceConvergenceError::RecoveryRequired)
+    ));
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+}
+
+#[tokio::test]
 async fn superseded_rejection_only_confirms_old_cleanup() {
     let directory = tempfile::tempdir().unwrap();
     let repository = durable_admission_repository(&directory, [0xdb; 16]);
@@ -363,6 +470,45 @@ async fn superseded_rejection_only_confirms_old_cleanup() {
     );
     assert_eq!(previous.rejection_reason, None);
     assert!(previous.outboxes.iter().all(|message| message.superseded));
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+}
+
+#[tokio::test]
+async fn superseded_delivery_acknowledgment_only_settles_old_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xf6; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+    let previous = repository.load(previous_id).await.unwrap().unwrap();
+    let cleanup = previous
+        .outboxes
+        .iter()
+        .find(|message| {
+            message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested
+                && !message.superseded
+        })
+        .unwrap();
+    let acknowledgment = super::admission::admission_acknowledgment(cleanup);
+
+    owner
+        .acknowledge_delivery(previous_id, &acknowledgment)
+        .await
+        .unwrap();
+
+    let settled_previous = repository.load(previous_id).await.unwrap().unwrap();
+    assert!(settled_previous
+        .outboxes
+        .iter()
+        .all(|message| message.superseded));
+    assert!(settled_previous.inbox_dedup.contains(&acknowledgment));
     assert_eq!(
         repository
             .project_current_local_join()
@@ -3296,6 +3442,7 @@ fn advance_joiner_to_candidate_or_prepared(
     attempt.existing_member_security_deliveries = Some(Vec::new());
     attempt.staged_security_state = Some(vec![9]);
     attempt.base_membership_history = Some(vec![10]);
+    attempt.identity_binding = Some(vec![14]);
     if stage == uc_core::membership::JoinerAdmissionStageV1::Prepared {
         attempt.verified_membership_history = Some(vec![11]);
         attempt.prepared_proof = Some(vec![12]);
@@ -3417,7 +3564,101 @@ async fn explicit_join_with_same_invitation_starts_new_attempt() {
 
     assert_ne!(first.attempt.attempt_id, second.attempt.attempt_id);
     assert_ne!(first.attempt.join_id, second.attempt.join_id);
+    assert_ne!(
+        first.attempt.local_join_ordinal,
+        second.attempt.local_join_ordinal
+    );
+    assert_ne!(
+        first.attempt.resume_public_key,
+        second.attempt.resume_public_key
+    );
+    assert_ne!(
+        first.attempt.resume_private_key,
+        second.attempt.resume_private_key
+    );
+    assert_ne!(
+        first.prepared_group_join.key_package,
+        second.prepared_group_join.key_package
+    );
+    assert_ne!(
+        first.prepared_group_join.private_state(),
+        second.prepared_group_join.private_state()
+    );
+    assert_ne!(
+        first.prepared_group_join.member_instance(),
+        second.prepared_group_join.member_instance()
+    );
     assert_eq!(preparation.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn explicit_join_supersedes_initiated_attempt_after_request_delivery_ack() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xe1; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+    let first = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"first-sponsor",
+            b"first-request",
+            false,
+        )
+        .await
+        .unwrap();
+    let first_request = first.attempt.outboxes[0].clone();
+    owner
+        .acknowledge_delivery(
+            first.attempt.attempt_id,
+            &super::admission::admission_acknowledgment(&first_request),
+        )
+        .await
+        .unwrap();
+
+    let second = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"second-sponsor",
+            b"second-request",
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(first.attempt.attempt_id, second.attempt.attempt_id);
+    let previous = repository
+        .load(first.attempt.attempt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        previous.terminal_result,
+        Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+    );
+    let cleanup = previous
+        .outboxes
+        .iter()
+        .find(|message| {
+            message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested
+        })
+        .unwrap();
+    assert_eq!(
+        cleanup.predecessor_message_id,
+        Some(first_request.message_id)
+    );
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        second.attempt.attempt_id
+    );
 }
 
 #[tokio::test]
@@ -3471,6 +3712,87 @@ async fn explicit_join_material_failure_keeps_previous_attempt() {
 }
 
 #[tokio::test]
+async fn failed_new_request_delivery_keeps_replacement_current_for_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xfd; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+    let first = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"first-sponsor",
+            b"first-request",
+            false,
+        )
+        .await
+        .unwrap();
+    let replacement = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"second-sponsor",
+            b"second-request",
+            false,
+        )
+        .await
+        .unwrap();
+
+    let deferred = owner
+        .recover_with(&DeferredAdmissionDelivery)
+        .await
+        .unwrap();
+    assert_eq!(deferred.deliveries_attempted, 2);
+    assert_eq!(deferred.deliveries_confirmed, 0);
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        replacement.attempt.attempt_id
+    );
+    assert_eq!(
+        repository
+            .load(first.attempt.attempt_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminal_result,
+        Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+    );
+    assert!(
+        !repository
+            .load(replacement.attempt.attempt_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .outboxes[0]
+            .superseded
+    );
+
+    let reopened = durable_admission_owner(Arc::clone(&repository));
+    let recovered = reopened
+        .recover_with(&ConfirmingAdmissionDelivery)
+        .await
+        .unwrap();
+    assert_eq!(recovered.deliveries_attempted, 2);
+    assert_eq!(recovered.deliveries_confirmed, 2);
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        replacement.attempt.attempt_id
+    );
+}
+
+#[tokio::test]
 async fn explicit_join_supersedes_candidate_before_prepared() {
     let directory = tempfile::tempdir().unwrap();
     let repository = durable_admission_repository(&directory, [0xe1; 16]);
@@ -3478,6 +3800,10 @@ async fn explicit_join_supersedes_candidate_before_prepared() {
     let preparation = RotatingPreparation {
         calls: AtomicUsize::new(0),
     };
+    repository
+        .compare_and_replace_membership_history_v2(None, b"source-membership-history")
+        .await
+        .unwrap();
     let first = owner
         .prepare_join_before_network(
             &preparation,
@@ -3519,6 +3845,17 @@ async fn explicit_join_supersedes_candidate_before_prepared() {
             .unwrap()
             .terminal_result,
         Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+    );
+    let previous = repository
+        .load(first.attempt.attempt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(previous.space_transition.is_none());
+    assert_eq!(previous.rejection_reason, None);
+    assert_eq!(
+        repository.load_membership_history_v2().await.unwrap(),
+        Some(b"source-membership-history".to_vec())
     );
 }
 
@@ -3580,6 +3917,106 @@ async fn explicit_join_after_prepared_returns_stable_conflict() {
             .attempt_id,
         first.attempt.attempt_id
     );
+}
+
+#[tokio::test]
+async fn explicit_join_after_prepared_rejects_every_space_transition_mode() {
+    use uc_core::membership::{
+        AdmissionSpaceTransitionV2, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionV2,
+        FreshSpaceTransitionPhaseV1, FreshSpaceTransitionV1, SameSpaceTransitionPhaseV1,
+        SameSpaceTransitionV1, CROSS_SPACE_TRANSITION_FORMAT_V2, FRESH_SPACE_TRANSITION_FORMAT_V1,
+        SAME_SPACE_TRANSITION_FORMAT_V1,
+    };
+
+    for mode in 0..3 {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = durable_admission_repository(&directory, [0x80 + mode; 16]);
+        let owner = durable_admission_owner(Arc::clone(&repository));
+        let preparation = RotatingPreparation {
+            calls: AtomicUsize::new(0),
+        };
+        let first = owner
+            .prepare_join_before_network(
+                &preparation,
+                &DeviceId::new("joiner"),
+                b"first-sponsor",
+                b"first-request",
+                false,
+            )
+            .await
+            .unwrap();
+        let attempt_id = first.attempt.attempt_id;
+        let mut prepared = first.attempt.clone();
+        prepared.record_version = 1;
+        advance_joiner_to_candidate_or_prepared(
+            &mut prepared,
+            uc_core::membership::JoinerAdmissionStageV1::Prepared,
+        );
+        let transition = match mode {
+            0 => AdmissionSpaceTransitionV2::Fresh(FreshSpaceTransitionV1 {
+                transition_format_version: FRESH_SPACE_TRANSITION_FORMAT_V1,
+                attempt_id,
+                target_space_id: "target-space".to_owned(),
+                target_generation: [1; 16],
+                target_keyslot_ref: vec![2],
+                target_workspace_ref: vec![3],
+                phase: FreshSpaceTransitionPhaseV1::TargetStaged,
+            }),
+            1 => AdmissionSpaceTransitionV2::SameSpace(SameSpaceTransitionV1 {
+                transition_format_version: SAME_SPACE_TRANSITION_FORMAT_V1,
+                attempt_id,
+                target_space_id: "target-space".to_owned(),
+                source_generation: [4; 16],
+                target_generation: [5; 16],
+                target_keyslot_ref: vec![6],
+                target_workspace_ref: vec![7],
+                phase: SameSpaceTransitionPhaseV1::TargetStaged,
+            }),
+            _ => AdmissionSpaceTransitionV2::CrossSpace(CrossSpaceTransitionV2 {
+                transition_format_version: CROSS_SPACE_TRANSITION_FORMAT_V2,
+                attempt_id,
+                source_space_id: "source-space".to_owned(),
+                source_generation: [8; 16],
+                source_backup_ref: vec![9],
+                source_backup_digest: [10; 32],
+                source_revision_at_backup: 1,
+                target_space_id: "target-space".to_owned(),
+                target_generation: [11; 16],
+                target_keyslot_ref: vec![12],
+                target_workspace_ref: vec![13],
+                phase: CrossSpaceTransitionPhaseV2::TargetStaged,
+                final_source_revision: None,
+                final_manifest_digest: None,
+                migrated_records: 0,
+                preserved_unreadable_records: 0,
+                preserve_unreadable_history: false,
+            }),
+        };
+        prepared.space_transition = transition.encode();
+        repository
+            .compare_and_advance(attempt_id, 0, &prepared)
+            .await
+            .unwrap();
+        let metadata_before = repository.profile_metadata().await.unwrap();
+
+        assert!(matches!(
+            owner
+                .prepare_join_before_network(
+                    &preparation,
+                    &DeviceId::new("joiner"),
+                    b"second-sponsor",
+                    b"second-request",
+                    false,
+                )
+                .await,
+            Err(WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded)
+        ));
+        assert_eq!(repository.load(attempt_id).await.unwrap(), Some(prepared));
+        assert_eq!(
+            repository.profile_metadata().await.unwrap(),
+            metadata_before
+        );
+    }
 }
 
 #[tokio::test]

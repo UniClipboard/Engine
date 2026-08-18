@@ -925,7 +925,13 @@ mod tests {
             (E::PassphraseMismatch, R::PassphraseMismatch),
             (E::CorruptedKeyMaterial, R::CorruptedKeyMaterial),
             (E::DeviceNameRequired, R::DeviceNameRequired),
+            (E::UnreadableHistoryRequiresConfirmation, R::Internal),
+            (
+                E::PreviousJoinCannotBeSuperseded,
+                R::PreviousJoinCannotBeSuperseded,
+            ),
             (E::SponsorRejectedInvitation, R::SponsorRejectedInvitation),
+            (E::SponsorAdmissionUnavailable, R::SponsorInternal),
             (E::SponsorAdmissionConflict, R::SponsorAdmissionConflict),
             (E::SponsorDeclined, R::SponsorDeclined),
             (E::SponsorTimedOut, R::SponsorTimedOut),

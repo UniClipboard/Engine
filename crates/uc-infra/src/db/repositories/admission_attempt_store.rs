@@ -1397,10 +1397,11 @@ mod tests {
     use uc_core::membership::{
         AdmissionAttemptId, AdmissionAttemptRepositoryPort, AdmissionAttemptRoleStateV1,
         AdmissionAttemptV1, AdmissionInboxRecordV1, AdmissionOutboxMessageV1,
-        AdmissionOutboxPurposeV1, AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
-        AdmissionTerminalResultV1, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
-        CrossSpaceTransitionV2, JoinerAdmissionStageV1, LocalJoinStartMutationV1, MemberInstanceId,
-        SponsorAdmissionStageV1, SponsorAdmissionStateV1, CROSS_SPACE_TRANSITION_FORMAT_V2,
+        AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1, AdmissionSpaceTransitionResultV2,
+        AdmissionSpaceTransitionV2, AdmissionTerminalResultV1, CrossSpaceTransitionPhaseV2,
+        CrossSpaceTransitionResultV2, CrossSpaceTransitionV2, JoinerAdmissionStageV1,
+        LocalJoinStartMutationV1, MemberInstanceId, SponsorAdmissionStageV1,
+        SponsorAdmissionStateV1, CROSS_SPACE_TRANSITION_FORMAT_V2,
     };
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
@@ -1548,6 +1549,19 @@ mod tests {
             payload: vec![8],
             superseded: false,
         });
+        attempt
+    }
+
+    fn rejected_sponsor(attempt_id: AdmissionAttemptId) -> AdmissionAttemptV1 {
+        let mut attempt =
+            AdmissionAttemptV1::new_joiner(attempt_id, [0; 16], JoinerAdmissionStageV1::Initiated);
+        attempt.join_id = None;
+        attempt.role_state = AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
+            stage: SponsorAdmissionStageV1::Rejected,
+        });
+        attempt.invitation_claim = Some(b"saved-invitation-claim".to_vec());
+        attempt.terminal_result = Some(AdmissionTerminalResultV1::Rejected);
+        attempt.rejection_reason = Some(AdmissionRejectionReasonV1::InvitationUnavailable);
         attempt
     }
 
@@ -1775,6 +1789,176 @@ mod tests {
             assert_eq!(store.load(previous_id).await.unwrap(), Some(previous));
             assert_eq!(store.load(replacement_id).await.unwrap(), None);
         }
+    }
+
+    #[tokio::test]
+    async fn supersession_counter_overflows_roll_back_atomically() {
+        let directory = tempdir().unwrap();
+        let database_path = directory
+            .path()
+            .join("admission-supersession-overflow.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0xd0; 16]),
+        );
+        let previous_id = AdmissionAttemptId::from_bytes([0xd1; 32]);
+        let previous = supersedable_joiner(previous_id, [0xd2; 16], 0);
+        store
+            .commit_local_join_start(LocalJoinStartMutationV1::Create {
+                replacement: previous.clone(),
+            })
+            .await
+            .unwrap();
+        let cleanup = AdmissionOutboxMessageV1 {
+            purpose: AdmissionOutboxPurposeV1::CancelRequested,
+            recipient: vec![6],
+            message_id: [0xd3; 32],
+            predecessor_message_id: Some([7; 32]),
+            payload: vec![9],
+            superseded: false,
+        };
+        let mut previous_terminal = previous.superseded_by_new_join(cleanup.clone()).unwrap();
+        previous_terminal.record_version = 1;
+        let replacement_id = AdmissionAttemptId::from_bytes([0xd4; 32]);
+
+        let mut connection = pool.get().unwrap();
+        let mut state = store.load_state_on(&mut connection).unwrap();
+        state.metadata.next_local_join_ordinal = u64::MAX;
+        state.metadata.device_trust_revision = u64::MAX;
+        store.save_state_on(&mut connection, &state).unwrap();
+        drop(connection);
+        let replacement = supersedable_joiner(replacement_id, [0xd5; 16], u64::MAX);
+        assert_eq!(
+            store
+                .commit_local_join_start(LocalJoinStartMutationV1::Supersede {
+                    expected_previous_attempt_id: previous_id,
+                    expected_previous_record_version: 0,
+                    previous_terminal: previous_terminal.clone(),
+                    replacement,
+                })
+                .await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+        );
+        assert_eq!(
+            store.load(previous_id).await.unwrap(),
+            Some(previous.clone())
+        );
+        assert_eq!(store.load(replacement_id).await.unwrap(), None);
+        assert_eq!(
+            store
+                .profile_metadata()
+                .await
+                .unwrap()
+                .next_local_join_ordinal,
+            u64::MAX
+        );
+
+        let mut connection = pool.get().unwrap();
+        let mut state = store.load_state_on(&mut connection).unwrap();
+        state.metadata.next_local_join_ordinal = 1;
+        state.metadata.device_trust_revision = u64::MAX;
+        store.save_state_on(&mut connection, &state).unwrap();
+        drop(connection);
+        let replacement = supersedable_joiner(replacement_id, [0xd5; 16], 1);
+        assert_eq!(
+            store
+                .commit_local_join_start(LocalJoinStartMutationV1::Supersede {
+                    expected_previous_attempt_id: previous_id,
+                    expected_previous_record_version: 0,
+                    previous_terminal: previous_terminal.clone(),
+                    replacement,
+                })
+                .await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+        );
+        assert_eq!(
+            store.load(previous_id).await.unwrap(),
+            Some(previous.clone())
+        );
+        assert_eq!(store.load(replacement_id).await.unwrap(), None);
+        let metadata = store.profile_metadata().await.unwrap();
+        assert_eq!(metadata.next_local_join_ordinal, 1);
+        assert_eq!(metadata.device_trust_revision, u64::MAX);
+
+        let mut connection = pool.get().unwrap();
+        let mut state = store.load_state_on(&mut connection).unwrap();
+        state.metadata.device_trust_revision = 1;
+        let stored = state.attempts.get(&previous_id).cloned().unwrap();
+        let mut max_version_previous = store.open_attempt(previous_id, &stored).unwrap();
+        max_version_previous.record_version = u64::MAX;
+        let resealed = store
+            .seal_attempt(
+                &max_version_previous,
+                stored.wrapped_data_key,
+                stored.consumed_invitation_digest,
+            )
+            .unwrap();
+        state.attempts.insert(previous_id, resealed);
+        store.save_state_on(&mut connection, &state).unwrap();
+        drop(connection);
+        let mut max_version_terminal = max_version_previous
+            .superseded_by_new_join(cleanup)
+            .unwrap();
+        max_version_terminal.record_version = u64::MAX;
+        let replacement = supersedable_joiner(replacement_id, [0xd5; 16], 1);
+        assert_eq!(
+            store
+                .commit_local_join_start(LocalJoinStartMutationV1::Supersede {
+                    expected_previous_attempt_id: previous_id,
+                    expected_previous_record_version: u64::MAX,
+                    previous_terminal: max_version_terminal,
+                    replacement,
+                })
+                .await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+        );
+        assert_eq!(
+            store.load(previous_id).await.unwrap(),
+            Some(max_version_previous)
+        );
+        assert_eq!(store.load(replacement_id).await.unwrap(), None);
+        let metadata = store.profile_metadata().await.unwrap();
+        assert_eq!(metadata.next_local_join_ordinal, 1);
+        assert_eq!(metadata.device_trust_revision, 1);
+    }
+
+    #[tokio::test]
+    async fn consumed_invitation_stays_bound_to_its_original_attempt() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("admission-invitation-binding.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0xf3; 16]),
+        );
+        let invitation_digest = [0xf4; 32];
+        let original_id = AdmissionAttemptId::from_bytes([0xf5; 32]);
+        let original = rejected_sponsor(original_id);
+        store
+            .create(&original, Some(invitation_digest), None)
+            .await
+            .unwrap();
+        store.compact_terminal(original_id, 0).await.unwrap();
+
+        let replacement_id = AdmissionAttemptId::from_bytes([0xf6; 32]);
+        let replacement = rejected_sponsor(replacement_id);
+        assert_eq!(
+            store
+                .create(&replacement, Some(invitation_digest), None)
+                .await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::AlreadyExists)
+        );
+        assert_eq!(store.load(replacement_id).await.unwrap(), None);
+        assert_eq!(
+            store
+                .load_terminal(original_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .invitation_digest,
+            Some(invitation_digest)
+        );
     }
 
     fn applied_completion_helper(attempt_id: AdmissionAttemptId) -> AdmissionAttemptV1 {
@@ -2737,6 +2921,88 @@ mod tests {
         assert!(files
             .iter()
             .any(|path| path.ends_with("admission-encrypted.sqlite")));
+        for path in files {
+            let bytes = fs::read(path).unwrap();
+            for marker in markers {
+                assert!(!bytes.windows(marker.len()).any(|window| window == marker));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn superseded_terminal_and_cleanup_never_reach_sqlite_files_in_plaintext() {
+        let directory = tempdir().unwrap();
+        let database_path = directory
+            .path()
+            .join("admission-superseded-encrypted.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool.clone()),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0xf7; 16]),
+        );
+        let previous_id = AdmissionAttemptId::from_bytes([0xf8; 32]);
+        let mut previous = supersedable_joiner(previous_id, [0xf9; 16], 0);
+        previous.joiner_pending_security_state = Some(b"old-private-state-marker".to_vec());
+        previous.candidate_key_package = Some(b"old-key-package-marker".to_vec());
+        previous.outboxes[0].recipient = b"old-private-recipient-marker".to_vec();
+        previous.outboxes[0].payload = b"old-private-request-marker".to_vec();
+        store
+            .commit_local_join_start(LocalJoinStartMutationV1::Create {
+                replacement: previous.clone(),
+            })
+            .await
+            .unwrap();
+
+        let cleanup = AdmissionOutboxMessageV1 {
+            purpose: AdmissionOutboxPurposeV1::CancelRequested,
+            recipient: b"old-private-recipient-marker".to_vec(),
+            message_id: [0xfa; 32],
+            predecessor_message_id: Some([7; 32]),
+            payload: b"private-cleanup-payload-marker".to_vec(),
+            superseded: false,
+        };
+        let mut previous_terminal = previous.superseded_by_new_join(cleanup).unwrap();
+        previous_terminal.record_version = 1;
+        let replacement_id = AdmissionAttemptId::from_bytes([0xfb; 32]);
+        let mut replacement = supersedable_joiner(replacement_id, [0xfc; 16], 1);
+        replacement.joiner_pending_security_state = Some(b"new-private-state-marker".to_vec());
+        replacement.candidate_key_package = Some(b"new-key-package-marker".to_vec());
+        replacement.outboxes[0].recipient = b"new-private-recipient-marker".to_vec();
+        replacement.outboxes[0].payload = b"new-private-request-marker".to_vec();
+        store
+            .commit_local_join_start(LocalJoinStartMutationV1::Supersede {
+                expected_previous_attempt_id: previous_id,
+                expected_previous_record_version: 0,
+                previous_terminal,
+                replacement,
+            })
+            .await
+            .unwrap();
+
+        let _open_connection = pool.get().unwrap();
+        let markers: [&[u8]; 9] = [
+            b"old-private-state-marker",
+            b"old-key-package-marker",
+            b"old-private-recipient-marker",
+            b"old-private-request-marker",
+            b"private-cleanup-payload-marker",
+            b"new-private-state-marker",
+            b"new-key-package-marker",
+            b"new-private-recipient-marker",
+            b"new-private-request-marker",
+        ];
+        let files = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        for expected in [
+            "admission-superseded-encrypted.sqlite",
+            "admission-superseded-encrypted.sqlite-wal",
+            "admission-superseded-encrypted.sqlite-shm",
+        ] {
+            assert!(files.iter().any(|path| path.ends_with(expected)));
+        }
         for path in files {
             let bytes = fs::read(path).unwrap();
             for marker in markers {

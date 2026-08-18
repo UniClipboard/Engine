@@ -6,11 +6,11 @@ Implement and verify Spec 025 end to end without caller-side orchestration.
 
 ## Next Step
 
-Finish repository-wide verification and create the scoped local commit.
+Run the Android two-device physical acceptance when a second device is available.
 
 ## Current Phase
 
-Phase 8
+Phase 9
 
 ## Phases
 
@@ -73,6 +73,15 @@ Phase 8
 - [x] Create and inspect the scoped local commit
 - **Status:** complete
 
+### Phase 9: Requirement-by-requirement completion audit
+
+- [x] Map every acceptance criterion and edge case to direct current evidence
+- [x] Replace indirect or missing evidence with focused behavior tests
+- [x] Re-run focused and repository-wide verification after any correction
+- [x] Record physical-device evidence separately from automated evidence
+- [x] Create and inspect any required follow-up commit
+- **Status:** complete; full specification acceptance remains blocked by the skipped Android two-device flow
+
 ## Key Questions
 
 1. Which existing type owns the durable attempt stage and terminal outcome?
@@ -96,6 +105,7 @@ Phase 8
 |-------|---------|------------|
 | No ADR-022 memory registry hit | 1 | Use the current ADR and workspace source as authoritative evidence. |
 | Plan status patch referenced a decision row in the wrong file | 1 | Re-read the current planning files and applied a scoped correction. |
+| Prior delivery treated passing automation as completion while the Spec still has an unchecked Android two-device acceptance item | 1 | Re-opened the goal and started a requirement-by-requirement evidence audit before making any completion claim. |
 
 ## Notes
 

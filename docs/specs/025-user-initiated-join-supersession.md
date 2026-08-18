@@ -532,13 +532,17 @@ WorkspaceAdmissionOwnerPort::prepare_local_join_before_network(...)
 | --- | --- | --- |
 | `explicit_join_supersedes_initiated_attempt_atomically` | 第一次停在 Initiated，第二次使用不同邀请 | 新旧身份全不同，旧终态与新 Pending 同时提交，第二请求可发送 |
 | `explicit_join_with_same_invitation_starts_new_attempt` | Initiated 后再次提交相同邀请 | 本机新 attempt；邀请方消费规则仍按原 attempt 判断 |
+| `explicit_join_supersedes_initiated_attempt_after_request_delivery_ack` | 旧首次请求已确认送达但仍停在 Initiated 后再次提交 | 仍可取代，旧清理继续关联原请求，新加入成为当前项 |
 | `explicit_join_supersedes_candidate_before_prepared` | 旧加入推进到 Candidate 后再次提交 | 成功取代，不写成员历史或目标 Space 副作用 |
 | `explicit_join_after_prepared_returns_stable_conflict` | 旧加入持久保存 Prepared 后再次提交 | 1295，旧 current_join 不变，无新编号、材料或网络请求 |
-| `automatic_recovery_keeps_the_same_join_identity` | 每阶段断线、重启、丢 Ack | 同一 attempt/join/member/key material 恢复 |
+| `automatic_recovery_keeps_the_same_join_identity` | Initiated 保存后重开负责人并读取恢复资料 | 同一 attempt/join/member/key material 恢复 |
 | `superseded_late_candidate_cannot_replace_current_join` | 旧 Candidate 在新加入后迟到 | 只处理旧清理，新投影不变 |
 | `superseded_late_commit_fails_closed` | 向被取代 attempt 注入有效 Commit | 无第二成员事实，进入稳定恢复错误 |
 | `concurrent_explicit_joins_leave_one_current_attempt` | 两个公开加入并发 | 串行收敛，只有最高 ordinal 当前加入 |
 | `supersession_failure_recovers_whole_old_or_new_state` | 在加密和保存边界逐点失败并重启 | 只出现完整旧状态或完整新状态 |
+| `failed_new_request_delivery_keeps_replacement_current_for_recovery` | 原子提交后模拟第二请求投递失败并重开负责人 | 新 Pending 保持当前，恢复重发同一请求，不回退旧加入 |
+| `explicit_join_after_prepared_rejects_every_space_transition_mode` | Fresh、Same-Space、Cross-Space 已保存 Prepared 后再次加入 | 三种状态都返回冲突且原记录不变 |
+| `compacted_superseded_join_rejects_late_protocol_messages` | 旧取代记录完成清理并压缩后收到 Candidate、Commit、Complete | 仍识别旧终态并稳定失败关闭，新投影不变 |
 
 代表性精确命令在对应测试落地后执行：
 
@@ -560,27 +564,31 @@ cargo test -p uc-ohos-napi previous_join_conflict_keeps_its_stable_summary
 
 | 命令筛选 | 匹配数 | 通过数 |
 | --- | ---: | ---: |
-| `uc-core admission_attempt` | 3 | 3 |
+| `uc-core admission_attempt` | 7 | 7 |
 | `uc-infra commit_local_join_start` | 1 | 1 |
-| `uc-infra supersession_` | 2 | 2 |
-| `uc-application explicit_join_` | 6 | 6 |
-| `uc-application superseded_late_` | 6 | 6 |
+| `uc-infra supersession_` | 3 | 3 |
+| `uc-infra consumed_invitation_stays_bound_to_its_original_attempt` | 1 | 1 |
+| `uc-infra superseded_terminal_and_cleanup_never_reach_sqlite_files_in_plaintext` | 1 | 1 |
+| `uc-application explicit_join_` | 8 | 8 |
+| `uc-application superseded_` | 10 | 10 |
+| `uc-application failed_new_request_delivery_keeps_replacement_current_for_recovery` | 1 | 1 |
 | `uc-engine previous_join_cannot_be_superseded` | 1 | 1 |
 | `uc-engine-uniffi engine_errors_keep_their_stable_code_category_and_retryability` | 1 | 1 |
 | `uc-ohos-napi previous_join_conflict_keeps_its_stable_summary` | 1 | 1 |
 
-完整工作区 `cargo test --workspace --all-targets --locked` 通过；其中 `uc-application` 通过 845 项、
-`uc-core` 通过 264 项、`uc-infra` 通过 809 项、`uc-engine` 通过 196 项、UniFFI 绑定通过 44 项、
+完整工作区 `cargo test --workspace --all-targets --locked` 通过；其中 `uc-application` 通过 850 项、
+`uc-core` 通过 268 项、`uc-infra` 通过 812 项、`uc-engine` 通过 196 项、UniFFI 绑定通过 44 项、
 HarmonyOS 绑定通过 33 项。`uc-infra` 中 4 项原有手动性能测试保持忽略，未计为通过。
 
 故障验证覆盖新资料生成失败、旧记录重新加密失败、新记录密钥生成失败、新记录加密失败、版本冲突、
-数据库写入失败、提交后发送失败和重启恢复；每种情况都只恢复完整旧状态或完整新状态。
+计数或记录版本溢出、数据库写入失败、提交后发送失败和重启恢复；每种情况都只恢复完整旧状态或完整新状态。
 
 ## Regression Test
 
 - 保留并运行现有 `automatic_recovery_keeps_the_same_join_identity`、
   `durable_join_preparation_is_not_regenerated_after_restart`、取消与 Commit 竞争、乱序消息、终态压缩和邀请消费测试。
-- Fresh、Same-Space、Cross-Space 各覆盖 Initiated/Candidate 取代和 Prepared 冲突。
+- Initiated/Candidate 尚未保存目标空间切换类型，共用同一原子取代规则；一旦保存 Prepared，Fresh、Same-Space、
+  Cross-Space 三种切换记录都直接覆盖不可取代冲突，并确认原记录不变。
 - 运行完整工作区测试，并记录各包实际测试数；任何筛选为零都需修正命令或 feature 后重跑。
 - 运行仓库强制检查：
 
