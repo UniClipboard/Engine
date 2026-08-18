@@ -44,3 +44,34 @@ jobs:
 
       - name: Check patch whitespace
         run: git diff --check
+
+  coverage:
+    name: Rust coverage
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: rust-coverage
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Generate Rust coverage
+        run: cargo llvm-cov --workspace --all-targets --locked --lcov --output-path lcov.info
+
+      - name: Upload Rust coverage to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
