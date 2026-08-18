@@ -13,8 +13,8 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     LegacyPeerProbeError, LegacyPeerProbePort, LegacyUpgradeDescriptor, LegacyUpgradeDispatchError,
     LegacyUpgradeDispatchPort, LegacyUpgradeEndpointPort, LegacyUpgradeId, LegacyUpgradeRequest,
-    LegacyUpgradeResponse, LegacyUpgradeResponseKind, MemberRepositoryPort,
-    ProtectionGroupAdmission, ProtectionGroupId,
+    LegacyUpgradeRequestKind, LegacyUpgradeResponse, LegacyUpgradeResponseKind,
+    MemberRepositoryPort, ProtectionGroupAdmission, ProtectionGroupId,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
@@ -23,8 +23,8 @@ use uc_core::space_access::GroupAdmission;
 use super::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
 use super::connect_with_staggered_retry;
 
-const WIRE_VERSION: u8 = 1;
-pub const LEGACY_UPGRADE_ALPN: &[u8] = b"uniclipboard/legacy-upgrade/1";
+const WIRE_VERSION: u8 = 2;
+pub const LEGACY_UPGRADE_ALPN: &[u8] = b"uniclipboard/legacy-upgrade/2";
 const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const RESPONSE_ACCEPTED: u8 = 1;
@@ -49,6 +49,14 @@ struct WireRequest {
     descriptor: WireDescriptor,
     key_package: Vec<u8>,
     proof: Vec<u8>,
+    kind: WireRequestKind,
+}
+
+#[derive(Serialize, Deserialize)]
+enum WireRequestKind {
+    Admission,
+    ReadmissionProbe,
+    ReadmissionConfirmation,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -91,6 +99,13 @@ fn encode_request(request: &LegacyUpgradeRequest) -> Result<Vec<u8>, LegacyUpgra
             descriptor: descriptor_to_wire(request.descriptor()),
             key_package: request.key_package().to_vec(),
             proof: request.proof().to_vec(),
+            kind: match request.kind() {
+                LegacyUpgradeRequestKind::Admission => WireRequestKind::Admission,
+                LegacyUpgradeRequestKind::ReadmissionProbe => WireRequestKind::ReadmissionProbe,
+                LegacyUpgradeRequestKind::ReadmissionConfirmation => {
+                    WireRequestKind::ReadmissionConfirmation
+                }
+            },
         },
     })
     .map_err(|_| LegacyUpgradeWireError::Codec)
@@ -103,13 +118,30 @@ fn decode_request(bytes: &[u8]) -> Result<LegacyUpgradeRequest, LegacyUpgradeWir
         return Err(LegacyUpgradeWireError::Version);
     }
     let body = envelope.body;
-    Ok(LegacyUpgradeRequest::unsigned(
+    let request = LegacyUpgradeRequest::unsigned(
         DeviceId::try_new(body.source_device_id).ok_or(LegacyUpgradeWireError::InvalidValue)?,
         DeviceId::try_new(body.target_device_id).ok_or(LegacyUpgradeWireError::InvalidValue)?,
         descriptor_from_wire(body.descriptor)?,
         body.key_package,
     )
-    .with_proof(body.proof))
+    .with_proof(body.proof);
+    match body.kind {
+        WireRequestKind::Admission => Ok(request),
+        WireRequestKind::ReadmissionProbe => Ok(LegacyUpgradeRequest::readmission_probe(
+            *request.source_device_id(),
+            *request.target_device_id(),
+            request.descriptor().clone(),
+        )
+        .with_proof(request.proof().to_vec())),
+        WireRequestKind::ReadmissionConfirmation => {
+            Ok(LegacyUpgradeRequest::readmission_confirmation(
+                *request.source_device_id(),
+                *request.target_device_id(),
+                request.descriptor().clone(),
+            )
+            .with_proof(request.proof().to_vec()))
+        }
+    }
 }
 
 fn encode_response(response: &LegacyUpgradeResponse) -> Result<Vec<u8>, LegacyUpgradeWireError> {

@@ -23,6 +23,16 @@ pub(crate) fn request_transcript(request: &LegacyUpgradeRequest) -> Vec<u8> {
             .protection_group_id()
             .map_or(&[][..], |id| id.as_str().as_bytes()),
     );
+    append_field(
+        &mut transcript,
+        match request.kind() {
+            uc_core::membership::LegacyUpgradeRequestKind::Admission => b"admission",
+            uc_core::membership::LegacyUpgradeRequestKind::ReadmissionProbe => b"readmission-probe",
+            uc_core::membership::LegacyUpgradeRequestKind::ReadmissionConfirmation => {
+                b"readmission-confirmation"
+            }
+        },
+    );
     append_field(&mut transcript, request.key_package());
     transcript
 }

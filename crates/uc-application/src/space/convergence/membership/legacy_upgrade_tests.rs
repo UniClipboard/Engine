@@ -210,6 +210,32 @@ impl LegacyProtectionPort for ScenarioProtection {
         .with_proof(vec![9]))
     }
 
+    async fn begin_readmission_confirmation(
+        &self,
+        source_device_id: &DeviceId,
+        target_device_id: &DeviceId,
+    ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
+        Ok(LegacyUpgradeRequest::readmission_confirmation(
+            *source_device_id,
+            *target_device_id,
+            self.descriptor.lock().unwrap().clone(),
+        )
+        .with_proof(vec![9]))
+    }
+
+    async fn begin_readmission_probe(
+        &self,
+        source_device_id: &DeviceId,
+        target_device_id: &DeviceId,
+    ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
+        Ok(LegacyUpgradeRequest::readmission_probe(
+            *source_device_id,
+            *target_device_id,
+            self.descriptor.lock().unwrap().clone(),
+        )
+        .with_proof(vec![9]))
+    }
+
     async fn inspect_request(
         &self,
         request: &LegacyUpgradeRequest,
@@ -276,6 +302,12 @@ impl LegacyProtectionPort for ScenarioProtection {
                     .unwrap()
                     .push((request, admission.clone()));
                 Ok(LegacyProtectionResult::MemberAdmitted(admission))
+            }
+            LegacyProtectionCommand::AcknowledgeReadmission { member } => {
+                self.pending_readmission.lock().unwrap().remove(&member);
+                Ok(LegacyProtectionResult::GroupReady(
+                    self.descriptor.lock().unwrap().clone(),
+                ))
             }
         }
     }
@@ -730,6 +762,49 @@ async fn a_lost_admission_response_is_replayed_for_the_exact_retry() {
 
     assert_eq!(retried, first);
     assert_eq!(sponsor.admission_calls.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn completed_legacy_readmission_is_acknowledged_only_after_the_joiner_confirms() {
+    let world = UpgradeWorld::new(&["device-a", "device-b"]);
+    let sponsor = world.protection("device-a");
+    sponsor.set_group("group-a");
+    sponsor.set_awaiting_readmission(DeviceId::new("device-b"));
+
+    let admission = world
+        .device("device-a")
+        .handle_legacy_upgrade_request(
+            &DeviceId::new("device-b"),
+            legacy_request("device-b", "device-a"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        admission.kind,
+        uc_core::membership::LegacyUpgradeResponseKind::Admission(_)
+    ));
+    assert!(sponsor
+        .pending_readmission
+        .lock()
+        .unwrap()
+        .contains(&DeviceId::new("device-b")));
+
+    let confirmation = LegacyUpgradeRequest::readmission_confirmation(
+        DeviceId::new("device-b"),
+        DeviceId::new("device-a"),
+        LegacyUpgradeDescriptor::ready(LegacyUpgradeId::from_bytes([1; 32]), group("group-a")),
+    );
+    world
+        .device("device-a")
+        .handle_legacy_upgrade_request(&DeviceId::new("device-b"), confirmation)
+        .await
+        .unwrap();
+
+    assert!(!sponsor
+        .pending_readmission
+        .lock()
+        .unwrap()
+        .contains(&DeviceId::new("device-b")));
 }
 
 #[tokio::test]

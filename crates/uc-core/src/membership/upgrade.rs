@@ -93,6 +93,9 @@ pub enum LegacyProtectionCommand {
         peer: DeviceId,
         admission: ProtectionGroupAdmission,
     },
+    AcknowledgeReadmission {
+        member: DeviceId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +158,14 @@ pub struct LegacyUpgradeRequest {
     descriptor: LegacyUpgradeDescriptor,
     key_package: Vec<u8>,
     proof: Vec<u8>,
+    kind: LegacyUpgradeRequestKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegacyUpgradeRequestKind {
+    Admission,
+    ReadmissionProbe,
+    ReadmissionConfirmation,
 }
 
 impl LegacyUpgradeRequest {
@@ -170,6 +181,37 @@ impl LegacyUpgradeRequest {
             descriptor,
             key_package,
             proof: Vec::new(),
+            kind: LegacyUpgradeRequestKind::Admission,
+        }
+    }
+
+    pub fn readmission_confirmation(
+        source_device_id: DeviceId,
+        target_device_id: DeviceId,
+        descriptor: LegacyUpgradeDescriptor,
+    ) -> Self {
+        Self {
+            source_device_id,
+            target_device_id,
+            descriptor,
+            key_package: Vec::new(),
+            proof: Vec::new(),
+            kind: LegacyUpgradeRequestKind::ReadmissionConfirmation,
+        }
+    }
+
+    pub fn readmission_probe(
+        source_device_id: DeviceId,
+        target_device_id: DeviceId,
+        descriptor: LegacyUpgradeDescriptor,
+    ) -> Self {
+        Self {
+            source_device_id,
+            target_device_id,
+            descriptor,
+            key_package: Vec::new(),
+            proof: Vec::new(),
+            kind: LegacyUpgradeRequestKind::ReadmissionProbe,
         }
     }
 
@@ -196,6 +238,10 @@ impl LegacyUpgradeRequest {
 
     pub fn proof(&self) -> &[u8] {
         &self.proof
+    }
+
+    pub const fn kind(&self) -> LegacyUpgradeRequestKind {
+        self.kind
     }
 }
 
@@ -234,6 +280,18 @@ pub trait LegacyProtectionPort: Send + Sync {
     ) -> Result<LegacyProtectionSnapshot, LegacyUpgradeError>;
 
     async fn begin_attempt(
+        &self,
+        source_device_id: &DeviceId,
+        target_device_id: &DeviceId,
+    ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError>;
+
+    async fn begin_readmission_confirmation(
+        &self,
+        source_device_id: &DeviceId,
+        target_device_id: &DeviceId,
+    ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError>;
+
+    async fn begin_readmission_probe(
         &self,
         source_device_id: &DeviceId,
         target_device_id: &DeviceId,

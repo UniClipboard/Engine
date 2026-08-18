@@ -155,6 +155,18 @@ impl DefaultLegacyProtection {
             }
         }
     }
+
+    fn sign_request(
+        &self,
+        request: LegacyUpgradeRequest,
+    ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
+        let proof = self
+            .space_access
+            .session
+            .legacy_upgrade_proof(&request_transcript(&request))
+            .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
+        Ok(request.with_proof(proof.to_vec()))
+    }
 }
 
 #[async_trait]
@@ -235,6 +247,32 @@ impl LegacyProtectionPort for DefaultLegacyProtection {
             )
             .await?;
         Ok(request)
+    }
+
+    async fn begin_readmission_confirmation(
+        &self,
+        source_device_id: &DeviceId,
+        target_device_id: &DeviceId,
+    ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
+        let unsigned = LegacyUpgradeRequest::readmission_confirmation(
+            *source_device_id,
+            *target_device_id,
+            self.descriptor().await?,
+        );
+        self.sign_request(unsigned)
+    }
+
+    async fn begin_readmission_probe(
+        &self,
+        source_device_id: &DeviceId,
+        target_device_id: &DeviceId,
+    ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
+        let unsigned = LegacyUpgradeRequest::readmission_probe(
+            *source_device_id,
+            *target_device_id,
+            self.descriptor().await?,
+        );
+        self.sign_request(unsigned)
     }
 
     async fn inspect_request(
@@ -372,6 +410,17 @@ impl LegacyProtectionPort for DefaultLegacyProtection {
                     .install_space_material(&material)
                     .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
                 self.attempt_store.clear_pending_attempt(&peer).await?;
+                Ok(LegacyProtectionResult::GroupReady(self.descriptor().await?))
+            }
+            LegacyProtectionCommand::AcknowledgeReadmission { member } => {
+                let space_id = self.current_space_id()?;
+                self.space_access
+                    .acknowledge_bootstrap_readmission_after_handoff(
+                        &space_id,
+                        &member,
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .await?;
                 Ok(LegacyProtectionResult::GroupReady(self.descriptor().await?))
             }
         }

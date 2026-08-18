@@ -120,7 +120,8 @@ pub use upgrade::{
     LegacyProtectionResult, LegacyProtectionSnapshot, LegacyRequestInspection, LegacyUpgradeAction,
     LegacyUpgradeDescriptor, LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort,
     LegacyUpgradeEndpointPort, LegacyUpgradeError, LegacyUpgradeId, LegacyUpgradeRequest,
-    LegacyUpgradeResponse, LegacyUpgradeResponseKind, ProtectionGroupAdmission, ProtectionGroupId,
+    LegacyUpgradeRequestKind, LegacyUpgradeResponse, LegacyUpgradeResponseKind,
+    ProtectionGroupAdmission, ProtectionGroupId,
 };
 pub use versioned_membership_history::{
     AdmissionActivationReceipt, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,

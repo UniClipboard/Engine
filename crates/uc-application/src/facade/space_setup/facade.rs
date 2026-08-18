@@ -1449,6 +1449,20 @@ mod tests {
         ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
             unreachable!("smoke tests never begin legacy upgrade")
         }
+        async fn begin_readmission_confirmation(
+            &self,
+            _source_device_id: &DeviceId,
+            _target_device_id: &DeviceId,
+        ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
+            unreachable!("smoke tests never confirm legacy readmission")
+        }
+        async fn begin_readmission_probe(
+            &self,
+            _source_device_id: &DeviceId,
+            _target_device_id: &DeviceId,
+        ) -> Result<LegacyUpgradeRequest, LegacyUpgradeError> {
+            unreachable!("smoke tests never probe legacy readmission")
+        }
         async fn inspect_request(
             &self,
             _request: &LegacyUpgradeRequest,

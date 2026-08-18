@@ -168,11 +168,17 @@ impl AutomaticLegacyUpgrade {
             .iter()
             .filter(|member| candidate_device_ids.contains(&member.device_id))
         {
-            let request = self
-                .deps
-                .protection
-                .begin_attempt(&local_device_id, &member.device_id)
-                .await?;
+            let request = if scope.source == CurrentWorkspacePeerScopeSource::CurrentHistory {
+                self.deps
+                    .protection
+                    .begin_readmission_probe(&local_device_id, &member.device_id)
+                    .await?
+            } else {
+                self.deps
+                    .protection
+                    .begin_attempt(&local_device_id, &member.device_id)
+                    .await?
+            };
             let local_descriptor = request.descriptor().clone();
             let response = match self
                 .deps
@@ -218,6 +224,22 @@ impl AutomaticLegacyUpgrade {
                             .complete_upgraded_legacy_join(&member.device_id)
                             .await
                             .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
+                    }
+                    let confirmation = self
+                        .deps
+                        .protection
+                        .begin_readmission_confirmation(&local_device_id, &member.device_id)
+                        .await?;
+                    let confirmation_response = self
+                        .deps
+                        .dispatch
+                        .exchange_legacy_upgrade(&member.device_id, &confirmation)
+                        .await
+                        .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
+                    if confirmation_response.kind != LegacyUpgradeResponseKind::UpToDate
+                        || confirmation_response.descriptor != *confirmation.descriptor()
+                    {
+                        return Err(LegacyUpgradeError::Unavailable);
                     }
                     match self.deps.presence.ensure_reachable(&member.device_id).await {
                         Ok(state) => {
@@ -533,6 +555,76 @@ impl LegacyUpgradeEndpointPort for AutomaticLegacyUpgrade {
         if inspection == LegacyRequestInspection::Invalid {
             warn!(reason = "proof", "legacy upgrade request rejected");
             return Err(LegacyUpgradeError::Unauthorized);
+        }
+
+        if request.kind() == uc_core::membership::LegacyUpgradeRequestKind::ReadmissionConfirmation
+        {
+            let scope = self
+                .peer_scope
+                .as_ref()
+                .ok_or(LegacyUpgradeError::Unauthorized)?
+                .snapshot()
+                .await
+                .map_err(|_| LegacyUpgradeError::Unauthorized)?;
+            if scope.local_membership != CurrentWorkspaceLocalMembership::Active {
+                return Err(LegacyUpgradeError::Unauthorized);
+            }
+            let protection = self
+                .deps
+                .protection
+                .snapshot(&[*authenticated_peer])
+                .await?;
+            if protection.descriptor != *request.descriptor()
+                || !protection.protected_members.contains(authenticated_peer)
+                || !protection
+                    .pending_readmission_members
+                    .contains(authenticated_peer)
+            {
+                return Err(LegacyUpgradeError::Unauthorized);
+            }
+            self.deps
+                .protection
+                .execute(LegacyProtectionCommand::AcknowledgeReadmission {
+                    member: *authenticated_peer,
+                })
+                .await?;
+            return Ok(LegacyUpgradeResponse {
+                descriptor: protection.descriptor,
+                kind: LegacyUpgradeResponseKind::UpToDate,
+            });
+        }
+
+        if request.kind() == uc_core::membership::LegacyUpgradeRequestKind::ReadmissionProbe {
+            let local_descriptor = self.deps.protection.snapshot(&[]).await?.descriptor;
+            if local_descriptor != *request.descriptor() {
+                return Err(LegacyUpgradeError::Unauthorized);
+            }
+            if let Some(convergence) = &self.convergence {
+                convergence
+                    .complete_upgraded_legacy_join(authenticated_peer)
+                    .await
+                    .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
+                let confirmation = self
+                    .deps
+                    .protection
+                    .begin_readmission_confirmation(&local_device_id, authenticated_peer)
+                    .await?;
+                let confirmation_response = self
+                    .deps
+                    .dispatch
+                    .exchange_legacy_upgrade(authenticated_peer, &confirmation)
+                    .await
+                    .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
+                if confirmation_response.kind != LegacyUpgradeResponseKind::UpToDate
+                    || confirmation_response.descriptor != *confirmation.descriptor()
+                {
+                    return Err(LegacyUpgradeError::Unavailable);
+                }
+            }
+            return Ok(LegacyUpgradeResponse {
+                descriptor: local_descriptor,
+                kind: LegacyUpgradeResponseKind::UpToDate,
+            });
         }
 
         let mut local_descriptor = self.deps.protection.snapshot(&[]).await?.descriptor;

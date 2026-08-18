@@ -37,13 +37,13 @@ use uc_core::membership::{
     CurrentMemberSignatureError, CurrentMemberSignaturePort, GroupBootstrapPort,
     GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
     LegacyBootstrapProgress, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
-    LegacyBootstrapStage, LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus,
-    MembershipCredential, PendingGroupUpdate, PrepareSponsorAdmissionSecurityPort,
-    PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId, RevocationId,
-    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
-    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError, SpaceProtectionMode,
-    SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
-    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRequest,
+    LegacyBootstrapStage, LegacyBootstrapStatus, LegacyUpgradeError, MemberProtection,
+    MemberProtectionStatus, MembershipCredential, PendingGroupUpdate,
+    PrepareSponsorAdmissionSecurityPort, PreparedRevocationResolution, ProtectionGroupAdmission,
+    ProtectionGroupId, RevocationId, RevocationOutboxMessage, RevocationRecord,
+    RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
+    SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
+    SpaceSecurityMode, SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRequest,
     SponsorPreparedAdmissionSecurity,
 };
 use uc_core::pairing::InvitationCode;
@@ -569,14 +569,14 @@ impl DefaultSpaceAccessAdapter {
         Ok(prepared)
     }
 
-    async fn acknowledge_bootstrap_readmission_after_admission(
+    pub(crate) async fn acknowledge_bootstrap_readmission_after_handoff(
         &self,
         space_id: &SpaceId,
         joiner_device_id: &DeviceId,
         now_ms: i64,
-    ) {
+    ) -> Result<(), LegacyUpgradeError> {
         let Some(repository) = &self.legacy_bootstrap_repository else {
-            return;
+            return Ok(());
         };
         let records = match repository
             .list_incomplete_legacy_bootstraps_for_space(space_id)
@@ -585,7 +585,7 @@ impl DefaultSpaceAccessAdapter {
             Ok(records) => records,
             Err(error) => {
                 warn!(error = %error, "legacy bootstrap readmission lookup failed after group admission");
-                return;
+                return Err(LegacyUpgradeError::Internal(error.to_string()));
             }
         };
         for record in records {
@@ -597,17 +597,12 @@ impl DefaultSpaceAccessAdapter {
             {
                 continue;
             }
-            if let Err(error) = repository
+            repository
                 .acknowledge_legacy_readmission(record.bootstrap_id(), joiner_device_id, now_ms)
                 .await
-            {
-                warn!(
-                    error = %error,
-                    bootstrap_id = %record.bootstrap_id().as_str(),
-                    "legacy bootstrap readmission acknowledgement will be retried during recovery"
-                );
-            }
+                .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
         }
+        Ok(())
     }
 
     pub(super) async fn admit_group_member_with_replay(
@@ -725,9 +720,6 @@ impl DefaultSpaceAccessAdapter {
         self.session
             .install_space_material(&next)
             .map_err(map_encryption_error)?;
-        self.acknowledge_bootstrap_readmission_after_admission(space_id, joiner_device_id, now_ms)
-            .await;
-
         Ok((group_admission, replay_admission))
     }
 
@@ -2672,39 +2664,7 @@ impl GroupBootstrapPort for DefaultSpaceAccessAdapter {
                     );
                 }
                 LegacyBootstrapStatus::AwaitingReadmission => {
-                    let key_epoch_repository =
-                        self.key_epoch_repository.as_ref().ok_or_else(|| {
-                            BootstrapError::Repository(
-                                "key epoch repository is not configured".into(),
-                            )
-                        })?;
-                    let material = key_epoch_repository
-                        .load_space_material(record.space_id())
-                        .await
-                        .map_err(|error| BootstrapError::Repository(error.to_string()))?
-                        .ok_or(BootstrapError::InvalidRecord)?;
-                    let group_state = MlsClientState::from_bytes(material.group_state().to_vec());
-                    for member in record.pending_readmission().to_vec() {
-                        let is_member = MlsGroupEngine::contains_active_member(
-                            &group_state,
-                            member.as_str().as_bytes(),
-                        )
-                        .map_err(|_| BootstrapError::CryptographicState)?;
-                        if is_member {
-                            repository
-                                .acknowledge_legacy_readmission(
-                                    record.bootstrap_id(),
-                                    &member,
-                                    now_ms,
-                                )
-                                .await?;
-                        }
-                    }
-                    let updated = repository
-                        .get_legacy_bootstrap(record.bootstrap_id())
-                        .await?
-                        .ok_or(BootstrapError::InvalidRecord)?;
-                    results.push(bootstrap_result(updated)?);
+                    results.push(bootstrap_result(record)?);
                 }
                 LegacyBootstrapStatus::Complete | LegacyBootstrapStatus::RecoveryRequired => {
                     results.push(bootstrap_result(record)?);
@@ -4190,7 +4150,7 @@ mod admission_tests {
     }
 
     #[tokio::test]
-    async fn group_admission_confirms_a_pending_legacy_readmission() {
+    async fn group_admission_keeps_a_pending_legacy_readmission_until_handoff_confirmation() {
         let directory = tempdir().unwrap();
         let session = Arc::new(InMemorySession::new());
         let space_id = SpaceId::from("legacy-readmission-space");
@@ -4241,12 +4201,26 @@ mod admission_tests {
                 .unwrap()
                 .unwrap()
                 .status(),
+            LegacyBootstrapStatus::AwaitingReadmission
+        );
+
+        adapter
+            .acknowledge_bootstrap_readmission_after_handoff(&space_id, &retained, 200)
+            .await
+            .unwrap();
+        assert_eq!(
+            bootstrap_repository
+                .get_legacy_bootstrap(&bootstrap_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
             LegacyBootstrapStatus::Complete
         );
     }
 
     #[tokio::test]
-    async fn bootstrap_recovery_confirms_readmission_from_persisted_mls_state() {
+    async fn bootstrap_recovery_keeps_readmission_pending_without_handoff_confirmation() {
         let directory = tempdir().unwrap();
         let session = Arc::new(InMemorySession::new());
         let space_id = SpaceId::from("legacy-recovery-space");
@@ -4307,7 +4281,7 @@ mod admission_tests {
         ));
 
         // Simulate a process exit after the admission commit persisted but before
-        // the bootstrap record acknowledgement could run.
+        // the joiner finished recovering membership history and confirmed it.
         let admission_adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
             local_key_material(&directory, memory_secure_storage()),
             Arc::new(DefaultCurrentProfile::new()),
@@ -4331,7 +4305,8 @@ mod admission_tests {
 
         assert!(matches!(
             resumed.as_slice(),
-            [GroupBootstrapResult::Complete { bootstrap_id: actual }] if actual == &bootstrap_id
+            [GroupBootstrapResult::AwaitingReadmission { bootstrap_id: actual, pending_members: 1 }]
+                if actual == &bootstrap_id
         ));
         assert_eq!(
             bootstrap_repository
@@ -4340,18 +4315,18 @@ mod admission_tests {
                 .unwrap()
                 .unwrap()
                 .status(),
-            LegacyBootstrapStatus::Complete
+            LegacyBootstrapStatus::AwaitingReadmission
         );
         let after_recovery = recovery_adapter
             .query_space_protection(&[sponsor, retained])
             .await
             .unwrap();
         assert_eq!(after_recovery.mode, SpaceProtectionMode::Ready);
-        assert!(after_recovery.legacy_bootstrap.is_none());
+        assert!(after_recovery.legacy_bootstrap.is_some());
         assert!(after_recovery
             .members
             .iter()
-            .all(|member| member.status == MemberProtectionStatus::Protected));
+            .any(|member| member.status == MemberProtectionStatus::AwaitingReadmission));
     }
 
     fn sponsor_fixture_with_stage_persistence(
