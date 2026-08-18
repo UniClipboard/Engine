@@ -658,6 +658,8 @@ pub struct AdmissionAttemptV1 {
     pub existing_member_security_deliveries: Option<Vec<super::SponsorAdmissionSecurityDelivery>>,
     #[serde(default)]
     pub preserve_unreadable_history: bool,
+    #[serde(default)]
+    pub sponsor_continuation_address: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for AdmissionAttemptV1 {
@@ -676,6 +678,19 @@ impl std::fmt::Debug for AdmissionAttemptV1 {
 }
 
 impl AdmissionAttemptV1 {
+    pub fn decode_persisted(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        match postcard::from_bytes(bytes) {
+            Ok(attempt) => Ok(attempt),
+            Err(postcard::Error::DeserializeUnexpectedEnd) => {
+                let mut previous_version = Vec::with_capacity(bytes.len() + 1);
+                previous_version.extend_from_slice(bytes);
+                previous_version.push(0);
+                postcard::from_bytes(&previous_version)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn new_completion_helper(attempt_id: AdmissionAttemptId) -> Self {
         let mut attempt = Self::new_joiner(attempt_id, [0; 16], JoinerAdmissionStageV1::Initiated);
         attempt.join_id = None;
@@ -739,6 +754,7 @@ impl AdmissionAttemptV1 {
             joiner_member_instance: None,
             existing_member_security_deliveries: None,
             preserve_unreadable_history: false,
+            sponsor_continuation_address: None,
         }
     }
 
@@ -1217,6 +1233,25 @@ mod tests {
                 Err(SupersedeAdmissionAttemptError::RecoveryRequired)
             );
         }
+    }
+
+    #[test]
+    fn admission_attempt_without_continuation_address_still_decodes() {
+        let attempt_id = AdmissionAttemptId::from_bytes([19; 32]);
+        let mut expected =
+            AdmissionAttemptV1::new_joiner(attempt_id, [20; 16], JoinerAdmissionStageV1::Initiated);
+        expected.cancel_request = Some(vec![21]);
+        expected.cancel_outcome = Some(vec![22]);
+        expected.resume_public_key = Some(vec![23; 32]);
+        expected.resume_private_key = Some(vec![24; 32]);
+        expected.preserve_unreadable_history = true;
+
+        let mut previous_version = postcard::to_stdvec(&expected).unwrap();
+        assert_eq!(previous_version.pop(), Some(0));
+        let decoded = AdmissionAttemptV1::decode_persisted(&previous_version).unwrap();
+
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.sponsor_continuation_address, None);
     }
 
     #[test]

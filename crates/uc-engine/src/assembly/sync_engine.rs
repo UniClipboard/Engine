@@ -90,8 +90,6 @@ pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
 use uc_infra::security::DefaultMembershipSecurityUpdateAdapter;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 
-struct DeferredAdmissionOutboxDelivery;
-
 #[derive(Default)]
 struct DeferredCurrentWorkspacePeerScope {
     delegate: tokio::sync::RwLock<Option<Arc<dyn CurrentWorkspacePeerScopePort>>>,
@@ -113,20 +111,6 @@ impl CurrentWorkspacePeerScopePort for DeferredCurrentWorkspacePeerScope {
             Some(delegate) => delegate.snapshot().await,
             None => Err(CurrentWorkspacePeerScopeError::Unavailable),
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl uc_core::membership::AdmissionOutboxDeliveryPort for DeferredAdmissionOutboxDelivery {
-    async fn deliver(
-        &self,
-        _attempt_id: uc_core::membership::AdmissionAttemptId,
-        _message: &uc_core::membership::AdmissionOutboxMessageV1,
-    ) -> Result<
-        uc_core::membership::AdmissionOutboxDeliveryResultV1,
-        uc_core::membership::AdmissionOutboxDeliveryError,
-    > {
-        Ok(uc_core::membership::AdmissionOutboxDeliveryResultV1::Deferred)
     }
 }
 
@@ -643,6 +627,11 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.device.device_identity),
         Arc::clone(&deps.settings),
     );
+    let admission_outbox_delivery =
+        Arc::new(uc_infra::pairing::PairingAdmissionOutboxDelivery::new(
+            Arc::clone(&handlers.session),
+            Duration::from_secs(180),
+        ));
     let membership_attestation = builder.build_membership_attestation_adapter(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&deps.device.device_identity),
@@ -726,7 +715,7 @@ pub async fn build_sync_engine_assembly(
                     .activate_completion_helper_admission_security,
             ),
             admission_space_transition: Arc::clone(&space_setup.admission_space_transition),
-            admission_outbox_delivery: Arc::new(DeferredAdmissionOutboxDelivery),
+            admission_outbox_delivery,
             admission_completion_recovery: admission_completion_recovery_adapter.clone(),
             legacy_migration_recovery: Arc::clone(&space_setup.legacy_migration_recovery),
             member_signatures: Arc::clone(&space_setup.current_member_signatures),

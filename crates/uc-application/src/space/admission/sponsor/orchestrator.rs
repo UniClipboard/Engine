@@ -191,7 +191,11 @@ impl PairingInboundOrchestrator {
             "inbound pairing event received"
         );
         if let PairingSessionMessage::DurableAdmission(frame) = message.clone() {
-            if frame.kind == uc_core::pairing::DurableAdmissionMessageKind::CompleteAck {
+            if matches!(
+                frame.kind,
+                uc_core::pairing::DurableAdmissionMessageKind::CompleteAck
+                    | uc_core::pairing::DurableAdmissionMessageKind::CancelRequested
+            ) {
                 self.handle_durable_admission(&session, frame).await;
                 return;
             }
@@ -215,6 +219,10 @@ impl PairingInboundOrchestrator {
                 return;
             }
         };
+        self.handle_request(session, request).await;
+    }
+
+    async fn handle_request(&self, session: PairingSessionId, request: JoinerRequest) {
         info!(
             session = %session,
             code = %request.invitation_code.as_str(),
@@ -378,7 +386,7 @@ impl PairingInboundOrchestrator {
             message_kind = message_variant,
             "inbound pairing follow-up message received"
         );
-        if let PairingSessionMessage::DurableAdmission(frame) = message {
+        if let PairingSessionMessage::DurableAdmission(frame) = message.clone() {
             self.handle_durable_admission(&session, frame).await;
             return;
         }
@@ -421,6 +429,45 @@ impl PairingInboundOrchestrator {
         frame: uc_core::pairing::DurableAdmissionFrame,
     ) {
         match frame.kind {
+            uc_core::pairing::DurableAdmissionMessageKind::CancelRequested => {
+                match self
+                    .workspace_convergence
+                    .reject_superseded_join_cleanup(&frame)
+                    .await
+                {
+                    Ok(rejected) => {
+                        match self
+                            .handshake
+                            .send_durable_frame(session, rejected.clone())
+                            .await
+                        {
+                            Ok(()) => {
+                                if let Err(error) = self
+                                    .workspace_convergence
+                                    .confirm_superseded_join_cleanup_sent(&rejected)
+                                    .await
+                                {
+                                    warn!(session = %session, error = %error, "superseded join cleanup confirmation finalization failed");
+                                }
+                            }
+                            Err(error) => {
+                                warn!(session = %session, error = %error, "superseded join cleanup confirmation send failed");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warn!(session = %session, error = %error, "superseded join cleanup failed");
+                        self.handshake
+                            .reject(
+                                session,
+                                PairingRejectReason::Internal(
+                                    "superseded join cleanup failed".to_owned(),
+                                ),
+                            )
+                            .await;
+                    }
+                }
+            }
             uc_core::pairing::DurableAdmissionMessageKind::Prepared => {
                 match self
                     .workspace_convergence
@@ -738,6 +785,34 @@ mod tests {
             Ok(durable_frame(
                 uc_core::pairing::DurableAdmissionMessageKind::Candidate,
             ))
+        }
+
+        async fn reject_superseded_join_cleanup(
+            &self,
+            frame: &uc_core::pairing::DurableAdmissionFrame,
+        ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("reject_superseded_join_cleanup");
+            Ok(uc_core::pairing::DurableAdmissionFrame {
+                attempt_id: frame.attempt_id,
+                kind: uc_core::pairing::DurableAdmissionMessageKind::Rejected,
+                message_id: [0x43; 32],
+                predecessor_message_id: Some(frame.message_id),
+                payload: Vec::new(),
+            })
+        }
+
+        async fn confirm_superseded_join_cleanup_sent(
+            &self,
+            _frame: &uc_core::pairing::DurableAdmissionFrame,
+        ) -> Result<(), WorkspaceConvergenceError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("confirm_superseded_join_cleanup_sent");
+            Ok(())
         }
 
         async fn commit_sponsor_prepared(
@@ -1161,6 +1236,51 @@ mod tests {
                 "confirm_sponsor_complete_ack",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn cleanup_first_returns_the_saved_rejection() {
+        let bundle = Bundle::happy();
+        let (orch, session_port, owner) = bundle.build();
+        let session = PairingSessionId::new("session-cleanup");
+        let cleanup = uc_core::membership::AdmissionOutboxMessageV1 {
+            purpose: uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested,
+            recipient: b"old-invitation".to_vec(),
+            message_id: [0x41; 32],
+            predecessor_message_id: Some([0x40; 32]),
+            payload: b"cancel_requested".to_vec(),
+            superseded: false,
+        };
+
+        orch.handle_event(PairingSessionEvent::Incoming {
+            session: session.clone(),
+            message: PairingSessionMessage::DurableAdmission(
+                uc_core::pairing::DurableAdmissionFrame {
+                    attempt_id: [0x42; 32],
+                    kind: uc_core::pairing::DurableAdmissionMessageKind::CancelRequested,
+                    message_id: cleanup.message_id,
+                    predecessor_message_id: cleanup.predecessor_message_id,
+                    payload: postcard::to_stdvec(&cleanup).unwrap(),
+                },
+            ),
+        })
+        .await;
+
+        assert_eq!(
+            owner.call_log(),
+            vec![
+                "reject_superseded_join_cleanup",
+                "confirm_superseded_join_cleanup_sent",
+            ]
+        );
+        let sent = session_port.sent();
+        assert!(matches!(
+            sent.first().map(|(_, message)| message),
+            Some(PairingSessionMessage::DurableAdmission(frame))
+                if frame.kind == uc_core::pairing::DurableAdmissionMessageKind::Rejected
+        ));
+        assert_eq!(sent.len(), 1);
+        assert!(session_port.closed().is_empty());
     }
 
     #[tokio::test]

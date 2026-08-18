@@ -7,11 +7,11 @@ use diesel::sql_types::Binary;
 use serde::{Deserialize, Serialize};
 use uc_core::membership::{
     AdmissionAttemptId, AdmissionAttemptRepositoryError, AdmissionAttemptRepositoryPort,
-    AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionProfileMetadataV1,
-    AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, AdmissionTerminalResultV1,
-    CompletionHelperAdmissionStageV1, CurrentLocalJoinProjectionV1, JoinerAdmissionStageV1,
-    LocalJoinStartMutationV1, SponsorAdmissionStageV1, TerminalAdmissionAttemptV1,
-    TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
+    AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionOutboxPurposeV1,
+    AdmissionProfileMetadataV1, AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+    AdmissionTerminalResultV1, CompletionHelperAdmissionStageV1, CurrentLocalJoinProjectionV1,
+    JoinerAdmissionStageV1, LocalJoinStartMutationV1, SponsorAdmissionStageV1,
+    TerminalAdmissionAttemptV1, TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
 };
 
 use crate::db::ports::DbExecutor;
@@ -182,7 +182,7 @@ impl<E: DbExecutor> DieselAdmissionAttemptStore<E> {
                 &stored.encrypted_payload,
             )
             .map_err(map_key_error)?;
-        let attempt: AdmissionAttemptV1 = postcard::from_bytes(&plaintext)
+        let attempt = AdmissionAttemptV1::decode_persisted(&plaintext)
             .map_err(|_| AdmissionAttemptRepositoryError::Corrupt)?;
         validate_attempt(&attempt)?;
         if attempt.attempt_id != attempt_id {
@@ -1239,6 +1239,22 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                             AdmissionAttemptRepositoryError::VersionConflict
                         ));
                     }
+                    let replay_result = if terminal_result == AdmissionTerminalResultV1::Rejected {
+                        attempt
+                            .outboxes
+                            .iter()
+                            .find(|message| message.purpose == AdmissionOutboxPurposeV1::Rejected)
+                            .map(|message| {
+                                let mut replay = message.clone();
+                                replay.superseded = false;
+                                postcard::to_stdvec(&replay)
+                            })
+                            .transpose()
+                            .map_err(|error| anyhow::anyhow!(error))?
+                            .unwrap_or_default()
+                    } else {
+                        attempt.completion.unwrap_or_default()
+                    };
                     let terminal = TerminalAdmissionAttemptV1 {
                         format_version: TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
                         attempt_id,
@@ -1250,7 +1266,7 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                         rejection_reason: attempt.rejection_reason,
                         candidate_event_id: attempt.candidate_event_id,
                         cancel_outcome: attempt.cancel_outcome,
-                        replay_result: attempt.completion.unwrap_or_default(),
+                        replay_result,
                         space_transition_result: attempt.space_transition_result,
                         acknowledgment_rebuild: attempt.inbox_dedup,
                     };

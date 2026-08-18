@@ -67,6 +67,56 @@ async fn seed_superseded_and_current_join(
     (previous_id, current_id)
 }
 
+#[derive(Default)]
+struct RecordingAdmissionDelivery {
+    routes: std::sync::Mutex<
+        Vec<(
+            uc_core::membership::AdmissionAttemptId,
+            Option<uc_core::membership::AdmissionOutboxDeliveryRouteV1>,
+        )>,
+    >,
+}
+
+#[async_trait]
+impl uc_core::membership::AdmissionOutboxDeliveryPort for RecordingAdmissionDelivery {
+    async fn deliver(
+        &self,
+        attempt_id: uc_core::membership::AdmissionAttemptId,
+        message: &uc_core::membership::AdmissionOutboxMessageV1,
+        route: Option<&uc_core::membership::AdmissionOutboxDeliveryRouteV1>,
+    ) -> Result<
+        uc_core::membership::AdmissionOutboxDeliveryResultV1,
+        uc_core::membership::AdmissionOutboxDeliveryError,
+    > {
+        self.routes
+            .lock()
+            .unwrap()
+            .push((attempt_id, route.cloned()));
+        if message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested {
+            return Ok(
+                uc_core::membership::AdmissionOutboxDeliveryResultV1::Rejected(
+                    super::admission::durable_admission_message(
+                        attempt_id,
+                        uc_core::membership::AdmissionOutboxPurposeV1::Rejected,
+                        &message.recipient,
+                        Some(message.message_id),
+                        &postcard::to_stdvec(&(
+                            uc_core::membership::AdmissionRejectionReasonV1::Cancelled,
+                            b"cancelled".to_vec(),
+                        ))
+                        .unwrap(),
+                    ),
+                ),
+            );
+        }
+        Ok(
+            uc_core::membership::AdmissionOutboxDeliveryResultV1::Persisted(
+                super::admission::admission_acknowledgment(message),
+            ),
+        )
+    }
+}
+
 #[tokio::test]
 async fn superseded_late_candidate_cannot_replace_current_join() {
     let directory = tempfile::tempdir().unwrap();
@@ -449,14 +499,17 @@ async fn superseded_rejection_only_confirms_old_cleanup() {
     let repository = durable_admission_repository(&directory, [0xdb; 16]);
     let owner = durable_admission_owner(Arc::clone(&repository));
     let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
-    let rejected = uc_core::membership::AdmissionOutboxMessageV1 {
-        purpose: uc_core::membership::AdmissionOutboxPurposeV1::Rejected,
-        recipient: b"joiner".to_vec(),
-        message_id: [0xdc; 32],
-        predecessor_message_id: Some([0xd3; 32]),
-        payload: b"cleanup-confirmed".to_vec(),
-        superseded: false,
-    };
+    let rejected = super::admission::durable_admission_message(
+        previous_id,
+        uc_core::membership::AdmissionOutboxPurposeV1::Rejected,
+        b"sponsor",
+        Some([0xd3; 32]),
+        &postcard::to_stdvec(&(
+            uc_core::membership::AdmissionRejectionReasonV1::Cancelled,
+            b"cleanup-confirmed".to_vec(),
+        ))
+        .unwrap(),
+    );
 
     owner
         .joiner_record_rejected(previous_id, &rejected)
@@ -569,6 +622,7 @@ async fn recovery_handles_multiple_superseded_cleanups_with_one_current_join() {
             &preparation,
             &DeviceId::new("joiner"),
             b"first-sponsor",
+            b"first-sponsor-address",
             b"first-request",
             false,
         )
@@ -579,6 +633,7 @@ async fn recovery_handles_multiple_superseded_cleanups_with_one_current_join() {
             &preparation,
             &DeviceId::new("joiner"),
             b"second-sponsor",
+            b"second-sponsor-address",
             b"second-request",
             false,
         )
@@ -589,20 +644,38 @@ async fn recovery_handles_multiple_superseded_cleanups_with_one_current_join() {
             &preparation,
             &DeviceId::new("joiner"),
             b"third-sponsor",
+            b"third-sponsor-address",
             b"third-request",
             false,
         )
         .await
         .unwrap();
 
-    let report = owner
-        .recover_with(&ConfirmingAdmissionDelivery)
-        .await
-        .unwrap();
+    let delivery = RecordingAdmissionDelivery::default();
+    let report = owner.recover_with(&delivery).await.unwrap();
 
     assert_eq!(report.deliveries_attempted, 3);
     assert_eq!(report.deliveries_confirmed, 3);
     assert_eq!(report.attempts_compacted, 2);
+    let routes = delivery.routes.lock().unwrap();
+    assert_eq!(routes.len(), 3);
+    assert!(routes.contains(&(
+        first.attempt.attempt_id,
+        Some(
+            uc_core::membership::AdmissionOutboxDeliveryRouteV1::Continuation(
+                b"first-sponsor-address".to_vec(),
+            ),
+        ),
+    )));
+    assert!(routes.contains(&(
+        second.attempt.attempt_id,
+        Some(
+            uc_core::membership::AdmissionOutboxDeliveryRouteV1::Continuation(
+                b"second-sponsor-address".to_vec(),
+            ),
+        ),
+    )));
+    assert!(routes.contains(&(current.attempt.attempt_id, None)));
     assert!(repository
         .load_terminal(first.attempt.attempt_id)
         .await
@@ -1590,6 +1663,11 @@ async fn durable_admission_cancel_and_commit_have_exactly_one_winner() {
         .sponsor_decide_cancel(attempt_id, &cancel, b"joiner", b"cancelled")
         .await
         .unwrap();
+    let replayed_rejected = sponsor
+        .sponsor_decide_cancel(attempt_id, &cancel, b"joiner", b"cancelled")
+        .await
+        .unwrap();
+    assert_eq!(replayed_rejected, rejected);
     assert_eq!(rejected.purpose, AdmissionOutboxPurposeV1::Rejected);
     let sponsor_rejected = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
     assert!(sponsor_rejected.candidate_event.is_some());
@@ -1636,8 +1714,18 @@ async fn durable_admission_cancel_and_commit_have_exactly_one_winner() {
         .outboxes
         .iter()
         .all(|message| message.superseded));
+    let settled_replay = sponsor
+        .sponsor_decide_cancel(attempt_id, &cancel, b"joiner", b"cancelled")
+        .await
+        .unwrap();
+    assert_eq!(settled_replay, rejected);
     joiner.compact_if_settled(attempt_id).await.unwrap();
     sponsor.compact_if_settled(attempt_id).await.unwrap();
+    let compacted_replay = sponsor
+        .sponsor_decide_cancel(attempt_id, &cancel, b"joiner", b"cancelled")
+        .await
+        .unwrap();
+    assert_eq!(compacted_replay, rejected);
 
     let sponsor_dir = tempfile::tempdir().unwrap();
     let joiner_dir = tempfile::tempdir().unwrap();
@@ -3459,7 +3547,7 @@ async fn explicit_join_supersedes_initiated_attempt_atomically() {
     };
 
     let first = durable_admission_owner(Arc::clone(&repository))
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"sponsor",
@@ -3469,7 +3557,7 @@ async fn explicit_join_supersedes_initiated_attempt_atomically() {
         .await
         .unwrap();
     let second = durable_admission_owner(Arc::clone(&repository))
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"different-sponsor",
@@ -3521,7 +3609,7 @@ async fn explicit_join_supersedes_initiated_attempt_atomically() {
     let confirmed_directory = tempfile::tempdir().unwrap();
     let confirmed_repository = durable_admission_repository(&confirmed_directory, [0x7b; 16]);
     let confirmed = durable_admission_owner(confirmed_repository)
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"other-sponsor",
@@ -3542,7 +3630,7 @@ async fn explicit_join_with_same_invitation_starts_new_attempt() {
         calls: AtomicUsize::new(0),
     };
     let first = owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"same-sponsor",
@@ -3552,7 +3640,7 @@ async fn explicit_join_with_same_invitation_starts_new_attempt() {
         .await
         .unwrap();
     let second = owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"same-sponsor",
@@ -3600,7 +3688,7 @@ async fn explicit_join_supersedes_initiated_attempt_after_request_delivery_ack()
         calls: AtomicUsize::new(0),
     };
     let first = owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"first-sponsor",
@@ -3619,7 +3707,7 @@ async fn explicit_join_supersedes_initiated_attempt_after_request_delivery_ack()
         .unwrap();
 
     let second = owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"second-sponsor",
@@ -3670,7 +3758,7 @@ async fn explicit_join_material_failure_keeps_previous_attempt() {
         calls: AtomicUsize::new(0),
     };
     let first = owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"first-sponsor",
@@ -3682,7 +3770,7 @@ async fn explicit_join_material_failure_keeps_previous_attempt() {
     let metadata_before = repository.profile_metadata().await.unwrap();
 
     assert!(owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &FailingPreparation,
             &DeviceId::new("joiner"),
             b"second-sponsor",
@@ -3720,7 +3808,7 @@ async fn failed_new_request_delivery_keeps_replacement_current_for_recovery() {
         calls: AtomicUsize::new(0),
     };
     let first = owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"first-sponsor",
@@ -3730,7 +3818,7 @@ async fn failed_new_request_delivery_keeps_replacement_current_for_recovery() {
         .await
         .unwrap();
     let replacement = owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"second-sponsor",
@@ -3809,6 +3897,7 @@ async fn explicit_join_supersedes_candidate_before_prepared() {
             &preparation,
             &DeviceId::new("joiner"),
             b"first-sponsor",
+            b"initial-sponsor-address",
             b"first-request",
             false,
         )
@@ -3820,13 +3909,17 @@ async fn explicit_join_supersedes_candidate_before_prepared() {
         &mut candidate,
         uc_core::membership::JoinerAdmissionStageV1::Candidate,
     );
+    let (candidate_payload, _, candidate_event, _, _) =
+        durable_candidate_verification_fixture(first.attempt.attempt_id);
+    candidate.candidate_event = Some(postcard::to_stdvec(&candidate_event).unwrap());
+    candidate.target_relationships = Some(candidate_payload.target_relationships);
     repository
         .compare_and_advance(first.attempt.attempt_id, 0, &candidate)
         .await
         .unwrap();
 
     let second = owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"second-sponsor",
@@ -3857,6 +3950,25 @@ async fn explicit_join_supersedes_candidate_before_prepared() {
         repository.load_membership_history_v2().await.unwrap(),
         Some(b"source-membership-history".to_vec())
     );
+
+    let delivery = RecordingAdmissionDelivery::default();
+    let report = owner.recover_with(&delivery).await.unwrap();
+    assert_eq!(report.deliveries_attempted, 2);
+    assert_eq!(report.deliveries_confirmed, 2);
+    assert_eq!(report.attempts_compacted, 1);
+    assert!(delivery.routes.lock().unwrap().contains(&(
+        first.attempt.attempt_id,
+        Some(uc_core::membership::AdmissionOutboxDeliveryRouteV1::Continuation(vec![5]),),
+    )));
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        second.attempt.attempt_id
+    );
 }
 
 #[tokio::test]
@@ -3868,7 +3980,7 @@ async fn explicit_join_after_prepared_returns_stable_conflict() {
         calls: AtomicUsize::new(0),
     };
     let first = owner
-        .prepare_join_before_network(
+        .prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"first-sponsor",
@@ -3896,7 +4008,7 @@ async fn explicit_join_after_prepared_returns_stable_conflict() {
 
     assert!(matches!(
         owner
-            .prepare_join_before_network(
+            .prepare_join_before_network_without_route(
                 &preparation,
                 &DeviceId::new("joiner"),
                 b"second-sponsor",
@@ -3936,7 +4048,7 @@ async fn explicit_join_after_prepared_rejects_every_space_transition_mode() {
             calls: AtomicUsize::new(0),
         };
         let first = owner
-            .prepare_join_before_network(
+            .prepare_join_before_network_without_route(
                 &preparation,
                 &DeviceId::new("joiner"),
                 b"first-sponsor",
@@ -4001,7 +4113,7 @@ async fn explicit_join_after_prepared_rejects_every_space_transition_mode() {
 
         assert!(matches!(
             owner
-                .prepare_join_before_network(
+                .prepare_join_before_network_without_route(
                     &preparation,
                     &DeviceId::new("joiner"),
                     b"second-sponsor",
@@ -4035,14 +4147,14 @@ async fn concurrent_explicit_joins_leave_one_current_attempt() {
     let second_device = DeviceId::new("joiner");
 
     let (first, second) = tokio::join!(
-        first_owner.prepare_join_before_network(
+        first_owner.prepare_join_before_network_without_route(
             &first_preparation,
             &first_device,
             b"first-sponsor",
             b"first-request",
             false,
         ),
-        second_owner.prepare_join_before_network(
+        second_owner.prepare_join_before_network_without_route(
             &second_preparation,
             &second_device,
             b"second-sponsor",
@@ -4111,7 +4223,7 @@ async fn inbound_admission_blocks_explicit_join_without_retry_loop() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        owner.prepare_join_before_network(
+        owner.prepare_join_before_network_without_route(
             &preparation,
             &DeviceId::new("joiner"),
             b"sponsor",

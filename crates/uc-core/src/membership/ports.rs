@@ -384,6 +384,13 @@ pub enum AdmissionOutboxDeliveryResultV1 {
     Deferred,
     Persisted(AdmissionInboxRecordV1),
     InvitationConsume(InvitationConsumeDeliveryResultV1),
+    Rejected(AdmissionOutboxMessageV1),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionOutboxDeliveryRouteV1 {
+    Invitation(Vec<u8>),
+    Continuation(Vec<u8>),
 }
 
 #[async_trait]
@@ -392,6 +399,7 @@ pub trait AdmissionOutboxDeliveryPort: Send + Sync {
         &self,
         attempt_id: AdmissionAttemptId,
         message: &AdmissionOutboxMessageV1,
+        route: Option<&AdmissionOutboxDeliveryRouteV1>,
     ) -> Result<AdmissionOutboxDeliveryResultV1, AdmissionOutboxDeliveryError>;
 }
 

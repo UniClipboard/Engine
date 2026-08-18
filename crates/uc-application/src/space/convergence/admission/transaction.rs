@@ -8,10 +8,10 @@ use uc_core::membership::{
     AdmissionAttemptRepositoryPort, AdmissionAttemptRoleStateV1, AdmissionAttemptV1,
     AdmissionCompletionRecoveryChallengeV1, AdmissionCompletionRecoveryResponseV1,
     AdmissionContentKeyCatalogV1, AdmissionIdentityBindingV1, AdmissionInboxRecordV1,
-    AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1, AdmissionOutboxMessageV1,
-    AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1, AdmissionSecurityCommitmentV1,
-    AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
-    AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
+    AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1, AdmissionOutboxDeliveryRouteV1,
+    AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1,
+    AdmissionSecurityCommitmentV1, AdmissionSecurityTransitionInput,
+    AdmissionSecurityTransitionPort, AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionResultV2,
     AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionV2, AdmissionTerminalResultV1,
     CompletionHelperAdmissionStageV1, CompletionHelperAdmissionStateV1,
@@ -38,6 +38,54 @@ pub(crate) struct DurableAdmissionTransaction {
 
 pub(crate) struct DurableAdmissionProjection {
     repository: Arc<dyn AdmissionAttemptRepositoryPort>,
+}
+
+fn admission_outbox_delivery_route(
+    attempt: &AdmissionAttemptV1,
+    message: &AdmissionOutboxMessageV1,
+) -> Result<Option<AdmissionOutboxDeliveryRouteV1>, WorkspaceConvergenceError> {
+    if message.purpose != AdmissionOutboxPurposeV1::CancelRequested {
+        return Ok(None);
+    }
+    if let (Some(event), Some(relationships)) = (
+        attempt.candidate_event.as_deref(),
+        attempt.target_relationships.as_deref(),
+    ) {
+        let event: MembershipEventV2 = postcard::from_bytes(event).map_err(admission_storage)?;
+        let mut sponsors = relationships
+            .iter()
+            .filter(|facts| facts.member_instance == event.author_member_instance_id);
+        let sponsor = sponsors.next().ok_or_else(|| {
+            inconsistent("superseded join has no sponsor continuation relationship")
+        })?;
+        if sponsors.next().is_some() {
+            return Err(inconsistent(
+                "superseded join has duplicate sponsor continuation relationships",
+            ));
+        }
+        if !sponsor.transport_address_blob.is_empty() {
+            return Ok(Some(AdmissionOutboxDeliveryRouteV1::Continuation(
+                sponsor.transport_address_blob.clone(),
+            )));
+        }
+    }
+    if let Some(address) = attempt
+        .sponsor_continuation_address
+        .as_ref()
+        .filter(|address| !address.is_empty())
+    {
+        return Ok(Some(AdmissionOutboxDeliveryRouteV1::Continuation(
+            address.clone(),
+        )));
+    }
+    if message.recipient.is_empty() {
+        return Err(inconsistent(
+            "superseded join cleanup has no delivery route",
+        ));
+    }
+    Ok(Some(AdmissionOutboxDeliveryRouteV1::Invitation(
+        message.recipient.clone(),
+    )))
 }
 
 impl DurableAdmissionProjection {
@@ -574,6 +622,7 @@ impl DurableAdmissionTransaction {
         preparation: &(impl GroupAdmissionPort + ?Sized),
         local_device_id: &DeviceId,
         sponsor: &[u8],
+        sponsor_continuation_address: &[u8],
         request_payload: &[u8],
         preserve_unreadable_history: bool,
     ) -> Result<DurableJoinStartV1, WorkspaceConvergenceError> {
@@ -627,6 +676,8 @@ impl DurableAdmissionTransaction {
             replacement.resume_public_key = Some(signing_key.verifying_key().to_bytes().to_vec());
             replacement.resume_private_key = Some(resume_private_key.to_vec());
             replacement.preserve_unreadable_history = preserve_unreadable_history;
+            replacement.sponsor_continuation_address = (!sponsor_continuation_address.is_empty())
+                .then(|| sponsor_continuation_address.to_vec());
             replacement.outboxes.push(outbound_message(
                 attempt_id,
                 AdmissionOutboxPurposeV1::JoinRequest,
@@ -711,6 +762,26 @@ impl DurableAdmissionTransaction {
                 Err(error) => return Err(map_repository_error(error)),
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_join_before_network_without_route(
+        &self,
+        preparation: &(impl GroupAdmissionPort + ?Sized),
+        local_device_id: &DeviceId,
+        sponsor: &[u8],
+        request_payload: &[u8],
+        preserve_unreadable_history: bool,
+    ) -> Result<DurableJoinStartV1, WorkspaceConvergenceError> {
+        self.prepare_join_before_network(
+            preparation,
+            local_device_id,
+            sponsor,
+            b"test-sponsor-address",
+            request_payload,
+            preserve_unreadable_history,
+        )
+        .await
     }
 
     pub(crate) async fn load_join_recovery_material(
@@ -1721,6 +1792,29 @@ impl DurableAdmissionTransaction {
             AdmissionOutboxPurposeV1::CancelRequested,
             cancel.predecessor_message_id,
         )?;
+        if let Some(terminal) = self
+            .repository
+            .load_terminal(attempt_id)
+            .await
+            .map_err(map_repository_error)?
+        {
+            if terminal.terminal_result != AdmissionTerminalResultV1::Rejected
+                || terminal.rejection_reason != Some(AdmissionRejectionReasonV1::Cancelled)
+            {
+                return Err(inconsistent("admission is already terminal"));
+            }
+            let rejected: AdmissionOutboxMessageV1 =
+                postcard::from_bytes(&terminal.replay_result).map_err(admission_storage)?;
+            if rejected.purpose != AdmissionOutboxPurposeV1::Rejected
+                || rejected.predecessor_message_id != Some(cancel.message_id)
+                || rejected.recipient != recipient
+                || decode_rejection_reason(&rejected.payload)?
+                    != AdmissionRejectionReasonV1::Cancelled
+            {
+                return Err(inconsistent("cancel rejection replay does not match"));
+            }
+            return Ok(rejected);
+        }
         let mut attempt = self.required_attempt(attempt_id).await?;
         let stage = match attempt.role_state {
             AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 { stage }) => stage,
@@ -1778,6 +1872,26 @@ impl DurableAdmissionTransaction {
                 self.persist_advance(attempt).await?;
                 Ok(committed)
             }
+            SponsorAdmissionStageV1::Rejected
+                if attempt.terminal_result == Some(AdmissionTerminalResultV1::Rejected)
+                    && attempt.rejection_reason == Some(AdmissionRejectionReasonV1::Cancelled)
+                    && attempt.cancel_request.as_deref() == Some(cancel.payload.as_slice())
+                    && attempt.inbox_dedup.contains(&inbox_record(cancel)) =>
+            {
+                attempt
+                    .outboxes
+                    .iter()
+                    .find(|message| {
+                        message.purpose == AdmissionOutboxPurposeV1::Rejected
+                            && message.predecessor_message_id == Some(cancel.message_id)
+                    })
+                    .cloned()
+                    .map(|mut message| {
+                        message.superseded = false;
+                        message
+                    })
+                    .ok_or_else(|| inconsistent("cancel rejection outbox is missing"))
+            }
             SponsorAdmissionStageV1::Completed | SponsorAdmissionStageV1::Rejected => {
                 Err(inconsistent("admission is already terminal"))
             }
@@ -1800,6 +1914,12 @@ impl DurableAdmissionTransaction {
                     "superseded join cleanup confirmation is invalid",
                 ));
             }
+            require_message(
+                attempt_id,
+                rejected,
+                AdmissionOutboxPurposeV1::Rejected,
+                Some(predecessor),
+            )?;
             let cleanup = attempt
                 .outboxes
                 .iter_mut()
@@ -1809,6 +1929,14 @@ impl DurableAdmissionTransaction {
                         && !message.superseded
                 })
                 .ok_or_else(|| inconsistent("superseded join cleanup does not match"))?;
+            if rejected.recipient != cleanup.recipient
+                || decode_rejection_reason(&rejected.payload)?
+                    != AdmissionRejectionReasonV1::Cancelled
+            {
+                return Err(inconsistent(
+                    "superseded join cleanup confirmation is invalid",
+                ));
+            }
             cleanup.superseded = true;
             if !attempt.inbox_dedup.contains(&acknowledgment) {
                 attempt.inbox_dedup.push(acknowledgment.clone());
@@ -1908,6 +2036,20 @@ impl DurableAdmissionTransaction {
         attempt_id: AdmissionAttemptId,
         rejected_ack: &AdmissionInboxRecordV1,
     ) -> Result<(), WorkspaceConvergenceError> {
+        if let Some(terminal) = self
+            .repository
+            .load_terminal(attempt_id)
+            .await
+            .map_err(map_repository_error)?
+        {
+            if terminal.terminal_result == AdmissionTerminalResultV1::Rejected
+                && terminal.rejection_reason == Some(AdmissionRejectionReasonV1::Cancelled)
+                && terminal.acknowledgment_rebuild.contains(rejected_ack)
+            {
+                return Ok(());
+            }
+            return Err(inconsistent("rejected acknowledgment does not match"));
+        }
         let mut attempt = self.required_attempt(attempt_id).await?;
         if !matches!(
             attempt.role_state,
@@ -2345,7 +2487,11 @@ impl DurableAdmissionTransaction {
                 .filter(|message| !message.superseded)
             {
                 report.deliveries_attempted += 1;
-                let Ok(outcome) = delivery.deliver(attempt.attempt_id, message).await else {
+                let route = admission_outbox_delivery_route(&attempt, message)?;
+                let Ok(outcome) = delivery
+                    .deliver(attempt.attempt_id, message, route.as_ref())
+                    .await
+                else {
                     continue;
                 };
                 let confirmed = match outcome {
@@ -2408,6 +2554,16 @@ impl DurableAdmissionTransaction {
                                 ));
                             }
                         }
+                        true
+                    }
+                    AdmissionOutboxDeliveryResultV1::Rejected(rejected) => {
+                        if message.purpose != AdmissionOutboxPurposeV1::CancelRequested {
+                            return Err(inconsistent(
+                                "rejection does not match admission outbox purpose",
+                            ));
+                        }
+                        self.joiner_record_rejected(attempt.attempt_id, &rejected)
+                            .await?;
                         true
                     }
                 };

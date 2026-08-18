@@ -651,6 +651,8 @@ impl PairingSessionPort for IrohPairingSessionAdapter {
     #[instrument(skip_all, fields(code = %code.as_str()))]
     async fn dial_by_invitation(&self, code: &InvitationCode) -> Result<DialOutcome, DialError> {
         let (sponsor_addr, channel) = self.resolve_invitation(code).await?;
+        let continuation_address = postcard::to_stdvec(&sponsor_addr)
+            .map_err(|error| DialError::Internal(format!("encode sponsor address: {error}")))?;
         let sponsor_id = sponsor_addr.id.fmt_short().to_string();
         let transport_addr_count = sponsor_addr.addrs.len();
         info!(
@@ -713,6 +715,7 @@ impl PairingSessionPort for IrohPairingSessionAdapter {
         Ok(DialOutcome {
             session_id: session,
             channel,
+            continuation_address,
         })
     }
 

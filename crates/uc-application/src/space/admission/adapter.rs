@@ -84,6 +84,7 @@ pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
         _preparation: &(dyn GroupAdmissionPort + Send + Sync),
         _local_device_id: &DeviceId,
         _sponsor: &[u8],
+        _sponsor_continuation_address: &[u8],
         _stable_request_binding: &[u8],
         _preserve_unreadable_history: bool,
     ) -> Result<DurableLocalJoinPreparation, WorkspaceConvergenceError> {
@@ -95,6 +96,20 @@ pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
         &self,
         _attempt_id: [u8; 32],
         _reason: uc_core::membership::AdmissionRejectionReasonV1,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
+
+    async fn reject_superseded_join_cleanup(
+        &self,
+        _frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        Err(WorkspaceConvergenceError::Unavailable)
+    }
+
+    async fn confirm_superseded_join_cleanup_sent(
+        &self,
+        _frame: &uc_core::pairing::DurableAdmissionFrame,
     ) -> Result<(), WorkspaceConvergenceError> {
         Err(WorkspaceConvergenceError::Unavailable)
     }
@@ -190,6 +205,7 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         preparation: &(dyn GroupAdmissionPort + Send + Sync),
         local_device_id: &DeviceId,
         sponsor: &[u8],
+        sponsor_continuation_address: &[u8],
         stable_request_binding: &[u8],
         preserve_unreadable_history: bool,
     ) -> Result<DurableLocalJoinPreparation, WorkspaceConvergenceError> {
@@ -198,6 +214,7 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
             preparation,
             local_device_id,
             sponsor,
+            sponsor_continuation_address,
             stable_request_binding,
             preserve_unreadable_history,
         )
@@ -210,6 +227,20 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         reason: uc_core::membership::AdmissionRejectionReasonV1,
     ) -> Result<(), WorkspaceConvergenceError> {
         WorkspaceConvergence::reject_local_join_before_candidate(self, attempt_id, reason).await
+    }
+
+    async fn reject_superseded_join_cleanup(
+        &self,
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        WorkspaceConvergence::reject_superseded_join_cleanup(self, frame).await
+    }
+
+    async fn confirm_superseded_join_cleanup_sent(
+        &self,
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        WorkspaceConvergence::confirm_superseded_join_cleanup_sent(self, frame).await
     }
 
     async fn admission_decision_for_joiner(

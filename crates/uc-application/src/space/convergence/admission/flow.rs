@@ -1105,6 +1105,7 @@ impl WorkspaceConvergence {
         preparation: &(dyn uc_core::ports::space::GroupAdmissionPort + Send + Sync),
         local_device_id: &DeviceId,
         sponsor: &[u8],
+        sponsor_continuation_address: &[u8],
         stable_request_binding: &[u8],
         preserve_unreadable_history: bool,
     ) -> Result<
@@ -1118,6 +1119,7 @@ impl WorkspaceConvergence {
                 preparation,
                 local_device_id,
                 sponsor,
+                sponsor_continuation_address,
                 stable_request_binding,
                 preserve_unreadable_history,
             )
@@ -1153,6 +1155,74 @@ impl WorkspaceConvergence {
             )
             .await
     }
+
+    pub(crate) async fn reject_superseded_join_cleanup(
+        &self,
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        use uc_core::membership::{AdmissionAttemptId, AdmissionOutboxPurposeV1};
+
+        if frame.kind != uc_core::pairing::DurableAdmissionMessageKind::CancelRequested {
+            return Err(WorkspaceConvergenceError::InvalidConfirmation);
+        }
+        let cancel: uc_core::membership::AdmissionOutboxMessageV1 =
+            postcard::from_bytes(&frame.payload)
+                .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
+        if cancel.purpose != AdmissionOutboxPurposeV1::CancelRequested
+            || cancel.message_id != frame.message_id
+            || cancel.predecessor_message_id != frame.predecessor_message_id
+        {
+            return Err(WorkspaceConvergenceError::InvalidConfirmation);
+        }
+        let _guard = self.state_lock.lock().await;
+        let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
+        let rejected = self
+            .admission
+            .sponsor_decide_cancel(
+                attempt_id,
+                &cancel,
+                &cancel.recipient,
+                b"superseded_by_new_join",
+            )
+            .await?;
+        Ok(uc_core::pairing::DurableAdmissionFrame {
+            attempt_id: frame.attempt_id,
+            kind: uc_core::pairing::DurableAdmissionMessageKind::Rejected,
+            message_id: rejected.message_id,
+            predecessor_message_id: rejected.predecessor_message_id,
+            payload: postcard::to_stdvec(&rejected)
+                .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?,
+        })
+    }
+
+    pub(crate) async fn confirm_superseded_join_cleanup_sent(
+        &self,
+        frame: &uc_core::pairing::DurableAdmissionFrame,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        use uc_core::membership::{AdmissionAttemptId, AdmissionOutboxPurposeV1};
+
+        if frame.kind != uc_core::pairing::DurableAdmissionMessageKind::Rejected {
+            return Err(WorkspaceConvergenceError::InvalidConfirmation);
+        }
+        let rejected: uc_core::membership::AdmissionOutboxMessageV1 =
+            postcard::from_bytes(&frame.payload)
+                .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
+        if rejected.purpose != AdmissionOutboxPurposeV1::Rejected
+            || rejected.message_id != frame.message_id
+            || rejected.predecessor_message_id != frame.predecessor_message_id
+        {
+            return Err(WorkspaceConvergenceError::InvalidConfirmation);
+        }
+        let _guard = self.state_lock.lock().await;
+        let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
+        let acknowledgment = transaction::admission_acknowledgment(&rejected);
+        self.admission
+            .sponsor_confirm_rejected(attempt_id, &acknowledgment)
+            .await?;
+        self.admission.compact_if_settled(attempt_id).await?;
+        Ok(())
+    }
+
     pub async fn requires_session_transition(&self) -> Result<bool, WorkspaceConvergenceError> {
         self.admission.requires_session_transition().await
     }

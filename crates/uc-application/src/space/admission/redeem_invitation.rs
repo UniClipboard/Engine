@@ -323,6 +323,7 @@ mod tests {
             Ok(DialOutcome {
                 session_id: PairingSessionId::new("session-1"),
                 channel: DiscoveryChannel::Cloud,
+                continuation_address: b"sponsor-address".to_vec(),
             })
         }
         async fn send(
@@ -548,6 +549,7 @@ mod tests {
             preparation: &(dyn GroupAdmissionPort + Send + Sync),
             local_device_id: &DeviceId,
             _sponsor: &[u8],
+            _sponsor_continuation_address: &[u8],
             _stable_request_binding: &[u8],
             _preserve_unreadable_history: bool,
         ) -> Result<

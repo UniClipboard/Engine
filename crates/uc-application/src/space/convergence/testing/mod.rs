@@ -52,6 +52,18 @@ struct UnusedAdmissionCompletionRecovery;
 
 struct ConfirmingAdmissionDelivery;
 
+struct BlockingLegacyMigrationRecovery {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl uc_core::ports::setup::LegacyMigrationRecoveryPort for BlockingLegacyMigrationRecovery {
+    async fn recover(&self) -> Result<(), uc_core::ports::setup::LegacyMigrationRecoveryError> {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
 struct LoopbackHistoryExchange {
     receiver: Arc<WorkspaceConvergence>,
     source_device_id: DeviceId,
@@ -121,6 +133,7 @@ impl uc_core::membership::AdmissionOutboxDeliveryPort for DeferredAdmissionDeliv
         &self,
         _attempt_id: uc_core::membership::AdmissionAttemptId,
         _message: &uc_core::membership::AdmissionOutboxMessageV1,
+        _route: Option<&uc_core::membership::AdmissionOutboxDeliveryRouteV1>,
     ) -> Result<
         uc_core::membership::AdmissionOutboxDeliveryResultV1,
         uc_core::membership::AdmissionOutboxDeliveryError,
@@ -133,8 +146,9 @@ impl uc_core::membership::AdmissionOutboxDeliveryPort for DeferredAdmissionDeliv
 impl uc_core::membership::AdmissionOutboxDeliveryPort for ConfirmingAdmissionDelivery {
     async fn deliver(
         &self,
-        _attempt_id: uc_core::membership::AdmissionAttemptId,
+        attempt_id: uc_core::membership::AdmissionAttemptId,
         message: &uc_core::membership::AdmissionOutboxMessageV1,
+        _route: Option<&uc_core::membership::AdmissionOutboxDeliveryRouteV1>,
     ) -> Result<
         uc_core::membership::AdmissionOutboxDeliveryResultV1,
         uc_core::membership::AdmissionOutboxDeliveryError,
@@ -143,6 +157,23 @@ impl uc_core::membership::AdmissionOutboxDeliveryPort for ConfirmingAdmissionDel
             return Ok(
                 uc_core::membership::AdmissionOutboxDeliveryResultV1::InvitationConsume(
                     uc_core::membership::InvitationConsumeDeliveryResultV1::Consumed,
+                ),
+            );
+        }
+        if message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested {
+            return Ok(
+                uc_core::membership::AdmissionOutboxDeliveryResultV1::Rejected(
+                    super::admission::durable_admission_message(
+                        attempt_id,
+                        uc_core::membership::AdmissionOutboxPurposeV1::Rejected,
+                        &message.recipient,
+                        Some(message.message_id),
+                        &postcard::to_stdvec(&(
+                            uc_core::membership::AdmissionRejectionReasonV1::Cancelled,
+                            b"cancelled".to_vec(),
+                        ))
+                        .unwrap(),
+                    ),
                 ),
             );
         }
@@ -1151,6 +1182,31 @@ fn harness(own_device: &str, members: Vec<(DeviceId, MemberInstanceId)>) -> Harn
         repository,
         presence,
     }
+}
+
+#[tokio::test]
+async fn runtime_pause_interrupts_an_in_flight_recovery() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
+    deps.legacy_migration_recovery = Arc::new(BlockingLegacyMigrationRecovery {
+        started: Arc::clone(&started),
+    });
+    let owner = WorkspaceConvergence::new(deps);
+    let (presence_tx, presence_rx) = tokio::sync::broadcast::channel(1);
+    let runtime = owner.start(presence_rx);
+    started.notified().await;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        runtime.activity().pause(),
+    )
+    .await
+    .expect("pause must not wait for network recovery")
+    .unwrap();
+
+    drop(presence_tx);
+    runtime.shutdown().await;
 }
 
 /// Build the full dependency set with no-op defaults for every port except

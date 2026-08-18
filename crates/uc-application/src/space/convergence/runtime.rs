@@ -21,6 +21,47 @@ enum WorkspaceConvergenceRuntimeCommand {
     Shutdown(oneshot::Sender<()>),
 }
 
+#[derive(Clone, Copy)]
+enum RecoveryTrigger {
+    Startup,
+    Resume,
+    Periodic,
+}
+
+struct RecoveryTask(Option<JoinHandle<()>>);
+
+impl RecoveryTask {
+    fn startup(owner: Arc<WorkspaceConvergence>) -> Self {
+        Self(Some(spawn_recovery(owner, RecoveryTrigger::Startup)))
+    }
+
+    fn is_running(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn start(&mut self, owner: Arc<WorkspaceConvergence>, trigger: RecoveryTrigger) {
+        if self.0.is_none() {
+            self.0 = Some(spawn_recovery(owner, trigger));
+        }
+    }
+
+    async fn cancel(&mut self) {
+        let Some(task) = self.0.take() else {
+            return;
+        };
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+impl Drop for RecoveryTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
+}
+
 pub struct WorkspaceConvergenceRuntime {
     activity: WorkspaceConvergenceActivity,
     task: Option<JoinHandle<()>>,
@@ -41,22 +82,8 @@ impl WorkspaceConvergence {
         let (commands, mut command_rx) = mpsc::unbounded_channel();
         let owner = Arc::clone(&self);
         let task = tokio::spawn(async move {
-            if owner.recover_legacy_migration_marker().await.is_err() {
-                warn!(
-                    error_kind = "legacy_migration_marker_recovery",
-                    retryable = true,
-                    "workspace convergence: legacy migration marker recovery deferred"
-                );
-            }
-            if let Err(error) = owner.recover_pending_admissions().await {
-                warn!(error = %error, "workspace convergence: pending admissions deferred");
-            }
-            if let Err(error) = owner.recover_pending_membership_effects().await {
-                warn!(error = %error, "workspace convergence: pending membership effects deferred");
-            }
-            if let Err(error) = owner.deliver_pending_membership_decisions().await {
-                warn!(error = %error, "workspace convergence: pending membership decisions deferred");
-            }
+            let mut recovery_task = RecoveryTask::startup(Arc::clone(&owner));
+            let mut resume_recovery_pending = false;
             let mut paused = false;
             let mut presence_open = true;
             let mut recovery_tick = tokio::time::interval_at(
@@ -68,34 +95,44 @@ impl WorkspaceConvergence {
                     command = command_rx.recv() => match command {
                         Some(WorkspaceConvergenceRuntimeCommand::Pause(completed)) => {
                             paused = true;
+                            resume_recovery_pending = false;
+                            recovery_task.cancel().await;
                             let _ = completed.send(());
                         }
                         Some(WorkspaceConvergenceRuntimeCommand::Resume(completed)) => {
                             paused = false;
+                            resume_recovery_pending = true;
                             let _ = completed.send(());
-                            if owner.recover_legacy_migration_marker().await.is_err() {
-                                warn!(error_kind = "legacy_migration_marker_recovery", retryable = true, "workspace convergence: legacy migration marker recovery deferred after resume");
-                            }
-                            if let Err(error) = owner.recover_pending_admissions().await {
-                                warn!(error = %error, "workspace convergence: pending admissions deferred after resume");
-                            }
-                            if let Err(error) = owner.recover_pending_membership_effects().await {
-                                warn!(error = %error, "workspace convergence: pending membership effects deferred after resume");
-                            }
-                            if let Err(error) = owner.deliver_pending_membership_decisions().await {
-                                warn!(error = %error, "workspace convergence: pending membership decisions deferred after resume");
-                            }
-                            if let Err(error) = owner.synchronize_chain().await {
-                                warn!(error = %error, "workspace convergence: resumed membership history exchange deferred");
+                            if !recovery_task.is_running() {
+                                recovery_task.start(Arc::clone(&owner), RecoveryTrigger::Resume);
+                                resume_recovery_pending = false;
                             }
                         }
                         Some(WorkspaceConvergenceRuntimeCommand::Shutdown(completed)) => {
+                            recovery_task.cancel().await;
                             let _ = completed.send(());
                             break;
                         }
                         None => break,
                     },
-                    event = presence_events.recv(), if !paused && presence_open => match event {
+                    result = async {
+                        match recovery_task.0.as_mut() {
+                            Some(task) => task.await,
+                            None => std::future::pending().await,
+                        }
+                    }, if recovery_task.is_running() => {
+                        if let Err(error) = result {
+                            if !error.is_cancelled() {
+                                warn!(error_kind = "workspace_convergence_recovery_panic", "workspace convergence recovery stopped unexpectedly");
+                            }
+                        }
+                        recovery_task.0 = None;
+                        if resume_recovery_pending && !paused {
+                            recovery_task.start(Arc::clone(&owner), RecoveryTrigger::Resume);
+                            resume_recovery_pending = false;
+                        }
+                    }
+                    event = presence_events.recv(), if !paused && !recovery_task.is_running() && presence_open => match event {
                         Ok(event) if event.state == uc_core::ports::ReachabilityState::Online => {
                             debug!(device_id = %event.device_id.as_str(), "workspace convergence: member online");
                             if let Err(error) = owner
@@ -114,19 +151,8 @@ impl WorkspaceConvergence {
                             presence_open = false;
                         }
                     },
-                    _ = recovery_tick.tick(), if !paused => {
-                        if owner.recover_legacy_migration_marker().await.is_err() {
-                            warn!(error_kind = "legacy_migration_marker_recovery", retryable = true, "workspace convergence: periodic legacy migration marker recovery deferred");
-                        }
-                        if let Err(error) = owner.recover_pending_admissions().await {
-                            warn!(error = %error, "workspace convergence: periodic admission recovery deferred");
-                        }
-                        if let Err(error) = owner.recover_pending_membership_effects().await {
-                            warn!(error = %error, "workspace convergence: periodic membership effect recovery deferred");
-                        }
-                        if let Err(error) = owner.deliver_pending_membership_decisions().await {
-                            warn!(error = %error, "workspace convergence: periodic membership decision delivery deferred");
-                        }
+                    _ = recovery_tick.tick(), if !paused && !recovery_task.is_running() => {
+                        recovery_task.start(Arc::clone(&owner), RecoveryTrigger::Periodic);
                     }
                 }
             }
@@ -134,6 +160,40 @@ impl WorkspaceConvergence {
         WorkspaceConvergenceRuntime {
             activity: WorkspaceConvergenceActivity { commands },
             task: Some(task),
+        }
+    }
+}
+
+fn spawn_recovery(owner: Arc<WorkspaceConvergence>, trigger: RecoveryTrigger) -> JoinHandle<()> {
+    tokio::spawn(run_recovery(owner, trigger))
+}
+
+async fn run_recovery(owner: Arc<WorkspaceConvergence>, trigger: RecoveryTrigger) {
+    let context = match trigger {
+        RecoveryTrigger::Startup => "startup",
+        RecoveryTrigger::Resume => "resume",
+        RecoveryTrigger::Periodic => "periodic",
+    };
+    if owner.recover_legacy_migration_marker().await.is_err() {
+        warn!(
+            error_kind = "legacy_migration_marker_recovery",
+            retryable = true,
+            recovery_context = context,
+            "workspace convergence: legacy migration marker recovery deferred"
+        );
+    }
+    if let Err(error) = owner.recover_pending_admissions().await {
+        warn!(error = %error, recovery_context = context, "workspace convergence: pending admissions deferred");
+    }
+    if let Err(error) = owner.recover_pending_membership_effects().await {
+        warn!(error = %error, recovery_context = context, "workspace convergence: pending membership effects deferred");
+    }
+    if let Err(error) = owner.deliver_pending_membership_decisions().await {
+        warn!(error = %error, recovery_context = context, "workspace convergence: pending membership decisions deferred");
+    }
+    if matches!(trigger, RecoveryTrigger::Resume) {
+        if let Err(error) = owner.synchronize_chain().await {
+            warn!(error = %error, "workspace convergence: resumed membership history exchange deferred");
         }
     }
 }

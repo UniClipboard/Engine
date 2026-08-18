@@ -289,6 +289,8 @@ fn to_wire(msg: &PairingSessionMessage) -> WireBody {
                     DurableAdmissionMessageKind::Applied => 4,
                     DurableAdmissionMessageKind::Complete => 5,
                     DurableAdmissionMessageKind::CompleteAck => 6,
+                    DurableAdmissionMessageKind::CancelRequested => 7,
+                    DurableAdmissionMessageKind::Rejected => 8,
                 },
                 message_id: frame.message_id,
                 predecessor_message_id: frame.predecessor_message_id,
@@ -381,6 +383,8 @@ fn from_wire(body: WireBody) -> Result<PairingSessionMessage, WireDecodeError> {
                     4 => DurableAdmissionMessageKind::Applied,
                     5 => DurableAdmissionMessageKind::Complete,
                     6 => DurableAdmissionMessageKind::CompleteAck,
+                    7 => DurableAdmissionMessageKind::CancelRequested,
+                    8 => DurableAdmissionMessageKind::Rejected,
                     other => {
                         return Err(WireDecodeError::UnsupportedDurableAdmissionKind(other));
                     }
@@ -575,6 +579,8 @@ mod tests {
             DurableAdmissionMessageKind::Applied,
             DurableAdmissionMessageKind::Complete,
             DurableAdmissionMessageKind::CompleteAck,
+            DurableAdmissionMessageKind::CancelRequested,
+            DurableAdmissionMessageKind::Rejected,
         ] {
             let original = PairingSessionMessage::DurableAdmission(DurableAdmissionFrame {
                 attempt_id: [0x21; 32],

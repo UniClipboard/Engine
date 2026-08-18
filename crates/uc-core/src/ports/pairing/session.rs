@@ -105,6 +105,9 @@ pub struct DialOutcome {
     pub session_id: PairingSessionId,
     /// The discovery channel whose resolution won the dial.
     pub channel: DiscoveryChannel,
+    /// Opaque address that can reopen a restricted admission session after
+    /// the one-time invitation has been consumed.
+    pub continuation_address: Vec<u8>,
 }
 
 /// Errors raised by send/recv/close on a session.

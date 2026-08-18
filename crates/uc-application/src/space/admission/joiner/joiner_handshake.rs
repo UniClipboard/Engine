@@ -196,6 +196,7 @@ impl JoinerHandshakeCoordinator {
         let DialOutcome {
             session_id: session,
             channel,
+            continuation_address,
         } = self
             .pairing_session
             .dial_by_invitation(code)
@@ -207,6 +208,7 @@ impl JoinerHandshakeCoordinator {
             .drive(
                 &session,
                 channel,
+                &continuation_address,
                 code,
                 passphrase,
                 preserve_unreadable_history,
@@ -236,6 +238,7 @@ impl JoinerHandshakeCoordinator {
         &self,
         session: &PairingSessionId,
         channel: DiscoveryChannel,
+        continuation_address: &[u8],
         code: &InvitationCode,
         passphrase: &Passphrase,
         preserve_unreadable_history: bool,
@@ -280,6 +283,7 @@ impl JoinerHandshakeCoordinator {
                 self.group_admission.as_ref(),
                 &local_device_id,
                 code.as_str().as_bytes(),
+                &continuation_address,
                 &stable_request_binding,
                 preserve_unreadable_history,
             )
@@ -834,6 +838,7 @@ mod tests {
                 Some(Ok(id)) => Ok(DialOutcome {
                     session_id: id.clone(),
                     channel: DiscoveryChannel::Cloud,
+                    continuation_address: b"sponsor-address".to_vec(),
                 }),
                 Some(Err(err)) => Err(clone_dial_err(err)),
                 None => Err(DialError::Internal("test misconfigured".into())),
@@ -1133,6 +1138,7 @@ mod tests {
             preparation: &(dyn GroupAdmissionPort + Send + Sync),
             local_device_id: &DeviceId,
             _sponsor: &[u8],
+            _sponsor_continuation_address: &[u8],
             _stable_request_binding: &[u8],
             _preserve_unreadable_history: bool,
         ) -> Result<

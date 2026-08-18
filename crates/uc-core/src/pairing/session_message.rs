@@ -45,6 +45,8 @@ pub enum DurableAdmissionMessageKind {
     Applied,
     Complete,
     CompleteAck,
+    CancelRequested,
+    Rejected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
