@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +34,12 @@ pub struct MembershipConnectivityDeps {
 pub struct MembershipConnectivityRuntime {
     cancel: CancellationToken,
     task: JoinHandle<()>,
+    activity: MembershipConnectivityActivity,
+}
+
+#[derive(Clone)]
+pub struct MembershipConnectivityActivity {
+    wake: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,11 +100,19 @@ struct MembershipConnectivity {
     deps: MembershipConnectivityDeps,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MembershipConnectivityPass {
+    Completed,
+    ScopeUnavailable,
+    Stopped,
+}
+
 impl MembershipConnectivity {
     async fn run(
         self,
         mut presence_events: broadcast::Receiver<PresenceEvent>,
         cancel: CancellationToken,
+        wake: Arc<Notify>,
     ) {
         let mut ticker = tokio::time::interval(BASE_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -107,6 +121,10 @@ impl MembershipConnectivity {
         fallback_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         fallback_ticker.tick().await;
         let mut backoff = HashMap::new();
+        let initial_outcome = self.dial_due_peers(&mut backoff, false, &cancel).await;
+        if initial_outcome == MembershipConnectivityPass::Stopped {
+            return;
+        }
 
         loop {
             tokio::select! {
@@ -138,12 +156,20 @@ impl MembershipConnectivity {
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 _ = ticker.tick() => {
-                    if !self.dial_due_peers(&mut backoff, false, &cancel).await {
+                    let outcome = self.dial_due_peers(&mut backoff, false, &cancel).await;
+                    if outcome == MembershipConnectivityPass::Stopped {
                         break;
                     }
                 }
                 _ = fallback_ticker.tick() => {
-                    if !self.dial_due_peers(&mut backoff, true, &cancel).await {
+                    let outcome = self.dial_due_peers(&mut backoff, true, &cancel).await;
+                    if outcome == MembershipConnectivityPass::Stopped {
+                        break;
+                    }
+                }
+                _ = wake.notified() => {
+                    let outcome = self.dial_due_peers(&mut backoff, false, &cancel).await;
+                    if outcome == MembershipConnectivityPass::Stopped {
                         break;
                     }
                 }
@@ -156,15 +182,15 @@ impl MembershipConnectivity {
         backoff: &mut HashMap<String, BackoffState>,
         sleeping_only: bool,
         cancel: &CancellationToken,
-    ) -> bool {
+    ) -> MembershipConnectivityPass {
         let Ok(records) = self.deps.peer_addresses.list().await else {
             warn!("failed to list paired peers for membership connectivity");
-            return true;
+            return MembershipConnectivityPass::Completed;
         };
         let Ok(scope) = self.deps.peer_scope.snapshot().await else {
             warn!("current peer scope is unavailable for membership connectivity");
             backoff.clear();
-            return true;
+            return MembershipConnectivityPass::ScopeUnavailable;
         };
         let addressable = records
             .into_iter()
@@ -196,7 +222,11 @@ impl MembershipConnectivity {
                 }
             })
             .collect::<Vec<_>>();
-        self.dispatch_dials(due, backoff, cancel).await
+        if self.dispatch_dials(due, backoff, cancel).await {
+            MembershipConnectivityPass::Completed
+        } else {
+            MembershipConnectivityPass::Stopped
+        }
     }
 
     async fn dispatch_dials(
@@ -250,20 +280,36 @@ pub fn start_membership_connectivity(
 ) -> MembershipConnectivityRuntime {
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
+    let wake = Arc::new(Notify::new());
+    let task_wake = Arc::clone(&wake);
     let task = tokio::spawn(async move {
         info!("membership connectivity started");
         MembershipConnectivity { deps }
-            .run(presence_events, task_cancel)
+            .run(presence_events, task_cancel, task_wake)
             .await;
         debug!("membership connectivity stopped");
     });
-    MembershipConnectivityRuntime { cancel, task }
+    MembershipConnectivityRuntime {
+        cancel,
+        task,
+        activity: MembershipConnectivityActivity { wake },
+    }
 }
 
 impl MembershipConnectivityRuntime {
+    pub(crate) fn activity(&self) -> MembershipConnectivityActivity {
+        self.activity.clone()
+    }
+
     pub async fn shutdown(self) {
         self.cancel.cancel();
         let _ = self.task.await;
+    }
+}
+
+impl MembershipConnectivityActivity {
+    pub(crate) fn resume(&self) {
+        self.wake.notify_one();
     }
 }
 
@@ -309,9 +355,29 @@ mod tests {
         events: broadcast::Sender<PresenceEvent>,
     }
 
+    struct RecordingPresence {
+        reached: std::sync::Mutex<Vec<DeviceId>>,
+        started: Notify,
+        events: broadcast::Sender<PresenceEvent>,
+    }
+
     struct EmptyPeerScope;
 
     struct FixedPeerScope(Vec<DeviceId>);
+
+    struct ReadinessGatedPeerScope {
+        ready: std::sync::Mutex<bool>,
+        unavailable: Notify,
+    }
+
+    impl ReadinessGatedPeerScope {
+        fn mark_ready(&self) {
+            *self
+                .ready
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        }
+    }
 
     #[async_trait::async_trait]
     impl uc_core::membership::CurrentWorkspacePeerScopePort for FixedPeerScope {
@@ -348,6 +414,66 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl uc_core::membership::CurrentWorkspacePeerScopePort for ReadinessGatedPeerScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<
+            uc_core::membership::CurrentWorkspacePeerSnapshot,
+            uc_core::membership::CurrentWorkspacePeerScopeError,
+        > {
+            if !*self
+                .ready
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+            {
+                self.unavailable.notify_one();
+                return Err(uc_core::membership::CurrentWorkspacePeerScopeError::Locked);
+            }
+            Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+                revision: 1,
+                source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
+                local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
+                peer_device_ids: vec![DeviceId::new("device-b")],
+            })
+        }
+    }
+
+    struct SinglePeerAddress;
+
+    #[async_trait::async_trait]
+    impl PeerAddressRepositoryPort for SinglePeerAddress {
+        async fn get(
+            &self,
+            _device: &DeviceId,
+        ) -> Result<Option<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError>
+        {
+            Ok(None)
+        }
+
+        async fn upsert(
+            &self,
+            _record: &uc_core::ports::PeerAddressRecord,
+        ) -> Result<(), uc_core::ports::PeerAddressError> {
+            Ok(())
+        }
+
+        async fn list(
+            &self,
+        ) -> Result<Vec<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError>
+        {
+            Ok(vec![uc_core::ports::PeerAddressRecord {
+                device_id: DeviceId::new("device-b"),
+                addr_blob: vec![1],
+                observed_at: Utc::now(),
+            }])
+        }
+
+        async fn remove(&self, _device: &DeviceId) -> Result<(), uc_core::ports::PeerAddressError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
     impl PresencePort for BlockingPresence {
         async fn ensure_reachable(
             &self,
@@ -355,6 +481,29 @@ mod tests {
         ) -> Result<ReachabilityState, PresenceError> {
             self.started.notify_one();
             std::future::pending().await
+        }
+
+        async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
+            ReachabilityState::Unknown
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+            self.events.subscribe()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PresencePort for RecordingPresence {
+        async fn ensure_reachable(
+            &self,
+            device: &DeviceId,
+        ) -> Result<ReachabilityState, PresenceError> {
+            self.reached
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(device.clone());
+            self.started.notify_one();
+            Ok(ReachabilityState::Online)
         }
 
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
@@ -448,6 +597,48 @@ mod tests {
                 .await
                 .is_err()
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retries_admitted_peer_when_scope_becomes_ready_after_startup() {
+        let (events, presence_events) = broadcast::channel(4);
+        let presence = Arc::new(RecordingPresence {
+            reached: std::sync::Mutex::new(Vec::new()),
+            started: Notify::new(),
+            events,
+        });
+        let scope = Arc::new(ReadinessGatedPeerScope {
+            ready: std::sync::Mutex::new(false),
+            unavailable: Notify::new(),
+        });
+        let runtime = start_membership_connectivity(
+            MembershipConnectivityDeps {
+                peer_addresses: Arc::new(SinglePeerAddress),
+                presence: presence.clone(),
+                local_device_id: DeviceId::new("device-a"),
+                peer_scope: scope.clone(),
+            },
+            presence_events,
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), scope.unavailable.notified())
+            .await
+            .expect("startup attempts to load the current admitted-member scope");
+        scope.mark_ready();
+        runtime.activity().resume();
+        tokio::time::timeout(Duration::from_secs(2), presence.started.notified())
+            .await
+            .expect("ready admitted peer is retried by the session-ready event");
+        assert_eq!(
+            presence
+                .reached
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            &[DeviceId::new("device-b")]
+        );
+
         runtime.shutdown().await;
     }
 }
