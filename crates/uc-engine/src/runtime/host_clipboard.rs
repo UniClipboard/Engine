@@ -91,9 +91,11 @@ impl HostClipboardChangeRuntime {
         source_started_at: Option<Instant>,
     ) -> Result<Option<SendReportSummary>, EngineError> {
         let lease = self.session_supervisor.acquire_operation().await?;
-        let result = self
-            .process_change_while_leased(dispatch_mode, source_started_at)
-            .await;
+        let cancellation = lease.cancellation();
+        let result = tokio::select! {
+            _ = cancellation.cancelled() => Err(super::operation_unavailable_error()),
+            result = self.process_change_while_leased(dispatch_mode, source_started_at) => result,
+        };
         drop(lease);
         result
     }

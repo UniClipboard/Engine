@@ -425,7 +425,11 @@ impl WorkspaceConvergence {
         }
         let _guard = self.state_lock.lock().await;
         let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
-        let payload = transaction::DurableAdmissionCandidatePayloadV1::decode(&frame.payload)?;
+        let attempt = self
+            .admission
+            .load(attempt_id)
+            .await?
+            .ok_or(WorkspaceConvergenceError::JoinNotFound)?;
         let candidate_message = transaction::durable_admission_message(
             attempt_id,
             AdmissionOutboxPurposeV1::Candidate,
@@ -436,6 +440,15 @@ impl WorkspaceConvergence {
         if candidate_message.message_id != frame.message_id {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         }
+        if attempt.terminal_result
+            == Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+        {
+            self.admission
+                .record_superseded_protocol_contradiction(attempt_id, &candidate_message)
+                .await?;
+            return Err(WorkspaceConvergenceError::RecoveryRequired);
+        }
+        let payload = transaction::DurableAdmissionCandidatePayloadV1::decode(&frame.payload)?;
         let base_history = VersionedMembershipHistory::decode_persisted_v2(
             &payload.base_membership_history,
             self.deps.historical_membership_signatures.as_ref(),
@@ -640,6 +653,14 @@ impl WorkspaceConvergence {
         );
         if commit.message_id != frame.message_id {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
+        }
+        if attempt.terminal_result
+            == Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+        {
+            self.admission
+                .record_superseded_protocol_contradiction(attempt_id, &commit)
+                .await?;
+            return Err(WorkspaceConvergenceError::RecoveryRequired);
         }
         let commit_payload = transaction::DurableAdmissionCommitPayloadV1::decode(&frame.payload)?;
         let candidate_event: MembershipEventV2 =
@@ -937,6 +958,14 @@ impl WorkspaceConvergence {
         );
         if complete.message_id != frame.message_id {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
+        }
+        if attempt.terminal_result
+            == Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+        {
+            self.admission
+                .record_superseded_protocol_contradiction(attempt_id, &complete)
+                .await?;
+            return Err(WorkspaceConvergenceError::RecoveryRequired);
         }
         let completion: AdmissionCompletionV1 = postcard::from_bytes(&frame.payload)
             .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;

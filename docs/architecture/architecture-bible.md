@@ -236,7 +236,7 @@ Space
 为止。若进程在共同保护状态写入后、成员历史起点写入前中断，持有未完成升级记录的创建方在重启后继续完成
 成员历史，不再重新按设备编号选择负责人。
 
-### 配对作为工作空间准入通道（ADR-017 部分实施，规格 023 分阶段实施）
+### 配对作为工作空间准入通道（ADR-017、ADR-022，规格 023）
 
 ADR-017 的目标是成员加入由 `WorkspaceConvergence` 完整负责，配对只保留内部通信职责。正常加入时产品和
 绑定只创建工作空间邀请或调用一次 JoinSpace，查询、取消和移除等管理动作也不能看到或驱动候选、历史
@@ -267,9 +267,12 @@ Space 唯一入站候选，正式设备信任快照也读取这些投影。活�
 `AppFacade` 仍不允许半构造，`uc-engine` 只组装并路由。profile 同时只允许一个被占用的准入槽，不区分
 本机加入或为其他设备发起；非终态、共享写前恢复、Space 切换或改变活动世代的清理全部收束后才释放，
 避免 Cross-Space 切换遗弃原 Space 的入站尝试。业务已终态且只剩按 attempt 隔离的消息重发或压缩时，
-旧记录继续恢复但不阻塞下一次准入。
+旧记录继续恢复但不阻塞下一次准入。ADR-022 增加唯一例外：新的用户 JoinSpace 可以在同一次持久提交中
+把尚未保存 Prepared 的旧本机 Joiner 变成 SupersededByNewJoin，并立即让全新尝试取得同一个槽；这个过程
+从不把槽释放给调用方，也不允许取代入站尝试、共享恢复或 Space transition。
 
-加入方尚未收到正式 Commit 而原发起方不可恢复时，无法安全判断是否已经提交，只能保持 Pending。加入方
+加入方已经持久保存 Prepared、尚未收到正式 Commit 而原发起方不可恢复时，无法安全判断是否已经提交，
+只能保持 Pending。加入方
 已保存 Commit 和应用回执后，任一仍在同一当前分支、已验证并保存正式 AddDevice 和该回执的成员可以
 接手完成。`WorkspaceConvergence` 先让帮助设备保存绑定三方身份、双方网络身份、单调计数和随机挑战的
 签名证明，再验证加入方使用本次加入专用凭据返回的原事件、原提交和原回执。帮助设备必须证明自己在
@@ -289,6 +292,14 @@ Complete outbox 建立前，本分支串行化其他成员安全变化。
 产品复用 `CancelJoinSpace(join_id)` 和现有 `RemoveMember(device_id)`，不新增按加入编号查询、入站取消或
 待激活专用移除接口。`DeviceTrustSnapshot.revision` 在同一 profile 内跨 Space 单调递增，变化后只发送
 `DeviceTrustChanged` 提醒重新查询。`QueryWorkspaceConvergence` 及其事件继续只用于 dev-tools 诊断。
+
+ADR-022 已实施。每次用户明确调用 JoinSpace 都会创建新的 attempt、join、ordinal、成员凭据
+和安全材料；断线、重启、消息重放和后台退避继续原尝试，宿主通过 current_join 恢复观察，不重放
+JoinSpace。旧本机 Joiner 只有在 Prepared 尚未持久保存且没有相关恢复工作时可被原子取代；Prepared
+及以后必须假定邀请方可能已经正式提交，新的调用返回专用 PreviousJoinCannotBeSuperseded Conflict，
+原加入继续向前恢复，不能再归入通用错误 1238。取代只留下加密 SupersededByNewJoin 终态和隔离清理，
+不调用普通或彻底重置，不清当前 Space、历史、设备身份或本机资料。相同邀请码也创建新本机尝试，但邀请方
+已经保存的一次性 claim 不能改绑，新尝试可以得到稳定的邀请已使用结果。
 
 CancelJoinSpace 只与发起方正式提交点竞争。取消先保存时没有 AddDevice 并返回 Rejected；正式提交先保存
 时 Commit 是“取消已太晚”的持久依据，加入方继续保持 Pending 直到同一尝试 Active。完成消息和帮助者只
@@ -920,6 +931,23 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-08-18：统一 UniFFI 公共契约测试的 Engine 关闭等待上限为 30 秒。连续运行完整契约测试时，15 秒
+  仍会在不同用例中误报正常网络关闭失败；只调整测试期限，不改变生产关闭行为。
+- 2026-08-18：修复宿主剪贴板变化正在后台发送时可能阻塞 Engine 关闭的问题；该后台动作现在与普通操作
+  使用同一会话关闭信号，关闭后不再继续占用旧会话。仅修正运行期收尾，不改变剪贴板保存和发送规则。
+- 2026-08-18：完成规格 025。每次用户明确 JoinSpace 都创建全新加入；旧本机加入仅在 Prepared 前由
+  `WorkspaceConvergence` 原子保存为 SupersededByNewJoin 并建立新尝试，Prepared 及以后返回稳定的
+  1295 冲突并继续恢复旧加入。正式消息入口先把迟到 Candidate、Commit 和 Complete 记录到旧尝试，再停止
+  推进；旧清理、并发调用和重启恢复也按加入尝试隔离，三端绑定保持同一公开结果。相关筛选测试与完整
+  工作区测试均通过；Android 双端实体设备验收因当前仅连接一台设备而跳过，
+  iOS、HarmonyOS 实体设备及额外网络矩阵也标记为跳过。
+- 2026-08-18：新增规格 025，将 ADR-022 拆成六个可验证阶段：先固定用户新动作与自动恢复的边界，
+  再跑通 Initiated 原子取代，补齐 Candidate/Prepared、迟到消息与恢复、三端错误契约，最后完成故障矩阵和
+  Android 双端实体设备验收。当前只完成实施设计，生产行为和实体设备结果仍待后续实现与验证。
+- 2026-08-18：采纳 ADR-022。每次用户明确 JoinSpace 创建全新加入；断线、重启和后台恢复继续原加入。
+  旧本机加入只在 Prepared 尚未持久保存时可由负责人原子保存为 SupersededByNewJoin 并创建新尝试；
+  Prepared 及以后返回专用不可取代冲突并继续向前恢复。该决定保留邀请一次性消费、当前 Space 和全部
+  本机资料，调用方不编排取消或重置。当前仅完成决策和权威文档修订，生产实现与实体设备复验待后续完成。
 - 2026-08-18：完成规格 024 的成员收敛内部职责整理。`WorkspaceConvergence` 继续是唯一完整负责人，主文件只保留负责人定义、公开类型、共享状态保存和必要协调；准入、成员关系、状态投影和连接维护分别归入对应领域目录，旧平铺路径和单一大测试文件已删除。测试随完整工作归位，仅无业务含义的公共夹具留在受限测试支持位置；公开行为、持久化、网络格式和运行顺序不变。
 - 2026-08-17：采纳 ADR-021，明确成员收敛内部按准入与完成恢复、成员历史核对、移除与用户决定、当前成员范围与状态查询、旧数据兼容与启动恢复划分职责。`WorkspaceConvergence` 继续是唯一完整负责人；主文件只保留稳定入口和必要协调，调用方不获得逐步流程。该决定指导后续整理，不改变当前运行行为。
 - 2026-08-17：新增并修订规格 024，将 ADR-021 细化为可逐项执行的成员收敛内部整理顺序、领域子模块目录、并发与重启边界及验证要求。加入、成员关系、状态投影和连接维护分别收口，避免拆成平铺同级文件；该规格不改变公开动作、成员规则或持久化格式，仅定义后续实现如何保持唯一负责人并删除旧位置。
@@ -1191,9 +1219,11 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/adr/019-device-specific-convergence-waiting-status.md`：已由 ADR-020 取代的等待设备状态记录。
 - `docs/adr/020-membership-reconciliation-and-user-decisions.md`：设备上线成员核对、未确认移除决定和分叉关系隔离规则。
 - `docs/adr/021-workspace-convergence-internal-boundaries.md`：成员收敛保持唯一负责人时的内部职责边界和整理规则。
+- `docs/adr/022-user-initiated-join-supersession.md`：用户明确加入、后台恢复和旧加入安全取代规则。
 - `docs/specs/015-offline-first-member-removal.md`：已由 ADR-020 取代的成员移除说明记录。
 - `docs/specs/016-workspace-wide-convergence.md`：已由 ADR-020 取代的工作空间收敛说明记录。
 - `docs/specs/021-device-trust-reconciliation-product-contract.md`：设备信任完整查询、决定和产品动作边界。
 - `docs/specs/022-current-member-runtime-scope.md`：当前成员运行范围、历史身份与普通授权的一致性规则。
 - `docs/specs/023-durable-membership-proof-and-admission-activation.md`：历史验证材料、准入正式提交、激活门禁、恢复和旧数据迁移规则。
 - `docs/specs/024-workspace-convergence-internal-boundaries.md`：成员收敛内部职责边界的实施顺序、验证与回归要求。
+- `docs/specs/025-user-initiated-join-supersession.md`：用户再次明确加入时安全取代旧本机加入的分阶段实施规格。

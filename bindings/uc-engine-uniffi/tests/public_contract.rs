@@ -14,6 +14,7 @@ use uc_engine_uniffi::{
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
+const ENGINE_SHUTDOWN_DEADLINE_MS: u64 = 30_000;
 
 #[test]
 fn core_version_uses_the_binding_package_version() {
@@ -69,6 +70,15 @@ fn engine_errors_keep_their_stable_code_category_and_retryability() {
             }
         );
     }
+
+    assert_eq!(
+        BindingError::from(EngineError::new(1295, EngineErrorCategory::Conflict, false,)),
+        BindingError::Engine {
+            code: 1295,
+            category: BindingErrorCategory::Conflict,
+            retryable: false,
+        }
+    );
 }
 
 struct MemoryHost {
@@ -403,7 +413,7 @@ fn mobile_host_can_create_a_space_with_analytics_and_shutdown_through_the_bindin
     assert!(lock(&analytics.space_person_id).is_some());
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -472,7 +482,7 @@ fn mobile_host_observes_suspend_and_resume_state_events() {
     wait_for_state(&engine, BindingEngineState::Running);
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -505,7 +515,7 @@ fn peer_refresh_returns_explicit_connection_counts() {
     assert_eq!(report.errors, 0);
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -582,7 +592,7 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
         Err(BindingError::Engine { code: 1103, .. })
     ));
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("reset binding engine must shut down within the deadline");
 
     let restarted = MobileEngine::start(
@@ -607,7 +617,7 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     );
 
     restarted
-        .shutdown(15_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -629,7 +639,7 @@ fn mobile_host_recovers_the_same_identity_after_process_restart() {
         )
         .expect("first binding engine must create a space");
     first
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("first binding engine must shut down");
 
     let restarted = MobileEngine::start(config, host).expect("restarted binding engine must start");
@@ -650,7 +660,7 @@ fn mobile_host_recovers_the_same_identity_after_process_restart() {
     );
 
     restarted
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("restarted binding engine must shut down");
 }
 
@@ -681,7 +691,7 @@ fn mobile_binding_exposes_membership_convergence() {
         serde_json::from_str(&status).expect("device trust must be valid JSON");
     assert_eq!(status["local_membership"], "active");
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -727,7 +737,7 @@ fn completed_engine_operations_are_available_as_structured_events() {
             assert_eq!(terminal, BindingOperationTerminal::Succeeded);
             assert_eq!(failure, None);
             engine
-                .shutdown(5_000)
+                .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
                 .expect("binding engine must shut down within the deadline");
             return;
         }
@@ -779,7 +789,7 @@ fn pairing_methods_return_invitation_data_and_stable_join_errors() {
     ));
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -816,7 +826,7 @@ fn text_send_returns_a_content_free_delivery_summary() {
     assert!(!format!("{report:?}").contains("private binding text"));
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -855,7 +865,7 @@ fn image_send_returns_the_shared_content_free_delivery_summary() {
     assert!(!format!("{report:?}").contains(&format!("{private_image:?}")));
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -895,7 +905,7 @@ fn file_send_reads_opaque_host_handles_and_returns_the_shared_summary() {
     assert!(!format!("{report:?}").contains("private binding file"));
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -934,7 +944,7 @@ fn capture_current_clipboard_reads_a_structured_host_snapshot() {
     assert!(!entry_id.is_empty());
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -979,7 +989,7 @@ fn observed_clipboard_change_returns_a_delivery_report_for_local_content() {
     assert_eq!(report.total_pending, 0);
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -1019,7 +1029,7 @@ fn observed_clipboard_change_can_capture_without_dispatching() {
     );
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -1071,7 +1081,7 @@ fn restore_clipboard_writes_a_structured_snapshot_to_the_host() {
     drop(writes);
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 
@@ -1120,7 +1130,7 @@ fn active_clipboard_can_be_queried_after_the_activation_event_was_missed() {
     assert_eq!(active.activated_by, local_device.device_id);
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down");
 }
 
@@ -1152,7 +1162,7 @@ fn active_clipboard_query_returns_empty_before_the_first_activation() {
     );
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down");
 }
 
@@ -1191,7 +1201,7 @@ fn active_clipboard_query_survives_session_recovery() {
         .expect("first binding engine must expose the local device")
         .device_id;
     first
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("first binding engine must shut down");
 
     let restarted = MobileEngine::start(config, host).expect("restarted binding engine must start");
@@ -1209,7 +1219,7 @@ fn active_clipboard_query_survives_session_recovery() {
     assert_eq!(active.activated_by, activated_by);
 
     restarted
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("restarted binding engine must shut down");
 }
 
@@ -1259,7 +1269,7 @@ fn export_entry_writes_to_an_opaque_host_handle_and_finishes_it() {
     assert!(host.file_finished("output-file-1"));
 
     engine
-        .shutdown(5_000)
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
 }
 

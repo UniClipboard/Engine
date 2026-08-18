@@ -91,6 +91,8 @@ pub enum WorkspaceConvergenceError {
     UnreadableHistoryRequiresConfirmation,
     #[error("another workspace admission is already in progress")]
     AdmissionInProgress,
+    #[error("the previous local join cannot be superseded")]
+    PreviousJoinCannotBeSuperseded,
     #[error("the admission conflicts with the current membership history")]
     AdmissionConflict,
     #[error("local join was not found")]

@@ -72,6 +72,8 @@ pub enum AdmissionAttemptRepositoryError {
     NotFound,
     #[error("admission attempt version conflicts with persisted state")]
     VersionConflict,
+    #[error("the previous local join cannot be superseded")]
+    PreviousJoinCannotBeSuperseded,
     #[error("admission attempt repository failed: {0}")]
     Repository(String),
 }

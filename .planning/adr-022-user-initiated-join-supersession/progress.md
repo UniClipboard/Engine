@@ -1,0 +1,21 @@
+# Progress
+
+- 2026-08-18: Adopted the product rule and created a scoped documentation plan without modifying the pre-existing ADR 023 planning directory.
+- 2026-08-18: Confirmed current revision, selected ADR 022, and identified the existing repeated-JoinSpace rule that must be superseded.
+- 2026-08-18: Read ADR 017/021 and the architecture bible. Confirmed the decision belongs inside the existing sole admission owner and requires an architecture-bible semantic update.
+- 2026-08-18: Mapped current source behavior and every Spec 023 conflict. Established the safe local supersession cutoff as before durable Prepared.
+- 2026-08-18: Reviewed public error coverage and invitation-claim semantics; identified the need for a dedicated stable conflict outcome and preserved one-time invitation behavior.
+- 2026-08-18: External research attempt through `bb-browser` failed before opening tabs because its daemon did not initialize; no browser tabs were created.
+- 2026-08-18: Confirmed the `bb-browser` daemon cannot start in this environment and moved external research to direct public-document retrieval.
+- 2026-08-18: Verified Stripe and AWS primary documentation endpoints are reachable for direct read-only research.
+- 2026-08-18: Completed external precedent research. Both sources support distinct identities for new user actions, identity reuse only for the same retry, and same-operation recovery under outcome uncertainty.
+- 2026-08-18: Located exact architecture-bible, glossary, and documentation-index update points before drafting.
+- 2026-08-18: Drafted ADR 022 with the pre-Prepared supersession rule, atomic persistence, stable conflict, late-message, invitation, current-Space, alternatives, consequences, and acceptance criteria. Updated the glossary and documentation index.
+- 2026-08-18: Reconciled Spec 023 admission-slot, terminal compaction, public Pending, caller contract, same-invitation, stable-error, and reset boundaries with ADR 022.
+- 2026-08-18: Reconciled Spec 023 J0, cancellation distinction, uncertain-commit recovery, concurrency scenarios, integration cases, and acceptance checklist. A phrase scan found no remaining old repeated-JoinSpace rule.
+- 2026-08-18: Updated Spec 023 status, ADR 017 revision metadata, architecture-bible admission semantics, maintenance record, and related-document index. Marked ADR 022 as adopted but not implemented.
+- 2026-08-18: Review found and fixed missing Superseded terminal/schema/compaction/projection coverage and qualified the architecture's uncertain-commit rule to joins that already persisted Prepared.
+- 2026-08-18: Contradiction scans now return only historical descriptions of the superseded rule and the new behavior. Added ADR 022 to Spec 023 related documents and completed the drafting phase.
+- 2026-08-18: `cargo metadata --locked`, `cargo fmt --all -- --check`, architecture repository preflight, and `git diff --check` all passed. Architecture preflight executed 6 OpenMLS checks plus negative fixtures.
+- 2026-08-18: `cargo check --workspace --all-targets --locked` passed. No production code was changed; ADR 022 remains explicitly adopted but unimplemented.
+- 2026-08-18: Final completion check passed; all referenced local documents exist, no production source appears in the diff, and ADR/Spec/architecture status consistently distinguishes adopted documentation from pending implementation and device validation.

@@ -140,6 +140,9 @@ pub enum RedeemPairingInvitationError {
     #[error("unreadable history requires explicit confirmation")]
     UnreadableHistoryRequiresConfirmation,
 
+    #[error("the previous local join cannot be superseded")]
+    PreviousJoinCannotBeSuperseded,
+
     /// sponsor 收到 `JoinerRequest` 后 code 未命中任何 pending 邀请，回
     /// `Reject(InvitationMismatch)`。多半 race：code 在 sponsor 这边已
     /// 过期或被别的 joiner 消费。

@@ -4,12 +4,14 @@
 - **日期**：2026-08-10
 - **补充**：ADR-016 的成员加入责任边界
 - **被修订**：ADR-020 允许当前分支成员单独完成加入，新增事件可在旧成员上线后自动补齐；规格 023
-  进一步规定历史验证材料和双方激活边界
+  进一步规定历史验证材料和双方激活边界；ADR-022 规定每次用户明确提交创建新加入，并只在本机保存
+  Prepared 前安全取代旧加入
 - **相关文档**：`docs/adr/016-workspace-wide-convergence.md`、
   `docs/specs/016-workspace-wide-convergence.md`、
   `docs/specs/017-pairing-as-workspace-admission.md`、
   `docs/specs/023-durable-membership-proof-and-admission-activation.md`、
   `docs/adr/020-membership-reconciliation-and-user-decisions.md`、
+  `docs/adr/022-user-initiated-join-supersession.md`、
   `docs/architecture/architecture-bible.md`
 
 本文早期版本关于 OpenRaft、learner、多数提交、最终成员配置和提交引用的决定已被 ADR-020 取代，

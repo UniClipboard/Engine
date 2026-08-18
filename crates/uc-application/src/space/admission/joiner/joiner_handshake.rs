@@ -284,11 +284,7 @@ impl JoinerHandshakeCoordinator {
                 preserve_unreadable_history,
             )
             .await
-            .map_err(|error| {
-                RedeemPairingInvitationError::Internal(format!(
-                    "persist local join before network: {error}"
-                ))
-            })?;
+            .map_err(map_local_join_preparation_error)?;
         let pending_group_join = durable.prepared_group_join;
         let membership_credential = self
             .group_admission
@@ -718,8 +714,24 @@ fn map_workspace_preflight_error(
         crate::space::convergence::WorkspaceConvergenceError::UnreadableHistoryRequiresConfirmation => {
             RedeemPairingInvitationError::UnreadableHistoryRequiresConfirmation
         }
+        crate::space::convergence::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded => {
+            RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded
+        }
         other => RedeemPairingInvitationError::Internal(format!(
             "preflight local join source: {other}"
+        )),
+    }
+}
+
+fn map_local_join_preparation_error(
+    error: crate::space::convergence::WorkspaceConvergenceError,
+) -> RedeemPairingInvitationError {
+    match error {
+        crate::space::convergence::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded => {
+            RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded
+        }
+        other => RedeemPairingInvitationError::Internal(format!(
+            "persist local join before network: {other}"
         )),
     }
 }
@@ -1059,6 +1071,7 @@ mod tests {
     }
 
     struct UnreadableHistoryAdmissionOwner;
+    struct UnsupersedableJoinAdmissionOwner;
 
     #[async_trait]
     impl WorkspaceAdmissionOwnerPort for UnreadableHistoryAdmissionOwner {
@@ -1069,6 +1082,32 @@ mod tests {
             assert!(!preserve_unreadable_history);
             Err(
                 crate::space::convergence::WorkspaceConvergenceError::UnreadableHistoryRequiresConfirmation,
+            )
+        }
+
+        async fn admission_decision_for_joiner(
+            &self,
+            _invitation_generation: u64,
+            _joiner_device_id: &DeviceId,
+        ) -> uc_core::membership::MembershipAdmissionDecision {
+            unreachable!()
+        }
+
+        async fn synchronize_chain(
+            &self,
+        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+            unreachable!()
+        }
+    }
+
+    #[async_trait]
+    impl WorkspaceAdmissionOwnerPort for UnsupersedableJoinAdmissionOwner {
+        async fn preflight_local_join_source(
+            &self,
+            _preserve_unreadable_history: bool,
+        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+            Err(
+                crate::space::convergence::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded,
             )
         }
 
@@ -1362,6 +1401,34 @@ mod tests {
         assert!(matches!(
             result,
             Err(RedeemPairingInvitationError::UnreadableHistoryRequiresConfirmation)
+        ));
+        assert_eq!(bundle.session.dial_calls(), 0);
+        assert!(bundle.session.sent().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupersedable_join_is_rejected_before_dial() {
+        let bundle = Bundle::happy();
+        let coordinator = JoinerHandshakeCoordinator::new(
+            bundle.session.clone(),
+            bundle.space_access.clone(),
+            bundle.space_access.clone(),
+            bundle.space_access.clone(),
+            Arc::new(FixedProof(vec![0xFE; 32])),
+            Arc::new(FixedLocal(joiner_fp())),
+            Arc::new(FixedDevice(DeviceId::new("joiner-device"))),
+            bundle.settings.clone(),
+            Arc::new(UnsupersedableJoinAdmissionOwner),
+            TEST_TTL,
+        );
+
+        let result = coordinator
+            .handshake_with_history_policy(&code("CODE-1"), &passphrase(), false)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded)
         ));
         assert_eq!(bundle.session.dial_calls(), 0);
         assert!(bundle.session.sent().is_empty());

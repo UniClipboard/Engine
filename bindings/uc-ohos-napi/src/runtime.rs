@@ -724,7 +724,7 @@ fn invalid_restore_mode() -> napi::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{count, device_trust_json, map_event, workspace_convergence};
+    use super::{count, device_trust_json, engine_error, map_event, workspace_convergence};
     use uc_engine::{
         EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
     };
@@ -777,6 +777,20 @@ mod tests {
         assert_eq!(event.error_code, Some(1214));
         assert_eq!(event.error_category.as_deref(), Some("unavailable"));
         assert_eq!(event.retryable, Some(true));
+    }
+
+    #[test]
+    fn previous_join_conflict_keeps_its_stable_summary() {
+        let error = EngineError::new(1295, EngineErrorCategory::Conflict, false);
+        let event = map_event(EngineEvent::OperationFinished {
+            operation_id: "join-space".to_owned(),
+            terminal: OperationTerminal::Failed(error.clone()),
+        });
+
+        assert_eq!(event.error_code, Some(1295));
+        assert_eq!(event.error_category.as_deref(), Some("conflict"));
+        assert_eq!(event.retryable, Some(false));
+        assert_eq!(engine_error(error).reason, "UC_ENGINE:1295:conflict:false");
     }
 
     #[test]

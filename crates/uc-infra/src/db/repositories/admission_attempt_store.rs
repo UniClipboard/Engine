@@ -10,7 +10,8 @@ use uc_core::membership::{
     AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionProfileMetadataV1,
     AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, AdmissionTerminalResultV1,
     CompletionHelperAdmissionStageV1, CurrentLocalJoinProjectionV1, JoinerAdmissionStageV1,
-    SponsorAdmissionStageV1, TerminalAdmissionAttemptV1, TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
+    LocalJoinStartMutationV1, SponsorAdmissionStageV1, TerminalAdmissionAttemptV1,
+    TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
 };
 
 use crate::db::ports::DbExecutor;
@@ -244,9 +245,25 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
             }
         )
     );
+    let superseded = matches!(
+        attempt.role_state,
+        AdmissionAttemptRoleStateV1::Joiner(uc_core::membership::JoinerAdmissionStateV1 {
+            stage: JoinerAdmissionStageV1::Superseded,
+        })
+    );
     if rejected {
         if attempt.terminal_result != Some(AdmissionTerminalResultV1::Rejected)
             || attempt.rejection_reason.is_none()
+        {
+            return Err(AdmissionAttemptRepositoryError::Corrupt);
+        }
+    } else if superseded {
+        if attempt.terminal_result != Some(AdmissionTerminalResultV1::SupersededByNewJoin)
+            || attempt.rejection_reason.is_some()
+            || attempt.cancel_request.is_none()
+            || attempt.outboxes.iter().all(|message| {
+                message.purpose != uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested
+            })
         {
             return Err(AdmissionAttemptRepositoryError::Corrupt);
         }
@@ -318,6 +335,7 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
     }
     if rank >= 2
         && !rejected
+        && !superseded
         && !helper
         && (attempt.lineage_id.is_none()
             || attempt.base_history_position.is_none()
@@ -336,16 +354,22 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
     {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
-    if rank >= 2 && !rejected && !helper && attempt.base_membership_history.is_none() {
+    if rank >= 2 && !rejected && !superseded && !helper && attempt.base_membership_history.is_none()
+    {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
-    if rank >= 3 && !rejected && !helper && attempt.prepared_proof.is_none() {
+    if rank >= 3 && !rejected && !superseded && !helper && attempt.prepared_proof.is_none() {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
-    if joiner && rank >= 3 && !rejected && attempt.verified_membership_history.is_none() {
+    if joiner
+        && rank >= 3
+        && !rejected
+        && !superseded
+        && attempt.verified_membership_history.is_none()
+    {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
-    if rank >= 5 && !rejected && attempt.activation_receipt.is_none() {
+    if rank >= 5 && !rejected && !superseded && attempt.activation_receipt.is_none() {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
     if matches!(
@@ -365,6 +389,53 @@ fn validate_attempt(attempt: &AdmissionAttemptV1) -> Result<(), AdmissionAttempt
             message.message_id,
         ))
     }) {
+        return Err(AdmissionAttemptRepositoryError::Corrupt);
+    }
+    Ok(())
+}
+
+fn validate_local_join_replacement(
+    attempt: &AdmissionAttemptV1,
+    expected_ordinal: u64,
+) -> Result<(), AdmissionAttemptRepositoryError> {
+    validate_attempt(attempt)?;
+    if attempt.record_version != 0
+        || attempt.local_join_ordinal != Some(expected_ordinal)
+        || !matches!(
+            attempt.role_state,
+            AdmissionAttemptRoleStateV1::Joiner(uc_core::membership::JoinerAdmissionStateV1 {
+                stage: JoinerAdmissionStageV1::Initiated,
+            })
+        )
+        || attempt.terminal_result.is_some()
+        || attempt.rejection_reason.is_some()
+        || attempt.prepared_proof.is_some()
+        || attempt.write_ahead_recovery.is_some()
+        || attempt.space_transition.is_some()
+        || attempt.space_transition_result.is_some()
+        || attempt.cancel_request.is_some()
+        || attempt.cancel_outcome.is_some()
+        || attempt.cleanup_pending
+        || attempt.joiner_pending_security_state.is_none()
+        || attempt.candidate_key_package.is_none()
+        || attempt.joiner_member_instance.is_none()
+        || attempt
+            .resume_public_key
+            .as_ref()
+            .is_none_or(|key| key.len() != 32)
+        || attempt
+            .resume_private_key
+            .as_ref()
+            .is_none_or(|key| key.len() != 32)
+        || attempt.outboxes.len() != 1
+        || !attempt.outboxes.iter().all(|message| {
+            message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::JoinRequest
+                && message.predecessor_message_id.is_none()
+                && !message.recipient.is_empty()
+                && !message.payload.is_empty()
+                && !message.superseded
+        })
+    {
         return Err(AdmissionAttemptRepositoryError::Corrupt);
     }
     Ok(())
@@ -483,6 +554,169 @@ fn validate_terminal_delivery_update(
 impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
     for DieselAdmissionAttemptStore<E>
 {
+    async fn commit_local_join_start(
+        &self,
+        mutation: LocalJoinStartMutationV1,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        let (
+            expected_previous_attempt_id,
+            expected_previous_record_version,
+            previous_terminal,
+            replacement,
+        ) = match mutation {
+            LocalJoinStartMutationV1::Create { replacement } => {
+                let metadata = self.profile_metadata().await?;
+                validate_local_join_replacement(&replacement, metadata.next_local_join_ordinal)?;
+                return self.create(&replacement, None, None).await;
+            }
+            LocalJoinStartMutationV1::Supersede {
+                expected_previous_attempt_id,
+                expected_previous_record_version,
+                previous_terminal,
+                replacement,
+            } => (
+                expected_previous_attempt_id,
+                expected_previous_record_version,
+                previous_terminal,
+                replacement,
+            ),
+        };
+
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_on(conn)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    validate_local_join_replacement(
+                        &replacement,
+                        state.metadata.next_local_join_ordinal,
+                    )
+                    .map_err(|error| anyhow::anyhow!(error))?;
+                    if replacement.attempt_id == expected_previous_attempt_id
+                        || state.attempts.contains_key(&replacement.attempt_id)
+                        || state.terminals.contains_key(&replacement.attempt_id)
+                        || state
+                            .terminals
+                            .values()
+                            .any(|terminal| terminal.join_id == replacement.join_id)
+                    {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::AlreadyExists
+                        ));
+                    }
+
+                    let previous_stored = state
+                        .attempts
+                        .get(&expected_previous_attempt_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(AdmissionAttemptRepositoryError::VersionConflict)
+                        })?;
+                    let previous = self
+                        .open_attempt(expected_previous_attempt_id, &previous_stored)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    if previous.record_version != expected_previous_record_version {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::VersionConflict
+                        ));
+                    }
+                    if previous.stage_rank().is_some_and(|rank| rank >= 3) {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::PreviousJoinCannotBeSuperseded
+                        ));
+                    }
+                    if state.attempts.iter().any(|(attempt_id, stored)| {
+                        if *attempt_id == expected_previous_attempt_id {
+                            return false;
+                        }
+                        self.open_attempt(*attempt_id, stored)
+                            .map_or(true, |attempt| {
+                                !attempt.is_terminal()
+                                    || attempt.write_ahead_recovery.is_some()
+                                    || (attempt.space_transition.is_some()
+                                        && attempt.space_transition_result.is_none())
+                                    || attempt.cleanup_pending
+                            })
+                    }) {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::VersionConflict
+                        ));
+                    }
+                    if previous_terminal.attempt_id != expected_previous_attempt_id
+                        || previous_terminal.record_version
+                            != expected_previous_record_version
+                                .checked_add(1)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt)
+                                })?
+                    {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::VersionConflict
+                        ));
+                    }
+                    let cleanup =
+                        previous_terminal.outboxes.last().cloned().ok_or_else(|| {
+                            anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt)
+                        })?;
+                    let mut expected_terminal = previous
+                        .superseded_by_new_join(cleanup)
+                        .map_err(|_| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    expected_terminal.record_version = previous_terminal.record_version;
+                    if expected_terminal != previous_terminal {
+                        return Err(anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt));
+                    }
+                    validate_attempt_update(&previous, &previous_terminal)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    if state.attempts.iter().any(|(attempt_id, stored)| {
+                        *attempt_id != expected_previous_attempt_id
+                            && self
+                                .open_attempt(*attempt_id, stored)
+                                .map_or(true, |attempt| attempt.join_id == replacement.join_id)
+                    }) {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::AlreadyExists
+                        ));
+                    }
+
+                    let previous_resealed = self
+                        .seal_attempt(
+                            &previous_terminal,
+                            previous_stored.wrapped_data_key,
+                            previous_stored.consumed_invitation_digest,
+                        )
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    let replacement_key = self
+                        .keys
+                        .create_wrapped_attempt_key(*replacement.attempt_id.as_bytes())
+                        .map_err(|error| anyhow::anyhow!(map_key_error(error)))?;
+                    let replacement_stored = self
+                        .seal_attempt(&replacement, replacement_key, None)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    state
+                        .attempts
+                        .insert(expected_previous_attempt_id, previous_resealed);
+                    state
+                        .attempts
+                        .insert(replacement.attempt_id, replacement_stored);
+                    state.metadata.next_local_join_ordinal = state
+                        .metadata
+                        .next_local_join_ordinal
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    state.metadata.device_trust_revision = state
+                        .metadata
+                        .device_trust_revision
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    self.save_state_on(conn, &state)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    Ok(state.metadata)
+                })
+            })
+            .map_err(executor_error)
+    }
+
     async fn create(
         &self,
         attempt: &AdmissionAttemptV1,
@@ -989,8 +1223,11 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                         .terminal_result
                         .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
                     let identity_binding = attempt.identity_binding.clone();
-                    if terminal_result != AdmissionTerminalResultV1::Rejected
-                        && identity_binding.is_none()
+                    if !matches!(
+                        terminal_result,
+                        AdmissionTerminalResultV1::Rejected
+                            | AdmissionTerminalResultV1::SupersededByNewJoin
+                    ) && identity_binding.is_none()
                     {
                         return Err(anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt));
                     }
@@ -1085,6 +1322,11 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
                     .terminals
                     .values()
                     .filter_map(|terminal| {
+                        if terminal.terminal_result
+                            == AdmissionTerminalResultV1::SupersededByNewJoin
+                        {
+                            return None;
+                        }
                         let ordinal = terminal.local_join_ordinal?;
                         if ordinal < state.metadata.join_projection_floor_ordinal {
                             return None;
@@ -1157,8 +1399,8 @@ mod tests {
         AdmissionAttemptV1, AdmissionInboxRecordV1, AdmissionOutboxMessageV1,
         AdmissionOutboxPurposeV1, AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
         AdmissionTerminalResultV1, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
-        CrossSpaceTransitionV2, JoinerAdmissionStageV1, SponsorAdmissionStageV1,
-        SponsorAdmissionStateV1, CROSS_SPACE_TRANSITION_FORMAT_V2,
+        CrossSpaceTransitionV2, JoinerAdmissionStageV1, LocalJoinStartMutationV1, MemberInstanceId,
+        SponsorAdmissionStageV1, SponsorAdmissionStateV1, CROSS_SPACE_TRANSITION_FORMAT_V2,
     };
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
@@ -1171,8 +1413,49 @@ mod tests {
         values: Mutex<HashMap<String, Vec<u8>>>,
     }
 
+    #[derive(Default)]
+    struct FaultInjectingSecureStorage {
+        values: Mutex<HashMap<String, Vec<u8>>>,
+        successful_gets_before_failure: Mutex<Option<usize>>,
+    }
+
+    impl FaultInjectingSecureStorage {
+        fn fail_after_successful_gets(&self, count: usize) {
+            *self.successful_gets_before_failure.lock().unwrap() = Some(count);
+        }
+    }
+
     impl SecureStoragePort for MemorySecureStorage {
         fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            Ok(self.values.lock().unwrap().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_vec());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
+            self.values.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    impl SecureStoragePort for FaultInjectingSecureStorage {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            let mut failure = self.successful_gets_before_failure.lock().unwrap();
+            if let Some(remaining) = failure.as_mut() {
+                if *remaining == 0 {
+                    *failure = None;
+                    return Err(SecureStorageError::Unavailable(
+                        "injected admission key read failure".to_owned(),
+                    ));
+                }
+                *remaining -= 1;
+            }
             Ok(self.values.lock().unwrap().get(key).cloned())
         }
 
@@ -1242,6 +1525,256 @@ mod tests {
         attempt.prepared_proof = Some(b"prepared-proof".to_vec());
         attempt.target_access_state = Some(b"target-access".to_vec());
         attempt
+    }
+
+    fn supersedable_joiner(
+        attempt_id: AdmissionAttemptId,
+        join_id: [u8; 16],
+        ordinal: u64,
+    ) -> AdmissionAttemptV1 {
+        let mut attempt =
+            AdmissionAttemptV1::new_joiner(attempt_id, join_id, JoinerAdmissionStageV1::Initiated);
+        attempt.local_join_ordinal = Some(ordinal);
+        attempt.joiner_pending_security_state = Some(vec![1]);
+        attempt.candidate_key_package = Some(vec![2]);
+        attempt.joiner_member_instance = Some(MemberInstanceId::from_bytes([3; 32]));
+        attempt.resume_public_key = Some(vec![4; 32]);
+        attempt.resume_private_key = Some(vec![5; 32]);
+        attempt.outboxes.push(AdmissionOutboxMessageV1 {
+            purpose: AdmissionOutboxPurposeV1::JoinRequest,
+            recipient: vec![6],
+            message_id: [7; 32],
+            predecessor_message_id: None,
+            payload: vec![8],
+            superseded: false,
+        });
+        attempt
+    }
+
+    #[tokio::test]
+    async fn commit_local_join_start_supersedes_and_creates_atomically() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("admission-supersession.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0xe1; 16]),
+        );
+        let previous_id = AdmissionAttemptId::from_bytes([0xe2; 32]);
+        let previous = supersedable_joiner(previous_id, [0xe3; 16], 0);
+        let created = store
+            .commit_local_join_start(LocalJoinStartMutationV1::Create {
+                replacement: previous.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.next_local_join_ordinal, 1);
+        assert_eq!(created.device_trust_revision, 1);
+
+        let cleanup = AdmissionOutboxMessageV1 {
+            purpose: AdmissionOutboxPurposeV1::CancelRequested,
+            recipient: vec![6],
+            message_id: [0xe4; 32],
+            predecessor_message_id: Some([7; 32]),
+            payload: vec![9],
+            superseded: false,
+        };
+        let mut previous_terminal = previous.superseded_by_new_join(cleanup).unwrap();
+        previous_terminal.record_version = 1;
+        let replacement_id = AdmissionAttemptId::from_bytes([0xe5; 32]);
+        let replacement = supersedable_joiner(replacement_id, [0xe6; 16], 1);
+        let committed = store
+            .commit_local_join_start(LocalJoinStartMutationV1::Supersede {
+                expected_previous_attempt_id: previous_id,
+                expected_previous_record_version: 0,
+                previous_terminal: previous_terminal.clone(),
+                replacement: replacement.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(committed.next_local_join_ordinal, 2);
+        assert_eq!(committed.device_trust_revision, 2);
+        assert_eq!(
+            store.load(previous_id).await.unwrap(),
+            Some(previous_terminal)
+        );
+        assert_eq!(store.load(replacement_id).await.unwrap(), Some(replacement));
+        assert_eq!(
+            store
+                .project_current_local_join()
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_id,
+            replacement_id
+        );
+
+        let mut settled_previous = store.load(previous_id).await.unwrap().unwrap();
+        let settled_version = settled_previous.record_version;
+        settled_previous.record_version += 1;
+        settled_previous
+            .outboxes
+            .iter_mut()
+            .find(|message| message.purpose == AdmissionOutboxPurposeV1::CancelRequested)
+            .unwrap()
+            .superseded = true;
+        store
+            .compare_and_advance(previous_id, settled_version, &settled_previous)
+            .await
+            .unwrap();
+        let compacted = store
+            .compact_terminal(previous_id, settled_previous.record_version)
+            .await
+            .unwrap();
+        assert_eq!(
+            compacted.terminal_result,
+            AdmissionTerminalResultV1::SupersededByNewJoin
+        );
+        assert_eq!(
+            store
+                .project_current_local_join()
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_id,
+            replacement_id
+        );
+    }
+
+    #[tokio::test]
+    async fn supersession_failure_recovers_whole_old_or_new_state() {
+        let directory = tempdir().unwrap();
+        let database_path = directory
+            .path()
+            .join("admission-supersession-rollback.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0xe7; 16]),
+        );
+        let previous_id = AdmissionAttemptId::from_bytes([0xe8; 32]);
+        let previous = supersedable_joiner(previous_id, [0xe9; 16], 0);
+        store
+            .commit_local_join_start(LocalJoinStartMutationV1::Create {
+                replacement: previous.clone(),
+            })
+            .await
+            .unwrap();
+        let before = store.profile_metadata().await.unwrap();
+        let cleanup = AdmissionOutboxMessageV1 {
+            purpose: AdmissionOutboxPurposeV1::CancelRequested,
+            recipient: vec![6],
+            message_id: [0xea; 32],
+            predecessor_message_id: Some([7; 32]),
+            payload: vec![9],
+            superseded: false,
+        };
+        let mut previous_terminal = previous.superseded_by_new_join(cleanup).unwrap();
+        previous_terminal.record_version = 1;
+        let replacement_id = AdmissionAttemptId::from_bytes([0xeb; 32]);
+        let replacement = supersedable_joiner(replacement_id, [0xec; 16], 1);
+
+        assert_eq!(
+            store
+                .commit_local_join_start(LocalJoinStartMutationV1::Supersede {
+                    expected_previous_attempt_id: previous_id,
+                    expected_previous_record_version: 1,
+                    previous_terminal: previous_terminal.clone(),
+                    replacement: replacement.clone(),
+                })
+                .await,
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::VersionConflict)
+        );
+        assert_eq!(store.profile_metadata().await.unwrap(), before);
+        assert_eq!(
+            store.load(previous_id).await.unwrap(),
+            Some(previous.clone())
+        );
+        assert_eq!(store.load(replacement_id).await.unwrap(), None);
+        assert_eq!(
+            store
+                .project_current_local_join()
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_id,
+            previous_id
+        );
+
+        store
+            .commit_local_join_start(LocalJoinStartMutationV1::Supersede {
+                expected_previous_attempt_id: previous_id,
+                expected_previous_record_version: 0,
+                previous_terminal,
+                replacement,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .project_current_local_join()
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_id,
+            replacement_id
+        );
+    }
+
+    #[tokio::test]
+    async fn supersession_crypto_failures_roll_back_atomically() {
+        // After opening repository state and the previous attempt, these fail at
+        // previous resealing, replacement-key creation, and replacement sealing.
+        for (case, successful_gets_before_failure) in [2, 3, 4].into_iter().enumerate() {
+            let directory = tempdir().unwrap();
+            let database_path = directory
+                .path()
+                .join(format!("admission-supersession-crypto-{case}.sqlite"));
+            let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+            let secure_storage = Arc::new(FaultInjectingSecureStorage::default());
+            let store = super::DieselAdmissionAttemptStore::new(
+                DieselSqliteExecutor::new(pool),
+                AdmissionKeyManager::new(secure_storage.clone(), [0xed; 16]),
+            );
+            let previous_id = AdmissionAttemptId::from_bytes([0xee; 32]);
+            let previous = supersedable_joiner(previous_id, [0xef; 16], 0);
+            store
+                .commit_local_join_start(LocalJoinStartMutationV1::Create {
+                    replacement: previous.clone(),
+                })
+                .await
+                .unwrap();
+            let before = store.profile_metadata().await.unwrap();
+            let cleanup = AdmissionOutboxMessageV1 {
+                purpose: AdmissionOutboxPurposeV1::CancelRequested,
+                recipient: vec![6],
+                message_id: [0xf0; 32],
+                predecessor_message_id: Some([7; 32]),
+                payload: vec![9],
+                superseded: false,
+            };
+            let mut previous_terminal = previous.superseded_by_new_join(cleanup).unwrap();
+            previous_terminal.record_version = 1;
+            let replacement_id = AdmissionAttemptId::from_bytes([0xf1; 32]);
+            let replacement = supersedable_joiner(replacement_id, [0xf2; 16], 1);
+
+            secure_storage.fail_after_successful_gets(successful_gets_before_failure);
+            assert_eq!(
+                store
+                    .commit_local_join_start(LocalJoinStartMutationV1::Supersede {
+                        expected_previous_attempt_id: previous_id,
+                        expected_previous_record_version: 0,
+                        previous_terminal,
+                        replacement,
+                    })
+                    .await,
+                Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+            );
+            assert_eq!(store.profile_metadata().await.unwrap(), before);
+            assert_eq!(store.load(previous_id).await.unwrap(), Some(previous));
+            assert_eq!(store.load(replacement_id).await.unwrap(), None);
+        }
     }
 
     fn applied_completion_helper(attempt_id: AdmissionAttemptId) -> AdmissionAttemptV1 {

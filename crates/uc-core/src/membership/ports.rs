@@ -252,8 +252,30 @@ pub trait WorkspaceConvergenceRepositoryPort: Send + Sync {
     >;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalJoinStartMutationV1 {
+    Create {
+        replacement: AdmissionAttemptV1,
+    },
+    Supersede {
+        expected_previous_attempt_id: AdmissionAttemptId,
+        expected_previous_record_version: u64,
+        previous_terminal: AdmissionAttemptV1,
+        replacement: AdmissionAttemptV1,
+    },
+}
+
 #[async_trait]
 pub trait AdmissionAttemptRepositoryPort: Send + Sync {
+    async fn commit_local_join_start(
+        &self,
+        _mutation: LocalJoinStartMutationV1,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        Err(AdmissionAttemptRepositoryError::Repository(
+            "local join start storage is unavailable".to_owned(),
+        ))
+    }
+
     async fn create(
         &self,
         attempt: &AdmissionAttemptV1,

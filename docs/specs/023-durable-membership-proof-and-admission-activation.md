@@ -2,14 +2,18 @@
 
 ## 状态
 
-- **状态**：仓库内实现完成；外部兼容样本与实体设备验收待补
+- **状态**：主体流程与 ADR-022 用户新加入取代规则已实现；外部兼容样本与实体设备验收待补
 - **日期**：2026-08-15
+- **最新修订**：2026-08-18，完成 ADR-022 的用户明确加入与安全取代规则
+- **实施规格**：`docs/specs/025-user-initiated-join-supersession.md`
 - **问题基线**：`3eb6fee5a9e7d9f2b03660d5916e338274436c60`
 - **细化**：ADR-017 的准入完成边界、ADR-020 的成员历史验证规则、规格 022 的新增成员运行门禁
 - **相关文档**：`docs/adr/017-pairing-as-workspace-admission.md`、
   `docs/adr/020-membership-reconciliation-and-user-decisions.md`、
+  `docs/adr/022-user-initiated-join-supersession.md`、
   `docs/specs/017-pairing-as-workspace-admission.md`、
   `docs/specs/022-current-member-runtime-scope.md`、
+  `docs/specs/025-user-initiated-join-supersession.md`、
   `docs/architecture/architecture-bible.md`
 
 本文是以下两项行为的唯一实现与验收依据：
@@ -516,7 +520,7 @@ V2 AddDevice 保存 `security_commitment_id` 和 `admission_bundle_digest`，eve
 | `join_id` | 加入方生成的独立 128-bit 随机公开关联标识；只进入正式结果和取消命令，不用于协议认证 |
 | `local_join_ordinal` | 仅加入方保存的 profile 级单调序号；用于从尝试事实选择 `current_join` |
 | `role` | `Sponsor`、`Joiner` 或只用于 S3 接管的 `CompletionHelper` |
-| `stage` | `Initiated`、`Accepted`、`Candidate`、`Prepared`、`Committed`、`Applied`、`Completed`、`Rejected` |
+| `stage` | `Initiated`、`Accepted`、`Candidate`、`Prepared`、`Committed`、`Applied`、`Completed`、`Rejected`、`Superseded` |
 | `lineage_id` | 目标 Space 沿革 |
 | `base_history_position` | 候选唯一允许扩展的父事件、深度和摘要 |
 | `candidate_event` | 正式提交时必须原样写入的 V2 AddDevice |
@@ -536,7 +540,7 @@ V2 AddDevice 保存 `security_commitment_id` 和 `admission_bundle_digest`，eve
 | `resume_peers` | 按 Sponsor 或接管成员实例保存挑战计数、双方最后持久消息号和认证传输身份摘要 |
 | `inbox_dedup` | 按消息编号和摘要保存的已消费消息及 Ack 重建依据 |
 | `outboxes` | 按 `(purpose, recipient, message_id)` 索引的待发集合；阶段消息、取消、邀请消费和成员更新可并存 |
-| `terminal_result` | Joiner 可重复查询的 `Active`/`Rejected`，Sponsor 的 `Completed`/`Rejected`，或 CompletionHelper 的 `Completed` |
+| `terminal_result` | Joiner 可重复查询的 `Active`/`Rejected` 或内部 `SupersededByNewJoin`，Sponsor 的 `Completed`/`Rejected`，或 CompletionHelper 的 `Completed` |
 
 该表是角色和阶段状态的字段并集，不是每条记录都必须同时具有全部字段。持久格式必须是
 `SponsorAdmissionState`、`JoinerAdmissionState` 和 `CompletionHelperState` 三个带阶段标签的版本化变体：`Initiated` 和早期
@@ -559,8 +563,11 @@ Space 或 Engine 单次请求的 `operation_id` 编码得到。
 
 `AdmissionUnavailable` 只是远端 profile 槽正在被另一尝试占用的可重试忙碌回复，不是 Rejected 或
 DeliveryAck。接收方不得消费邀请、创建 Sponsor attempt 或保存候选；发送方保留原 JoinRequest outbox、
-同一 attempt 和 Pending，只按负责人内部有界退避重试。对本机发起的第二个 JoinSpace 则返回稳定 Engine
-`JoinOperationInProgress` 冲突，不创建尝试。两种结果都不能修改已取得槽的原流程。
+同一 attempt 和 Pending，只按负责人内部有界退避重试。对本机再次明确发起的 `JoinSpace`，负责人按
+ADR-022 裁决：旧本机 Joiner 尚未持久保存 Prepared 时，原子保存旧 `SupersededByNewJoin` 终态并创建
+全新尝试；Prepared 或更晚阶段返回稳定 `PreviousJoinCannotBeSuperseded` Engine Conflict 且不创建尝试。
+入站准入、共享写前恢复、Space transition 或其他不可取代工作继续返回 `JoinOperationInProgress`。
+任何分支都不能让调用方编排取消、重置和加入步骤。
 
 `Initiated` 由加入方在任何网络发送前保存；`Accepted` 由发起方在原子消费邀请并绑定 `attempt_id`、
 加入方身份和本次凭据后保存。相同邀请和相同 `attempt_id` 重放同一尝试；相同邀请绑定另一
@@ -581,7 +588,8 @@ J0 同时生成只用于续接的独立 Ed25519 密钥，并把其公钥摘要�
 第三方接管时，当前成员必须先从连续历史验证候选中的 resume 公钥摘要、自己的父位置资格和当前资格，
 再进行上述双向挑战；仅持有路由密文、知道 `attempt_id` 或建立到同一地址的连接都不构成认证。续接凭据
 只允许查询或发送该尝试的 Candidate、Prepared、Commit、Applied、Complete、Rejected 和 Ack，不授予
-普通成员权限。Joiner Rejected 或 Active 后不再建立新续接会话；已经持久保存的最终回复仍可幂等重放。
+普通成员权限。Joiner Rejected、Active 或 Superseded 后不再建立新续接会话；已经持久保存的最终回复或
+被取代事实仍可幂等重放。
 日志不得记录公钥、挑战、nonce、签名或身份摘要。
 
 ### `CrossSpaceTransitionV2`
@@ -688,7 +696,7 @@ durable outbox，也不需要 ack-of-ack；完成消息的发送者收到它后�
 
 ### Terminal attempt compaction
 
-业务进入 Sponsor/CompletionHelper `Completed`、Joiner `Active` 或任一 `Rejected` 后，不立即删除尝试。只在 outbox 已确认
+业务进入 Sponsor/CompletionHelper `Completed`、Joiner `Active`、`SupersededByNewJoin` 或任一 `Rejected` 后，不立即删除尝试。只在 outbox 已确认
 清空、写前恢复完成，且实际存在 AddDevice 时所需永久回执已经写入版本化成员历史后，才删除 KeyPackage、暂存安全状态、历史页和逐
 消息 inbox 等大负载。压缩必须按上文先把终态原子重封装到 `ProfileAdmissionMasterKey`，再删除 wrapped
 attempt data key。终态记录至少永久保留 `attempt_id`、`join_id`、Joiner 的 local ordinal、邀请消费摘要、
@@ -696,9 +704,10 @@ attempt data key。终态记录至少永久保留 `attempt_id`、`join_id`、Joi
 回复所需的证明引用；S2 前 Rejected 的 `event_id` 和证明引用为空，Sponsor Completed 也不能写成 Joiner
 Active。
 
-首版不自动删除终态记录。同一 `join_id`、同一已消费邀请或同一幂等请求的重复 `JoinSpace`、Applied、
-Complete 或 Ack 从终态记录和版本化成员历史返回同一结果，不能重新消费邀请或创建另一实例。新的有效邀请
-或新的明确请求可以创建新 attempt；一次 Rejected 不得永久封死该设备以后加入。以后如需保留期限，必须
+首版不自动删除终态记录。同一 `attempt_id`、同一 `join_id`、同一已消费邀请或同一协议消息的重复
+JoinRequest、Applied、Complete 或 Ack 从终态记录和版本化成员历史返回同一结果，不能重新消费邀请或
+创建另一实例。每次新的明确 `JoinSpace` 按 ADR-022 使用新 attempt；一次 Rejected 或
+SupersededByNewJoin 不得永久封死该设备以后加入。以后如需保留期限，必须
 先另行定义跨设备最大重试期和已消费邀请的永久防重放依据。
 
 ### `LegacyPrefixCheckpointV2`
@@ -807,8 +816,10 @@ DeviceTrustSnapshotSummary {
 Cross-Space join 返回最终 J3 计数。绑定必须对 device name 和 fingerprint 使用现有脱敏 Debug 规则。
 
 `Pending` 不公开 Candidate、Prepared、Commit、Applied、J3 迁移 phase 或安全摘要。同步调用超时、网络暂
-不可达或重启恢复都返回同一尝试；相同已消费邀请或当前非终态请求的重复 `JoinSpace` 取得同一结果。已有
-非终态本机或入站尝试时提交另一邀请返回稳定 Engine `JoinOperationInProgress`，不创建 Rejected 尝试；
+不可达或重启恢复都由负责人继续同一尝试；调用方从 `QueryDeviceTrust` 取得当前 `current_join`，不得为
+恢复再次调用 `JoinSpace`。新的明确 `JoinSpace` 在旧本机 Joiner 处于 Initiated/Candidate 时原子取代旧尝试
+并返回新 Pending；旧尝试已经持久保存 Prepared 时返回 `PreviousJoinCannotBeSuperseded`，原 Pending 不变。
+本机入站尝试或其他不可取代的 profile 工作仍返回 `JoinOperationInProgress`，不创建 Rejected 尝试；
 调用方从 `QueryDeviceTrust` 取得当前 `current_join` 或 `pending_inbound_member`。本机已有非终态 Joiner
 尝试时收到入站请求，则在保存 Accepted 前返回 AdmissionUnavailable，不消费邀请或创建 Sponsor attempt；
 远端 Joiner 保持同一 Pending 和 JoinRequest outbox，稍后重试。
@@ -818,8 +829,8 @@ Cross-Space join 返回最终 J3 计数。绑定必须对 device name 和 finger
 Engine 请求，不能复用为跨重启的加入标识。产品不提供按编号查询任意历史加入的第二入口。
 
 `current_join` 有非终态本机尝试时选择该尝试；否则选择不小于 `join_projection_floor_ordinal` 且
-`local_join_ordinal` 最大的终态尝试。Active 或 Rejected 一直显示到下一次本机 JoinSpace 创建成功或普通
-ResetSpace 推进 floor。Fresh Pending/Rejected 时设备关系字段使用无活动 Space 的空值，但 `current_join`
+`local_join_ordinal` 最大的可公开终态尝试。Active 或 Rejected 一直显示到下一次本机 JoinSpace 创建成功或普通
+ResetSpace 推进 floor；SupersededByNewJoin 从不单独投影，原子提交后只显示取代它的新尝试。Fresh Pending/Rejected 时设备关系字段使用无活动 Space 的空值，但 `current_join`
 仍可查询；Cross-Space J3 前设备关系继续描述来源 Space，J3 后一次切换为目标 Space。被 floor 隐藏的旧
 终态仍在内部用于幂等和防重放，但不与当前结果并列公开。
 
@@ -838,9 +849,27 @@ profile 级常驻 `WorkspaceConvergence` 提供，不能因为还没有活动 Sp
 `WorkspaceConvergenceChanged` 继续受 `dev-tools` 限制，只观察内部收敛诊断，不承载正式准入状态，也不
 进入桌面、iOS、Android 或 HarmonyOS 的产品契约。
 
-正常加入仍只要求调用一次 `JoinSpace`；后续推进和恢复不需要产品动作。`CancelJoinSpace` 是用户明确放弃
+正常加入仍只要求调用一次 `JoinSpace`；后续推进和恢复不需要产品动作。每一次公开 `JoinSpace` 调用都表示
+新的用户操作，不是恢复命令；相同邀请码也生成新的 attempt、join、ordinal、成员实例和安全材料。调用方
+丢失首次结果时查询 `current_join`，不能重放公开操作。`CancelJoinSpace` 是用户明确放弃
 本机待加入时的可选命令，只保存 CancelRequested；返回 Pending 表示发起方尚未裁决。未知或不属于本机的
 `join_id` 返回稳定 NotFound；Active/Rejected 返回已保存终态，不能创建反向流程。
+
+新的用户操作只在旧本机加入尚未持久保存 Prepared、没有相关写前恢复或 Space transition 且记录完整时
+可以取代旧加入。负责人必须在同一事务或加密写前记录中保存旧 `SupersededByNewJoin`、停止旧提交前
+outbox、保留迟到消息与隔离取消所需事实、创建全新尝试并推进 DeviceTrust revision；提交后才发送新请求。
+旧终态不公开为第四类 JoinSpace 结果，`current_join` 只显示新尝试。崩溃恢复只能得到完整旧状态或完整
+新状态，不能出现两个当前加入或丢失当前加入。
+
+Prepared 一旦持久保存，就必须假定邀请方可能已经正式提交。新的 `JoinSpace` 返回专用
+`PreviousJoinCannotBeSuperseded` Engine Conflict，且不生成新 attempt、ordinal、材料、邀请消费或目标
+Space 副作用；原加入继续向前恢复。该错误必须使用独立稳定错误码，不得映射为 1238。被取代尝试的迟到
+Candidate、重复请求和取消回复只重放被取代事实或推进旧清理；若收到 Commit 或后继消息则说明协议或
+持久状态矛盾，进入 RecoveryRequired，不能重新打开旧尝试或覆盖新尝试。
+
+相同邀请码的新尝试仍遵守 Sponsor 一次性 claim：旧尝试尚未消费时可以继续，已经绑定旧 attempt 或身份时
+稳定拒绝，不能改绑或复用旧材料。取代不调用 ResetSpace/FactoryResetSpace，也不清当前 Space、历史、
+设备身份、设置、关系、搜索或文件；Cross-Space 仍在新尝试完成 J3 前保持来源 Space 活动。
 
 取消和 S2 只在 Sponsor 的持久版本上决定先后。取消先保存时最终为 `Rejected(Cancelled)`，没有
 AddDevice；S2 先保存时 Commit 本身就是 `TooLateCommitted` 的稳定依据，Joiner 停止重发取消并继续保持
@@ -899,7 +928,9 @@ Sponsor 使用现有 `RemoveMember(device_id)` 处理 `pending_inbound_member`�
 | --- | --- |
 | 输入缺字段、设备名非法、join_id 格式非法 | 现有 InvalidInput 类 Engine error；不创建 attempt |
 | 本机未解锁、当前 setup/session 不可用 | InvalidState 类 Engine error；不创建或推进 attempt |
-| 已有另一非终态本机加入 | `JoinOperationInProgress` Engine conflict；原 attempt 不变 |
+| 旧本机加入尚未保存 Prepared | 按 ADR-022 原子保存旧 SupersededByNewJoin 并创建全新 attempt |
+| 旧本机加入已保存 Prepared 或更晚 | 专用 `PreviousJoinCannotBeSuperseded` Engine Conflict；原 attempt 向前恢复，新请求零副作用 |
+| 已有非终态入站准入或其他不可取代 profile 工作 | `JoinOperationInProgress` Engine Conflict；原工作不变 |
 | 未确认保留不可读来源历史 | 现有确认所需 Engine conflict；不联系 Sponsor、不创建 attempt |
 | J0 本机持久化失败、安全存储不可用、目标 keyslot 损坏 | Storage/Internal 类 Engine error；失败关闭 |
 | attempt 已存在后的网络断开、超时、对端暂不可达 | 同一 `Pending`；后台继续，不返回 transient error |
@@ -1105,8 +1136,9 @@ Confirm:  Complete
 
 1. **J0 加入方准备**：先完成输入、解锁状态和不可读来源历史确认预检；通过后生成 256-bit 随机
    `attempt_id`、独立公开 `join_id`、持久 `local_join_ordinal`、本次成员凭据和 KeyPackage 私有状态，
-   把初始请求、profile 级新 DeviceTrust revision 和 outbox 与恢复资料一起加密保存，再发送。重启或相同
-   `JoinSpace` 不得生成另一标识、序号或凭据。
+   把初始请求、profile 级新 DeviceTrust revision 和 outbox 与恢复资料一起加密保存，再发送。同一次加入的
+   重启、断线和后台恢复不得生成另一标识、序号或凭据；新的公开 `JoinSpace` 调用按 ADR-022 创建新尝试，
+   并只在旧尝试未持久保存 Prepared 时安全取代它。
 2. **S0 发起方受理**：验证邀请、口令、双方身份、当前分支和本机资格；保存邀请消费绑定、加入方身份和
    基础历史位置，并把本机加密 claim、`attempt_id`、双方身份和远端 consume outbox 一次提交。存在待决定
    移除或 `RecoveryRequired` 时不创建候选；同一邀请改绑另一尝试或身份时稳定拒绝。渠道 consume 在提交
@@ -1219,6 +1251,9 @@ S2 后该操作通过正常 `RemoveDevice` 流程移除这个精确待激活实�
 
 ## Cancellation and forward-only recovery
 
+- 用户新的 `JoinSpace` 与 `CancelJoinSpace` 是不同动作。前者按 ADR-022 在本机 Prepared 之前原子保存旧
+  `SupersededByNewJoin` 并创建全新尝试，不等待 Sponsor 裁决；后者请求 Sponsor 把当前尝试正式拒绝，且不
+  自动创建下一尝试。两者不得共享产品端步骤或把本机被取代伪装成 Sponsor Rejected。
 - 发起方是本次尝试提交或拒绝的唯一裁决者。加入方在初始请求已经发出后，取消只保存并发送
   `CancelRequested`，并继续保持 `Pending`、凭据、KeyPackage 和暂存安全状态。发起方只有在 S2 前保存该
   请求时才生成 `Rejected(Cancelled)`；加入方收到并持久保存该终态后才清理暂存状态。
@@ -1240,8 +1275,9 @@ S2 后该操作通过正常 `RemoveDevice` 流程移除这个精确待激活实�
 - Commit、Applied、Complete 或任一 Ack 丢失时只重发同一业务消息，或从持久去重记录重建回复。
   相同消息幂等；乱序消息返回当前阶段或要求
   重发前置消息，不产生副作用。
-- 原发起方在 S2 前或保存 S2 后尚未把 Commit 交给加入方即永久离线时，其他设备无法证明它是否提交；
-  加入方只能保持同一 `Pending`，直到发起方持久状态恢复，不能超时变成 Rejected 或创建新实例。
+- 加入方已持久保存 Prepared 后，原发起方在 S2 前或保存 S2 后尚未把 Commit 交给加入方即永久离线时，
+  其他设备无法证明它是否提交；加入方只能保持同一 `Pending`，直到发起方持久状态恢复，不能超时变成
+  Rejected 或创建新实例。Prepared 之前则允许后续明确 `JoinSpace` 按 ADR-022 安全取代，不能用超时自动取代。
 - 加入方已保存 Commit 和 Applied 后，才可把同一事件和回执提交给其他合格当前成员；首个验证并永久
   保存成功的成员返回等价 Complete。加入方只保留首份有效 Completion；其他完成者不能产生成员事实、
   取消结果或全网证明。
@@ -1448,7 +1484,7 @@ Space 仓储显式按 attempt/Space/generation/key 访问，不依赖活动 sess
 `crates/uc-application/src/space/admission/`
 
 **Change:** 在 profile 级常驻的 `WorkspaceConvergence` 内实现 Initiated、Accepted、Candidate、Prepared、
-Committed、Applied、Sponsor Completed、Joiner Active 和 Rejected 状态机及可重建 Ack；即使没有活动 Space，也先构造该负责人和
+Committed、Applied、Sponsor Completed、Joiner Active、Rejected 和 Superseded 状态机及可重建 Ack；即使没有活动 Space，也先构造该负责人和
 准入仓储，再按需接入零或一个完整活动 Space 上下文。每次回复前持久化状态和 outbox；发起方独占提交/
 拒绝裁决；S2 到永久
 Applied 加 Complete/既有成员更新 outbox 之间持有本分支 guard，并封存 AddDevice、新 epoch 和更新，S3
@@ -1723,9 +1759,10 @@ active pointer 和旧行 guard；指针存在时不得回退备份。
 
 ### Scenario: 本机入站准入与本机 JoinSpace 竞争
 **Expected behavior:** 只有最先持久取得 profile 准入槽的一方继续。远端入站请求在任何消费邀请或创建尝试
-前收到 AdmissionUnavailable 并保持原 Pending；本机第二次 JoinSpace 在备份来源或暂存目标前收到
-JoinOperationInProgress 冲突。两者都不是 Rejected。任何 Cross-Space J3 都不会遗弃原 Space 的
-Accepted/Candidate/Prepared 入站尝试。
+前收到 AdmissionUnavailable 并保持原 Pending；本机已有入站尝试或其他不可取代工作时，新的 JoinSpace
+在备份来源或暂存目标前收到 JoinOperationInProgress 冲突。已有本机 Joiner 时，Prepared 前按 ADR-022
+原子取代，Prepared 后返回 PreviousJoinCannotBeSuperseded。任何 Cross-Space J3 都不会遗弃原 Space 的
+Accepted/Candidate/Prepared 入站尝试；上述冲突都不是 Rejected。
 **Implementation:** `Initiated` 与 `Accepted` 在同一 profile 元数据版本上 compare-and-advance；统一
 `admission_slot_held` 覆盖非终态、共享写前恢复、transition 和改变活动世代的清理。业务终态且只剩按
 attempt 隔离的消息重发或压缩时释放槽，但恢复扫描继续处理旧记录。
@@ -1785,7 +1822,7 @@ Completion。缺 key、缺 backup 或出现非备份旧-key行时 RecoveryRequir
    的 V2 投影，预期只得到固定规则允许的集合，任何回执都不能添加历史外成员。
 11. 对同一 event_id 追加相同和冲突 Applied 回执，并让多个有效 Completion 到达同一 Joiner；预期回执
     幂等或 RecoveryRequired，Joiner 只保留首份有效 Completion，后续同事实消息不进入共享历史。
-12. 压缩 Sponsor Completed、Joiner Active 和 Rejected 尝试，预期 profile key 下的终态、邀请防重放和必要永久回执仍存在，wrapped
+12. 压缩 Sponsor Completed、Joiner Active、Rejected 和 SupersededByNewJoin 尝试，预期 profile key 下的终态、邀请防重放和必要永久回执仍存在，wrapped
     attempt data key 与大负载已删除；outbox 非空或终态重封装未提交时拒绝压缩。Fresh Rejected 也能重启查询。
 13. 对 FullyVerified、LegacyAccepted、RecoveryRequired 和未知版本夹具逐个迁移并重启，预期结果稳定，
     原 V2 外层密文逐字节不变，V1 规范证据摘要一致。
@@ -1834,7 +1871,8 @@ Completion。缺 key、缺 backup 或出现非备份旧-key行时 RecoveryRequir
    直到 J3 完整完成后才可实际接收和发送普通内容。发起方与既有成员全程继续可用。
 7. 让其他当前成员离线，发起方和加入方仍完成；其他成员上线后取得同一 AddDevice 和 Applied 回执，再
    进入普通范围。
-8. 重复执行同一 JoinSpace：Pending 恢复同一 attempt，Active 返回同一终态，Rejected 不产生新尝试。
+8. 对同一 attempt 重复网络消息、断线并重启，预期恢复同一 attempt；随后再次明确执行 JoinSpace，
+   Initiated/Candidate 创建全新 attempt，Prepared 及以后返回 PreviousJoinCannotBeSuperseded 且原尝试不变。
 9. P2P 失败时保持 Pending，观测不到 LAN 自动连接。
 10. 保留已移除成员的资料、公钥和地址，再创建候选；暂存安全状态和全部普通消费者都不包含该成员。
 11. 发起方业务已 Completed 但 Complete outbox 未清空时重启；`scan_recoverable()` 必须重发。Ack 后压缩
@@ -1870,8 +1908,10 @@ Completion。缺 key、缺 backup 或出现非备份旧-key行时 RecoveryRequir
     `RemoveMember` 与 S2/S3 只能得到无 Add Rejected、Add+Remove 后 RemovedBeforeActivation，或 Completed
     后普通 Remove。再让原 Sponsor 与多个帮助者并发发送 Completion，证明它们只能完成同一加入，不能因
     取消产生任何 RemoveDevice。历史连续、guard 可恢复释放，终态不改写。
-24. 本机已有非终态 JoinSpace 时，用另一邀请加入另一 Space，预期 `QueryDeviceTrust.current_join` 返回原
-    `join_id` 且新请求明确冲突；原尝试终态后，新有效邀请可创建新 join_id，不受旧 Rejected 永久阻塞。
+24. 本机已有非终态 JoinSpace 时，用另一邀请加入另一 Space：旧尝试在 Initiated/Candidate 时原子保存
+    SupersededByNewJoin，并以更大 ordinal 和全新 join_id 投影新 Pending；旧尝试在 Prepared 及以后时新请求
+    返回 PreviousJoinCannotBeSuperseded，`current_join` 仍是原 join_id。原尝试终态后，新有效邀请同样可
+    创建新 join_id，不受旧 Rejected 或 SupersededByNewJoin 永久阻塞。
 25. Sponsor 在 Accepted、Candidate、Prepared 分别对快照候选调用 `RemoveMember`，并与 S2 反复交错；
     S2 前移除先保存时双方最终只见 Rejected(RemovedBeforeActivation) 且没有 AddDevice，S2 先保存时必须
     追加真实 RemoveDevice，不能删除 AddDevice。
@@ -2003,17 +2043,22 @@ Completion。缺 key、缺 backup 或出现非备份旧-key行时 RecoveryRequir
       描述来源 Space，提升后只描述目标 Space，不暴露暂存目标为当前状态。
 * [ ] CancelJoinSpace 只请求 S2 前拒绝；提交后返回同一 Pending/Active，不自动移除。Sponsor 对快照候选
       复用现有 RemoveMember 并沿用现有二次确认交互，两项操作的结果不会互相冒充。
-* [ ] Pending 和重复 JoinSpace 恢复同一 attempt；后台恢复不依赖产品端重新编排步骤。
+* [ ] Pending 的断线、重启、消息重放和后台重试恢复同一 attempt；每次新的公开 JoinSpace 调用表示新的
+      用户操作，后台恢复不依赖产品端重放该操作或编排步骤。
 * [ ] 本机邀请 claim、attempt 和身份一次保存后即为唯一裁决；远端 consume 的成功、已不存在、冲突、
       网络失败或重启都不能撤销 claim、改绑身份或形成第二 attempt。
 * [ ] 每个 profile 全局最多一个被占用的准入槽，不区分 Sponsor 或 Joiner；Initiated/Accepted 原子竞争，
-      远端失败方得到 AdmissionUnavailable 并保持 Pending，本机失败方得到 JoinOperationInProgress 冲突。
-      非终态、共享写前恢复、Space transition 或改变活动世代的清理存在时槽不释放；业务终态且只剩隔离
+      远端失败方得到 AdmissionUnavailable 并保持 Pending。本机再次明确 JoinSpace 时，只有旧 Joiner 在
+      Initiated/Candidate 且无相关恢复工作时可原子保存 SupersededByNewJoin 并创建新尝试；Prepared 及以后
+      返回 PreviousJoinCannotBeSuperseded；入站尝试和其他不可取代工作返回 JoinOperationInProgress。
+      共享写前恢复、Space transition 或改变活动世代的清理存在时槽不释放；业务终态且只剩隔离
       outbox/压缩时可开始新尝试，旧记录仍由恢复扫描继续且不被覆盖。
 * [ ] AdmissionUnavailable 不消费邀请、不创建 Sponsor attempt、不清 JoinRequest outbox，也不形成 Rejected；
-      Joiner 保持同一 Pending 并跨重启重试，本机第二个 JoinSpace 使用稳定冲突且不创建 ordinal。
+      Joiner 保持同一 Pending 并跨重启重试。新的本机 JoinSpace 按 ADR-022 创建新 ordinal，或在不可取代时
+      使用专用稳定冲突并保持 ordinal 不变；不得再因新旧输入不一致返回 1238。
 * [ ] profile 级 ProfileAdmissionMasterKey 在无活动 Space 时也能解密 revision、ordinal、projection floor、邀请防重放索引和
-      终态；J0 的 wrapped AdmissionAttemptDataKey 只保护未压缩尝试。Active/Rejected 先原子重封装终态，
+      终态；J0 的 wrapped AdmissionAttemptDataKey 只保护未压缩尝试。Active/Rejected/SupersededByNewJoin
+      先原子重封装终态，
       再删临时 key；普通 ResetSpace 仍保留这些事实，Fresh Rejected、重启、跨 Space 和下一次 Join 仍可
       幂等读取且不出现明文。
 * [ ] J3 前目标 Space 暂存不替换来源 Space 的 session、keyslot 或活动指针；J3 只在完整目标世代通过生产

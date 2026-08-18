@@ -1,5 +1,483 @@
 use super::super::tests::*;
 
+async fn seed_superseded_and_current_join(
+    repository: &Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+) -> (
+    uc_core::membership::AdmissionAttemptId,
+    uc_core::membership::AdmissionAttemptId,
+) {
+    use uc_core::membership::{
+        AdmissionAttemptId, AdmissionAttemptV1, AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1,
+        JoinerAdmissionStageV1, LocalJoinStartMutationV1, MemberInstanceId,
+    };
+
+    fn initiated(
+        attempt_id: AdmissionAttemptId,
+        join_id: [u8; 16],
+        ordinal: u64,
+    ) -> AdmissionAttemptV1 {
+        let mut attempt =
+            AdmissionAttemptV1::new_joiner(attempt_id, join_id, JoinerAdmissionStageV1::Initiated);
+        attempt.local_join_ordinal = Some(ordinal);
+        attempt.joiner_pending_security_state = Some(vec![1]);
+        attempt.candidate_key_package = Some(b"joiner-key-package".to_vec());
+        attempt.joiner_member_instance = Some(MemberInstanceId::from_bytes([2; 32]));
+        attempt.resume_public_key = Some(vec![3; 32]);
+        attempt.resume_private_key = Some(vec![4; 32]);
+        attempt.outboxes.push(AdmissionOutboxMessageV1 {
+            purpose: AdmissionOutboxPurposeV1::JoinRequest,
+            recipient: b"sponsor".to_vec(),
+            message_id: [5; 32],
+            predecessor_message_id: None,
+            payload: b"join-request".to_vec(),
+            superseded: false,
+        });
+        attempt
+    }
+
+    let previous_id = AdmissionAttemptId::from_bytes([0xd1; 32]);
+    let previous = initiated(previous_id, [0xd2; 16], 0);
+    repository
+        .commit_local_join_start(LocalJoinStartMutationV1::Create {
+            replacement: previous.clone(),
+        })
+        .await
+        .unwrap();
+    let cleanup = AdmissionOutboxMessageV1 {
+        purpose: AdmissionOutboxPurposeV1::CancelRequested,
+        recipient: b"sponsor".to_vec(),
+        message_id: [0xd3; 32],
+        predecessor_message_id: Some([5; 32]),
+        payload: b"cancel_requested".to_vec(),
+        superseded: false,
+    };
+    let mut previous_terminal = previous.superseded_by_new_join(cleanup).unwrap();
+    previous_terminal.record_version = 1;
+    let current_id = AdmissionAttemptId::from_bytes([0xd4; 32]);
+    let current = initiated(current_id, [0xd5; 16], 1);
+    repository
+        .commit_local_join_start(LocalJoinStartMutationV1::Supersede {
+            expected_previous_attempt_id: previous_id,
+            expected_previous_record_version: 0,
+            previous_terminal,
+            replacement: current,
+        })
+        .await
+        .unwrap();
+    (previous_id, current_id)
+}
+
+#[tokio::test]
+async fn superseded_late_candidate_cannot_replace_current_join() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xd6; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+    let (candidate, history, event, commitment, _) =
+        durable_candidate_verification_fixture(previous_id);
+    let candidate_message = uc_core::membership::AdmissionOutboxMessageV1 {
+        purpose: uc_core::membership::AdmissionOutboxPurposeV1::Candidate,
+        recipient: b"joiner".to_vec(),
+        message_id: [0xd7; 32],
+        predecessor_message_id: Some([5; 32]),
+        payload: b"candidate".to_vec(),
+        superseded: false,
+    };
+
+    let cleanup = owner
+        .joiner_verify_and_prepare(
+            previous_id,
+            &candidate_message,
+            candidate,
+            history,
+            &event,
+            &commitment,
+            b"target-access",
+            b"prepared-proof",
+            None,
+            b"sponsor",
+            b"prepared",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        cleanup.purpose,
+        uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested
+    );
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+}
+
+#[tokio::test]
+async fn superseded_late_candidate_is_recorded_through_the_protocol_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xc0; 16]);
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+    let mut deps = test_deps(
+        Arc::new(MemoryWorkspaceRepository::default()),
+        "device-1",
+        Vec::new(),
+    );
+    deps.admission_attempts = Arc::clone(&repository);
+    let owner = WorkspaceConvergence::new(deps);
+    let candidate = super::admission::durable_admission_message(
+        previous_id,
+        uc_core::membership::AdmissionOutboxPurposeV1::Candidate,
+        b"device-1",
+        Some([5; 32]),
+        b"late-candidate",
+    );
+    let frame = uc_core::pairing::DurableAdmissionFrame {
+        attempt_id: *previous_id.as_bytes(),
+        kind: uc_core::pairing::DurableAdmissionMessageKind::Candidate,
+        message_id: candidate.message_id,
+        predecessor_message_id: candidate.predecessor_message_id,
+        payload: candidate.payload,
+    };
+
+    assert!(matches!(
+        owner
+            .prepare_joiner_candidate(
+                &frame,
+                &FailingPreparation,
+                &FailingTargetAccess,
+                &uc_core::crypto::domain::Passphrase::new("passphrase"),
+            )
+            .await,
+        Err(WorkspaceConvergenceError::RecoveryRequired)
+    ));
+    let previous = repository.load(previous_id).await.unwrap().unwrap();
+    assert!(previous
+        .inbox_dedup
+        .iter()
+        .any(|record| record.message_id == frame.message_id));
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+}
+
+#[tokio::test]
+async fn superseded_late_commit_fails_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xd8; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+    let (_, _, _, _, receipt) = durable_candidate_verification_fixture(previous_id);
+    let commit = uc_core::membership::AdmissionOutboxMessageV1 {
+        purpose: uc_core::membership::AdmissionOutboxPurposeV1::Commit,
+        recipient: b"joiner".to_vec(),
+        message_id: [0xd9; 32],
+        predecessor_message_id: Some([0xda; 32]),
+        payload: b"commit".to_vec(),
+        superseded: false,
+    };
+
+    assert!(matches!(
+        owner
+            .joiner_apply(previous_id, &commit, &receipt, b"sponsor", b"applied")
+            .await,
+        Err(WorkspaceConvergenceError::RecoveryRequired)
+    ));
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+    assert!(!repository
+        .load(previous_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .inbox_dedup
+        .is_empty());
+}
+
+#[tokio::test]
+async fn superseded_late_complete_fails_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xde; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+    let complete = uc_core::membership::AdmissionOutboxMessageV1 {
+        purpose: uc_core::membership::AdmissionOutboxPurposeV1::Complete,
+        recipient: b"joiner".to_vec(),
+        message_id: [0xdf; 32],
+        predecessor_message_id: Some([0xe0; 32]),
+        payload: b"complete".to_vec(),
+        superseded: false,
+    };
+
+    assert!(matches!(
+        owner
+            .joiner_activate(previous_id, &complete, b"completion")
+            .await,
+        Err(WorkspaceConvergenceError::RecoveryRequired)
+    ));
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+}
+
+#[tokio::test]
+async fn superseded_late_commit_is_recorded_through_the_protocol_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xc1; 16]);
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+    let mut deps = test_deps(
+        Arc::new(MemoryWorkspaceRepository::default()),
+        "device-1",
+        Vec::new(),
+    );
+    deps.admission_attempts = Arc::clone(&repository);
+    let owner = WorkspaceConvergence::new(deps);
+    let commit = super::admission::durable_admission_message(
+        previous_id,
+        uc_core::membership::AdmissionOutboxPurposeV1::Commit,
+        b"device-1",
+        Some([0xc2; 32]),
+        b"late-commit",
+    );
+    let frame = uc_core::pairing::DurableAdmissionFrame {
+        attempt_id: *previous_id.as_bytes(),
+        kind: uc_core::pairing::DurableAdmissionMessageKind::Commit,
+        message_id: commit.message_id,
+        predecessor_message_id: commit.predecessor_message_id,
+        payload: commit.payload,
+    };
+
+    assert!(matches!(
+        owner.apply_joiner_commit(&frame, &FailingPreparation).await,
+        Err(WorkspaceConvergenceError::RecoveryRequired)
+    ));
+    let previous = repository.load(previous_id).await.unwrap().unwrap();
+    assert!(previous
+        .inbox_dedup
+        .iter()
+        .any(|record| record.message_id == frame.message_id));
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+}
+
+#[tokio::test]
+async fn superseded_late_complete_is_recorded_through_the_protocol_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xc3; 16]);
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+    let mut deps = test_deps(
+        Arc::new(MemoryWorkspaceRepository::default()),
+        "device-1",
+        Vec::new(),
+    );
+    deps.admission_attempts = Arc::clone(&repository);
+    let owner = WorkspaceConvergence::new(deps);
+    let complete = super::admission::durable_admission_message(
+        previous_id,
+        uc_core::membership::AdmissionOutboxPurposeV1::Complete,
+        b"device-1",
+        Some([0xc4; 32]),
+        b"late-complete",
+    );
+    let frame = uc_core::pairing::DurableAdmissionFrame {
+        attempt_id: *previous_id.as_bytes(),
+        kind: uc_core::pairing::DurableAdmissionMessageKind::Complete,
+        message_id: complete.message_id,
+        predecessor_message_id: complete.predecessor_message_id,
+        payload: complete.payload,
+    };
+
+    assert!(matches!(
+        owner.activate_joiner_complete(&frame).await,
+        Err(WorkspaceConvergenceError::RecoveryRequired)
+    ));
+    let previous = repository.load(previous_id).await.unwrap().unwrap();
+    assert!(previous
+        .inbox_dedup
+        .iter()
+        .any(|record| record.message_id == frame.message_id));
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+}
+
+#[tokio::test]
+async fn superseded_rejection_only_confirms_old_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xdb; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+    let rejected = uc_core::membership::AdmissionOutboxMessageV1 {
+        purpose: uc_core::membership::AdmissionOutboxPurposeV1::Rejected,
+        recipient: b"joiner".to_vec(),
+        message_id: [0xdc; 32],
+        predecessor_message_id: Some([0xd3; 32]),
+        payload: b"cleanup-confirmed".to_vec(),
+        superseded: false,
+    };
+
+    owner
+        .joiner_record_rejected(previous_id, &rejected)
+        .await
+        .unwrap();
+
+    let previous = repository.load(previous_id).await.unwrap().unwrap();
+    assert_eq!(
+        previous.terminal_result,
+        Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+    );
+    assert_eq!(previous.rejection_reason, None);
+    assert!(previous.outboxes.iter().all(|message| message.superseded));
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+}
+
+#[tokio::test]
+async fn recovery_keeps_current_join_and_old_cleanup_isolated() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xdd; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
+
+    let report = owner
+        .recover_with(&ConfirmingAdmissionDelivery)
+        .await
+        .unwrap();
+
+    assert_eq!(report.deliveries_attempted, 2);
+    assert_eq!(report.deliveries_confirmed, 2);
+    assert_eq!(report.attempts_compacted, 1);
+    assert!(repository.load(previous_id).await.unwrap().is_none());
+    assert_eq!(
+        repository
+            .load_terminal(previous_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminal_result,
+        uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin
+    );
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current_id
+    );
+}
+
+#[tokio::test]
+async fn recovery_handles_multiple_superseded_cleanups_with_one_current_join() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xe1; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+    let first = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"first-sponsor",
+            b"first-request",
+            false,
+        )
+        .await
+        .unwrap();
+    let second = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"second-sponsor",
+            b"second-request",
+            false,
+        )
+        .await
+        .unwrap();
+    let current = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"third-sponsor",
+            b"third-request",
+            false,
+        )
+        .await
+        .unwrap();
+
+    let report = owner
+        .recover_with(&ConfirmingAdmissionDelivery)
+        .await
+        .unwrap();
+
+    assert_eq!(report.deliveries_attempted, 3);
+    assert_eq!(report.deliveries_confirmed, 3);
+    assert_eq!(report.attempts_compacted, 2);
+    assert!(repository
+        .load_terminal(first.attempt.attempt_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(repository
+        .load_terminal(second.attempt.attempt_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        current.attempt.attempt_id
+    );
+}
+
 #[test]
 fn durable_admission_preparation_rejects_security_result_mismatch() {
     let (history, candidate_event, commitment) = admission_verification_fixture([0x84; 32]);
@@ -1249,51 +1727,6 @@ async fn base_history_change_during_commit_is_durably_rejected() {
             .unwrap(),
         Some(b"concurrent-formal-history".to_vec())
     );
-}
-
-#[tokio::test]
-async fn durable_join_start_reuses_the_saved_wire_identity_after_restart() {
-    let joiner_dir = tempfile::tempdir().unwrap();
-    let repository = durable_admission_repository(&joiner_dir, [0x44; 16]);
-    let first_owner = durable_admission_owner(Arc::clone(&repository));
-
-    let first = first_owner
-        .begin_join_before_network(
-            b"invitation-route",
-            b"join-request-body",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-        )
-        .await
-        .unwrap();
-    assert_ne!(first.attempt_id.as_bytes(), &[0; 32]);
-    assert_ne!(first.join_id.unwrap(), [0; 16]);
-    assert_ne!(first.outboxes[0].message_id, [0; 32]);
-
-    let reopened_owner = durable_admission_owner(Arc::clone(&repository));
-    let replay = reopened_owner
-        .begin_join_before_network(
-            b"invitation-route",
-            b"join-request-body",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-        )
-        .await
-        .unwrap();
-    assert_eq!(replay, first);
-
-    let conflict = reopened_owner
-        .begin_join_before_network(
-            b"another-invitation-route",
-            b"another-join-request-body",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-        )
-        .await;
-    assert!(matches!(
-        conflict,
-        Err(WorkspaceConvergenceError::AdmissionInProgress)
-    ));
 }
 
 #[tokio::test]
@@ -2696,7 +3129,7 @@ async fn durable_join_starts_once_and_survives_owner_restart() {
 }
 
 #[tokio::test]
-async fn durable_join_reopens_the_exact_member_and_resume_material() {
+async fn automatic_recovery_keeps_the_same_join_identity() {
     use super::admission::DurableJoinRecoveryMaterialV1;
     use uc_core::membership::AdmissionAttemptRepositoryPort;
 
@@ -2734,60 +3167,147 @@ async fn durable_join_reopens_the_exact_member_and_resume_material() {
     );
 }
 
+struct RotatingPreparation {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+struct FailingPreparation;
+
+struct FailingTargetAccess;
+
+#[async_trait::async_trait]
+impl uc_core::ports::space::PrepareAdmissionTargetAccessPort for FailingTargetAccess {
+    async fn prepare_target_access(
+        &self,
+        _target_space_id: &SpaceId,
+        _passphrase: &uc_core::crypto::domain::Passphrase,
+    ) -> Result<
+        uc_core::space_access::PreparedAdmissionTargetAccess,
+        uc_core::ports::space::SpaceAccessError,
+    > {
+        Err(uc_core::ports::space::SpaceAccessError::Internal(
+            "unused".to_owned(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl uc_core::ports::space::GroupAdmissionPort for FailingPreparation {
+    async fn prepare_group_join(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<uc_core::space_access::PreparedGroupJoin, uc_core::ports::space::SpaceAccessError>
+    {
+        Err(uc_core::ports::space::SpaceAccessError::Internal(
+            "injected join material failure".to_owned(),
+        ))
+    }
+
+    async fn admit_group_member(
+        &self,
+        _space_id: &SpaceId,
+        _sponsor_device_id: &DeviceId,
+        _joiner_device_id: &DeviceId,
+        _existing_member_ids: &[DeviceId],
+        _key_package: &[u8],
+    ) -> Result<uc_core::space_access::GroupAdmission, uc_core::ports::space::SpaceAccessError>
+    {
+        Err(uc_core::ports::space::SpaceAccessError::Internal(
+            "unused".to_owned(),
+        ))
+    }
+
+    async fn install_group_join(
+        &self,
+        _space_id: &SpaceId,
+        _passphrase: &uc_core::crypto::domain::Passphrase,
+        _pending: uc_core::space_access::PreparedGroupJoin,
+        _welcome: &[u8],
+        _encrypted_key_catalog: &[u8],
+        _group_epoch: u64,
+    ) -> Result<(), uc_core::ports::space::SpaceAccessError> {
+        Err(uc_core::ports::space::SpaceAccessError::Internal(
+            "unused".to_owned(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl uc_core::ports::space::GroupAdmissionPort for RotatingPreparation {
+    async fn prepare_group_join(
+        &self,
+        _device_id: &DeviceId,
+    ) -> Result<uc_core::space_access::PreparedGroupJoin, uc_core::ports::space::SpaceAccessError>
+    {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) as u8 + 1;
+        Ok(
+            uc_core::space_access::PreparedGroupJoin::new(vec![call], vec![call.wrapping_add(1)])
+                .with_member_instance(MemberInstanceId::from_bytes([call; 32])),
+        )
+    }
+
+    async fn admit_group_member(
+        &self,
+        _space_id: &SpaceId,
+        _sponsor_device_id: &DeviceId,
+        _joiner_device_id: &DeviceId,
+        _existing_member_ids: &[DeviceId],
+        _key_package: &[u8],
+    ) -> Result<uc_core::space_access::GroupAdmission, uc_core::ports::space::SpaceAccessError>
+    {
+        Err(uc_core::ports::space::SpaceAccessError::Internal(
+            "unused".to_owned(),
+        ))
+    }
+
+    async fn install_group_join(
+        &self,
+        _space_id: &SpaceId,
+        _passphrase: &uc_core::crypto::domain::Passphrase,
+        _pending: uc_core::space_access::PreparedGroupJoin,
+        _welcome: &[u8],
+        _encrypted_key_catalog: &[u8],
+        _group_epoch: u64,
+    ) -> Result<(), uc_core::ports::space::SpaceAccessError> {
+        Err(uc_core::ports::space::SpaceAccessError::Internal(
+            "unused".to_owned(),
+        ))
+    }
+}
+
+fn advance_joiner_to_candidate_or_prepared(
+    attempt: &mut uc_core::membership::AdmissionAttemptV1,
+    stage: uc_core::membership::JoinerAdmissionStageV1,
+) {
+    attempt.role_state = uc_core::membership::AdmissionAttemptRoleStateV1::Joiner(
+        uc_core::membership::JoinerAdmissionStateV1 { stage },
+    );
+    attempt.lineage_id = Some("target-space".to_owned());
+    attempt.base_history_position = Some(vec![1]);
+    attempt.candidate_event = Some(vec![2]);
+    attempt.candidate_event_id = Some([3; 32]);
+    attempt.target_members_digest = Some([4; 32]);
+    attempt.security_commitment = Some(vec![5]);
+    attempt.security_commit = Some(vec![6]);
+    attempt.security_welcome = Some(vec![7]);
+    attempt.target_protection_group_id = Some("target-group".to_owned());
+    attempt.target_key_catalog = Some(vec![8]);
+    attempt.target_relationships = Some(Vec::new());
+    attempt.existing_member_security_deliveries = Some(Vec::new());
+    attempt.staged_security_state = Some(vec![9]);
+    attempt.base_membership_history = Some(vec![10]);
+    if stage == uc_core::membership::JoinerAdmissionStageV1::Prepared {
+        attempt.verified_membership_history = Some(vec![11]);
+        attempt.prepared_proof = Some(vec![12]);
+        attempt.target_access_state = Some(vec![13]);
+    }
+}
+
 #[tokio::test]
-async fn durable_join_preparation_is_not_regenerated_after_restart() {
-    use uc_core::ports::space::GroupAdmissionPort;
-    use uc_core::space_access::{GroupAdmission, PreparedGroupJoin};
-
-    struct CountingPreparation {
-        calls: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl GroupAdmissionPort for CountingPreparation {
-        async fn prepare_group_join(
-            &self,
-            _device_id: &DeviceId,
-        ) -> Result<PreparedGroupJoin, uc_core::ports::space::SpaceAccessError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(PreparedGroupJoin::new(
-                b"stable-key-package".to_vec(),
-                b"stable-private-state".to_vec(),
-            )
-            .with_member_instance(MemberInstanceId::from_bytes([0x79; 32])))
-        }
-
-        async fn admit_group_member(
-            &self,
-            _space_id: &SpaceId,
-            _sponsor_device_id: &DeviceId,
-            _joiner_device_id: &DeviceId,
-            _existing_member_ids: &[DeviceId],
-            _key_package: &[u8],
-        ) -> Result<GroupAdmission, uc_core::ports::space::SpaceAccessError> {
-            Err(uc_core::ports::space::SpaceAccessError::Internal(
-                "unused".to_owned(),
-            ))
-        }
-
-        async fn install_group_join(
-            &self,
-            _space_id: &SpaceId,
-            _passphrase: &uc_core::crypto::domain::Passphrase,
-            _pending: PreparedGroupJoin,
-            _welcome: &[u8],
-            _encrypted_key_catalog: &[u8],
-            _group_epoch: u64,
-        ) -> Result<(), uc_core::ports::space::SpaceAccessError> {
-            Err(uc_core::ports::space::SpaceAccessError::Internal(
-                "unused".to_owned(),
-            ))
-        }
-    }
-
+async fn explicit_join_supersedes_initiated_attempt_atomically() {
     let directory = tempfile::tempdir().unwrap();
     let repository = durable_admission_repository(&directory, [0x7a; 16]);
-    let preparation = CountingPreparation {
+    let preparation = RotatingPreparation {
         calls: AtomicUsize::new(0),
     };
 
@@ -2805,39 +3325,50 @@ async fn durable_join_preparation_is_not_regenerated_after_restart() {
         .prepare_join_before_network(
             &preparation,
             &DeviceId::new("joiner"),
-            b"sponsor",
-            b"join-request",
+            b"different-sponsor",
+            b"different-join-request",
             false,
         )
         .await
         .unwrap();
 
-    assert_eq!(preparation.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(first.attempt, second.attempt);
+    assert_eq!(preparation.calls.load(Ordering::SeqCst), 2);
+    assert_ne!(first.attempt.attempt_id, second.attempt.attempt_id);
+    assert_ne!(first.attempt.join_id, second.attempt.join_id);
+    assert_ne!(
+        first.attempt.local_join_ordinal,
+        second.attempt.local_join_ordinal
+    );
     assert!(!first.attempt.preserve_unreadable_history);
-    assert!(matches!(
-        durable_admission_owner(Arc::clone(&repository))
-            .prepare_join_before_network(
-                &preparation,
-                &DeviceId::new("joiner"),
-                b"sponsor",
-                b"join-request",
-                true,
-            )
-            .await,
-        Err(WorkspaceConvergenceError::AdmissionInProgress)
-    ));
-    assert_eq!(
+    assert_ne!(
         first.prepared_group_join.key_package,
         second.prepared_group_join.key_package
     );
-    assert_eq!(
+    assert_ne!(
         first.prepared_group_join.private_state(),
         second.prepared_group_join.private_state()
     );
-    assert_eq!(
+    assert_ne!(
         first.prepared_group_join.member_instance(),
         second.prepared_group_join.member_instance()
+    );
+    let previous = repository
+        .load(first.attempt.attempt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        previous.terminal_result,
+        Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+    );
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        second.attempt.attempt_id
     );
 
     let confirmed_directory = tempfile::tempdir().unwrap();
@@ -2853,6 +3384,311 @@ async fn durable_join_preparation_is_not_regenerated_after_restart() {
         .await
         .unwrap();
     assert!(confirmed.attempt.preserve_unreadable_history);
+}
+
+#[tokio::test]
+async fn explicit_join_with_same_invitation_starts_new_attempt() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xe0; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+    let first = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"same-sponsor",
+            b"same-request",
+            false,
+        )
+        .await
+        .unwrap();
+    let second = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"same-sponsor",
+            b"same-request",
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(first.attempt.attempt_id, second.attempt.attempt_id);
+    assert_ne!(first.attempt.join_id, second.attempt.join_id);
+    assert_eq!(preparation.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn explicit_join_material_failure_keeps_previous_attempt() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xf3; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+    let first = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"first-sponsor",
+            b"first-request",
+            false,
+        )
+        .await
+        .unwrap();
+    let metadata_before = repository.profile_metadata().await.unwrap();
+
+    assert!(owner
+        .prepare_join_before_network(
+            &FailingPreparation,
+            &DeviceId::new("joiner"),
+            b"second-sponsor",
+            b"second-request",
+            false,
+        )
+        .await
+        .is_err());
+
+    assert_eq!(
+        repository.profile_metadata().await.unwrap(),
+        metadata_before
+    );
+    assert_eq!(
+        repository.load(first.attempt.attempt_id).await.unwrap(),
+        Some(first.attempt.clone())
+    );
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        first.attempt.attempt_id
+    );
+}
+
+#[tokio::test]
+async fn explicit_join_supersedes_candidate_before_prepared() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xe1; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+    let first = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"first-sponsor",
+            b"first-request",
+            false,
+        )
+        .await
+        .unwrap();
+    let mut candidate = first.attempt.clone();
+    candidate.record_version = 1;
+    advance_joiner_to_candidate_or_prepared(
+        &mut candidate,
+        uc_core::membership::JoinerAdmissionStageV1::Candidate,
+    );
+    repository
+        .compare_and_advance(first.attempt.attempt_id, 0, &candidate)
+        .await
+        .unwrap();
+
+    let second = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"second-sponsor",
+            b"second-request",
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(first.attempt.attempt_id, second.attempt.attempt_id);
+    assert_eq!(
+        repository
+            .load(first.attempt.attempt_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminal_result,
+        Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+    );
+}
+
+#[tokio::test]
+async fn explicit_join_after_prepared_returns_stable_conflict() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xe2; 16]);
+    let owner = durable_admission_owner(Arc::clone(&repository));
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+    let first = owner
+        .prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"first-sponsor",
+            b"first-request",
+            false,
+        )
+        .await
+        .unwrap();
+    let mut prepared = first.attempt.clone();
+    prepared.record_version = 1;
+    advance_joiner_to_candidate_or_prepared(
+        &mut prepared,
+        uc_core::membership::JoinerAdmissionStageV1::Prepared,
+    );
+    repository
+        .compare_and_advance(first.attempt.attempt_id, 0, &prepared)
+        .await
+        .unwrap();
+    let before = repository.profile_metadata().await.unwrap();
+
+    assert!(matches!(
+        owner.preflight_join_source(false).await,
+        Err(WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded)
+    ));
+
+    assert!(matches!(
+        owner
+            .prepare_join_before_network(
+                &preparation,
+                &DeviceId::new("joiner"),
+                b"second-sponsor",
+                b"second-request",
+                false,
+            )
+            .await,
+        Err(WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded)
+    ));
+    assert_eq!(preparation.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(repository.profile_metadata().await.unwrap(), before);
+    assert_eq!(
+        repository
+            .project_current_local_join()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        first.attempt.attempt_id
+    );
+}
+
+#[tokio::test]
+async fn concurrent_explicit_joins_leave_one_current_attempt() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xe3; 16]);
+    let first_owner = durable_admission_owner(Arc::clone(&repository));
+    let second_owner = durable_admission_owner(Arc::clone(&repository));
+    let first_preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+    let second_preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+    let first_device = DeviceId::new("joiner");
+    let second_device = DeviceId::new("joiner");
+
+    let (first, second) = tokio::join!(
+        first_owner.prepare_join_before_network(
+            &first_preparation,
+            &first_device,
+            b"first-sponsor",
+            b"first-request",
+            false,
+        ),
+        second_owner.prepare_join_before_network(
+            &second_preparation,
+            &second_device,
+            b"second-sponsor",
+            b"second-request",
+            false,
+        )
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    let current = repository
+        .project_current_local_join()
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_ne!(first.attempt.attempt_id, second.attempt.attempt_id);
+    assert!(
+        current.attempt_id == first.attempt.attempt_id
+            || current.attempt_id == second.attempt.attempt_id
+    );
+    let historical_id = if current.attempt_id == first.attempt.attempt_id {
+        second.attempt.attempt_id
+    } else {
+        first.attempt.attempt_id
+    };
+    assert_eq!(
+        repository
+            .load(historical_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminal_result,
+        Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
+    );
+    assert_eq!(
+        repository
+            .profile_metadata()
+            .await
+            .unwrap()
+            .next_local_join_ordinal,
+        2
+    );
+}
+
+#[tokio::test]
+async fn inbound_admission_blocks_explicit_join_without_retry_loop() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = durable_admission_repository(&directory, [0xe4; 16]);
+    let mut inbound = uc_core::membership::AdmissionAttemptV1::new_joiner(
+        uc_core::membership::AdmissionAttemptId::from_bytes([0xe5; 32]),
+        [0xe6; 16],
+        uc_core::membership::JoinerAdmissionStageV1::Initiated,
+    );
+    inbound.join_id = None;
+    inbound.role_state = uc_core::membership::AdmissionAttemptRoleStateV1::Sponsor(
+        uc_core::membership::SponsorAdmissionStateV1 {
+            stage: uc_core::membership::SponsorAdmissionStageV1::Accepted,
+        },
+    );
+    inbound.invitation_claim = Some(vec![1]);
+    repository.create(&inbound, None, None).await.unwrap();
+    let owner = durable_admission_owner(repository);
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        owner.prepare_join_before_network(
+            &preparation,
+            &DeviceId::new("joiner"),
+            b"sponsor",
+            b"request",
+            false,
+        ),
+    )
+    .await
+    .expect("explicit join must not retry indefinitely");
+
+    assert!(matches!(
+        result,
+        Err(WorkspaceConvergenceError::AdmissionInProgress)
+    ));
 }
 
 #[tokio::test]

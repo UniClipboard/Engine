@@ -88,6 +88,11 @@ fn map_fresh_join_error(error: RedeemPairingInvitationError) -> EngineError {
             EngineErrorCategory::Conflict,
             false,
         ),
+        RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded => error_with(
+            JOIN_SPACE_PREVIOUS_JOIN_CANNOT_BE_SUPERSEDED_CODE,
+            EngineErrorCategory::Conflict,
+            false,
+        ),
         RedeemPairingInvitationError::SponsorRejectedInvitation => error_with(
             JOIN_SPACE_SPONSOR_REJECTED_CODE,
             EngineErrorCategory::Conflict,
@@ -168,5 +173,18 @@ mod tests {
         );
         assert_eq!(unreadable.category(), EngineErrorCategory::Conflict);
         assert!(!unreadable.is_retryable());
+    }
+
+    #[test]
+    fn previous_join_cannot_be_superseded_is_a_stable_conflict() {
+        let error =
+            map_fresh_join_error(RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded);
+
+        assert_eq!(
+            error.code(),
+            JOIN_SPACE_PREVIOUS_JOIN_CANNOT_BE_SUPERSEDED_CODE
+        );
+        assert_eq!(error.category(), EngineErrorCategory::Conflict);
+        assert!(!error.is_retryable());
     }
 }

@@ -201,6 +201,9 @@ fn map_redeem_error_to_pairing_failure_reason(
         RedeemPairingInvitationError::UnreadableHistoryRequiresConfirmation => {
             PairingFailureReason::Internal
         }
+        RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded => {
+            PairingFailureReason::PreviousJoinCannotBeSuperseded
+        }
         RedeemPairingInvitationError::SponsorRejectedInvitation => {
             PairingFailureReason::SponsorRejectedInvitation
         }
