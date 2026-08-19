@@ -469,10 +469,15 @@ impl WorkspaceConvergence {
     /// The only caller-controlled facts are the opaque pending identifier and
     /// accept/reject choice; this owner derives and signs every other field.
     /// Reconcile the local member history with every applied peer before an
-    /// admission is committed. The bounded exchange is the same one used by
-    /// the runtime when a peer becomes reachable, so admission cannot revive
-    /// the superseded recovery channel or use a second membership source.
+    /// admission is committed. The checks remain sequential, but share one
+    /// bounded budget so offline peers cannot make an admission wait once per
+    /// device. The exchange is the same one used by the runtime when a peer
+    /// becomes reachable, so admission cannot revive the superseded recovery
+    /// channel or use a second membership source.
     pub async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
+        const PRE_ADMISSION_HISTORY_SYNC_BUDGET: std::time::Duration =
+            std::time::Duration::from_secs(10);
+
         let history_candidates = {
             let _guard = self.state_lock.lock().await;
             let state = self.load_state().await?;
@@ -503,9 +508,14 @@ impl WorkspaceConvergence {
         };
         candidates.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         candidates.dedup();
+        let deadline = tokio::time::Instant::now() + PRE_ADMISSION_HISTORY_SYNC_BUDGET;
         for device in candidates {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
             let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(20),
+                remaining,
                 self.reconcile_membership_history_with_peer(&device),
             )
             .await;
