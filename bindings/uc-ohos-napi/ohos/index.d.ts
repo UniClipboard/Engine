@@ -134,6 +134,7 @@ export interface OhEngineEvent {
   sharedDeviceRefresh?: OhSharedDeviceRefresh
   networkRecoveryPhase?: 'idle' | 'recovering' | 'retry_scheduled' | 'failed'
   nextRetryInMs?: number
+  rePairingScope?: 'all_devices'
 }
 
 export interface OhSpaceCreated {

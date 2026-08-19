@@ -9,7 +9,7 @@ use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
-    execute_decide_device_trust_change, execute_list_devices, execute_query_legacy_bootstrap,
+    execute_decide_device_trust_change, execute_list_devices,
     execute_query_member_sync_preferences, execute_query_profile_device_trust,
     execute_query_space_protection, execute_remove_member, execute_update_member_sync_preferences,
 };
@@ -136,6 +136,7 @@ impl EngineRuntime for ProductionRuntime {
         }
         let session_lease = self.session_supervisor.acquire_operation().await?;
         let may_require_session_transition = matches!(&operation, Operation::JoinSpace(_));
+        let operation_kind = operation.kind();
         let operation = async {
             match operation {
                 Operation::CreateSpace(input) => {
@@ -353,10 +354,6 @@ impl EngineRuntime for ProductionRuntime {
                     execute_decide_membership_removal(self.current_facade().await?.as_ref(), input)
                         .await
                 }
-                Operation::QueryLegacyBootstrap(input) => {
-                    execute_query_legacy_bootstrap(self.current_facade().await?.as_ref(), input)
-                        .await
-                }
                 Operation::QuerySpaceProtection => {
                     execute_query_space_protection(self.current_facade().await?.as_ref()).await
                 }
@@ -475,6 +472,16 @@ impl EngineRuntime for ProductionRuntime {
             _ = session_cancellation.cancelled() => Err(super::operation_unavailable_error()),
             result = operation => result,
         };
+        if matches!(operation_kind, crate::OperationKind::UnlockSpace) && result.is_ok() {
+            if let Ok(facade) = self.current_facade().await {
+                if let Ok(state) = facade.query_setup_state().await {
+                    if let Some(scope) = super::re_pairing_scope_for_setup_state(&state) {
+                        self.events
+                            .send(crate::EngineEvent::RePairingRequired { scope });
+                    }
+                }
+            }
+        }
         if may_require_session_transition && result.is_ok() {
             let convergence = self
                 .current_session_field(|session| session.sync_engine.space_transition_recovery())

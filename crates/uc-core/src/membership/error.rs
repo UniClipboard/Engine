@@ -229,13 +229,3 @@ pub enum MembershipHistoryExchangeError {
     #[error("membership history exchange transport failed")]
     Transport,
 }
-
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum LegacyPeerProbeError {
-    #[error("legacy peer probe target is offline")]
-    Offline,
-    #[error("legacy peer probe was rejected")]
-    Rejected,
-    #[error("legacy peer probe transport failed")]
-    Transport,
-}

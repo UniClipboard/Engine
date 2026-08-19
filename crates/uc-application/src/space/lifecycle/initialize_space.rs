@@ -205,6 +205,7 @@ impl InitializeSpaceUseCase {
             .set_status(&SetupStatus {
                 has_completed: true,
                 space_id: Some(space_id.clone()),
+                re_pairing_required: false,
             })
             .await
             .map_err(|e| InitializeSpaceError::StorageFailed(e.to_string()))?;
@@ -916,6 +917,7 @@ mod tests {
         *h.setup_status.status.lock().unwrap() = SetupStatus {
             has_completed: true,
             space_id: None,
+            re_pairing_required: false,
         };
 
         let err = h.uc.execute(ok_cmd(Some("My Mac"))).await.unwrap_err();

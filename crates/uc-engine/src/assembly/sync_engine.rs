@@ -46,14 +46,13 @@ const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
-    ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, AutomaticLegacyUpgradeDeps,
-    BlobTransferDeps, BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort,
-    ClipboardLiveIndexer, ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent,
-    HostEventBus, InboundClipboardApplyPort, MemberRosterDeps, MemberRosterFacade,
-    MembershipConnectivityDeps, MembershipConvergenceDeps, SpaceAdmissionDeps,
-    SpaceApplicationRuntime, SpaceConvergenceAssembly, SpaceConvergenceDeps, SpaceFacade,
-    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, TransferHostEvent,
-    WorkspaceConvergenceDeps,
+    ActiveClipboardLifecycle, ActiveClipboardPullServeFacadeDeps, BlobTransferDeps,
+    BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
+    ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent, HostEventBus,
+    InboundClipboardApplyPort, MemberRosterDeps, MemberRosterFacade, MembershipConnectivityDeps,
+    MembershipConvergenceDeps, SpaceAdmissionDeps, SpaceApplicationRuntime,
+    SpaceConvergenceAssembly, SpaceConvergenceDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps,
+    SpaceTransitionDeps, TransferHostEvent, WorkspaceConvergenceDeps,
 };
 use uc_application::facade::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
@@ -64,7 +63,6 @@ use uc_core::file_transfer::{
 };
 use uc_core::membership::{
     CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort, CurrentWorkspacePeerSnapshot,
-    LegacyUpgradeDispatchPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::space::ProofPort;
@@ -225,13 +223,6 @@ impl SyncEngineAssembly {
     pub(crate) async fn admission_completion_recovery_is_reachable_for_test(&self) -> bool {
         self.iroh_node
             .accepts_protocol_for_test(uc_infra::network::iroh::ADMISSION_COMPLETION_RECOVERY_ALPN)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn legacy_upgrade_is_reachable_for_test(&self) -> bool {
-        self.iroh_node
-            .accepts_protocol_for_test(uc_infra::network::iroh::LEGACY_UPGRADE_ALPN)
             .await
     }
 
@@ -607,6 +598,11 @@ pub async fn build_sync_engine_assembly(
             previous_app_version.as_deref(),
             current_app_version,
         );
+    let legacy_profile_isolation_required =
+        uc_application::facade::WorkspaceConvergenceStateOrigin::requires_legacy_profile_isolation(
+            previous_app_version.as_deref(),
+            current_app_version,
+        );
     // IdentityFingerprintFactory is stateless — the one in SecurityPorts is
     // the same `Sha256IdentityFingerprintFactory` ZST, but we construct a
     // fresh one here rather than down-casting through `dyn` because
@@ -669,13 +665,6 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.security.fingerprint),
         Arc::clone(&deps.security.space_access_ports.group_revocation),
     )?;
-    let legacy_upgrade_adapter = builder.build_legacy_upgrade_adapter(
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&deps.device.member_repo),
-        Arc::clone(&deps.security.fingerprint),
-    );
-    let legacy_upgrade_dispatch: Arc<dyn LegacyUpgradeDispatchPort> =
-        legacy_upgrade_adapter.clone();
     // Presence is installed before the convergence owner is assembled so the
     // owner can expose reachability as an independent product fact.
     let presence: Arc<dyn PresencePort> = builder.install_presence(
@@ -730,7 +719,6 @@ pub async fn build_sync_engine_assembly(
             clock: Arc::clone(&deps.system.clock),
             device_identity: Arc::clone(&deps.device.device_identity),
             membership_history_exchange: membership_history_exchange_adapter.clone(),
-            legacy_peer_probe: legacy_upgrade_adapter.clone(),
             trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
             peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
             presence: Arc::clone(&presence),
@@ -765,13 +753,6 @@ pub async fn build_sync_engine_assembly(
         },
         group_revocation: Arc::clone(&deps.security.space_access_ports.group_revocation),
         group_update_dispatch: Arc::clone(&group_update_dispatch),
-        legacy_upgrade: AutomaticLegacyUpgradeDeps {
-            member_repo: Arc::clone(&deps.device.member_repo),
-            device_identity: Arc::clone(&deps.device.device_identity),
-            protection: Arc::clone(&space_setup.legacy_protection),
-            dispatch: Arc::clone(&legacy_upgrade_dispatch),
-            presence: Arc::clone(&presence),
-        },
     });
     group_update_recovery_scope
         .install(convergence_assembly.current_peer_scope())
@@ -791,10 +772,6 @@ pub async fn build_sync_engine_assembly(
     builder.install_admission_completion_recovery(
         &admission_completion_recovery_adapter,
         convergence_assembly.admission_completion_recovery(),
-    )?;
-    builder.install_legacy_upgrade_handler(
-        legacy_upgrade_adapter.as_ref(),
-        convergence_assembly.legacy_upgrade_endpoint(),
     )?;
     // Phase 96 INDIC-01:连接通道单一真相源。复用同一 endpoint +
     // peer_addr_repo,纯读 adapter 不装 ALPN handler。
@@ -935,6 +912,7 @@ pub async fn build_sync_engine_assembly(
             space_access: deps.security.space_access_ports.clone(),
             setup_status: Arc::clone(&deps.setup_status),
             mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
+            legacy_profile_isolation_required,
         },
         admission: SpaceAdmissionDeps {
             local_identity: Arc::clone(&local_identity),
@@ -971,17 +949,11 @@ pub async fn build_sync_engine_assembly(
             presence: Arc::clone(&presence),
             connection_channel: Some(Arc::clone(&connection_channel)),
         })
-        .with_group_bootstrap(Arc::clone(
-            &deps.security.space_access_ports.group_bootstrap,
-        ))
         .with_space_protection(Arc::clone(
             &deps.security.space_access_ports.space_protection,
         ))
         .with_convergence(Arc::clone(&convergence_assembly)),
     );
-    if let Err(error) = roster.resume_legacy_bootstraps().await {
-        warn!(error = %error, "legacy bootstrap recovery could not resume during startup");
-    }
     let space_application_runtime = SpaceApplicationRuntime::start(
         Arc::clone(&convergence_assembly),
         MembershipConnectivityDeps {

@@ -37,6 +37,7 @@ impl SetupStatusPort for ManifestProjectingSetupStatusRepository {
             return Ok(SetupStatus {
                 has_completed: true,
                 space_id: Some(uc_core::ids::SpaceId::from_str(&manifest.space_id)),
+                re_pairing_required: false,
             });
         }
         self.legacy.get_status().await
@@ -161,6 +162,7 @@ mod tests {
             .set_status(&SetupStatus {
                 has_completed: true,
                 space_id: Some(uc_core::ids::SpaceId::from_str("legacy-space")),
+                re_pairing_required: false,
             })
             .await
             .unwrap();

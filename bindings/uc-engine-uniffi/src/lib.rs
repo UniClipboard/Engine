@@ -312,6 +312,11 @@ pub enum BindingTransferDirection {
     Receiving,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingRePairingScope {
+    AllDevices,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum BindingEvent {
     StateChanged {
@@ -388,6 +393,9 @@ pub enum BindingEvent {
         phase: String,
         retryable: bool,
         next_retry_in_ms: Option<u64>,
+    },
+    RePairingRequired {
+        scope: BindingRePairingScope,
     },
     Changed {
         kind: String,

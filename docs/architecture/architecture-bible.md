@@ -382,7 +382,7 @@ profile 准入密钥和文件网络身份，随后清数据库、配置导入暂
 | 文件进度 | `uniclipboard/transfer-progress/0` | 接收方向发送方回报字节进度 |
 | 成员安全更新 | `uniclipboard/group-update/1` | 已接受成员历史移除后的密钥世代更新 |
 | 成员候选资料 | `uniclipboard/membership-gossip/1` | 公告、候选成员和安全资料核验；不决定成员资格 |
-| 旧空间升级 | `uniclipboard/legacy-upgrade/2` | 旧安全模型迁移到可靠密钥世代，并在成员资料完整恢复后结束等待 |
+| 旧资料独立化 | 无网络协议 | 升级后保留本机资料，清空旧设备关系，建立仅含本机的新空间并要求全部重新配对 |
 | 成员历史核对 | `uniclipboard/membership-history/2` | 已认证成员交换完整版本化成员历史与各自签署的决定 |
 | 准入完成接力 | `uniclipboard/workspace-admission-resume/1` | 原接纳设备离线后，合格当前成员验证并完成已提交的同一加入 |
 
@@ -944,6 +944,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - 2026-08-19：修复普通旧空间安全提升被误当作旧成员重新接纳的问题。首次加入共同保护状态后直接进入成员历史交接和在线恢复；只有持久记录明确处于等待重新加入的设备才发送并要求恢复确认。同步校准升级消息新增类型字段后的固定测试基线。负责人、公开入口和普通成员范围不变。
 - 2026-08-19：空间加入前的成员历史核对保持逐台执行，但所有设备共用 10 秒总等待时间；时间耗尽后直接继续准入，离线设备数量不再线性延长切换等待。负责人、公开入口、成员历史来源和恢复边界不变。
 - 2026-08-19：修复空间加入完成后切换会话时的 mDNS 后台任务泄漏。受控的发现组件在目标已停止时终止延迟清理任务，不再按 10 毫秒持续重试；Engine 仍通过原有生命周期统一启动和停止发现服务，宿主无需新增取消、重启或重试步骤。
+- 2026-08-19：删除已被 ADR-023 取代的旧配对自动恢复实现，包括旧设备探测、旧升级网络通道、等待重新接纳、启动重试和旧迁移查询。已发布数据库中的旧待恢复表保留迁移历史，但升级时一次性清空；当前运行流程只负责本机独立化和通知产品全部重新配对。
+- 2026-08-19：ADR-023 取代旧资料自动恢复方案。`0.20.0` 之前的资料在解锁后由 Engine 一次性清除旧成员关系和旧恢复状态，保留本地内容与解锁材料后建立单设备新空间，并保存需要重新配对标记；完成后以带 `all_devices` 范围的事件通知产品立即展示重新配对引导，保存标记继续作为漏事件后的恢复依据，产品不参与清理或旧关系恢复。
 - 2026-08-18：旧空间升级的等待状态改为双方完成恢复后才结束。发起方保留等待记录并在重启后主动请求旧设备补齐成员资料；旧设备完成资料恢复后回传确认，发起方收到确认才结束等待。保护关系已建立不再单独视为恢复完成，避免中途退出后留下无法继续配对的半完成状态。
 - 2026-08-18：修复启动时成员范围暂不可读会拖延已接受设备自动恢复的问题。活动 Space 的连接运行期现在
   先立即检查当前范围；资料可用的统一会话事件会直接唤醒连接恢复，真实网络失败仍按原有退避处理。成员
@@ -1250,6 +1252,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/adr/020-membership-reconciliation-and-user-decisions.md`：设备上线成员核对、未确认移除决定和分叉关系隔离规则。
 - `docs/adr/021-workspace-convergence-internal-boundaries.md`：成员收敛保持唯一负责人时的内部职责边界和整理规则。
 - `docs/adr/022-user-initiated-join-supersession.md`：用户明确加入、后台恢复和旧加入安全取代规则。
+- `docs/adr/023-legacy-profile-isolation-and-re-pairing.md`：旧资料升级后本机独立化和全部重新配对规则。
 - `docs/specs/015-offline-first-member-removal.md`：已由 ADR-020 取代的成员移除说明记录。
 - `docs/specs/016-workspace-wide-convergence.md`：已由 ADR-020 取代的工作空间收敛说明记录。
 - `docs/specs/021-device-trust-reconciliation-product-contract.md`：设备信任完整查询、决定和产品动作边界。
@@ -1257,3 +1260,4 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/specs/023-durable-membership-proof-and-admission-activation.md`：历史验证材料、准入正式提交、激活门禁、恢复和旧数据迁移规则。
 - `docs/specs/024-workspace-convergence-internal-boundaries.md`：成员收敛内部职责边界的实施顺序、验证与回归要求。
 - `docs/specs/025-user-initiated-join-supersession.md`：用户再次明确加入时安全取代旧本机加入的分阶段实施规格。
+- `docs/specs/026-legacy-profile-isolation-and-re-pairing.md`：旧资料独立化、关系清理和产品提醒的实施规格。

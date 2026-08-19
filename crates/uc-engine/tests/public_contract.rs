@@ -2,9 +2,8 @@ use uc_engine::{
     CancelJoinSpaceInput, ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
     EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
     EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
-    JoinSpaceInput, LegacyBootstrapOutcome, LegacyBootstrapSummary, LocalDeviceSummary,
-    MemberSyncPreferencesPatch, MemberSyncPreferencesSummary, Operation, OperationKind,
-    OperationResult, QueryHistoryInput, QueryLegacyBootstrapInput, QueryMemberSyncPreferencesInput,
+    JoinSpaceInput, LocalDeviceSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
+    Operation, OperationKind, OperationResult, QueryHistoryInput, QueryMemberSyncPreferencesInput,
     RecoverSessionInput, RefreshReason, RemoveMemberInput, ResendEntryInput, SearchEntriesInput,
     SearchPageSummary, SearchResultSummary, SecretString, SendFilesInput, SendImageInput,
     SendTextInput, SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary,
@@ -131,12 +130,6 @@ fn every_public_operation_has_a_stable_kind() {
                 device_id: "member-1".into(),
             }),
             OperationKind::RemoveMember,
-        ),
-        (
-            Operation::QueryLegacyBootstrap(QueryLegacyBootstrapInput {
-                bootstrap_id: "bootstrap-a".into(),
-            }),
-            OperationKind::QueryLegacyBootstrap,
         ),
         (
             Operation::QuerySpaceProtection,
@@ -1311,19 +1304,9 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
     .contains("workspace_convergence"));
     assert!(format!(
         "{:?}",
-        OperationResult::LegacyBootstrapStatus(Some(LegacyBootstrapSummary {
-            bootstrap_id: "bootstrap-a".into(),
-            outcome: LegacyBootstrapOutcome::AwaitingReadmission,
-            pending_readmission: 1,
-        }))
-    )
-    .contains("legacy_bootstrap_status"));
-    assert!(format!(
-        "{:?}",
         OperationResult::SpaceProtection(SpaceProtectionSummary {
             mode: SpaceProtectionModeSummary::Ready,
             members: Vec::new(),
-            legacy_bootstrap: None,
         })
     )
     .contains("space_protection"));
@@ -1506,6 +1489,7 @@ fn setup_state_result_preserves_invitation_and_redacts_user_content() {
             expires_at_ms: 1234,
         }),
         device_name: Some("Private Device".into()),
+        re_pairing_required: false,
     });
     let debug = format!("{result:?}");
 
@@ -1659,6 +1643,14 @@ fn lagged_consumers_receive_a_refresh_event() {
 fn device_trust_change_events_only_invalidate_the_complete_snapshot() {
     let event = EngineEvent::DeviceTrustChanged { revision: 7 };
     assert_eq!(event.kind(), "device_trust_changed");
+}
+
+#[test]
+fn legacy_profile_isolation_notifies_the_product_to_re_pair() {
+    let event = EngineEvent::RePairingRequired {
+        scope: uc_engine::RePairingScope::AllDevices,
+    };
+    assert_eq!(event.kind(), "re_pairing_required");
 }
 
 #[test]

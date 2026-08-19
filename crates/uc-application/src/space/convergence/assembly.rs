@@ -1,6 +1,6 @@
 //! Space convergence assembly — the single application-layer construction
 //! point for the workspace convergence owner, the membership gossip, the
-//! group-update delivery and the automatic legacy upgrade.
+//! group-update delivery.
 //!
 //! Engine callers never construct these owners directly (ADR-018): they fill
 //! [`SpaceConvergenceDeps`] with uc-core ports and already-built
@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use uc_core::membership::{
     AdmissionCompletionRecoveryEndpointPort, ContentExchangeGatePort,
     CurrentWorkspacePeerScopePort, GroupRevocationPort, GroupUpdateDispatchPort,
-    LegacyUpgradeEndpointPort, MembershipAttestationEndpointPort, MembershipGossipEndpointPort,
+    MembershipAttestationEndpointPort, MembershipGossipEndpointPort,
     MembershipHistoryExchangeEndpointPort,
 };
 use uc_core::ports::PresenceEvent;
@@ -27,9 +27,6 @@ use crate::space::convergence::discovery::{
 use crate::space::convergence::membership::group_update_delivery::{
     GroupUpdateDelivery, GroupUpdateDeliveryPort,
 };
-use crate::space::convergence::membership::legacy_upgrade::{
-    AutomaticLegacyUpgrade, AutomaticLegacyUpgradeDeps, AutomaticLegacyUpgradeRuntime,
-};
 use crate::space::convergence::WorkspaceConvergence;
 
 /// Passive dependency bundle for the space convergence owners. All fields
@@ -40,7 +37,6 @@ pub struct SpaceConvergenceDeps {
     pub membership: MembershipConvergenceDeps,
     pub group_revocation: Arc<dyn GroupRevocationPort>,
     pub group_update_dispatch: Arc<dyn GroupUpdateDispatchPort>,
-    pub legacy_upgrade: AutomaticLegacyUpgradeDeps,
 }
 
 /// The assembled space convergence owners. Internal fields stay
@@ -50,7 +46,6 @@ pub struct SpaceConvergenceAssembly {
     pub(crate) workspace: Arc<WorkspaceConvergence>,
     pub(crate) membership: Arc<MembershipConvergence>,
     pub(crate) group_update_delivery: Arc<dyn GroupUpdateDeliveryPort>,
-    pub(crate) legacy_upgrade: Arc<AutomaticLegacyUpgrade>,
 }
 
 impl SpaceConvergenceAssembly {
@@ -66,7 +61,6 @@ impl SpaceConvergenceAssembly {
             membership,
             group_revocation,
             group_update_dispatch,
-            legacy_upgrade,
         } = deps;
         let workspace = WorkspaceConvergence::new(workspace);
         let membership = build_membership_convergence(membership);
@@ -78,14 +72,10 @@ impl SpaceConvergenceAssembly {
             ),
         );
         membership.install_group_update_delivery(Arc::clone(&group_update_delivery));
-        let legacy_upgrade = Arc::new(
-            AutomaticLegacyUpgrade::new(legacy_upgrade).with_convergence(Arc::clone(&workspace)),
-        );
         Self {
             workspace,
             membership,
             group_update_delivery,
-            legacy_upgrade,
         }
     }
 
@@ -124,11 +114,6 @@ impl SpaceConvergenceAssembly {
         Arc::clone(&self.membership) as Arc<dyn MembershipGossipEndpointPort>
     }
 
-    /// Legacy-upgrade endpoint installed on the shared node.
-    pub fn legacy_upgrade_endpoint(&self) -> Arc<dyn LegacyUpgradeEndpointPort> {
-        Arc::clone(&self.legacy_upgrade) as Arc<dyn LegacyUpgradeEndpointPort>
-    }
-
     /// Group-update delivery consumed by the sponsor handshake.
     pub fn group_update_delivery(&self) -> Arc<dyn GroupUpdateDeliveryPort> {
         Arc::clone(&self.group_update_delivery)
@@ -152,13 +137,5 @@ impl SpaceConvergenceAssembly {
         presence_events: broadcast::Receiver<PresenceEvent>,
     ) -> MembershipConvergenceRuntime {
         self.membership.clone().start(presence_events)
-    }
-
-    /// Start the automatic legacy upgrade runtime.
-    pub fn start_legacy_upgrade_runtime(
-        &self,
-        presence_events: broadcast::Receiver<PresenceEvent>,
-    ) -> AutomaticLegacyUpgradeRuntime {
-        self.legacy_upgrade.clone().start(presence_events)
     }
 }

@@ -20,8 +20,7 @@ use tokio::sync::broadcast;
 use tracing::instrument;
 
 use uc_core::membership::{
-    BootstrapId, CurrentWorkspacePeerScopePort, GroupBootstrapPort, GroupBootstrapResult,
-    LegacyBootstrapStatus, MemberProtectionStatus as CoreMemberProtectionStatus,
+    CurrentWorkspacePeerScopePort, MemberProtectionStatus as CoreMemberProtectionStatus,
     MemberRepositoryPort, MembershipEventId, RemovalDecision,
     SpaceProtectionMode as CoreSpaceProtectionMode, SpaceProtectionSnapshot,
     SpaceProtectionStatusPort,
@@ -30,10 +29,9 @@ use uc_core::ports::{ConnectionChannelPort, LocalIdentityPort, PresenceEvent, Pr
 use uc_core::DeviceId;
 
 use crate::facade::roster::commands::{
-    apply_member_sync_preferences_patch, LegacyBootstrapState, LegacyBootstrapView,
-    MemberProtectionStatusView, MemberProtectionView, MemberSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, PeerSnapshotView, RosterEntry, SpaceProtectionModeView,
-    SpaceProtectionView,
+    apply_member_sync_preferences_patch, MemberProtectionStatusView, MemberProtectionView,
+    MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
+    RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
 };
 use crate::facade::roster::errors::RosterError;
 use crate::space::convergence::WorkspaceConvergenceError;
@@ -57,7 +55,6 @@ pub struct MemberRosterFacade {
     local_identity: Arc<dyn LocalIdentityPort>,
     presence: Arc<dyn PresencePort>,
     connection_channel: Option<Arc<dyn ConnectionChannelPort>>,
-    group_bootstrap: Option<Arc<dyn GroupBootstrapPort>>,
     space_protection: Option<Arc<dyn SpaceProtectionStatusPort>>,
     workspace_convergence: Option<Arc<crate::space::convergence::WorkspaceConvergence>>,
     peer_scope: Option<Arc<dyn CurrentWorkspacePeerScopePort>>,
@@ -70,16 +67,10 @@ impl MemberRosterFacade {
             local_identity: deps.local_identity,
             presence: deps.presence,
             connection_channel: deps.connection_channel,
-            group_bootstrap: None,
             space_protection: None,
             workspace_convergence: None,
             peer_scope: None,
         }
-    }
-
-    pub fn with_group_bootstrap(mut self, group_bootstrap: Arc<dyn GroupBootstrapPort>) -> Self {
-        self.group_bootstrap = Some(group_bootstrap);
-        self
     }
 
     pub fn with_space_protection(
@@ -337,39 +328,6 @@ impl MemberRosterFacade {
             .map_err(map_workspace_convergence_error)
     }
 
-    pub async fn query_legacy_bootstrap(
-        &self,
-        bootstrap_id: &str,
-    ) -> Result<Option<LegacyBootstrapView>, RosterError> {
-        let group_bootstrap = self
-            .group_bootstrap
-            .as_ref()
-            .ok_or(RosterError::Unavailable)?;
-        let bootstrap_id = BootstrapId::from_string(bootstrap_id)
-            .map_err(|error| RosterError::GroupBootstrap(error.to_string()))?;
-        group_bootstrap
-            .query_legacy_bootstrap(&bootstrap_id)
-            .await
-            .map(|result| result.map(Self::legacy_bootstrap_view))
-            .map_err(|error| RosterError::GroupBootstrap(error.to_string()))
-    }
-
-    pub async fn resume_legacy_bootstraps(&self) -> Result<Vec<LegacyBootstrapView>, RosterError> {
-        let Some(group_bootstrap) = &self.group_bootstrap else {
-            return Ok(Vec::new());
-        };
-        group_bootstrap
-            .resume_legacy_bootstraps(chrono::Utc::now().timestamp_millis())
-            .await
-            .map(|results| {
-                results
-                    .into_iter()
-                    .map(Self::legacy_bootstrap_view)
-                    .collect()
-            })
-            .map_err(|error| RosterError::GroupBootstrap(error.to_string()))
-    }
-
     pub async fn query_space_protection(&self) -> Result<SpaceProtectionView, RosterError> {
         let space_protection = self
             .space_protection
@@ -419,51 +377,7 @@ impl MemberRosterFacade {
                 },
             })
             .collect();
-        let legacy_bootstrap = snapshot
-            .legacy_bootstrap
-            .map(|progress| LegacyBootstrapView {
-                bootstrap_id: progress.bootstrap_id.as_str().to_owned(),
-                state: match progress.status {
-                    LegacyBootstrapStatus::RecoveryRequired => {
-                        LegacyBootstrapState::RecoveryRequired
-                    }
-                    LegacyBootstrapStatus::Complete => LegacyBootstrapState::Complete,
-                    LegacyBootstrapStatus::Prepared
-                    | LegacyBootstrapStatus::Staged
-                    | LegacyBootstrapStatus::AwaitingReadmission => {
-                        LegacyBootstrapState::AwaitingReadmission
-                    }
-                },
-                pending_readmission: progress.pending_readmission,
-            });
-        SpaceProtectionView {
-            mode,
-            members,
-            legacy_bootstrap,
-        }
-    }
-
-    fn legacy_bootstrap_view(result: GroupBootstrapResult) -> LegacyBootstrapView {
-        match result {
-            GroupBootstrapResult::AwaitingReadmission {
-                bootstrap_id,
-                pending_members,
-            } => LegacyBootstrapView {
-                bootstrap_id: bootstrap_id.as_str().to_owned(),
-                state: LegacyBootstrapState::AwaitingReadmission,
-                pending_readmission: pending_members,
-            },
-            GroupBootstrapResult::Complete { bootstrap_id } => LegacyBootstrapView {
-                bootstrap_id: bootstrap_id.as_str().to_owned(),
-                state: LegacyBootstrapState::Complete,
-                pending_readmission: 0,
-            },
-            GroupBootstrapResult::RecoveryRequired { bootstrap_id } => LegacyBootstrapView {
-                bootstrap_id: bootstrap_id.as_str().to_owned(),
-                state: LegacyBootstrapState::RecoveryRequired,
-                pending_readmission: 0,
-            },
-        }
+        SpaceProtectionView { mode, members }
     }
 
     /// `PresencePort::subscribe` 的 thin 转发。

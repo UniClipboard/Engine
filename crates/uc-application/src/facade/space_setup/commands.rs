@@ -175,6 +175,7 @@ pub struct SetupStateView {
     /// Display name persisted in `Settings.general.device_name`, or
     /// `None` when unset on a fresh install.
     pub device_name: Option<String>,
+    pub re_pairing_required: bool,
 }
 
 /// Companion to [`SetupStateView::current_invitation`].

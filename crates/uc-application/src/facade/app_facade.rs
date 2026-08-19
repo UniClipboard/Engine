@@ -733,15 +733,6 @@ impl AppFacade {
         self.member_roster.query_space_protection().await
     }
 
-    pub async fn legacy_bootstrap(
-        &self,
-        bootstrap_id: &str,
-    ) -> Result<Option<crate::facade::LegacyBootstrapView>, RosterError> {
-        self.member_roster
-            .query_legacy_bootstrap(bootstrap_id)
-            .await
-    }
-
     pub async fn diagnostics_status(
         &self,
     ) -> Result<crate::facade::DebugStatusView, crate::facade::DiagnosticsFacadeError> {

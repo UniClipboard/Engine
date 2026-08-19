@@ -297,18 +297,13 @@ pub fn wire_dependencies_from_inputs(
 
     // Space access — single session/key access entry. See
     // `build_space_access_ports` for the §8.3 single-adapter-reuse rationale.
-    let (
-        space_access_ports,
-        space_access_adapter,
-        legacy_protection,
-        current_member_signatures,
-        space_security_reset,
-    ) = build_space_access_ports(
-        &infra.key_material,
-        &platform.current_profile,
-        &platform.session,
-        &infra.db_executor,
-    );
+    let (space_access_ports, space_access_adapter, current_member_signatures, space_security_reset) =
+        build_space_access_ports(
+            &infra.key_material,
+            &platform.current_profile,
+            &platform.session,
+            &infra.db_executor,
+        );
     let membership_session = Arc::clone(&platform.session);
     let workspace_convergence_repository: Arc<
         dyn uc_core::membership::WorkspaceConvergenceRepositoryPort,
@@ -727,7 +722,6 @@ pub fn wire_dependencies_from_inputs(
         profile_reset,
         sync_engine: SyncEngineDeps {
             iroh_identity_storage,
-            legacy_protection,
             peer_admission,
             peer_addr_repo: Arc::clone(&peer_addr_repo),
             relationship_reset,

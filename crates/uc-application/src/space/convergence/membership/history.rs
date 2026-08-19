@@ -30,23 +30,8 @@ impl WorkspaceConvergence {
         &self,
         peer: &DeviceId,
     ) -> Result<(), WorkspaceConvergenceError> {
-        match self
-            .reconcile_membership_history_serialized(peer, ReconciliationPeerRole::RuntimePeer)
+        self.reconcile_membership_history_serialized(peer, ReconciliationPeerRole::RuntimePeer)
             .await
-        {
-            Ok(()) => Ok(()),
-            // A legacy probe is only version evidence when the current 1.1
-            // endpoint could not be reached. A current endpoint rejection
-            // instead means the authenticated exchange could not proceed and
-            // must never be presented as an upgrade requirement.
-            Err(current_error @ WorkspaceConvergenceError::Unavailable) => {
-                match self.deps.legacy_peer_probe.probe_legacy_peer(peer).await {
-                    Ok(()) => self.mark_peer_upgrade_required(peer).await,
-                    Err(_) => Err(current_error),
-                }
-            }
-            Err(current_error) => Err(current_error),
-        }
     }
 
     pub(super) async fn reconcile_membership_history_serialized(
@@ -64,25 +49,6 @@ impl WorkspaceConvergence {
         };
         let _peer_guard = peer_lock.lock().await;
         self.reconcile_membership_history(peer, peer_role).await
-    }
-
-    async fn mark_peer_upgrade_required(
-        &self,
-        peer: &DeviceId,
-    ) -> Result<(), WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let now_ms = self.deps.clock.now_ms();
-        let mut state = self.load_state().await?;
-        self.update_peer_history_relationship(
-            &mut state,
-            peer.clone(),
-            MembershipHistoryRelationship::UpgradeRequired,
-            now_ms,
-        )?;
-        self.persist(&state).await?;
-        self.publish(&state);
-        self.notify();
-        Ok(())
     }
 
     async fn record_current_peer_confirmation(

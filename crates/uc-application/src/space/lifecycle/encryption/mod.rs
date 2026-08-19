@@ -210,6 +210,7 @@ mod tests {
             .clone_from(&SetupStatus {
                 has_completed: completed,
                 space_id: completed.then(|| SpaceId::from("canonical-space")),
+                re_pairing_required: false,
             });
         let space_access = Arc::new(FakeSpaceAccess::default());
         *space_access.unlocked.lock().expect("unlocked lock") = unlocked;

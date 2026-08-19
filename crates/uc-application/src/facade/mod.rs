@@ -28,9 +28,6 @@ pub use crate::space::admission::coordinator::{JoinSpaceError, JoinSpaceInput, J
 pub use crate::space::convergence::connectivity::membership::{
     start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
 };
-pub use crate::space::convergence::membership::legacy_upgrade::{
-    AutomaticLegacyUpgrade, AutomaticLegacyUpgradeDeps, AutomaticLegacyUpgradeRuntime,
-};
 pub use crate::space::convergence::network_recovery::{
     NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
     NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,
@@ -154,10 +151,9 @@ pub use crate::clipboard::resource::{
 };
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
-    LegacyBootstrapState, LegacyBootstrapView, MemberProtectionStatusView, MemberProtectionView,
-    MemberRosterDeps, MemberRosterFacade, MemberSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, PeerSnapshotView, PresenceEvent, RosterEntry, RosterError,
-    SpaceProtectionModeView, SpaceProtectionView,
+    MemberProtectionStatusView, MemberProtectionView, MemberRosterDeps, MemberRosterFacade,
+    MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
+    PresenceEvent, RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{
     map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,

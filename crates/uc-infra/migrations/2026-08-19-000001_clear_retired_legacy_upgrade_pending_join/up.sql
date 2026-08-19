@@ -1,0 +1,1 @@
+DELETE FROM legacy_upgrade_pending_join;

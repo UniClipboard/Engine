@@ -23,6 +23,7 @@ pub struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
     pub setup_status: Arc<dyn SetupStatusPort>,
     pub mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
+    pub legacy_profile_isolation_required: bool,
 }
 
 pub struct SpaceAdmissionDeps {

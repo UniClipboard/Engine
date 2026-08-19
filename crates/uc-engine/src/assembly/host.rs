@@ -838,10 +838,6 @@ mod tests {
             .sync_engine_assembly
             .admission_completion_recovery_is_reachable_for_test()
             .await;
-        let legacy_upgrade_reachable = lifecycle
-            .sync_engine_assembly
-            .legacy_upgrade_is_reachable_for_test()
-            .await;
         let deprecated_removal_protocols_reachable = lifecycle
             .sync_engine_assembly
             .deprecated_removal_protocols_are_reachable_for_test()
@@ -862,10 +858,6 @@ mod tests {
         assert!(
             admission_completion_recovery_reachable,
             "admission completion recovery was not installed"
-        );
-        assert!(
-            legacy_upgrade_reachable,
-            "legacy space upgrade protocol was not installed"
         );
         assert!(
             !deprecated_removal_protocols_reachable,

@@ -23,6 +23,7 @@
 - [可持续验证的成员历史与准入激活](specs/023-durable-membership-proof-and-admission-activation.md)
 - [成员收敛内部职责边界](specs/024-workspace-convergence-internal-boundaries.md)
 - [用户明确加入安全取代旧加入](specs/025-user-initiated-join-supersession.md)
+- [旧资料独立化与重新配对](specs/026-legacy-profile-isolation-and-re-pairing.md)
 - [Engine 仓库检查](specs/engine-repository-checks.md)
 - [Port 定义](specs/ports.md)
 - [uc-engine 跨平台核心接口](specs/uc-engine-interface.md)
@@ -47,3 +48,4 @@
 - [ADR-020：设备上线核对成员历史，未确认的移除由用户决定](adr/020-membership-reconciliation-and-user-decisions.md)
 - [ADR-021：成员收敛的内部职责边界](adr/021-workspace-convergence-internal-boundaries.md)
 - [ADR-022：用户明确加入创建新尝试并安全取代旧尝试](adr/022-user-initiated-join-supersession.md)
+- [ADR-023：旧资料独立化与重新配对](adr/023-legacy-profile-isolation-and-re-pairing.md)

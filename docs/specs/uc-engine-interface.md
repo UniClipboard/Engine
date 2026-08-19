@@ -38,11 +38,14 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `DeviceTrustChanged { revision }` | 正式设备信任状态已经变化；宿主重新调用 `QueryDeviceTrust` 读取完整事实 |
 | `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
 | `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
+| `RePairingRequired { scope }` | 旧资料独立化完成，需要产品提示重新配对；`all_devices` 表示全部旧设备关系均须重新建立 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |
 | `Fatal` | 核心遇到不可恢复错误 |
 
 当底层变化事件不包含完整条目摘要时，核心只发送 `RefreshRequired(StateInvalidated)`，不得猜测内容类型、时间或预览。
+
+旧资料独立化完成后，核心发送 `RePairingRequired { scope: AllDevices }`。产品收到后立即展示完整重新配对引导；若启动时错过事件，则通过 `QuerySetupState.re_pairing_required` 恢复同一提示。产品不得从设备列表自行推断范围，也不负责清理旧关系。
 
 ### iOS 和 Android 产品分析
 

@@ -45,6 +45,7 @@ pub async fn execute_query_setup_state(facade: &AppFacade) -> Result<OperationRe
                 expires_at_ms: invitation.expires_at.timestamp_millis(),
             }),
         device_name: state.device_name,
+        re_pairing_required: state.re_pairing_required,
     };
     info!(
         operation = "query_setup_state",

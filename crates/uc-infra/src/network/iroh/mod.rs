@@ -16,7 +16,6 @@ mod connect;
 pub mod connection_channel_adapter;
 pub mod group_update_adapter;
 pub mod identity_store;
-pub mod legacy_upgrade_adapter;
 pub mod membership_attestation_adapter;
 pub mod membership_history_exchange_adapter;
 mod net_recovery;
@@ -60,9 +59,6 @@ pub(crate) use connect::connect_with_staggered_retry;
 pub use connection_channel_adapter::IrohConnectionChannelAdapter;
 pub use group_update_adapter::{IrohGroupUpdateAdapter, IrohGroupUpdateHandler, GROUP_UPDATE_ALPN};
 pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
-pub use legacy_upgrade_adapter::{
-    IrohLegacyUpgradeAdapter, IrohLegacyUpgradeHandler, LEGACY_UPGRADE_ALPN,
-};
 pub use membership_history_exchange_adapter::{
     IrohMembershipHistoryExchangeAdapter, IrohMembershipHistoryExchangeHandler,
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN,

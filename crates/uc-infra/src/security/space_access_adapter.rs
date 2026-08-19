@@ -36,19 +36,19 @@ use uc_core::membership::{
     AdmissionSecurityTransitionInput, BeginRevocationOutcome, BootstrapError, BootstrapId,
     CurrentMemberSignatureError, CurrentMemberSignaturePort, GroupBootstrapPort,
     GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
-    LegacyBootstrapProgress, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
-    LegacyBootstrapStage, LegacyBootstrapStatus, LegacyUpgradeError, MemberProtection,
-    MemberProtectionStatus, MembershipCredential, PendingGroupUpdate,
-    PrepareSponsorAdmissionSecurityPort, PreparedRevocationResolution, ProtectionGroupAdmission,
-    ProtectionGroupId, RevocationId, RevocationOutboxMessage, RevocationRecord,
-    RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
-    SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
-    SpaceSecurityMode, SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRequest,
+    LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
+    LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus, MembershipCredential,
+    PendingGroupUpdate, PrepareSponsorAdmissionSecurityPort, PreparedRevocationResolution,
+    ProtectionGroupAdmission, ProtectionGroupId, RevocationId, RevocationOutboxMessage,
+    RevocationRecord, RevocationRepositoryPort, RevocationStage, RevocationStatus,
+    SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError, SpaceProtectionMode,
+    SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
+    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRequest,
     SponsorPreparedAdmissionSecurity,
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
-use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
+use uc_core::ports::space::{AdoptIsolatedSpacePort, SpaceAccessError, SpaceAccessStore};
 use uc_core::space_access::{
     AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
     PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
@@ -569,42 +569,6 @@ impl DefaultSpaceAccessAdapter {
         Ok(prepared)
     }
 
-    pub(crate) async fn acknowledge_bootstrap_readmission_after_handoff(
-        &self,
-        space_id: &SpaceId,
-        joiner_device_id: &DeviceId,
-        now_ms: i64,
-    ) -> Result<(), LegacyUpgradeError> {
-        let Some(repository) = &self.legacy_bootstrap_repository else {
-            return Ok(());
-        };
-        let records = match repository
-            .list_incomplete_legacy_bootstraps_for_space(space_id)
-            .await
-        {
-            Ok(records) => records,
-            Err(error) => {
-                warn!(error = %error, "legacy bootstrap readmission lookup failed after group admission");
-                return Err(LegacyUpgradeError::Internal(error.to_string()));
-            }
-        };
-        for record in records {
-            if record.status() != LegacyBootstrapStatus::AwaitingReadmission
-                || !record
-                    .pending_readmission()
-                    .iter()
-                    .any(|member| member == joiner_device_id)
-            {
-                continue;
-            }
-            repository
-                .acknowledge_legacy_readmission(record.bootstrap_id(), joiner_device_id, now_ms)
-                .await
-                .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
-        }
-        Ok(())
-    }
-
     pub(super) async fn admit_group_member_with_replay(
         &self,
         space_id: &SpaceId,
@@ -838,39 +802,6 @@ impl DefaultSpaceAccessAdapter {
         }
         self.kek_observed.store(true, Ordering::Release);
         Ok(())
-    }
-
-    pub(super) fn complete_group_join_material(
-        &self,
-        space_id: &SpaceId,
-        pending: PreparedGroupJoin,
-        welcome: &[u8],
-        encrypted_key_catalog: &[u8],
-        group_epoch: u64,
-    ) -> Result<SpaceKeyMaterial, SpaceAccessError> {
-        let (key_package, private_state) = pending.into_parts();
-        let completed = MlsGroupEngine::complete_join(
-            PendingMlsJoin::new(key_package, MlsClientState::from_bytes(private_state)),
-            space_id.as_ref().as_bytes(),
-            welcome,
-        )
-        .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
-        if completed.epoch != group_epoch {
-            return Err(SpaceAccessError::CorruptedKeyMaterial);
-        }
-        let portable = open_group_catalog(
-            &completed.wrapping_key,
-            space_id,
-            group_epoch,
-            encrypted_key_catalog,
-        )
-        .map_err(map_encryption_error)?;
-        Ok(SpaceKeyMaterial::new(
-            portable.state,
-            completed.client_state.into_bytes(),
-            portable.key_catalog,
-            chrono::Utc::now().timestamp_millis(),
-        ))
     }
 
     async fn revoke_group_member(
@@ -2156,6 +2087,22 @@ impl SpaceAccessStore for DefaultSpaceAccessAdapter {
     }
 }
 
+#[async_trait]
+impl AdoptIsolatedSpacePort for DefaultSpaceAccessAdapter {
+    async fn adopt_isolated_space(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<ActiveSpace, SpaceAccessError> {
+        let master_key = self
+            .session
+            .get_master_key()
+            .map_err(map_encryption_error)?;
+        self.session
+            .set_master_key_for_space(space_id.clone(), master_key);
+        Ok(ActiveSpace::new(space_id.clone()))
+    }
+}
+
 // ---- Intent ports ----
 //
 // The single adapter satisfies every narrow space-access intent port by
@@ -2770,15 +2717,7 @@ impl SpaceProtectionStatusPort for DefaultSpaceAccessAdapter {
                 })
             })
             .collect::<Result<Vec<_>, SpaceProtectionError>>()?;
-        Ok(SpaceProtectionSnapshot {
-            mode,
-            members,
-            legacy_bootstrap: legacy_bootstrap.map(|record| LegacyBootstrapProgress {
-                bootstrap_id: record.bootstrap_id().clone(),
-                status: record.status(),
-                pending_readmission: record.pending_readmission().len(),
-            }),
-        })
+        Ok(SpaceProtectionSnapshot { mode, members })
     }
 }
 
@@ -3228,8 +3167,6 @@ mod admission_tests {
         BeginRevocationOutcome, BootstrapError, BootstrapId, ContentKeyId, ContentKeyPurpose,
         GroupBootstrapPort, GroupBootstrapResult, KeyEpochError, LegacyBootstrapRecord,
         LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
-        LegacyProtectionCommand, LegacyProtectionPort, LegacyProtectionResult,
-        LegacyRequestInspection, LegacyUpgradeDescriptor, LegacyUpgradeRequest,
         PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
         RevocationStatus,
     };
@@ -3241,8 +3178,6 @@ mod admission_tests {
     use crate::db::pool::init_db_pool;
     use crate::db::repositories::DieselSpaceSecurityStore;
     use crate::fs::key_slot_store::JsonKeySlotStore;
-    use crate::security::legacy_upgrade::proof::{request_id, request_transcript};
-    use crate::security::legacy_upgrade::DefaultLegacyProtection;
     use crate::security::DefaultCurrentProfile;
 
     mockall::mock! {
@@ -3841,252 +3776,6 @@ mod admission_tests {
     }
 
     #[tokio::test]
-    async fn legacy_upgrade_request_is_verified_only_for_the_bound_peer_pair() {
-        let directory = tempdir().unwrap();
-        let session = Arc::new(InMemorySession::new());
-        session.set_master_key_for_space(
-            SpaceId::from("legacy-upgrade-space"),
-            MasterKey::from_bytes(&[0x31; 32]).unwrap(),
-        );
-        let (repository, _) = memory_revocation_repository(None);
-        let space_access = Arc::new(adapter(
-            local_key_material(&directory, memory_secure_storage()),
-            Arc::clone(&session),
-            repository,
-        ));
-        let pool = init_db_pool(":memory:").unwrap();
-        let attempt_store = Arc::new(DieselSpaceSecurityStore::new(
-            DieselSqliteExecutor::new(pool),
-            session.as_ref().clone(),
-        ));
-        let protection = DefaultLegacyProtection::new(space_access, attempt_store);
-
-        let request = protection
-            .begin_attempt(&DeviceId::new("device-a"), &DeviceId::new("device-b"))
-            .await
-            .unwrap();
-        assert_eq!(
-            protection.inspect_request(&request).await.unwrap(),
-            LegacyRequestInspection::Verified
-        );
-
-        let replay = LegacyUpgradeRequest::unsigned(
-            DeviceId::new("device-a"),
-            DeviceId::new("device-c"),
-            request.descriptor().clone(),
-            request.key_package().to_vec(),
-        )
-        .with_proof(request.proof().to_vec());
-        assert_eq!(
-            protection.inspect_request(&replay).await.unwrap(),
-            LegacyRequestInspection::Invalid
-        );
-    }
-
-    #[tokio::test]
-    async fn legacy_ready_material_without_group_id_is_backfilled_once() {
-        let directory = tempdir().unwrap();
-        let database_url = directory.path().join("legacy-ready-backfill.sqlite");
-        let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
-        let session = Arc::new(InMemorySession::new());
-        let space_id = SpaceId::from("legacy-ready-backfill-space");
-        session.set_master_key_for_space(
-            space_id.clone(),
-            MasterKey::from_bytes(&[0x36; 32]).unwrap(),
-        );
-        let sponsor = DeviceId::new("device-a");
-        let sponsor_state = MlsGroupEngine::create_sponsor(
-            space_id.as_ref().as_bytes(),
-            sponsor.as_str().as_bytes(),
-        )
-        .unwrap();
-        let material = session
-            .create_legacy_bootstrap_material_in_group(
-                &space_id,
-                ProtectionGroupId::from_string("removed-by-old-format").unwrap(),
-                sponsor_state.into_bytes(),
-                100,
-            )
-            .unwrap();
-        let mut legacy_json = serde_json::to_value(material).unwrap();
-        let removed = legacy_json
-            .get_mut("state")
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|state| state.remove("protection_group_id"));
-        assert!(removed.is_some());
-        let legacy_material: SpaceKeyMaterial = serde_json::from_value(legacy_json).unwrap();
-        assert!(legacy_material.state().protection_group_id().is_none());
-
-        let repository = Arc::new(DieselSpaceSecurityStore::new(
-            DieselSqliteExecutor::new(pool.clone()),
-            session.as_ref().clone(),
-        ));
-        repository
-            .save_space_material(&legacy_material)
-            .await
-            .unwrap();
-        let repository_port: Arc<dyn RevocationRepositoryPort> = repository.clone();
-        let space_access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
-            local_key_material(&directory, memory_secure_storage()),
-            Arc::new(DefaultCurrentProfile::new()),
-            Arc::clone(&session),
-            repository_port,
-        ));
-        let protection = DefaultLegacyProtection::new(space_access, repository.clone());
-
-        let first = protection.snapshot(&[]).await.unwrap().descriptor;
-        assert!(first.is_ready());
-        let first_group_id = first.protection_group_id().cloned().unwrap();
-        let second = protection.snapshot(&[]).await.unwrap().descriptor;
-        assert_eq!(second.protection_group_id(), Some(&first_group_id));
-
-        drop(protection);
-        let reopened_repository = DieselSpaceSecurityStore::new(
-            DieselSqliteExecutor::new(pool),
-            session.as_ref().clone(),
-        );
-        let persisted = reopened_repository
-            .load_space_material(&space_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            persisted.state().protection_group_id(),
-            Some(&first_group_id)
-        );
-    }
-
-    #[tokio::test]
-    async fn pending_upgrade_request_is_reused_after_adapter_restart() {
-        let directory = tempdir().unwrap();
-        let database_url = directory.path().join("legacy-upgrade.sqlite");
-        let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
-        let session = Arc::new(InMemorySession::new());
-        session.set_master_key_for_space(
-            SpaceId::from("legacy-upgrade-restart-space"),
-            MasterKey::from_bytes(&[0x35; 32]).unwrap(),
-        );
-        let (key_epoch_repository, _) = memory_revocation_repository(None);
-        let upgrade_repository = Arc::new(DieselSpaceSecurityStore::new(
-            DieselSqliteExecutor::new(pool.clone()),
-            session.as_ref().clone(),
-        ));
-        let first_space_access = Arc::new(adapter(
-            local_key_material(&directory, memory_secure_storage()),
-            Arc::clone(&session),
-            Arc::clone(&key_epoch_repository),
-        ));
-        let first_adapter = DefaultLegacyProtection::new(first_space_access, upgrade_repository);
-        let local = DeviceId::new("device-b");
-        let peer = DeviceId::new("device-a");
-        let first = first_adapter.begin_attempt(&local, &peer).await.unwrap();
-        drop(first_adapter);
-
-        let reopened_repository = Arc::new(DieselSpaceSecurityStore::new(
-            DieselSqliteExecutor::new(pool),
-            session.as_ref().clone(),
-        ));
-        let reopened_space_access = Arc::new(adapter(
-            local_key_material(&directory, memory_secure_storage()),
-            session,
-            key_epoch_repository,
-        ));
-        let reopened_adapter =
-            DefaultLegacyProtection::new(reopened_space_access, reopened_repository);
-        let restored = reopened_adapter.begin_attempt(&local, &peer).await.unwrap();
-
-        assert_eq!(restored, first);
-    }
-
-    #[tokio::test]
-    async fn legacy_admission_and_replay_response_share_one_durable_material() {
-        let directory = tempdir().unwrap();
-        let session = Arc::new(InMemorySession::new());
-        let space_id = SpaceId::from("legacy-admission-cache-space");
-        session.set_master_key_for_space(
-            space_id.clone(),
-            MasterKey::from_bytes(&[0x34; 32]).unwrap(),
-        );
-        let sponsor = DeviceId::new("device-a");
-        let joiner = DeviceId::new("device-b");
-        let sponsor_state = MlsGroupEngine::create_sponsor(
-            space_id.as_ref().as_bytes(),
-            sponsor.as_str().as_bytes(),
-        )
-        .unwrap();
-        let material = session
-            .create_legacy_bootstrap_material_in_group(
-                &space_id,
-                ProtectionGroupId::from_string("group-a").unwrap(),
-                sponsor_state.into_bytes(),
-                100,
-            )
-            .unwrap();
-        session.install_space_material(&material).unwrap();
-        let (repository, _) = memory_revocation_repository(Some(material));
-        let space_access = Arc::new(adapter(
-            local_key_material(&directory, memory_secure_storage()),
-            Arc::clone(&session),
-            Arc::clone(&repository),
-        ));
-        let pending = space_access.prepare_group_join(&joiner).await.unwrap();
-        let unsigned = LegacyUpgradeRequest::unsigned(
-            joiner,
-            sponsor,
-            LegacyUpgradeDescriptor::legacy(session.legacy_upgrade_id().unwrap()),
-            pending.key_package.clone(),
-        );
-        let proof = session
-            .legacy_upgrade_proof(&request_transcript(&unsigned))
-            .unwrap();
-        let request = unsigned.with_proof(proof.to_vec());
-        let attempt_pool = init_db_pool(":memory:").unwrap();
-        let attempt_store = Arc::new(DieselSpaceSecurityStore::new(
-            DieselSqliteExecutor::new(attempt_pool),
-            session.as_ref().clone(),
-        ));
-        let protection = DefaultLegacyProtection::new(space_access, attempt_store);
-
-        let result = protection
-            .execute(LegacyProtectionCommand::AdmitMember {
-                sponsor,
-                existing_members: Vec::new(),
-                request: request.clone(),
-            })
-            .await
-            .unwrap();
-        let LegacyProtectionResult::MemberAdmitted(admission) = result else {
-            panic!("expected admitted member result");
-        };
-        let persisted = repository
-            .load_space_material(&space_id)
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            persisted
-                .cached_group_admission(request.source_device_id(), request_id(&request),)
-                .map(|cached| (
-                    &cached.protection_group_id,
-                    &cached.admission.welcome,
-                    &cached.admission.encrypted_key_catalog,
-                    cached.admission.group_epoch,
-                )),
-            Some((
-                &admission.protection_group_id,
-                &admission.admission.welcome,
-                &admission.admission.encrypted_key_catalog,
-                admission.admission.group_epoch,
-            ))
-        );
-        assert_eq!(
-            protection.inspect_request(&request).await.unwrap(),
-            LegacyRequestInspection::Replay(admission)
-        );
-    }
-
-    #[tokio::test]
     async fn protection_status_ignores_a_superseded_local_bootstrap_after_convergence() {
         let directory = tempdir().unwrap();
         let session = Arc::new(InMemorySession::new());
@@ -4137,196 +3826,10 @@ mod admission_tests {
             .unwrap();
 
         assert_eq!(snapshot.mode, SpaceProtectionMode::Ready);
-        assert!(snapshot.legacy_bootstrap.is_none());
         assert_eq!(
             snapshot.members[1].status,
             MemberProtectionStatus::RequiresReadmission
         );
-        assert!(adapter
-            .resume_legacy_bootstraps(300)
-            .await
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn group_admission_keeps_a_pending_legacy_readmission_until_handoff_confirmation() {
-        let directory = tempdir().unwrap();
-        let session = Arc::new(InMemorySession::new());
-        let space_id = SpaceId::from("legacy-readmission-space");
-        session.set_master_key_for_space(
-            space_id.clone(),
-            MasterKey::from_bytes(&[0x7b; 32]).unwrap(),
-        );
-        let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
-        let (key_epoch_repository, _) = memory_revocation_repository(None);
-        let key_epoch_port: Arc<dyn RevocationRepositoryPort> = key_epoch_repository.clone();
-        let adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
-            local_key_material(&directory, memory_secure_storage()),
-            Arc::new(DefaultCurrentProfile::new()),
-            Arc::clone(&session),
-            key_epoch_port,
-            bootstrap_repository.clone(),
-        );
-        let sponsor = DeviceId::new("sponsor-device");
-        let retained = DeviceId::new("retained-device");
-        let bootstrap_id = match adapter
-            .bootstrap_legacy_space(&sponsor, &[retained.clone()], 100)
-            .await
-            .unwrap()
-        {
-            GroupBootstrapResult::AwaitingReadmission { bootstrap_id, .. } => bootstrap_id,
-            other => panic!("unexpected bootstrap result: {other:?}"),
-        };
-        let stage = bootstrap_repository
-            .load_legacy_bootstrap_stage(&bootstrap_id)
-            .await
-            .unwrap()
-            .unwrap();
-        key_epoch_repository
-            .save_space_material(stage.material())
-            .await
-            .unwrap();
-        let pending = adapter.prepare_group_join(&retained).await.unwrap();
-
-        adapter
-            .admit_group_member(&space_id, &sponsor, &retained, &[], &pending.key_package)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            bootstrap_repository
-                .get_legacy_bootstrap(&bootstrap_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status(),
-            LegacyBootstrapStatus::AwaitingReadmission
-        );
-
-        adapter
-            .acknowledge_bootstrap_readmission_after_handoff(&space_id, &retained, 200)
-            .await
-            .unwrap();
-        assert_eq!(
-            bootstrap_repository
-                .get_legacy_bootstrap(&bootstrap_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status(),
-            LegacyBootstrapStatus::Complete
-        );
-    }
-
-    #[tokio::test]
-    async fn bootstrap_recovery_keeps_readmission_pending_without_handoff_confirmation() {
-        let directory = tempdir().unwrap();
-        let session = Arc::new(InMemorySession::new());
-        let space_id = SpaceId::from("legacy-recovery-space");
-        session.set_master_key_for_space(
-            space_id.clone(),
-            MasterKey::from_bytes(&[0x6d; 32]).unwrap(),
-        );
-        let bootstrap_repository = Arc::new(MemoryLegacyBootstrapRepository::new());
-        let (key_epoch_repository, _) = memory_revocation_repository(None);
-        let key_epoch_port: Arc<dyn RevocationRepositoryPort> = key_epoch_repository.clone();
-        let recovery_adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
-            local_key_material(&directory, memory_secure_storage()),
-            Arc::new(DefaultCurrentProfile::new()),
-            Arc::clone(&session),
-            key_epoch_port.clone(),
-            bootstrap_repository.clone(),
-        );
-        let sponsor = DeviceId::new("sponsor-device");
-        let retained = DeviceId::new("retained-device");
-        let bootstrap_id = match recovery_adapter
-            .bootstrap_legacy_space(&sponsor, &[retained.clone()], 100)
-            .await
-            .unwrap()
-        {
-            GroupBootstrapResult::AwaitingReadmission { bootstrap_id, .. } => bootstrap_id,
-            other => panic!("unexpected bootstrap result: {other:?}"),
-        };
-        let stage = bootstrap_repository
-            .load_legacy_bootstrap_stage(&bootstrap_id)
-            .await
-            .unwrap()
-            .unwrap();
-        key_epoch_repository
-            .save_space_material(stage.material())
-            .await
-            .unwrap();
-        let before_readmission = recovery_adapter
-            .query_space_protection(&[sponsor.clone(), retained.clone()])
-            .await
-            .unwrap();
-        assert_eq!(before_readmission.mode, SpaceProtectionMode::Ready);
-        assert!(matches!(
-            before_readmission.members.as_slice(),
-            [
-                MemberProtection {
-                    status: MemberProtectionStatus::Protected,
-                    ..
-                },
-                MemberProtection {
-                    status: MemberProtectionStatus::AwaitingReadmission,
-                    ..
-                },
-            ]
-        ));
-        assert!(matches!(
-            before_readmission.legacy_bootstrap,
-            Some(LegacyBootstrapProgress { bootstrap_id: ref actual, .. }) if actual == &bootstrap_id
-        ));
-
-        // Simulate a process exit after the admission commit persisted but before
-        // the joiner finished recovering membership history and confirmed it.
-        let admission_adapter = DefaultSpaceAccessAdapter::new_with_security_repositories(
-            local_key_material(&directory, memory_secure_storage()),
-            Arc::new(DefaultCurrentProfile::new()),
-            Arc::clone(&session),
-            key_epoch_port,
-            Arc::new(MemoryLegacyBootstrapRepository::new()),
-        );
-        let pending = admission_adapter
-            .prepare_group_join(&retained)
-            .await
-            .unwrap();
-        admission_adapter
-            .admit_group_member(&space_id, &sponsor, &retained, &[], &pending.key_package)
-            .await
-            .unwrap();
-
-        let resumed = recovery_adapter
-            .resume_legacy_bootstraps(200)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            resumed.as_slice(),
-            [GroupBootstrapResult::AwaitingReadmission { bootstrap_id: actual, pending_members: 1 }]
-                if actual == &bootstrap_id
-        ));
-        assert_eq!(
-            bootstrap_repository
-                .get_legacy_bootstrap(&bootstrap_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status(),
-            LegacyBootstrapStatus::AwaitingReadmission
-        );
-        let after_recovery = recovery_adapter
-            .query_space_protection(&[sponsor, retained])
-            .await
-            .unwrap();
-        assert_eq!(after_recovery.mode, SpaceProtectionMode::Ready);
-        assert!(after_recovery.legacy_bootstrap.is_some());
-        assert!(after_recovery
-            .members
-            .iter()
-            .any(|member| member.status == MemberProtectionStatus::AwaitingReadmission));
     }
 
     fn sponsor_fixture_with_stage_persistence(

@@ -8,10 +8,9 @@ use uc_application::facade::{
     ActionUnavailableReason, AppFacade, ContentTypesPatch as AppContentTypesPatch,
     CurrentJoinStatus, DeviceCompatibility, DeviceMembership, DeviceTrustAction, DeviceTrustChoice,
     DeviceTrustDecisionResult, DeviceTrustImpact, DeviceTrustSnapshot, GroupRelationship,
-    LegacyBootstrapState, LegacyBootstrapView, MemberProtectionStatusView,
-    MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    RecoveryAvailability, RosterError, SpaceProtectionModeView, SpaceProtectionView,
-    SyncRelationship,
+    MemberProtectionStatusView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
+    MemberSyncPreferencesView, RecoveryAvailability, RosterError, SpaceProtectionModeView,
+    SpaceProtectionView, SyncRelationship,
 };
 use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ReachabilityState;
@@ -25,9 +24,8 @@ use crate::{
     DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary,
     DeviceTrustUnavailableReasonSummary, EngineError, EngineErrorCategory,
     JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary, JoinedSpaceSummary,
-    LegacyBootstrapOutcome, LegacyBootstrapSummary, MemberProtectionStatusSummary,
-    MemberProtectionSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
-    OperationResult, PendingInboundMemberSummary, QueryLegacyBootstrapInput,
+    MemberProtectionStatusSummary, MemberProtectionSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesSummary, OperationResult, PendingInboundMemberSummary,
     QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
     SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
     WorkspaceConvergenceFailureCategorySummary, WorkspaceConvergencePhaseSummary,
@@ -252,20 +250,6 @@ pub async fn execute_query_space_protection(
     )))
 }
 
-pub async fn execute_query_legacy_bootstrap(
-    facade: &AppFacade,
-    input: QueryLegacyBootstrapInput,
-) -> Result<OperationResult, EngineError> {
-    validate_opaque_id(&input.bootstrap_id)?;
-    let result = facade
-        .legacy_bootstrap(&input.bootstrap_id)
-        .await
-        .map_err(map_roster_error)?;
-    Ok(OperationResult::LegacyBootstrapStatus(
-        result.map(legacy_bootstrap_summary),
-    ))
-}
-
 fn space_protection_summary(result: SpaceProtectionView) -> SpaceProtectionSummary {
     let mode = match result.mode {
         SpaceProtectionModeView::Legacy => SpaceProtectionModeSummary::Legacy,
@@ -294,24 +278,7 @@ fn space_protection_summary(result: SpaceProtectionView) -> SpaceProtectionSumma
             },
         })
         .collect();
-    SpaceProtectionSummary {
-        mode,
-        members,
-        legacy_bootstrap: result.legacy_bootstrap.map(legacy_bootstrap_summary),
-    }
-}
-
-fn legacy_bootstrap_summary(result: LegacyBootstrapView) -> LegacyBootstrapSummary {
-    let outcome = match result.state {
-        LegacyBootstrapState::AwaitingReadmission => LegacyBootstrapOutcome::AwaitingReadmission,
-        LegacyBootstrapState::Complete => LegacyBootstrapOutcome::Complete,
-        LegacyBootstrapState::RecoveryRequired => LegacyBootstrapOutcome::RecoveryRequired,
-    };
-    LegacyBootstrapSummary {
-        bootstrap_id: result.bootstrap_id,
-        outcome,
-        pending_readmission: u64::try_from(result.pending_readmission).unwrap_or(u64::MAX),
-    }
+    SpaceProtectionSummary { mode, members }
 }
 
 pub(crate) fn workspace_convergence_summary(
@@ -640,17 +607,6 @@ fn device_trust_unavailable_reason(
             DeviceTrustUnavailableReasonSummary::EngineUnavailable
         }
     }
-}
-
-fn validate_opaque_id(opaque_id: &str) -> Result<(), EngineError> {
-    if opaque_id.is_empty() || opaque_id.len() > 128 || !opaque_id.is_ascii() {
-        return Err(EngineError::new(
-            MEMBER_INVALID_INPUT_CODE,
-            EngineErrorCategory::InvalidInput,
-            false,
-        ));
-    }
-    Ok(())
 }
 
 fn validate_device_id(device_id: &str) -> Result<(), EngineError> {

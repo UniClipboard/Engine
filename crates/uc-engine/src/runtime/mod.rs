@@ -60,7 +60,6 @@ pub(crate) struct ProductionRuntime {
     clipboard_import_root: std::path::PathBuf,
     files: Arc<dyn HostFileAccess>,
     clipboard_change_runtime: HostClipboardChangeRuntime,
-    #[cfg(feature = "lan-compat")]
     events: EventSender,
 }
 
@@ -144,6 +143,14 @@ fn engine_event_for_active_clipboard(
 
 fn engine_event_for_workspace_convergence(revision: u64) -> crate::EngineEvent {
     crate::EngineEvent::DeviceTrustChanged { revision }
+}
+
+fn re_pairing_scope_for_setup_state(
+    state: &uc_application::facade::SetupStateView,
+) -> Option<crate::RePairingScope> {
+    state
+        .re_pairing_required
+        .then_some(crate::RePairingScope::AllDevices)
 }
 
 async fn spawn_profile_workspace_events(
@@ -391,7 +398,6 @@ impl ProductionRuntime {
             clipboard_import_root,
             files,
             clipboard_change_runtime,
-            #[cfg(feature = "lan-compat")]
             events,
         })
     }
@@ -645,6 +651,22 @@ mod tests {
                 retryable: false,
                 next_retry_in_ms: None,
             }
+        );
+    }
+
+    #[test]
+    fn re_pairing_setup_state_requests_an_all_devices_product_event() {
+        let state = uc_application::facade::SetupStateView {
+            has_completed: true,
+            space_id: None,
+            current_invitation: None,
+            device_name: None,
+            re_pairing_required: true,
+        };
+
+        assert_eq!(
+            re_pairing_scope_for_setup_state(&state),
+            Some(crate::RePairingScope::AllDevices)
         );
     }
 

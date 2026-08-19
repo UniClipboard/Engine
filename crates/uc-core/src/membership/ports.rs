@@ -9,7 +9,7 @@ use super::admission_attempt::{
 use super::error::{
     AdmissionAttemptRepositoryError, AdmissionOutboxDeliveryError,
     AdmissionSecurityTransitionError, AdmissionSpaceTransitionError, CurrentMemberSignatureError,
-    CurrentMembershipIdentityError, GroupUpdateDispatchError, LegacyPeerProbeError,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError,
     MembershipAnnouncementRepositoryError, MembershipAppliedSecurityUpdateRepositoryError,
     MembershipAttestationEndpointError, MembershipAttestationError,
     MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
@@ -994,15 +994,6 @@ pub trait MembershipHistoryExchangeEndpointPort: Send + Sync {
         source_device_id: &DeviceId,
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError>;
-}
-
-/// Positive-only probe for an older peer that still listens on its historical
-/// member-upgrade endpoint. A successful probe means only that the already
-/// authenticated peer accepted the connection; it must not send a request or
-/// modify membership, security, or content state.
-#[async_trait]
-pub trait LegacyPeerProbePort: Send + Sync {
-    async fn probe_legacy_peer(&self, peer: &DeviceId) -> Result<(), LegacyPeerProbeError>;
 }
 
 /// 成员历史对内容发送的最小限制查询。

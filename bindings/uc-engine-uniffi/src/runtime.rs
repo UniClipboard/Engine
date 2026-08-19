@@ -28,8 +28,8 @@ use crate::{
     BindingClipboardOrigin, BindingClipboardRepresentation, BindingClipboardRestoreMode,
     BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
     BindingError, BindingErrorCategory, BindingEvent, BindingFailure, BindingFileMetadata,
-    BindingHost, BindingLifecycleAction, BindingOperationTerminal, BindingRefreshReason,
-    BindingTransferDirection, HostBindingError,
+    BindingHost, BindingLifecycleAction, BindingOperationTerminal, BindingRePairingScope,
+    BindingRefreshReason, BindingTransferDirection, HostBindingError,
 };
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
@@ -1812,6 +1812,11 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
                 next_retry_in_ms: status.next_retry_in_ms,
             }
         }
+        uc_engine::EngineEvent::RePairingRequired { scope } => BindingEvent::RePairingRequired {
+            scope: match scope {
+                uc_engine::RePairingScope::AllDevices => BindingRePairingScope::AllDevices,
+            },
+        },
         other => BindingEvent::Changed {
             kind: other.kind().to_owned(),
         },
@@ -2848,6 +2853,18 @@ mod tests {
                 phase: "retry_scheduled".to_owned(),
                 retryable: true,
                 next_retry_in_ms: Some(500),
+            }
+        );
+    }
+
+    #[test]
+    fn re_pairing_event_keeps_the_affected_device_scope() {
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::RePairingRequired {
+                scope: uc_engine::RePairingScope::AllDevices,
+            }),
+            BindingEvent::RePairingRequired {
+                scope: BindingRePairingScope::AllDevices,
             }
         );
     }

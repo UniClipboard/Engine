@@ -559,24 +559,7 @@ impl WorkspaceConvergence {
             .chain(std::iter::once(&self.deps.own_device))
             .min_by(|left, right| left.as_str().cmp(right.as_str()))
             == Some(&self.deps.own_device);
-        let mut protection_member_ids = members
-            .iter()
-            .map(|member| member.device_id)
-            .collect::<Vec<_>>();
-        protection_member_ids.push(self.deps.own_device);
-        protection_member_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        protection_member_ids.dedup();
-        let protection = self
-            .deps
-            .space_protection
-            .query_space_protection(&protection_member_ids)
-            .await
-            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-        let resumes_owned_legacy_bootstrap =
-            protection.legacy_bootstrap.as_ref().is_some_and(|item| {
-                item.status == uc_core::membership::LegacyBootstrapStatus::AwaitingReadmission
-            });
-        let is_initializer = is_stable_initializer || resumes_owned_legacy_bootstrap;
+        let is_initializer = is_stable_initializer;
         let security_state = self.deps.security_updates.current_state().await?;
         let mut digest = sha2::Sha256::new();
         digest.update(b"uniclipboard-membership-security/v1\0");

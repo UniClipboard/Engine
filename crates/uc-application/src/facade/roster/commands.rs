@@ -17,20 +17,6 @@ use uc_core::ports::{ConnectionChannel, ReachabilityState};
 use uc_core::settings::model::ContentTypes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LegacyBootstrapState {
-    AwaitingReadmission,
-    Complete,
-    RecoveryRequired,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LegacyBootstrapView {
-    pub bootstrap_id: String,
-    pub state: LegacyBootstrapState,
-    pub pending_readmission: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpaceProtectionModeView {
     Legacy,
     Migrating,
@@ -56,7 +42,6 @@ pub struct MemberProtectionView {
 pub struct SpaceProtectionView {
     pub mode: SpaceProtectionModeView,
     pub members: Vec<MemberProtectionView>,
-    pub legacy_bootstrap: Option<LegacyBootstrapView>,
 }
 
 /// One row of the member roster view.
