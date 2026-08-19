@@ -30,6 +30,8 @@ dbg_macro = "warn"
 # Keep the audited UniClipboard fix for HashContext::persist().
 [patch.crates-io]
 iroh-blobs = { git = "https://github.com/UniClipboard/iroh-blobs.git", rev = "b33af91e8a4bd189cc0f954fc6584feb5ffd1823" }
+# A closed discovery actor must terminate its delayed GC task instead of retrying indefinitely.
+swarm-discovery = { path = "third_party/swarm-discovery" }
 
 [profile.dev]
 debug = "line-tables-only"

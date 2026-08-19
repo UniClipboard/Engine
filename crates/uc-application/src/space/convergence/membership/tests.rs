@@ -492,6 +492,52 @@ async fn concurrent_online_events_run_one_reconciliation_per_peer() {
     assert_eq!(exchange.maximum_active.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test(start_paused = true)]
+async fn pre_admission_history_synchronization_uses_one_ten_second_total_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = MemoryWorkspaceRepository::default();
+    let exchange = Arc::new(BlockingTrackingExchange::new());
+    let mut deps = test_deps(Arc::new(repository.clone()), "sponsor", Vec::new());
+    deps.membership_history_exchange = exchange.clone();
+    deps.peer_addr_repo = Arc::new(FixedPeerAddrRepo {
+        records: vec![
+            uc_core::ports::PeerAddressRecord {
+                device_id: DeviceId::new("offline-a"),
+                addr_blob: vec![1],
+                observed_at: chrono::Utc::now(),
+            },
+            uc_core::ports::PeerAddressRecord {
+                device_id: DeviceId::new("offline-b"),
+                addr_blob: vec![2],
+                observed_at: chrono::Utc::now(),
+            },
+        ],
+    });
+    let own_instance = install_current_history(&mut deps, &directory, 0xc6).await;
+    let owner = WorkspaceConvergence::new(deps);
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(own_instance);
+    repository.save_state(&state).await.unwrap();
+
+    let first_request_started = exchange.started.notified();
+    let synchronization = tokio::spawn({
+        let owner = Arc::clone(&owner);
+        async move { owner.synchronize_chain().await }
+    });
+    first_request_started.await;
+
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        synchronization.is_finished(),
+        "all pre-admission history checks must share a ten-second budget"
+    );
+    assert!(synchronization.await.unwrap().is_ok());
+    assert_eq!(exchange.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(exchange.maximum_active.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn persisted_v2_removal_decision_is_retried_after_restart_for_a_diverged_author() {
     use uc_core::membership::{

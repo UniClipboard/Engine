@@ -225,21 +225,23 @@ impl AutomaticLegacyUpgrade {
                             .await
                             .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
                     }
-                    let confirmation = self
-                        .deps
-                        .protection
-                        .begin_readmission_confirmation(&local_device_id, &member.device_id)
-                        .await?;
-                    let confirmation_response = self
-                        .deps
-                        .dispatch
-                        .exchange_legacy_upgrade(&member.device_id, &confirmation)
-                        .await
-                        .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
-                    if confirmation_response.kind != LegacyUpgradeResponseKind::UpToDate
-                        || confirmation_response.descriptor != *confirmation.descriptor()
-                    {
-                        return Err(LegacyUpgradeError::Unavailable);
+                    if scope.source == CurrentWorkspacePeerScopeSource::CurrentHistory {
+                        let confirmation = self
+                            .deps
+                            .protection
+                            .begin_readmission_confirmation(&local_device_id, &member.device_id)
+                            .await?;
+                        let confirmation_response = self
+                            .deps
+                            .dispatch
+                            .exchange_legacy_upgrade(&member.device_id, &confirmation)
+                            .await
+                            .map_err(|error| LegacyUpgradeError::Internal(error.to_string()))?;
+                        if confirmation_response.kind != LegacyUpgradeResponseKind::UpToDate
+                            || confirmation_response.descriptor != *confirmation.descriptor()
+                        {
+                            return Err(LegacyUpgradeError::Unavailable);
+                        }
                     }
                     match self.deps.presence.ensure_reachable(&member.device_id).await {
                         Ok(state) => {
