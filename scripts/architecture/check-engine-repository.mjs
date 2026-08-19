@@ -492,7 +492,10 @@ function checkRetiredLegacyPairingRecovery() {
   }
 
   const eventContract = read('crates/uc-engine/src/contract/event.rs')
-  if (!eventContract.includes('re_pairing_required') || !eventContract.includes('AllDevices')) {
+  const hasRePairingVariant = /RePairingRequired\s*\{\s*scope:\s*RePairingScope\s*,?\s*\}/s.test(eventContract)
+  const hasAllDevicesScope = /enum\s+RePairingScope\s*\{[^}]*\bAllDevices\b[^}]*\}/s.test(eventContract)
+  const hasKindMapping = /Self::RePairingRequired\s*\{\s*\.\.\s*\}\s*=>\s*"re_pairing_required"/s.test(eventContract)
+  if (!hasRePairingVariant || !hasAllDevicesScope || !hasKindMapping) {
     addProblem(problems, 'retired legacy pairing recovery', 'all-device re-pairing event is missing')
   }
   return problems

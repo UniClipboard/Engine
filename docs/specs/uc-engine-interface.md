@@ -45,7 +45,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 
 当底层变化事件不包含完整条目摘要时，核心只发送 `RefreshRequired(StateInvalidated)`，不得猜测内容类型、时间或预览。
 
-旧资料独立化完成后，核心发送 `RePairingRequired { scope: AllDevices }`。产品收到后立即展示完整重新配对引导；若启动时错过事件，则通过 `QuerySetupState.re_pairing_required` 恢复同一提示。产品不得从设备列表自行推断范围，也不负责清理旧关系。
+旧资料独立化完成后，核心发送 `RePairingRequired { scope: AllDevices }`。产品收到后立即展示完整重新配对引导；若启动时错过事件，则通过 `QuerySetupState.re_pairing_required` 恢复同一提示。该值为 `true` 表示仍须重新配对，为 `false` 表示无需重新配对；成功创建或加入新空间后由 Engine 清除。仅关闭提示不能清除该值。产品不得从设备列表自行推断范围，也不负责清理旧关系。
 
 ### iOS 和 Android 产品分析
 

@@ -6,8 +6,18 @@ use thiserror::Error;
 use crate::ids::{DeviceId, SpaceId};
 use crate::space_access::GroupAdmission;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct ProtectionGroupId(String);
+
+impl<'de> Deserialize<'de> for ProtectionGroupId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_string(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl ProtectionGroupId {
     pub fn from_string(value: impl Into<String>) -> Result<Self, KeyEpochError> {
@@ -1340,4 +1350,27 @@ pub enum KeyEpochError {
 
     #[error("key epoch repository failure: {0}")]
     Repository(String),
+}
+
+#[cfg(test)]
+mod protection_group_id_tests {
+    use super::*;
+
+    #[test]
+    fn deserialization_rejects_invalid_protection_group_ids() {
+        for value in [
+            "\"\"".to_owned(),
+            format!("\"{}\"", "a".repeat(129)),
+            "\"空间\"".to_owned(),
+        ] {
+            let error = serde_json::from_str::<ProtectionGroupId>(&value).unwrap_err();
+            assert!(error.to_string().contains("invalid protection group id"));
+        }
+    }
+
+    #[test]
+    fn deserialization_accepts_a_valid_protection_group_id() {
+        let id = serde_json::from_str::<ProtectionGroupId>("\"group-1\"").unwrap();
+        assert_eq!(id.as_str(), "group-1");
+    }
 }

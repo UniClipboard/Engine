@@ -473,12 +473,24 @@ impl EngineRuntime for ProductionRuntime {
             result = operation => result,
         };
         if matches!(operation_kind, crate::OperationKind::UnlockSpace) && result.is_ok() {
-            if let Ok(facade) = self.current_facade().await {
-                if let Ok(state) = facade.query_setup_state().await {
-                    if let Some(scope) = super::re_pairing_scope_for_setup_state(&state) {
-                        self.events
-                            .send(crate::EngineEvent::RePairingRequired { scope });
+            match self.current_facade().await {
+                Ok(facade) => match facade.query_setup_state().await {
+                    Ok(state) => {
+                        if let Some(scope) = super::re_pairing_scope_for_setup_state(&state) {
+                            self.events
+                                .send(crate::EngineEvent::RePairingRequired { scope });
+                        }
                     }
+                    Err(error) => tracing::warn!(
+                        error = %error,
+                        "re-pairing notification deferred to setup-state recovery query"
+                    ),
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "re-pairing notification deferred because the facade is unavailable"
+                    );
                 }
             }
         }

@@ -96,10 +96,44 @@ impl LegacyProfileIsolationUseCase {
             .await
             .map_err(|error| error.to_string())?;
         if status.re_pairing_required {
-            return Ok(());
+            return self
+                .setup_status
+                .clear_legacy_isolation_target()
+                .await
+                .map_err(|error| error.to_string());
         }
 
-        let space_id = SpaceId::new();
+        let settings = self
+            .settings
+            .load()
+            .await
+            .map_err(|error| error.to_string())?;
+        let device_name = settings
+            .general
+            .device_name
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| "local device name is unavailable".to_owned())?;
+        let identity_fingerprint = self
+            .local_identity
+            .ensure()
+            .await
+            .map_err(|error| error.to_string())?;
+        let space_id = match self
+            .setup_status
+            .get_legacy_isolation_target()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            Some(space_id) => space_id,
+            None => {
+                let space_id = SpaceId::new();
+                self.setup_status
+                    .set_legacy_isolation_target(&space_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                space_id
+            }
+        };
         self.adopt_space
             .adopt_isolated_space(&space_id)
             .await
@@ -113,24 +147,10 @@ impl LegacyProfileIsolationUseCase {
             .await
             .map_err(|error| error.to_string())?;
 
-        let settings = self
-            .settings
-            .load()
-            .await
-            .map_err(|error| error.to_string())?;
-        let device_name = settings
-            .general
-            .device_name
-            .filter(|name| !name.trim().is_empty())
-            .ok_or_else(|| "local device name is unavailable".to_owned())?;
         let member = SpaceMember {
             device_id: self.device_identity.current_device_id(),
             device_name,
-            identity_fingerprint: self
-                .local_identity
-                .ensure()
-                .await
-                .map_err(|error| error.to_string())?,
+            identity_fingerprint,
             joined_at: Utc::now(),
             sync_preferences: MemberSyncPreferences::default(),
         };
@@ -148,6 +168,10 @@ impl LegacyProfileIsolationUseCase {
                 space_id: Some(space_id),
                 re_pairing_required: true,
             })
+            .await
+            .map_err(|error| error.to_string())?;
+        self.setup_status
+            .clear_legacy_isolation_target()
             .await
             .map_err(|error| error.to_string())
     }
@@ -465,6 +489,10 @@ impl SpaceFacade {
         };
 
         if resumed {
+            self.legacy_profile_isolation
+                .execute()
+                .await
+                .map_err(TryResumeSessionError::Internal)?;
             self.mobile_consumable_backfill.backfill_best_effort().await;
             self.ensure_relationship_storage_ready()
                 .await
@@ -1137,6 +1165,7 @@ mod tests {
         unlock_error: Option<SpaceAccessError>,
         factory_reset_result: Option<Result<(), SpaceAccessError>>,
         expected_resume_space: Option<SpaceId>,
+        resume_success: bool,
     ) -> Arc<MockSpaceAccess> {
         let mut mock = MockSpaceAccess::new();
         mock.expect_initialize()
@@ -1169,7 +1198,9 @@ mod tests {
                 mock.expect_try_resume_session()
                     .withf(move |space_id| space_id == &expected)
                     .times(1)
-                    .returning(|_| Ok(None));
+                    .returning(move |space_id| {
+                        Ok(resume_success.then(|| ActiveSpace::new(space_id.clone())))
+                    });
             }
             None => {
                 mock.expect_try_resume_session().returning(|_| Ok(None));
@@ -1181,7 +1212,7 @@ mod tests {
     }
 
     fn space_access() -> Arc<MockSpaceAccess> {
-        configured_space_access(None, None, None)
+        configured_space_access(None, None, None, false)
     }
 
     struct FakeLocalIdentity {
@@ -1291,6 +1322,7 @@ mod tests {
     #[derive(Default)]
     struct InMemorySetupStatus {
         status: StdMutex<SetupStatus>,
+        legacy_isolation_target: StdMutex<Option<SpaceId>>,
     }
     #[async_trait]
     impl SetupStatusPort for InMemorySetupStatus {
@@ -1299,6 +1331,17 @@ mod tests {
         }
         async fn set_status(&self, status: &SetupStatus) -> anyhow::Result<()> {
             *self.status.lock().unwrap() = status.clone();
+            Ok(())
+        }
+        async fn get_legacy_isolation_target(&self) -> anyhow::Result<Option<SpaceId>> {
+            Ok(self.legacy_isolation_target.lock().unwrap().clone())
+        }
+        async fn set_legacy_isolation_target(&self, space_id: &SpaceId) -> anyhow::Result<()> {
+            *self.legacy_isolation_target.lock().unwrap() = Some(space_id.clone());
+            Ok(())
+        }
+        async fn clear_legacy_isolation_target(&self) -> anyhow::Result<()> {
+            *self.legacy_isolation_target.lock().unwrap() = None;
             Ok(())
         }
     }
@@ -1655,6 +1698,24 @@ mod tests {
         mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
+        make_facade_with_member_repo_and_isolation(
+            space_access,
+            setup_status,
+            settings,
+            mobile_consumable_backfill,
+            member_repo,
+            false,
+        )
+    }
+
+    fn make_facade_with_member_repo_and_isolation(
+        space_access: Arc<MockSpaceAccess>,
+        setup_status: Arc<dyn SetupStatusPort>,
+        settings: Arc<dyn SettingsPort>,
+        mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        legacy_profile_isolation_required: bool,
+    ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         let pairing_invitation = Arc::new(FakeInvitationPort::default());
         let peer_addr_repo = Arc::new(FakePeerAddrRepo::default());
         let facade = SpaceFacade::new(SpaceFacadeDeps {
@@ -1662,7 +1723,7 @@ mod tests {
                 space_access: SpaceAccessPorts::from_adapter(space_access),
                 setup_status,
                 mobile_consumable_backfill,
-                legacy_profile_isolation_required: false,
+                legacy_profile_isolation_required,
             },
             admission: SpaceAdmissionDeps {
                 local_identity: Arc::new(FakeLocalIdentity {
@@ -1794,7 +1855,7 @@ mod tests {
             re_pairing_required: false,
         };
         let space_access =
-            configured_space_access(Some(SpaceAccessError::WrongPassphrase), None, None);
+            configured_space_access(Some(SpaceAccessError::WrongPassphrase), None, None, false);
         let (facade, _inv, _peer) = make_facade(
             space_access,
             Arc::new(setup_status),
@@ -2006,7 +2067,7 @@ mod tests {
             space_id: None,
             re_pairing_required: false,
         };
-        let space_access = configured_space_access(None, Some(Ok(())), None);
+        let space_access = configured_space_access(None, Some(Ok(())), None, false);
         let (facade, _inv, _peer) = make_facade(
             space_access.clone(),
             Arc::new(setup_status),
@@ -2036,6 +2097,7 @@ mod tests {
             None,
             Some(Err(SpaceAccessError::Internal("disk i/o".to_string()))),
             None,
+            false,
         );
         let (facade, _inv, _peer) = make_facade(
             space_access.clone(),
@@ -2154,7 +2216,7 @@ mod tests {
             re_pairing_required: false,
         };
         let space_access =
-            configured_space_access(None, None, Some(SpaceId::from("canonical-space")));
+            configured_space_access(None, None, Some(SpaceId::from("canonical-space")), false);
         let (facade, _inv, _peer) = make_facade(
             space_access.clone(),
             Arc::new(setup_status),
@@ -2162,5 +2224,33 @@ mod tests {
         );
 
         assert!(!facade.try_resume_session().await.expect("resume check"));
+    }
+
+    #[tokio::test]
+    async fn try_resume_session_isolates_a_legacy_profile() {
+        let setup_status = Arc::new(InMemorySetupStatus::default());
+        *setup_status.status.lock().unwrap() = SetupStatus {
+            has_completed: true,
+            space_id: Some(SpaceId::from("legacy-space")),
+            re_pairing_required: false,
+        };
+        let space_access =
+            configured_space_access(None, None, Some(SpaceId::from("legacy-space")), true);
+        let (facade, _, _) = make_facade_with_member_repo_and_isolation(
+            space_access,
+            setup_status.clone(),
+            settings_with_device_name("Legacy device"),
+            Arc::new(NoopMobileConsumableBackfill),
+            Arc::new(InMemoryMemberRepo::default()),
+            true,
+        );
+
+        assert!(facade.try_resume_session().await.expect("resume legacy"));
+        assert!(setup_status.status.lock().unwrap().re_pairing_required);
+        assert!(setup_status
+            .legacy_isolation_target
+            .lock()
+            .unwrap()
+            .is_none());
     }
 }

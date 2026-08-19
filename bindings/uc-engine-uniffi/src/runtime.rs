@@ -221,6 +221,7 @@ pub struct SpaceInvitation {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SpaceState {
     pub has_completed: bool,
+    pub re_pairing_required: bool,
     pub space_id: Option<String>,
     pub current_invitation: Option<SpaceInvitation>,
     pub device_name: Option<String>,
@@ -1878,6 +1879,7 @@ fn map_space_created(result: OperationResult) -> Result<SpaceCreated, BindingErr
 fn map_space_state(result: OperationResult) -> Result<SpaceState, BindingError> {
     unpack_operation!(result, OperationResult::SetupState(state) => SpaceState {
         has_completed: state.has_completed,
+        re_pairing_required: state.re_pairing_required,
         space_id: state.space_id,
         current_invitation: state.current_invitation.map(|invitation| SpaceInvitation {
             invitation_code: invitation.invitation_code,

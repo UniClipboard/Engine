@@ -622,6 +622,7 @@ fn operation_response(result: OperationResult) -> Value {
             "ok": true,
             "kind": "setup_state",
             "has_completed": state.has_completed,
+            "re_pairing_required": state.re_pairing_required,
             "has_current_invitation": state.current_invitation.is_some(),
             "has_device_name": state.device_name.is_some(),
         }),
@@ -1605,6 +1606,20 @@ mod tests {
             lock_unpoisoned(&summary).last_re_pairing_scope.as_deref(),
             Some("all_devices")
         );
+    }
+
+    #[test]
+    fn setup_state_response_exposes_durable_re_pairing_requirement() {
+        let response =
+            operation_response(OperationResult::SetupState(uc_engine::SetupStateSummary {
+                has_completed: true,
+                space_id: Some("isolated-space".to_owned()),
+                re_pairing_required: true,
+                current_invitation: None,
+                device_name: Some("Device".to_owned()),
+            }));
+
+        assert_eq!(response["re_pairing_required"], true);
     }
 
     #[test]
