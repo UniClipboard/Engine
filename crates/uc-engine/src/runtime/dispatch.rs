@@ -481,16 +481,24 @@ impl EngineRuntime for ProductionRuntime {
                                 .send(crate::EngineEvent::RePairingRequired { scope });
                         }
                     }
-                    Err(error) => tracing::warn!(
-                        error = %error,
-                        "re-pairing notification deferred to setup-state recovery query"
-                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "re-pairing notification deferred to setup-state recovery query"
+                        );
+                        self.events.send(crate::EngineEvent::RefreshRequired {
+                            reason: crate::RefreshReason::StateInvalidated,
+                        });
+                    }
                 },
                 Err(error) => {
                     tracing::warn!(
                         error = %error,
                         "re-pairing notification deferred because the facade is unavailable"
                     );
+                    self.events.send(crate::EngineEvent::RefreshRequired {
+                        reason: crate::RefreshReason::StateInvalidated,
+                    });
                 }
             }
         }
