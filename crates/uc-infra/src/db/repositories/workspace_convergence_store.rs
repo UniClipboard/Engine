@@ -405,7 +405,9 @@ impl From<WorkspaceConvergenceState> for WorkspaceConvergenceStateV3Payload {
 impl From<WorkspaceConvergenceStateV3Payload> for WorkspaceConvergenceState {
     fn from(state: WorkspaceConvergenceStateV3Payload) -> Self {
         let migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
-            || (state.phase == WorkspacePhase::Complete
+            || (!state.removed
+                && state.phase != WorkspacePhase::RecoveryRequired
+                && state.failure_category.is_none()
                 && state.own_instance.is_some()
                 && !state.peer_history_relationships.is_empty()
                 && state
@@ -1131,6 +1133,44 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_rc4_v3_state(pool: &DbPool, state: &WorkspaceConvergenceState) {
+        let master_key = MasterKey::from_bytes(&[0x57; 32]).unwrap();
+        let space_id = SpaceId::from_str(SPACE);
+        let lookup_token = super::space_lookup_token(&master_key, &space_id).unwrap();
+        let slot_id = "rc4-active-slot";
+        let stored = Rc4WorkspaceConvergenceStateV3 {
+            storage_version: super::WORKSPACE_STATE_V3_STORAGE_VERSION,
+            state: state.clone(),
+        };
+        let encrypted = super::seal_prefixed_payload(
+            &master_key,
+            super::WORKSPACE_STATE_V3_PREFIX,
+            &stored,
+            &super::workspace_v3_slot_aad(SPACE, slot_id),
+        )
+        .unwrap();
+        let mut connection = pool.get().unwrap();
+        diesel::sql_query(
+            "INSERT INTO workspace_convergence_v3_slots \
+             (space_lookup_token, slot_id, encrypted_payload, updated_at_ms) VALUES (?, ?, ?, ?)",
+        )
+        .bind::<diesel::sql_types::Text, _>(&lookup_token)
+        .bind::<diesel::sql_types::Text, _>(slot_id)
+        .bind::<diesel::sql_types::Binary, _>(encrypted)
+        .bind::<diesel::sql_types::BigInt, _>(state.updated_at_ms)
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO workspace_convergence_v3_active \
+             (space_lookup_token, slot_id, generation) VALUES (?, ?, ?)",
+        )
+        .bind::<diesel::sql_types::Text, _>(lookup_token)
+        .bind::<diesel::sql_types::Text, _>(slot_id)
+        .bind::<diesel::sql_types::BigInt, _>(1_i64)
+        .execute(&mut connection)
+        .unwrap();
+    }
+
     fn rc3_v2_plaintext(state: &WorkspaceConvergenceState) -> Vec<u8> {
         let rc3_state = Rc3WorkspaceConvergenceState::from(state.clone());
         let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
@@ -1653,6 +1693,36 @@ mod tests {
         assert_eq!(WorkspaceConvergenceState::from(stored.state), expected);
     }
 
+    #[tokio::test]
+    async fn rc4_v3_state_migrated_from_rc3_while_locally_applied_recovers_legacy_origin() {
+        let (_store, pool, _directory) = make_store();
+        let mut affected = persisted_state();
+        affected.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
+        affected.phase = WorkspacePhase::LocallyApplied;
+        affected.membership_reconciliation = None;
+        affected.migrated_from_pre_adr_020 = false;
+        insert_rc4_v3_state(&pool, &affected);
+
+        let recovered = reopen_store(pool).load_state().await.unwrap().unwrap();
+
+        assert!(recovered.migrated_from_pre_adr_020);
+    }
+
+    #[tokio::test]
+    async fn rc4_v3_state_migrated_from_rc3_while_converging_recovers_legacy_origin() {
+        let (_store, pool, _directory) = make_store();
+        let mut affected = persisted_state();
+        affected.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
+        affected.phase = WorkspacePhase::Converging;
+        affected.membership_reconciliation = None;
+        affected.migrated_from_pre_adr_020 = false;
+        insert_rc4_v3_state(&pool, &affected);
+
+        let recovered = reopen_store(pool).load_state().await.unwrap().unwrap();
+
+        assert!(recovered.migrated_from_pre_adr_020);
+    }
+
     #[test]
     fn v3_state_previously_migrated_without_provenance_recovers_legacy_origin() {
         let mut affected = persisted_state();
@@ -1668,21 +1738,36 @@ mod tests {
     }
 
     #[test]
-    fn v3_state_without_complete_legacy_evidence_remains_fail_closed() {
+    fn v3_state_without_durable_legacy_evidence_remains_fail_closed() {
         let mut incomplete = persisted_state();
         incomplete.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
         incomplete.membership_reconciliation = None;
         incomplete.migrated_from_pre_adr_020 = false;
 
         let mut missing_identity = incomplete.clone();
-        missing_identity.phase = WorkspacePhase::Complete;
         missing_identity.own_instance = None;
 
         let mut missing_peer_relationship = incomplete.clone();
-        missing_peer_relationship.phase = WorkspacePhase::Complete;
         missing_peer_relationship.peer_history_relationships.clear();
 
-        for state in [incomplete, missing_identity, missing_peer_relationship] {
+        let mut removed = incomplete.clone();
+        removed.removed = true;
+
+        let mut recovery_required = incomplete;
+        recovery_required.phase = WorkspacePhase::RecoveryRequired;
+
+        let mut integrity_failure = recovery_required.clone();
+        integrity_failure.phase = WorkspacePhase::LocallyApplied;
+        integrity_failure.failure_category =
+            Some(uc_core::membership::WorkspaceFailureCategory::Storage);
+
+        for state in [
+            missing_identity,
+            missing_peer_relationship,
+            removed,
+            recovery_required,
+            integrity_failure,
+        ] {
             let recovered = WorkspaceConvergenceState::from(
                 super::WorkspaceConvergenceStateV3Payload::from(state),
             );
