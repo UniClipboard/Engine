@@ -63,7 +63,6 @@ use crate::operations::space::create_space::execute_create_space;
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
 use crate::operations::space::join_space::{current_join_result, execute_join_space};
-use crate::operations::space::reset_space::execute_reset_space;
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
@@ -134,7 +133,11 @@ impl EngineRuntime for ProductionRuntime {
             }
             _ => {}
         }
-        let session_lease = self.session_supervisor.acquire_operation().await?;
+        let mut session_lease = Some(self.session_supervisor.acquire_operation().await?);
+        let session_cancellation = session_lease
+            .as_ref()
+            .ok_or_else(super::operation_unavailable_error)?
+            .cancellation();
         let may_require_session_transition = matches!(&operation, Operation::JoinSpace(_));
         let operation_kind = operation.kind();
         let operation = async {
@@ -163,11 +166,13 @@ impl EngineRuntime for ProductionRuntime {
                     execute_cancel_invitation(self.current_facade().await?.as_ref()).await
                 }
                 Operation::ResetSpace => {
-                    execute_reset_space(
-                        self.profile_convergence.as_ref(),
-                        self.current_facade().await?.as_ref(),
-                    )
-                    .await
+                    self.session_supervisor
+                        .reset_space(
+                            session_lease
+                                .take()
+                                .ok_or_else(super::operation_unavailable_error)?,
+                        )
+                        .await
                 }
                 Operation::QuerySetupState => {
                     execute_query_setup_state(self.current_facade().await?.as_ref()).await
@@ -467,10 +472,13 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::ExportEntry(input) => self.execute_export_entry(input).await,
             }
         };
-        let session_cancellation = session_lease.cancellation();
-        let result = tokio::select! {
-            _ = session_cancellation.cancelled() => Err(super::operation_unavailable_error()),
-            result = operation => result,
+        let result = if matches!(operation_kind, crate::OperationKind::ResetSpace) {
+            operation.await
+        } else {
+            tokio::select! {
+                _ = session_cancellation.cancelled() => Err(super::operation_unavailable_error()),
+                result = operation => result,
+            }
         };
         if matches!(operation_kind, crate::OperationKind::UnlockSpace) && result.is_ok() {
             match self.current_facade().await {
@@ -514,7 +522,11 @@ impl EngineRuntime for ProductionRuntime {
                 })?
             {
                 self.session_supervisor
-                    .transition_session(session_lease)
+                    .transition_session(
+                        session_lease
+                            .take()
+                            .ok_or_else(super::operation_unavailable_error)?,
+                    )
                     .await?;
                 return current_join_result(self.profile_convergence.as_ref()).await;
             }

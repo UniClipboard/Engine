@@ -243,25 +243,6 @@ impl DurableAdmissionProjection {
             .await?
             .ok_or(WorkspaceConvergenceError::JoinNotFound)
     }
-
-    pub(crate) async fn reset_join_projection_if_quiet(
-        &self,
-    ) -> Result<uc_core::membership::AdmissionProfileMetadataV1, WorkspaceConvergenceError> {
-        let metadata = self
-            .repository
-            .profile_metadata()
-            .await
-            .map_err(map_repository_error)?;
-        self.repository
-            .advance_projection_floor(metadata.device_trust_revision)
-            .await
-            .map_err(|error| match error {
-                AdmissionAttemptRepositoryError::VersionConflict => {
-                    WorkspaceConvergenceError::Unavailable
-                }
-                other => map_repository_error(other),
-            })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2652,14 +2633,6 @@ impl DurableAdmissionTransaction {
             .await
     }
 
-    pub(crate) async fn reset_join_projection_if_quiet(
-        &self,
-    ) -> Result<uc_core::membership::AdmissionProfileMetadataV1, WorkspaceConvergenceError> {
-        DurableAdmissionProjection::new(Arc::clone(&self.repository))
-            .reset_join_projection_if_quiet()
-            .await
-    }
-
     pub(crate) async fn compact_if_settled(
         &self,
         attempt_id: AdmissionAttemptId,
@@ -3319,9 +3292,9 @@ fn map_space_transition_error(error: AdmissionSpaceTransitionError) -> Workspace
         AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation => {
             WorkspaceConvergenceError::UnreadableHistoryRequiresConfirmation
         }
-        AdmissionSpaceTransitionError::Locked | AdmissionSpaceTransitionError::Storage => {
-            admission_storage(error)
-        }
+        AdmissionSpaceTransitionError::Locked
+        | AdmissionSpaceTransitionError::Storage
+        | AdmissionSpaceTransitionError::InsufficientStorage => admission_storage(error),
         AdmissionSpaceTransitionError::Unavailable => WorkspaceConvergenceError::Unavailable,
         AdmissionSpaceTransitionError::RecoveryRequired => {
             WorkspaceConvergenceError::RecoveryRequired
