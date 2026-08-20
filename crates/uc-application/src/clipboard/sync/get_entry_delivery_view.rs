@@ -136,6 +136,15 @@ impl GetEntryDeliveryViewUseCase {
             .map_err(|e| GetEntryDeliveryViewError::Storage(e.to_string()))?
             .ok_or_else(|| GetEntryDeliveryViewError::EntryNotFound(entry_id.to_string()))?;
 
+        let current_peers: HashSet<DeviceId> = self
+            .peer_scope
+            .snapshot()
+            .await
+            .map_err(|e| GetEntryDeliveryViewError::Storage(format!("current peer scope: {e:?}")))?
+            .peer_device_ids
+            .into_iter()
+            .collect();
+
         // 2. 历史 entry 直接降级:不合成 Pending,deliveries 留空,
         //    视图层据此渲染"无投递记录"。
         if !entry.delivery_tracked {
@@ -210,15 +219,6 @@ impl GetEntryDeliveryViewUseCase {
 
         // 5. 本机 entry:当前成员范围与 trusted_peer 取交集后 LEFT JOIN
         //    delivery 表。可信关系和投递事实为历史验证保留,不能单独恢复当前资格。
-        let current_peers: HashSet<DeviceId> = self
-            .peer_scope
-            .snapshot()
-            .await
-            .map_err(|e| GetEntryDeliveryViewError::Storage(format!("current peer scope: {e:?}")))?
-            .peer_device_ids
-            .into_iter()
-            .collect();
-
         let trusted = self
             .trusted_peer_repo
             .list()
@@ -732,6 +732,25 @@ mod tests {
         assert!(view.deliveries.is_empty());
     }
 
+    #[tokio::test]
+    async fn historical_entry_fails_when_current_peer_scope_is_unavailable() {
+        let entries = Arc::new(FakeEntryRepo::new());
+        entries.insert(make_entry("e1", "ev1", false));
+        let uc = build_uc_full_with_scope(
+            entries,
+            Arc::new(FakeEventRepo::new()),
+            Arc::new(FakeTrustedPeerRepo::new(vec![])),
+            Arc::new(FakeDeliveryRepo::new(vec![])),
+            Arc::new(FakeMemberRepo::new(vec![])),
+            Arc::new(make_empty_mobile_device_repo()),
+            Arc::new(FailingPeerScope),
+        );
+
+        let err = uc.execute(&entry_id("e1")).await.unwrap_err();
+
+        assert!(matches!(err, GetEntryDeliveryViewError::Storage(_)));
+    }
+
     // ── 分支 3: source_device = None → Historical fallback ─────────────
 
     #[tokio::test]
@@ -752,6 +771,25 @@ mod tests {
             view.deliveries.is_empty(),
             "无可信来源时不得合成 Pending 误导用户"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_source_device_fails_when_current_peer_scope_is_unavailable() {
+        let entries = Arc::new(FakeEntryRepo::new());
+        entries.insert(make_entry("e1", "ev1", true));
+        let uc = build_uc_full_with_scope(
+            entries,
+            Arc::new(FakeEventRepo::new()),
+            Arc::new(FakeTrustedPeerRepo::new(vec![])),
+            Arc::new(FakeDeliveryRepo::new(vec![])),
+            Arc::new(FakeMemberRepo::new(vec![])),
+            Arc::new(make_empty_mobile_device_repo()),
+            Arc::new(FailingPeerScope),
+        );
+
+        let err = uc.execute(&entry_id("e1")).await.unwrap_err();
+
+        assert!(matches!(err, GetEntryDeliveryViewError::Storage(_)));
     }
 
     // ── 分支 4: 远端 entry → Remote, deliveries 空 ─────────────────────
@@ -780,6 +818,27 @@ mod tests {
             view.deliveries.is_empty(),
             "远端 entry 视图不应列举对其他 peer 的转发"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_entry_fails_when_current_peer_scope_is_unavailable() {
+        let entries = Arc::new(FakeEntryRepo::new());
+        entries.insert(make_entry("e1", "ev1", true));
+        let events = Arc::new(FakeEventRepo::new());
+        events.set_source(&event_id("ev1"), Some(peer("origin-peer")));
+        let uc = build_uc_full_with_scope(
+            entries,
+            events,
+            Arc::new(FakeTrustedPeerRepo::new(vec![])),
+            Arc::new(FakeDeliveryRepo::new(vec![])),
+            Arc::new(FakeMemberRepo::new(vec![])),
+            Arc::new(make_empty_mobile_device_repo()),
+            Arc::new(FailingPeerScope),
+        );
+
+        let err = uc.execute(&entry_id("e1")).await.unwrap_err();
+
+        assert!(matches!(err, GetEntryDeliveryViewError::Storage(_)));
     }
 
     // ── 分支 5: 本机 entry · 无 peer → Local, deliveries 空 ─────────────
