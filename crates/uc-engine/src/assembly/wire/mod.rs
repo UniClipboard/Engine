@@ -326,6 +326,7 @@ pub fn wire_dependencies_from_inputs(
             Arc::clone(&active_manifest_store),
             space_access_adapter,
             Arc::clone(&platform.session),
+            Arc::clone(&platform.current_profile),
         ));
     let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
 

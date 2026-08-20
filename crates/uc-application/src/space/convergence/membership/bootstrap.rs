@@ -1,6 +1,42 @@
 use super::super::*;
 
 impl WorkspaceConvergence {
+    pub(crate) async fn repair_incomplete_isolated_space_membership(
+        &self,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        match self.verified_admission_base_history().await {
+            Ok(_) => Ok(()),
+            Err(
+                WorkspaceConvergenceError::RecoveryRequired
+                | WorkspaceConvergenceError::NotAMember
+                | WorkspaceConvergenceError::OwnInstanceRemoved,
+            ) => {
+                let previous_history = self
+                    .deps
+                    .admission_attempts
+                    .load_membership_history_v2()
+                    .await
+                    .map_err(crate::space::convergence::admission::map_repository_error)?;
+                self.rebuild_new_space_membership().await?;
+                let repaired_history = self
+                    .verified_legacy_admission_base_history()
+                    .await?
+                    .encode_persisted_v2()
+                    .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
+                self.deps
+                    .admission_attempts
+                    .compare_and_replace_membership_history_v2(
+                        previous_history.as_deref(),
+                        &repaired_history,
+                    )
+                    .await
+                    .map_err(crate::space::convergence::admission::map_repository_error)?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) async fn recover_legacy_migration_marker(
         &self,
     ) -> Result<(), WorkspaceConvergenceError> {
@@ -540,6 +576,13 @@ impl WorkspaceConvergence {
     pub async fn initialize_upgraded_legacy_space(
         &self,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
+        self.initialize_legacy_space_membership(false).await
+    }
+
+    async fn initialize_legacy_space_membership(
+        &self,
+        force_local_initializer: bool,
+    ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
         let own_instance = self
             .deps
             .member_signatures
@@ -559,7 +602,7 @@ impl WorkspaceConvergence {
             .chain(std::iter::once(&self.deps.own_device))
             .min_by(|left, right| left.as_str().cmp(right.as_str()))
             == Some(&self.deps.own_device);
-        let is_initializer = is_stable_initializer;
+        let is_initializer = force_local_initializer || is_stable_initializer;
         let security_state = self.deps.security_updates.current_state().await?;
         let mut digest = sha2::Sha256::new();
         digest.update(b"uniclipboard-membership-security/v1\0");
@@ -620,7 +663,25 @@ impl WorkspaceConvergence {
                 "new space protection group did not complete".to_owned(),
             ));
         }
-        self.initialize_upgraded_legacy_space().await?;
+        self.rebuild_new_space_membership().await
+    }
+
+    async fn rebuild_new_space_membership(&self) -> Result<(), WorkspaceConvergenceError> {
+        let lineage = self
+            .deps
+            .membership_identity
+            .current_membership_identity()
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?
+            .space_id
+            .as_ref()
+            .to_owned();
+        {
+            let _guard = self.state_lock.lock().await;
+            let state = WorkspaceConvergenceState::fresh(lineage, self.deps.clock.now_ms());
+            self.persist(&state).await?;
+        }
+        self.initialize_legacy_space_membership(true).await?;
         Ok(())
     }
 

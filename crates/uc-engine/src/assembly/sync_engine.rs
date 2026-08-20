@@ -52,7 +52,8 @@ use uc_application::facade::{
     InboundClipboardApplyPort, MemberRosterDeps, MemberRosterFacade, MembershipConnectivityDeps,
     MembershipConvergenceDeps, SpaceAdmissionDeps, SpaceApplicationRuntime,
     SpaceConvergenceAssembly, SpaceConvergenceDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps,
-    SpaceTransitionDeps, TransferHostEvent, WorkspaceConvergenceDeps,
+    SpaceTransitionDeps, TransferHostEvent, UpgradeFacade, UpgradeFacadeDeps,
+    WorkspaceConvergenceDeps,
 };
 use uc_application::facade::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
@@ -572,7 +573,7 @@ pub enum SyncEngineAssemblyError {
     #[error(transparent)]
     IrohNode(#[from] IrohNodeError),
     #[error(transparent)]
-    AppVersionState(#[from] uc_core::ports::AppVersionStateError),
+    DetectUpgrade(#[from] uc_application::facade::DetectUpgradeError),
 }
 
 /// Assemble the Slice 1 `SpaceFacade` from an already-wired dependency
@@ -592,17 +593,15 @@ pub async fn build_sync_engine_assembly(
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     iroh_config: IrohNodeConfig,
 ) -> Result<SyncEngineAssembly, SyncEngineAssemblyError> {
-    let previous_app_version = deps.app_version_state.read().await?;
+    let upgrade_status = UpgradeFacade::new(UpgradeFacadeDeps {
+        app_version_state: Arc::clone(&deps.app_version_state),
+        setup_status: Arc::clone(&deps.setup_status),
+    })
+    .detect_on_startup(current_app_version)
+    .await?;
     let initial_state_origin =
-        uc_application::facade::WorkspaceConvergenceStateOrigin::from_version_transition(
-            previous_app_version.as_deref(),
-            current_app_version,
-        );
-    let legacy_profile_isolation_required =
-        uc_application::facade::WorkspaceConvergenceStateOrigin::requires_legacy_profile_isolation(
-            previous_app_version.as_deref(),
-            current_app_version,
-        );
+        uc_application::facade::WorkspaceConvergenceStateOrigin::CurrentInstallation;
+    let legacy_profile_isolation_required = upgrade_status.requires_legacy_profile_isolation();
     // IdentityFingerprintFactory is stateless — the one in SecurityPorts is
     // the same `Sha256IdentityFingerprintFactory` ZST, but we construct a
     // fresh one here rather than down-casting through `dyn` because
@@ -913,6 +912,8 @@ pub async fn build_sync_engine_assembly(
             setup_status: Arc::clone(&deps.setup_status),
             mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
             legacy_profile_isolation_required,
+            app_version_state: Arc::clone(&deps.app_version_state),
+            current_app_version: current_app_version.to_owned(),
         },
         admission: SpaceAdmissionDeps {
             local_identity: Arc::clone(&local_identity),

@@ -2375,13 +2375,22 @@ impl DurableAdmissionTransaction {
                             "space transition result does not match cleanup state",
                         ));
                     }
+                    let verified_history =
+                        attempt.verified_membership_history.clone().ok_or_else(|| {
+                            inconsistent("space transition verified history is missing")
+                        })?;
                     attempt.space_transition_result = Some(encode_transition_result(&result)?);
                     attempt.terminal_result = Some(AdmissionTerminalResultV1::Active);
                     attempt.role_state =
                         AdmissionAttemptRoleStateV1::Joiner(JoinerAdmissionStateV1 {
                             stage: JoinerAdmissionStageV1::Completed,
                         });
-                    self.persist_advance(attempt).await?;
+                    self.persist_advance_with_history(
+                        attempt,
+                        Some(&verified_history),
+                        &verified_history,
+                    )
+                    .await?;
                     return self.required_attempt(transition.attempt_id()).await;
                 }
             }

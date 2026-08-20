@@ -150,16 +150,6 @@ impl WorkspaceConvergenceStateOrigin {
     pub fn from_version_transition(_previous: Option<&str>, _current: &str) -> Self {
         Self::CurrentInstallation
     }
-
-    pub fn requires_legacy_profile_isolation(previous: Option<&str>, current: &str) -> bool {
-        let Some(previous) = previous.and_then(|value| semver::Version::parse(value).ok()) else {
-            return false;
-        };
-        let Ok(current) = semver::Version::parse(current) else {
-            return false;
-        };
-        previous < semver::Version::new(0, 20, 0) && previous < current
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

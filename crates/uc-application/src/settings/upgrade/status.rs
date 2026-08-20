@@ -30,3 +30,38 @@ pub enum UpgradeStatus {
         to: semver::Version,
     },
 }
+
+impl UpgradeStatus {
+    pub fn requires_legacy_profile_isolation(&self) -> bool {
+        let minimum_current_version = semver::Version::new(0, 20, 0);
+
+        match self {
+            Self::Upgraded { from: None, to } => to >= &minimum_current_version,
+            Self::Upgraded {
+                from: Some(from),
+                to,
+            } => from < &minimum_current_version && from < to,
+            Self::FreshInstall | Self::NoChange | Self::Downgraded { .. } => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_legacy_profile_without_cursor_requires_isolation() {
+        let status = UpgradeStatus::Upgraded {
+            from: None,
+            to: semver::Version::new(1, 0, 0),
+        };
+
+        assert!(status.requires_legacy_profile_isolation());
+    }
+
+    #[test]
+    fn fresh_install_without_cursor_does_not_require_isolation() {
+        assert!(!UpgradeStatus::FreshInstall.requires_legacy_profile_isolation());
+    }
+}

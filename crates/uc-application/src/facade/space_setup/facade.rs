@@ -17,6 +17,7 @@
 //! `tracing::warn!` so ops still sees them.
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,7 +74,7 @@ use uc_core::setup::SetupStatus;
 use uc_core::{MemberRepositoryPort, MemberSyncPreferences, SpaceMember};
 
 struct LegacyProfileIsolationUseCase {
-    required: bool,
+    required: AtomicBool,
     adopt_space: Arc<dyn AdoptIsolatedSpacePort>,
     relationship_reset: Arc<dyn RelationshipStateResetPort>,
     security_reset: Arc<dyn SpaceSecurityStateResetPort>,
@@ -83,24 +84,63 @@ struct LegacyProfileIsolationUseCase {
     settings: Arc<dyn SettingsPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
     convergence: Arc<crate::space::convergence::WorkspaceConvergence>,
+    app_version_state: Arc<dyn uc_core::ports::AppVersionStatePort>,
+    current_app_version: String,
 }
 
 impl LegacyProfileIsolationUseCase {
-    async fn execute(&self) -> Result<(), String> {
-        if !self.required {
-            return Ok(());
+    async fn remove_remote_members(&self) -> Result<(), String> {
+        let local_device_id = self.device_identity.current_device_id();
+        let members = self
+            .member_repo
+            .list()
+            .await
+            .map_err(|error| error.to_string())?;
+        for member in members {
+            if member.device_id != local_device_id {
+                self.member_repo
+                    .remove(&member.device_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
         }
+        Ok(())
+    }
+
+    async fn mark_completed(&self) -> Result<(), String> {
+        self.app_version_state
+            .write(&self.current_app_version)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn execute(&self) -> Result<(), String> {
         let status = self
             .setup_status
             .get_status()
             .await
             .map_err(|error| error.to_string())?;
         if status.re_pairing_required {
-            return self
-                .setup_status
+            self.remove_remote_members().await?;
+            self.convergence
+                .repair_incomplete_isolated_space_membership()
+                .await
+                .map_err(|error| error.to_string())?;
+            self.setup_status
                 .clear_legacy_isolation_target()
                 .await
-                .map_err(|error| error.to_string());
+                .map_err(|error| error.to_string())?;
+            self.mark_completed().await?;
+            self.required.store(false, Ordering::Release);
+            return Ok(());
+        }
+        let pending_isolation_target = self
+            .setup_status
+            .get_legacy_isolation_target()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !self.required.load(Ordering::Acquire) && pending_isolation_target.is_none() {
+            return Ok(());
         }
 
         let settings = self
@@ -118,12 +158,7 @@ impl LegacyProfileIsolationUseCase {
             .ensure()
             .await
             .map_err(|error| error.to_string())?;
-        let space_id = match self
-            .setup_status
-            .get_legacy_isolation_target()
-            .await
-            .map_err(|error| error.to_string())?
-        {
+        let space_id = match pending_isolation_target {
             Some(space_id) => space_id,
             None => {
                 let space_id = SpaceId::new();
@@ -146,6 +181,7 @@ impl LegacyProfileIsolationUseCase {
             .clear_space_security_state_except(&space_id)
             .await
             .map_err(|error| error.to_string())?;
+        self.remove_remote_members().await?;
 
         let member = SpaceMember {
             device_id: self.device_identity.current_device_id(),
@@ -173,7 +209,10 @@ impl LegacyProfileIsolationUseCase {
         self.setup_status
             .clear_legacy_isolation_target()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.mark_completed().await?;
+        self.required.store(false, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -253,6 +292,8 @@ impl SpaceFacade {
             setup_status,
             mobile_consumable_backfill,
             legacy_profile_isolation_required,
+            app_version_state,
+            current_app_version,
         } = session;
         let SpaceAdmissionDeps {
             local_identity,
@@ -295,7 +336,7 @@ impl SpaceFacade {
         // (reads `Settings.general.device_name`).
         let settings_for_facade = Arc::clone(&settings);
         let legacy_profile_isolation = LegacyProfileIsolationUseCase {
-            required: legacy_profile_isolation_required,
+            required: AtomicBool::new(legacy_profile_isolation_required),
             adopt_space: Arc::clone(&space_access.adopt_isolated_space),
             relationship_reset: Arc::clone(&relationship_reset),
             security_reset: space_security_reset,
@@ -305,6 +346,8 @@ impl SpaceFacade {
             settings: Arc::clone(&settings),
             member_repo: Arc::clone(&member_repo),
             convergence: Arc::clone(&workspace_convergence),
+            app_version_state,
+            current_app_version,
         };
 
         // Invitation holder is purely an internal flow-state component
@@ -929,8 +972,8 @@ mod tests {
         SpaceAccessError, UnlockSpacePort, VerifyKeychainAccessPort,
     };
     use uc_core::ports::{
-        ClockPort, DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort,
-        SetupStatusPort,
+        AppVersionStateError, AppVersionStatePort, ClockPort, DeviceIdentityPort,
+        LocalIdentityError, LocalIdentityPort, SettingsPort, SetupStatusPort,
     };
 
     use crate::deps::SpaceAccessPorts;
@@ -948,6 +991,21 @@ mod tests {
     use uc_core::SessionId;
 
     // ── mock ports ───────────────────────────────────────────────────────
+
+    #[derive(Default)]
+    struct InMemoryAppVersionState(StdMutex<Option<String>>);
+
+    #[async_trait]
+    impl AppVersionStatePort for InMemoryAppVersionState {
+        async fn read(&self) -> Result<Option<String>, AppVersionStateError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        async fn write(&self, version: &str) -> Result<(), AppVersionStateError> {
+            *self.0.lock().unwrap() = Some(version.to_owned());
+            Ok(())
+        }
+    }
 
     mockall::mock! {
         SpaceAccess {}
@@ -1164,7 +1222,7 @@ mod tests {
     fn configured_space_access(
         unlock_error: Option<SpaceAccessError>,
         factory_reset_result: Option<Result<(), SpaceAccessError>>,
-        expected_resume_space: Option<SpaceId>,
+        expected_resume_spaces: Vec<SpaceId>,
         resume_success: bool,
     ) -> Arc<MockSpaceAccess> {
         let mut mock = MockSpaceAccess::new();
@@ -1193,16 +1251,18 @@ mod tests {
                 mock.expect_factory_reset().returning(|_| Ok(()));
             }
         }
-        match expected_resume_space {
-            Some(expected) => {
+        match expected_resume_spaces.is_empty() {
+            false => {
+                let expected = expected_resume_spaces;
+                let expected_count = expected.len();
                 mock.expect_try_resume_session()
-                    .withf(move |space_id| space_id == &expected)
-                    .times(1)
+                    .withf(move |space_id| expected.contains(space_id))
+                    .times(expected_count)
                     .returning(move |space_id| {
                         Ok(resume_success.then(|| ActiveSpace::new(space_id.clone())))
                     });
             }
-            None => {
+            true => {
                 mock.expect_try_resume_session().returning(|_| Ok(None));
             }
         }
@@ -1212,7 +1272,7 @@ mod tests {
     }
 
     fn space_access() -> Arc<MockSpaceAccess> {
-        configured_space_access(None, None, None, false)
+        configured_space_access(None, None, Vec::new(), false)
     }
 
     struct FakeLocalIdentity {
@@ -1264,8 +1324,11 @@ mod tests {
             self.rows.lock().unwrap().push(member.clone());
             Ok(())
         }
-        async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
-            Ok(true)
+        async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError> {
+            let mut rows = self.rows.lock().unwrap();
+            let before = rows.len();
+            rows.retain(|member| &member.device_id != device_id);
+            Ok(rows.len() != before)
         }
     }
 
@@ -1724,6 +1787,8 @@ mod tests {
                 setup_status,
                 mobile_consumable_backfill,
                 legacy_profile_isolation_required,
+                app_version_state: Arc::new(InMemoryAppVersionState::default()),
+                current_app_version: "1.1.0".to_owned(),
             },
             admission: SpaceAdmissionDeps {
                 local_identity: Arc::new(FakeLocalIdentity {
@@ -1854,8 +1919,12 @@ mod tests {
             space_id: None,
             re_pairing_required: false,
         };
-        let space_access =
-            configured_space_access(Some(SpaceAccessError::WrongPassphrase), None, None, false);
+        let space_access = configured_space_access(
+            Some(SpaceAccessError::WrongPassphrase),
+            None,
+            Vec::new(),
+            false,
+        );
         let (facade, _inv, _peer) = make_facade(
             space_access,
             Arc::new(setup_status),
@@ -2067,7 +2136,7 @@ mod tests {
             space_id: None,
             re_pairing_required: false,
         };
-        let space_access = configured_space_access(None, Some(Ok(())), None, false);
+        let space_access = configured_space_access(None, Some(Ok(())), Vec::new(), false);
         let (facade, _inv, _peer) = make_facade(
             space_access.clone(),
             Arc::new(setup_status),
@@ -2096,7 +2165,7 @@ mod tests {
         let space_access = configured_space_access(
             None,
             Some(Err(SpaceAccessError::Internal("disk i/o".to_string()))),
-            None,
+            Vec::new(),
             false,
         );
         let (facade, _inv, _peer) = make_facade(
@@ -2216,7 +2285,7 @@ mod tests {
             re_pairing_required: false,
         };
         let space_access =
-            configured_space_access(None, None, Some(SpaceId::from("canonical-space")), false);
+            configured_space_access(None, None, vec![SpaceId::from("canonical-space")], false);
         let (facade, _inv, _peer) = make_facade(
             space_access.clone(),
             Arc::new(setup_status),
@@ -2234,14 +2303,26 @@ mod tests {
             space_id: Some(SpaceId::from("legacy-space")),
             re_pairing_required: false,
         };
-        let space_access =
-            configured_space_access(None, None, Some(SpaceId::from("legacy-space")), true);
+        let space_access = configured_space_access(
+            None,
+            None,
+            vec![SpaceId::from("legacy-space"), SpaceId::from("paired-space")],
+            true,
+        );
+        let member_repo = Arc::new(InMemoryMemberRepo::default());
+        member_repo.rows.lock().unwrap().push(SpaceMember {
+            device_id: DeviceId::new("legacy-peer"),
+            device_name: "Legacy peer".to_owned(),
+            identity_fingerprint: default_fingerprint(),
+            joined_at: Utc::now(),
+            sync_preferences: MemberSyncPreferences::default(),
+        });
         let (facade, _, _) = make_facade_with_member_repo_and_isolation(
             space_access,
             setup_status.clone(),
             settings_with_device_name("Legacy device"),
             Arc::new(NoopMobileConsumableBackfill),
-            Arc::new(InMemoryMemberRepo::default()),
+            member_repo.clone(),
             true,
         );
 
@@ -2252,5 +2333,39 @@ mod tests {
             .lock()
             .unwrap()
             .is_none());
+        assert_eq!(
+            member_repo
+                .list()
+                .await
+                .unwrap()
+                .iter()
+                .map(|member| member.device_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["device-1"]
+        );
+
+        *setup_status.status.lock().unwrap() = SetupStatus {
+            has_completed: true,
+            space_id: Some(SpaceId::from("paired-space")),
+            re_pairing_required: false,
+        };
+        member_repo.rows.lock().unwrap().push(SpaceMember {
+            device_id: DeviceId::new("new-peer"),
+            device_name: "New peer".to_owned(),
+            identity_fingerprint: default_fingerprint(),
+            joined_at: Utc::now(),
+            sync_preferences: MemberSyncPreferences::default(),
+        });
+
+        assert!(facade
+            .try_resume_session()
+            .await
+            .expect("resume after pairing"));
+        assert!(member_repo
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|member| member.device_id == DeviceId::new("new-peer")));
     }
 }

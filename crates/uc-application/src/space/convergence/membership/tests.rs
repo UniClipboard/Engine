@@ -877,6 +877,103 @@ async fn runtime_clears_a_stale_legacy_marker_after_current_history_exists() {
 }
 
 #[tokio::test]
+async fn isolated_legacy_profile_starts_with_fresh_single_member_history() {
+    let old_a = instance(0x0a);
+    let old_b = instance(0x0b);
+    let repository = MemoryWorkspaceRepository::default();
+    let genesis = membership_event(None, 0, old_a, old_a, "device-a", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, old_a, old_b, "device-b", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), old_a);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(addition).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(old_a);
+    state.membership_reconciliation = Some(history);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+
+    let device_id = DeviceId::new("device-a");
+    let credential = uc_core::membership::MembershipCredential::new(1, vec![0x73; 32]);
+    let expected_instance = credential.member_instance_id(&device_id);
+    let mut deps = test_deps(Arc::new(repository.clone()), device_id.as_str(), Vec::new());
+    deps.member_signatures = Arc::new(CredentialBackedSigner {
+        device_id,
+        credential,
+    });
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-b")]));
+    let owner = WorkspaceConvergence::new(deps);
+    owner.initialize_new_space_membership().await.unwrap();
+
+    let repaired = repository.load_state().await.unwrap().unwrap();
+    assert!(!repaired.migrated_from_pre_adr_020);
+    assert_eq!(repaired.own_instance, Some(expected_instance));
+    assert_eq!(repaired.effective_members().len(), 1);
+    let repaired_history = repaired.membership_reconciliation.as_ref().unwrap();
+    assert_eq!(repaired_history.known_event_count(), 1);
+    assert_eq!(
+        repaired_history.known_head(),
+        repaired_history.applied_head()
+    );
+}
+
+#[tokio::test]
+async fn unusable_isolated_profile_rebuilds_its_membership_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0xd1; 16]);
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xd2; 32]);
+    let (_, stale_history, _, _, _) = durable_candidate_verification_fixture(attempt_id);
+    admission_repository
+        .compare_and_replace_membership_history_v2(
+            None,
+            &stale_history.encode_persisted_v2().unwrap(),
+        )
+        .await
+        .unwrap();
+    let repository = MemoryWorkspaceRepository::default();
+    let device_id = DeviceId::new("device-a");
+    let credential = uc_core::membership::MembershipCredential::new(1, vec![0x74; 32]);
+    let expected_instance = credential.member_instance_id(&device_id);
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(expected_instance);
+    state.membership_reconciliation = Some(MembershipReconciliation::new(
+        SPACE.to_owned(),
+        expected_instance,
+    ));
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.admission_attempts = admission_repository.clone();
+    deps.member_signatures = Arc::new(CredentialBackedSigner {
+        device_id,
+        credential,
+    });
+    let owner = WorkspaceConvergence::new(deps);
+
+    owner
+        .repair_incomplete_isolated_space_membership()
+        .await
+        .unwrap();
+
+    let repaired = repository.load_state().await.unwrap().unwrap();
+    assert!(!repaired.migrated_from_pre_adr_020);
+    assert_eq!(repaired.effective_members(), [expected_instance].into());
+    let repaired_history = admission_repository
+        .load_membership_history_v2()
+        .await
+        .unwrap()
+        .unwrap();
+    let repaired_history = uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
+        &repaired_history,
+        &DeterministicHistoricalVerifier,
+    )
+    .unwrap();
+    assert_eq!(repaired_history.lineage_id(), SPACE);
+    assert_eq!(
+        repaired_history.active_members(),
+        [expected_instance].into()
+    );
+}
+
+#[tokio::test]
 async fn session_resume_retries_a_legacy_marker_repair_deferred_while_locked() {
     let a = instance(0x0a);
     let repository = MemoryWorkspaceRepository::default();

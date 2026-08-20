@@ -55,18 +55,36 @@ impl WorkspaceConvergence {
             if history.lineage_id() != state.space_lineage
                 || !history.active_members().contains(&own_instance)
             {
+                tracing::warn!(
+                    error_kind = "persisted_history_identity_mismatch",
+                    "workspace admission base rejected"
+                );
                 return Err(WorkspaceConvergenceError::RecoveryRequired);
             }
             return Ok(history);
         }
 
+        self.verified_legacy_admission_base_history().await
+    }
+
+    pub(crate) async fn verified_legacy_admission_base_history(
+        &self,
+    ) -> Result<uc_core::membership::VersionedMembershipHistory, WorkspaceConvergenceError> {
         let state = self.load_state().await?;
         if state.removed {
+            tracing::warn!(
+                error_kind = "local_member_removed",
+                "workspace admission base rejected"
+            );
             return Err(WorkspaceConvergenceError::OwnInstanceRemoved);
         }
-        let own_instance = state
-            .own_instance
-            .ok_or(WorkspaceConvergenceError::RecoveryRequired)?;
+        let own_instance = state.own_instance.ok_or_else(|| {
+            tracing::warn!(
+                error_kind = "local_member_instance_unavailable",
+                "workspace admission base rejected"
+            );
+            WorkspaceConvergenceError::RecoveryRequired
+        })?;
         let current_instance = self
             .deps
             .member_signatures
@@ -74,6 +92,10 @@ impl WorkspaceConvergence {
             .await
             .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
         if current_instance != own_instance {
+            tracing::warn!(
+                error_kind = "local_member_instance_mismatch",
+                "workspace admission base rejected"
+            );
             return Err(WorkspaceConvergenceError::RecoveryRequired);
         }
         let remote_members = self
@@ -84,17 +106,33 @@ impl WorkspaceConvergence {
             .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?
             .into_iter()
             .any(|member| member.device_id != self.deps.own_device);
-        let legacy = state
-            .membership_reconciliation
-            .as_ref()
-            .ok_or(WorkspaceConvergenceError::RecoveryRequired)?;
+        let legacy = state.membership_reconciliation.as_ref().ok_or_else(|| {
+            tracing::warn!(
+                error_kind = "membership_history_unavailable",
+                "workspace admission base rejected"
+            );
+            WorkspaceConvergenceError::RecoveryRequired
+        })?;
         let head = legacy
             .applied_head()
             .filter(|head| legacy.known_head() == Some(*head))
-            .ok_or(WorkspaceConvergenceError::RecoveryRequired)?;
-        let event = legacy
-            .event(head)
-            .ok_or(WorkspaceConvergenceError::RecoveryRequired)?;
+            .ok_or_else(|| {
+                tracing::warn!(
+                    error_kind = "membership_history_head_unavailable",
+                    history_event_count = legacy.known_event_count(),
+                    known_head_present = legacy.known_head().is_some(),
+                    applied_head_present = legacy.applied_head().is_some(),
+                    "workspace admission base rejected"
+                );
+                WorkspaceConvergenceError::RecoveryRequired
+            })?;
+        let event = legacy.event(head).ok_or_else(|| {
+            tracing::warn!(
+                error_kind = "membership_history_event_unavailable",
+                "workspace admission base rejected"
+            );
+            WorkspaceConvergenceError::RecoveryRequired
+        })?;
         if remote_members
             || legacy.known_event_count() != 1
             || legacy.effective_members() != [own_instance].into()
@@ -106,6 +144,12 @@ impl WorkspaceConvergence {
                         && admission.device_id == self.deps.own_device
             )
         {
+            tracing::warn!(
+                error_kind = "membership_baseline_mismatch",
+                remote_members,
+                history_event_count = legacy.known_event_count(),
+                "workspace admission base rejected"
+            );
             return Err(WorkspaceConvergenceError::RecoveryRequired);
         }
         let credential = self
@@ -126,6 +170,10 @@ impl WorkspaceConvergence {
                 .await
                 .map_err(|_| WorkspaceConvergenceError::RecoveryRequired)?
         {
+            tracing::warn!(
+                error_kind = "membership_credential_mismatch",
+                "workspace admission base rejected"
+            );
             return Err(WorkspaceConvergenceError::RecoveryRequired);
         }
         let own_facts = self.local_admission_facts(Some(own_instance)).await?;
