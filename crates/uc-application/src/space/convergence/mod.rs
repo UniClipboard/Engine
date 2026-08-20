@@ -147,8 +147,12 @@ pub enum WorkspaceConvergenceStateOrigin {
 }
 
 impl WorkspaceConvergenceStateOrigin {
-    pub fn from_version_transition(_previous: Option<&str>, _current: &str) -> Self {
-        Self::CurrentInstallation
+    pub fn from_version_transition(previous: Option<&str>, _current: &str) -> Self {
+        if previous.is_some() {
+            Self::UpgradeWithoutConvergenceState
+        } else {
+            Self::CurrentInstallation
+        }
     }
 }
 
@@ -450,7 +454,9 @@ impl WorkspaceConvergence {
         self.wake.notify_waiters();
     }
 
-    async fn load_state(&self) -> Result<WorkspaceConvergenceState, WorkspaceConvergenceError> {
+    async fn load_state_with_presence(
+        &self,
+    ) -> Result<(WorkspaceConvergenceState, bool), WorkspaceConvergenceError> {
         let lineage = self
             .deps
             .membership_identity
@@ -458,7 +464,9 @@ impl WorkspaceConvergence {
             .await
             .map(|identity| identity.space_id.as_ref().to_owned())
             .unwrap_or_default();
-        let mut state = match self.deps.repository.load_state().await? {
+        let persisted = self.deps.repository.load_state().await?;
+        let was_persisted = persisted.is_some();
+        let mut state = match persisted {
             Some(state) => state,
             None => {
                 let mut state =
@@ -473,7 +481,11 @@ impl WorkspaceConvergence {
         if state.space_lineage.is_empty() {
             state.space_lineage = lineage;
         }
-        Ok(state)
+        Ok((state, was_persisted))
+    }
+
+    async fn load_state(&self) -> Result<WorkspaceConvergenceState, WorkspaceConvergenceError> {
+        Ok(self.load_state_with_presence().await?.0)
     }
 
     async fn persist(
