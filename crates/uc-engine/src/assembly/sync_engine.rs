@@ -941,6 +941,7 @@ pub async fn build_sync_engine_assembly(
             convergence: Arc::clone(&convergence_assembly),
         },
         transition: SpaceTransitionDeps {
+            device_management_reset_data: Arc::clone(&space_setup.device_management_reset_data),
             relationship_reset: Arc::clone(&space_setup.relationship_reset),
             space_security_reset: Arc::clone(&space_setup.space_security_reset),
         },

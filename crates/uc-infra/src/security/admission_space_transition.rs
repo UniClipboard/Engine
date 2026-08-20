@@ -9,6 +9,7 @@ use uc_core::blob::ports::BlobReaderPort;
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
 use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
+use uc_core::membership::DeviceManagementResetDataPort;
 use uc_core::membership::{
     ActiveSpaceManifestV2, AdmissionContentKeyCatalogV1, AdmissionSpaceTransitionError,
     AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
@@ -41,8 +42,8 @@ use crate::file_transfer::persistence_cipher::TransferPersistenceCipher;
 use crate::search::render_payload::RenderPayloadCodec;
 
 use super::{
-    ActiveSpaceManifestStore, BlobCipherAdapter, DefaultSpaceAccessAdapter, EncryptedBlobStore,
-    InMemorySession,
+    active_space_manifest_store::DeviceManagementResetJournalV1, ActiveSpaceManifestStore,
+    BlobCipherAdapter, DefaultSpaceAccessAdapter, EncryptedBlobStore, InMemorySession,
 };
 
 struct TargetSessionSubkeyDeriver(InMemorySession);
@@ -81,6 +82,16 @@ pub struct DurableAdmissionSpaceTransition {
     space_access: Arc<DefaultSpaceAccessAdapter>,
     session: Arc<InMemorySession>,
     current_profile: Arc<dyn CurrentProfilePort>,
+    device_reset_source: tokio::sync::Mutex<Option<DeviceResetSource>>,
+}
+
+struct DeviceResetSource {
+    target_space_id: SpaceId,
+    reset_id: [u8; 32],
+    target_generation: [u8; 16],
+    source_space_id: SpaceId,
+    source_session: Arc<InMemorySession>,
+    prepared: PreparedSpaceGeneration,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -158,7 +169,15 @@ impl DurableAdmissionSpaceTransition {
             space_access,
             session,
             current_profile,
+            device_reset_source: tokio::sync::Mutex::new(None),
         }
+    }
+
+    fn device_reset_id(target_space_id: &SpaceId) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"uniclipboard/device-management-reset/v1\0");
+        hasher.update(target_space_id.as_ref().as_bytes());
+        hasher.finalize().into()
     }
 
     fn generation(&self, attempt_id: &[u8; 32], purpose: &[u8]) -> [u8; 16] {
@@ -887,6 +906,269 @@ impl DurableAdmissionSpaceTransition {
 }
 
 #[async_trait]
+impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
+    async fn prepare_device_management_reset(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        let active_manifest = self
+            .manifest_store
+            .load()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        if active_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
+        {
+            return Ok(());
+        }
+        let mut source = self.device_reset_source.lock().await;
+        if source
+            .as_ref()
+            .is_some_and(|source| &source.target_space_id == target_space_id)
+        {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&self.generations.generation_root)
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let required_space =
+            reset_required_free_bytes(&self.source_pool, &self.generations.source_blob_root)?;
+        ensure_reset_capacity(
+            available_space_bytes(&self.generations.generation_root)?,
+            required_space,
+        )?;
+        let source_space_id = self
+            .session
+            .current_space_id()
+            .map_err(|_| AdmissionSpaceTransitionError::Locked)?;
+        let reset_id = Self::device_reset_id(target_space_id);
+        let source_generation = self.generation(&reset_id, b"device-reset-source");
+        let target_generation = self.generation(&reset_id, b"device-reset-target-database");
+        let journal = match self
+            .manifest_store
+            .load_device_reset_journal()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+        {
+            Some(journal)
+                if journal.target_space_id == target_space_id.as_ref()
+                    && journal.target_generation == target_generation =>
+            {
+                journal
+            }
+            Some(_) => return Err(AdmissionSpaceTransitionError::Inconsistent),
+            None => DeviceManagementResetJournalV1 {
+                format_version: 1,
+                target_space_id: target_space_id.as_ref().to_owned(),
+                target_generation,
+                source_space_id: active_manifest
+                    .as_ref()
+                    .map(|manifest| manifest.space_id.clone()),
+                source_generation: active_manifest
+                    .as_ref()
+                    .map(|manifest| manifest.database_generation),
+            },
+        };
+        self.manifest_store
+            .save_device_reset_journal(&journal)
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let reset_source_directory = self
+            .generations
+            .generation_directory(&reset_id, &source_generation);
+        remove_file_if_present(&reset_source_directory.join("source-backup.sqlite"))?;
+        remove_file_if_present(&reset_source_directory.join("source-backup.snapshot.tmp"))?;
+        let prepared = self
+            .generations
+            .prepare_source(reset_id, source_generation)
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        *source = Some(DeviceResetSource {
+            target_space_id: target_space_id.clone(),
+            reset_id,
+            target_generation,
+            source_space_id,
+            source_session: self.session.detached_clone(),
+            prepared,
+        });
+        Ok(())
+    }
+
+    async fn stage_device_management_reset_mutations(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        if self
+            .manifest_store
+            .load()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
+        {
+            return Ok(());
+        }
+        let source = self.device_reset_source.lock().await;
+        let source = source
+            .as_ref()
+            .filter(|source| &source.target_space_id == target_space_id)
+            .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+        verify_existing_snapshot(&source.prepared.backup_path, source.prepared.backup_digest)
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let target_directory = self.generations.generation_directory(
+            target_space_id.as_ref().as_bytes(),
+            &source.target_generation,
+        );
+        std::fs::create_dir_all(&target_directory)
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let working_database = target_directory.join("reset-working.sqlite");
+        remove_sqlite_database_if_present(&working_database)?;
+        let source_bytes = std::fs::read(&source.prepared.backup_path)
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        write_new_file(&working_database, &source_bytes)
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        self.source_pool
+            .replace_database(
+                working_database
+                    .to_str()
+                    .ok_or(AdmissionSpaceTransitionError::Storage)?,
+            )
+            .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)
+    }
+
+    async fn promote_device_management_reset(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        if self
+            .manifest_store
+            .load()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
+        {
+            return Ok(());
+        }
+        let mut source = self.device_reset_source.lock().await;
+        let prepared = source
+            .as_ref()
+            .filter(|source| &source.target_space_id == target_space_id)
+            .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+        if self.session.current_space_id().ok().as_ref() != Some(target_space_id) {
+            return Err(AdmissionSpaceTransitionError::Inconsistent);
+        }
+        let final_source = self
+            .generations
+            .finalize_source(
+                PreparedSpaceGeneration {
+                    backup_path: prepared.prepared.backup_path.clone(),
+                    backup_digest: prepared.prepared.backup_digest,
+                },
+                target_space_id,
+                prepared.target_generation,
+            )
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let target_directory = self.generations.generation_directory(
+            target_space_id.as_ref().as_bytes(),
+            &prepared.target_generation,
+        );
+        remove_file_if_present(&target_directory.join("target.sqlite"))?;
+        remove_directory_if_present(&target_directory.join("blobs"))?;
+        let finalized = self
+            .generations
+            .rewrap_finalized_source(
+                final_source,
+                &prepared.source_space_id,
+                Arc::clone(&prepared.source_session),
+                target_space_id,
+                Arc::clone(&self.session),
+                prepared.target_generation,
+                false,
+            )
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
+        let manifest = ActiveSpaceManifestV2::new(
+            target_space_id.as_ref().to_owned(),
+            self.generation(&prepared.reset_id, b"device-reset-keyslot"),
+            prepared.target_generation,
+            self.generation(&prepared.reset_id, b"device-reset-security"),
+        )
+        .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+        self.manifest_store
+            .promote(&manifest)
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        self.source_pool
+            .replace_database(
+                finalized
+                    .database_path
+                    .to_str()
+                    .ok_or(AdmissionSpaceTransitionError::Storage)?,
+            )
+            .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
+        self.blob_store.replace_root(target_directory.join("blobs"));
+        *source = None;
+        Ok(())
+    }
+
+    async fn finalize_device_management_reset(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        let active_manifest = self
+            .manifest_store
+            .load()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+        if active_manifest.space_id != target_space_id.as_ref() {
+            return Err(AdmissionSpaceTransitionError::Inconsistent);
+        }
+        let Some(journal) = self
+            .manifest_store
+            .load_device_reset_journal()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+        else {
+            return Ok(());
+        };
+        if journal.target_space_id != target_space_id.as_ref()
+            || journal.target_generation != active_manifest.database_generation
+        {
+            return Err(AdmissionSpaceTransitionError::Inconsistent);
+        }
+        if let (Some(source_space_id), Some(source_generation)) =
+            (&journal.source_space_id, journal.source_generation)
+        {
+            let source_directory = self
+                .generations
+                .generation_directory(source_space_id.as_bytes(), &source_generation);
+            let target_directory = self.generations.generation_directory(
+                target_space_id.as_ref().as_bytes(),
+                &journal.target_generation,
+            );
+            if source_directory != target_directory {
+                remove_directory_if_present(&source_directory)?;
+            }
+        }
+        let reset_id = Self::device_reset_id(target_space_id);
+        let reset_source_generation = self.generation(&reset_id, b"device-reset-source");
+        let reset_source_directory = self
+            .generations
+            .generation_directory(&reset_id, &reset_source_generation);
+        remove_directory_if_present(&reset_source_directory)?;
+        let target_directory = self.generations.generation_directory(
+            target_space_id.as_ref().as_bytes(),
+            &journal.target_generation,
+        );
+        remove_file_if_present(&target_directory.join("source-final.sqlite"))?;
+        remove_sqlite_database_if_present(&target_directory.join("reset-working.sqlite"))?;
+        self.manifest_store
+            .clear_device_reset_journal()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)
+    }
+}
+
+#[async_trait]
 impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
     async fn preflight_source_history(
         &self,
@@ -1330,6 +1612,141 @@ fn remove_file_if_present(path: &Path) -> Result<(), AdmissionSpaceTransitionErr
     }
 }
 
+fn remove_sqlite_database_if_present(path: &Path) -> Result<(), AdmissionSpaceTransitionError> {
+    remove_file_if_present(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(AdmissionSpaceTransitionError::Storage)?;
+    for suffix in ["-wal", "-shm"] {
+        remove_file_if_present(&path.with_file_name(format!("{file_name}{suffix}")))?;
+    }
+    Ok(())
+}
+
+fn remove_directory_if_present(path: &Path) -> Result<(), AdmissionSpaceTransitionError> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AdmissionSpaceTransitionError::Storage),
+    }
+}
+
+fn ensure_reset_capacity(
+    available_bytes: u64,
+    required_bytes: u64,
+) -> Result<(), AdmissionSpaceTransitionError> {
+    (available_bytes >= required_bytes)
+        .then_some(())
+        .ok_or(AdmissionSpaceTransitionError::InsufficientStorage)
+}
+
+fn reset_required_free_bytes(
+    source_pool: &DbPool,
+    source_blob_root: &Path,
+) -> Result<u64, AdmissionSpaceTransitionError> {
+    #[derive(diesel::QueryableByName)]
+    struct PageCountRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        page_count: i64,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct PageSizeRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        page_size: i64,
+    }
+
+    let mut connection = source_pool
+        .get()
+        .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+    let page_count = diesel::sql_query("PRAGMA page_count")
+        .get_result::<PageCountRow>(&mut connection)
+        .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+        .page_count;
+    let page_size = diesel::sql_query("PRAGMA page_size")
+        .get_result::<PageSizeRow>(&mut connection)
+        .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+        .page_size;
+    let database_bytes = u64::try_from(page_count)
+        .ok()
+        .and_then(|count| {
+            u64::try_from(page_size)
+                .ok()
+                .map(|size| count.saturating_mul(size))
+        })
+        .ok_or(AdmissionSpaceTransitionError::Storage)?;
+    let blob_bytes = directory_file_bytes(source_blob_root)?;
+
+    Ok(database_bytes
+        .saturating_mul(5)
+        .saturating_add(blob_bytes.saturating_mul(2))
+        .saturating_add(64 * 1024 * 1024))
+}
+
+fn directory_file_bytes(path: &Path) -> Result<u64, AdmissionSpaceTransitionError> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err(AdmissionSpaceTransitionError::Storage),
+    };
+    let mut total = 0_u64;
+    for entry in entries {
+        let entry = entry.map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let file_type = entry
+            .file_type()
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        if file_type.is_dir() {
+            total = total.saturating_add(directory_file_bytes(&entry.path())?);
+        } else if file_type.is_file() {
+            total = total.saturating_add(
+                entry
+                    .metadata()
+                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+                    .len(),
+            );
+        } else {
+            return Err(AdmissionSpaceTransitionError::Storage);
+        }
+    }
+    Ok(total)
+}
+
+#[cfg(unix)]
+fn available_space_bytes(path: &Path) -> Result<u64, AdmissionSpaceTransitionError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(AdmissionSpaceTransitionError::Storage);
+    }
+    let stats = unsafe { stats.assume_init() };
+    Ok(u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize)))
+}
+
+#[cfg(windows)]
+fn available_space_bytes(path: &Path) -> Result<u64, AdmissionSpaceTransitionError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    let mut available = 0_u64;
+    let result = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (result != 0)
+        .then_some(available)
+        .ok_or(AdmissionSpaceTransitionError::Storage)
+}
+
 fn copy_directory_contents(
     source: &Path,
     destination: &Path,
@@ -1410,10 +1827,16 @@ impl SqliteSpaceGenerationStore {
         let directory = self.generation_directory(&attempt_id, &source_generation);
         std::fs::create_dir_all(&directory)
             .map_err(|_| "create generation directory".to_owned())?;
+        let backup_path = directory.join("source-backup.sqlite");
+        if let Ok(bytes) = std::fs::read(&backup_path) {
+            return Ok(PreparedSpaceGeneration {
+                backup_path,
+                backup_digest: digest(&bytes),
+            });
+        }
         let scratch = directory.join("source-backup.snapshot.tmp");
         let bytes = db_snapshot::snapshot_to_bytes(&self.source_pool, &scratch)
             .map_err(|_| "snapshot source generation".to_owned())?;
-        let backup_path = directory.join("source-backup.sqlite");
         write_new_file(&backup_path, &bytes)?;
         Ok(PreparedSpaceGeneration {
             backup_path,
@@ -1459,6 +1882,8 @@ impl SqliteSpaceGenerationStore {
         let source_bytes = db_snapshot::snapshot_to_bytes(&self.source_pool, &scratch)
             .map_err(|_| "snapshot final source generation".to_owned())?;
         let database_path = directory.join("source-final.sqlite");
+        remove_file_if_present(&database_path)
+            .map_err(|_| "remove stale final source".to_owned())?;
         write_new_file(&database_path, &source_bytes)?;
         Ok(FinalSourceGeneration {
             database_path,
@@ -2285,12 +2710,13 @@ mod tests {
     use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
     use uc_core::membership::{
         AdmissionAttemptId, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
-        AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, AdmissionSpaceTransitionPort,
-        AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionResultV2,
-        AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionV2,
-        BaseMembershipHistoryPositionV1, ContentKeyPurpose, CrossSpaceTransitionPhaseV2,
-        MembershipCredential, PendingGroupUpdate, RevocationRepositoryPort,
-        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+        AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, AdmissionSpaceTransitionError,
+        AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
+        AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionStepV2,
+        AdmissionSpaceTransitionV2, BaseMembershipHistoryPositionV1, ContentKeyPurpose,
+        CrossSpaceTransitionPhaseV2, DeviceManagementResetDataPort, MembershipCredential,
+        PendingGroupUpdate, RevocationRepositoryPort, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+        ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::ports::security::current_profile::CurrentProfilePort;
     use uc_core::ports::security::BlobCipherPort;
@@ -2321,7 +2747,18 @@ mod tests {
         MasterKey,
     };
 
-    use super::{DurableAdmissionSpaceTransition, SqliteSpaceGenerationStore};
+    use super::{
+        ensure_reset_capacity, DurableAdmissionSpaceTransition, SqliteSpaceGenerationStore,
+    };
+
+    #[test]
+    fn reset_capacity_fails_closed_before_writes_when_space_is_insufficient() {
+        assert_eq!(
+            ensure_reset_capacity(99, 100),
+            Err(AdmissionSpaceTransitionError::InsufficientStorage)
+        );
+        assert_eq!(ensure_reset_capacity(100, 100), Ok(()));
+    }
 
     #[derive(Default)]
     struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);
@@ -2469,6 +2906,127 @@ mod tests {
         .bind::<diesel::sql_types::Binary, _>(ciphertext)
         .execute(connection)
         .unwrap();
+    }
+
+    #[derive(diesel::QueryableByName)]
+    struct EventIdRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        event_id: String,
+    }
+
+    #[tokio::test]
+    async fn device_management_reset_stages_mutations_without_touching_active_database() {
+        let directory = tempdir().unwrap();
+        let source_path = directory.path().join("source.sqlite");
+        let source_blob_root = directory.path().join("source-blobs");
+        let generation_root = directory.path().join("space-generations");
+        let vault = directory.path().join("vault");
+        let pool = init_db_pool(source_path.to_str().unwrap()).unwrap();
+        diesel::sql_query(
+            "INSERT INTO clipboard_event \
+             (event_id, captured_at_ms, source_device, snapshot_hash) \
+             VALUES ('active-event', 1, 'old-peer', 'active-snapshot')",
+        )
+        .execute(&mut pool.get().unwrap())
+        .unwrap();
+
+        let secure_storage: Arc<dyn SecureStoragePort> = Arc::new(MemorySecureStorage::default());
+        let session = Arc::new(InMemorySession::new());
+        let key_material = Arc::new(KeyMaterialStore::new(
+            Arc::clone(&secure_storage),
+            Arc::new(JsonKeySlotStore::new(vault.clone())),
+        ));
+        let key_epoch_repository: Arc<dyn RevocationRepositoryPort> =
+            Arc::new(DieselSpaceSecurityStore::new(
+                Arc::new(DieselSqliteExecutor::new(pool.clone())),
+                session.as_ref().clone(),
+            ));
+        let access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
+            key_material,
+            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&session),
+            key_epoch_repository,
+        ));
+        SpaceAccessStore::initialize(
+            access.as_ref(),
+            &SpaceId::from_str("old-space"),
+            &Passphrase::new("source passphrase"),
+        )
+        .await
+        .unwrap();
+        let manifest_store = Arc::new(ActiveSpaceManifestStore::new(
+            vault,
+            Arc::new(AdmissionKeyManager::new(
+                Arc::clone(&secure_storage),
+                [0x41; 16],
+            )),
+        ));
+        let transitioner = DurableAdmissionSpaceTransition::new(
+            pool.clone(),
+            source_blob_root.clone(),
+            generation_root.clone(),
+            b"default".to_vec(),
+            Arc::new(SwitchableFilesystemBlobStore::new(source_blob_root.clone())),
+            Arc::clone(&manifest_store),
+            Arc::clone(&access),
+            Arc::clone(&session),
+            Arc::new(DefaultCurrentProfile::new()),
+        );
+        let target = SpaceId::from_str("reset-target");
+
+        transitioner
+            .prepare_device_management_reset(&target)
+            .await
+            .unwrap();
+        transitioner
+            .stage_device_management_reset_mutations(&target)
+            .await
+            .unwrap();
+        diesel::sql_query("DELETE FROM clipboard_event WHERE event_id = 'active-event'")
+            .execute(&mut pool.get().unwrap())
+            .unwrap();
+
+        let reopened = init_db_pool(source_path.to_str().unwrap()).unwrap();
+        let event = diesel::sql_query(
+            "SELECT event_id FROM clipboard_event WHERE event_id = 'active-event'",
+        )
+        .get_result::<EventIdRow>(&mut reopened.get().unwrap())
+        .unwrap();
+        assert_eq!(event.event_id, "active-event");
+
+        drop(transitioner);
+        diesel::sql_query(
+            "INSERT INTO clipboard_event \
+             (event_id, captured_at_ms, source_device, snapshot_hash) \
+             VALUES ('post-failure-event', 2, 'old-peer', 'post-failure-snapshot')",
+        )
+        .execute(&mut reopened.get().unwrap())
+        .unwrap();
+        let retried = DurableAdmissionSpaceTransition::new(
+            reopened.clone(),
+            source_blob_root.clone(),
+            generation_root,
+            b"default".to_vec(),
+            Arc::new(SwitchableFilesystemBlobStore::new(source_blob_root)),
+            manifest_store,
+            access,
+            session,
+            Arc::new(DefaultCurrentProfile::new()),
+        );
+        retried
+            .prepare_device_management_reset(&target)
+            .await
+            .unwrap();
+        retried
+            .stage_device_management_reset_mutations(&target)
+            .await
+            .unwrap();
+        let new_event = diesel::sql_query(
+            "SELECT event_id FROM clipboard_event WHERE event_id = 'post-failure-event'",
+        )
+        .get_result::<EventIdRow>(&mut reopened.get().unwrap())
+        .unwrap();
+        assert_eq!(new_event.event_id, "post-failure-event");
     }
 
     #[tokio::test]

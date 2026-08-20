@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::{operation_error_with_code, ProductionRuntime, ProductionSession, SessionFactory};
-use crate::EngineError;
+use crate::{EngineError, OperationResult};
 
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
 
@@ -107,6 +107,61 @@ impl SessionSupervisor {
             .await
             .map_err(|error| operation_error_with_code(1103, "recover space transition", error))?;
         self.install_new_session(true).await
+    }
+
+    pub(super) async fn reset_space(
+        &self,
+        current_operation: SessionOperationLease,
+    ) -> Result<OperationResult, EngineError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.operations
+            .close_and_wait(Some(current_operation))
+            .await?;
+        let session = self
+            .session
+            .lock()
+            .await
+            .take()
+            .ok_or_else(super::operation_unavailable_error)?;
+        let facade = Arc::clone(&session.facade);
+        session
+            .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+            .await;
+        let transfer_result = self
+            .file_transfer
+            .cancel_active_sessions(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
+            .await
+            .map_err(|error| {
+                operation_error_with_code(1104, "cancel active file transfers", error)
+            });
+        if let Err(error) = transfer_result {
+            return match self.install_new_session(false).await {
+                Ok(()) => Err(error),
+                Err(install_error) => Err(install_error),
+            };
+        }
+
+        let result = crate::operations::space::reset_space::execute_reset_space(&facade).await;
+        let install_result = self.install_new_session(result.is_ok()).await;
+        match (result, install_result) {
+            (Ok(result), Ok(())) => Ok(result),
+            (Err(error), Ok(())) => {
+                let facade = self
+                    .session
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|session| Arc::clone(&session.facade))
+                    .ok_or_else(super::operation_unavailable_error)?;
+                match facade.has_committed_device_management_reset().await {
+                    Ok(true) => {
+                        crate::operations::space::reset_space::execute_reset_space(&facade).await
+                    }
+                    Ok(false) | Err(_) => Err(error),
+                }
+            }
+            (_, Err(error)) => Err(error),
+        }
     }
 
     pub(super) async fn suspend(&self) -> Result<(), EngineError> {

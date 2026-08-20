@@ -327,6 +327,12 @@ impl AppFacade {
         self.space.reset().await
     }
 
+    pub async fn has_committed_device_management_reset(
+        &self,
+    ) -> Result<bool, crate::facade::ResetSpaceError> {
+        self.space.has_committed_device_management_reset().await
+    }
+
     /// 尝试静默恢复空间会话。
     pub async fn try_resume_session(&self) -> Result<bool, TryResumeSessionError> {
         self.space.try_resume_session().await

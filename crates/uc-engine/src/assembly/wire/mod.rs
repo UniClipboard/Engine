@@ -316,7 +316,7 @@ pub fn wire_dependencies_from_inputs(
             Arc::clone(&infra.db_executor),
             admission_keys.as_ref().clone(),
         ));
-    let admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort> =
+    let durable_space_transition =
         Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(
             db_pool_for_space_transition,
             source_blob_root,
@@ -328,6 +328,10 @@ pub fn wire_dependencies_from_inputs(
             Arc::clone(&platform.session),
             Arc::clone(&platform.current_profile),
         ));
+    let admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort> =
+        durable_space_transition.clone();
+    let device_management_reset_data: Arc<dyn uc_core::membership::DeviceManagementResetDataPort> =
+        durable_space_transition;
     let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
 
     let relationship_store = Arc::new(EncryptedRelationshipStore::new(
@@ -737,6 +741,7 @@ pub fn wire_dependencies_from_inputs(
             workspace_convergence_repository,
             admission_attempt_repository,
             admission_space_transition,
+            device_management_reset_data,
             legacy_migration_recovery,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             iroh_blob_store_dir: iroh_blob_store_dir_for_wiring,

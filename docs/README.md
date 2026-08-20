@@ -49,3 +49,4 @@
 - [ADR-021：成员收敛的内部职责边界](adr/021-workspace-convergence-internal-boundaries.md)
 - [ADR-022：用户明确加入创建新尝试并安全取代旧尝试](adr/022-user-initiated-join-supersession.md)
 - [ADR-023：旧资料独立化与重新配对](adr/023-legacy-profile-isolation-and-re-pairing.md)
+- [ADR-024：将 ResetSpace 定义为设备管理重置](adr/024-reset-space-as-device-management-reset.md)

@@ -10,6 +10,9 @@
   `docs/specs/025-user-initiated-join-supersession.md`、
   `docs/architecture/architecture-bible.md`
 
+> **后续修订**：ADR-024 已取代本文关于 `ResetSpace` 只在准入静止时执行轻量清理的规则。
+> 用户明确加入的取代规则不变；`ResetSpace` 现为清除全部旧设备关系的设备管理重置。
+
 ## 背景
 
 当前 `JoinSpace` 在发送网络请求前查找本机未结束加入。只要找到记录，就把本次输入当作同一加入的恢复，

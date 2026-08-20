@@ -16,6 +16,9 @@
   `docs/specs/025-user-initiated-join-supersession.md`、
   `docs/architecture/architecture-bible.md`
 
+> **后续修订**：ADR-024 已取代本文关于普通 `ResetSpace` 的静止门禁、投影水位推进和轻量清理规则。
+> 本文其余准入、防重放、加入取代和 `FactoryResetSpace` 规则继续有效。
+
 本文是以下两项行为的唯一实现与验收依据：
 
 1. 成员被移除后，其过去合法签署的成员历史如何继续被新设备验证；

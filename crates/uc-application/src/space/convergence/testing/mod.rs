@@ -321,6 +321,21 @@ struct LockedAdmissionRepository {
 
 #[async_trait]
 impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepository {
+    async fn reset_for_device_management(
+        &self,
+    ) -> Result<
+        uc_core::membership::AdmissionProfileMetadataV1,
+        uc_core::membership::AdmissionAttemptRepositoryError,
+    > {
+        if self.allow_empty_history_reads {
+            Ok(uc_core::membership::AdmissionProfileMetadataV1::fresh(
+                [0; 16],
+            ))
+        } else {
+            Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        }
+    }
+
     async fn create(
         &self,
         _attempt: &uc_core::membership::AdmissionAttemptV1,
