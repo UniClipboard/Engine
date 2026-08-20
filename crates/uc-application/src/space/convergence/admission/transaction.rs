@@ -243,25 +243,6 @@ impl DurableAdmissionProjection {
             .await?
             .ok_or(WorkspaceConvergenceError::JoinNotFound)
     }
-
-    pub(crate) async fn reset_join_projection_if_quiet(
-        &self,
-    ) -> Result<uc_core::membership::AdmissionProfileMetadataV1, WorkspaceConvergenceError> {
-        let metadata = self
-            .repository
-            .profile_metadata()
-            .await
-            .map_err(map_repository_error)?;
-        self.repository
-            .advance_projection_floor(metadata.device_trust_revision)
-            .await
-            .map_err(|error| match error {
-                AdmissionAttemptRepositoryError::VersionConflict => {
-                    WorkspaceConvergenceError::Unavailable
-                }
-                other => map_repository_error(other),
-            })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2649,14 +2630,6 @@ impl DurableAdmissionTransaction {
     ) -> Result<CurrentJoinStatus, WorkspaceConvergenceError> {
         DurableAdmissionProjection::new(Arc::clone(&self.repository))
             .cancel_local_join(join_id)
-            .await
-    }
-
-    pub(crate) async fn reset_join_projection_if_quiet(
-        &self,
-    ) -> Result<uc_core::membership::AdmissionProfileMetadataV1, WorkspaceConvergenceError> {
-        DurableAdmissionProjection::new(Arc::clone(&self.repository))
-            .reset_join_projection_if_quiet()
             .await
     }
 

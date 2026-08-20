@@ -106,6 +106,13 @@ impl InMemorySession {
         }
     }
 
+    pub(crate) fn detached_clone(&self) -> Arc<Self> {
+        Arc::new(Self {
+            state: Arc::new(Mutex::new(self.lock_state().clone())),
+            ready: Arc::new(Notify::new()),
+        })
+    }
+
     pub async fn wait_until_ready(&self) {
         loop {
             let notified = self.ready.notified();

@@ -396,6 +396,17 @@ impl WorkspaceConvergence {
         self.admission.current_local_join().await
     }
 
+    pub(crate) async fn reset_admission_for_device_management(
+        &self,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        self.deps
+            .admission_attempts
+            .reset_for_device_management()
+            .await
+            .map_err(admission::map_repository_error)?;
+        Ok(())
+    }
+
     fn admission_generation(state: &WorkspaceConvergenceState) -> u64 {
         state
             .membership_reconciliation

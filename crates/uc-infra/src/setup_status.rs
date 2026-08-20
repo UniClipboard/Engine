@@ -14,7 +14,8 @@ use uc_core::setup::SetupStatus;
 use crate::security::ActiveSpaceManifestStore;
 
 pub const DEFAULT_SETUP_STATUS_FILE: &str = ".setup_status";
-const LEGACY_ISOLATION_TARGET_SUFFIX: &str = ".legacy_isolation_target";
+// Keep the existing filename so an interrupted legacy isolation remains resumable.
+const DEVICE_MANAGEMENT_RESET_TARGET_SUFFIX: &str = ".legacy_isolation_target";
 
 pub struct FileSetupStatusRepository {
     status_file_path: PathBuf,
@@ -49,19 +50,23 @@ impl SetupStatusPort for ManifestProjectingSetupStatusRepository {
         self.legacy.set_status(status).await
     }
 
-    async fn get_legacy_isolation_target(&self) -> anyhow::Result<Option<uc_core::ids::SpaceId>> {
-        self.legacy.get_legacy_isolation_target().await
+    async fn get_device_management_reset_target(
+        &self,
+    ) -> anyhow::Result<Option<uc_core::ids::SpaceId>> {
+        self.legacy.get_device_management_reset_target().await
     }
 
-    async fn set_legacy_isolation_target(
+    async fn set_device_management_reset_target(
         &self,
         space_id: &uc_core::ids::SpaceId,
     ) -> anyhow::Result<()> {
-        self.legacy.set_legacy_isolation_target(space_id).await
+        self.legacy
+            .set_device_management_reset_target(space_id)
+            .await
     }
 
-    async fn clear_legacy_isolation_target(&self) -> anyhow::Result<()> {
-        self.legacy.clear_legacy_isolation_target().await
+    async fn clear_device_management_reset_target(&self) -> anyhow::Result<()> {
+        self.legacy.clear_device_management_reset_target().await
     }
 }
 
@@ -92,9 +97,9 @@ impl FileSetupStatusRepository {
         Ok(())
     }
 
-    fn legacy_isolation_target_path(&self) -> PathBuf {
+    fn device_management_reset_target_path(&self) -> PathBuf {
         self.status_file_path
-            .with_extension(LEGACY_ISOLATION_TARGET_SUFFIX)
+            .with_extension(DEVICE_MANAGEMENT_RESET_TARGET_SUFFIX)
     }
 }
 
@@ -139,8 +144,10 @@ impl SetupStatusPort for FileSetupStatusRepository {
         Ok(())
     }
 
-    async fn get_legacy_isolation_target(&self) -> anyhow::Result<Option<uc_core::ids::SpaceId>> {
-        let path = self.legacy_isolation_target_path();
+    async fn get_device_management_reset_target(
+        &self,
+    ) -> anyhow::Result<Option<uc_core::ids::SpaceId>> {
+        let path = self.device_management_reset_target_path();
         match fs::read_to_string(path).await {
             Ok(value) => Ok(Some(uc_core::ids::SpaceId::from_str(value.trim()))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -148,19 +155,19 @@ impl SetupStatusPort for FileSetupStatusRepository {
         }
     }
 
-    async fn set_legacy_isolation_target(
+    async fn set_device_management_reset_target(
         &self,
         space_id: &uc_core::ids::SpaceId,
     ) -> anyhow::Result<()> {
         self.ensure_parent_dir().await?;
-        let mut file = fs::File::create(self.legacy_isolation_target_path()).await?;
+        let mut file = fs::File::create(self.device_management_reset_target_path()).await?;
         file.write_all(space_id.as_str().as_bytes()).await?;
         file.sync_all().await?;
         Ok(())
     }
 
-    async fn clear_legacy_isolation_target(&self) -> anyhow::Result<()> {
-        match fs::remove_file(self.legacy_isolation_target_path()).await {
+    async fn clear_device_management_reset_target(&self) -> anyhow::Result<()> {
+        match fs::remove_file(self.device_management_reset_target_path()).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
@@ -254,21 +261,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_isolation_target_survives_repository_recreation() {
+    async fn device_management_reset_target_survives_repository_recreation() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("setup.json");
         let target = uc_core::ids::SpaceId::from_str("stable-isolation-target");
         FileSetupStatusRepository::new(path.clone())
-            .set_legacy_isolation_target(&target)
+            .set_device_management_reset_target(&target)
             .await
             .unwrap();
 
         let reopened = FileSetupStatusRepository::new(path);
         assert_eq!(
-            reopened.get_legacy_isolation_target().await.unwrap(),
+            reopened.get_device_management_reset_target().await.unwrap(),
             Some(target)
         );
-        reopened.clear_legacy_isolation_target().await.unwrap();
-        assert_eq!(reopened.get_legacy_isolation_target().await.unwrap(), None);
+        reopened
+            .clear_device_management_reset_target()
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.get_device_management_reset_target().await.unwrap(),
+            None
+        );
     }
 }

@@ -267,6 +267,14 @@ pub enum LocalJoinStartMutationV1 {
 
 #[async_trait]
 pub trait AdmissionAttemptRepositoryPort: Send + Sync {
+    async fn reset_for_device_management(
+        &self,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        Err(AdmissionAttemptRepositoryError::Repository(
+            "device management reset storage is unavailable".to_owned(),
+        ))
+    }
+
     async fn commit_local_join_start(
         &self,
         _mutation: LocalJoinStartMutationV1,
@@ -780,6 +788,19 @@ pub trait SpaceSecurityStateResetPort: Send + Sync {
         &self,
         active_space_id: &SpaceId,
     ) -> Result<(), SpaceSecurityStateResetError>;
+}
+
+#[async_trait]
+pub trait DeviceManagementResetDataPort: Send + Sync {
+    async fn prepare_device_management_reset(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError>;
+
+    async fn promote_device_management_reset(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError>;
 }
 
 #[async_trait]

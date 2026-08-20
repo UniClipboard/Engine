@@ -92,6 +92,7 @@ pub struct SyncEngineDeps {
     /// Profile-scoped encrypted persistence for durable admission attempts.
     pub admission_attempt_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
     pub admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort>,
+    pub device_management_reset_data: Arc<dyn uc_core::membership::DeviceManagementResetDataPort>,
     pub legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort>,
     /// plaintext-hash → ciphertext-digest dedupe cache (Slice 3 Phase 1).
     pub blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,

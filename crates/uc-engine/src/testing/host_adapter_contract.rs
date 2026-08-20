@@ -781,6 +781,139 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn reset_space_rebuilds_device_management_state_and_preserves_local_history() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let secure_storage = MemoryHostSecureStorage::default();
+    let config = EngineConfig::new("1.2.3");
+    let (engine, _events) = Engine::start(
+        config.clone(),
+        persistent_engine_host(temp.path(), secure_storage.clone()),
+    )
+    .await
+    .unwrap();
+    let created_space = match engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Reset Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap()
+    {
+        crate::OperationResult::SpaceCreated { space_id, .. } => space_id,
+        other => panic!("expected created space, got {other:?}"),
+    };
+    let sent_entry_id = match engine
+        .execute(crate::Operation::SendText(crate::SendTextInput {
+            text: "history survives reset".into(),
+            target_devices: Vec::new(),
+        }))
+        .await
+        .unwrap()
+    {
+        crate::OperationResult::EntrySent(report) => report.entry_id,
+        other => panic!("expected sent entry, got {other:?}"),
+    };
+    engine
+        .execute(crate::Operation::IssueInvitation)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        engine.execute(crate::Operation::ResetSpace).await.unwrap(),
+        crate::OperationResult::SpaceReset
+    );
+
+    let setup = engine
+        .execute(crate::Operation::QuerySetupState)
+        .await
+        .unwrap();
+    assert!(matches!(
+        setup,
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            has_completed: true,
+            re_pairing_required: true,
+            current_invitation: None,
+            ref space_id,
+            ..
+        }) if space_id.as_deref().is_some_and(|space_id| space_id != created_space)
+    ));
+    let devices = engine.execute(crate::Operation::ListDevices).await.unwrap();
+    assert!(matches!(
+        devices,
+        crate::OperationResult::Devices(ref devices)
+            if devices.len() == 1 && devices[0].is_local
+    ));
+    let history = engine
+        .execute(crate::Operation::ListHistoryEntries(
+            crate::ListHistoryEntriesInput {
+                limit: 10,
+                offset: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        history,
+        crate::OperationResult::HistoryEntries(ref entries)
+            if entries.iter().any(|entry| entry.entry_id == sent_entry_id)
+    ));
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::IssueInvitation)
+            .await
+            .unwrap(),
+        crate::OperationResult::InvitationIssued { .. }
+    ));
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+
+    let (restarted, _events) =
+        Engine::start(config, persistent_engine_host(temp.path(), secure_storage))
+            .await
+            .unwrap();
+    restarted
+        .execute(crate::Operation::RecoverSession(
+            crate::RecoverSessionInput {
+                allow_secure_storage_unlock: true,
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        restarted
+            .execute(crate::Operation::QuerySetupState)
+            .await
+            .unwrap(),
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            has_completed: true,
+            re_pairing_required: true,
+            ..
+        })
+    ));
+    assert!(matches!(
+        restarted
+            .execute(crate::Operation::ListHistoryEntries(
+                crate::ListHistoryEntriesInput {
+                    limit: 10,
+                    offset: 0,
+                },
+            ))
+            .await
+            .unwrap(),
+        crate::OperationResult::HistoryEntries(ref entries)
+            if entries.iter().any(|entry| entry.entry_id == sent_entry_id)
+    ));
+    restarted
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
 struct FailingHostSecureStorage {
     category: crate::HostCapabilityErrorCategory,
 }

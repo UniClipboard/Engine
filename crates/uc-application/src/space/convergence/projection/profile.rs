@@ -119,12 +119,6 @@ impl ProfileWorkspaceConvergence {
         Ok(result)
     }
 
-    pub async fn prepare_reset_space(&self) -> Result<(), WorkspaceConvergenceError> {
-        let metadata = self.admission.reset_join_projection_if_quiet().await?;
-        let _ = self.events.send(metadata.device_trust_revision);
-        Ok(())
-    }
-
     pub async fn query_device_trust(
         &self,
     ) -> Result<DeviceTrustSnapshot, WorkspaceConvergenceError> {

@@ -260,8 +260,8 @@ Candidate、Prepared、Commit、Applied、Complete 五步网络交换均已接�
 激活或跨 Space 前向切换后，从保存的邀请方地址重开受限准入通道并发送同一 CompleteAck；发送失败不回滚
 Active，下次启动继续发送。邀请方收到重复回执或已经压缩终态时均幂等成功。
 
-profile 级 `WorkspaceConvergence` 已随 Engine 常驻，即使没有活动 Space 也负责加入终态、取消、普通重置
-门禁和跨 Space revision/ordinal；活动 Space 上下文仍以完整对象装入或移除。当前仓储
+profile 级 `WorkspaceConvergence` 已随 Engine 常驻，即使没有活动 Space 也负责加入终态、取消和跨 Space
+revision/ordinal；活动 Space 上下文仍以完整对象装入或移除。当前仓储
 已经保证 profile 内单调编号、单调版本、防重放索引和唯一未收束准入槽；应用层可以投影当前本机加入与当前
 Space 唯一入站候选，正式设备信任快照也读取这些投影。活动
 `AppFacade` 仍不允许半构造，`uc-engine` 只组装并路由。profile 同时只允许一个被占用的准入槽，不区分
@@ -324,9 +324,10 @@ MasterKey 和内容密文，只提升已验证状态；Cross-Space 排空来源�
 联系邀请方。用户确认后，同一选择随尝试和切换阶段加密保存；不可读密文保留原字节并隔离，最终结果返回
 保留数量，其余可读数据才重封装到目标 Space。
 
-现有 ResetSpace 和 FactoryResetSpace 也先经过 profile 级负责人。普通 ResetSpace 不是取消：仍有未完成
-尝试、任一待确认发送、写前恢复、切换、终态重封装或清理时零副作用冲突；静止时只清现有设置和未消费
-邀请，并通过加密投影水位隐藏旧加入结果，终态、防重放、单调编号、永久激活回执和 profile key 均保留。
+ResetSpace 已按 ADR-024 实现为用户明确触发的设备管理重置。Engine 先排空并停止旧空间运行，再由应用层
+唯一负责人保存目标、清除全部准入和设备关系、建立单设备成员与安全状态、重封装本机可读历史和文件、提升
+目标数据世代并保存重新配对状态。它不等待网络；中断、重启和重复调用继续同一目标。对外操作名称、输入和
+成功结果不变，本机一般设置、设备身份、解锁材料和资料保留。旧设备不会被远程清空，也不能重新取得新空间资格。
 FactoryResetSpace 是唯一强制
 本机销毁边界：先锁 profile、停运行并保存无标识 intent，按固定命名空间清除并确认全部活动/暂存/profile
 密钥不存在，再从固定 profile 根清设置、关系、准入密文、邀请、搜索文件及受管 cache/blob 实际文件。
@@ -790,7 +791,7 @@ Blob 拉取和移动流式上传都持有或复用同一个会话，不再分别
 活动 Space 生产运行期只接收完整构造的 `AppFacade`。唯一装配点必须一次提供空间、成员、接收、搜索、恢复、剪贴板同步、出站和 Blob 能力；不得使用默认值补空，也不得在运行中继续安装能力。恢复和重启重新执行同一完整装配。
 
 另有一个职责明确的 profile 级 `WorkspaceConvergence` 运行期：它在无 Space 时也常驻，负责加入、取消、
-终态投影、普通重置门禁和恢复，并持有零或一个完整 `AppFacade` 上下文；它不是缺能力的空 facade，
+终态投影和恢复，并持有零或一个完整 `AppFacade` 上下文；它不是缺能力的空 facade，
 也不对外暴露活动 Space 的半成品。活动 Space 提升只能由同一准入事务一次替换完整上下文。
 
 `AppFacade` 的内部对象全部私有。引擎只能调用面向用户动作的顶层方法，不能读取子对象后自行选择步骤或路线。局域网移动同步由运行会话单独持有，不在应用总入口保留永远不会装入的槽位。
@@ -942,6 +943,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 ## 文档维护记录
 
 - 2026-08-20：单条历史记录的发送视图改用当前成员范围与历史可信关系的交集；历史关系和旧发送事实继续保留，当前范围不可用时查询失败。该修改补齐既有当前成员范围规则，不改变分层或所有权。
+
+- 2026-08-20：实施 ADR-024。`ResetSpace` 现为用户明确触发的设备管理重置：先停止旧空间运行，再保留本机历史、文件、一般设置、身份和解锁能力，原子清除准入记录与全部旧设备关系，重封装资料并建立只含本机的新空间。目标在开始前保存，中断、重启和重复调用继续同一次重置；成功后恢复新空间运行并持久提示全部设备重新配对。公开名称、输入和成功结果不变，远端设备不被远程清空；实体设备与产品确认界面仍需在各产品仓验收。
 
 - 2026-08-20：全新安装首次启动确认没有既有设置后立即保存当前应用版本，避免完成设置后的第二次启动因版本游标仍为空而被误判为旧资料升级。既有资料缺少版本游标时仍进入旧资料独立化，并且只有独立化完整成功后才推进版本游标，失败时保留重试能力。不改变对外接口或持久化格式。
 
@@ -1264,6 +1267,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/adr/021-workspace-convergence-internal-boundaries.md`：成员收敛保持唯一负责人时的内部职责边界和整理规则。
 - `docs/adr/022-user-initiated-join-supersession.md`：用户明确加入、后台恢复和旧加入安全取代规则。
 - `docs/adr/023-legacy-profile-isolation-and-re-pairing.md`：旧资料升级后本机独立化和全部重新配对规则。
+- `docs/adr/024-reset-space-as-device-management-reset.md`：用户明确重置全部设备关系并建立单设备空间的决策。
 - `docs/specs/015-offline-first-member-removal.md`：已由 ADR-020 取代的成员移除说明记录。
 - `docs/specs/016-workspace-wide-convergence.md`：已由 ADR-020 取代的工作空间收敛说明记录。
 - `docs/specs/021-device-trust-reconciliation-product-contract.md`：设备信任完整查询、决定和产品动作边界。

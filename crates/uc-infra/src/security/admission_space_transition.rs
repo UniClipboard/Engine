@@ -9,6 +9,7 @@ use uc_core::blob::ports::BlobReaderPort;
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
 use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
+use uc_core::membership::DeviceManagementResetDataPort;
 use uc_core::membership::{
     ActiveSpaceManifestV2, AdmissionContentKeyCatalogV1, AdmissionSpaceTransitionError,
     AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
@@ -81,6 +82,16 @@ pub struct DurableAdmissionSpaceTransition {
     space_access: Arc<DefaultSpaceAccessAdapter>,
     session: Arc<InMemorySession>,
     current_profile: Arc<dyn CurrentProfilePort>,
+    device_reset_source: tokio::sync::Mutex<Option<DeviceResetSource>>,
+}
+
+struct DeviceResetSource {
+    target_space_id: SpaceId,
+    reset_id: [u8; 32],
+    target_generation: [u8; 16],
+    source_space_id: SpaceId,
+    source_session: Arc<InMemorySession>,
+    prepared: PreparedSpaceGeneration,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -158,7 +169,15 @@ impl DurableAdmissionSpaceTransition {
             space_access,
             session,
             current_profile,
+            device_reset_source: tokio::sync::Mutex::new(None),
         }
+    }
+
+    fn device_reset_id(target_space_id: &SpaceId) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"uniclipboard/device-management-reset/v1\0");
+        hasher.update(target_space_id.as_ref().as_bytes());
+        hasher.finalize().into()
     }
 
     fn generation(&self, attempt_id: &[u8; 32], purpose: &[u8]) -> [u8; 16] {
@@ -887,6 +906,128 @@ impl DurableAdmissionSpaceTransition {
 }
 
 #[async_trait]
+impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
+    async fn prepare_device_management_reset(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        if self
+            .manifest_store
+            .load()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
+        {
+            return Ok(());
+        }
+        let mut source = self.device_reset_source.lock().await;
+        if source
+            .as_ref()
+            .is_some_and(|source| &source.target_space_id == target_space_id)
+        {
+            return Ok(());
+        }
+        let source_space_id = self
+            .session
+            .current_space_id()
+            .map_err(|_| AdmissionSpaceTransitionError::Locked)?;
+        let reset_id = Self::device_reset_id(target_space_id);
+        let source_generation = self.generation(&reset_id, b"device-reset-source");
+        let target_generation = self.generation(&reset_id, b"device-reset-target-database");
+        let prepared = self
+            .generations
+            .prepare_source(reset_id, source_generation)
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        *source = Some(DeviceResetSource {
+            target_space_id: target_space_id.clone(),
+            reset_id,
+            target_generation,
+            source_space_id,
+            source_session: self.session.detached_clone(),
+            prepared,
+        });
+        Ok(())
+    }
+
+    async fn promote_device_management_reset(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        if self
+            .manifest_store
+            .load()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
+        {
+            return Ok(());
+        }
+        let mut source = self.device_reset_source.lock().await;
+        let prepared = source
+            .as_ref()
+            .filter(|source| &source.target_space_id == target_space_id)
+            .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+        if self.session.current_space_id().ok().as_ref() != Some(target_space_id) {
+            return Err(AdmissionSpaceTransitionError::Inconsistent);
+        }
+        let final_source = self
+            .generations
+            .finalize_source(
+                PreparedSpaceGeneration {
+                    backup_path: prepared.prepared.backup_path.clone(),
+                    backup_digest: prepared.prepared.backup_digest,
+                },
+                target_space_id,
+                prepared.target_generation,
+            )
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let target_directory = self.generations.generation_directory(
+            target_space_id.as_ref().as_bytes(),
+            &prepared.target_generation,
+        );
+        remove_file_if_present(&target_directory.join("target.sqlite"))?;
+        remove_directory_if_present(&target_directory.join("blobs"))?;
+        let finalized = self
+            .generations
+            .rewrap_finalized_source(
+                final_source,
+                &prepared.source_space_id,
+                Arc::clone(&prepared.source_session),
+                target_space_id,
+                Arc::clone(&self.session),
+                prepared.target_generation,
+                false,
+            )
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
+        let manifest = ActiveSpaceManifestV2::new(
+            target_space_id.as_ref().to_owned(),
+            self.generation(&prepared.reset_id, b"device-reset-keyslot"),
+            prepared.target_generation,
+            self.generation(&prepared.reset_id, b"device-reset-security"),
+        )
+        .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+        self.manifest_store
+            .promote(&manifest)
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        self.source_pool
+            .replace_database(
+                finalized
+                    .database_path
+                    .to_str()
+                    .ok_or(AdmissionSpaceTransitionError::Storage)?,
+            )
+            .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
+        self.blob_store.replace_root(target_directory.join("blobs"));
+        remove_file_if_present(&prepared.prepared.backup_path)?;
+        remove_file_if_present(&target_directory.join("source-final.sqlite"))?;
+        *source = None;
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
     async fn preflight_source_history(
         &self,
@@ -1330,6 +1471,14 @@ fn remove_file_if_present(path: &Path) -> Result<(), AdmissionSpaceTransitionErr
     }
 }
 
+fn remove_directory_if_present(path: &Path) -> Result<(), AdmissionSpaceTransitionError> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AdmissionSpaceTransitionError::Storage),
+    }
+}
+
 fn copy_directory_contents(
     source: &Path,
     destination: &Path,
@@ -1410,10 +1559,16 @@ impl SqliteSpaceGenerationStore {
         let directory = self.generation_directory(&attempt_id, &source_generation);
         std::fs::create_dir_all(&directory)
             .map_err(|_| "create generation directory".to_owned())?;
+        let backup_path = directory.join("source-backup.sqlite");
+        if let Ok(bytes) = std::fs::read(&backup_path) {
+            return Ok(PreparedSpaceGeneration {
+                backup_path,
+                backup_digest: digest(&bytes),
+            });
+        }
         let scratch = directory.join("source-backup.snapshot.tmp");
         let bytes = db_snapshot::snapshot_to_bytes(&self.source_pool, &scratch)
             .map_err(|_| "snapshot source generation".to_owned())?;
-        let backup_path = directory.join("source-backup.sqlite");
         write_new_file(&backup_path, &bytes)?;
         Ok(PreparedSpaceGeneration {
             backup_path,
@@ -1459,6 +1614,8 @@ impl SqliteSpaceGenerationStore {
         let source_bytes = db_snapshot::snapshot_to_bytes(&self.source_pool, &scratch)
             .map_err(|_| "snapshot final source generation".to_owned())?;
         let database_path = directory.join("source-final.sqlite");
+        remove_file_if_present(&database_path)
+            .map_err(|_| "remove stale final source".to_owned())?;
         write_new_file(&database_path, &source_bytes)?;
         Ok(FinalSourceGeneration {
             database_path,

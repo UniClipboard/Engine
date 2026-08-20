@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    MemberRepositoryPort, RelationshipStateResetPort, SpaceSecurityStateResetPort,
+    DeviceManagementResetDataPort, MemberRepositoryPort, RelationshipStateResetPort,
+    SpaceSecurityStateResetPort,
 };
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
 use uc_core::ports::pairing_invitation::{
@@ -50,6 +51,7 @@ pub struct SpaceAdmissionDeps {
 }
 
 pub struct SpaceTransitionDeps {
+    pub device_management_reset_data: Arc<dyn DeviceManagementResetDataPort>,
     pub relationship_reset: Arc<dyn RelationshipStateResetPort>,
     pub space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,
 }
