@@ -13,7 +13,6 @@ mod ports;
 mod preferences;
 mod protection;
 mod revocation;
-mod upgrade;
 mod versioned_membership_history;
 mod workspace_convergence;
 
@@ -52,7 +51,7 @@ pub use cross_space_transition::{
 pub use error::{
     AdmissionAttemptRepositoryError, AdmissionOutboxDeliveryError,
     AdmissionSecurityTransitionError, AdmissionSpaceTransitionError, CurrentMemberSignatureError,
-    CurrentMembershipIdentityError, GroupUpdateDispatchError, LegacyPeerProbeError,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError,
     MembershipAnnouncementRepositoryError, MembershipAppliedSecurityUpdateRepositoryError,
     MembershipAttestationEndpointError, MembershipAttestationError,
     MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
@@ -92,8 +91,8 @@ pub use ports::{
     CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort,
     CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot, GroupRevocationPort,
     GroupUpdateDispatchPort, InvitationConsumeDeliveryResultV1, JoinerStagedSecurityTransition,
-    LegacyPeerProbePort, LocalJoinStartMutationV1, MemberRepositoryPort,
-    MembershipAdmissionDecision, MembershipAdmissionGatePort, MembershipAnnouncementRepositoryPort,
+    LocalJoinStartMutationV1, MemberRepositoryPort, MembershipAdmissionDecision,
+    MembershipAdmissionGatePort, MembershipAnnouncementRepositoryPort,
     MembershipAppliedSecurityUpdateRepositoryPort, MembershipAttestationEndpointPort,
     MembershipAttestationPort, MembershipCandidateRepositoryPort, MembershipGossipEndpointPort,
     MembershipGossipTransportPort, MembershipHistoryExchangeEndpointPort,
@@ -106,22 +105,14 @@ pub use ports::{
 };
 pub use preferences::MemberSyncPreferences;
 pub use protection::{
-    LegacyBootstrapProgress, MemberProtection, MemberProtectionStatus, SpaceProtectionError,
-    SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
+    MemberProtection, MemberProtectionStatus, SpaceProtectionError, SpaceProtectionMode,
+    SpaceProtectionSnapshot, SpaceProtectionStatusPort,
 };
 pub use revocation::{
-    ContentKeyId, ContentKeyPurpose, GroupEpoch, GroupRevocationResult, KeyEpochError,
-    PendingGroupUpdate, PreparedRevocationResolution, RevocationId, RevocationOutboxMessage,
-    RevocationRecord, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
-    SpaceSecurityMode,
-};
-pub use upgrade::{
-    decide_legacy_upgrade, AdmissionReplayId, LegacyProtectionCommand, LegacyProtectionPort,
-    LegacyProtectionResult, LegacyProtectionSnapshot, LegacyRequestInspection, LegacyUpgradeAction,
-    LegacyUpgradeDescriptor, LegacyUpgradeDispatchError, LegacyUpgradeDispatchPort,
-    LegacyUpgradeEndpointPort, LegacyUpgradeError, LegacyUpgradeId, LegacyUpgradeRequest,
-    LegacyUpgradeRequestKind, LegacyUpgradeResponse, LegacyUpgradeResponseKind,
-    ProtectionGroupAdmission, ProtectionGroupId,
+    AdmissionReplayId, ContentKeyId, ContentKeyPurpose, GroupEpoch, GroupRevocationResult,
+    KeyEpochError, PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupAdmission,
+    ProtectionGroupId, RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationStage,
+    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityMode,
 };
 pub use versioned_membership_history::{
     AdmissionActivationReceipt, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,

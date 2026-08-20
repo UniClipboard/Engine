@@ -153,6 +153,7 @@ pub struct OhEngineEvent {
     pub device_trust_revision: Option<f64>,
     pub network_recovery_phase: Option<String>,
     pub next_retry_in_ms: Option<f64>,
+    pub re_pairing_scope: Option<String>,
 }
 
 pub struct PreparedHost {

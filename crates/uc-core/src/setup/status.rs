@@ -16,6 +16,8 @@ pub struct SetupStatus {
     pub has_completed: bool,
     #[serde(default)]
     pub space_id: Option<SpaceId>,
+    #[serde(default)]
+    pub re_pairing_required: bool,
 }
 
 impl Default for SetupStatus {
@@ -23,6 +25,7 @@ impl Default for SetupStatus {
         Self {
             has_completed: false,
             space_id: None,
+            re_pairing_required: false,
         }
     }
 }

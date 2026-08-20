@@ -1,6 +1,5 @@
 mod encrypted_payload;
 mod legacy_bootstrap;
-mod legacy_upgrade;
 mod revocation;
 mod space_material;
 

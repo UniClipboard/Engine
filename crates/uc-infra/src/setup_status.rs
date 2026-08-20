@@ -14,6 +14,7 @@ use uc_core::setup::SetupStatus;
 use crate::security::ActiveSpaceManifestStore;
 
 pub const DEFAULT_SETUP_STATUS_FILE: &str = ".setup_status";
+const LEGACY_ISOLATION_TARGET_SUFFIX: &str = ".legacy_isolation_target";
 
 pub struct FileSetupStatusRepository {
     status_file_path: PathBuf,
@@ -34,9 +35,11 @@ impl ManifestProjectingSetupStatusRepository {
 impl SetupStatusPort for ManifestProjectingSetupStatusRepository {
     async fn get_status(&self) -> anyhow::Result<SetupStatus> {
         if let Some(manifest) = self.manifest.load().await? {
+            let re_pairing_required = self.legacy.get_status().await?.re_pairing_required;
             return Ok(SetupStatus {
                 has_completed: true,
                 space_id: Some(uc_core::ids::SpaceId::from_str(&manifest.space_id)),
+                re_pairing_required,
             });
         }
         self.legacy.get_status().await
@@ -44,6 +47,21 @@ impl SetupStatusPort for ManifestProjectingSetupStatusRepository {
 
     async fn set_status(&self, status: &SetupStatus) -> anyhow::Result<()> {
         self.legacy.set_status(status).await
+    }
+
+    async fn get_legacy_isolation_target(&self) -> anyhow::Result<Option<uc_core::ids::SpaceId>> {
+        self.legacy.get_legacy_isolation_target().await
+    }
+
+    async fn set_legacy_isolation_target(
+        &self,
+        space_id: &uc_core::ids::SpaceId,
+    ) -> anyhow::Result<()> {
+        self.legacy.set_legacy_isolation_target(space_id).await
+    }
+
+    async fn clear_legacy_isolation_target(&self) -> anyhow::Result<()> {
+        self.legacy.clear_legacy_isolation_target().await
     }
 }
 
@@ -72,6 +90,11 @@ impl FileSetupStatusRepository {
             fs::create_dir_all(parent).await?;
         }
         Ok(())
+    }
+
+    fn legacy_isolation_target_path(&self) -> PathBuf {
+        self.status_file_path
+            .with_extension(LEGACY_ISOLATION_TARGET_SUFFIX)
     }
 }
 
@@ -114,6 +137,34 @@ impl SetupStatusPort for FileSetupStatusRepository {
             .map_err(|e| anyhow::anyhow!("Failed to sync status file: {e}"))?;
 
         Ok(())
+    }
+
+    async fn get_legacy_isolation_target(&self) -> anyhow::Result<Option<uc_core::ids::SpaceId>> {
+        let path = self.legacy_isolation_target_path();
+        match fs::read_to_string(path).await {
+            Ok(value) => Ok(Some(uc_core::ids::SpaceId::from_str(value.trim()))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn set_legacy_isolation_target(
+        &self,
+        space_id: &uc_core::ids::SpaceId,
+    ) -> anyhow::Result<()> {
+        self.ensure_parent_dir().await?;
+        let mut file = fs::File::create(self.legacy_isolation_target_path()).await?;
+        file.write_all(space_id.as_str().as_bytes()).await?;
+        file.sync_all().await?;
+        Ok(())
+    }
+
+    async fn clear_legacy_isolation_target(&self) -> anyhow::Result<()> {
+        match fs::remove_file(self.legacy_isolation_target_path()).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -161,6 +212,7 @@ mod tests {
             .set_status(&SetupStatus {
                 has_completed: true,
                 space_id: Some(uc_core::ids::SpaceId::from_str("legacy-space")),
+                re_pairing_required: true,
             })
             .await
             .unwrap();
@@ -198,5 +250,25 @@ mod tests {
             projected.space_id,
             Some(uc_core::ids::SpaceId::from_str("target-space"))
         );
+        assert!(projected.re_pairing_required);
+    }
+
+    #[tokio::test]
+    async fn legacy_isolation_target_survives_repository_recreation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("setup.json");
+        let target = uc_core::ids::SpaceId::from_str("stable-isolation-target");
+        FileSetupStatusRepository::new(path.clone())
+            .set_legacy_isolation_target(&target)
+            .await
+            .unwrap();
+
+        let reopened = FileSetupStatusRepository::new(path);
+        assert_eq!(
+            reopened.get_legacy_isolation_target().await.unwrap(),
+            Some(target)
+        );
+        reopened.clear_legacy_isolation_target().await.unwrap();
+        assert_eq!(reopened.get_legacy_isolation_target().await.unwrap(), None);
     }
 }

@@ -2621,6 +2621,10 @@ async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
     assert!(transition.advances.lock().unwrap().is_empty());
     assert!(joiner.requires_session_transition().await.unwrap());
     let interrupted = joiner_repository.load(attempt_id).await.unwrap().unwrap();
+    let expected_active_history = interrupted
+        .verified_membership_history
+        .clone()
+        .expect("activated join must retain its verified history");
     assert_eq!(
         interrupted.completion.as_deref(),
         Some(b"completion".as_slice())
@@ -2680,6 +2684,13 @@ async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
         .unwrap()
         .unwrap();
     assert_eq!(active.terminal_result, AdmissionTerminalResultV1::Active);
+    assert_eq!(
+        joiner_repository
+            .load_membership_history_v2()
+            .await
+            .unwrap(),
+        Some(expected_active_history)
+    );
     let AdmissionSpaceTransitionResultV2::CrossSpace(result) =
         AdmissionSpaceTransitionResultV2::decode(
             active.space_transition_result.as_deref().unwrap(),

@@ -4,18 +4,15 @@ use tempfile::{tempdir, TempDir};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, LegacyBootstrapRecord,
-    LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus,
-    LegacyUpgradeDescriptor, LegacyUpgradeId, LegacyUpgradeRequest, PendingGroupUpdate,
+    LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus, PendingGroupUpdate,
     PreparedRevocationResolution, RevocationId, RevocationOutboxMessage, RevocationRecord,
     RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
     SpaceSecurityStateResetPort,
 };
-use uc_core::space_access::PreparedGroupJoin;
 
 use super::DieselSpaceSecurityStore;
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::pool::{init_db_pool, DbPool};
-use crate::security::legacy_upgrade::{LegacyUpgradeAttemptStore, PreparedLegacyUpgradeAttempt};
 use crate::security::{InMemorySession, MasterKey};
 
 fn make_repo() -> (
@@ -217,14 +214,6 @@ struct RawCiphertexts {
 struct RawSpaceCiphertext {
     #[diesel(sql_type = Text)]
     space_lookup_token: String,
-    #[diesel(sql_type = Binary)]
-    encrypted_payload: Vec<u8>,
-}
-
-#[derive(QueryableByName)]
-struct RawLegacyUpgradeCiphertext {
-    #[diesel(sql_type = Text)]
-    peer_lookup_token: String,
     #[diesel(sql_type = Binary)]
     encrypted_payload: Vec<u8>,
 }
@@ -1091,67 +1080,4 @@ async fn permanent_loss_recovery_is_atomic_and_survives_restart() {
             .epoch(),
         GroupEpoch::new(3)
     );
-}
-
-#[tokio::test]
-async fn pending_legacy_upgrade_join_survives_restart_without_plaintext_storage() {
-    let (repo, pool, _tempdir) = make_repo();
-    let peer = DeviceId::new("peer-device-sensitive");
-    let request = LegacyUpgradeRequest::unsigned(
-        DeviceId::new("local-device-sensitive"),
-        peer,
-        LegacyUpgradeDescriptor::legacy(LegacyUpgradeId::from_bytes([0x71; 32])),
-        b"public-key-package-sensitive".to_vec(),
-    )
-    .with_proof(b"proof-sensitive".to_vec());
-    let pending = PreparedLegacyUpgradeAttempt::new(
-        request,
-        PreparedGroupJoin::new(
-            b"public-key-package-sensitive".to_vec(),
-            b"private-join-state-sensitive".to_vec(),
-        ),
-    );
-
-    repo.save_pending_attempt(&peer, &pending, 100)
-        .await
-        .unwrap();
-    drop(repo);
-
-    let reopened = reopen_repo(&pool);
-    let restored = reopened.load_pending_attempt(&peer).await.unwrap().unwrap();
-    assert_eq!(restored.request(), pending.request());
-    assert_eq!(
-        restored.pending_group_join().private_state(),
-        pending.pending_group_join().private_state()
-    );
-
-    let mut conn = pool.get().unwrap();
-    let row = diesel::sql_query(
-        "SELECT peer_lookup_token, encrypted_payload FROM legacy_upgrade_pending_join LIMIT 1",
-    )
-    .get_result::<RawLegacyUpgradeCiphertext>(&mut conn)
-    .unwrap();
-    assert_ne!(row.peer_lookup_token, peer.as_str());
-    let row_bytes = [
-        row.peer_lookup_token.as_bytes(),
-        row.encrypted_payload.as_slice(),
-    ]
-    .concat();
-    for sensitive in [
-        peer.as_str().as_bytes(),
-        b"local-device-sensitive".as_slice(),
-        b"proof-sensitive".as_slice(),
-        b"private-join-state-sensitive".as_slice(),
-    ] {
-        assert!(!row_bytes
-            .windows(sensitive.len())
-            .any(|window| window == sensitive));
-    }
-
-    reopened.clear_pending_attempt(&peer).await.unwrap();
-    assert!(reopened
-        .load_pending_attempt(&peer)
-        .await
-        .unwrap()
-        .is_none());
 }

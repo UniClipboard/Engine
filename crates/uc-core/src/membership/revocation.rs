@@ -4,9 +4,57 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ids::{DeviceId, SpaceId};
+use crate::space_access::GroupAdmission;
 
-use super::ProtectionGroupId;
-use super::{AdmissionReplayId, ProtectionGroupAdmission};
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct ProtectionGroupId(String);
+
+impl<'de> Deserialize<'de> for ProtectionGroupId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_string(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ProtectionGroupId {
+    pub fn from_string(value: impl Into<String>) -> Result<Self, KeyEpochError> {
+        let value = value.into();
+        if value.is_empty() || value.len() > 128 || !value.is_ascii() {
+            return Err(KeyEpochError::InvalidProtectionGroupId);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AdmissionReplayId([u8; 32]);
+
+impl AdmissionReplayId {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectionGroupAdmission {
+    pub protection_group_id: ProtectionGroupId,
+    pub admission: GroupAdmission,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GroupEpoch(u64);
@@ -1255,6 +1303,9 @@ pub enum KeyEpochError {
     #[error("invalid content key id")]
     InvalidContentKeyId,
 
+    #[error("invalid protection group id")]
+    InvalidProtectionGroupId,
+
     #[error("content key id cannot be reused")]
     ContentKeyReuse,
 
@@ -1299,4 +1350,27 @@ pub enum KeyEpochError {
 
     #[error("key epoch repository failure: {0}")]
     Repository(String),
+}
+
+#[cfg(test)]
+mod protection_group_id_tests {
+    use super::*;
+
+    #[test]
+    fn deserialization_rejects_invalid_protection_group_ids() {
+        for value in [
+            "\"\"".to_owned(),
+            format!("\"{}\"", "a".repeat(129)),
+            "\"空间\"".to_owned(),
+        ] {
+            let error = serde_json::from_str::<ProtectionGroupId>(&value).unwrap_err();
+            assert!(error.to_string().contains("invalid protection group id"));
+        }
+    }
+
+    #[test]
+    fn deserialization_accepts_a_valid_protection_group_id() {
+        let id = serde_json::from_str::<ProtectionGroupId>("\"group-1\"").unwrap();
+        assert_eq!(id.as_str(), "group-1");
+    }
 }

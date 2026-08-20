@@ -78,7 +78,6 @@ pub enum OperationKind {
     QueryWorkspaceConvergence,
     QueryDeviceTrust,
     DecideDeviceTrustChange,
-    QueryLegacyBootstrap,
     QuerySpaceProtection,
     SearchEntries,
     QuerySearchTags,
@@ -176,7 +175,6 @@ impl fmt::Display for OperationKind {
             Self::QueryWorkspaceConvergence => "query_workspace_convergence",
             Self::QueryDeviceTrust => "query_device_trust",
             Self::DecideDeviceTrustChange => "decide_device_trust_change",
-            Self::QueryLegacyBootstrap => "query_legacy_bootstrap",
             Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
             Self::QuerySearchTags => "query_search_tags",
@@ -307,7 +305,6 @@ pub enum Operation {
     QueryWorkspaceConvergence,
     QueryDeviceTrust,
     DecideDeviceTrustChange(DecideDeviceTrustChangeInput),
-    QueryLegacyBootstrap(QueryLegacyBootstrapInput),
     QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
     QuerySearchTags,
@@ -405,7 +402,6 @@ impl Operation {
             Self::QueryWorkspaceConvergence => OperationKind::QueryWorkspaceConvergence,
             Self::QueryDeviceTrust => OperationKind::QueryDeviceTrust,
             Self::DecideDeviceTrustChange(_) => OperationKind::DecideDeviceTrustChange,
-            Self::QueryLegacyBootstrap(_) => OperationKind::QueryLegacyBootstrap,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
             Self::QuerySearchTags => OperationKind::QuerySearchTags,
@@ -555,11 +551,6 @@ pub struct DecideDeviceTrustChangeInput {
     pub change_id: String,
     pub choice: DeviceTrustChoiceSummary,
     pub confirm_local_removal: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueryLegacyBootstrapInput {
-    pub bootstrap_id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

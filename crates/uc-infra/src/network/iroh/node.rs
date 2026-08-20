@@ -38,8 +38,8 @@ use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
     AdmissionCompletionRecoveryEndpointPort, ContentExchangeGatePort, CurrentMemberSignaturePort,
     CurrentMembershipIdentityPort, CurrentWorkspacePeerScopePort, GroupRevocationPort,
-    GroupUpdateDispatchPort, LegacyUpgradeEndpointPort, MemberRepositoryPort,
-    MembershipAttestationEndpointPort, MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
+    GroupUpdateDispatchPort, MemberRepositoryPort, MembershipAttestationEndpointPort,
+    MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
@@ -75,7 +75,6 @@ use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
 use super::identity_store::IrohIdentityStore;
-use super::legacy_upgrade_adapter::{IrohLegacyUpgradeAdapter, LEGACY_UPGRADE_ALPN};
 use super::membership_attestation_adapter::{
     IrohMembershipAttestationAdapter, IrohMembershipGossipTransportAdapter,
     IrohMembershipIdentityAdapter, MEMBERSHIP_ATTESTATION_ALPN,
@@ -1023,31 +1022,6 @@ impl IrohNodeBuilder {
             ADMISSION_COMPLETION_RECOVERY_ALPN,
             adapter.handler(endpoint),
         ));
-        Ok(())
-    }
-
-    pub fn build_legacy_upgrade_adapter(
-        &self,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> Arc<IrohLegacyUpgradeAdapter> {
-        Arc::new(IrohLegacyUpgradeAdapter::new(
-            Arc::clone(&self.endpoint),
-            peer_addr_repo,
-            member_repo,
-            fingerprint_factory,
-        ))
-    }
-
-    pub fn install_legacy_upgrade_handler(
-        &mut self,
-        adapter: &IrohLegacyUpgradeAdapter,
-        upgrade_endpoint: Arc<dyn LegacyUpgradeEndpointPort>,
-    ) -> Result<(), IrohNodeError> {
-        let builder = self.take_router_builder()?;
-        self.router_builder =
-            Some(builder.accept(LEGACY_UPGRADE_ALPN, adapter.handler(upgrade_endpoint)));
         Ok(())
     }
 

@@ -18,13 +18,12 @@ use uc_core::membership::{
     BootstrapId, CurrentMemberSignatureError, CurrentMemberSignaturePort,
     CurrentMembershipAnnouncementMaterial, CurrentMembershipAnnouncementPort,
     CurrentMembershipIdentity, CurrentMembershipIdentityError, CurrentMembershipIdentityPort,
-    CurrentWorkspacePeerScopePort, LegacyBootstrapProgress, LegacyBootstrapStatus,
-    MemberInstanceId, MemberProtection, MemberProtectionStatus, MemberRepositoryPort,
-    MembershipAdmissionDecision, MembershipAdmissionGatePort, MembershipHistoryMessage,
-    MembershipHistoryV2Ack, MembershipOperation, MembershipReconciliation,
-    MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalDecision,
-    SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort,
-    WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
+    CurrentWorkspacePeerScopePort, MemberInstanceId, MemberProtection, MemberProtectionStatus,
+    MemberRepositoryPort, MembershipAdmissionDecision, MembershipAdmissionGatePort,
+    MembershipHistoryMessage, MembershipHistoryV2Ack, MembershipOperation,
+    MembershipReconciliation, MembershipSecurityUpdateError, MembershipSecurityUpdatePort,
+    RemovalDecision, SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot,
+    SpaceProtectionStatusPort, WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
     WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState,
 };
 use uc_core::ports::{ClockPort, DeviceIdentityPort};
@@ -44,8 +43,6 @@ struct ScriptedExchange {
     replies: Arc<Mutex<VecDeque<MembershipHistoryMessage>>>,
     history_sent: Arc<Mutex<Vec<(DeviceId, MembershipHistoryMessage)>>>,
 }
-
-struct RejectingExchange;
 
 struct DeferredAdmissionDelivery;
 struct UnusedAdmissionCompletionRecovery;
@@ -226,47 +223,6 @@ impl uc_core::membership::MembershipHistoryExchangePort for BlockingTrackingExch
         Ok(MembershipHistoryMessage::AckV2(
             MembershipHistoryV2Ack::Consistent,
         ))
-    }
-}
-
-#[async_trait]
-impl uc_core::membership::MembershipHistoryExchangePort for RejectingExchange {
-    async fn exchange_membership_history(
-        &self,
-        _recipient: &DeviceId,
-        _message: MembershipHistoryMessage,
-    ) -> Result<MembershipHistoryMessage, uc_core::membership::MembershipHistoryExchangeError> {
-        Err(uc_core::membership::MembershipHistoryExchangeError::Rejected)
-    }
-}
-
-#[derive(Clone)]
-struct ScriptedLegacyProbe {
-    responses: Arc<Mutex<VecDeque<Result<(), uc_core::membership::LegacyPeerProbeError>>>>,
-    calls: Arc<Mutex<Vec<DeviceId>>>,
-}
-
-impl ScriptedLegacyProbe {
-    fn new(responses: Vec<Result<(), uc_core::membership::LegacyPeerProbeError>>) -> Self {
-        Self {
-            responses: Arc::new(Mutex::new(responses.into())),
-            calls: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-#[async_trait]
-impl uc_core::membership::LegacyPeerProbePort for ScriptedLegacyProbe {
-    async fn probe_legacy_peer(
-        &self,
-        peer: &DeviceId,
-    ) -> Result<(), uc_core::membership::LegacyPeerProbeError> {
-        self.calls.lock().unwrap().push(peer.clone());
-        self.responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or(Err(uc_core::membership::LegacyPeerProbeError::Transport))
     }
 }
 
@@ -1245,7 +1201,6 @@ pub(crate) fn test_deps(
         clock: Arc::new(UnusedClock),
         device_identity: Arc::new(UnusedDeviceIdentity),
         membership_history_exchange: Arc::new(UnusedExchange::default()),
-        legacy_peer_probe: Arc::new(UnusedLegacyProbe),
         trusted_peer_repo: Arc::new(TestTrustedPeerRepo),
         peer_addr_repo: Arc::new(TestPeerAddrRepo),
         presence: Arc::new(FixedPresence::default()),
@@ -1317,7 +1272,6 @@ impl SpaceProtectionStatusPort for FixedSpaceProtection {
         Ok(SpaceProtectionSnapshot {
             mode: self.0,
             members: Vec::new(),
-            legacy_bootstrap: None,
         })
     }
 }
@@ -1325,16 +1279,6 @@ impl SpaceProtectionStatusPort for FixedSpaceProtection {
 #[derive(Default)]
 struct ProtectsQueriedMembers {
     queries: Mutex<Vec<Vec<DeviceId>>>,
-    active_legacy_bootstrap: bool,
-}
-
-impl ProtectsQueriedMembers {
-    fn with_active_legacy_bootstrap() -> Self {
-        Self {
-            active_legacy_bootstrap: true,
-            ..Self::default()
-        }
-    }
 }
 
 #[async_trait]
@@ -1353,26 +1297,7 @@ impl SpaceProtectionStatusPort for ProtectsQueriedMembers {
                     status: MemberProtectionStatus::Protected,
                 })
                 .collect(),
-            legacy_bootstrap: self
-                .active_legacy_bootstrap
-                .then(|| LegacyBootstrapProgress {
-                    bootstrap_id: BootstrapId::generate(),
-                    status: LegacyBootstrapStatus::AwaitingReadmission,
-                    pending_readmission: 1,
-                }),
         })
-    }
-}
-
-struct UnusedLegacyProbe;
-
-#[async_trait]
-impl uc_core::membership::LegacyPeerProbePort for UnusedLegacyProbe {
-    async fn probe_legacy_peer(
-        &self,
-        _peer: &DeviceId,
-    ) -> Result<(), uc_core::membership::LegacyPeerProbeError> {
-        Err(uc_core::membership::LegacyPeerProbeError::Transport)
     }
 }
 

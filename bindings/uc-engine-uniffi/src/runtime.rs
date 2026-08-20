@@ -28,8 +28,8 @@ use crate::{
     BindingClipboardOrigin, BindingClipboardRepresentation, BindingClipboardRestoreMode,
     BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
     BindingError, BindingErrorCategory, BindingEvent, BindingFailure, BindingFileMetadata,
-    BindingHost, BindingLifecycleAction, BindingOperationTerminal, BindingRefreshReason,
-    BindingTransferDirection, HostBindingError,
+    BindingHost, BindingLifecycleAction, BindingOperationTerminal, BindingRePairingScope,
+    BindingRefreshReason, BindingTransferDirection, HostBindingError,
 };
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
@@ -221,6 +221,7 @@ pub struct SpaceInvitation {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SpaceState {
     pub has_completed: bool,
+    pub re_pairing_required: bool,
     pub space_id: Option<String>,
     pub current_invitation: Option<SpaceInvitation>,
     pub device_name: Option<String>,
@@ -1812,6 +1813,11 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
                 next_retry_in_ms: status.next_retry_in_ms,
             }
         }
+        uc_engine::EngineEvent::RePairingRequired { scope } => BindingEvent::RePairingRequired {
+            scope: match scope {
+                uc_engine::RePairingScope::AllDevices => BindingRePairingScope::AllDevices,
+            },
+        },
         other => BindingEvent::Changed {
             kind: other.kind().to_owned(),
         },
@@ -1873,6 +1879,7 @@ fn map_space_created(result: OperationResult) -> Result<SpaceCreated, BindingErr
 fn map_space_state(result: OperationResult) -> Result<SpaceState, BindingError> {
     unpack_operation!(result, OperationResult::SetupState(state) => SpaceState {
         has_completed: state.has_completed,
+        re_pairing_required: state.re_pairing_required,
         space_id: state.space_id,
         current_invitation: state.current_invitation.map(|invitation| SpaceInvitation {
             invitation_code: invitation.invitation_code,
@@ -2848,6 +2855,18 @@ mod tests {
                 phase: "retry_scheduled".to_owned(),
                 retryable: true,
                 next_retry_in_ms: Some(500),
+            }
+        );
+    }
+
+    #[test]
+    fn re_pairing_event_keeps_the_affected_device_scope() {
+        assert_eq!(
+            map_engine_event(uc_engine::EngineEvent::RePairingRequired {
+                scope: uc_engine::RePairingScope::AllDevices,
+            }),
+            BindingEvent::RePairingRequired {
+                scope: BindingRePairingScope::AllDevices,
             }
         );
     }

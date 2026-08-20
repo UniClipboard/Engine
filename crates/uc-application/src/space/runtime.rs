@@ -11,7 +11,6 @@ use crate::space::convergence::connectivity::membership::{
 use crate::space::convergence::discovery::{
     MembershipConvergenceActivity, MembershipConvergenceRuntime,
 };
-use crate::space::convergence::membership::legacy_upgrade::AutomaticLegacyUpgradeRuntime;
 use crate::space::convergence::{WorkspaceConvergenceActivity, WorkspaceConvergenceRuntime};
 use uc_core::ports::PresenceEvent;
 
@@ -63,7 +62,6 @@ pub struct SpaceApplicationRuntime {
     membership_runtime: MembershipConvergenceRuntime,
     connectivity_runtime: MembershipConnectivityRuntime,
     convergence_runtime: WorkspaceConvergenceRuntime,
-    legacy_upgrade_runtime: AutomaticLegacyUpgradeRuntime,
     setup: Arc<SpaceFacade>,
 }
 
@@ -81,7 +79,6 @@ impl SpaceApplicationRuntime {
         let membership_runtime = assembly.start_membership_runtime(presence_events.resubscribe());
         let connectivity_runtime =
             start_membership_connectivity(connectivity, presence_events.resubscribe());
-        let legacy_upgrade_runtime = assembly.start_legacy_upgrade_runtime(presence_events);
         let handle = SpaceApplicationHandle {
             activity: SpaceMembershipActivity {
                 membership: membership_runtime.activity(),
@@ -94,7 +91,6 @@ impl SpaceApplicationRuntime {
             membership_runtime,
             connectivity_runtime,
             convergence_runtime,
-            legacy_upgrade_runtime,
             setup,
         }
     }
@@ -107,7 +103,6 @@ impl SpaceApplicationRuntime {
         self.connectivity_runtime.shutdown().await;
         self.membership_runtime.shutdown().await;
         self.convergence_runtime.shutdown().await;
-        self.legacy_upgrade_runtime.shutdown().await;
         self.setup.on_shutdown().await;
     }
 }

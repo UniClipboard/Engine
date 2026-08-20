@@ -1,7 +1,7 @@
 use hmac::{Hmac, Mac};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::Sha256;
-use uc_core::ids::{DeviceId, SpaceId};
+use uc_core::ids::SpaceId;
 use uc_core::membership::KeyEpochError;
 
 use crate::security::crypto_model::EncryptedBlob;
@@ -17,17 +17,6 @@ pub fn space_lookup_token(
     mac.update(b"uc-space-lookup-v1|");
     mac.update(&(space_id.as_ref().len() as u64).to_be_bytes());
     mac.update(space_id.as_ref().as_bytes());
-    Ok(hex::encode(mac.finalize().into_bytes()))
-}
-
-pub(super) fn device_lookup_token(
-    master_key: &MasterKey,
-    device_id: &DeviceId,
-) -> Result<String, KeyEpochError> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(master_key.as_bytes()).map_err(backend)?;
-    mac.update(b"uc-legacy-upgrade-peer-lookup-v1|");
-    mac.update(&(device_id.as_str().len() as u64).to_be_bytes());
-    mac.update(device_id.as_str().as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 

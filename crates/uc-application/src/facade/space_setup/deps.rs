@@ -9,8 +9,8 @@ use uc_core::ports::pairing_invitation::{
 };
 use uc_core::ports::space::ProofPort;
 use uc_core::ports::{
-    ClockPort, DeviceIdentityPort, LocalIdentityPort, PeerAddressRepositoryPort, PresencePort,
-    SettingsPort, SetupStatusPort,
+    AppVersionStatePort, ClockPort, DeviceIdentityPort, LocalIdentityPort,
+    PeerAddressRepositoryPort, PresencePort, SettingsPort, SetupStatusPort,
 };
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsFacade;
@@ -23,6 +23,9 @@ pub struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
     pub setup_status: Arc<dyn SetupStatusPort>,
     pub mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
+    pub legacy_profile_isolation_required: bool,
+    pub app_version_state: Arc<dyn AppVersionStatePort>,
+    pub current_app_version: String,
 }
 
 pub struct SpaceAdmissionDeps {

@@ -159,6 +159,7 @@ struct EventSummary {
     last_state: Option<String>,
     member_removal_changes: u64,
     last_workspace_phase: Option<String>,
+    last_re_pairing_scope: Option<String>,
 }
 
 #[derive(Clone)]
@@ -564,6 +565,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 "last_state": events.last_state,
                 "member_removal_changes": events.member_removal_changes,
                 "last_workspace_phase": events.last_workspace_phase,
+                "last_re_pairing_scope": events.last_re_pairing_scope,
             })
         }
         ProbeCommand::Shutdown => match state.engine.take() {
@@ -620,6 +622,7 @@ fn operation_response(result: OperationResult) -> Value {
             "ok": true,
             "kind": "setup_state",
             "has_completed": state.has_completed,
+            "re_pairing_required": state.re_pairing_required,
             "has_current_invitation": state.current_invitation.is_some(),
             "has_device_name": state.device_name.is_some(),
         }),
@@ -1081,17 +1084,11 @@ fn operation_response(result: OperationResult) -> Value {
             "receive_content_types": preferences.receive_content_types,
         }),
 
-        OperationResult::LegacyBootstrapStatus(summary) => json!({
-            "ok": true,
-            "kind": "legacy_bootstrap_status",
-            "bootstrap": summary,
-        }),
         OperationResult::SpaceProtection(summary) => json!({
             "ok": true,
             "kind": "space_protection",
             "mode": summary.mode,
             "members": summary.members,
-            "legacy_bootstrap": summary.legacy_bootstrap,
         }),
         OperationResult::SearchPage(page) => json!({
             "ok": true,
@@ -1415,6 +1412,14 @@ fn record_event(summary: &Arc<Mutex<EventSummary>>, event: EngineEvent) {
         EngineEvent::ActiveClipboardChanged(_) => summary.refresh_requests += 1,
         EngineEvent::MobileLanSettingsChanged(_) => summary.refresh_requests += 1,
         EngineEvent::NetworkRecoveryChanged(_) => summary.refresh_requests += 1,
+        EngineEvent::RePairingRequired { scope } => {
+            summary.last_re_pairing_scope = Some(
+                match scope {
+                    uc_engine::RePairingScope::AllDevices => "all_devices",
+                }
+                .to_owned(),
+            );
+        }
         EngineEvent::RefreshRequired { .. } => summary.refresh_requests += 1,
         EngineEvent::OperationFinished { .. } => summary.completed_operations += 1,
         EngineEvent::LifecycleFailed { .. } => summary.lifecycle_failures += 1,
@@ -1584,6 +1589,37 @@ mod tests {
         );
 
         assert_eq!(lock_unpoisoned(&summary).lifecycle_failures, 1);
+    }
+
+    #[test]
+    fn event_summary_keeps_the_re_pairing_scope() {
+        let summary = Arc::new(Mutex::new(EventSummary::default()));
+
+        record_event(
+            &summary,
+            EngineEvent::RePairingRequired {
+                scope: uc_engine::RePairingScope::AllDevices,
+            },
+        );
+
+        assert_eq!(
+            lock_unpoisoned(&summary).last_re_pairing_scope.as_deref(),
+            Some("all_devices")
+        );
+    }
+
+    #[test]
+    fn setup_state_response_exposes_durable_re_pairing_requirement() {
+        let response =
+            operation_response(OperationResult::SetupState(uc_engine::SetupStateSummary {
+                has_completed: true,
+                space_id: Some("isolated-space".to_owned()),
+                re_pairing_required: true,
+                current_invitation: None,
+                device_name: Some("Device".to_owned()),
+            }));
+
+        assert_eq!(response["re_pairing_required"], true);
     }
 
     #[test]

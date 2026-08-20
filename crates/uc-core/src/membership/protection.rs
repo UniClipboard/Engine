@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::ids::DeviceId;
 
-use super::{BootstrapId, LegacyBootstrapStatus, SpaceSecurityMode};
+use super::SpaceSecurityMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpaceProtectionMode {
@@ -39,17 +39,9 @@ pub struct MemberProtection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegacyBootstrapProgress {
-    pub bootstrap_id: BootstrapId,
-    pub status: LegacyBootstrapStatus,
-    pub pending_readmission: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceProtectionSnapshot {
     pub mode: SpaceProtectionMode,
     pub members: Vec<MemberProtection>,
-    pub legacy_bootstrap: Option<LegacyBootstrapProgress>,
 }
 
 #[async_trait]

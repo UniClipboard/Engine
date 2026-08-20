@@ -373,7 +373,6 @@ function checkCurrentPeerScopeOwnership() {
     'crates/uc-application/src/facade/roster/facade.rs',
     'crates/uc-application/src/space/convergence/connectivity/reachability.rs',
     'crates/uc-application/src/space/convergence/connectivity/membership.rs',
-    'crates/uc-application/src/space/convergence/membership/legacy_upgrade.rs',
     'crates/uc-application/src/clipboard/sync/dispatch_entry/target_selector.rs',
     'crates/uc-application/src/clipboard/sync/active_state/fanout.rs',
     'crates/uc-application/src/clipboard/sync/resend_entry.rs',
@@ -419,10 +418,7 @@ function checkCurrentPeerScopeOwnership() {
     )
   }
 
-  const allowedPendingReadmissionConsumers = new Set([
-    'crates/uc-application/src/space/convergence/membership/legacy_upgrade.rs',
-    'crates/uc-application/src/space/convergence/membership/legacy_upgrade_tests.rs',
-  ])
+  const allowedPendingReadmissionConsumers = new Set()
   const applicationRoot = join(REPOSITORY_ROOT, 'crates/uc-application/src')
   const pendingDirectories = [applicationRoot]
   while (pendingDirectories.length > 0) {
@@ -445,6 +441,62 @@ function checkCurrentPeerScopeOwnership() {
         }
       }
     }
+  }
+  return problems
+}
+
+function checkRetiredLegacyPairingRecovery() {
+  const problems = []
+  const retiredPaths = [
+    'crates/uc-application/src/space/convergence/membership/legacy_upgrade.rs',
+    'crates/uc-application/src/space/convergence/membership/legacy_upgrade_tests.rs',
+    'crates/uc-core/src/membership/upgrade.rs',
+    'crates/uc-core/tests/legacy_upgrade.rs',
+    'crates/uc-infra/src/network/iroh/legacy_upgrade_adapter.rs',
+  ]
+  for (const path of retiredPaths) {
+    if (existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'retired legacy pairing recovery', `retired path remains: ${path}`)
+    }
+  }
+
+  const forbiddenMarkers = [
+    'AutomaticLegacyUpgrade',
+    'LEGACY_UPGRADE_ALPN',
+    'uniclipboard/legacy-upgrade/2',
+    'QueryLegacyBootstrap',
+  ]
+  const sourceRoots = ['crates', 'bindings', 'tests/hosts']
+  for (const sourceRoot of sourceRoots) {
+    const pendingDirectories = [join(REPOSITORY_ROOT, sourceRoot)]
+    while (pendingDirectories.length > 0) {
+      const directory = pendingDirectories.pop()
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name)
+        if (entry.isDirectory()) {
+          pendingDirectories.push(path)
+        } else if (entry.name.endsWith('.rs')) {
+          const source = readFileSync(path, 'utf8')
+          for (const marker of forbiddenMarkers) {
+            if (source.includes(marker)) {
+              addProblem(
+                problems,
+                'retired legacy pairing recovery',
+                `${relative(REPOSITORY_ROOT, path)} contains retired marker: ${marker}`
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const eventContract = read('crates/uc-engine/src/contract/event.rs')
+  const hasRePairingVariant = /RePairingRequired\s*\{\s*scope:\s*RePairingScope\s*,?\s*\}/s.test(eventContract)
+  const hasAllDevicesScope = /enum\s+RePairingScope\s*\{[^}]*\bAllDevices\b[^}]*\}/s.test(eventContract)
+  const hasKindMapping = /Self::RePairingRequired\s*\{\s*\.\.\s*\}\s*=>\s*"re_pairing_required"/s.test(eventContract)
+  if (!hasRePairingVariant || !hasAllDevicesScope || !hasKindMapping) {
+    addProblem(problems, 'retired legacy pairing recovery', 'all-device re-pairing event is missing')
   }
   return problems
 }
@@ -524,6 +576,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkLanIsolation(metadata, sources),
     ...checkCurrentPeerScopeOwnership(),
     ...checkWorkspaceConvergenceInternalBoundaries(),
+    ...checkRetiredLegacyPairingRecovery(),
     ...(includePlaintext ? checkPlaintextScanner() : []),
   ]
 }

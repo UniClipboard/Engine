@@ -255,6 +255,7 @@ impl FileLegacyMigrationRecovery {
             .set_status(&SetupStatus {
                 has_completed: true,
                 space_id: Some(target_space_id.clone()),
+                re_pairing_required: true,
             })
             .await
             .map_err(internal)?;

@@ -1003,6 +1003,7 @@ mod tests {
             Ok(uc_core::setup::SetupStatus {
                 has_completed: true,
                 space_id: None,
+                re_pairing_required: false,
             })
         }
         async fn set_status(&self, _s: &uc_core::setup::SetupStatus) -> anyhow::Result<()> {

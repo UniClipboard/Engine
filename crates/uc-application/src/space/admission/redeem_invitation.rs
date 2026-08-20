@@ -143,6 +143,7 @@ impl RedeemPairingInvitationUseCase {
                 .set_status(&SetupStatus {
                     has_completed: true,
                     space_id: Some(outcome.space_id.clone()),
+                    re_pairing_required: false,
                 })
                 .await
                 .map_err(|e| {

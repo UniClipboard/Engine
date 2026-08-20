@@ -280,6 +280,16 @@ pub trait ResumeSpaceSessionPort: Send + Sync {
     ) -> Result<Option<ActiveSpace>, SpaceAccessError>;
 }
 
+/// Rebind an already-unlocked local profile to a new standalone space while
+/// retaining its existing local key material.
+#[async_trait]
+pub trait AdoptIsolatedSpacePort: Send + Sync {
+    async fn adopt_isolated_space(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<ActiveSpace, SpaceAccessError>;
+}
+
 /// Probe whether the persistent secret store can silently yield a space's
 /// wrapping key.
 #[async_trait]

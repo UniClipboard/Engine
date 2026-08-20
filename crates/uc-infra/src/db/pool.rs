@@ -244,6 +244,12 @@ mod switch_tests {
         name: String,
     }
 
+    #[derive(diesel::QueryableByName)]
+    struct CountRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+
     fn seed(path: &std::path::Path, value: &str) {
         let mut connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
         diesel::sql_query("CREATE TABLE generation_probe (value TEXT NOT NULL)")
@@ -322,6 +328,7 @@ mod switch_tests {
         let mut connection = pool.get().unwrap();
 
         connection.revert_last_migration(MIGRATIONS).unwrap();
+        connection.revert_last_migration(MIGRATIONS).unwrap();
 
         let remaining = diesel::sql_query(
             "SELECT name FROM sqlite_master WHERE type = 'trigger' \
@@ -333,6 +340,29 @@ mod switch_tests {
         .map(|row| row.name)
         .collect::<Vec<_>>();
         assert!(remaining.is_empty(), "remaining triggers: {remaining:?}");
+    }
+
+    #[test]
+    fn retired_legacy_upgrade_records_are_cleared_by_migration() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("retired-legacy-upgrade.sqlite");
+        let pool = init_db_pool(database.to_str().unwrap()).unwrap();
+        let mut connection = pool.get().unwrap();
+
+        connection.revert_last_migration(MIGRATIONS).unwrap();
+        diesel::sql_query(
+            "INSERT INTO legacy_upgrade_pending_join \
+             (peer_lookup_token, encrypted_payload, updated_at_ms) VALUES ('peer', X'01', 1)",
+        )
+        .execute(&mut connection)
+        .unwrap();
+
+        connection.run_pending_migrations(MIGRATIONS).unwrap();
+
+        let row = diesel::sql_query("SELECT COUNT(*) AS count FROM legacy_upgrade_pending_join")
+            .get_result::<CountRow>(&mut connection)
+            .unwrap();
+        assert_eq!(row.count, 0);
     }
 }
 

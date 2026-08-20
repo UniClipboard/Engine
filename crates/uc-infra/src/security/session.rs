@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::sync::Notify;
@@ -19,7 +18,7 @@ use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
     AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, ContentKeyId, ContentKeyPurpose,
-    GroupEpoch, LegacyUpgradeId, ProtectionGroupId, SpaceKeyMaterial, SpaceSecurityMode,
+    GroupEpoch, ProtectionGroupId, SpaceKeyMaterial, SpaceSecurityMode,
 };
 
 use super::secrets::MasterKey;
@@ -492,58 +491,6 @@ impl InMemorySession {
         Ok(output)
     }
 
-    pub(crate) fn legacy_upgrade_id(&self) -> Result<LegacyUpgradeId, EncryptionError> {
-        let secret = self.derive_legacy_upgrade_secret(b"uniclipboard-legacy-upgrade-id/v1")?;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&secret).map_err(|_| EncryptionError::CryptoFailure)?;
-        mac.update(b"legacy-space-membership");
-        Ok(LegacyUpgradeId::from_bytes(
-            mac.finalize().into_bytes().into(),
-        ))
-    }
-
-    pub(crate) fn legacy_upgrade_proof(
-        &self,
-        transcript: &[u8],
-    ) -> Result<[u8; 32], EncryptionError> {
-        let secret = self.derive_legacy_upgrade_secret(b"uniclipboard-legacy-upgrade-proof/v1")?;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&secret).map_err(|_| EncryptionError::CryptoFailure)?;
-        mac.update(transcript);
-        Ok(mac.finalize().into_bytes().into())
-    }
-
-    pub(crate) fn verify_legacy_upgrade_proof(
-        &self,
-        transcript: &[u8],
-        proof: &[u8],
-    ) -> Result<bool, EncryptionError> {
-        let secret = self.derive_legacy_upgrade_secret(b"uniclipboard-legacy-upgrade-proof/v1")?;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&secret).map_err(|_| EncryptionError::CryptoFailure)?;
-        mac.update(transcript);
-        Ok(mac.verify_slice(proof).is_ok())
-    }
-
-    fn derive_legacy_upgrade_secret(&self, info: &[u8]) -> Result<[u8; 32], EncryptionError> {
-        let state = self.lock_state();
-        if state.space_id.is_none() {
-            return Err(EncryptionError::NotInitialized);
-        }
-        let legacy_key = state
-            .content_keys
-            .get(&ContentKeyId::legacy_v1())
-            .ok_or(EncryptionError::KeyNotFound)?;
-        let hkdf = Hkdf::<Sha256>::new(
-            Some(b"uniclipboard-legacy-upgrade/v1"),
-            legacy_key.key.as_bytes(),
-        );
-        let mut output = [0u8; 32];
-        hkdf.expand(info, &mut output)
-            .map_err(|_| EncryptionError::CryptoFailure)?;
-        Ok(output)
-    }
-
     fn resolve_from_state(
         state: &State,
         content_key_id: &ContentKeyId,
@@ -728,65 +675,6 @@ mod tests {
                 .unwrap(),
             expected
         );
-    }
-
-    #[test]
-    fn legacy_upgrade_id_is_stable_for_the_same_legacy_space_key() {
-        let first = InMemorySession::new();
-        first.set_master_key_for_space(SpaceId::from_str("space-a"), key(7));
-        let second = InMemorySession::new();
-        second.set_master_key_for_space(SpaceId::from_str("space-a"), key(7));
-
-        assert_eq!(
-            first.legacy_upgrade_id().unwrap(),
-            second.legacy_upgrade_id().unwrap()
-        );
-    }
-
-    #[test]
-    fn legacy_upgrade_identity_uses_the_shared_key_not_the_local_space_label() {
-        let first = InMemorySession::new();
-        first.set_master_key_for_space(SpaceId::from_str("local-space-a"), key(7));
-        let second = InMemorySession::new();
-        second.set_master_key_for_space(SpaceId::from_str("local-space-b"), key(7));
-        let transcript = b"same-upgrade-request";
-
-        assert_eq!(
-            first.legacy_upgrade_id().unwrap(),
-            second.legacy_upgrade_id().unwrap()
-        );
-        let proof = first.legacy_upgrade_proof(transcript).unwrap();
-        assert!(second
-            .verify_legacy_upgrade_proof(transcript, &proof)
-            .unwrap());
-    }
-
-    #[test]
-    fn legacy_upgrade_id_differs_for_a_different_legacy_space_key() {
-        let first = InMemorySession::new();
-        first.set_master_key_for_space(SpaceId::from_str("space-a"), key(7));
-        let second = InMemorySession::new();
-        second.set_master_key_for_space(SpaceId::from_str("space-a"), key(8));
-
-        assert_ne!(
-            first.legacy_upgrade_id().unwrap(),
-            second.legacy_upgrade_id().unwrap()
-        );
-    }
-
-    #[test]
-    fn legacy_upgrade_proof_is_bound_to_the_complete_request_transcript() {
-        let session = InMemorySession::new();
-        session.set_master_key_for_space(SpaceId::from_str("space-a"), key(7));
-        let request = b"device-a|device-b|group-a|key-package-a";
-        let proof = session.legacy_upgrade_proof(request).unwrap();
-
-        assert!(session
-            .verify_legacy_upgrade_proof(request, &proof)
-            .unwrap());
-        assert!(!session
-            .verify_legacy_upgrade_proof(b"device-a|device-c|group-a|key-package-a", &proof,)
-            .unwrap());
     }
 
     #[test]

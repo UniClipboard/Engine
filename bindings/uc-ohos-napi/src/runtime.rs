@@ -633,6 +633,7 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
         device_trust_revision: None,
         network_recovery_phase: None,
         next_retry_in_ms: None,
+        re_pairing_scope: None,
     };
     match event {
         EngineEvent::StateChanged { state } => mapped.state = Some(engine_state(state).to_owned()),
@@ -664,6 +665,14 @@ fn map_event(event: EngineEvent) -> OhEngineEvent {
             mapped.network_recovery_phase = Some(recovery_phase(status.phase).to_owned());
             mapped.retryable = Some(status.retryable);
             mapped.next_retry_in_ms = status.next_retry_in_ms.map(|value| value as f64);
+        }
+        EngineEvent::RePairingRequired { scope } => {
+            mapped.re_pairing_scope = Some(
+                match scope {
+                    uc_engine::RePairingScope::AllDevices => "all_devices",
+                }
+                .to_owned(),
+            );
         }
         _ => {}
     }
@@ -758,6 +767,16 @@ mod tests {
         );
         assert_eq!(event.retryable, Some(true));
         assert_eq!(event.next_retry_in_ms, Some(500.0));
+    }
+
+    #[test]
+    fn re_pairing_event_keeps_the_affected_device_scope() {
+        let event = map_event(EngineEvent::RePairingRequired {
+            scope: uc_engine::RePairingScope::AllDevices,
+        });
+
+        assert_eq!(event.kind, "re_pairing_required");
+        assert_eq!(event.re_pairing_scope.as_deref(), Some("all_devices"));
     }
 
     #[test]

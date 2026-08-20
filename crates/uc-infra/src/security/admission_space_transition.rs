@@ -41,8 +41,8 @@ use crate::file_transfer::persistence_cipher::TransferPersistenceCipher;
 use crate::search::render_payload::RenderPayloadCodec;
 
 use super::{
-    ActiveSpaceManifestStore, BlobCipherAdapter, DefaultCurrentProfile, DefaultSpaceAccessAdapter,
-    EncryptedBlobStore, InMemorySession,
+    ActiveSpaceManifestStore, BlobCipherAdapter, DefaultSpaceAccessAdapter, EncryptedBlobStore,
+    InMemorySession,
 };
 
 struct TargetSessionSubkeyDeriver(InMemorySession);
@@ -80,6 +80,7 @@ pub struct DurableAdmissionSpaceTransition {
     manifest_store: Arc<ActiveSpaceManifestStore>,
     space_access: Arc<DefaultSpaceAccessAdapter>,
     session: Arc<InMemorySession>,
+    current_profile: Arc<dyn CurrentProfilePort>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -142,6 +143,7 @@ impl DurableAdmissionSpaceTransition {
         manifest_store: Arc<ActiveSpaceManifestStore>,
         space_access: Arc<DefaultSpaceAccessAdapter>,
         session: Arc<InMemorySession>,
+        current_profile: Arc<dyn CurrentProfilePort>,
     ) -> Self {
         Self {
             generations: SqliteSpaceGenerationStore::new(
@@ -155,6 +157,7 @@ impl DurableAdmissionSpaceTransition {
             manifest_store,
             space_access,
             session,
+            current_profile,
         }
     }
 
@@ -748,7 +751,7 @@ impl DurableAdmissionSpaceTransition {
         let store = EncryptedRelationshipStore::new(
             Arc::new(DieselSqliteExecutor::new(target_pool)),
             Arc::new(TargetSessionSubkeyDeriver(target_session.clone())),
-            Arc::new(DefaultCurrentProfile::new()) as Arc<dyn CurrentProfilePort>,
+            Arc::clone(&self.current_profile),
         );
         let timestamp = Utc
             .timestamp_millis_opt(0)
@@ -2550,6 +2553,7 @@ mod tests {
             Arc::clone(&manifest_store),
             Arc::clone(&access),
             Arc::clone(&session),
+            Arc::new(DefaultCurrentProfile::new()),
         );
         let relayed_update = PendingGroupUpdate::persistent(
             DeviceId::new("target-peer"),
@@ -2720,6 +2724,9 @@ mod tests {
 
         let secure_storage: Arc<dyn SecureStoragePort> = Arc::new(MemorySecureStorage::default());
         let session = Arc::new(InMemorySession::new());
+        let current_profile: Arc<dyn CurrentProfilePort> = Arc::new(
+            DefaultCurrentProfile::for_profile(uc_core::ids::ProfileId::from("upgrade-profile")),
+        );
         let key_material = Arc::new(KeyMaterialStore::new(
             Arc::clone(&secure_storage),
             Arc::new(JsonKeySlotStore::new(vault.clone())),
@@ -2731,7 +2738,7 @@ mod tests {
             ));
         let access = Arc::new(DefaultSpaceAccessAdapter::new_with_key_epoch_repository(
             key_material,
-            Arc::new(DefaultCurrentProfile::new()),
+            Arc::clone(&current_profile),
             Arc::clone(&session),
             key_epoch_repository,
         ));
@@ -2762,6 +2769,7 @@ mod tests {
             Arc::clone(&manifest_store),
             Arc::clone(&access),
             Arc::clone(&session),
+            Arc::clone(&current_profile),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
             attempt_id: AdmissionAttemptId::from_bytes([0x92; 32]),
@@ -2823,7 +2831,7 @@ mod tests {
         let relationship_store = EncryptedRelationshipStore::new(
             Arc::new(DieselSqliteExecutor::new(pool)),
             Arc::clone(&transitioner.space_access) as Arc<dyn DeriveSpaceSubkeyPort>,
-            Arc::new(DefaultCurrentProfile::new()) as Arc<dyn CurrentProfilePort>,
+            current_profile,
         );
         assert_eq!(relationship_store.list_members().await.unwrap().len(), 2);
     }
@@ -2923,6 +2931,7 @@ mod tests {
             Arc::clone(&manifest_store),
             Arc::clone(&access),
             Arc::clone(&session),
+            Arc::new(DefaultCurrentProfile::new()),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
             attempt_id: AdmissionAttemptId::from_bytes([0xa2; 32]),

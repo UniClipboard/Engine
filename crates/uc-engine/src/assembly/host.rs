@@ -808,7 +808,7 @@ mod tests {
             Box::new(EmptyHostClipboard),
             Box::new(EmptyHostFiles),
         );
-        let wiring = wire_host_capabilities(&EngineConfig::new("test"), host).unwrap();
+        let wiring = wire_host_capabilities(&EngineConfig::new("1.2.3"), host).unwrap();
         let mut settings = wiring.wired.deps.settings.load().await.unwrap();
         settings.network.allow_relay_fallback = false;
         wiring.wired.deps.settings.save(&settings).await.unwrap();
@@ -817,7 +817,7 @@ mod tests {
             &wiring.wired.deps,
             &wiring.wired.sync_engine,
             &wiring.wired.shared,
-            "test",
+            "1.2.3",
             #[cfg(feature = "lan-compat")]
             wiring.wired.mobile_sync_ports.clone(),
             None,
@@ -837,10 +837,6 @@ mod tests {
         let admission_completion_recovery_reachable = lifecycle
             .sync_engine_assembly
             .admission_completion_recovery_is_reachable_for_test()
-            .await;
-        let legacy_upgrade_reachable = lifecycle
-            .sync_engine_assembly
-            .legacy_upgrade_is_reachable_for_test()
             .await;
         let deprecated_removal_protocols_reachable = lifecycle
             .sync_engine_assembly
@@ -862,10 +858,6 @@ mod tests {
         assert!(
             admission_completion_recovery_reachable,
             "admission completion recovery was not installed"
-        );
-        assert!(
-            legacy_upgrade_reachable,
-            "legacy space upgrade protocol was not installed"
         );
         assert!(
             !deprecated_removal_protocols_reachable,

@@ -324,129 +324,6 @@ async fn paged_history_transfers_257_events_end_to_end() {
 }
 
 #[tokio::test]
-async fn session_resume_reconciles_an_existing_legacy_member_without_a_new_online_event() {
-    let directory = tempfile::tempdir().unwrap();
-    let repository = MemoryWorkspaceRepository::default();
-    let exchange = Arc::new(ScriptedExchange::new(Vec::new()));
-    let probe = Arc::new(ScriptedLegacyProbe::new(vec![Ok(())]));
-    let peer = DeviceId::new("joiner");
-    let mut deps = test_deps(Arc::new(repository.clone()), "sponsor", Vec::new());
-    deps.membership_history_exchange = exchange;
-    deps.legacy_peer_probe = probe.clone();
-    deps.peer_addr_repo = Arc::new(FixedPeerAddrRepo {
-        records: vec![uc_core::ports::PeerAddressRecord {
-            device_id: peer.clone(),
-            addr_blob: vec![1],
-            observed_at: chrono::Utc::now(),
-        }],
-    });
-    let own_instance = install_current_history(&mut deps, &directory, 0xb2).await;
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(own_instance);
-    repository.save_state(&state).await.unwrap();
-    let owner = WorkspaceConvergence::new(deps);
-    let (_presence_tx, presence_events) = tokio::sync::broadcast::channel(1);
-
-    let runtime = Arc::clone(&owner).start(presence_events);
-    runtime
-        .activity()
-        .resume()
-        .await
-        .expect("resume workspace convergence after session unlock");
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if owner
-                .query()
-                .await
-                .unwrap()
-                .upgrade_required_peer_device_ids
-                == vec![peer.clone()]
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("startup reconciliation marks the existing legacy member");
-    runtime.shutdown().await;
-
-    assert_eq!(*probe.calls.lock().unwrap(), vec![peer]);
-}
-
-#[tokio::test]
-async fn indeterminate_peer_does_not_be_reported_as_requiring_an_upgrade() {
-    let directory = tempfile::tempdir().unwrap();
-    let repository = MemoryWorkspaceRepository::default();
-    let exchange = Arc::new(ScriptedExchange::new(Vec::new()));
-    let probe = Arc::new(ScriptedLegacyProbe::new(vec![Err(
-        uc_core::membership::LegacyPeerProbeError::Transport,
-    )]));
-    let peer = DeviceId::new("joiner");
-    let mut deps = test_deps(Arc::new(repository.clone()), "sponsor", Vec::new());
-    deps.membership_history_exchange = exchange;
-    deps.legacy_peer_probe = probe.clone();
-    let own_instance = install_current_history(&mut deps, &directory, 0xb3).await;
-    let owner = WorkspaceConvergence::new(deps);
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(own_instance);
-    state
-        .apply(
-            WorkspaceConvergenceEvent::PeerHistoryRelationshipUpdated {
-                peer: peer.clone(),
-                relationship: uc_core::membership::MembershipHistoryRelationship::Consistent,
-            },
-            2,
-        )
-        .unwrap();
-    repository.save_state(&state).await.unwrap();
-
-    assert!(owner
-        .reconcile_membership_history_with_peer(&peer)
-        .await
-        .is_err());
-
-    assert!(owner
-        .query()
-        .await
-        .unwrap()
-        .upgrade_required_peer_device_ids
-        .is_empty());
-    assert!(!owner.locally_removed(&peer).await);
-    assert_eq!(*probe.calls.lock().unwrap(), vec![peer]);
-}
-
-#[tokio::test]
-async fn rejected_current_peer_is_not_probed_or_reported_as_requiring_an_upgrade() {
-    let directory = tempfile::tempdir().unwrap();
-    let repository = MemoryWorkspaceRepository::default();
-    let probe = Arc::new(ScriptedLegacyProbe::new(vec![Ok(())]));
-    let peer = DeviceId::new("joiner");
-    let mut deps = test_deps(Arc::new(repository.clone()), "sponsor", Vec::new());
-    deps.membership_history_exchange = Arc::new(RejectingExchange);
-    deps.legacy_peer_probe = probe.clone();
-    let own_instance = install_current_history(&mut deps, &directory, 0xb4).await;
-    let owner = WorkspaceConvergence::new(deps);
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(own_instance);
-    repository.save_state(&state).await.unwrap();
-
-    assert!(owner
-        .reconcile_membership_history_with_peer(&peer)
-        .await
-        .is_err());
-
-    assert!(owner
-        .query()
-        .await
-        .unwrap()
-        .upgrade_required_peer_device_ids
-        .is_empty());
-    assert!(!owner.locally_removed(&peer).await);
-    assert!(probe.calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn concurrent_online_events_run_one_reconciliation_per_peer() {
     let directory = tempfile::tempdir().unwrap();
     let repository = MemoryWorkspaceRepository::default();
@@ -641,147 +518,6 @@ async fn persisted_v2_removal_decision_is_retried_after_restart_for_a_diverged_a
         sent[0].1,
         MembershipHistoryMessage::HistoryPageV2(_)
     ));
-}
-
-#[tokio::test]
-async fn active_legacy_bootstrap_owner_initializes_history_after_restart_even_when_not_smallest() {
-    let repository = MemoryWorkspaceRepository::default();
-    let mut deps = test_deps(Arc::new(repository), "device-z", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-a")]));
-    deps.space_protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
-    let owner = WorkspaceConvergence::new(deps);
-
-    let snapshot = owner.initialize_upgraded_legacy_space().await.unwrap();
-
-    assert_eq!(snapshot.history_event_count, 1);
-}
-
-#[tokio::test]
-async fn initialized_legacy_history_excludes_pending_legacy_peer_from_ordinary_scope() {
-    let repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.migrated_from_pre_adr_020 = true;
-    repository.save_state(&state).await.unwrap();
-    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![
-        legacy_member("device-a"),
-        legacy_member("device-b"),
-    ]));
-    deps.space_protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
-    let owner = WorkspaceConvergence::new(deps);
-
-    let initialized = owner.initialize_upgraded_legacy_space().await.unwrap();
-    let scope = owner.snapshot().await.unwrap();
-
-    assert_eq!(initialized.history_event_count, 1);
-    assert_eq!(
-        scope.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
-    );
-    assert!(scope.peer_device_ids.is_empty());
-}
-
-#[tokio::test]
-async fn fresh_legacy_upgrade_switches_to_current_history_after_initialization() {
-    let repository = MemoryWorkspaceRepository::default();
-    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
-    deps.initial_state_origin =
-        super::WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState;
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![
-        legacy_member("device-a"),
-        legacy_member("device-b"),
-        legacy_member("device-c"),
-    ]));
-    deps.space_protection = Arc::new(ProtectsQueriedMembers::with_active_legacy_bootstrap());
-    let owner = WorkspaceConvergence::new(deps);
-
-    let initialized = owner.initialize_upgraded_legacy_space().await.unwrap();
-    let scope = owner.snapshot().await.unwrap();
-    let saved = repository.load_state().await.unwrap().unwrap();
-
-    assert_eq!(initialized.history_event_count, 1);
-    assert!(!saved.migrated_from_pre_adr_020);
-    assert_eq!(
-        scope.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
-    );
-    assert!(scope.peer_device_ids.is_empty());
-}
-
-#[test]
-fn earlier_app_version_marks_an_upgrade_without_convergence_state() {
-    assert_eq!(
-        super::WorkspaceConvergenceStateOrigin::from_version_transition(
-            Some("0.19.1"),
-            "1.0.0-alpha.3"
-        ),
-        super::WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState
-    );
-    assert_eq!(
-        super::WorkspaceConvergenceStateOrigin::from_version_transition(
-            Some("1.0.0-alpha.3"),
-            "1.0.0-alpha.3"
-        ),
-        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
-    );
-    assert_eq!(
-        super::WorkspaceConvergenceStateOrigin::from_version_transition(None, "1.0.0-alpha.3"),
-        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
-    );
-    assert_eq!(
-        super::WorkspaceConvergenceStateOrigin::from_version_transition(
-            Some("1.1.0"),
-            "1.0.0-alpha.3"
-        ),
-        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
-    );
-    assert_eq!(
-        super::WorkspaceConvergenceStateOrigin::from_version_transition(
-            Some("not-semver"),
-            "1.0.0-alpha.3"
-        ),
-        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
-    );
-    assert_eq!(
-        super::WorkspaceConvergenceStateOrigin::from_version_transition(
-            Some("0.19.1"),
-            "not-semver"
-        ),
-        super::WorkspaceConvergenceStateOrigin::CurrentInstallation
-    );
-}
-
-#[tokio::test]
-async fn confirmed_legacy_peer_is_marked_upgrade_required_after_current_flow_is_unavailable() {
-    let directory = tempfile::tempdir().unwrap();
-    let repository = MemoryWorkspaceRepository::default();
-    let exchange = Arc::new(ScriptedExchange::new(Vec::new()));
-    let probe = Arc::new(ScriptedLegacyProbe::new(vec![Ok(())]));
-    let peer = DeviceId::new("joiner");
-    let mut deps = test_deps(Arc::new(repository.clone()), "sponsor", Vec::new());
-    deps.membership_history_exchange = exchange.clone();
-    deps.legacy_peer_probe = probe.clone();
-    let own_instance = install_current_history(&mut deps, &directory, 0xb1).await;
-    let owner = WorkspaceConvergence::new(deps);
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(own_instance);
-    repository.save_state(&state).await.unwrap();
-
-    owner
-        .reconcile_membership_history_with_peer(&peer)
-        .await
-        .unwrap();
-
-    assert!(owner.locally_removed(&peer).await);
-    assert_eq!(
-        owner
-            .query()
-            .await
-            .unwrap()
-            .upgrade_required_peer_device_ids,
-        vec![peer.clone()]
-    );
-    assert_eq!(*probe.calls.lock().unwrap(), vec![peer]);
 }
 
 #[tokio::test]
@@ -1138,6 +874,103 @@ async fn runtime_clears_a_stale_legacy_marker_after_current_history_exists() {
 
     owner.recover_legacy_migration_marker().await.unwrap();
     assert_eq!(repository.load_state().await.unwrap().unwrap(), repaired);
+}
+
+#[tokio::test]
+async fn isolated_legacy_profile_starts_with_fresh_single_member_history() {
+    let old_a = instance(0x0a);
+    let old_b = instance(0x0b);
+    let repository = MemoryWorkspaceRepository::default();
+    let genesis = membership_event(None, 0, old_a, old_a, "device-a", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, old_a, old_b, "device-b", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), old_a);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(addition).unwrap();
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(old_a);
+    state.membership_reconciliation = Some(history);
+    state.migrated_from_pre_adr_020 = true;
+    repository.save_state(&state).await.unwrap();
+
+    let device_id = DeviceId::new("device-a");
+    let credential = uc_core::membership::MembershipCredential::new(1, vec![0x73; 32]);
+    let expected_instance = credential.member_instance_id(&device_id);
+    let mut deps = test_deps(Arc::new(repository.clone()), device_id.as_str(), Vec::new());
+    deps.member_signatures = Arc::new(CredentialBackedSigner {
+        device_id,
+        credential,
+    });
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-b")]));
+    let owner = WorkspaceConvergence::new(deps);
+    owner.initialize_new_space_membership().await.unwrap();
+
+    let repaired = repository.load_state().await.unwrap().unwrap();
+    assert!(!repaired.migrated_from_pre_adr_020);
+    assert_eq!(repaired.own_instance, Some(expected_instance));
+    assert_eq!(repaired.effective_members().len(), 1);
+    let repaired_history = repaired.membership_reconciliation.as_ref().unwrap();
+    assert_eq!(repaired_history.known_event_count(), 1);
+    assert_eq!(
+        repaired_history.known_head(),
+        repaired_history.applied_head()
+    );
+}
+
+#[tokio::test]
+async fn unusable_isolated_profile_rebuilds_its_membership_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission_repository = durable_admission_repository(&directory, [0xd1; 16]);
+    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xd2; 32]);
+    let (_, stale_history, _, _, _) = durable_candidate_verification_fixture(attempt_id);
+    admission_repository
+        .compare_and_replace_membership_history_v2(
+            None,
+            &stale_history.encode_persisted_v2().unwrap(),
+        )
+        .await
+        .unwrap();
+    let repository = MemoryWorkspaceRepository::default();
+    let device_id = DeviceId::new("device-a");
+    let credential = uc_core::membership::MembershipCredential::new(1, vec![0x74; 32]);
+    let expected_instance = credential.member_instance_id(&device_id);
+    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(expected_instance);
+    state.membership_reconciliation = Some(MembershipReconciliation::new(
+        SPACE.to_owned(),
+        expected_instance,
+    ));
+    repository.save_state(&state).await.unwrap();
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.admission_attempts = admission_repository.clone();
+    deps.member_signatures = Arc::new(CredentialBackedSigner {
+        device_id,
+        credential,
+    });
+    let owner = WorkspaceConvergence::new(deps);
+
+    owner
+        .repair_incomplete_isolated_space_membership()
+        .await
+        .unwrap();
+
+    let repaired = repository.load_state().await.unwrap().unwrap();
+    assert!(!repaired.migrated_from_pre_adr_020);
+    assert_eq!(repaired.effective_members(), [expected_instance].into());
+    let repaired_history = admission_repository
+        .load_membership_history_v2()
+        .await
+        .unwrap()
+        .unwrap();
+    let repaired_history = uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
+        &repaired_history,
+        &DeterministicHistoricalVerifier,
+    )
+    .unwrap();
+    assert_eq!(repaired_history.lineage_id(), SPACE);
+    assert_eq!(
+        repaired_history.active_members(),
+        [expected_instance].into()
+    );
 }
 
 #[tokio::test]

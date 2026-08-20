@@ -498,7 +498,6 @@ pub enum OperationResult {
     WorkspaceConvergence(WorkspaceConvergenceSummary),
     DeviceTrust(DeviceTrustSnapshotSummary),
     DeviceTrustDecision(DeviceTrustDecisionSummary),
-    LegacyBootstrapStatus(Option<LegacyBootstrapSummary>),
     SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
     SearchTags(Vec<SearchTagSummary>),
@@ -703,9 +702,6 @@ impl fmt::Debug for OperationResult {
                     },
                 )
             }
-            Self::LegacyBootstrapStatus(summary) => debug
-                .field("kind", &"legacy_bootstrap_status")
-                .field("summary", summary),
             Self::SpaceProtection(summary) => debug
                 .field("kind", &"space_protection")
                 .field("summary", summary),
@@ -811,6 +807,7 @@ pub struct SetupStateSummary {
     pub space_id: Option<String>,
     pub current_invitation: Option<SetupInvitationSummary>,
     pub device_name: Option<String>,
+    pub re_pairing_required: bool,
 }
 
 impl fmt::Debug for SetupStateSummary {
@@ -821,6 +818,7 @@ impl fmt::Debug for SetupStateSummary {
             .field("has_space_id", &self.space_id.is_some())
             .field("has_current_invitation", &self.current_invitation.is_some())
             .field("has_device_name", &self.device_name.is_some())
+            .field("re_pairing_required", &self.re_pairing_required)
             .finish()
     }
 }
@@ -1139,21 +1137,6 @@ pub struct WorkspaceConvergenceSummary {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LegacyBootstrapOutcome {
-    AwaitingReadmission,
-    Complete,
-    RecoveryRequired,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegacyBootstrapSummary {
-    pub bootstrap_id: String,
-    pub outcome: LegacyBootstrapOutcome,
-    pub pending_readmission: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum SpaceProtectionModeSummary {
     Legacy,
     Migrating,
@@ -1180,7 +1163,6 @@ pub struct MemberProtectionSummary {
 pub struct SpaceProtectionSummary {
     pub mode: SpaceProtectionModeSummary,
     pub members: Vec<MemberProtectionSummary>,
-    pub legacy_bootstrap: Option<LegacyBootstrapSummary>,
 }
 
 impl fmt::Debug for DeviceSummary {

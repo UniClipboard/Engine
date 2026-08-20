@@ -1,0 +1,1 @@
+-- Retired legacy pairing recovery records cannot be reconstructed.

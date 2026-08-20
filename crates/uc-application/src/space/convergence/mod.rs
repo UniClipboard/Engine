@@ -42,8 +42,8 @@ use tracing::info;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     CurrentMemberSignaturePort, CurrentMembershipAnnouncementPort, CurrentMembershipIdentityPort,
-    LegacyPeerProbePort, MemberRepositoryPort, MembershipDecision, MembershipDecisionV2,
-    MembershipEvent, MembershipEventId, MembershipEventV2, MembershipHistoryExchangeEndpointPort,
+    MemberRepositoryPort, MembershipDecision, MembershipDecisionV2, MembershipEvent,
+    MembershipEventId, MembershipEventV2, MembershipHistoryExchangeEndpointPort,
     MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
     MembershipHistoryRelationship, MembershipOperation, MembershipOperationV2,
     MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalDecision,
@@ -130,9 +130,6 @@ pub struct WorkspaceConvergenceDeps {
     /// The sole authenticated peer channel for bounded member-history
     /// reconciliation.
     pub membership_history_exchange: Arc<dyn MembershipHistoryExchangePort>,
-    /// Positive-only legacy endpoint probe. It is used only after the current
-    /// member-history endpoint failed to confirm the peer.
-    pub legacy_peer_probe: Arc<dyn LegacyPeerProbePort>,
     /// Member roster persistence: admission commits write the admitted
     /// member facts here in the same save boundary.
     pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
@@ -150,18 +147,8 @@ pub enum WorkspaceConvergenceStateOrigin {
 }
 
 impl WorkspaceConvergenceStateOrigin {
-    pub fn from_version_transition(previous: Option<&str>, current: &str) -> Self {
-        let Some(previous) = previous.and_then(|value| semver::Version::parse(value).ok()) else {
-            return Self::CurrentInstallation;
-        };
-        let Ok(current) = semver::Version::parse(current) else {
-            return Self::CurrentInstallation;
-        };
-        if previous < current {
-            Self::UpgradeWithoutConvergenceState
-        } else {
-            Self::CurrentInstallation
-        }
+    pub fn from_version_transition(_previous: Option<&str>, _current: &str) -> Self {
+        Self::CurrentInstallation
     }
 }
 
