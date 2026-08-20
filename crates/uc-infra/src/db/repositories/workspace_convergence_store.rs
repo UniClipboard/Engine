@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{BigInt, Binary, Text};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -42,6 +42,55 @@ struct UnversionedCurrentWorkspaceState {
     revision: u64,
     removed: bool,
     updated_at_ms: i64,
+}
+
+/// Exact V2 payload layout written by Engine 1.1.0-rc.3.
+///
+/// Postcard encodes struct fields positionally, so this persisted layout must
+/// not be replaced with the evolving domain type.
+#[derive(Deserialize)]
+struct WorkspaceConvergenceStateV2 {
+    space_lineage: String,
+    own_instance: Option<MemberInstanceId>,
+    peer_history_relationships:
+        std::collections::BTreeMap<uc_core::DeviceId, MembershipHistoryRelationship>,
+    membership_reconciliation: Option<uc_core::membership::MembershipReconciliation>,
+    pending_applied_membership_effects: Vec<PendingAppliedMembershipEffect>,
+    pending_membership_decision_deliveries: Vec<PendingMembershipDecisionDelivery>,
+    pending_admissions: std::collections::BTreeMap<PairingSessionId, PendingAdmissionRecord>,
+    phase: WorkspacePhase,
+    failure_category: Option<WorkspaceFailureCategory>,
+    revision: u64,
+    removed: bool,
+    updated_at_ms: i64,
+    #[serde(default)]
+    migrated_from_pre_adr_020: bool,
+}
+
+impl From<WorkspaceConvergenceStateV2> for WorkspaceConvergenceState {
+    fn from(state: WorkspaceConvergenceStateV2) -> Self {
+        let migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
+            || state
+                .membership_reconciliation
+                .as_ref()
+                .is_none_or(|history| history.applied_head().is_none());
+        Self {
+            space_lineage: state.space_lineage,
+            own_instance: state.own_instance,
+            peer_history_relationships: state.peer_history_relationships,
+            membership_reconciliation: state.membership_reconciliation,
+            pending_applied_membership_effects: state.pending_applied_membership_effects,
+            pending_membership_decision_deliveries: state.pending_membership_decision_deliveries,
+            pending_membership_history_transfers: std::collections::BTreeMap::new(),
+            pending_admissions: state.pending_admissions,
+            phase: state.phase,
+            failure_category: state.failure_category,
+            revision: state.revision,
+            removed: state.removed,
+            updated_at_ms: state.updated_at_ms,
+            migrated_from_pre_adr_020,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -307,7 +356,81 @@ const WORKSPACE_STATE_V3_STORAGE_VERSION: u16 = 3;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkspaceConvergenceStateV3 {
     storage_version: u16,
-    state: WorkspaceConvergenceState,
+    state: WorkspaceConvergenceStateV3Payload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkspaceConvergenceStateV3Payload {
+    space_lineage: String,
+    own_instance: Option<MemberInstanceId>,
+    peer_history_relationships:
+        std::collections::BTreeMap<uc_core::DeviceId, MembershipHistoryRelationship>,
+    membership_reconciliation: Option<uc_core::membership::MembershipReconciliation>,
+    pending_applied_membership_effects: Vec<PendingAppliedMembershipEffect>,
+    pending_membership_decision_deliveries: Vec<PendingMembershipDecisionDelivery>,
+    pending_membership_history_transfers: std::collections::BTreeMap<
+        uc_core::DeviceId,
+        uc_core::membership::PendingMembershipHistoryTransferV2,
+    >,
+    pending_admissions: std::collections::BTreeMap<PairingSessionId, PendingAdmissionRecord>,
+    phase: WorkspacePhase,
+    failure_category: Option<WorkspaceFailureCategory>,
+    revision: u64,
+    removed: bool,
+    updated_at_ms: i64,
+    migrated_from_pre_adr_020: bool,
+}
+
+impl From<WorkspaceConvergenceState> for WorkspaceConvergenceStateV3Payload {
+    fn from(state: WorkspaceConvergenceState) -> Self {
+        Self {
+            space_lineage: state.space_lineage,
+            own_instance: state.own_instance,
+            peer_history_relationships: state.peer_history_relationships,
+            membership_reconciliation: state.membership_reconciliation,
+            pending_applied_membership_effects: state.pending_applied_membership_effects,
+            pending_membership_decision_deliveries: state.pending_membership_decision_deliveries,
+            pending_membership_history_transfers: state.pending_membership_history_transfers,
+            pending_admissions: state.pending_admissions,
+            phase: state.phase,
+            failure_category: state.failure_category,
+            revision: state.revision,
+            removed: state.removed,
+            updated_at_ms: state.updated_at_ms,
+            migrated_from_pre_adr_020: state.migrated_from_pre_adr_020,
+        }
+    }
+}
+
+impl From<WorkspaceConvergenceStateV3Payload> for WorkspaceConvergenceState {
+    fn from(state: WorkspaceConvergenceStateV3Payload) -> Self {
+        let migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
+            || (!state.removed
+                && state.phase != WorkspacePhase::RecoveryRequired
+                && state.failure_category.is_none()
+                && state.own_instance.is_some()
+                && !state.peer_history_relationships.is_empty()
+                && state
+                    .membership_reconciliation
+                    .as_ref()
+                    .is_none_or(|history| history.applied_head().is_none()));
+        Self {
+            space_lineage: state.space_lineage,
+            own_instance: state.own_instance,
+            peer_history_relationships: state.peer_history_relationships,
+            membership_reconciliation: state.membership_reconciliation,
+            pending_applied_membership_effects: state.pending_applied_membership_effects,
+            pending_membership_decision_deliveries: state.pending_membership_decision_deliveries,
+            pending_membership_history_transfers: state.pending_membership_history_transfers,
+            pending_admissions: state.pending_admissions,
+            phase: state.phase,
+            failure_category: state.failure_category,
+            revision: state.revision,
+            removed: state.removed,
+            updated_at_ms: state.updated_at_ms,
+            migrated_from_pre_adr_020,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -371,13 +494,15 @@ fn open_workspace_plaintext(
         .map_err(|_| WorkspaceConvergenceRepositoryError::Corrupt)
 }
 
-fn decode_current_workspace_payload<T: DeserializeOwned>(
+fn decode_v2_workspace_payload(
     plaintext: &[u8],
-) -> Result<T, WorkspaceConvergenceRepositoryError> {
+) -> Result<WorkspaceConvergenceState, WorkspaceConvergenceRepositoryError> {
     let encoded = plaintext
         .strip_prefix(WORKSPACE_STATE_V2_PREFIX)
         .unwrap_or(plaintext);
-    postcard::from_bytes(encoded).map_err(|_| WorkspaceConvergenceRepositoryError::Corrupt)
+    postcard::from_bytes::<WorkspaceConvergenceStateV2>(encoded)
+        .map(WorkspaceConvergenceState::from)
+        .map_err(|_| WorkspaceConvergenceRepositoryError::Corrupt)
 }
 
 #[derive(QueryableByName)]
@@ -487,8 +612,9 @@ fn open_v3_slot_payload(
     if stored.storage_version != WORKSPACE_STATE_V3_STORAGE_VERSION {
         return Err(WorkspaceConvergenceRepositoryError::Corrupt);
     }
-    validate_loaded_state(&stored.state, space_id, row.updated_at_ms)?;
-    Ok((stored.state, Sha256::digest(&plaintext).into()))
+    let state = WorkspaceConvergenceState::from(stored.state);
+    validate_loaded_state(&state, space_id, row.updated_at_ms)?;
+    Ok((state, Sha256::digest(&plaintext).into()))
 }
 
 fn load_v3_state_on(
@@ -638,7 +764,7 @@ fn save_v3_state_on(
 
     let stored = WorkspaceConvergenceStateV3 {
         storage_version: WORKSPACE_STATE_V3_STORAGE_VERSION,
-        state: state.clone(),
+        state: state.clone().into(),
     };
     let encrypted_slot = seal_prefixed_payload(
         master_key,
@@ -781,7 +907,7 @@ fn load_state_on(
         &workspace_state_aad(space_id.as_ref()),
     )?;
     if plaintext.starts_with(WORKSPACE_STATE_V2_PREFIX) {
-        let state: WorkspaceConvergenceState = decode_current_workspace_payload(&plaintext)?;
+        let state = decode_v2_workspace_payload(&plaintext)?;
         validate_loaded_state(&state, space_id, row.updated_at_ms)?;
         let source = row.encrypted_payload;
         run_workspace_transaction(conn, |conn| {
@@ -889,7 +1015,8 @@ mod tests {
     use uc_core::membership::{
         AdmissionChangeFacts, MemberInstanceId, MembershipActivationBaselineV2,
         MembershipCredential, MembershipEvent, MembershipHistoryRelationship, MembershipOperation,
-        MembershipReconciliation, PendingAdmissionRecord, PendingMembershipHistoryTransferV2,
+        MembershipReconciliation, PendingAdmissionRecord, PendingAppliedMembershipEffect,
+        PendingMembershipDecisionDelivery, PendingMembershipHistoryTransferV2,
         VersionedMembershipHistory, WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState,
         WorkspacePhase, ED25519_SIGNATURE_ALGORITHM_V1,
     };
@@ -929,6 +1056,51 @@ mod tests {
         updated_at_ms: i64,
     }
 
+    #[derive(serde::Serialize)]
+    struct Rc3WorkspaceConvergenceState {
+        space_lineage: String,
+        own_instance: Option<MemberInstanceId>,
+        peer_history_relationships: BTreeMap<DeviceId, MembershipHistoryRelationship>,
+        membership_reconciliation: Option<MembershipReconciliation>,
+        pending_applied_membership_effects: Vec<PendingAppliedMembershipEffect>,
+        pending_membership_decision_deliveries: Vec<PendingMembershipDecisionDelivery>,
+        pending_admissions:
+            BTreeMap<uc_core::ports::pairing::PairingSessionId, PendingAdmissionRecord>,
+        phase: WorkspacePhase,
+        failure_category: Option<uc_core::membership::WorkspaceFailureCategory>,
+        revision: u64,
+        removed: bool,
+        updated_at_ms: i64,
+        migrated_from_pre_adr_020: bool,
+    }
+
+    #[derive(serde::Serialize)]
+    struct Rc4WorkspaceConvergenceStateV3 {
+        storage_version: u16,
+        state: WorkspaceConvergenceState,
+    }
+
+    impl From<WorkspaceConvergenceState> for Rc3WorkspaceConvergenceState {
+        fn from(state: WorkspaceConvergenceState) -> Self {
+            Self {
+                space_lineage: state.space_lineage,
+                own_instance: state.own_instance,
+                peer_history_relationships: state.peer_history_relationships,
+                membership_reconciliation: state.membership_reconciliation,
+                pending_applied_membership_effects: state.pending_applied_membership_effects,
+                pending_membership_decision_deliveries: state
+                    .pending_membership_decision_deliveries,
+                pending_admissions: state.pending_admissions,
+                phase: state.phase,
+                failure_category: state.failure_category,
+                revision: state.revision,
+                removed: state.removed,
+                updated_at_ms: state.updated_at_ms,
+                migrated_from_pre_adr_020: state.migrated_from_pre_adr_020,
+            }
+        }
+    }
+
     fn insert_unversioned_payload<T: serde::Serialize>(
         pool: &DbPool,
         value: &T,
@@ -959,6 +1131,61 @@ mod tests {
         .bind::<diesel::sql_types::BigInt, _>(updated_at_ms)
         .execute(&mut connection)
         .unwrap();
+    }
+
+    fn insert_rc4_v3_state(pool: &DbPool, state: &WorkspaceConvergenceState) {
+        let master_key = MasterKey::from_bytes(&[0x57; 32]).unwrap();
+        let space_id = SpaceId::from_str(SPACE);
+        let lookup_token = super::space_lookup_token(&master_key, &space_id).unwrap();
+        let slot_id = "rc4-active-slot";
+        let stored = Rc4WorkspaceConvergenceStateV3 {
+            storage_version: super::WORKSPACE_STATE_V3_STORAGE_VERSION,
+            state: state.clone(),
+        };
+        let encrypted = super::seal_prefixed_payload(
+            &master_key,
+            super::WORKSPACE_STATE_V3_PREFIX,
+            &stored,
+            &super::workspace_v3_slot_aad(SPACE, slot_id),
+        )
+        .unwrap();
+        let mut connection = pool.get().unwrap();
+        diesel::sql_query(
+            "INSERT INTO workspace_convergence_v3_slots \
+             (space_lookup_token, slot_id, encrypted_payload, updated_at_ms) VALUES (?, ?, ?, ?)",
+        )
+        .bind::<diesel::sql_types::Text, _>(&lookup_token)
+        .bind::<diesel::sql_types::Text, _>(slot_id)
+        .bind::<diesel::sql_types::Binary, _>(encrypted)
+        .bind::<diesel::sql_types::BigInt, _>(state.updated_at_ms)
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO workspace_convergence_v3_active \
+             (space_lookup_token, slot_id, generation) VALUES (?, ?, ?)",
+        )
+        .bind::<diesel::sql_types::Text, _>(lookup_token)
+        .bind::<diesel::sql_types::Text, _>(slot_id)
+        .bind::<diesel::sql_types::BigInt, _>(1_i64)
+        .execute(&mut connection)
+        .unwrap();
+    }
+
+    fn rc3_v2_plaintext(state: &WorkspaceConvergenceState) -> Vec<u8> {
+        let rc3_state = Rc3WorkspaceConvergenceState::from(state.clone());
+        let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
+        plaintext.extend(postcard::to_stdvec(&rc3_state).unwrap());
+        plaintext
+    }
+
+    fn expected_rc3_state(mut state: WorkspaceConvergenceState) -> WorkspaceConvergenceState {
+        state.pending_membership_history_transfers.clear();
+        state.migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
+            || state
+                .membership_reconciliation
+                .as_ref()
+                .is_none_or(|history| history.applied_head().is_none());
+        state
     }
 
     fn session() -> InMemorySession {
@@ -1368,8 +1595,7 @@ mod tests {
         let (store, pool, _directory) = make_store();
         let mut state = persisted_state();
         state.space_lineage = "another-space".to_owned();
-        let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
-        plaintext.extend(postcard::to_stdvec(&state).unwrap());
+        let plaintext = rc3_v2_plaintext(&state);
         insert_encrypted_plaintext(&pool, &plaintext, state.updated_at_ms);
 
         assert_eq!(
@@ -1381,9 +1607,8 @@ mod tests {
     #[tokio::test]
     async fn v2_state_is_side_written_verified_and_guarded_before_v3_activation() {
         let (store, pool, _directory) = make_store();
-        let state = persisted_state();
-        let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
-        plaintext.extend(postcard::to_stdvec(&state).unwrap());
+        let state = expected_rc3_state(persisted_state());
+        let plaintext = rc3_v2_plaintext(&state);
         insert_encrypted_plaintext(&pool, &plaintext, state.updated_at_ms);
 
         assert_eq!(store.load_state().await.unwrap(), Some(state.clone()));
@@ -1419,11 +1644,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rc3_v2_state_is_recovered_and_migrated_to_v3() {
+        let (store, pool, _directory) = make_store();
+        let expected = expected_rc3_state(persisted_state());
+        let plaintext = rc3_v2_plaintext(&expected);
+        insert_encrypted_plaintext(&pool, &plaintext, expected.updated_at_ms);
+
+        let encoded = plaintext
+            .strip_prefix(super::WORKSPACE_STATE_V2_PREFIX)
+            .unwrap();
+        assert!(postcard::from_bytes::<WorkspaceConvergenceState>(encoded).is_err());
+
+        assert_eq!(store.load_state().await.unwrap(), Some(expected.clone()));
+
+        let reopened = reopen_store(pool);
+        assert_eq!(reopened.load_state().await.unwrap(), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn rc3_v2_state_without_current_history_recovers_legacy_migration_provenance() {
+        let (store, pool, _directory) = make_store();
+        let mut expected = expected_rc3_state(persisted_state());
+        expected.membership_reconciliation = None;
+        expected.migrated_from_pre_adr_020 = false;
+        let plaintext = rc3_v2_plaintext(&expected);
+        insert_encrypted_plaintext(&pool, &plaintext, expected.updated_at_ms);
+
+        let loaded = store.load_state().await.unwrap().unwrap();
+
+        assert!(loaded.membership_reconciliation.is_none());
+        assert!(loaded.migrated_from_pre_adr_020);
+        let reopened = reopen_store(pool);
+        assert_eq!(reopened.load_state().await.unwrap(), Some(loaded));
+    }
+
+    #[test]
+    fn rc4_v3_payload_remains_readable_by_the_fixed_v3_layout() {
+        let expected = persisted_state();
+        let rc4 = Rc4WorkspaceConvergenceStateV3 {
+            storage_version: super::WORKSPACE_STATE_V3_STORAGE_VERSION,
+            state: expected.clone(),
+        };
+
+        let encoded = postcard::to_stdvec(&rc4).unwrap();
+        let stored: super::WorkspaceConvergenceStateV3 = postcard::from_bytes(&encoded).unwrap();
+
+        assert_eq!(stored.storage_version, rc4.storage_version);
+        assert_eq!(WorkspaceConvergenceState::from(stored.state), expected);
+    }
+
+    #[tokio::test]
+    async fn rc4_v3_state_migrated_from_rc3_while_locally_applied_recovers_legacy_origin() {
+        let (_store, pool, _directory) = make_store();
+        let mut affected = persisted_state();
+        affected.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
+        affected.phase = WorkspacePhase::LocallyApplied;
+        affected.membership_reconciliation = None;
+        affected.migrated_from_pre_adr_020 = false;
+        insert_rc4_v3_state(&pool, &affected);
+
+        let recovered = reopen_store(pool).load_state().await.unwrap().unwrap();
+
+        assert!(recovered.migrated_from_pre_adr_020);
+    }
+
+    #[tokio::test]
+    async fn rc4_v3_state_migrated_from_rc3_while_converging_recovers_legacy_origin() {
+        let (_store, pool, _directory) = make_store();
+        let mut affected = persisted_state();
+        affected.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
+        affected.phase = WorkspacePhase::Converging;
+        affected.membership_reconciliation = None;
+        affected.migrated_from_pre_adr_020 = false;
+        insert_rc4_v3_state(&pool, &affected);
+
+        let recovered = reopen_store(pool).load_state().await.unwrap().unwrap();
+
+        assert!(recovered.migrated_from_pre_adr_020);
+    }
+
+    #[test]
+    fn v3_state_previously_migrated_without_provenance_recovers_legacy_origin() {
+        let mut affected = persisted_state();
+        affected.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
+        affected.phase = WorkspacePhase::Complete;
+        affected.membership_reconciliation = None;
+        affected.migrated_from_pre_adr_020 = false;
+        let stored = super::WorkspaceConvergenceStateV3Payload::from(affected);
+
+        let recovered = WorkspaceConvergenceState::from(stored);
+
+        assert!(recovered.migrated_from_pre_adr_020);
+    }
+
+    #[test]
+    fn v3_state_without_durable_legacy_evidence_remains_fail_closed() {
+        let mut incomplete = persisted_state();
+        incomplete.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
+        incomplete.membership_reconciliation = None;
+        incomplete.migrated_from_pre_adr_020 = false;
+
+        let mut missing_identity = incomplete.clone();
+        missing_identity.own_instance = None;
+
+        let mut missing_peer_relationship = incomplete.clone();
+        missing_peer_relationship.peer_history_relationships.clear();
+
+        let mut removed = incomplete.clone();
+        removed.removed = true;
+
+        let mut recovery_required = incomplete;
+        recovery_required.phase = WorkspacePhase::RecoveryRequired;
+
+        let mut integrity_failure = recovery_required.clone();
+        integrity_failure.phase = WorkspacePhase::LocallyApplied;
+        integrity_failure.failure_category =
+            Some(uc_core::membership::WorkspaceFailureCategory::Storage);
+
+        for state in [
+            missing_identity,
+            missing_peer_relationship,
+            removed,
+            recovery_required,
+            integrity_failure,
+        ] {
+            let recovered = WorkspaceConvergenceState::from(
+                super::WorkspaceConvergenceStateV3Payload::from(state),
+            );
+            assert!(!recovered.migrated_from_pre_adr_020);
+        }
+    }
+
+    #[tokio::test]
     async fn failed_v3_reopen_keeps_original_v2_ciphertext_and_no_active_pointer() {
         let (store, pool, _directory) = make_store();
-        let state = persisted_state();
-        let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
-        plaintext.extend(postcard::to_stdvec(&state).unwrap());
+        let state = expected_rc3_state(persisted_state());
+        let plaintext = rc3_v2_plaintext(&state);
         insert_encrypted_plaintext(&pool, &plaintext, state.updated_at_ms);
         let original = {
             let mut connection = pool.get().unwrap();
@@ -1465,9 +1821,8 @@ mod tests {
     #[tokio::test]
     async fn reopen_finishes_v3_cleanup_without_changing_the_active_state() {
         let (store, pool, _directory) = make_store();
-        let state = persisted_state();
-        let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
-        plaintext.extend(postcard::to_stdvec(&state).unwrap());
+        let state = expected_rc3_state(persisted_state());
+        let plaintext = rc3_v2_plaintext(&state);
         insert_encrypted_plaintext(&pool, &plaintext, state.updated_at_ms);
         assert_eq!(store.load_state().await.unwrap(), Some(state.clone()));
 

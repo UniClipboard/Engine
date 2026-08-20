@@ -9,6 +9,25 @@ use super::{AdmissionKeyError, AdmissionKeyManager};
 
 const ACTIVE_MANIFEST_FILE: &str = ".active-space-manifest-v2";
 const ACTIVE_MANIFEST_PURPOSE: &[u8] = b"active-space-manifest-v2";
+const DEVICE_RESET_JOURNAL_FILE: &str = ".device-management-reset-v1";
+const DEVICE_RESET_JOURNAL_PURPOSE: &[u8] = b"device-management-reset-v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DeviceManagementResetJournalV1 {
+    pub(crate) format_version: u16,
+    pub(crate) target_space_id: String,
+    pub(crate) target_generation: [u8; 16],
+    pub(crate) source_space_id: Option<String>,
+    pub(crate) source_generation: Option<[u8; 16]>,
+}
+
+impl DeviceManagementResetJournalV1 {
+    pub(crate) fn validate(&self) -> bool {
+        self.format_version == 1
+            && !self.target_space_id.is_empty()
+            && self.source_space_id.is_some() == self.source_generation.is_some()
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ActiveSpaceManifestStoreError {
@@ -20,6 +39,7 @@ pub enum ActiveSpaceManifestStoreError {
 
 pub struct ActiveSpaceManifestStore {
     path: PathBuf,
+    reset_journal_path: PathBuf,
     keys: Arc<AdmissionKeyManager>,
     write_lock: Mutex<()>,
 }
@@ -28,6 +48,7 @@ impl ActiveSpaceManifestStore {
     pub fn new(base_dir: PathBuf, keys: Arc<AdmissionKeyManager>) -> Self {
         Self {
             path: base_dir.join(ACTIVE_MANIFEST_FILE),
+            reset_journal_path: base_dir.join(DEVICE_RESET_JOURNAL_FILE),
             keys,
             write_lock: Mutex::new(()),
         }
@@ -116,6 +137,80 @@ impl ActiveSpaceManifestStore {
             .map_err(|_| ActiveSpaceManifestStoreError::Storage)?;
         sync_parent_directory(parent).map_err(|_| ActiveSpaceManifestStoreError::Storage)
     }
+
+    pub(crate) async fn load_device_reset_journal(
+        &self,
+    ) -> Result<Option<DeviceManagementResetJournalV1>, ActiveSpaceManifestStoreError> {
+        let ciphertext = match tokio::fs::read(&self.reset_journal_path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ActiveSpaceManifestStoreError::Storage),
+        };
+        let plaintext = self
+            .keys
+            .open_profile_payload(DEVICE_RESET_JOURNAL_PURPOSE, &ciphertext)
+            .map_err(map_key_error)?;
+        let journal: DeviceManagementResetJournalV1 =
+            postcard::from_bytes(&plaintext).map_err(|_| ActiveSpaceManifestStoreError::Corrupt)?;
+        journal
+            .validate()
+            .then_some(Some(journal))
+            .ok_or(ActiveSpaceManifestStoreError::Corrupt)
+    }
+
+    pub(crate) async fn save_device_reset_journal(
+        &self,
+        journal: &DeviceManagementResetJournalV1,
+    ) -> Result<(), ActiveSpaceManifestStoreError> {
+        if !journal.validate() {
+            return Err(ActiveSpaceManifestStoreError::Corrupt);
+        }
+        let _guard = self.write_lock.lock().await;
+        let parent = self
+            .reset_journal_path
+            .parent()
+            .ok_or(ActiveSpaceManifestStoreError::Storage)?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|_| ActiveSpaceManifestStoreError::Storage)?;
+        let plaintext =
+            postcard::to_stdvec(journal).map_err(|_| ActiveSpaceManifestStoreError::Corrupt)?;
+        let ciphertext = self
+            .keys
+            .seal_profile_payload(DEVICE_RESET_JOURNAL_PURPOSE, &plaintext)
+            .map_err(map_key_error)?;
+        let temporary = self.reset_journal_path.with_extension("tmp");
+        let mut file = tokio::fs::File::create(&temporary)
+            .await
+            .map_err(|_| ActiveSpaceManifestStoreError::Storage)?;
+        file.write_all(&ciphertext)
+            .await
+            .map_err(|_| ActiveSpaceManifestStoreError::Storage)?;
+        file.sync_all()
+            .await
+            .map_err(|_| ActiveSpaceManifestStoreError::Storage)?;
+        drop(file);
+        replace_file_atomically(&temporary, &self.reset_journal_path)
+            .map_err(|_| ActiveSpaceManifestStoreError::Storage)?;
+        sync_parent_directory(parent).map_err(|_| ActiveSpaceManifestStoreError::Storage)
+    }
+
+    pub(crate) async fn clear_device_reset_journal(
+        &self,
+    ) -> Result<(), ActiveSpaceManifestStoreError> {
+        let _guard = self.write_lock.lock().await;
+        match tokio::fs::remove_file(&self.reset_journal_path).await {
+            Ok(()) => {
+                let parent = self
+                    .reset_journal_path
+                    .parent()
+                    .ok_or(ActiveSpaceManifestStoreError::Storage)?;
+                sync_parent_directory(parent).map_err(|_| ActiveSpaceManifestStoreError::Storage)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(ActiveSpaceManifestStoreError::Storage),
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -183,6 +278,44 @@ mod tests {
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
+
+    #[tokio::test]
+    async fn device_reset_journal_round_trips_encrypted_and_clears_idempotently() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ActiveSpaceManifestStore::new(
+            directory.path().to_path_buf(),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::new(MemorySecureStorage::default()),
+                [0x61; 16],
+            )),
+        );
+        let journal = DeviceManagementResetJournalV1 {
+            format_version: 1,
+            target_space_id: "private-reset-target".to_owned(),
+            target_generation: [0x62; 16],
+            source_space_id: Some("private-source-space".to_owned()),
+            source_generation: Some([0x63; 16]),
+        };
+
+        store.save_device_reset_journal(&journal).await.unwrap();
+
+        assert_eq!(
+            store.load_device_reset_journal().await.unwrap(),
+            Some(journal)
+        );
+        let bytes = tokio::fs::read(directory.path().join(DEVICE_RESET_JOURNAL_FILE))
+            .await
+            .unwrap();
+        assert!(!bytes
+            .windows(b"private-reset-target".len())
+            .any(|window| window == b"private-reset-target"));
+        assert!(!bytes
+            .windows(b"private-source-space".len())
+            .any(|window| window == b"private-source-space"));
+        store.clear_device_reset_journal().await.unwrap();
+        store.clear_device_reset_journal().await.unwrap();
+        assert_eq!(store.load_device_reset_journal().await.unwrap(), None);
+    }
 
     #[derive(Default)]
     struct MemorySecureStorage(StdMutex<HashMap<String, Vec<u8>>>);

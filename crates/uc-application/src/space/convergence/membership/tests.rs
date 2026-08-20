@@ -876,6 +876,52 @@ async fn runtime_clears_a_stale_legacy_marker_after_current_history_exists() {
     assert_eq!(repository.load_state().await.unwrap().unwrap(), repaired);
 }
 
+#[test]
+fn existing_installation_without_convergence_state_keeps_upgrade_origin() {
+    assert_eq!(
+        WorkspaceConvergenceStateOrigin::from_version_transition(Some("1.1.0-rc.4"), "1.1.0-rc.4"),
+        WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState
+    );
+}
+
+#[tokio::test]
+async fn recovery_persists_missing_state_for_an_existing_installation() {
+    let repository = MemoryWorkspaceRepository::default();
+    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.initial_state_origin = WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState;
+    deps.member_repo = Arc::new(FixedMemberRepo(vec![
+        legacy_member("device-a"),
+        legacy_member("device-b"),
+    ]));
+    deps.space_protection = Arc::new(ProtectsQueriedMembers::default());
+    let owner = WorkspaceConvergence::new(deps);
+
+    owner.recover_legacy_migration_marker().await.unwrap();
+
+    let recovered = repository.load_state().await.unwrap().unwrap();
+    assert!(recovered.migrated_from_pre_adr_020);
+    let snapshot = owner.snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.source,
+        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
+    );
+    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
+}
+
+#[tokio::test]
+async fn recovery_does_not_persist_missing_state_for_a_fresh_installation() {
+    let repository = MemoryWorkspaceRepository::default();
+    let owner = WorkspaceConvergence::new(test_deps(
+        Arc::new(repository.clone()),
+        "device-a",
+        Vec::new(),
+    ));
+
+    owner.recover_legacy_migration_marker().await.unwrap();
+
+    assert!(repository.load_state().await.unwrap().is_none());
+}
+
 #[tokio::test]
 async fn isolated_legacy_profile_starts_with_fresh_single_member_history() {
     let old_a = instance(0x0a);

@@ -81,7 +81,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `CancelJoinSpace` | 请求取消指定的本机加入；只与发起方正式提交点竞争 |
 | `IssueInvitation` | 签发一次配对邀请 |
 | `CancelInvitation` | 取消当前尚未兑换的配对邀请 |
-| `ResetSpace` | 清除当前空间设置和未消费邀请，保留可恢复密钥材料 |
+| `ResetSpace` | 保留本机资料、设置、身份和解锁能力，废弃全部旧设备关系并建立只含本机的新空间 |
 | `FactoryResetSpace` | 停止旧运行入口后依次清除密钥材料、空间状态和邀请，使设备可重新初始化 |
 | `QuerySetupState` | 查询设置是否完成、当前邀请和已保存设备名 |
 | `QueryStorageStats` | 查询数据库、密钥库、缓存和日志占用大小，不返回本机目录 |
@@ -148,9 +148,10 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 
 `RecoverSession` 的 `allow_secure_storage_unlock` 由宿主根据当前运行环境决定。值为 `false` 时核心不得尝试从系统安全存储恢复密钥；值为 `true` 时，核心统一完成加密会话、空间会话、搜索和接收能力恢复。
 
-`CancelInvitation` 在没有待取消邀请时返回冲突错误。`ResetSpace` 不是取消加入：profile 仍有未结束加入、
-待确认发送、恢复、切换或清理时返回冲突且不改变加入、设置或邀请；静止时只清除当前空间设置和未消费
-邀请，并隐藏此前公开的加入结果，不删除终态、防重放事实或可恢复密钥材料。`FactoryResetSpace` 则停止
+`CancelInvitation` 在没有待取消邀请时返回冲突错误。`ResetSpace` 是用户明确触发的最后兜底：Engine 先停止
+旧空间运行，清除未结束加入、待确认发送、恢复、切换、邀请和全部旧设备关系，把仍可读取的本机历史与文件
+迁移到只含本机的新空间，并保存全部设备需要重新配对的状态。它不等待网络，不清除一般设置、设备身份、
+解锁材料或本机资料；中断和重复调用继续同一个目标空间。`FactoryResetSpace` 则停止
 全部旧运行入口，先清除并确认密钥材料不存在，再清除数据库、空间世代、设置、邀请、关系、准入记录、
 导入暂存和受管缓存。完成后旧 Engine 会话失效，宿主必须重新创建 Engine；启动遇到未完成清理时会续完
 清理并返回可重试的 unavailable，宿主随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。

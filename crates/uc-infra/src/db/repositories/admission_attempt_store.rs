@@ -554,6 +554,35 @@ fn validate_terminal_delivery_update(
 impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
     for DieselAdmissionAttemptStore<E>
 {
+    async fn reset_for_device_management(
+        &self,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_on(conn)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    state.attempts.clear();
+                    state.terminals.clear();
+                    state.membership_history_v2 = None;
+                    state.metadata.join_projection_floor_ordinal =
+                        state.metadata.next_local_join_ordinal;
+                    state.metadata.consumed_invitation_attempts.clear();
+                    state.metadata.completion_recovery_challenges.clear();
+                    state.metadata.device_trust_revision = state
+                        .metadata
+                        .device_trust_revision
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    self.save_state_on(conn, &state)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    Ok(state.metadata)
+                })
+            })
+            .map_err(executor_error)
+    }
+
     async fn commit_local_join_start(
         &self,
         mutation: LocalJoinStartMutationV1,
@@ -1579,6 +1608,42 @@ mod tests {
         attempt.terminal_result = Some(AdmissionTerminalResultV1::Rejected);
         attempt.rejection_reason = Some(AdmissionRejectionReasonV1::InvitationUnavailable);
         attempt
+    }
+
+    #[tokio::test]
+    async fn device_management_reset_clears_admission_state_and_preserves_monotonic_metadata() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("device-management-reset.sqlite");
+        let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
+        let store = super::DieselAdmissionAttemptStore::new(
+            DieselSqliteExecutor::new(pool),
+            AdmissionKeyManager::new(Arc::new(MemorySecureStorage::default()), [0xd1; 16]),
+        );
+        let attempt_id = AdmissionAttemptId::from_bytes([0xd2; 32]);
+        let attempt = supersedable_joiner(attempt_id, [0xd3; 16], 0);
+        let before = store
+            .create(&attempt, Some([0xd4; 32]), Some(b"old-membership-history"))
+            .await
+            .unwrap();
+
+        let reset = store.reset_for_device_management().await.unwrap();
+
+        assert_eq!(reset.profile_generation, before.profile_generation);
+        assert_eq!(
+            reset.next_local_join_ordinal,
+            before.next_local_join_ordinal
+        );
+        assert_eq!(
+            reset.join_projection_floor_ordinal,
+            reset.next_local_join_ordinal
+        );
+        assert!(reset.device_trust_revision > before.device_trust_revision);
+        assert!(reset.consumed_invitation_attempts.is_empty());
+        assert!(reset.completion_recovery_challenges.is_empty());
+        assert!(store.load(attempt_id).await.unwrap().is_none());
+        assert!(store.load_membership_history_v2().await.unwrap().is_none());
+        assert!(store.scan_recoverable().await.unwrap().is_empty());
+        assert!(store.project_current_local_join().await.unwrap().is_none());
     }
 
     #[tokio::test]

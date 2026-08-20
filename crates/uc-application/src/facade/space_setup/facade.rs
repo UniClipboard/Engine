@@ -59,8 +59,8 @@ use crate::space::lifecycle::initialize_space::InitializeSpaceUseCase;
 use crate::space::lifecycle::unlock_space::UnlockSpaceUseCase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    CurrentWorkspacePeerScopePort, MembershipAdmissionGatePort, RelationshipStateResetPort,
-    SpaceSecurityStateResetPort,
+    CurrentWorkspacePeerScopePort, DeviceManagementResetDataPort, MembershipAdmissionGatePort,
+    RelationshipStateResetPort, SpaceSecurityStateResetPort,
 };
 use uc_core::ports::pairing::PairingSessionPort;
 use uc_core::ports::space::{
@@ -73,9 +73,11 @@ use uc_core::ports::{
 use uc_core::setup::SetupStatus;
 use uc_core::{MemberRepositoryPort, MemberSyncPreferences, SpaceMember};
 
-struct LegacyProfileIsolationUseCase {
-    required: AtomicBool,
+struct DeviceManagementResetUseCase {
+    legacy_isolation_required: AtomicBool,
+    execution_lock: tokio::sync::Mutex<()>,
     adopt_space: Arc<dyn AdoptIsolatedSpacePort>,
+    data_transition: Arc<dyn DeviceManagementResetDataPort>,
     relationship_reset: Arc<dyn RelationshipStateResetPort>,
     security_reset: Arc<dyn SpaceSecurityStateResetPort>,
     setup_status: Arc<dyn SetupStatusPort>,
@@ -88,7 +90,7 @@ struct LegacyProfileIsolationUseCase {
     current_app_version: String,
 }
 
-impl LegacyProfileIsolationUseCase {
+impl DeviceManagementResetUseCase {
     async fn remove_remote_members(&self) -> Result<(), String> {
         let local_device_id = self.device_identity.current_device_id();
         let members = self
@@ -114,7 +116,8 @@ impl LegacyProfileIsolationUseCase {
             .map_err(|error| error.to_string())
     }
 
-    async fn execute(&self) -> Result<(), String> {
+    async fn resume_legacy_isolation_if_required(&self) -> Result<(), String> {
+        let _guard = self.execution_lock.lock().await;
         let status = self
             .setup_status
             .get_status()
@@ -127,61 +130,136 @@ impl LegacyProfileIsolationUseCase {
                 .await
                 .map_err(|error| error.to_string())?;
             self.setup_status
-                .clear_legacy_isolation_target()
+                .clear_device_management_reset_target()
                 .await
                 .map_err(|error| error.to_string())?;
-            self.mark_completed().await?;
-            self.required.store(false, Ordering::Release);
+            if self.legacy_isolation_required.load(Ordering::Acquire) {
+                self.mark_completed().await?;
+            }
+            self.legacy_isolation_required
+                .store(false, Ordering::Release);
             return Ok(());
         }
         let pending_isolation_target = self
             .setup_status
-            .get_legacy_isolation_target()
+            .get_device_management_reset_target()
             .await
             .map_err(|error| error.to_string())?;
-        if !self.required.load(Ordering::Acquire) && pending_isolation_target.is_none() {
+        if !self.legacy_isolation_required.load(Ordering::Acquire)
+            && pending_isolation_target.is_none()
+        {
             return Ok(());
         }
 
+        self.execute_reset(pending_isolation_target)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.mark_completed().await?;
+        self.legacy_isolation_required
+            .store(false, Ordering::Release);
+        Ok(())
+    }
+
+    async fn execute_user_requested(&self) -> Result<(), ResetSpaceError> {
+        let _guard = self.execution_lock.lock().await;
+        let pending_target = self
+            .setup_status
+            .get_device_management_reset_target()
+            .await
+            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
+        let status = self
+            .setup_status
+            .get_status()
+            .await
+            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
+        if pending_target
+            .as_ref()
+            .is_some_and(|target| status.space_id.as_ref() == Some(target))
+        {
+            let target = pending_target
+                .as_ref()
+                .ok_or_else(|| ResetSpaceError::Internal("reset target disappeared".to_owned()))?;
+            self.data_transition
+                .finalize_device_management_reset(target)
+                .await
+                .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
+            if !status.re_pairing_required {
+                self.setup_status
+                    .set_status(&SetupStatus {
+                        has_completed: true,
+                        space_id: status.space_id,
+                        re_pairing_required: true,
+                    })
+                    .await
+                    .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
+            }
+            self.setup_status
+                .clear_device_management_reset_target()
+                .await
+                .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
+            return Ok(());
+        }
+        if pending_target.is_none() && status.re_pairing_required {
+            return Ok(());
+        }
+        self.execute_reset(pending_target).await
+    }
+
+    async fn execute_reset(
+        &self,
+        pending_isolation_target: Option<SpaceId>,
+    ) -> Result<(), ResetSpaceError> {
         let settings = self
             .settings
             .load()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
         let device_name = settings
             .general
             .device_name
             .filter(|name| !name.trim().is_empty())
-            .ok_or_else(|| "local device name is unavailable".to_owned())?;
+            .ok_or_else(|| {
+                ResetSpaceError::PreparationFailed("local device name is unavailable".to_owned())
+            })?;
         let identity_fingerprint = self
             .local_identity
             .ensure()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
         let space_id = match pending_isolation_target {
             Some(space_id) => space_id,
             None => {
                 let space_id = SpaceId::new();
                 self.setup_status
-                    .set_legacy_isolation_target(&space_id)
+                    .set_device_management_reset_target(&space_id)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
                 space_id
             }
         };
+        self.data_transition
+            .prepare_device_management_reset(&space_id)
+            .await
+            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
+        self.data_transition
+            .stage_device_management_reset_mutations(&space_id)
+            .await
+            .map_err(|error| ResetSpaceError::StagingFailed(error.to_string()))?;
         self.adopt_space
             .adopt_isolated_space(&space_id)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
+        self.convergence
+            .reset_admission_for_device_management()
+            .await
+            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
         self.relationship_reset
             .clear_all_relationships()
             .await
-            .map_err(|error| error.to_string())?;
-        self.security_reset
-            .clear_space_security_state_except(&space_id)
+            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
+        self.remove_remote_members()
             .await
-            .map_err(|error| error.to_string())?;
-        self.remove_remote_members().await?;
+            .map_err(ResetSpaceError::RebuildFailed)?;
 
         let member = SpaceMember {
             device_id: self.device_identity.current_device_id(),
@@ -193,11 +271,23 @@ impl LegacyProfileIsolationUseCase {
         self.member_repo
             .save(&member)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
         self.convergence
             .initialize_new_space_membership()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
+        self.data_transition
+            .promote_device_management_reset(&space_id)
+            .await
+            .map_err(|error| ResetSpaceError::CommitFailed(error.to_string()))?;
+        self.security_reset
+            .clear_space_security_state_except(&space_id)
+            .await
+            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
+        self.data_transition
+            .finalize_device_management_reset(&space_id)
+            .await
+            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
         self.setup_status
             .set_status(&SetupStatus {
                 has_completed: true,
@@ -205,13 +295,11 @@ impl LegacyProfileIsolationUseCase {
                 re_pairing_required: true,
             })
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
         self.setup_status
-            .clear_legacy_isolation_target()
+            .clear_device_management_reset_target()
             .await
-            .map_err(|error| error.to_string())?;
-        self.mark_completed().await?;
-        self.required.store(false, Ordering::Release);
+            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
         Ok(())
     }
 }
@@ -262,7 +350,7 @@ pub struct SpaceFacade {
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     presence: Arc<dyn PresencePort>,
     pairing_session: Arc<dyn PairingSessionPort>,
-    legacy_profile_isolation: LegacyProfileIsolationUseCase,
+    device_management_reset: DeviceManagementResetUseCase,
     /// `current_device_id()` snapshotted at facade-construction time so
     /// `list_paired_peer_device_ids` can self-filter without grabbing the
     /// `DeviceIdentityPort` lock on every call.
@@ -319,6 +407,7 @@ impl SpaceFacade {
         let group_update_delivery: Arc<dyn GroupUpdateDeliveryPort> =
             convergence.group_update_delivery();
         let SpaceTransitionDeps {
+            device_management_reset_data,
             relationship_reset,
             space_security_reset,
         } = transition;
@@ -335,9 +424,11 @@ impl SpaceFacade {
         // Slice4 P3 T3.2 · facade-local handle for `query_setup_state`
         // (reads `Settings.general.device_name`).
         let settings_for_facade = Arc::clone(&settings);
-        let legacy_profile_isolation = LegacyProfileIsolationUseCase {
-            required: AtomicBool::new(legacy_profile_isolation_required),
+        let device_management_reset = DeviceManagementResetUseCase {
+            legacy_isolation_required: AtomicBool::new(legacy_profile_isolation_required),
+            execution_lock: tokio::sync::Mutex::new(()),
             adopt_space: Arc::clone(&space_access.adopt_isolated_space),
+            data_transition: device_management_reset_data,
             relationship_reset: Arc::clone(&relationship_reset),
             security_reset: space_security_reset,
             setup_status: Arc::clone(&setup_status),
@@ -479,7 +570,7 @@ impl SpaceFacade {
             peer_addr_repo: peer_addr_repo_for_facade,
             presence: presence_for_facade,
             pairing_session: pairing_session_for_facade,
-            legacy_profile_isolation,
+            device_management_reset,
             local_device_id: local_device_id_for_facade,
         }
     }
@@ -532,8 +623,8 @@ impl SpaceFacade {
         };
 
         if resumed {
-            self.legacy_profile_isolation
-                .execute()
+            self.device_management_reset
+                .resume_legacy_isolation_if_required()
                 .await
                 .map_err(TryResumeSessionError::Internal)?;
             self.mobile_consumable_backfill.backfill_best_effort().await;
@@ -571,8 +662,8 @@ impl SpaceFacade {
         let cmd: UnlockSpaceCommand = input.into();
         let out = self.unlock_space.execute(cmd).await?;
 
-        self.legacy_profile_isolation
-            .execute()
+        self.device_management_reset
+            .resume_legacy_isolation_if_required()
             .await
             .map_err(UnlockSpaceError::Internal)?;
 
@@ -660,31 +751,37 @@ impl SpaceFacade {
         Ok(())
     }
 
-    /// Slice4 P3 T3.2 · Reset this device back to a fresh-install
-    /// state by clearing `SetupStatus` and dropping any in-flight
-    /// invitations.
-    ///
-    /// Maps to `POST /v2/setup/reset`. Stateless model: the only
-    /// persistent fact this clears is `SetupStatus.has_completed` (and
-    /// `space_id`). The keyslot on disk is intentionally left in place
-    /// — operators recover key material via passphrase-based unlock
-    /// after re-init, and a true factory reset (key material wipe) is
-    /// a separate operator action handled outside this facade.
-    ///
-    /// The network runtime is **not** stopped: `on_shutdown` is the
-    /// canonical F2 path; reset is invoked while the daemon stays up.
+    /// Rebuild this profile as a single-device space while retaining local
+    /// content, settings, identity, and unlock material.
     #[instrument(skip_all)]
     pub async fn reset(&self) -> Result<(), ResetSpaceError> {
-        self.setup_status
-            .set_status(&SetupStatus::default())
-            .await
-            .map_err(|err| ResetSpaceError::StorageFailed(err.to_string()))?;
         let dropped = self.invitation_holder.cancel_all().await;
+        self.device_management_reset
+            .execute_user_requested()
+            .await?;
         info!(
             cancelled_invitations = dropped,
-            "reset cleared setup status and pending invitations"
+            "device management reset rebuilt the local space"
         );
         Ok(())
+    }
+
+    pub async fn has_committed_device_management_reset(&self) -> Result<bool, ResetSpaceError> {
+        let pending_target = self
+            .device_management_reset
+            .setup_status
+            .get_device_management_reset_target()
+            .await
+            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
+        let status = self
+            .device_management_reset
+            .setup_status
+            .get_status()
+            .await
+            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
+        Ok(pending_target
+            .as_ref()
+            .is_some_and(|target| status.space_id.as_ref() == Some(target)))
     }
 
     /// User-driven "重置并重新开始" — wipe key material **and** clear setup
@@ -1332,6 +1429,51 @@ mod tests {
         }
     }
 
+    struct SwitchingInMemoryMemberRepo {
+        staged: Arc<AtomicBool>,
+        active_rows: StdMutex<Vec<SpaceMember>>,
+        working_rows: StdMutex<Vec<SpaceMember>>,
+    }
+
+    impl SwitchingInMemoryMemberRepo {
+        fn rows(&self) -> &StdMutex<Vec<SpaceMember>> {
+            if self.staged.load(Ordering::Acquire) {
+                &self.working_rows
+            } else {
+                &self.active_rows
+            }
+        }
+    }
+
+    #[async_trait]
+    impl uc_core::membership::MemberRepositoryPort for SwitchingInMemoryMemberRepo {
+        async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
+            Ok(self
+                .rows()
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|member| &member.device_id == device_id)
+                .cloned())
+        }
+
+        async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
+            Ok(self.rows().lock().unwrap().clone())
+        }
+
+        async fn save(&self, member: &SpaceMember) -> Result<(), MembershipError> {
+            self.rows().lock().unwrap().push(member.clone());
+            Ok(())
+        }
+
+        async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError> {
+            let mut rows = self.rows().lock().unwrap();
+            let before = rows.len();
+            rows.retain(|member| &member.device_id != device_id);
+            Ok(rows.len() != before)
+        }
+    }
+
     struct UnreadableMemberRepo;
 
     #[async_trait]
@@ -1363,6 +1505,85 @@ mod tests {
 
     struct NoopRelationshipStateReset;
 
+    struct NoopDeviceManagementResetData;
+
+    #[async_trait]
+    impl DeviceManagementResetDataPort for NoopDeviceManagementResetData {
+        async fn prepare_device_management_reset(
+            &self,
+            _target_space_id: &SpaceId,
+        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+            Ok(())
+        }
+
+        async fn stage_device_management_reset_mutations(
+            &self,
+            _target_space_id: &SpaceId,
+        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+            Ok(())
+        }
+
+        async fn promote_device_management_reset(
+            &self,
+            _target_space_id: &SpaceId,
+        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+            Ok(())
+        }
+
+        async fn finalize_device_management_reset(
+            &self,
+            _target_space_id: &SpaceId,
+        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+            Ok(())
+        }
+    }
+
+    struct FailOnceDeviceManagementResetData {
+        fail_promotion: AtomicBool,
+        staged: Arc<AtomicBool>,
+        prepared_targets: StdMutex<Vec<SpaceId>>,
+    }
+
+    #[async_trait]
+    impl DeviceManagementResetDataPort for FailOnceDeviceManagementResetData {
+        async fn prepare_device_management_reset(
+            &self,
+            target_space_id: &SpaceId,
+        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+            self.prepared_targets
+                .lock()
+                .unwrap()
+                .push(target_space_id.clone());
+            Ok(())
+        }
+
+        async fn stage_device_management_reset_mutations(
+            &self,
+            _target_space_id: &SpaceId,
+        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+            self.staged.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn promote_device_management_reset(
+            &self,
+            _target_space_id: &SpaceId,
+        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+            if self.fail_promotion.swap(false, Ordering::AcqRel) {
+                self.staged.store(false, Ordering::Release);
+                return Err(uc_core::membership::AdmissionSpaceTransitionError::Storage);
+            }
+            Ok(())
+        }
+
+        async fn finalize_device_management_reset(
+            &self,
+            _target_space_id: &SpaceId,
+        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl RelationshipStateResetPort for NoopRelationshipStateReset {
         async fn clear_all_relationships(&self) -> Result<(), RelationshipStateResetError> {
@@ -1385,7 +1606,7 @@ mod tests {
     #[derive(Default)]
     struct InMemorySetupStatus {
         status: StdMutex<SetupStatus>,
-        legacy_isolation_target: StdMutex<Option<SpaceId>>,
+        device_management_reset_target: StdMutex<Option<SpaceId>>,
     }
     #[async_trait]
     impl SetupStatusPort for InMemorySetupStatus {
@@ -1396,15 +1617,18 @@ mod tests {
             *self.status.lock().unwrap() = status.clone();
             Ok(())
         }
-        async fn get_legacy_isolation_target(&self) -> anyhow::Result<Option<SpaceId>> {
-            Ok(self.legacy_isolation_target.lock().unwrap().clone())
+        async fn get_device_management_reset_target(&self) -> anyhow::Result<Option<SpaceId>> {
+            Ok(self.device_management_reset_target.lock().unwrap().clone())
         }
-        async fn set_legacy_isolation_target(&self, space_id: &SpaceId) -> anyhow::Result<()> {
-            *self.legacy_isolation_target.lock().unwrap() = Some(space_id.clone());
+        async fn set_device_management_reset_target(
+            &self,
+            space_id: &SpaceId,
+        ) -> anyhow::Result<()> {
+            *self.device_management_reset_target.lock().unwrap() = Some(space_id.clone());
             Ok(())
         }
-        async fn clear_legacy_isolation_target(&self) -> anyhow::Result<()> {
-            *self.legacy_isolation_target.lock().unwrap() = None;
+        async fn clear_device_management_reset_target(&self) -> anyhow::Result<()> {
+            *self.device_management_reset_target.lock().unwrap() = None;
             Ok(())
         }
     }
@@ -1779,6 +2003,26 @@ mod tests {
         member_repo: Arc<dyn MemberRepositoryPort>,
         legacy_profile_isolation_required: bool,
     ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
+        make_facade_with_member_repo_isolation_and_reset_data(
+            space_access,
+            setup_status,
+            settings,
+            mobile_consumable_backfill,
+            member_repo,
+            legacy_profile_isolation_required,
+            Arc::new(NoopDeviceManagementResetData),
+        )
+    }
+
+    fn make_facade_with_member_repo_isolation_and_reset_data(
+        space_access: Arc<MockSpaceAccess>,
+        setup_status: Arc<dyn SetupStatusPort>,
+        settings: Arc<dyn SettingsPort>,
+        mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        legacy_profile_isolation_required: bool,
+        reset_data: Arc<dyn DeviceManagementResetDataPort>,
+    ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         let pairing_invitation = Arc::new(FakeInvitationPort::default());
         let peer_addr_repo = Arc::new(FakePeerAddrRepo::default());
         let facade = SpaceFacade::new(SpaceFacadeDeps {
@@ -1825,6 +2069,7 @@ mod tests {
                 )),
             },
             transition: SpaceTransitionDeps {
+                device_management_reset_data: reset_data,
                 relationship_reset: Arc::new(NoopRelationshipStateReset),
                 space_security_reset: Arc::new(NoopSpaceSecurityStateReset),
             },
@@ -2105,17 +2350,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_clears_setup_status_and_invitations() {
-        let setup_status = InMemorySetupStatus::default();
+    async fn reset_rebuilds_a_single_device_space_and_clears_invitations() {
+        let setup_status = Arc::new(InMemorySetupStatus::default());
         *setup_status.status.lock().unwrap() = SetupStatus {
             has_completed: true,
-            space_id: None,
+            space_id: Some(SpaceId::from("old-space")),
             re_pairing_required: false,
         };
-        let (facade, _inv, _peer) = make_facade(
+        let member_repo = Arc::new(InMemoryMemberRepo::default());
+        member_repo.rows.lock().unwrap().push(SpaceMember {
+            device_id: DeviceId::new("old-peer"),
+            device_name: "Old peer".to_owned(),
+            identity_fingerprint: default_fingerprint(),
+            joined_at: Utc::now(),
+            sync_preferences: MemberSyncPreferences::default(),
+        });
+        let (facade, _inv, _peer) = make_facade_with_member_repo(
             space_access(),
-            Arc::new(setup_status),
-            Arc::new(InMemorySettings::default()),
+            setup_status,
+            settings_with_device_name("Current device"),
+            Arc::new(NoopMobileConsumableBackfill),
+            member_repo.clone(),
         );
         facade.issue_pairing_invitation().await.expect("B1 ok");
         assert_eq!(facade.invitation_holder.len().await, 1);
@@ -2124,8 +2379,181 @@ mod tests {
 
         assert_eq!(facade.invitation_holder.len().await, 0);
         let view = facade.query_setup_state().await.expect("query ok");
-        assert!(!view.has_completed);
+        assert!(view.has_completed);
+        assert_ne!(view.space_id.as_ref().map(AsRef::as_ref), Some("old-space"));
+        assert!(view.re_pairing_required);
         assert!(view.current_invitation.is_none());
+        assert_eq!(
+            member_repo
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|member| member.device_id)
+                .collect::<Vec<_>>(),
+            vec![DeviceId::new("device-1")]
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_reset_reuses_the_completed_device_management_reset() {
+        let setup_status = Arc::new(InMemorySetupStatus::default());
+        *setup_status.status.lock().unwrap() = SetupStatus {
+            has_completed: true,
+            space_id: Some(SpaceId::from("old-space")),
+            re_pairing_required: false,
+        };
+        let (facade, _inv, _peer) = make_facade(
+            space_access(),
+            setup_status,
+            settings_with_device_name("Current device"),
+        );
+
+        facade.reset().await.expect("first reset");
+        let first = facade.query_setup_state().await.expect("first state");
+        facade.reset().await.expect("repeated reset");
+        let repeated = facade.query_setup_state().await.expect("repeated state");
+
+        assert_eq!(repeated.space_id, first.space_id);
+        assert!(repeated.re_pairing_required);
+    }
+
+    #[tokio::test]
+    async fn interrupted_reset_reuses_its_persisted_target() {
+        let setup_status = Arc::new(InMemorySetupStatus::default());
+        *setup_status.status.lock().unwrap() = SetupStatus {
+            has_completed: true,
+            space_id: Some(SpaceId::from("old-space")),
+            re_pairing_required: false,
+        };
+        let reset_data = Arc::new(FailOnceDeviceManagementResetData {
+            fail_promotion: AtomicBool::new(true),
+            staged: Arc::new(AtomicBool::new(false)),
+            prepared_targets: StdMutex::new(Vec::new()),
+        });
+        let (facade, _inv, _peer) = make_facade_with_member_repo_isolation_and_reset_data(
+            space_access(),
+            setup_status.clone(),
+            settings_with_device_name("Current device"),
+            Arc::new(NoopMobileConsumableBackfill),
+            Arc::new(InMemoryMemberRepo::default()),
+            false,
+            reset_data.clone(),
+        );
+
+        let error = facade.reset().await.expect_err("promotion fails once");
+        assert_eq!(
+            error.to_string(),
+            "failed to commit device management reset: space transition storage failed"
+        );
+        let pending_target = setup_status
+            .device_management_reset_target
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("reset target remains durable");
+        facade.reset().await.expect("retry reset");
+
+        let prepared_targets = reset_data.prepared_targets.lock().unwrap().clone();
+        assert_eq!(
+            prepared_targets,
+            vec![pending_target.clone(), pending_target.clone()]
+        );
+        let completed = facade.query_setup_state().await.expect("completed state");
+        assert_eq!(completed.space_id, Some(pending_target));
+        assert!(completed.re_pairing_required);
+        assert!(setup_status
+            .device_management_reset_target
+            .lock()
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_reset_does_not_remove_members_from_the_active_space() {
+        let setup_status = Arc::new(InMemorySetupStatus::default());
+        *setup_status.status.lock().unwrap() = SetupStatus {
+            has_completed: true,
+            space_id: Some(SpaceId::from("old-space")),
+            re_pairing_required: false,
+        };
+        let staged = Arc::new(AtomicBool::new(false));
+        let old_member = SpaceMember {
+            device_id: DeviceId::new("old-peer"),
+            device_name: "Old peer".to_owned(),
+            identity_fingerprint: default_fingerprint(),
+            joined_at: Utc::now(),
+            sync_preferences: MemberSyncPreferences::default(),
+        };
+        let member_repo = Arc::new(SwitchingInMemoryMemberRepo {
+            staged: Arc::clone(&staged),
+            active_rows: StdMutex::new(vec![old_member.clone()]),
+            working_rows: StdMutex::new(vec![old_member]),
+        });
+        let reset_data = Arc::new(FailOnceDeviceManagementResetData {
+            fail_promotion: AtomicBool::new(true),
+            staged,
+            prepared_targets: StdMutex::new(Vec::new()),
+        });
+        let (facade, _inv, _peer) = make_facade_with_member_repo_isolation_and_reset_data(
+            space_access(),
+            setup_status.clone(),
+            settings_with_device_name("Current device"),
+            Arc::new(NoopMobileConsumableBackfill),
+            member_repo.clone(),
+            false,
+            reset_data,
+        );
+
+        assert!(facade.reset().await.is_err());
+
+        assert_eq!(
+            setup_status.status.lock().unwrap().space_id.as_ref(),
+            Some(&SpaceId::from("old-space"))
+        );
+        assert_eq!(
+            member_repo
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|member| member.device_id)
+                .collect::<Vec<_>>(),
+            vec![DeviceId::new("old-peer")]
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_reset_finishes_status_without_rebuilding_the_target_space() {
+        let target = SpaceId::from("committed-target");
+        let setup_status = Arc::new(InMemorySetupStatus::default());
+        *setup_status.status.lock().unwrap() = SetupStatus {
+            has_completed: true,
+            space_id: Some(target.clone()),
+            re_pairing_required: true,
+        };
+        *setup_status.device_management_reset_target.lock().unwrap() = Some(target.clone());
+        let (facade, _inv, _peer) = make_facade_with_member_repo_isolation_and_reset_data(
+            space_access(),
+            setup_status.clone(),
+            settings_with_device_name("Current device"),
+            Arc::new(NoopMobileConsumableBackfill),
+            Arc::new(UnreadableMemberRepo),
+            false,
+            Arc::new(NoopDeviceManagementResetData),
+        );
+
+        facade.reset().await.expect("finish committed reset");
+
+        assert!(setup_status
+            .device_management_reset_target
+            .lock()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            setup_status.status.lock().unwrap().space_id.as_ref(),
+            Some(&target)
+        );
     }
 
     #[tokio::test]
@@ -2329,7 +2757,7 @@ mod tests {
         assert!(facade.try_resume_session().await.expect("resume legacy"));
         assert!(setup_status.status.lock().unwrap().re_pairing_required);
         assert!(setup_status
-            .legacy_isolation_target
+            .device_management_reset_target
             .lock()
             .unwrap()
             .is_none());

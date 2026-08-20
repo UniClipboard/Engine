@@ -606,8 +606,15 @@ pub async fn build_sync_engine_assembly(
     ) {
         upgrade.acknowledge(current_app_version).await?;
     }
+    let previous_installation = !matches!(
+        upgrade_status,
+        uc_application::facade::UpgradeStatus::FreshInstall
+    );
     let initial_state_origin =
-        uc_application::facade::WorkspaceConvergenceStateOrigin::CurrentInstallation;
+        uc_application::facade::WorkspaceConvergenceStateOrigin::from_version_transition(
+            previous_installation.then_some(current_app_version),
+            current_app_version,
+        );
     let legacy_profile_isolation_required = upgrade_status.requires_legacy_profile_isolation();
     // IdentityFingerprintFactory is stateless — the one in SecurityPorts is
     // the same `Sha256IdentityFingerprintFactory` ZST, but we construct a
@@ -941,6 +948,7 @@ pub async fn build_sync_engine_assembly(
             convergence: Arc::clone(&convergence_assembly),
         },
         transition: SpaceTransitionDeps {
+            device_management_reset_data: Arc::clone(&space_setup.device_management_reset_data),
             relationship_reset: Arc::clone(&space_setup.relationship_reset),
             space_security_reset: Arc::clone(&space_setup.space_security_reset),
         },

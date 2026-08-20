@@ -150,7 +150,7 @@ crates/uc-application/src/space/convergence/
 
 ### Projection
 
-`projection/` 只将已保存事实转换为稳定查询和运行范围。`profile.rs` 承载 `ProfileWorkspaceConvergence` 的构造、活动负责人附着、加入状态投影、取消、普通重置门禁、无活动 Space 的设备信任结果和版本变化转发。`device_trust.rs` 负责完整设备信任查询。`current_scope.rs` 负责当前成员运行范围、内容交换门禁和相应受限端点。
+`projection/` 只将已保存事实转换为稳定查询和运行范围。`profile.rs` 承载 `ProfileWorkspaceConvergence` 的构造、活动负责人附着、加入状态投影、取消、无活动 Space 的设备信任结果和版本变化转发。设备管理重置由空间生命周期负责人完整执行，不属于查询投影。`device_trust.rs` 负责完整设备信任查询。`current_scope.rs` 负责当前成员运行范围、内容交换门禁和相应受限端点。
 
 `projection/mod.rs` 是投影领域入口。它只能读取既有加密状态或转交活动负责人的完整查询；成员资料、地址、在线状态和安全组关系只能作为独立事实，不能授予普通成员资格。
 

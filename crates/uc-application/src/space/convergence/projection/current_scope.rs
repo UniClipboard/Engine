@@ -173,12 +173,13 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
             .as_ref()
             .filter(|history| history.applied_head().is_some());
         let Some(history) = history else {
-            let members = self
-                .deps
-                .member_repo
-                .list()
-                .await
-                .map_err(|_| CurrentWorkspacePeerScopeError::Unavailable)?;
+            let members = self.deps.member_repo.list().await.map_err(|_| {
+                tracing::warn!(
+                    error_kind = "current_peer_scope_legacy_member_roster_read",
+                    "current peer scope unavailable"
+                );
+                CurrentWorkspacePeerScopeError::Unavailable
+            })?;
             let member_ids = members
                 .iter()
                 .map(|member| member.device_id)
@@ -194,13 +195,32 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
                 .await
                 .map_err(|error| match error {
                     uc_core::membership::SpaceProtectionError::Corrupted => {
+                        tracing::warn!(
+                            error_kind = "current_peer_scope_legacy_protection_read",
+                            error_category = "corrupt",
+                            "current peer scope unavailable"
+                        );
                         CurrentWorkspacePeerScopeError::Corrupt
                     }
-                    _ => CurrentWorkspacePeerScopeError::Unavailable,
+                    _ => {
+                        tracing::warn!(
+                            error_kind = "current_peer_scope_legacy_protection_read",
+                            error_category = "unavailable",
+                            "current peer scope unavailable"
+                        );
+                        CurrentWorkspacePeerScopeError::Unavailable
+                    }
                 })?;
             if protection.mode != uc_core::membership::SpaceProtectionMode::Legacy
                 && !state.migrated_from_pre_adr_020
             {
+                tracing::warn!(
+                    error_kind = "current_peer_scope_current_history_absent",
+                    protection_mode = ?protection.mode,
+                    migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020,
+                    member_record_count = member_ids.len(),
+                    "current peer scope unavailable"
+                );
                 return Err(CurrentWorkspacePeerScopeError::Unavailable);
             }
             let local_is_member = protection.mode
