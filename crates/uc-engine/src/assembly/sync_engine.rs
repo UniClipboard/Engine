@@ -574,6 +574,8 @@ pub enum SyncEngineAssemblyError {
     IrohNode(#[from] IrohNodeError),
     #[error(transparent)]
     DetectUpgrade(#[from] uc_application::facade::DetectUpgradeError),
+    #[error(transparent)]
+    AcknowledgeUpgrade(#[from] uc_application::facade::AcknowledgeUpgradeError),
 }
 
 /// Assemble the Slice 1 `SpaceFacade` from an already-wired dependency
@@ -593,12 +595,17 @@ pub async fn build_sync_engine_assembly(
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     iroh_config: IrohNodeConfig,
 ) -> Result<SyncEngineAssembly, SyncEngineAssemblyError> {
-    let upgrade_status = UpgradeFacade::new(UpgradeFacadeDeps {
+    let upgrade = UpgradeFacade::new(UpgradeFacadeDeps {
         app_version_state: Arc::clone(&deps.app_version_state),
         setup_status: Arc::clone(&deps.setup_status),
-    })
-    .detect_on_startup(current_app_version)
-    .await?;
+    });
+    let upgrade_status = upgrade.detect_on_startup(current_app_version).await?;
+    if matches!(
+        upgrade_status,
+        uc_application::facade::UpgradeStatus::FreshInstall
+    ) {
+        upgrade.acknowledge(current_app_version).await?;
+    }
     let initial_state_origin =
         uc_application::facade::WorkspaceConvergenceStateOrigin::CurrentInstallation;
     let legacy_profile_isolation_required = upgrade_status.requires_legacy_profile_isolation();
