@@ -41,8 +41,11 @@ impl WorkspaceConvergence {
         &self,
     ) -> Result<(), WorkspaceConvergenceError> {
         let _guard = self.state_lock.lock().await;
-        let mut state = self.load_state().await?;
-        if Self::clear_legacy_migration_marker_if_current_history_exists(&mut state) {
+        let (mut state, was_persisted) = self.load_state_with_presence().await?;
+        let initialized_missing_legacy_state = !was_persisted && state.migrated_from_pre_adr_020;
+        if initialized_missing_legacy_state
+            || Self::clear_legacy_migration_marker_if_current_history_exists(&mut state)
+        {
             self.persist(&state).await?;
         }
         Ok(())
