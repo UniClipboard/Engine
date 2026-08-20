@@ -404,6 +404,14 @@ impl From<WorkspaceConvergenceState> for WorkspaceConvergenceStateV3Payload {
 
 impl From<WorkspaceConvergenceStateV3Payload> for WorkspaceConvergenceState {
     fn from(state: WorkspaceConvergenceStateV3Payload) -> Self {
+        let migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
+            || (state.phase == WorkspacePhase::Complete
+                && state.own_instance.is_some()
+                && !state.peer_history_relationships.is_empty()
+                && state
+                    .membership_reconciliation
+                    .as_ref()
+                    .is_none_or(|history| history.applied_head().is_none()));
         Self {
             space_lineage: state.space_lineage,
             own_instance: state.own_instance,
@@ -418,7 +426,7 @@ impl From<WorkspaceConvergenceStateV3Payload> for WorkspaceConvergenceState {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020: state.migrated_from_pre_adr_020,
+            migrated_from_pre_adr_020,
         }
     }
 }
@@ -1643,6 +1651,43 @@ mod tests {
 
         assert_eq!(stored.storage_version, rc4.storage_version);
         assert_eq!(WorkspaceConvergenceState::from(stored.state), expected);
+    }
+
+    #[test]
+    fn v3_state_previously_migrated_without_provenance_recovers_legacy_origin() {
+        let mut affected = persisted_state();
+        affected.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
+        affected.phase = WorkspacePhase::Complete;
+        affected.membership_reconciliation = None;
+        affected.migrated_from_pre_adr_020 = false;
+        let stored = super::WorkspaceConvergenceStateV3Payload::from(affected);
+
+        let recovered = WorkspaceConvergenceState::from(stored);
+
+        assert!(recovered.migrated_from_pre_adr_020);
+    }
+
+    #[test]
+    fn v3_state_without_complete_legacy_evidence_remains_fail_closed() {
+        let mut incomplete = persisted_state();
+        incomplete.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
+        incomplete.membership_reconciliation = None;
+        incomplete.migrated_from_pre_adr_020 = false;
+
+        let mut missing_identity = incomplete.clone();
+        missing_identity.phase = WorkspacePhase::Complete;
+        missing_identity.own_instance = None;
+
+        let mut missing_peer_relationship = incomplete.clone();
+        missing_peer_relationship.phase = WorkspacePhase::Complete;
+        missing_peer_relationship.peer_history_relationships.clear();
+
+        for state in [incomplete, missing_identity, missing_peer_relationship] {
+            let recovered = WorkspaceConvergenceState::from(
+                super::WorkspaceConvergenceStateV3Payload::from(state),
+            );
+            assert!(!recovered.migrated_from_pre_adr_020);
+        }
     }
 
     #[tokio::test]
