@@ -820,6 +820,25 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
         .execute(crate::Operation::IssueInvitation)
         .await
         .unwrap();
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+
+    let (engine, _events) = Engine::start(
+        config.clone(),
+        persistent_engine_host(temp.path(), secure_storage.clone()),
+    )
+    .await
+    .unwrap();
+    engine
+        .execute(crate::Operation::RecoverSession(
+            crate::RecoverSessionInput {
+                allow_secure_storage_unlock: true,
+            },
+        ))
+        .await
+        .unwrap();
 
     assert_eq!(
         engine.execute(crate::Operation::ResetSpace).await.unwrap(),
@@ -867,6 +886,10 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
             .unwrap(),
         crate::OperationResult::InvitationIssued { .. }
     ));
+    assert!(!temp
+        .path()
+        .join("private/vault/.device-management-reset-v1")
+        .exists());
     engine
         .shutdown(std::time::Duration::from_secs(15))
         .await

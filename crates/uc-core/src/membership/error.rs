@@ -100,6 +100,8 @@ pub enum AdmissionSpaceTransitionError {
     Unavailable,
     #[error("space transition storage failed")]
     Storage,
+    #[error("insufficient storage for space transition")]
+    InsufficientStorage,
     #[error("space transition state is inconsistent")]
     Inconsistent,
     #[error("space transition requires recovery")]

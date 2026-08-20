@@ -9,7 +9,12 @@ use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 pub async fn execute_reset_space(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     facade.reset_space().await.map_err(|error| match error {
-        ResetSpaceError::StorageFailed(_) | ResetSpaceError::Internal(_) => {
+        ResetSpaceError::PreparationFailed(_)
+        | ResetSpaceError::StagingFailed(_)
+        | ResetSpaceError::RebuildFailed(_)
+        | ResetSpaceError::CommitFailed(_)
+        | ResetSpaceError::FinalizationFailed(_)
+        | ResetSpaceError::Internal(_) => {
             error!(error = %error, "reset space failed");
             EngineError::new(
                 RESET_SPACE_FAILED_CODE,

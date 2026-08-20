@@ -225,10 +225,20 @@ pub enum CancelInvitationError {
 /// (Slice4 P3 T3.2).
 #[derive(Debug, Error)]
 pub enum ResetSpaceError {
-    /// Failed to clear `SetupStatus` — the device may be in an
-    /// inconsistent state. Caller should surface to the operator.
-    #[error("failed to clear setup status: {0}")]
-    StorageFailed(String),
+    #[error("failed to prepare device management reset: {0}")]
+    PreparationFailed(String),
+
+    #[error("failed to stage device management reset: {0}")]
+    StagingFailed(String),
+
+    #[error("failed to rebuild the single-device space: {0}")]
+    RebuildFailed(String),
+
+    #[error("failed to commit device management reset: {0}")]
+    CommitFailed(String),
+
+    #[error("device management reset committed but finalization failed: {0}")]
+    FinalizationFailed(String),
 
     /// Uncategorised infra / adapter failure.
     #[error("internal error: {0}")]

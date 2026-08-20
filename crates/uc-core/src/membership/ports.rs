@@ -797,7 +797,20 @@ pub trait DeviceManagementResetDataPort: Send + Sync {
         target_space_id: &SpaceId,
     ) -> Result<(), AdmissionSpaceTransitionError>;
 
+    /// Redirect every shared database-backed repository to an isolated working
+    /// generation. The active manifest and its database remain untouched until
+    /// `promote_device_management_reset` commits the fully prepared target.
+    async fn stage_device_management_reset_mutations(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError>;
+
     async fn promote_device_management_reset(
+        &self,
+        target_space_id: &SpaceId,
+    ) -> Result<(), AdmissionSpaceTransitionError>;
+
+    async fn finalize_device_management_reset(
         &self,
         target_space_id: &SpaceId,
     ) -> Result<(), AdmissionSpaceTransitionError>;

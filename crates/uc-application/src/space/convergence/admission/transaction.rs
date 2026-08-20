@@ -3292,9 +3292,9 @@ fn map_space_transition_error(error: AdmissionSpaceTransitionError) -> Workspace
         AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation => {
             WorkspaceConvergenceError::UnreadableHistoryRequiresConfirmation
         }
-        AdmissionSpaceTransitionError::Locked | AdmissionSpaceTransitionError::Storage => {
-            admission_storage(error)
-        }
+        AdmissionSpaceTransitionError::Locked
+        | AdmissionSpaceTransitionError::Storage
+        | AdmissionSpaceTransitionError::InsufficientStorage => admission_storage(error),
         AdmissionSpaceTransitionError::Unavailable => WorkspaceConvergenceError::Unavailable,
         AdmissionSpaceTransitionError::RecoveryRequired => {
             WorkspaceConvergenceError::RecoveryRequired

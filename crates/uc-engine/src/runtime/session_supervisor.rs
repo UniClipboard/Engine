@@ -145,7 +145,21 @@ impl SessionSupervisor {
         let install_result = self.install_new_session(result.is_ok()).await;
         match (result, install_result) {
             (Ok(result), Ok(())) => Ok(result),
-            (Err(error), Ok(())) => Err(error),
+            (Err(error), Ok(())) => {
+                let facade = self
+                    .session
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|session| Arc::clone(&session.facade))
+                    .ok_or_else(super::operation_unavailable_error)?;
+                match facade.has_committed_device_management_reset().await {
+                    Ok(true) => {
+                        crate::operations::space::reset_space::execute_reset_space(&facade).await
+                    }
+                    Ok(false) | Err(_) => Err(error),
+                }
+            }
             (_, Err(error)) => Err(error),
         }
     }

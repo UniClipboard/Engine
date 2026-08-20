@@ -36,11 +36,16 @@ impl ManifestProjectingSetupStatusRepository {
 impl SetupStatusPort for ManifestProjectingSetupStatusRepository {
     async fn get_status(&self) -> anyhow::Result<SetupStatus> {
         if let Some(manifest) = self.manifest.load().await? {
-            let re_pairing_required = self.legacy.get_status().await?.re_pairing_required;
+            let legacy_status = self.legacy.get_status().await?;
+            let reset_committed = self
+                .legacy
+                .get_device_management_reset_target()
+                .await?
+                .is_some_and(|target| target.as_ref() == manifest.space_id);
             return Ok(SetupStatus {
                 has_completed: true,
                 space_id: Some(uc_core::ids::SpaceId::from_str(&manifest.space_id)),
-                re_pairing_required,
+                re_pairing_required: legacy_status.re_pairing_required || reset_committed,
             });
         }
         self.legacy.get_status().await
@@ -257,6 +262,52 @@ mod tests {
             projected.space_id,
             Some(uc_core::ids::SpaceId::from_str("target-space"))
         );
+        assert!(projected.re_pairing_required);
+    }
+
+    #[tokio::test]
+    async fn committed_reset_target_projects_re_pairing_before_legacy_status_catches_up() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = uc_core::ids::SpaceId::from_str("reset-target");
+        let legacy: Arc<dyn SetupStatusPort> = Arc::new(FileSetupStatusRepository::new(
+            directory.path().join("setup.json"),
+        ));
+        legacy
+            .set_status(&SetupStatus {
+                has_completed: true,
+                space_id: Some(uc_core::ids::SpaceId::from_str("old-space")),
+                re_pairing_required: false,
+            })
+            .await
+            .unwrap();
+        legacy
+            .set_device_management_reset_target(&target)
+            .await
+            .unwrap();
+        let manifest = Arc::new(ActiveSpaceManifestStore::new(
+            directory.path().to_path_buf(),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::new(MemorySecureStorage::default()),
+                [0x41; 16],
+            )),
+        ));
+        manifest
+            .promote(
+                &ActiveSpaceManifestV2::new(
+                    target.as_ref().to_owned(),
+                    [0x42; 16],
+                    [0x43; 16],
+                    [0x44; 16],
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let projecting = ManifestProjectingSetupStatusRepository::new(legacy, manifest);
+
+        let projected = projecting.get_status().await.unwrap();
+
+        assert_eq!(projected.space_id, Some(target));
         assert!(projected.re_pairing_required);
     }
 
