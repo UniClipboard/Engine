@@ -69,6 +69,11 @@ struct WorkspaceConvergenceStateV2 {
 
 impl From<WorkspaceConvergenceStateV2> for WorkspaceConvergenceState {
     fn from(state: WorkspaceConvergenceStateV2) -> Self {
+        let migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
+            || state
+                .membership_reconciliation
+                .as_ref()
+                .is_none_or(|history| history.applied_head().is_none());
         Self {
             space_lineage: state.space_lineage,
             own_instance: state.own_instance,
@@ -83,7 +88,7 @@ impl From<WorkspaceConvergenceStateV2> for WorkspaceConvergenceState {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020: state.migrated_from_pre_adr_020,
+            migrated_from_pre_adr_020,
         }
     }
 }
@@ -1127,6 +1132,11 @@ mod tests {
 
     fn expected_rc3_state(mut state: WorkspaceConvergenceState) -> WorkspaceConvergenceState {
         state.pending_membership_history_transfers.clear();
+        state.migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
+            || state
+                .membership_reconciliation
+                .as_ref()
+                .is_none_or(|history| history.applied_head().is_none());
         state
     }
 
@@ -1601,6 +1611,23 @@ mod tests {
 
         let reopened = reopen_store(pool);
         assert_eq!(reopened.load_state().await.unwrap(), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn rc3_v2_state_without_current_history_recovers_legacy_migration_provenance() {
+        let (store, pool, _directory) = make_store();
+        let mut expected = expected_rc3_state(persisted_state());
+        expected.membership_reconciliation = None;
+        expected.migrated_from_pre_adr_020 = false;
+        let plaintext = rc3_v2_plaintext(&expected);
+        insert_encrypted_plaintext(&pool, &plaintext, expected.updated_at_ms);
+
+        let loaded = store.load_state().await.unwrap().unwrap();
+
+        assert!(loaded.membership_reconciliation.is_none());
+        assert!(loaded.migrated_from_pre_adr_020);
+        let reopened = reopen_store(pool);
+        assert_eq!(reopened.load_state().await.unwrap(), Some(loaded));
     }
 
     #[test]

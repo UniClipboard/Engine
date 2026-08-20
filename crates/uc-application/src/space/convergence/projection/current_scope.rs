@@ -25,28 +25,8 @@ impl WorkspaceConvergence {
             .admission_attempts
             .load_membership_history_v2()
             .await
-            .map_err(|error| {
-                let (category, mapped) = match error {
-                    AdmissionAttemptRepositoryError::Locked => {
-                        ("locked", CurrentWorkspacePeerScopeError::Locked)
-                    }
-                    AdmissionAttemptRepositoryError::Corrupt => {
-                        ("corrupt", CurrentWorkspacePeerScopeError::Corrupt)
-                    }
-                    _ => ("unavailable", CurrentWorkspacePeerScopeError::Unavailable),
-                };
-                tracing::warn!(
-                    error_kind = "current_peer_scope_history_read",
-                    error_category = category,
-                    "[DEBUG-cps1] current peer scope diagnostic"
-                );
-                mapped
-            })?
+            .map_err(map_repository_error)?
         else {
-            tracing::debug!(
-                error_kind = "current_peer_scope_v2_history_absent",
-                "[DEBUG-cps1] current peer scope diagnostic"
-            );
             return Ok(None);
         };
         let history = VersionedMembershipHistory::decode_persisted_v2(
@@ -55,44 +35,16 @@ impl WorkspaceConvergence {
         )
         .map_err(|error| match error {
             MembershipHistoryV2Error::UpgradeRequired => {
-                tracing::warn!(
-                    error_kind = "current_peer_scope_history_decode",
-                    error_category = "upgrade_required",
-                    "[DEBUG-cps1] current peer scope diagnostic"
-                );
                 CurrentWorkspacePeerScopeError::Unavailable
             }
-            _ => {
-                tracing::warn!(
-                    error_kind = "current_peer_scope_history_decode",
-                    error_category = "corrupt",
-                    "[DEBUG-cps1] current peer scope diagnostic"
-                );
-                CurrentWorkspacePeerScopeError::Corrupt
-            }
+            _ => CurrentWorkspacePeerScopeError::Corrupt,
         })?;
         let local_join = self
             .deps
             .admission_attempts
             .project_current_local_join()
             .await
-            .map_err(|error| {
-                let (category, mapped) = match error {
-                    AdmissionAttemptRepositoryError::Locked => {
-                        ("locked", CurrentWorkspacePeerScopeError::Locked)
-                    }
-                    AdmissionAttemptRepositoryError::Corrupt => {
-                        ("corrupt", CurrentWorkspacePeerScopeError::Corrupt)
-                    }
-                    _ => ("unavailable", CurrentWorkspacePeerScopeError::Unavailable),
-                };
-                tracing::warn!(
-                    error_kind = "current_peer_scope_local_join_read",
-                    error_category = category,
-                    "[DEBUG-cps1] current peer scope diagnostic"
-                );
-                mapped
-            })?;
+            .map_err(map_repository_error)?;
         if history.lineage_id() != state.space_lineage {
             if let Some(join) = &local_join {
                 if join.terminal_result.is_none() {
@@ -136,22 +88,15 @@ impl WorkspaceConvergence {
                     }
                 }
             }
-            tracing::warn!(
-                error_kind = "current_peer_scope_lineage_mismatch",
-                local_join_present = local_join.is_some(),
-                "[DEBUG-cps1] current peer scope diagnostic"
-            );
             return Err(CurrentWorkspacePeerScopeError::Corrupt);
         }
 
-        let members = self.deps.member_repo.list().await.map_err(|_| {
-            tracing::warn!(
-                error_kind = "current_peer_scope_member_roster_read",
-                error_category = "unavailable",
-                "[DEBUG-cps1] current peer scope diagnostic"
-            );
-            CurrentWorkspacePeerScopeError::Unavailable
-        })?;
+        let members = self
+            .deps
+            .member_repo
+            .list()
+            .await
+            .map_err(|_| CurrentWorkspacePeerScopeError::Unavailable)?;
         let mut candidate_devices = members
             .into_iter()
             .map(|member| member.device_id)
@@ -160,22 +105,15 @@ impl WorkspaceConvergence {
         candidate_devices.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         candidate_devices.dedup();
 
-        let active_member_count = history.active_members().len();
         let active_devices = history
             .active_members()
             .iter()
-            .filter_map(|member| history.device_for_member(member, &candidate_devices))
-            .collect::<Vec<_>>();
-        if active_devices.len() != active_member_count {
-            tracing::warn!(
-                error_kind = "current_peer_scope_active_member_mapping_missing",
-                active_member_count,
-                candidate_device_count = candidate_devices.len(),
-                unresolved_member_count = active_member_count - active_devices.len(),
-                "[DEBUG-cps1] current peer scope diagnostic"
-            );
-            return Err(CurrentWorkspacePeerScopeError::Unavailable);
-        }
+            .map(|member| {
+                history
+                    .device_for_member(member, &candidate_devices)
+                    .ok_or(CurrentWorkspacePeerScopeError::Unavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let local_join_does_not_block_current_history =
             local_join.is_none_or(|join| join.terminal_result.is_some());
         let local_membership = if active_devices.contains(&self.deps.own_device)
@@ -235,14 +173,12 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
             .as_ref()
             .filter(|history| history.applied_head().is_some());
         let Some(history) = history else {
-            let members = self.deps.member_repo.list().await.map_err(|_| {
-                tracing::warn!(
-                    error_kind = "current_peer_scope_legacy_member_roster_read",
-                    error_category = "unavailable",
-                    "[DEBUG-cps1] current peer scope diagnostic"
-                );
-                CurrentWorkspacePeerScopeError::Unavailable
-            })?;
+            let members = self
+                .deps
+                .member_repo
+                .list()
+                .await
+                .map_err(|_| CurrentWorkspacePeerScopeError::Unavailable)?;
             let member_ids = members
                 .iter()
                 .map(|member| member.device_id)
@@ -258,32 +194,13 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence
                 .await
                 .map_err(|error| match error {
                     uc_core::membership::SpaceProtectionError::Corrupted => {
-                        tracing::warn!(
-                            error_kind = "current_peer_scope_legacy_protection_read",
-                            error_category = "corrupt",
-                            "[DEBUG-cps1] current peer scope diagnostic"
-                        );
                         CurrentWorkspacePeerScopeError::Corrupt
                     }
-                    _ => {
-                        tracing::warn!(
-                            error_kind = "current_peer_scope_legacy_protection_read",
-                            error_category = "unavailable",
-                            "[DEBUG-cps1] current peer scope diagnostic"
-                        );
-                        CurrentWorkspacePeerScopeError::Unavailable
-                    }
+                    _ => CurrentWorkspacePeerScopeError::Unavailable,
                 })?;
             if protection.mode != uc_core::membership::SpaceProtectionMode::Legacy
                 && !state.migrated_from_pre_adr_020
             {
-                tracing::warn!(
-                    error_kind = "current_peer_scope_current_history_absent",
-                    protection_mode = ?protection.mode,
-                    migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020,
-                    member_record_count = member_ids.len(),
-                    "[DEBUG-cps1] current peer scope diagnostic"
-                );
                 return Err(CurrentWorkspacePeerScopeError::Unavailable);
             }
             let local_is_member = protection.mode
