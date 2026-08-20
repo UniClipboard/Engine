@@ -70,9 +70,9 @@ pub struct ClipboardSyncDeps {
     /// 关联的发送路径(LocalCapture → outbound)才会触发实际写入,CLI /
     /// 测试路径走 entry_id=None 时本端口空跑。
     pub entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
-    /// `get_entry_delivery_view` 拼装视图时需要 entry / event / trusted_peer
-    /// 三类仓储:entry 验存在 + 取 delivery_tracked,event 反查来源设备,
-    /// trusted_peer 给出"全集"用于合成 Pending。
+    /// `get_entry_delivery_view` 拼装视图时需要 entry / event / trusted_peer:
+    /// entry 验存在 + 取 delivery_tracked,event 反查来源设备,trusted_peer
+    /// 与 `peer_scope` 取交集后用于合成 Pending。
     pub entry_repo: Arc<dyn GetClipboardEntryPort>,
     pub event_repo: Arc<dyn ClipboardEventRepositoryPort>,
     pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
@@ -215,6 +215,7 @@ impl ClipboardSyncFacade {
             Arc::clone(&deps.entry_repo),
             Arc::clone(&deps.event_repo),
             Arc::clone(&deps.trusted_peer_repo),
+            Arc::clone(&deps.peer_scope),
             Arc::clone(&deps.entry_delivery_repo),
             Arc::clone(&deps.device_identity),
             Arc::clone(&deps.member_repo),
