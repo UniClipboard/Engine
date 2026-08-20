@@ -2,18 +2,19 @@
 //!
 //! 为什么需要这个模块:
 //! 持久化层只记"投递发生过的事实"(`EntryDeliveryRepositoryPort`),不记"未尝试"
-//! 这种状态。视图层要回答的是"这条 entry 对每台可信对端目前的状态如何",这
-//! 是一个跨多个仓储的合成动作 —— entry 本身、来源(event)、当前可信对端集合、
-//! 已发生的投递事实四者差集合并,才能得出一个完整、不误导的视图。把这些拼接
+//! 这种状态。视图层要回答的是"这条 entry 对每台当前可信对端的状态如何",这
+//! 是一个跨多个仓储的合成动作 —— entry 本身、来源(event)、当前成员范围、
+//! 历史可信关系、已发生的投递事实合并,才能得出一个完整、不误导的视图。把这些拼接
 //! 关在一个 use case 里,facade 上层只看一个动作:`get_entry_delivery_view`。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use uc_core::clipboard::{
     DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus as DomainDeliveryStatus,
 };
 use uc_core::ids::{DeviceId, EntryId};
+use uc_core::membership::CurrentWorkspacePeerScopePort;
 use uc_core::mobile_sync::MobileDeviceId;
 use uc_core::ports::clipboard::GetClipboardEntryPort;
 use uc_core::ports::{
@@ -23,7 +24,7 @@ use uc_core::ports::{
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uc_core::MemberRepositoryPort;
 
-/// 视图模型:某条 entry 的"来源 + 对每个可信对端的同步状态"完整快照。
+/// 视图模型:某条 entry 的"来源 + 对每个当前可信对端的同步状态"完整快照。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryDeliveryView {
     pub entry_id: EntryId,
@@ -47,8 +48,8 @@ pub enum EntrySource {
     Historical,
 }
 
-/// 单个对端的同步状态视图。`Pending` 不来自数据库,而是"该对端属于可信集合
-/// 但尚未在 delivery 表里出现"时由视图层合成。
+/// 单个对端的同步状态视图。`Pending` 不来自数据库,而是"该对端同时属于当前
+/// 成员范围和可信集合,但尚未在 delivery 表里出现"时由视图层合成。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryDeliveryTargetView {
     pub target_device_id: DeviceId,
@@ -93,6 +94,7 @@ pub(crate) struct GetEntryDeliveryViewUseCase {
     entry_repo: Arc<dyn GetClipboardEntryPort>,
     event_repo: Arc<dyn ClipboardEventRepositoryPort>,
     trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
+    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
     entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
@@ -104,6 +106,7 @@ impl GetEntryDeliveryViewUseCase {
         entry_repo: Arc<dyn GetClipboardEntryPort>,
         event_repo: Arc<dyn ClipboardEventRepositoryPort>,
         trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
+        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
@@ -113,6 +116,7 @@ impl GetEntryDeliveryViewUseCase {
             entry_repo,
             event_repo,
             trusted_peer_repo,
+            peer_scope,
             entry_delivery_repo,
             device_identity,
             member_repo,
@@ -204,9 +208,17 @@ impl GetEntryDeliveryViewUseCase {
             });
         }
 
-        // 5. 本机 entry:trusted_peer 全集 LEFT JOIN delivery 表合成视图。
-        //    delivery 表中"孤儿"行(target 已不在 trusted_peer 全集)被
-        //    自动忽略,这是有意的:用户解除配对后,UI 上不该再显示鬼魂设备。
+        // 5. 本机 entry:当前成员范围与 trusted_peer 取交集后 LEFT JOIN
+        //    delivery 表。可信关系和投递事实为历史验证保留,不能单独恢复当前资格。
+        let current_peers: HashSet<DeviceId> = self
+            .peer_scope
+            .snapshot()
+            .await
+            .map_err(|e| GetEntryDeliveryViewError::Storage(format!("current peer scope: {e:?}")))?
+            .peer_device_ids
+            .into_iter()
+            .collect();
+
         let trusted = self
             .trusted_peer_repo
             .list()
@@ -232,6 +244,9 @@ impl GetEntryDeliveryViewUseCase {
         // 参数切换,而不是把 trusted_peer 集合外的也展示出来)。
         for peer in trusted {
             let target_id = peer.peer_device_id;
+            if !current_peers.contains(&target_id) {
+                continue;
+            }
             let target_name = name_index.get(&target_id).cloned();
             match delivery_index.get(target_id.as_str()) {
                 Some(rec) => {
@@ -304,6 +319,10 @@ mod tests {
     use std::sync::Mutex;
     use uc_core::clipboard::ClipboardEntry;
     use uc_core::ids::EventId;
+    use uc_core::membership::{
+        CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
+        CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot,
+    };
     use uc_core::mobile_sync::{MobileClientType, MobileDevice, MobileDeviceError};
     use uc_core::security::IdentityFingerprint;
     use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
@@ -401,6 +420,15 @@ mod tests {
                 peers: Mutex::new(list),
             }
         }
+
+        fn device_ids(&self) -> Vec<DeviceId> {
+            self.peers
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|peer| peer.peer_device_id.clone())
+                .collect()
+        }
     }
     #[async_trait]
     impl TrustedPeerRepositoryPort for FakeTrustedPeerRepo {
@@ -458,6 +486,33 @@ mod tests {
     impl DeviceIdentityPort for FixedIdentity {
         fn current_device_id(&self) -> DeviceId {
             self.0.clone()
+        }
+    }
+
+    struct FixedPeerScope(Vec<DeviceId>);
+
+    #[async_trait]
+    impl CurrentWorkspacePeerScopePort for FixedPeerScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
+            Ok(CurrentWorkspacePeerSnapshot {
+                revision: 1,
+                source: CurrentWorkspacePeerScopeSource::CurrentHistory,
+                local_membership: CurrentWorkspaceLocalMembership::Active,
+                peer_device_ids: self.0.clone(),
+            })
+        }
+    }
+
+    struct FailingPeerScope;
+
+    #[async_trait]
+    impl CurrentWorkspacePeerScopePort for FailingPeerScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
+            Err(CurrentWorkspacePeerScopeError::Unavailable)
         }
     }
 
@@ -613,10 +668,32 @@ mod tests {
         member_repo: Arc<FakeMemberRepo>,
         mobile_device_repo: Arc<dyn FindMobileDeviceByIdPort>,
     ) -> GetEntryDeliveryViewUseCase {
+        let current_peers = trusted_peer_repo.device_ids();
+        build_uc_full_with_scope(
+            entry_repo,
+            event_repo,
+            trusted_peer_repo,
+            delivery_repo,
+            member_repo,
+            mobile_device_repo,
+            Arc::new(FixedPeerScope(current_peers)),
+        )
+    }
+
+    fn build_uc_full_with_scope(
+        entry_repo: Arc<FakeEntryRepo>,
+        event_repo: Arc<FakeEventRepo>,
+        trusted_peer_repo: Arc<FakeTrustedPeerRepo>,
+        delivery_repo: Arc<FakeDeliveryRepo>,
+        member_repo: Arc<FakeMemberRepo>,
+        mobile_device_repo: Arc<dyn FindMobileDeviceByIdPort>,
+        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+    ) -> GetEntryDeliveryViewUseCase {
         GetEntryDeliveryViewUseCase::new(
             entry_repo,
             event_repo,
             trusted_peer_repo,
+            peer_scope,
             delivery_repo,
             Arc::new(FixedIdentity(local_id())),
             member_repo,
@@ -778,6 +855,123 @@ mod tests {
         let view = uc.execute(&entry_id("e1")).await.unwrap();
         assert_eq!(view.deliveries.len(), 1, "孤儿 target 应被丢弃");
         assert_eq!(view.deliveries[0].target_device_id, peer("p1"));
+    }
+
+    #[tokio::test]
+    async fn removed_peer_with_retained_trust_and_delivery_is_excluded() {
+        let entries = Arc::new(FakeEntryRepo::new());
+        entries.insert(make_entry("e1", "ev1", true));
+        let events = Arc::new(FakeEventRepo::new());
+        events.set_source(&event_id("ev1"), Some(local_id()));
+        let removed = peer("removed-peer");
+        let uc = build_uc_full_with_scope(
+            entries,
+            events,
+            Arc::new(FakeTrustedPeerRepo::new(vec![removed.clone()])),
+            Arc::new(FakeDeliveryRepo::new(vec![delivered("e1", removed, 100)])),
+            Arc::new(FakeMemberRepo::new(vec![])),
+            Arc::new(make_empty_mobile_device_repo()),
+            Arc::new(FixedPeerScope(vec![])),
+        );
+
+        let view = uc.execute(&entry_id("e1")).await.unwrap();
+
+        assert!(view.deliveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn removed_peer_with_retained_trust_does_not_get_pending_status() {
+        let entries = Arc::new(FakeEntryRepo::new());
+        entries.insert(make_entry("e1", "ev1", true));
+        let events = Arc::new(FakeEventRepo::new());
+        events.set_source(&event_id("ev1"), Some(local_id()));
+        let uc = build_uc_full_with_scope(
+            entries,
+            events,
+            Arc::new(FakeTrustedPeerRepo::new(vec![peer("removed-peer")])),
+            Arc::new(FakeDeliveryRepo::new(vec![])),
+            Arc::new(FakeMemberRepo::new(vec![])),
+            Arc::new(make_empty_mobile_device_repo()),
+            Arc::new(FixedPeerScope(vec![])),
+        );
+
+        let view = uc.execute(&entry_id("e1")).await.unwrap();
+
+        assert!(view.deliveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn current_trusted_peer_keeps_recorded_delivery_status() {
+        let entries = Arc::new(FakeEntryRepo::new());
+        entries.insert(make_entry("e1", "ev1", true));
+        let events = Arc::new(FakeEventRepo::new());
+        events.set_source(&event_id("ev1"), Some(local_id()));
+        let current = peer("current-peer");
+        let uc = build_uc_full_with_scope(
+            entries,
+            events,
+            Arc::new(FakeTrustedPeerRepo::new(vec![current.clone()])),
+            Arc::new(FakeDeliveryRepo::new(vec![delivered(
+                "e1",
+                current.clone(),
+                100,
+            )])),
+            Arc::new(FakeMemberRepo::new(vec![])),
+            Arc::new(make_empty_mobile_device_repo()),
+            Arc::new(FixedPeerScope(vec![current])),
+        );
+
+        let view = uc.execute(&entry_id("e1")).await.unwrap();
+
+        assert_eq!(view.deliveries.len(), 1);
+        assert_eq!(
+            view.deliveries[0].status,
+            EntryDeliveryStatusView::Delivered
+        );
+    }
+
+    #[tokio::test]
+    async fn current_trusted_peer_without_delivery_record_is_pending() {
+        let entries = Arc::new(FakeEntryRepo::new());
+        entries.insert(make_entry("e1", "ev1", true));
+        let events = Arc::new(FakeEventRepo::new());
+        events.set_source(&event_id("ev1"), Some(local_id()));
+        let current = peer("current-peer");
+        let uc = build_uc_full_with_scope(
+            entries,
+            events,
+            Arc::new(FakeTrustedPeerRepo::new(vec![current.clone()])),
+            Arc::new(FakeDeliveryRepo::new(vec![])),
+            Arc::new(FakeMemberRepo::new(vec![])),
+            Arc::new(make_empty_mobile_device_repo()),
+            Arc::new(FixedPeerScope(vec![current])),
+        );
+
+        let view = uc.execute(&entry_id("e1")).await.unwrap();
+
+        assert_eq!(view.deliveries.len(), 1);
+        assert_eq!(view.deliveries[0].status, EntryDeliveryStatusView::Pending);
+    }
+
+    #[tokio::test]
+    async fn current_peer_scope_failure_does_not_fall_back_to_retained_trust() {
+        let entries = Arc::new(FakeEntryRepo::new());
+        entries.insert(make_entry("e1", "ev1", true));
+        let events = Arc::new(FakeEventRepo::new());
+        events.set_source(&event_id("ev1"), Some(local_id()));
+        let uc = build_uc_full_with_scope(
+            entries,
+            events,
+            Arc::new(FakeTrustedPeerRepo::new(vec![peer("removed-peer")])),
+            Arc::new(FakeDeliveryRepo::new(vec![])),
+            Arc::new(FakeMemberRepo::new(vec![])),
+            Arc::new(make_empty_mobile_device_repo()),
+            Arc::new(FailingPeerScope),
+        );
+
+        let err = uc.execute(&entry_id("e1")).await.unwrap_err();
+
+        assert!(matches!(err, GetEntryDeliveryViewError::Storage(_)));
     }
 
     // ── 分支 8: device_name 解析 — 命中/未命中 fallback ─────────────────

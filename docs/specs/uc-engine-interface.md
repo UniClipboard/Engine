@@ -133,7 +133,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `ReadBlob` | 读取指定 blob 的完整字节和媒体类型 |
 | `ReadThumbnail` | 读取指定表示的缩略图字节和媒体类型 |
 | `ReadEntryFile` | 读取指定记录的首个已物化文件及下载文件名 |
-| `QueryEntryDelivery` | 返回指定记录的来源及每个可信设备的投递状态 |
+| `QueryEntryDelivery` | 返回指定记录的来源及每个当前仍有效且可信设备的投递状态；已移除设备不显示，当前成员范围无法确认时查询失败 |
 | `ClearHistory` | 清空全部历史，并返回删除数量和未删除条目标识 |
 | `QueryEntryReceiveProgress` | 查询指定远端接收任务的当前聚合进度 |
 | `ListEntryReceiveProgress` | 列出全部尚未结束的远端接收任务进度 |
