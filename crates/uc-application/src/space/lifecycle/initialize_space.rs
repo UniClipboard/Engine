@@ -27,12 +27,14 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::ids::SpaceId;
-use uc_core::membership::{MemberRepositoryPort, MemberSyncPreferences, SpaceMember};
+use uc_core::membership::{
+    MemberRepositoryPort, MemberSyncPreferences, MembershipInitializationError, SpaceMember,
+    SpaceMembershipInitializerPort,
+};
 use uc_core::ports::space::{InitializeSpacePort, SpaceAccessError};
 use uc_core::ports::{
     ClockPort, DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort,
@@ -46,28 +48,12 @@ use uc_observability_contract::analytics::{
 use crate::facade::space_setup::commands::InitializeSpaceCommand;
 use crate::facade::space_setup::{InitializeSpaceError, InitializeSpaceResult};
 
-#[async_trait]
-pub(crate) trait NewSpaceMembershipInitializer: Send + Sync {
-    async fn initialize_new_space_membership(
-        &self,
-    ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError>;
-}
-
-#[async_trait]
-impl NewSpaceMembershipInitializer for crate::space::convergence::WorkspaceConvergence {
-    async fn initialize_new_space_membership(
-        &self,
-    ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
-        self.initialize_new_space_membership().await
-    }
-}
-
 pub(crate) struct InitializeSpaceUseCase {
     space_access: Arc<dyn InitializeSpacePort>,
     local_identity: Arc<dyn LocalIdentityPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
-    membership_initializer: Arc<dyn NewSpaceMembershipInitializer>,
+    membership_initializer: Arc<dyn SpaceMembershipInitializerPort>,
     setup_status: Arc<dyn SetupStatusPort>,
     settings: Arc<dyn SettingsPort>,
     clock: Arc<dyn ClockPort>,
@@ -85,7 +71,7 @@ impl InitializeSpaceUseCase {
         local_identity: Arc<dyn LocalIdentityPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        membership_initializer: Arc<dyn NewSpaceMembershipInitializer>,
+        membership_initializer: Arc<dyn SpaceMembershipInitializerPort>,
         setup_status: Arc<dyn SetupStatusPort>,
         settings: Arc<dyn SettingsPort>,
         clock: Arc<dyn ClockPort>,
@@ -191,7 +177,7 @@ impl InitializeSpaceUseCase {
         //    baseline behind the convergence owner rather than exposing those
         //    steps to this lifecycle use case.
         self.membership_initializer
-            .initialize_new_space_membership()
+            .initialize()
             .await
             .map_err(|error| InitializeSpaceError::Internal(error.to_string()))?;
 
@@ -439,15 +425,15 @@ mod tests {
     }
 
     #[async_trait]
-    impl NewSpaceMembershipInitializer for FakeMembershipInitializer {
-        async fn initialize_new_space_membership(
+    impl SpaceMembershipInitializerPort for FakeMembershipInitializer {
+        async fn initialize(
             &self,
-        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+        ) -> Result<(), MembershipInitializationError> {
             *self.calls.lock().unwrap() += 1;
             let has_completed = self.setup_status.get_status().await.unwrap().has_completed;
             self.observed_completed.lock().unwrap().push(has_completed);
             if *self.fail.lock().unwrap() {
-                return Err(crate::space::convergence::WorkspaceConvergenceError::Unavailable);
+                return Err(MembershipInitializationError::Unavailable);
             }
             Ok(())
         }

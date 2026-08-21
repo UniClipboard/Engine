@@ -6,6 +6,7 @@
 
 pub mod deps;
 pub mod facade;
+mod error;
 
 pub(crate) mod clipboard;
 pub(crate) mod search;

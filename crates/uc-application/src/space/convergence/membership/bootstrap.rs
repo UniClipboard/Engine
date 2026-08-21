@@ -1,4 +1,6 @@
 use super::super::*;
+use async_trait::async_trait;
+use uc_core::membership::{MembershipInitializationError, SpaceMembershipInitializerPort};
 
 impl WorkspaceConvergence {
     pub(crate) async fn repair_incomplete_isolated_space_membership(
@@ -705,5 +707,14 @@ impl WorkspaceConvergence {
         self.reconcile_membership_history_with_sponsor(sponsor)
             .await?;
         self.query().await
+    }
+}
+
+#[async_trait]
+impl SpaceMembershipInitializerPort for WorkspaceConvergence {
+    async fn initialize(&self) -> Result<(), MembershipInitializationError> {
+        self.initialize_new_space_membership()
+            .await
+            .map_err(map_membership_initialization_error)
     }
 }

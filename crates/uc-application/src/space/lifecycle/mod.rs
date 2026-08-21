@@ -14,3 +14,6 @@ pub mod profile_reset;
 pub(crate) mod session;
 pub(crate) mod setup_status;
 pub(crate) mod unlock_space;
+pub(crate) mod reset_space;
+pub(crate) mod rebuild_space;
+pub(crate) mod errors;

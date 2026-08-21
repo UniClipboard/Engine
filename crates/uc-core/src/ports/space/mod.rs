@@ -1,9 +1,10 @@
 mod access;
 mod persistence;
 mod proof;
+mod rebuild;
 
 pub use access::{
-    AdoptIsolatedSpacePort, CurrentSessionProofKeyPort, DeriveAdmissionProofKeyPort,
+    RebindSpaceSessionPort, CurrentSessionProofKeyPort, DeriveAdmissionProofKeyPort,
     DeriveProofKeyPort, DeriveSpaceSubkeyPort, FactoryResetSpacePort, GroupAdmissionPort,
     InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, PrepareAdmissionOfferPort,
     PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort, ResumeSpaceSessionPort,
@@ -11,3 +12,4 @@ pub use access::{
 };
 pub use persistence::*;
 pub use proof::*;
+pub use rebuild::*;

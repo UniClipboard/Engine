@@ -55,9 +55,10 @@ pub use error::{
     MembershipAnnouncementRepositoryError, MembershipAppliedSecurityUpdateRepositoryError,
     MembershipAttestationEndpointError, MembershipAttestationError,
     MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
-    MembershipGossipTransportError, MembershipHistoryExchangeError,
+    MembershipGossipTransportError, MembershipHistoryExchangeError, MembershipInitializationError,
     MembershipOutboxRepositoryError, MembershipSecurityUpdateError, RelationshipStateResetError,
-    SpaceSecurityStateResetError, VerifiedPeerPromotionError, WorkspaceConvergenceRepositoryError,
+    SpaceMembershipRebuildError, SpaceSecurityStateResetError, VerifiedPeerPromotionError,
+    WorkspaceConvergenceRepositoryError,
 };
 pub use gossip::{
     CandidateEffect, CandidateEvent, CandidateFailure, CandidateMergeError, CandidateMergeOutcome,
@@ -98,7 +99,8 @@ pub use ports::{
     MembershipGossipTransportPort, MembershipHistoryExchangeEndpointPort,
     MembershipHistoryExchangePort, MembershipOutboxRepositoryPort, MembershipSecurityState,
     MembershipSecurityUpdatePort, PrepareSponsorAdmissionSecurityPort, RelationshipStateResetPort,
-    RevocationRepositoryPort, SpaceSecurityStateResetPort, SponsorAdmissionSecurityDelivery,
+    RevocationRepositoryPort, SpaceMembershipInitializerPort, SpaceMembershipRebuildPort,
+    SpaceSecurityStateResetPort, SponsorAdmissionSecurityDelivery,
     SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
     SponsorPreparedAdmissionSecurity, SponsorPreparedSecurityTransition, VerifiedPeerPromotionPort,
     WorkspaceConvergenceRepositoryPort,

@@ -48,7 +48,7 @@ use uc_core::membership::{
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
-use uc_core::ports::space::{AdoptIsolatedSpacePort, SpaceAccessError, SpaceAccessStore};
+use uc_core::ports::space::{RebindSpaceSessionPort, SpaceAccessError, SpaceAccessStore};
 use uc_core::space_access::{
     AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
     PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
@@ -2088,8 +2088,8 @@ impl SpaceAccessStore for DefaultSpaceAccessAdapter {
 }
 
 #[async_trait]
-impl AdoptIsolatedSpacePort for DefaultSpaceAccessAdapter {
-    async fn adopt_isolated_space(
+impl RebindSpaceSessionPort for DefaultSpaceAccessAdapter {
+    async fn rebind_to_space(
         &self,
         space_id: &SpaceId,
     ) -> Result<ActiveSpace, SpaceAccessError> {

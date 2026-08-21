@@ -6,6 +6,7 @@ pub trait SetupStatusPort: Send + Sync {
     async fn get_status(&self) -> anyhow::Result<SetupStatus>;
     async fn set_status(&self, status: &SetupStatus) -> anyhow::Result<()>;
 
+    // FUCK: 
     async fn get_device_management_reset_target(&self) -> anyhow::Result<Option<SpaceId>> {
         Ok(None)
     }

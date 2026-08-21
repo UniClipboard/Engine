@@ -60,11 +60,11 @@ use crate::space::lifecycle::unlock_space::UnlockSpaceUseCase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     CurrentWorkspacePeerScopePort, DeviceManagementResetDataPort, MembershipAdmissionGatePort,
-    RelationshipStateResetPort, SpaceSecurityStateResetPort,
+    RelationshipStateResetPort, SpaceMembershipInitializerPort, SpaceSecurityStateResetPort,
 };
 use uc_core::ports::pairing::PairingSessionPort;
 use uc_core::ports::space::{
-    AdoptIsolatedSpacePort, FactoryResetSpacePort, ResumeSpaceSessionPort, SpaceAccessError,
+    FactoryResetSpacePort, RebindSpaceSessionPort, ResumeSpaceSessionPort, SpaceAccessError,
 };
 use uc_core::ports::{
     PeerAddressRepositoryPort, PresenceError, PresencePort, ReachabilityState, SettingsPort,
@@ -76,7 +76,7 @@ use uc_core::{MemberRepositoryPort, MemberSyncPreferences, SpaceMember};
 struct DeviceManagementResetUseCase {
     legacy_isolation_required: AtomicBool,
     execution_lock: tokio::sync::Mutex<()>,
-    adopt_space: Arc<dyn AdoptIsolatedSpacePort>,
+    adopt_space: Arc<dyn RebindSpaceSessionPort>,
     data_transition: Arc<dyn DeviceManagementResetDataPort>,
     relationship_reset: Arc<dyn RelationshipStateResetPort>,
     security_reset: Arc<dyn SpaceSecurityStateResetPort>,
@@ -246,7 +246,7 @@ impl DeviceManagementResetUseCase {
             .await
             .map_err(|error| ResetSpaceError::StagingFailed(error.to_string()))?;
         self.adopt_space
-            .adopt_isolated_space(&space_id)
+            .rebind_to_space(&space_id)
             .await
             .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
         self.convergence
@@ -307,7 +307,9 @@ impl DeviceManagementResetUseCase {
 /// Space-lifecycle facade (A1 initialise, A2 unlock, B1 issue invitation,
 /// B2 redeem invitation, P7e inbound subscriber, F2 shutdown).
 pub struct SpaceFacade {
+    // 初始化空间
     initialize_space: Arc<InitializeSpaceUseCase>,
+    // 解锁空间
     unlock_space: Arc<UnlockSpaceUseCase>,
     issue_pairing_invitation: Arc<IssuePairingInvitationUseCase>,
     redeem_pairing_invitation: Arc<RedeemPairingInvitationUseCase>,
@@ -454,10 +456,7 @@ impl SpaceFacade {
             Arc::clone(&local_identity),
             Arc::clone(&device_identity),
             Arc::clone(&member_repo),
-            Arc::clone(&workspace_convergence)
-                as Arc<
-                    dyn crate::space::lifecycle::initialize_space::NewSpaceMembershipInitializer,
-                >,
+            Arc::clone(&workspace_convergence) as Arc<dyn SpaceMembershipInitializerPort>,
             Arc::clone(&setup_status),
             Arc::clone(&settings),
             Arc::clone(&clock),
@@ -1063,9 +1062,9 @@ mod tests {
         PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
     };
     use uc_core::ports::space::{
-        AdoptIsolatedSpacePort, DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort,
-        FactoryResetSpacePort, GroupAdmissionPort, InitializeSpacePort, IsSpaceUnlockedPort,
-        LockSpacePort, PrepareAdmissionOfferPort, ProofPort, ResumeSpaceSessionPort,
+        DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, FactoryResetSpacePort,
+        GroupAdmissionPort, InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort,
+        PrepareAdmissionOfferPort, ProofPort, RebindSpaceSessionPort, ResumeSpaceSessionPort,
         SpaceAccessError, UnlockSpacePort, VerifyKeychainAccessPort,
     };
     use uc_core::ports::{
@@ -1307,8 +1306,8 @@ mod tests {
     }
 
     #[async_trait]
-    impl AdoptIsolatedSpacePort for MockSpaceAccess {
-        async fn adopt_isolated_space(
+    impl RebindSpaceSessionPort for MockSpaceAccess {
+        async fn rebind_to_space(
             &self,
             space_id: &SpaceId,
         ) -> Result<ActiveSpace, SpaceAccessError> {

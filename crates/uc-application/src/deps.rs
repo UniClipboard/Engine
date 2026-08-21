@@ -148,7 +148,7 @@ pub struct ClipboardPorts {
 /// whole struct and hand each use case its slice.
 #[derive(Clone)]
 pub struct SpaceAccessPorts {
-    pub adopt_isolated_space: Arc<dyn uc_core::ports::space::AdoptIsolatedSpacePort>,
+    pub adopt_isolated_space: Arc<dyn uc_core::ports::space::RebindSpaceSessionPort>,
     pub initialize: Arc<dyn InitializeSpacePort>,
     pub unlock: Arc<dyn UnlockSpacePort>,
     pub is_unlocked: Arc<dyn IsSpaceUnlockedPort>,
@@ -180,7 +180,7 @@ impl SpaceAccessPorts {
     pub fn from_adapter<A>(adapter: Arc<A>) -> Self
     where
         A: InitializeSpacePort
-            + uc_core::ports::space::AdoptIsolatedSpacePort
+            + uc_core::ports::space::RebindSpaceSessionPort
             + UnlockSpacePort
             + IsSpaceUnlockedPort
             + LockSpacePort

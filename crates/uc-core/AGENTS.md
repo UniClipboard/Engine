@@ -12,6 +12,10 @@
 
 **任何对 `uc-core` 的修改，都必须遵循本规范并进行自我审查。**
 
+### 注释语言
+
+`uc-core` 中 Rust 代码的行内注释与 doc comment 仅使用中文。本条为目录级规则，覆盖仓库根目录中关于代码注释语言的通用约束；代码标识符和提交信息仍使用英文。
+
 ---
 
 ## 2. uc-core 的定位
@@ -193,42 +197,42 @@ impl SpaceMembershipCandidate {
 
 规则：
 
-- 状态字段（如 `status`）只被 `apply` 及其私有辅助方法修改；所有状态推进
+* 状态字段（如 `status`）只被 `apply` 及其私有辅助方法修改；所有状态推进
   分支必须显式写在 `apply` 里，使状态图在单一函数中可见。
-- **效果分离**：`apply` 只回答“状态怎么变、需要什么效果”，副作用（持久化、
+* **效果分离**：`apply` 只回答“状态怎么变、需要什么效果”，副作用（持久化、
   唤醒运行期、网络动作）由调用方按返回的 `CandidateEffect` 执行。
-- **构造与转换分离**：新建实体用 `from_*` 构造器（初始状态在构造器中确定）；
+* **构造与转换分离**：新建实体用 `from_*` 构造器（初始状态在构造器中确定）；
   已有实体的一切变化走 `apply`。
-- **终态不可回退**：终态（如 `Blocked` / `Rejected`）必须在 `apply` 内守卫，
+* **终态不可回退**：终态（如 `Blocked` / `Rejected`）必须在 `apply` 内守卫，
   拒绝任何推进事件；不允许后续事件把终态改回可重试状态。
-- 事件与效果语义必须保持为“数据合并 + 条件推进”的真实表达：乱序到达、
+* 事件与效果语义必须保持为“数据合并 + 条件推进”的真实表达：乱序到达、
   重复到达（幂等）、过期资料等合法结果用 `outcome` 表达（如 `Stale` /
   `Unchanged`），不得用错误或例外表达业务常态。
 
 #### 4.5.2 事件集设计
 
-- 事件按“调用方语义”命名，不复制内部步骤：一个事件代表一次完整的外部
+* 事件按“调用方语义”命名，不复制内部步骤：一个事件代表一次完整的外部
   输入（资料到达、验证结果、环境信号），而不是内部操作的镜像。
-- 重试等待时间、失败类别等调用方已知的参数可以随事件携带
+* 重试等待时间、失败类别等调用方已知的参数可以随事件携带
   （如 `AttestationFailed { failure, retry_at_ms }`）；退避策略本身留在
   应用层，核心只表达状态。
-- 新增事件时先回答：它是资料合并、验证结果还是环境信号？回答不清不得实现。
+* 新增事件时先回答：它是资料合并、验证结果还是环境信号？回答不清不得实现。
 
 #### 4.5.3 持久化与兼容
 
-- 实体保持单一可序列化结构（状态作为字段），**禁止**用 typestate（每状态
+* 实体保持单一可序列化结构（状态作为字段），**禁止**用 typestate（每状态
   一个类型）拆分实体：会破坏持久化格式、repo 接口和跨重启恢复。
-- 不得引入第三方状态机库（见 §10 依赖纪律）；std / serde / thiserror 足以
+* 不得引入第三方状态机库（见 §10 依赖纪律）；std / serde / thiserror 足以
   实现本模式。
-- 状态枚举与事件枚举的序列化布局保持稳定；新增变体必须考虑旧数据兼容。
+* 状态枚举与事件枚举的序列化布局保持稳定；新增变体必须考虑旧数据兼容。
 
 #### 4.5.4 测试要求
 
-- **转换矩阵测试**：每个（事件 × 相关状态）的合法转换必须断言结果状态、
+* **转换矩阵测试**：每个（事件 × 相关状态）的合法转换必须断言结果状态、
   `outcome` 与 `effect`；非法转换（终态回退等）断言被拒绝。
-- **不变量测试**：终态不可回退、重复/乱序事件幂等、冲突不产生部分信任、
+* **不变量测试**：终态不可回退、重复/乱序事件幂等、冲突不产生部分信任、
   过期不复活。
-- 测试通过构造器 + 事件序列构造任意中间状态，**不得**为测试暴露额外
+* 测试通过构造器 + 事件序列构造任意中间状态，**不得**为测试暴露额外
   的状态写入方法（测试用 `apply` 是唯一构造路径）。
 
 ---
@@ -241,12 +245,12 @@ Ports 用于定义领域所需的外部能力，而不是具体实现。
 
 ### 5.2 Ports 设计原则
 
-| 原则      | 说明                       |
+| 原则 | 说明 |
 | ------- | ------------------------ |
 | 以业务能力命名 | 如 `DeviceRepositoryPort` |
-| 不暴露技术细节 | 不出现 HTTP、libp2p 等        |
-| 面向领域对象  | 使用 `DeviceId` 等          |
-| 保持最小接口  | 避免过度设计                   |
+| 不暴露技术细节 | 不出现 HTTP、libp2p 等 |
+| 面向领域对象 | 使用 `DeviceId` 等 |
+| 保持最小接口 | 避免过度设计 |
 
 ### 5.3 示例
 
@@ -264,21 +268,21 @@ Port trait、方法签名、领域类型上的 doc-comment 只能描述 **领域
 
 **禁止出现的内容**（任何形式：英文、中文、代码示例、注释片段都不行）：
 
-- 上层模块名：`uc_application::...` / `uc_webserver::...` / `uc_desktop::...` / `uc-tauri` / `uc-cli`
-- Use case / facade / orchestrator 名：`ApplyInboundClipUseCase` / `MobileSyncFacade` / `SetupOrchestrator`
-- HTTP 路由 / API 端点：`PUT /file` / `/SyncClipboard.json` / `POST /v2/setup/redeem`
-- 协议名：`SyncClipboard` / `iroh` / `libp2p`
-- 具体调用场景的描述：「用于 X 流程」/「PUT /file 阶段先用占位 entry_id」/「mobile_lan 路径」
-- 调用顺序耦合：「先调 A 再调 B」/「等 X 完成后再调用本方法」（如果是 port 自身的契约约束才允许）
-- 实现侧的细节：「用 SQLite 表 …」/「通过 broadcast channel 推送」
+* 上层模块名：`uc_application::...` / `uc_webserver::...` / `uc_desktop::...` / `uc-tauri` / `uc-cli`
+* Use case / facade / orchestrator 名：`ApplyInboundClipUseCase` / `MobileSyncFacade` / `SetupOrchestrator`
+* HTTP 路由 / API 端点：`PUT /file` / `/SyncClipboard.json` / `POST /v2/setup/redeem`
+* 协议名：`SyncClipboard` / `iroh` / `libp2p`
+* 具体调用场景的描述：「用于 X 流程」/「PUT /file 阶段先用占位 entry_id」/「mobile_lan 路径」
+* 调用顺序耦合：「先调 A 再调 B」/「等 X 完成后再调用本方法」（如果是 port 自身的契约约束才允许）
+* 实现侧的细节：「用 SQLite 表 …」/「通过 broadcast channel 推送」
 
 **允许的内容**：
 
-- 领域语义：这个方法在领域里做什么、改变了什么状态、对外承诺什么
-- 输入输出契约：参数含义、返回值语义、None / 空集合的边界
-- 幂等性、原子性、副作用范围
-- 错误语义：什么情况下返回什么 Error 变体（不是底层实现错误）
-- 不变量：调用前后必须满足的领域不变量
+* 领域语义：这个方法在领域里做什么、改变了什么状态、对外承诺什么
+* 输入输出契约：参数含义、返回值语义、None / 空集合的边界
+* 幂等性、原子性、副作用范围
+* 错误语义：什么情况下返回什么 Error 变体（不是底层实现错误）
+* 不变量：调用前后必须满足的领域不变量
 
 #### ❌ 错误示例（被污染的 port 注释）
 
@@ -375,19 +379,19 @@ Phase B milestone (Slice 1-7) + Phase C (Slice 8) 起统一落实——以下所
 
 ### 7.3 历史条款回顾（已废止）
 
-- 早期文档曾列 "`MasterKey` / `KeySlot` / `WrappedKey` 允许进 core"——Phase B 重构前立场。milestone/1.0.0 Phase B 已全部下沉到 `uc-infra/src/security/`,任何反向再次往 uc-core 加这些类型的 PR **应被拒绝**。如需新增持久化/密钥物料数据结构，默认放 `uc-infra/src/security/crypto_model.rs` 或 `secrets.rs`,uc-core 只看端口契约与领域中性类型。
-- 早期设计曾把"设备是否初始化过加密"用独立的 `EncryptionStatePort` / `EncryptionState` enum 单独记录——Phase C (Slice 8) 确认这与 `SetupStatusPort.has_completed` 是同一业务事实的冗余副本，已彻底删除。任何反向再引入"独立 encryption state 持久化"的 PR **应被拒绝**:真相源唯一为 `SetupStatusPort`,adapter 需要查"keyslot 是否真实存在"时直接调 `KeyMaterialStore::keyslot_exists()`。
+* 早期文档曾列 "`MasterKey` / `KeySlot` / `WrappedKey` 允许进 core"——Phase B 重构前立场。milestone/1.0.0 Phase B 已全部下沉到 `uc-infra/src/security/`,任何反向再次往 uc-core 加这些类型的 PR **应被拒绝**。如需新增持久化/密钥物料数据结构，默认放 `uc-infra/src/security/crypto_model.rs` 或 `secrets.rs`,uc-core 只看端口契约与领域中性类型。
+* 早期设计曾把"设备是否初始化过加密"用独立的 `EncryptionStatePort` / `EncryptionState` enum 单独记录——Phase C (Slice 8) 确认这与 `SetupStatusPort.has_completed` 是同一业务事实的冗余副本，已彻底删除。任何反向再引入"独立 encryption state 持久化"的 PR **应被拒绝**:真相源唯一为 `SetupStatusPort`,adapter 需要查"keyslot 是否真实存在"时直接调 `KeyMaterialStore::keyslot_exists()`。
 
 ---
 
 ## 8. Settings 与 Config 的边界
 
-| 类型   | 是否属于 core | 示例             |
+| 类型 | 是否属于 core | 示例 |
 | ---- | --------- | -------------- |
-| 业务设置 | ✅         | `SyncSettings` |
-| 配置加载 | ❌         | 读取 TOML        |
-| 环境变量 | ❌         | `std::env`     |
-| 默认路径 | ❌         | `AppData`      |
+| 业务设置 | ✅ | `SyncSettings` |
+| 配置加载 | ❌ | 读取 TOML |
+| 环境变量 | ❌ | `std::env` |
+| 默认路径 | ❌ | `AppData` |
 
 ---
 
@@ -421,13 +425,13 @@ Phase B milestone (Slice 1-7) + Phase C (Slice 8) 起统一落实——以下所
 
 ### 10.2 禁止的依赖
 
-| 禁止    | 示例                  |
+| 禁止 | 示例 |
 | ----- | ------------------- |
-| 网络库   | `libp2p`, `reqwest` |
-| 数据库   | `diesel`, `sqlx`    |
-| UI    | `tauri`             |
-| 异步运行时 | `tokio`             |
-| 加密实现  | `ring`, `argon2`    |
+| 网络库 | `libp2p`, `reqwest` |
+| 数据库 | `diesel`, `sqlx` |
+| UI | `tauri` |
+| 异步运行时 | `tokio` |
+| 加密实现 | `ring`, `argon2` |
 
 ---
 
@@ -537,9 +541,9 @@ Code Review 时应重点关注：
 
 > **Stable · Pure · Business-Oriented · Implementation-Agnostic**
 
-| 原则                      | 含义      |
+| 原则 | 含义 |
 | ----------------------- | ------- |
-| Stable                  | 变化频率最低  |
-| Pure                    | 不包含技术实现 |
-| Business-Oriented       | 只表达业务语义 |
-| Implementation-Agnostic | 与平台无关   |
+| Stable | 变化频率最低 |
+| Pure | 不包含技术实现 |
+| Business-Oriented | 只表达业务语义 |
+| Implementation-Agnostic | 与平台无关 |
