@@ -119,6 +119,25 @@ impl ProfileWorkspaceConvergence {
         Ok(result)
     }
 
+    /// Lightweight recovery for a stale "admission in progress" record left
+    /// behind by a crashed/interrupted pairing: clears only the pending
+    /// admission attempts so a new pairing can start, without disturbing the
+    /// intact space (terminals, membership history, trust revision).
+    pub async fn clear_stale_admission(&self) -> Result<(), WorkspaceConvergenceError> {
+        self.admission_attempts
+            .clear_pending_admissions()
+            .await
+            .map_err(admission::map_repository_error)?;
+        let revision = self
+            .admission_attempts
+            .profile_metadata()
+            .await
+            .map_err(admission::map_repository_error)?
+            .device_trust_revision;
+        let _ = self.events.send(revision);
+        Ok(())
+    }
+
     pub async fn query_device_trust(
         &self,
     ) -> Result<DeviceTrustSnapshot, WorkspaceConvergenceError> {
