@@ -91,6 +91,22 @@ struct DeviceManagementResetUseCase {
 }
 
 impl DeviceManagementResetUseCase {
+    /// Clear any persisted admission state (pending joins / sponsorships) that
+    /// could block a future pairing attempt.
+    ///
+    /// Used by both the full device-management reset ([`Self::execute_reset`])
+    /// and the last-resort factory reset (`SpaceFacade::factory_reset`): a
+    /// crash mid-admission leaves a durable "admission in progress" record,
+    /// and if that record survives a wipe-and-repair recovery every later
+    /// pairing attempt fails with `AdmissionInProgress` until the store is
+    /// cleared.
+    async fn clear_admission_state(&self) -> Result<(), String> {
+        self.convergence
+            .reset_admission_for_device_management()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn remove_remote_members(&self) -> Result<(), String> {
         let local_device_id = self.device_identity.current_device_id();
         let members = self
@@ -249,10 +265,9 @@ impl DeviceManagementResetUseCase {
             .adopt_isolated_space(&space_id)
             .await
             .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
-        self.convergence
-            .reset_admission_for_device_management()
+        self.clear_admission_state()
             .await
-            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
+            .map_err(|error| ResetSpaceError::RebuildFailed(error))?;
         self.relationship_reset
             .clear_all_relationships()
             .await
@@ -803,7 +818,10 @@ impl SpaceFacade {
     ///    `AlreadyInitialized` due to the residual keyslot).
     /// 2. Clear `SetupStatus` so `EncryptionFacade::state()` flips
     ///    `initialized = false` and the UI routes to `SetupPage`.
-    /// 3. Cancel any in-flight invitations — same hygiene as
+    /// 3. Clear persisted admission state — a crash mid-admission leaves a
+    ///    durable "admission in progress" record that would otherwise block
+    ///    every later pairing attempt.
+    /// 4. Cancel any in-flight invitations — same hygiene as
     ///    [`Self::reset`].
     ///
     /// The `space_id` passed to the port is an opaque handle: the
@@ -819,6 +837,14 @@ impl SpaceFacade {
             .await
             .map_err(|err| FactoryResetError::KeyMaterialWipeFailed(err.to_string()))?;
         self.clear_space_peer_state().await?;
+        // A crash mid-admission leaves a durable "admission in progress" record.
+        // The factory reset is the last-resort recovery path, so it must clear
+        // that state too — otherwise every later pairing attempt fails with
+        // `AdmissionInProgress` and the user is locked out of re-pairing.
+        self.device_management_reset
+            .clear_admission_state()
+            .await
+            .map_err(FactoryResetError::AdmissionStateResetFailed)?;
         self.setup_status
             .set_status(&SetupStatus::default())
             .await
