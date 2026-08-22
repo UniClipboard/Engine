@@ -89,13 +89,13 @@ pub async fn execute_query_workspace_convergence(
         .workspace_convergence()
         .await
         .map_err(map_roster_error)?;
-    Ok(OperationResult::WorkspaceConvergence(
+    Ok(OperationResult::WorkspaceMembership(
         workspace_convergence_summary(snapshot),
     ))
 }
 
 pub async fn execute_query_profile_device_trust(
-    convergence: &uc_application::facade::ProfileWorkspaceConvergence,
+    convergence: &uc_application::facade::ProfileSpaceAdmission,
 ) -> Result<OperationResult, EngineError> {
     let snapshot = convergence
         .query_device_trust()
@@ -208,7 +208,7 @@ pub async fn execute_remove_member(
         .remove_member(&input.device_id)
         .await
         .map_err(map_roster_error)?;
-    Ok(OperationResult::WorkspaceConvergence(
+    Ok(OperationResult::WorkspaceMembership(
         workspace_convergence_summary(snapshot),
     ))
 }
@@ -236,7 +236,7 @@ pub async fn execute_decide_membership_removal(
         .decide_membership_removal(removal_event_id, decision)
         .await
         .map_err(map_roster_error)?;
-    Ok(OperationResult::WorkspaceConvergence(
+    Ok(OperationResult::WorkspaceMembership(
         workspace_convergence_summary(snapshot),
     ))
 }

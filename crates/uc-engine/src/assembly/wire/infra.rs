@@ -1,5 +1,21 @@
 use super::*;
 
+struct ApplicationSpaceUnlockAdapter {
+    inner: Arc<uc_infra::security::DefaultSpaceAccessAdapter>,
+}
+
+#[async_trait::async_trait]
+impl uc_application::deps::UnlockSpacePort for ApplicationSpaceUnlockAdapter {
+    async fn unlock(
+        &self,
+        space_id: &uc_core::ids::SpaceId,
+        passphrase: &uc_core::crypto::domain::Passphrase,
+    ) -> Result<uc_core::crypto::domain::ActiveSpace, uc_core::ports::space::SpaceAccessError> {
+        uc_core::ports::space::SpaceAccessStore::unlock(self.inner.as_ref(), space_id, passphrase)
+            .await
+    }
+}
+
 /// Create SQLite database connection pool
 pub(super) fn create_db_pool(db_path: &PathBuf) -> WiringResult<DbPool> {
     if db_path.as_os_str() != ":memory:" {
@@ -49,8 +65,33 @@ pub(super) fn build_space_access_ports(
     );
     let current_member_signatures: Arc<dyn uc_core::membership::CurrentMemberSignaturePort> =
         space_access_adapter.clone();
+    let unlock = Arc::new(ApplicationSpaceUnlockAdapter {
+        inner: Arc::clone(&space_access_adapter),
+    });
+    let rebind = Arc::new(uc_infra::security::SpaceSessionRebindAdapter::new(
+        Arc::clone(session),
+    ));
+    let space_access_ports = SpaceAccessPorts {
+        adopt_isolated_space: rebind,
+        initialize: space_access_adapter.clone(),
+        unlock,
+        is_unlocked: space_access_adapter.clone(),
+        lock: space_access_adapter.clone(),
+        resume_session: space_access_adapter.clone(),
+        derive_subkey: space_access_adapter.clone(),
+        prepare_admission_offer: space_access_adapter.clone(),
+        derive_admission_proof_key: space_access_adapter.clone(),
+        prepare_admission_target_access: space_access_adapter.clone(),
+        group_admission: space_access_adapter.clone(),
+        prepare_sponsor_admission_security: space_access_adapter.clone(),
+        activate_sponsor_admission_security: space_access_adapter.clone(),
+        activate_completion_helper_admission_security: space_access_adapter.clone(),
+        group_revocation: space_access_adapter.clone(),
+        group_bootstrap: space_access_adapter.clone(),
+        space_protection: space_access_adapter.clone(),
+    };
     (
-        SpaceAccessPorts::from_adapter(Arc::clone(&space_access_adapter)),
+        space_access_ports,
         space_access_adapter,
         current_member_signatures,
         space_security_reset,
@@ -205,7 +246,8 @@ pub(super) fn build_config_migration_facade(
     iroh_identity_storage: &Arc<dyn SecureStoragePort>,
     db_pool_for_config_migration: DbPool,
     clock: &Arc<dyn ClockPort>,
-    setup_status: &Arc<dyn SetupStatusPort>,
+    current_space_identity: &Arc<dyn CurrentSpaceIdentityPort>,
+    portable_current_space_identity: &Arc<dyn PortableCurrentSpaceIdentityPort>,
     space_access_ports: &SpaceAccessPorts,
     app_version: String,
     source_mode: ConfigSourceMode,
@@ -233,7 +275,8 @@ pub(super) fn build_config_migration_facade(
         export_bundle: config_migration_adapter.clone(),
         preview_import: config_migration_adapter.clone(),
         stage_import: config_migration_adapter.clone(),
-        setup_status: setup_status.clone(),
+        current_space_identity: current_space_identity.clone(),
+        portable_current_space_identity: portable_current_space_identity.clone(),
         is_unlocked: space_access_ports.is_unlocked.clone(),
     }))
 }
@@ -340,8 +383,10 @@ pub(super) fn create_infra_layer(
 
     let settings_repo: Arc<dyn SettingsPort> = Arc::new(FileSettingsRepository::new(settings_path));
 
-    let setup_status: Arc<dyn SetupStatusPort> =
-        Arc::new(FileSetupStatusRepository::with_defaults(vault_path.clone()));
+    let vault_layout = VaultLayout::new(vault_path.clone());
+    let space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort> = Arc::new(
+        uc_infra::space::FileSpaceRebuildProgress::new(vault_layout.space_rebuild_progress_path()),
+    );
 
     // 升级游标——独立小文件，落在 app_data_root 顶层（与 vault/keyring/settings.json
     // 同级），不污染 vault/。schema_version=1，写入走 tempfile + rename 原子化。
@@ -408,7 +453,7 @@ pub(super) fn create_infra_layer(
         thumbnail_generator,
         key_material,
         settings_repo,
-        setup_status,
+        space_rebuild_progress,
         app_version_state,
         first_sync_state,
         clock,

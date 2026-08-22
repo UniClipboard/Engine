@@ -17,19 +17,18 @@
 //! `tracing::warn!` so ops still sees them.
 
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
 
 use crate::clipboard::write::MobileConsumableBackfill;
+use crate::deps::CurrentSpaceIdentityPort;
+use crate::deps::SpaceRebuildProgressPort;
 use crate::facade::space_setup::commands::{
-    CurrentInvitation, InitializeSpaceCommand, InitializeSpaceInput, InitializeSpaceResult,
-    IssuePairingInvitationResult, PairingInvitationAddressCandidate, SetupStateView,
-    UnlockSpaceCommand, UnlockSpaceInput, UnlockSpaceResult,
+    CurrentInvitation, InitializeSpaceInput, IssuePairingInvitationResult,
+    PairingInvitationAddressCandidate, SetupStateView, UnlockSpaceInput, UnlockSpaceResult,
 };
 use crate::facade::space_setup::commands::{
     RedeemPairingInvitationCommand, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
@@ -37,12 +36,9 @@ use crate::facade::space_setup::commands::{
 use crate::facade::space_setup::deps::{
     SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
 };
+use crate::facade::space_setup::errors::IssuePairingInvitationError;
 use crate::facade::space_setup::errors::{
-    CancelInvitationError, FactoryResetError, QuerySetupStateError, RedeemPairingInvitationError,
-    ResetSpaceError,
-};
-use crate::facade::space_setup::errors::{
-    InitializeSpaceError, IssuePairingInvitationError, TryResumeSessionError, UnlockSpaceError,
+    CancelInvitationError, QuerySetupStateError, RedeemPairingInvitationError,
 };
 use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
@@ -51,258 +47,31 @@ use crate::space::admission::joiner::joiner_handshake::JoinerHandshakeCoordinato
 use crate::space::admission::redeem_invitation::RedeemPairingInvitationUseCase;
 use crate::space::admission::sponsor::orchestrator::PairingInboundOrchestrator;
 use crate::space::admission::sponsor::sponsor_handshake::SponsorHandshakeCoordinator;
-use crate::space::convergence::connectivity::reachability::{
+use crate::space::admission::PriorSpaceAdmissionStateReset;
+use crate::space::connectivity::reachability::{
     EnsureReachableAllError, EnsureReachableAllReport, EnsureReachableAllUseCase,
 };
-use crate::space::convergence::membership::group_update_delivery::GroupUpdateDeliveryPort;
-use crate::space::lifecycle::initialize_space::InitializeSpaceUseCase;
-use crate::space::lifecycle::unlock_space::UnlockSpaceUseCase;
-use uc_core::ids::{DeviceId, SpaceId};
+use crate::space::initialize_space::{
+    InitializeSpaceError, InitializeSpaceRequest, InitializeSpaceResult, InitializeSpaceUseCase,
+};
+use crate::space::re_pairing::RePairingState;
+use crate::space::rebuild_space::{
+    RebuildSpaceUseCase, SpaceMembershipRebuilder, SpaceRebuildTransition,
+};
+use crate::space::reset_space::{ResetSpaceError, ResetSpaceUseCase};
+use crate::space::session::ResumeSpaceSessionPort;
+use crate::space::unlock_space::{PostSessionReadiness, UnlockSpaceError, UnlockSpaceUseCase};
+use crate::space::upgrade_space::UpgradeSpaceUseCase;
+use crate::space::workspace_membership::membership::group_update_delivery::GroupUpdateDeliveryPort;
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    CurrentWorkspacePeerScopePort, DeviceManagementResetDataPort, MembershipAdmissionGatePort,
-    RelationshipStateResetPort, SpaceMembershipInitializerPort, SpaceSecurityStateResetPort,
+    CurrentWorkspacePeerScopePort, MembershipAdmissionGatePort, SpaceMembershipInitializerPort,
 };
 use uc_core::ports::pairing::PairingSessionPort;
-use uc_core::ports::space::{
-    FactoryResetSpacePort, RebindSpaceSessionPort, ResumeSpaceSessionPort, SpaceAccessError,
-};
 use uc_core::ports::{
     PeerAddressRepositoryPort, PresenceError, PresencePort, ReachabilityState, SettingsPort,
-    SetupStatusPort,
 };
-use uc_core::setup::SetupStatus;
-use uc_core::{MemberRepositoryPort, MemberSyncPreferences, SpaceMember};
-
-struct DeviceManagementResetUseCase {
-    legacy_isolation_required: AtomicBool,
-    execution_lock: tokio::sync::Mutex<()>,
-    adopt_space: Arc<dyn RebindSpaceSessionPort>,
-    data_transition: Arc<dyn DeviceManagementResetDataPort>,
-    relationship_reset: Arc<dyn RelationshipStateResetPort>,
-    security_reset: Arc<dyn SpaceSecurityStateResetPort>,
-    setup_status: Arc<dyn SetupStatusPort>,
-    local_identity: Arc<dyn uc_core::ports::LocalIdentityPort>,
-    device_identity: Arc<dyn uc_core::ports::DeviceIdentityPort>,
-    settings: Arc<dyn SettingsPort>,
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    convergence: Arc<crate::space::convergence::WorkspaceConvergence>,
-    app_version_state: Arc<dyn uc_core::ports::AppVersionStatePort>,
-    current_app_version: String,
-}
-
-impl DeviceManagementResetUseCase {
-    async fn remove_remote_members(&self) -> Result<(), String> {
-        let local_device_id = self.device_identity.current_device_id();
-        let members = self
-            .member_repo
-            .list()
-            .await
-            .map_err(|error| error.to_string())?;
-        for member in members {
-            if member.device_id != local_device_id {
-                self.member_repo
-                    .remove(&member.device_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn mark_completed(&self) -> Result<(), String> {
-        self.app_version_state
-            .write(&self.current_app_version)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn resume_legacy_isolation_if_required(&self) -> Result<(), String> {
-        let _guard = self.execution_lock.lock().await;
-        let status = self
-            .setup_status
-            .get_status()
-            .await
-            .map_err(|error| error.to_string())?;
-        if status.re_pairing_required {
-            self.remove_remote_members().await?;
-            self.convergence
-                .repair_incomplete_isolated_space_membership()
-                .await
-                .map_err(|error| error.to_string())?;
-            self.setup_status
-                .clear_device_management_reset_target()
-                .await
-                .map_err(|error| error.to_string())?;
-            if self.legacy_isolation_required.load(Ordering::Acquire) {
-                self.mark_completed().await?;
-            }
-            self.legacy_isolation_required
-                .store(false, Ordering::Release);
-            return Ok(());
-        }
-        let pending_isolation_target = self
-            .setup_status
-            .get_device_management_reset_target()
-            .await
-            .map_err(|error| error.to_string())?;
-        if !self.legacy_isolation_required.load(Ordering::Acquire)
-            && pending_isolation_target.is_none()
-        {
-            return Ok(());
-        }
-
-        self.execute_reset(pending_isolation_target)
-            .await
-            .map_err(|error| error.to_string())?;
-        self.mark_completed().await?;
-        self.legacy_isolation_required
-            .store(false, Ordering::Release);
-        Ok(())
-    }
-
-    async fn execute_user_requested(&self) -> Result<(), ResetSpaceError> {
-        let _guard = self.execution_lock.lock().await;
-        let pending_target = self
-            .setup_status
-            .get_device_management_reset_target()
-            .await
-            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
-        let status = self
-            .setup_status
-            .get_status()
-            .await
-            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
-        if pending_target
-            .as_ref()
-            .is_some_and(|target| status.space_id.as_ref() == Some(target))
-        {
-            let target = pending_target
-                .as_ref()
-                .ok_or_else(|| ResetSpaceError::Internal("reset target disappeared".to_owned()))?;
-            self.data_transition
-                .finalize_device_management_reset(target)
-                .await
-                .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
-            if !status.re_pairing_required {
-                self.setup_status
-                    .set_status(&SetupStatus {
-                        has_completed: true,
-                        space_id: status.space_id,
-                        re_pairing_required: true,
-                    })
-                    .await
-                    .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
-            }
-            self.setup_status
-                .clear_device_management_reset_target()
-                .await
-                .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
-            return Ok(());
-        }
-        if pending_target.is_none() && status.re_pairing_required {
-            return Ok(());
-        }
-        self.execute_reset(pending_target).await
-    }
-
-    async fn execute_reset(
-        &self,
-        pending_isolation_target: Option<SpaceId>,
-    ) -> Result<(), ResetSpaceError> {
-        let settings = self
-            .settings
-            .load()
-            .await
-            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
-        let device_name = settings
-            .general
-            .device_name
-            .filter(|name| !name.trim().is_empty())
-            .ok_or_else(|| {
-                ResetSpaceError::PreparationFailed("local device name is unavailable".to_owned())
-            })?;
-        let identity_fingerprint = self
-            .local_identity
-            .ensure()
-            .await
-            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
-        let space_id = match pending_isolation_target {
-            Some(space_id) => space_id,
-            None => {
-                let space_id = SpaceId::new();
-                self.setup_status
-                    .set_device_management_reset_target(&space_id)
-                    .await
-                    .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
-                space_id
-            }
-        };
-        self.data_transition
-            .prepare_device_management_reset(&space_id)
-            .await
-            .map_err(|error| ResetSpaceError::PreparationFailed(error.to_string()))?;
-        self.data_transition
-            .stage_device_management_reset_mutations(&space_id)
-            .await
-            .map_err(|error| ResetSpaceError::StagingFailed(error.to_string()))?;
-        self.adopt_space
-            .rebind_to_space(&space_id)
-            .await
-            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
-        self.convergence
-            .reset_admission_for_device_management()
-            .await
-            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
-        self.relationship_reset
-            .clear_all_relationships()
-            .await
-            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
-        self.remove_remote_members()
-            .await
-            .map_err(ResetSpaceError::RebuildFailed)?;
-
-        let member = SpaceMember {
-            device_id: self.device_identity.current_device_id(),
-            device_name,
-            identity_fingerprint,
-            joined_at: Utc::now(),
-            sync_preferences: MemberSyncPreferences::default(),
-        };
-        self.member_repo
-            .save(&member)
-            .await
-            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
-        self.convergence
-            .initialize_new_space_membership()
-            .await
-            .map_err(|error| ResetSpaceError::RebuildFailed(error.to_string()))?;
-        self.data_transition
-            .promote_device_management_reset(&space_id)
-            .await
-            .map_err(|error| ResetSpaceError::CommitFailed(error.to_string()))?;
-        self.security_reset
-            .clear_space_security_state_except(&space_id)
-            .await
-            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
-        self.data_transition
-            .finalize_device_management_reset(&space_id)
-            .await
-            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
-        self.setup_status
-            .set_status(&SetupStatus {
-                has_completed: true,
-                space_id: Some(space_id),
-                re_pairing_required: true,
-            })
-            .await
-            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
-        self.setup_status
-            .clear_device_management_reset_target()
-            .await
-            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
-        Ok(())
-    }
-}
+use uc_core::MemberRepositoryPort;
 
 /// Space-lifecycle facade (A1 initialise, A2 unlock, B1 issue invitation,
 /// B2 redeem invitation, P7e inbound subscriber, F2 shutdown).
@@ -317,17 +86,10 @@ pub struct SpaceFacade {
     /// spawned during construction. Aborted in [`Self::on_shutdown`] so
     /// the event loop doesn't outlive the facade.
     pairing_inbound_handle: JoinHandle<()>,
-    /// Held for [`Self::try_resume_session`] — the silent resume path needs
-    /// both the setup flag (to decide whether there's anything to resume at
-    /// all) and direct access to [`ResumeSpaceSessionPort::try_resume_session`].
-    /// Everything else still goes through use cases.
-    resume_session: Arc<dyn ResumeSpaceSessionPort>,
-    /// Held for [`Self::factory_reset`] — wipes persisted key material before
-    /// clearing setup status.
-    factory_reset: Arc<dyn FactoryResetSpacePort>,
-    relationship_reset: Arc<dyn RelationshipStateResetPort>,
-    setup_status: Arc<dyn SetupStatusPort>,
-    mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
+    session_readiness: Arc<PostSessionReadiness>,
+    space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort>,
+    re_pairing_state: Arc<RePairingState>,
+    current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     /// Slice4 P3 T3.2 · `query_setup_state` reads `device_name` from
     /// `Settings.general`; `cancel_invitation` / `reset` need no
     /// settings access but the field stays `pub(crate)` so a future
@@ -352,7 +114,7 @@ pub struct SpaceFacade {
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     presence: Arc<dyn PresencePort>,
     pairing_session: Arc<dyn PairingSessionPort>,
-    device_management_reset: DeviceManagementResetUseCase,
+    reset_space: Arc<ResetSpaceUseCase>,
     /// `current_device_id()` snapshotted at facade-construction time so
     /// `list_paired_peer_device_ids` can self-filter without grabbing the
     /// `DeviceIdentityPort` lock on every call.
@@ -365,7 +127,7 @@ impl SpaceFacade {
     ///
     /// The workspace convergence owner and the group-update delivery are
     /// taken from `admission.convergence`; callers assemble them through
-    /// [`SpaceConvergenceAssembly::new`] so the application layer stays the
+    /// [`SpaceModules::new`] so the application layer stays the
     /// single construction point (ADR-018).
     pub fn new(deps: SpaceFacadeDeps) -> Self {
         Self::new_internal(deps)
@@ -379,11 +141,11 @@ impl SpaceFacade {
         } = deps;
         let SpaceSessionDeps {
             space_access,
-            setup_status,
             mobile_consumable_backfill,
-            legacy_profile_isolation_required,
-            app_version_state,
-            current_app_version,
+            engine_version_state,
+            current_engine_version,
+            current_space_identity,
+            initial_space_activation,
         } = session;
         let SpaceAdmissionDeps {
             local_identity,
@@ -404,45 +166,25 @@ impl SpaceFacade {
             ..
         } = admission;
         let convergence = Arc::clone(&convergence);
-        let workspace_convergence = Arc::clone(&convergence.workspace);
+        let workspace_membership = convergence.workspace_membership();
+        let space_admission = convergence.space_admission();
         let peer_scope = convergence.current_peer_scope();
         let group_update_delivery: Arc<dyn GroupUpdateDeliveryPort> =
             convergence.group_update_delivery();
         let SpaceTransitionDeps {
+            admission_attempts,
             device_management_reset_data,
             relationship_reset,
             space_security_reset,
+            space_rebuild_progress,
+            re_pairing_state_store,
         } = transition;
 
-        // Stash the narrow slices the facade itself drives (`try_resume_session`
-        // / `factory_reset`) before the bundle's other slices are handed to the
-        // use cases below. The facade owns these two paths directly rather than
-        // routing through a use case that would only wrap a single port call.
-        let resume_session_for_facade = Arc::clone(&space_access.resume_session);
-        let factory_reset_for_facade = Arc::clone(&space_access.factory_reset);
-        let relationship_reset_for_facade = Arc::clone(&relationship_reset);
-        let setup_status_for_facade = Arc::clone(&setup_status);
+        let resume_session = Arc::clone(&space_access.resume_session);
         let member_repo_for_facade = Arc::clone(&member_repo);
         // Slice4 P3 T3.2 · facade-local handle for `query_setup_state`
         // (reads `Settings.general.device_name`).
         let settings_for_facade = Arc::clone(&settings);
-        let device_management_reset = DeviceManagementResetUseCase {
-            legacy_isolation_required: AtomicBool::new(legacy_profile_isolation_required),
-            execution_lock: tokio::sync::Mutex::new(()),
-            adopt_space: Arc::clone(&space_access.adopt_isolated_space),
-            data_transition: device_management_reset_data,
-            relationship_reset: Arc::clone(&relationship_reset),
-            security_reset: space_security_reset,
-            setup_status: Arc::clone(&setup_status),
-            local_identity: Arc::clone(&local_identity),
-            device_identity: Arc::clone(&device_identity),
-            settings: Arc::clone(&settings),
-            member_repo: Arc::clone(&member_repo),
-            convergence: Arc::clone(&workspace_convergence),
-            app_version_state,
-            current_app_version,
-        };
-
         // Invitation holder is purely an internal flow-state component
         // (§11.4) — construct it here so bootstrap never sees the type.
         let invitation_holder = Arc::new(InMemoryPairingInvitationHolder::new());
@@ -450,21 +192,56 @@ impl SpaceFacade {
         // / `query_setup_state` snapshots; the use case + orchestrator
         // already own their own `Arc::clone`s below.
         let invitation_holder_for_facade = Arc::clone(&invitation_holder);
+        let prior_admission_state =
+            Arc::new(PriorSpaceAdmissionStateReset::new(admission_attempts));
+        let membership_rebuilder = Arc::new(SpaceMembershipRebuilder::new(
+            Arc::clone(&member_repo),
+            Arc::clone(&relationship_reset),
+            Arc::clone(&workspace_membership) as Arc<dyn SpaceMembershipInitializerPort>,
+        ));
+        let space_rebuild_progress_for_facade = Arc::clone(&space_rebuild_progress);
+        let re_pairing_state = Arc::new(RePairingState::new(re_pairing_state_store));
+        let re_pairing_state_for_facade = Arc::clone(&re_pairing_state);
+        let rebuild_transition = Arc::new(SpaceRebuildTransition::new(
+            device_management_reset_data,
+            space_security_reset,
+            Arc::clone(&current_space_identity),
+            space_rebuild_progress,
+            Arc::clone(&re_pairing_state),
+        ));
+        let rebuild_space = Arc::new(RebuildSpaceUseCase::new(
+            Arc::clone(&settings),
+            Arc::clone(&local_identity),
+            Arc::clone(&device_identity),
+            rebuild_transition,
+            Arc::clone(&space_access.adopt_isolated_space),
+            prior_admission_state,
+            membership_rebuilder,
+            Arc::clone(&clock),
+        ));
+        let reset_space = Arc::new(ResetSpaceUseCase::new(
+            Arc::clone(&rebuild_space),
+            Arc::clone(&invitation_holder)
+                as Arc<dyn crate::space::reset_space::ports::PendingSpaceInvitationResetPort>,
+        ));
+        let upgrade_space = Arc::new(UpgradeSpaceUseCase::new(
+            current_engine_version,
+            rebuild_space,
+            engine_version_state,
+            Arc::clone(&current_space_identity),
+            Arc::clone(&re_pairing_state),
+        ));
 
         let initialize_space = Arc::new(InitializeSpaceUseCase::new(
             Arc::clone(&space_access.initialize),
             Arc::clone(&local_identity),
             Arc::clone(&device_identity),
             Arc::clone(&member_repo),
-            Arc::clone(&workspace_convergence) as Arc<dyn SpaceMembershipInitializerPort>,
-            Arc::clone(&setup_status),
+            Arc::clone(&workspace_membership) as Arc<dyn SpaceMembershipInitializerPort>,
+            Arc::clone(&current_space_identity),
+            initial_space_activation,
             Arc::clone(&settings),
             Arc::clone(&clock),
-            Arc::clone(&analytics),
-        ));
-        let unlock_space = Arc::new(UnlockSpaceUseCase::new(
-            Arc::clone(&space_access.unlock),
-            Arc::clone(&setup_status),
             Arc::clone(&analytics),
         ));
         let issue_pairing_invitation = Arc::new(IssuePairingInvitationUseCase::new(
@@ -475,7 +252,7 @@ impl SpaceFacade {
             Arc::clone(&clock),
             Arc::clone(&invitation_holder),
             Arc::clone(&analytics),
-            Arc::clone(&workspace_convergence) as Arc<dyn MembershipAdmissionGatePort>,
+            Arc::clone(&space_admission) as Arc<dyn MembershipAdmissionGatePort>,
         ));
         // T8 · F1 hook: construct ensure_reachable_all early so peer_addr_repo /
         // device_identity can still be Arc::clone'd here — both are moved into
@@ -489,7 +266,7 @@ impl SpaceFacade {
         let pairing_session_for_facade = Arc::clone(&pairing_session);
         let ensure_reachable_all = Arc::new(EnsureReachableAllUseCase::new(
             Arc::clone(&peer_addr_repo),
-            presence,
+            Arc::clone(&presence),
             Arc::clone(&device_identity),
             Arc::clone(&peer_scope),
         ));
@@ -515,7 +292,7 @@ impl SpaceFacade {
             Arc::clone(&space_access.prepare_admission_offer),
             group_update_delivery,
             Arc::clone(&proof_port),
-            Arc::clone(&setup_status),
+            Arc::clone(&current_space_identity),
             handshake_ttl,
         );
         let inbound_orchestrator = Arc::new(PairingInboundOrchestrator::new(
@@ -524,10 +301,24 @@ impl SpaceFacade {
             invitation_holder,
             Arc::clone(&clock),
             sponsor_handshake,
-            Arc::clone(&workspace_convergence) as Arc<dyn WorkspaceAdmissionOwnerPort>,
+            Arc::clone(&space_admission) as Arc<dyn WorkspaceAdmissionOwnerPort>,
             Arc::clone(&analytics),
         ));
         let pairing_inbound_handle = inbound_orchestrator.spawn();
+
+        let session_readiness = Arc::new(PostSessionReadiness::new(
+            Arc::clone(&upgrade_space),
+            Arc::clone(&mobile_consumable_backfill),
+            Arc::clone(&member_repo),
+            Arc::clone(&presence),
+            Arc::clone(&ensure_reachable_all),
+        ));
+        let unlock_space = Arc::new(UnlockSpaceUseCase::new(
+            Arc::clone(&space_access.unlock),
+            Arc::clone(&current_space_identity),
+            Arc::clone(&session_readiness),
+            Arc::clone(&analytics),
+        ));
 
         // joiner-side symmetric: coordinator holds wire + crypto, use
         // case composes it with the workspace owner's admission saves.
@@ -540,13 +331,13 @@ impl SpaceFacade {
             local_identity,
             device_identity,
             settings,
-            Arc::clone(&workspace_convergence) as Arc<dyn WorkspaceAdmissionOwnerPort>,
+            Arc::clone(&space_admission) as Arc<dyn WorkspaceAdmissionOwnerPort>,
             handshake_ttl,
         );
         let redeem_pairing_invitation = Arc::new(RedeemPairingInvitationUseCase::new(
             joiner_handshake,
-            setup_status,
-            Arc::clone(&resume_session_for_facade),
+            resume_session,
+            Arc::clone(&re_pairing_state),
             Arc::clone(&analytics),
         ));
 
@@ -556,11 +347,10 @@ impl SpaceFacade {
             issue_pairing_invitation,
             redeem_pairing_invitation,
             pairing_inbound_handle,
-            resume_session: resume_session_for_facade,
-            factory_reset: factory_reset_for_facade,
-            relationship_reset: relationship_reset_for_facade,
-            setup_status: setup_status_for_facade,
-            mobile_consumable_backfill,
+            session_readiness,
+            space_rebuild_progress: space_rebuild_progress_for_facade,
+            re_pairing_state: re_pairing_state_for_facade,
+            current_space_identity,
             settings: settings_for_facade,
             invitation_holder: invitation_holder_for_facade,
             ensure_reachable_all,
@@ -569,70 +359,13 @@ impl SpaceFacade {
             peer_addr_repo: peer_addr_repo_for_facade,
             presence: presence_for_facade,
             pairing_session: pairing_session_for_facade,
-            device_management_reset,
+            reset_space,
             local_device_id: local_device_id_for_facade,
         }
     }
 
-    /// Try to restore the in-memory space session silently, using the
-    /// KEK cached in secure storage by a previous `init` / `unlock`.
-    ///
-    /// Returns `Ok(true)` when the session is now unlocked and ready
-    /// for pairing operations; `Ok(false)` when there is nothing to
-    /// resume (setup has not completed on this profile). Genuine
-    /// problems — corrupt key material, missing keyring entry despite
-    /// a keyslot on disk, or adapter faults — surface via
-    /// [`TryResumeSessionError`].
-    ///
-    /// Intended for short-lived CLI processes: every `invite` call
-    /// drives this before B1 so the sponsor's `verify_proof` path has
-    /// the master key in memory when the joiner's ChallengeResponse
-    /// lands. GUI / daemon callers can use it at startup to skip the
-    /// passphrase prompt when the keyring still has the KEK.
-    #[instrument(skip_all)]
-    pub async fn try_resume_session(&self) -> Result<bool, TryResumeSessionError> {
-        let status = self
-            .setup_status
-            .get_status()
-            .await
-            .map_err(|err| TryResumeSessionError::Internal(err.to_string()))?;
-        if !status.has_completed {
-            return Ok(false);
-        }
-
-        let space_id = status
-            .space_id
-            .clone()
-            .unwrap_or_else(super::legacy_space_id);
-        let resumed = match self.resume_session.try_resume_session(&space_id).await {
-            Ok(Some(_)) => true,
-            // Keyslot missing despite has_completed == true — treat
-            // as "nothing to resume" rather than an error: can happen
-            // right after factory_reset when setup_status lagged.
-            Ok(None) => false,
-            Err(SpaceAccessError::CorruptedKeyMaterial) => {
-                return Err(TryResumeSessionError::CorruptedKeyMaterial);
-            }
-            // NotInitialized and WrongPassphrase from load_kek map to
-            // "keyring didn't give us what we needed to silently unlock".
-            Err(SpaceAccessError::NotInitialized) | Err(SpaceAccessError::WrongPassphrase) => {
-                return Err(TryResumeSessionError::KeyringMiss);
-            }
-            Err(other) => return Err(TryResumeSessionError::Internal(other.to_string())),
-        };
-
-        if resumed {
-            self.device_management_reset
-                .resume_legacy_isolation_if_required()
-                .await
-                .map_err(TryResumeSessionError::Internal)?;
-            self.mobile_consumable_backfill.backfill_best_effort().await;
-            self.ensure_relationship_storage_ready()
-                .await
-                .map_err(TryResumeSessionError::Internal)?;
-        }
-
-        Ok(resumed)
+    pub fn session_readiness(&self) -> Arc<PostSessionReadiness> {
+        Arc::clone(&self.session_readiness)
     }
 
     /// A1 · Create the encrypted space on a fresh device. On success the
@@ -642,11 +375,15 @@ impl SpaceFacade {
         &self,
         input: InitializeSpaceInput,
     ) -> Result<InitializeSpaceResult, InitializeSpaceError> {
-        let cmd: InitializeSpaceCommand = input.into();
-        let out = self.initialize_space.execute(cmd).await?;
+        let request = InitializeSpaceRequest {
+            passphrase: uc_core::crypto::domain::Passphrase::new(input.passphrase),
+            passphrase_confirm: uc_core::crypto::domain::Passphrase::new(input.passphrase_confirm),
+            device_name: input.device_name,
+        };
+        let out = self.initialize_space.execute(request).await?;
         self.ensure_relationship_storage_ready()
             .await
-            .map_err(InitializeSpaceError::Internal)?;
+            .map_err(|error| InitializeSpaceError::internal(anyhow::anyhow!(error)))?;
         self.auto_prime_presence().await;
         Ok(out)
     }
@@ -658,22 +395,11 @@ impl SpaceFacade {
         &self,
         input: UnlockSpaceInput,
     ) -> Result<UnlockSpaceResult, UnlockSpaceError> {
-        let cmd: UnlockSpaceCommand = input.into();
-        let out = self.unlock_space.execute(cmd).await?;
-
-        self.device_management_reset
-            .resume_legacy_isolation_if_required()
-            .await
-            .map_err(UnlockSpaceError::Internal)?;
-
-        self.mobile_consumable_backfill.backfill_best_effort().await;
-
-        self.ensure_relationship_storage_ready()
-            .await
-            .map_err(UnlockSpaceError::Internal)?;
-
-        self.auto_prime_presence().await;
-        Ok(out)
+        let space_id = self
+            .unlock_space
+            .execute(uc_core::crypto::domain::Passphrase::new(input.passphrase))
+            .await?;
+        Ok(UnlockSpaceResult { space_id })
     }
 
     /// B1 · Ask the rendezvous service for a fresh invitation code and
@@ -735,7 +461,7 @@ impl SpaceFacade {
     /// the daemon can surface HTTP 409 and the UI can distinguish
     /// "nothing to cancel" from a transport failure.
     ///
-    /// Does **not** touch `SetupStatus` — only Pending invitation
+    /// Does **not** change profile readiness — only Pending invitation
     /// aggregates are cleared. The rendezvous server is **not**
     /// notified: stateless v2 model treats invitations as pure local
     /// state, and any joiner that races a redeem against this cancel
@@ -754,88 +480,23 @@ impl SpaceFacade {
     /// content, settings, identity, and unlock material.
     #[instrument(skip_all)]
     pub async fn reset(&self) -> Result<(), ResetSpaceError> {
-        let dropped = self.invitation_holder.cancel_all().await;
-        self.device_management_reset
-            .execute_user_requested()
-            .await?;
-        info!(
-            cancelled_invitations = dropped,
-            "device management reset rebuilt the local space"
-        );
-        Ok(())
+        self.reset_space.execute().await
     }
 
     pub async fn has_committed_device_management_reset(&self) -> Result<bool, ResetSpaceError> {
         let pending_target = self
-            .device_management_reset
-            .setup_status
-            .get_device_management_reset_target()
+            .space_rebuild_progress
+            .load_target()
             .await
             .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
-        let status = self
-            .device_management_reset
-            .setup_status
-            .get_status()
+        let current_space_id = self
+            .current_space_identity
+            .current_space_id()
             .await
             .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
         Ok(pending_target
             .as_ref()
-            .is_some_and(|target| status.space_id.as_ref() == Some(target)))
-    }
-
-    /// User-driven "重置并重新开始" — wipe key material **and** clear setup
-    /// status so a user who has forgotten their passphrase can re-run A1
-    /// from a fresh-install state.
-    ///
-    /// Distinct from [`Self::reset`], which intentionally preserves the
-    /// keyslot for operator-driven recovery: that path is no use to a user
-    /// who can't recall the passphrase — `InitializeSpaceUseCase` would
-    /// reject the next setup attempt with `AlreadyInitialized` because the
-    /// keyslot is still on disk.
-    ///
-    /// Step order matters:
-    ///
-    /// 1. `FactoryResetSpacePort::factory_reset` — wipe keyslot + KEK first. If
-    ///    this fails we leave `setup_status.has_completed = true` so the
-    ///    UI still routes the user to `UnlockPage` (where they can retry)
-    ///    rather than `SetupPage` (which would immediately fail with
-    ///    `AlreadyInitialized` due to the residual keyslot).
-    /// 2. Clear `SetupStatus` so `EncryptionFacade::state()` flips
-    ///    `initialized = false` and the UI routes to `SetupPage`.
-    /// 3. Cancel any in-flight invitations — same hygiene as
-    ///    [`Self::reset`].
-    ///
-    /// The `space_id` passed to the port is an opaque handle: the
-    /// `SpaceAccessAdapter` keys off the current profile, not this value.
-    /// We mint a fresh one rather than reading from `SetupStatus` because
-    /// the use-case may run when `SetupStatus.space_id` is `None` (e.g.
-    /// `setup_status` is partially populated from a prior abort).
-    #[instrument(skip_all)]
-    pub async fn factory_reset(&self) -> Result<(), FactoryResetError> {
-        let space_id = SpaceId::new();
-        self.factory_reset
-            .factory_reset(&space_id)
-            .await
-            .map_err(|err| FactoryResetError::KeyMaterialWipeFailed(err.to_string()))?;
-        self.clear_space_peer_state().await?;
-        self.setup_status
-            .set_status(&SetupStatus::default())
-            .await
-            .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))?;
-        let dropped = self.invitation_holder.cancel_all().await;
-        info!(
-            cancelled_invitations = dropped,
-            "factory reset wiped key material, cleared setup status, dropped invitations"
-        );
-        Ok(())
-    }
-
-    async fn clear_space_peer_state(&self) -> Result<(), FactoryResetError> {
-        self.presence.disconnect_all().await;
-        self.relationship_reset
-            .clear_all_relationships()
-            .await
-            .map_err(|err| FactoryResetError::StorageFailed(err.to_string()))
+            .is_some_and(|target| current_space_id.as_ref() == Some(target)))
     }
 
     /// Slice4 P3 T3.2 · Read-only snapshot of setup state for the
@@ -844,16 +505,16 @@ impl SpaceFacade {
     /// Maps to `GET /v2/setup/state`. Composes three independent
     /// reads into a single response so the UI doesn't have to
     /// orchestrate them itself:
-    /// * `has_completed` from [`SetupStatusPort`].
+    /// * `has_completed` from the current Space identity.
     /// * `current_invitation` from the in-memory holder
     ///   (earliest-expiring Pending entry; `None` when the holder is
     ///   empty).
     /// * `device_name` from `Settings.general.device_name`.
     #[instrument(skip_all)]
     pub async fn query_setup_state(&self) -> Result<SetupStateView, QuerySetupStateError> {
-        let status = self
-            .setup_status
-            .get_status()
+        let current_space_id = self
+            .current_space_identity
+            .current_space_id()
             .await
             .map_err(|err| QuerySetupStateError::StorageFailed(err.to_string()))?;
         let current_invitation = self
@@ -866,12 +527,17 @@ impl SpaceFacade {
             .load()
             .await
             .map_err(|err| QuerySetupStateError::StorageFailed(err.to_string()))?;
+        let re_pairing_required = self
+            .re_pairing_state
+            .is_required()
+            .await
+            .map_err(|err| QuerySetupStateError::StorageFailed(err.to_string()))?;
         Ok(SetupStateView {
-            has_completed: status.has_completed,
-            space_id: status.space_id,
+            has_completed: current_space_id.is_some(),
+            space_id: current_space_id,
             current_invitation,
             device_name: settings.general.device_name,
-            re_pairing_required: status.re_pairing_required,
+            re_pairing_required,
         })
     }
 
@@ -924,7 +590,7 @@ impl SpaceFacade {
 
     pub(crate) async fn deliver_join_completion_ack(
         &self,
-        pending: crate::space::convergence::PendingJoinerCompleteAck,
+        pending: crate::space::admission::PendingJoinerCompleteAck,
     ) -> Result<(), RedeemPairingInvitationError> {
         let address = self
             .peer_addr_repo
@@ -1062,22 +728,23 @@ mod tests {
         PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
     };
     use uc_core::ports::space::{
-        DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, FactoryResetSpacePort,
-        GroupAdmissionPort, InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort,
-        PrepareAdmissionOfferPort, ProofPort, RebindSpaceSessionPort, ResumeSpaceSessionPort,
-        SpaceAccessError, UnlockSpacePort, VerifyKeychainAccessPort,
+        DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, GroupAdmissionPort,
+        PrepareAdmissionOfferPort, ProofPort, SpaceAccessError,
     };
     use uc_core::ports::{
         AppVersionStateError, AppVersionStatePort, ClockPort, DeviceIdentityPort,
-        LocalIdentityError, LocalIdentityPort, SettingsPort, SetupStatusPort,
+        LocalIdentityError, LocalIdentityPort, SettingsPort,
     };
 
-    use crate::deps::SpaceAccessPorts;
-    use crate::space::convergence::assembly::SpaceConvergenceAssembly;
+    use crate::deps::{
+        InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, ResumeSpaceSessionPort,
+        SpaceAccessPorts,
+    };
+    use crate::space::assembly::SpaceModules;
     use crate::space::convergence::tests::MemoryWorkspaceRepository;
+    use crate::space::unlock_space::UnlockSpacePort;
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
-    use uc_core::setup::SetupStatus;
     use uc_core::space_access::{
         AdmissionOffer, GroupAdmission, PreparedAdmissionOffer, PreparedGroupJoin, ProofDerivedKey,
         SpaceAccessProofArtifact,
@@ -1131,19 +798,11 @@ mod tests {
             async fn lock(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError>;
         }
         #[async_trait]
-        impl FactoryResetSpacePort for SpaceAccess {
-            async fn factory_reset(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError>;
-        }
-        #[async_trait]
         impl ResumeSpaceSessionPort for SpaceAccess {
             async fn try_resume_session(
                 &self,
                 space_id: &SpaceId,
             ) -> Result<Option<ActiveSpace>, SpaceAccessError>;
-        }
-        #[async_trait]
-        impl VerifyKeychainAccessPort for SpaceAccess {
-            async fn verify_keychain_access(&self) -> Result<bool, SpaceAccessError>;
         }
         #[async_trait]
         impl DeriveSpaceSubkeyPort for SpaceAccess {
@@ -1306,18 +965,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl RebindSpaceSessionPort for MockSpaceAccess {
+    impl crate::deps::RebindSpaceSessionPort for MockSpaceAccess {
         async fn rebind_to_space(
             &self,
             space_id: &SpaceId,
-        ) -> Result<ActiveSpace, SpaceAccessError> {
-            Ok(ActiveSpace::new(space_id.clone()))
+        ) -> Result<(), crate::deps::SpaceSessionRebindError> {
+            let _ = space_id;
+            Ok(())
         }
     }
 
     fn configured_space_access(
         unlock_error: Option<SpaceAccessError>,
-        factory_reset_result: Option<Result<(), SpaceAccessError>>,
         expected_resume_spaces: Vec<SpaceId>,
         resume_success: bool,
     ) -> Arc<MockSpaceAccess> {
@@ -1337,16 +996,6 @@ mod tests {
         }
         mock.expect_is_unlocked().returning(|_| true);
         mock.expect_lock().returning(|_| Ok(()));
-        match factory_reset_result {
-            Some(result) => {
-                mock.expect_factory_reset()
-                    .times(1)
-                    .return_once(move |_| result);
-            }
-            None => {
-                mock.expect_factory_reset().returning(|_| Ok(()));
-            }
-        }
         match expected_resume_spaces.is_empty() {
             false => {
                 let expected = expected_resume_spaces;
@@ -1362,13 +1011,12 @@ mod tests {
                 mock.expect_try_resume_session().returning(|_| Ok(None));
             }
         }
-        mock.expect_verify_keychain_access().returning(|| Ok(true));
         mock.expect_derive_subkey().returning(|_, _| Ok([0; 32]));
         Arc::new(mock)
     }
 
     fn space_access() -> Arc<MockSpaceAccess> {
-        configured_space_access(None, None, Vec::new(), false)
+        configured_space_access(None, Vec::new(), false)
     }
 
     struct FakeLocalIdentity {
@@ -1602,32 +1250,85 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct InMemorySetupStatus {
-        status: StdMutex<SetupStatus>,
-        device_management_reset_target: StdMutex<Option<SpaceId>>,
+    #[derive(Clone, Default)]
+    struct TestProfileReadiness {
+        has_completed: bool,
+        space_id: Option<SpaceId>,
     }
+
+    #[derive(Default)]
+    struct InMemoryProfileReadiness {
+        status: StdMutex<TestProfileReadiness>,
+        device_management_reset_target: Arc<StdMutex<Option<SpaceId>>>,
+    }
+
+    struct InMemoryRebuildProgress {
+        target: Arc<StdMutex<Option<SpaceId>>>,
+    }
+
     #[async_trait]
-    impl SetupStatusPort for InMemorySetupStatus {
-        async fn get_status(&self) -> anyhow::Result<SetupStatus> {
-            Ok(self.status.lock().unwrap().clone())
+    impl crate::deps::SpaceRebuildProgressPort for InMemoryRebuildProgress {
+        async fn load_target(
+            &self,
+        ) -> Result<Option<SpaceId>, crate::deps::SpaceRebuildProgressError> {
+            Ok(self.target.lock().unwrap().clone())
         }
-        async fn set_status(&self, status: &SetupStatus) -> anyhow::Result<()> {
-            *self.status.lock().unwrap() = status.clone();
-            Ok(())
-        }
-        async fn get_device_management_reset_target(&self) -> anyhow::Result<Option<SpaceId>> {
-            Ok(self.device_management_reset_target.lock().unwrap().clone())
-        }
-        async fn set_device_management_reset_target(
+
+        async fn store_target(
             &self,
             space_id: &SpaceId,
-        ) -> anyhow::Result<()> {
-            *self.device_management_reset_target.lock().unwrap() = Some(space_id.clone());
+        ) -> Result<(), crate::deps::SpaceRebuildProgressError> {
+            *self.target.lock().unwrap() = Some(space_id.clone());
             Ok(())
         }
-        async fn clear_device_management_reset_target(&self) -> anyhow::Result<()> {
-            *self.device_management_reset_target.lock().unwrap() = None;
+
+        async fn clear_target(&self) -> Result<(), crate::deps::SpaceRebuildProgressError> {
+            *self.target.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct InMemoryRePairingStateStore {
+        required: StdMutex<bool>,
+    }
+
+    #[async_trait]
+    impl crate::deps::RePairingStateStorePort for InMemoryRePairingStateStore {
+        async fn is_required(&self) -> Result<bool, crate::deps::RePairingStateError> {
+            Ok(*self.required.lock().unwrap())
+        }
+
+        async fn set_required(
+            &self,
+            required: bool,
+        ) -> Result<(), crate::deps::RePairingStateError> {
+            *self.required.lock().unwrap() = required;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct InMemoryCurrentSpaceState {
+        space_id: StdMutex<Option<SpaceId>>,
+    }
+
+    #[async_trait]
+    impl crate::deps::CurrentSpaceIdentityPort for InMemoryCurrentSpaceState {
+        async fn current_space_id(
+            &self,
+        ) -> Result<Option<SpaceId>, crate::deps::CurrentSpaceIdentityError> {
+            Ok(self.space_id.lock().unwrap().clone())
+        }
+    }
+
+    #[async_trait]
+    impl crate::deps::InitialSpaceActivationPort for InMemoryCurrentSpaceState {
+        async fn activate_initial_space(
+            &self,
+            space_id: &SpaceId,
+        ) -> Result<(), crate::deps::CurrentSpaceIdentityError> {
+            *self.space_id.lock().unwrap() = Some(space_id.clone());
             Ok(())
         }
     }
@@ -1951,12 +1652,12 @@ mod tests {
 
     fn make_facade(
         space_access: Arc<MockSpaceAccess>,
-        setup_status: Arc<dyn SetupStatusPort>,
+        profile_readiness: Arc<InMemoryProfileReadiness>,
         settings: Arc<dyn SettingsPort>,
     ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         make_facade_with(
             space_access,
-            setup_status,
+            profile_readiness,
             settings,
             Arc::new(NoopMobileConsumableBackfill),
         )
@@ -1964,13 +1665,13 @@ mod tests {
 
     fn make_facade_with(
         space_access: Arc<MockSpaceAccess>,
-        setup_status: Arc<dyn SetupStatusPort>,
+        profile_readiness: Arc<InMemoryProfileReadiness>,
         settings: Arc<dyn SettingsPort>,
         mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
     ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         make_facade_with_member_repo(
             space_access,
-            setup_status,
+            profile_readiness,
             settings,
             mobile_consumable_backfill,
             Arc::new(InMemoryMemberRepo::default()),
@@ -1979,14 +1680,14 @@ mod tests {
 
     fn make_facade_with_member_repo(
         space_access: Arc<MockSpaceAccess>,
-        setup_status: Arc<dyn SetupStatusPort>,
+        profile_readiness: Arc<InMemoryProfileReadiness>,
         settings: Arc<dyn SettingsPort>,
         mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
         member_repo: Arc<dyn MemberRepositoryPort>,
     ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         make_facade_with_member_repo_and_isolation(
             space_access,
-            setup_status,
+            profile_readiness,
             settings,
             mobile_consumable_backfill,
             member_repo,
@@ -1996,7 +1697,7 @@ mod tests {
 
     fn make_facade_with_member_repo_and_isolation(
         space_access: Arc<MockSpaceAccess>,
-        setup_status: Arc<dyn SetupStatusPort>,
+        profile_readiness: Arc<InMemoryProfileReadiness>,
         settings: Arc<dyn SettingsPort>,
         mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
         member_repo: Arc<dyn MemberRepositoryPort>,
@@ -2004,7 +1705,7 @@ mod tests {
     ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         make_facade_with_member_repo_isolation_and_reset_data(
             space_access,
-            setup_status,
+            profile_readiness,
             settings,
             mobile_consumable_backfill,
             member_repo,
@@ -2015,7 +1716,7 @@ mod tests {
 
     fn make_facade_with_member_repo_isolation_and_reset_data(
         space_access: Arc<MockSpaceAccess>,
-        setup_status: Arc<dyn SetupStatusPort>,
+        profile_readiness: Arc<InMemoryProfileReadiness>,
         settings: Arc<dyn SettingsPort>,
         mobile_consumable_backfill: Arc<dyn MobileConsumableBackfill>,
         member_repo: Arc<dyn MemberRepositoryPort>,
@@ -2024,14 +1725,42 @@ mod tests {
     ) -> (SpaceFacade, Arc<FakeInvitationPort>, Arc<FakePeerAddrRepo>) {
         let pairing_invitation = Arc::new(FakeInvitationPort::default());
         let peer_addr_repo = Arc::new(FakePeerAddrRepo::default());
+        let current_space = Arc::new(InMemoryCurrentSpaceState::default());
+        let setup = profile_readiness.status.lock().unwrap().clone();
+        if setup.has_completed {
+            *current_space.space_id.lock().unwrap() =
+                Some(setup.space_id.unwrap_or_else(|| SpaceId::from("space")));
+        }
+        let space_rebuild_progress = Arc::new(InMemoryRebuildProgress {
+            target: Arc::clone(&profile_readiness.device_management_reset_target),
+        });
         let facade = SpaceFacade::new(SpaceFacadeDeps {
             session: SpaceSessionDeps {
-                space_access: SpaceAccessPorts::from_adapter(space_access),
-                setup_status,
+                space_access: SpaceAccessPorts {
+                    adopt_isolated_space: space_access.clone(),
+                    initialize: space_access.clone(),
+                    unlock: space_access.clone(),
+                    is_unlocked: space_access.clone(),
+                    lock: space_access.clone(),
+                    resume_session: space_access.clone(),
+                    derive_subkey: space_access.clone(),
+                    prepare_admission_offer: space_access.clone(),
+                    derive_admission_proof_key: space_access.clone(),
+                    prepare_admission_target_access: space_access.clone(),
+                    group_admission: space_access.clone(),
+                    prepare_sponsor_admission_security: space_access.clone(),
+                    activate_sponsor_admission_security: space_access.clone(),
+                    activate_completion_helper_admission_security: space_access.clone(),
+                    group_revocation: space_access.clone(),
+                    group_bootstrap: space_access.clone(),
+                    space_protection: space_access.clone(),
+                },
                 mobile_consumable_backfill,
                 legacy_profile_isolation_required,
                 app_version_state: Arc::new(InMemoryAppVersionState::default()),
                 current_app_version: "1.1.0".to_owned(),
+                current_space_identity: current_space.clone(),
+                initial_space_activation: current_space.clone(),
             },
             admission: SpaceAdmissionDeps {
                 local_identity: Arc::new(FakeLocalIdentity {
@@ -2054,14 +1783,15 @@ mod tests {
                     as Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
                 presence: Arc::new(FakePresence),
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
-                convergence: Arc::new(SpaceConvergenceAssembly::new(
-                    crate::space::convergence::assembly::SpaceConvergenceDeps {
+                convergence: Arc::new(SpaceModules::new(
+                    crate::space::assembly::SpaceModulesDeps {
                         workspace: crate::space::convergence::tests::test_deps(
                             Arc::new(MemoryWorkspaceRepository::default()),
                             "device-1",
                             Vec::new(),
                         ),
-                        membership: crate::space::convergence::discovery::testing::test_deps(),
+                        membership:
+                            crate::space::workspace_membership::discovery::testing::test_deps(),
                         group_revocation: Arc::new(NoopGroupRevocation),
                         group_update_dispatch: Arc::new(NoopGroupUpdateDispatch),
                     },
@@ -2071,6 +1801,8 @@ mod tests {
                 device_management_reset_data: reset_data,
                 relationship_reset: Arc::new(NoopRelationshipStateReset),
                 space_security_reset: Arc::new(NoopSpaceSecurityStateReset),
+                space_rebuild_progress,
+                re_pairing_state_store: Arc::new(InMemoryRePairingStateStore::default()),
             },
         });
         (facade, pairing_invitation, peer_addr_repo)
@@ -2091,7 +1823,7 @@ mod tests {
     async fn initialize_space_forwards_happy_path() {
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             settings_with_device_name("mac"),
         );
         let cmd = InitializeSpaceInput {
@@ -2107,7 +1839,7 @@ mod tests {
     async fn initialize_space_forwards_passphrase_mismatch() {
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             settings_with_device_name("mac"),
         );
         let cmd = InitializeSpaceInput {
@@ -2121,16 +1853,15 @@ mod tests {
 
     #[tokio::test]
     async fn unlock_space_forwards_happy_path() {
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = InMemoryProfileReadiness::default();
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: None,
-            re_pairing_required: false,
         };
         let backfill = Arc::new(CountingMobileConsumableBackfill::default());
         let (facade, _inv, _peer) = make_facade_with(
             space_access(),
-            Arc::new(setup_status),
+            Arc::new(profile_readiness),
             Arc::new(InMemorySettings::default()),
             backfill.clone(),
         );
@@ -2145,7 +1876,7 @@ mod tests {
     async fn unlock_space_forwards_setup_not_completed() {
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             Arc::new(InMemorySettings::default()),
         );
         let cmd = UnlockSpaceInput {
@@ -2157,21 +1888,16 @@ mod tests {
 
     #[tokio::test]
     async fn unlock_space_forwards_wrong_passphrase() {
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = InMemoryProfileReadiness::default();
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: None,
-            re_pairing_required: false,
         };
-        let space_access = configured_space_access(
-            Some(SpaceAccessError::WrongPassphrase),
-            None,
-            Vec::new(),
-            false,
-        );
+        let space_access =
+            configured_space_access(Some(SpaceAccessError::WrongPassphrase), Vec::new(), false);
         let (facade, _inv, _peer) = make_facade(
             space_access,
-            Arc::new(setup_status),
+            Arc::new(profile_readiness),
             Arc::new(InMemorySettings::default()),
         );
         let cmd = UnlockSpaceInput {
@@ -2190,7 +1916,7 @@ mod tests {
         // 不阻塞。
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             Arc::new(InMemorySettings::default()),
         );
         facade.on_shutdown().await;
@@ -2208,7 +1934,7 @@ mod tests {
     async fn f1_hook_initialize_space_success_triggers_ensure_reachable_all() {
         let (facade, _inv, peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             settings_with_device_name("mac"),
         );
         let cmd = InitializeSpaceInput {
@@ -2226,15 +1952,14 @@ mod tests {
 
     #[tokio::test]
     async fn f1_hook_unlock_space_success_triggers_ensure_reachable_all() {
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = InMemoryProfileReadiness::default();
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: None,
-            re_pairing_required: false,
         };
         let (facade, _inv, peer) = make_facade(
             space_access(),
-            Arc::new(setup_status),
+            Arc::new(profile_readiness),
             Arc::new(InMemorySettings::default()),
         );
         let cmd = UnlockSpaceInput {
@@ -2250,15 +1975,14 @@ mod tests {
 
     #[tokio::test]
     async fn unlock_fails_when_relationship_storage_is_unreadable() {
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = InMemoryProfileReadiness::default();
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: None,
-            re_pairing_required: false,
         };
         let (facade, _inv, peer) = make_facade_with_member_repo(
             space_access(),
-            Arc::new(setup_status),
+            Arc::new(profile_readiness),
             Arc::new(InMemorySettings::default()),
             Arc::new(NoopMobileConsumableBackfill),
             Arc::new(UnreadableMemberRepo),
@@ -2281,7 +2005,7 @@ mod tests {
         // 验证 guard 顺序正确(失败短路在 prime 之前)。
         let (facade, _inv, peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             settings_with_device_name("mac"),
         );
         let cmd = InitializeSpaceInput {
@@ -2299,7 +2023,7 @@ mod tests {
     async fn issue_pairing_invitation_forwards_happy_path() {
         let (facade, inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             Arc::new(InMemorySettings::default()),
         );
         let out = facade.issue_pairing_invitation().await.expect("B1 ok");
@@ -2311,7 +2035,7 @@ mod tests {
     async fn issue_pairing_invitation_forwards_network_not_started() {
         let (facade, inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             Arc::new(InMemorySettings::default()),
         );
         *inv.next_err.lock().unwrap() = Some(InvitationError::NetworkNotStarted);
@@ -2328,7 +2052,7 @@ mod tests {
     async fn cancel_invitation_returns_not_issued_when_holder_empty() {
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             Arc::new(InMemorySettings::default()),
         );
         let err = facade.cancel_invitation().await.unwrap_err();
@@ -2339,7 +2063,7 @@ mod tests {
     async fn cancel_invitation_clears_pending_after_issue() {
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             Arc::new(InMemorySettings::default()),
         );
         facade.issue_pairing_invitation().await.expect("B1 ok");
@@ -2350,11 +2074,10 @@ mod tests {
 
     #[tokio::test]
     async fn reset_rebuilds_a_single_device_space_and_clears_invitations() {
-        let setup_status = Arc::new(InMemorySetupStatus::default());
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = Arc::new(InMemoryProfileReadiness::default());
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: Some(SpaceId::from("old-space")),
-            re_pairing_required: false,
         };
         let member_repo = Arc::new(InMemoryMemberRepo::default());
         member_repo.rows.lock().unwrap().push(SpaceMember {
@@ -2366,7 +2089,7 @@ mod tests {
         });
         let (facade, _inv, _peer) = make_facade_with_member_repo(
             space_access(),
-            setup_status,
+            profile_readiness,
             settings_with_device_name("Current device"),
             Arc::new(NoopMobileConsumableBackfill),
             member_repo.clone(),
@@ -2396,15 +2119,14 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_reset_reuses_the_completed_device_management_reset() {
-        let setup_status = Arc::new(InMemorySetupStatus::default());
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = Arc::new(InMemoryProfileReadiness::default());
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: Some(SpaceId::from("old-space")),
-            re_pairing_required: false,
         };
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            setup_status,
+            profile_readiness,
             settings_with_device_name("Current device"),
         );
 
@@ -2419,11 +2141,10 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_reset_reuses_its_persisted_target() {
-        let setup_status = Arc::new(InMemorySetupStatus::default());
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = Arc::new(InMemoryProfileReadiness::default());
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: Some(SpaceId::from("old-space")),
-            re_pairing_required: false,
         };
         let reset_data = Arc::new(FailOnceDeviceManagementResetData {
             fail_promotion: AtomicBool::new(true),
@@ -2432,7 +2153,7 @@ mod tests {
         });
         let (facade, _inv, _peer) = make_facade_with_member_repo_isolation_and_reset_data(
             space_access(),
-            setup_status.clone(),
+            profile_readiness.clone(),
             settings_with_device_name("Current device"),
             Arc::new(NoopMobileConsumableBackfill),
             Arc::new(InMemoryMemberRepo::default()),
@@ -2445,7 +2166,7 @@ mod tests {
             error.to_string(),
             "failed to commit device management reset: space transition storage failed"
         );
-        let pending_target = setup_status
+        let pending_target = profile_readiness
             .device_management_reset_target
             .lock()
             .unwrap()
@@ -2461,7 +2182,7 @@ mod tests {
         let completed = facade.query_setup_state().await.expect("completed state");
         assert_eq!(completed.space_id, Some(pending_target));
         assert!(completed.re_pairing_required);
-        assert!(setup_status
+        assert!(profile_readiness
             .device_management_reset_target
             .lock()
             .unwrap()
@@ -2470,11 +2191,10 @@ mod tests {
 
     #[tokio::test]
     async fn failed_reset_does_not_remove_members_from_the_active_space() {
-        let setup_status = Arc::new(InMemorySetupStatus::default());
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = Arc::new(InMemoryProfileReadiness::default());
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: Some(SpaceId::from("old-space")),
-            re_pairing_required: false,
         };
         let staged = Arc::new(AtomicBool::new(false));
         let old_member = SpaceMember {
@@ -2496,7 +2216,7 @@ mod tests {
         });
         let (facade, _inv, _peer) = make_facade_with_member_repo_isolation_and_reset_data(
             space_access(),
-            setup_status.clone(),
+            profile_readiness.clone(),
             settings_with_device_name("Current device"),
             Arc::new(NoopMobileConsumableBackfill),
             member_repo.clone(),
@@ -2507,7 +2227,7 @@ mod tests {
         assert!(facade.reset().await.is_err());
 
         assert_eq!(
-            setup_status.status.lock().unwrap().space_id.as_ref(),
+            profile_readiness.status.lock().unwrap().space_id.as_ref(),
             Some(&SpaceId::from("old-space"))
         );
         assert_eq!(
@@ -2525,16 +2245,18 @@ mod tests {
     #[tokio::test]
     async fn committed_reset_finishes_status_without_rebuilding_the_target_space() {
         let target = SpaceId::from("committed-target");
-        let setup_status = Arc::new(InMemorySetupStatus::default());
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = Arc::new(InMemoryProfileReadiness::default());
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: Some(target.clone()),
-            re_pairing_required: true,
         };
-        *setup_status.device_management_reset_target.lock().unwrap() = Some(target.clone());
+        *profile_readiness
+            .device_management_reset_target
+            .lock()
+            .unwrap() = Some(target.clone());
         let (facade, _inv, _peer) = make_facade_with_member_repo_isolation_and_reset_data(
             space_access(),
-            setup_status.clone(),
+            profile_readiness.clone(),
             settings_with_device_name("Current device"),
             Arc::new(NoopMobileConsumableBackfill),
             Arc::new(UnreadableMemberRepo),
@@ -2544,70 +2266,14 @@ mod tests {
 
         facade.reset().await.expect("finish committed reset");
 
-        assert!(setup_status
+        assert!(profile_readiness
             .device_management_reset_target
             .lock()
             .unwrap()
             .is_none());
         assert_eq!(
-            setup_status.status.lock().unwrap().space_id.as_ref(),
+            profile_readiness.status.lock().unwrap().space_id.as_ref(),
             Some(&target)
-        );
-    }
-
-    #[tokio::test]
-    async fn factory_reset_wipes_key_material_and_clears_setup_status() {
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
-            has_completed: true,
-            space_id: None,
-            re_pairing_required: false,
-        };
-        let space_access = configured_space_access(None, Some(Ok(())), Vec::new(), false);
-        let (facade, _inv, _peer) = make_facade(
-            space_access.clone(),
-            Arc::new(setup_status),
-            Arc::new(InMemorySettings::default()),
-        );
-        facade.issue_pairing_invitation().await.expect("B1 ok");
-        assert_eq!(facade.invitation_holder.len().await, 1);
-
-        facade.factory_reset().await.expect("factory_reset ok");
-
-        assert_eq!(facade.invitation_holder.len().await, 0);
-        let view = facade.query_setup_state().await.expect("query ok");
-        assert!(!view.has_completed);
-    }
-
-    #[tokio::test]
-    async fn factory_reset_preserves_setup_status_when_key_wipe_fails() {
-        // 关键不变式: keyslot 删除失败时 setup_status 必须保留 `has_completed=true`,
-        // 否则 UI 会跳到 SetupPage,用户再走 init 立即撞到 AlreadyInitialized,体验更糟。
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
-            has_completed: true,
-            space_id: None,
-            re_pairing_required: false,
-        };
-        let space_access = configured_space_access(
-            None,
-            Some(Err(SpaceAccessError::Internal("disk i/o".to_string()))),
-            Vec::new(),
-            false,
-        );
-        let (facade, _inv, _peer) = make_facade(
-            space_access.clone(),
-            Arc::new(setup_status),
-            Arc::new(InMemorySettings::default()),
-        );
-
-        let err = facade.factory_reset().await.unwrap_err();
-
-        assert!(matches!(err, FactoryResetError::KeyMaterialWipeFailed(_)));
-        let view = facade.query_setup_state().await.expect("query ok");
-        assert!(
-            view.has_completed,
-            "setup_status must remain completed when key wipe fails"
         );
     }
 
@@ -2615,7 +2281,7 @@ mod tests {
     async fn query_setup_state_reports_fresh_install_defaults() {
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             Arc::new(InMemorySettings::default()),
         );
         let view = facade.query_setup_state().await.expect("query ok");
@@ -2626,15 +2292,14 @@ mod tests {
 
     #[tokio::test]
     async fn query_setup_state_reflects_completed_status_and_device_name() {
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
+        let profile_readiness = InMemoryProfileReadiness::default();
+        *profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
             space_id: Some(SpaceId::from("space-restore")),
-            re_pairing_required: false,
         };
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            Arc::new(setup_status),
+            Arc::new(profile_readiness),
             settings_with_device_name("MacBook"),
         );
         let view = facade.query_setup_state().await.expect("query ok");
@@ -2651,7 +2316,7 @@ mod tests {
     async fn query_setup_state_surfaces_pending_invitation_after_issue() {
         let (facade, _inv, _peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             Arc::new(InMemorySettings::default()),
         );
         facade.issue_pairing_invitation().await.expect("B1 ok");
@@ -2672,7 +2337,7 @@ mod tests {
         // (presence 缓存只该被 A1 / A2 / B2 触动,B1 出码不涉及与对端互联)。
         let (facade, _inv, peer) = make_facade(
             space_access(),
-            Arc::new(InMemorySetupStatus::default()),
+            Arc::new(InMemoryProfileReadiness::default()),
             Arc::new(InMemorySettings::default()),
         );
         facade.issue_pairing_invitation().await.expect("B1 ok");
@@ -2681,118 +2346,5 @@ mod tests {
             0,
             "B1 must not trigger ensure_reachable_all",
         );
-    }
-
-    #[tokio::test]
-    async fn try_resume_session_resumes_silent_unlock() {
-        // helper 默认返回 Ok(None)，模拟没有
-        // keyslot 的场景——`try_resume_session` 应返回 Ok(false)。
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
-            has_completed: true,
-            space_id: None,
-            re_pairing_required: false,
-        };
-        let (facade, _inv, _peer) = make_facade(
-            space_access(),
-            Arc::new(setup_status),
-            Arc::new(InMemorySettings::default()),
-        );
-        let resumed = facade.try_resume_session().await.expect("resume ok");
-        // helper 默认 Ok(None) → "nothing to resume"
-        assert!(!resumed);
-    }
-
-    #[tokio::test]
-    async fn try_resume_session_uses_the_canonical_setup_space() {
-        let setup_status = InMemorySetupStatus::default();
-        *setup_status.status.lock().unwrap() = SetupStatus {
-            has_completed: true,
-            space_id: Some(SpaceId::from("canonical-space")),
-            re_pairing_required: false,
-        };
-        let space_access =
-            configured_space_access(None, None, vec![SpaceId::from("canonical-space")], false);
-        let (facade, _inv, _peer) = make_facade(
-            space_access.clone(),
-            Arc::new(setup_status),
-            Arc::new(InMemorySettings::default()),
-        );
-
-        assert!(!facade.try_resume_session().await.expect("resume check"));
-    }
-
-    #[tokio::test]
-    async fn try_resume_session_isolates_a_legacy_profile() {
-        let setup_status = Arc::new(InMemorySetupStatus::default());
-        *setup_status.status.lock().unwrap() = SetupStatus {
-            has_completed: true,
-            space_id: Some(SpaceId::from("legacy-space")),
-            re_pairing_required: false,
-        };
-        let space_access = configured_space_access(
-            None,
-            None,
-            vec![SpaceId::from("legacy-space"), SpaceId::from("paired-space")],
-            true,
-        );
-        let member_repo = Arc::new(InMemoryMemberRepo::default());
-        member_repo.rows.lock().unwrap().push(SpaceMember {
-            device_id: DeviceId::new("legacy-peer"),
-            device_name: "Legacy peer".to_owned(),
-            identity_fingerprint: default_fingerprint(),
-            joined_at: Utc::now(),
-            sync_preferences: MemberSyncPreferences::default(),
-        });
-        let (facade, _, _) = make_facade_with_member_repo_and_isolation(
-            space_access,
-            setup_status.clone(),
-            settings_with_device_name("Legacy device"),
-            Arc::new(NoopMobileConsumableBackfill),
-            member_repo.clone(),
-            true,
-        );
-
-        assert!(facade.try_resume_session().await.expect("resume legacy"));
-        assert!(setup_status.status.lock().unwrap().re_pairing_required);
-        assert!(setup_status
-            .device_management_reset_target
-            .lock()
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            member_repo
-                .list()
-                .await
-                .unwrap()
-                .iter()
-                .map(|member| member.device_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["device-1"]
-        );
-
-        *setup_status.status.lock().unwrap() = SetupStatus {
-            has_completed: true,
-            space_id: Some(SpaceId::from("paired-space")),
-            re_pairing_required: false,
-        };
-        member_repo.rows.lock().unwrap().push(SpaceMember {
-            device_id: DeviceId::new("new-peer"),
-            device_name: "New peer".to_owned(),
-            identity_fingerprint: default_fingerprint(),
-            joined_at: Utc::now(),
-            sync_preferences: MemberSyncPreferences::default(),
-        });
-
-        assert!(facade
-            .try_resume_session()
-            .await
-            .expect("resume after pairing"));
-        assert!(member_repo
-            .list()
-            .await
-            .unwrap()
-            .iter()
-            .any(|member| member.device_id == DeviceId::new("new-peer")));
     }
 }

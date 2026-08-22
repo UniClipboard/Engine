@@ -31,16 +31,37 @@ use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::search::search_key::SearchKeyDerivationPort;
 use uc_core::ports::search::search_pipeline::SearchPipelinePort;
 use uc_core::ports::space::{
-    DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, FactoryResetSpacePort, GroupAdmissionPort,
-    InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, PrepareAdmissionOfferPort,
-    ResumeSpaceSessionPort, UnlockSpacePort, VerifyKeychainAccessPort,
+    DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, GroupAdmissionPort,
+    PrepareAdmissionOfferPort,
 };
 use uc_core::ports::*;
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsPort;
 
 use crate::clipboard::write::{MobileConsumabilityProbe, MobileConsumableBackfill};
-
+pub use crate::profile::factory_reset::{
+    ClearProfileStatePort, FactoryResetPhase, PrepareProfileLifecycleUseCase,
+    ProfileFactoryResetCapabilityError, ProfileGeneration, ProfileLifecycle, ProfileLifecycleError,
+    ProfileLifecycleRepositoryError, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
+    StopProfileRuntimePort, WipeProfileKeysPort,
+};
+pub use crate::profile::probe_profile_key_access::{
+    ProbeProfileKeyAccessPort, ProbeProfileKeyAccessUseCase, ProfileKeyAccessProbe,
+    ProfileKeyAccessProbePortError,
+};
+pub use crate::space::current_space::{
+    CurrentSpaceIdentityError, CurrentSpaceIdentityPort, InitialSpaceActivationPort,
+    PortableCurrentSpaceIdentityPort,
+};
+pub use crate::space::initialize_space::InitializeSpacePort;
+pub use crate::space::lock_space_session::LockSpacePort;
+pub use crate::space::re_pairing::{RePairingStateError, RePairingStateStorePort};
+pub use crate::space::rebuild_space::{
+    RebindSpaceSessionPort, SpaceRebuildProgressError, SpaceRebuildProgressPort,
+    SpaceSessionRebindError,
+};
+pub use crate::space::session::{IsSpaceUnlockedPort, ResumeSpaceSessionPort};
+pub use crate::space::unlock_space::UnlockSpacePort;
 // §11.4.3 — the `entry_identity` module is `pub(crate)`, but its coordinator is
 // held by the `pub` `ClipboardPorts` field below and threaded into `pub` use-case
 // builders. Re-export it from this composition module so it stays reachable for
@@ -148,14 +169,12 @@ pub struct ClipboardPorts {
 /// whole struct and hand each use case its slice.
 #[derive(Clone)]
 pub struct SpaceAccessPorts {
-    pub adopt_isolated_space: Arc<dyn uc_core::ports::space::RebindSpaceSessionPort>,
+    pub adopt_isolated_space: Arc<dyn RebindSpaceSessionPort>,
     pub initialize: Arc<dyn InitializeSpacePort>,
     pub unlock: Arc<dyn UnlockSpacePort>,
     pub is_unlocked: Arc<dyn IsSpaceUnlockedPort>,
     pub lock: Arc<dyn LockSpacePort>,
-    pub factory_reset: Arc<dyn FactoryResetSpacePort>,
     pub resume_session: Arc<dyn ResumeSpaceSessionPort>,
-    pub verify_keychain_access: Arc<dyn VerifyKeychainAccessPort>,
     pub derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
     pub prepare_admission_offer: Arc<dyn PrepareAdmissionOfferPort>,
     pub derive_admission_proof_key: Arc<dyn DeriveAdmissionProofKeyPort>,
@@ -173,67 +192,16 @@ pub struct SpaceAccessPorts {
     pub space_protection: Arc<dyn uc_core::membership::SpaceProtectionStatusPort>,
 }
 
-impl SpaceAccessPorts {
-    /// Fan one concrete adapter — implementing every narrow space-access intent
-    /// port — out into the bundle. Used by the composition root and by
-    /// integration tests that build a single adapter (ports.md §8.3).
-    pub fn from_adapter<A>(adapter: Arc<A>) -> Self
-    where
-        A: InitializeSpacePort
-            + uc_core::ports::space::RebindSpaceSessionPort
-            + UnlockSpacePort
-            + IsSpaceUnlockedPort
-            + LockSpacePort
-            + FactoryResetSpacePort
-            + ResumeSpaceSessionPort
-            + VerifyKeychainAccessPort
-            + DeriveSpaceSubkeyPort
-            + PrepareAdmissionOfferPort
-            + DeriveAdmissionProofKeyPort
-            + uc_core::ports::space::PrepareAdmissionTargetAccessPort
-            + GroupAdmissionPort
-            + uc_core::membership::PrepareSponsorAdmissionSecurityPort
-            + uc_core::membership::ActivateSponsorAdmissionSecurityPort
-            + uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort
-            + GroupRevocationPort
-            + uc_core::membership::GroupBootstrapPort
-            + uc_core::membership::SpaceProtectionStatusPort
-            + 'static,
-    {
-        Self {
-            adopt_isolated_space: adapter.clone(),
-            initialize: adapter.clone(),
-            unlock: adapter.clone(),
-            is_unlocked: adapter.clone(),
-            lock: adapter.clone(),
-            factory_reset: adapter.clone(),
-            resume_session: adapter.clone(),
-            verify_keychain_access: adapter.clone(),
-            derive_subkey: adapter.clone(),
-            prepare_admission_offer: adapter.clone(),
-            derive_admission_proof_key: adapter.clone(),
-            prepare_admission_target_access: adapter.clone(),
-            group_admission: adapter.clone(),
-            prepare_sponsor_admission_security: adapter.clone(),
-            activate_sponsor_admission_security: adapter.clone(),
-            activate_completion_helper_admission_security: adapter.clone(),
-            group_revocation: adapter.clone(),
-            group_bootstrap: adapter.clone(),
-            space_protection: adapter,
-        }
-    }
-}
-
 /// Security-domain ports bundle.
 /// 安全领域端口组。
 #[derive(Clone)]
 pub struct SecurityPorts {
     pub current_profile: Arc<dyn uc_core::ports::security::current_profile::CurrentProfilePort>,
     pub secure_storage: Arc<dyn SecureStoragePort>,
+    pub profile_key_access_probe: Arc<dyn ProbeProfileKeyAccessPort>,
     /// Narrow space-access intent ports (initialize / unlock / lock / resume /
-    /// factory-reset / keychain-probe / subkey / proof-key, etc.). Each
-    /// consumer depends on the slice it calls; nothing holds a catch-all
-    /// space-access surface.
+    /// subkey / proof-key, etc.). Each consumer depends on the slice it calls;
+    /// nothing holds a catch-all space-access surface.
     pub space_access_ports: SpaceAccessPorts,
     /// 业务 blob 加解密 port——4 个剪切板 decorator 通过此 port 加解密
     /// inline_data。adapter 内部端到端自管会话与 V1 AEAD。
@@ -382,15 +350,18 @@ pub struct AppDeps {
     pub security: SecurityPorts,
     /// Device-domain ports (includes pairing) / 设备领域端口（含配对）
     pub device: DevicePorts,
-    /// Setup status (setup-specific) / 设置状态（设置流程专用）
-    pub setup_status: Arc<dyn SetupStatusPort>,
+    pub space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort>,
+    pub re_pairing_state_store: Arc<dyn RePairingStateStorePort>,
+    pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
+    pub initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
+    pub portable_current_space_identity: Arc<dyn PortableCurrentSpaceIdentityPort>,
     /// 整机配置迁移 facade（导出 / 导入预览 / 暂存导入）。
     ///
     /// 与其它抽象 port 不同,这里直接携带组装好的 facade:它的依赖
     /// (db_pool / local_identity / profile_id 等)只在 `wire_dependencies`
     /// 的同步上下文里齐全,无法仅凭 `AppDeps` 里的抽象 port 在
     /// `build_app_facade_from_deps` 处重新组装。因此在 wiring 处构造好后随
-    /// `AppDeps` 流转,与 `setup_status` 一样是"携带即用"的句柄。
+    /// `AppDeps` 流转，供外层直接使用。
     pub config_migration: Arc<crate::facade::ConfigMigrationFacade>,
     /// 升级游标端口：持久化"上次运行的应用版本"。
     /// 由 `UpgradeFacade::detect_on_startup` 在启动期读取并比较。

@@ -31,9 +31,9 @@ use super::db_snapshot::{self, DbSnapshotError};
 use super::manifest::{BundleManifest, MANIFEST_MEMBER, MANIFEST_SCHEMA_VER};
 use super::secret_keys::{migratable_secret_keys, MigratableSecretKind, SECRETS_MEMBER};
 use super::staging::{
-    PendingImportMarker, SecretsFile, StagingError, StagingLayout, DB_MEMBER, DEVICE_ID_MEMBER,
-    IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER, PENDING_IMPORT_SCHEMA_VER, SETTINGS_MEMBER,
-    SETUP_STATUS_MEMBER, STAGING_DIR_NAME, UI_STATE_PREFIX,
+    PendingImportMarker, SecretsFile, StagingError, StagingLayout, CURRENT_SPACE_ID_MEMBER,
+    DB_MEMBER, DEVICE_ID_MEMBER, IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER, PENDING_IMPORT_SCHEMA_VER,
+    SETTINGS_MEMBER, STAGING_DIR_NAME, UI_STATE_PREFIX,
 };
 
 /// Raw secure-storage entries collected for a bundle, paired with the
@@ -420,12 +420,8 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
         let keyslot = Self::read_required(&self.paths.vault_dir.join("keyslot.json"))?;
         let (bundle_salt, bundle_kdf) = parse_keyslot_kdf(&keyslot)?;
         let device_id = Self::read_required(&self.paths.vault_dir.join("device_id.txt"))?;
-        // Setup-status marker (`vault/.setup_status`): on an initialized source
-        // it should exist, but read it defensively (carry if present, skip if
-        // absent) so a corner case where the marker was deleted but keyslot
-        // remains does not abort the export. Its absence in the target after
-        // apply would make the facade treat the installation as uninitialized.
-        let setup_status = Self::read_optional(&self.paths.vault_dir.join(".setup_status"))?;
+        let current_space_id =
+            Self::read_required(&self.paths.vault_dir.join(".current-space-id-v1"))?;
         let settings = Self::read_optional(&self.paths.settings_path)?;
 
         // 5. Device fingerprint (human-confirmable identity) + timestamp.
@@ -445,9 +441,7 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
         archive.insert(DB_MEMBER, db_bytes);
         archive.insert(KEYSLOT_MEMBER, keyslot);
         archive.insert(DEVICE_ID_MEMBER, device_id);
-        if let Some(setup_status) = setup_status {
-            archive.insert(SETUP_STATUS_MEMBER, setup_status);
-        }
+        archive.insert(CURRENT_SPACE_ID_MEMBER, current_space_id);
         if let Some(settings) = settings {
             archive.insert(SETTINGS_MEMBER, settings);
         }

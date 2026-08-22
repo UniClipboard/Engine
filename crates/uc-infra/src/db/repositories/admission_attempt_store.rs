@@ -554,7 +554,7 @@ fn validate_terminal_delivery_update(
 impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
     for DieselAdmissionAttemptStore<E>
 {
-    async fn reset_for_device_management(
+    async fn reset_admission_profile(
         &self,
     ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
         self.executor
@@ -1611,7 +1611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_management_reset_clears_admission_state_and_preserves_monotonic_metadata() {
+    async fn admission_profile_reset_clears_state_and_preserves_monotonic_metadata() {
         let directory = tempdir().unwrap();
         let database_path = directory.path().join("device-management-reset.sqlite");
         let pool = init_db_pool(database_path.to_str().unwrap()).unwrap();
@@ -1626,7 +1626,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reset = store.reset_for_device_management().await.unwrap();
+        let reset = store.reset_admission_profile().await.unwrap();
 
         assert_eq!(reset.profile_generation, before.profile_generation);
         assert_eq!(

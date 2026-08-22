@@ -52,10 +52,10 @@ use uc_core::pairing::session_message::{
 };
 use uc_core::ports::pairing::{PairingSessionId, PairingSessionPort};
 use uc_core::ports::space::{PrepareAdmissionOfferPort, ProofPort};
-use uc_core::ports::SetupStatusPort;
 use uc_core::space_access::domain::{ProofDerivedKey, SpaceAccessProofArtifact};
 
-use crate::space::convergence::membership::group_update_delivery::GroupUpdateDeliveryPort;
+use crate::space::current_space::CurrentSpaceIdentityPort;
+use crate::space::workspace_membership::membership::group_update_delivery::GroupUpdateDeliveryPort;
 
 /// Facts about the verified joiner, handed to the orchestrator so it can
 /// drive admit + trust use cases without re-parsing the `JoinerRequest`.
@@ -99,7 +99,7 @@ pub(crate) struct SponsorHandshakeCoordinator {
     /// design minted a fresh UUID per handshake, which caused the joiner
     /// to adopt an id unrelated to the sponsor's original space — this
     /// port fixes that by giving `begin` access to the canonical value.
-    setup_status: Arc<dyn SetupStatusPort>,
+    current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     sessions: Mutex<HashMap<PairingSessionId, SessionCtx>>,
     /// handshake TTL (max wait between begin and confirm/reject).
     handshake_ttl: Duration,
@@ -114,7 +114,7 @@ impl SponsorHandshakeCoordinator {
         space_access: Arc<dyn PrepareAdmissionOfferPort>,
         group_update_delivery: Arc<dyn GroupUpdateDeliveryPort>,
         proof_port: Arc<dyn ProofPort>,
-        setup_status: Arc<dyn SetupStatusPort>,
+        current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
         handshake_ttl: Duration,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
@@ -122,7 +122,7 @@ impl SponsorHandshakeCoordinator {
             space_access,
             group_update_delivery,
             proof_port,
-            setup_status,
+            current_space_identity,
             sessions: Mutex::new(HashMap::new()),
             handshake_ttl,
             self_weak: weak.clone(),
@@ -156,26 +156,22 @@ impl SponsorHandshakeCoordinator {
             .await;
             return Err(());
         }
-        // Load the canonical `SpaceId` persisted at A1 time so the
-        // joiner adopts the sponsor's actual space — not a fresh UUID
-        // minted here. Legacy installs that pre-date the
-        // `SetupStatus.space_id` field fall back to a fresh id + a
-        // warning; everything else (adapter Branch A, `SpaceMember`
-        // rows, wire frames) is content-addressed by keyslot anyway,
-        // so the fallback is recoverable.
-        let probe_space_id = match self.setup_status.get_status().await {
-            Ok(status) => status.space_id.unwrap_or_else(|| {
-                warn!(
-                    session = %session,
-                    "SetupStatus.space_id missing; using stable legacy Space identity"
-                );
-                crate::facade::space_setup::legacy_space_id()
-            }),
+        let probe_space_id = match self.current_space_identity.current_space_id().await {
+            Ok(Some(space_id)) => space_id,
+            Ok(None) => {
+                warn!(session = %session, "current Space is absent; rejecting pairing");
+                self.send_reject_and_close(
+                    session,
+                    PairingRejectReason::Internal("current Space is unavailable".into()),
+                )
+                .await;
+                return Err(());
+            }
             Err(err) => {
                 warn!(
                     session = %session,
                     error = %err,
-                    "setup_status.get_status failed; rejecting pairing"
+                    "current Space lookup failed; rejecting pairing"
                 );
                 self.send_reject_and_close(
                     session,
@@ -700,27 +696,19 @@ mod tests {
             space_access,
             delivery,
             proof,
-            // Tests don't care which space_id lands in the AdmissionOffer
-            // — a stub that returns a fixed completed-but-no-id status
-            // exercises the fallback branch, which is fine because
-            // assertions compare against what the coordinator emits.
-            Arc::new(StubSetupStatus),
+            Arc::new(StubCurrentSpace),
             ttl,
         )
     }
 
-    struct StubSetupStatus;
+    struct StubCurrentSpace;
     #[async_trait]
-    impl SetupStatusPort for StubSetupStatus {
-        async fn get_status(&self) -> anyhow::Result<uc_core::setup::SetupStatus> {
-            Ok(uc_core::setup::SetupStatus {
-                has_completed: true,
-                space_id: None,
-                re_pairing_required: false,
-            })
-        }
-        async fn set_status(&self, _status: &uc_core::setup::SetupStatus) -> anyhow::Result<()> {
-            Ok(())
+    impl CurrentSpaceIdentityPort for StubCurrentSpace {
+        async fn current_space_id(
+            &self,
+        ) -> Result<Option<SpaceId>, crate::space::current_space::CurrentSpaceIdentityError>
+        {
+            Ok(Some(SpaceId::from("test-space")))
         }
     }
 

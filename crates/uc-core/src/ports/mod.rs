@@ -29,6 +29,7 @@ pub mod config_migration;
 pub mod connection_channel;
 pub mod device_identity;
 pub mod directory_publish_log;
+pub mod engine_version;
 pub mod entry_receive_attempt;
 pub mod errors;
 pub mod file_transfer;
@@ -45,7 +46,6 @@ pub mod pairing;
 pub mod pairing_invitation;
 pub mod peer_address;
 pub mod presence;
-pub mod profile_lifecycle;
 pub mod receive_artifact_log;
 pub mod search;
 pub mod security;
@@ -58,6 +58,7 @@ pub use app_version::{AppVersionStateError, AppVersionStatePort};
 pub use cache_fs::{CacheFsPort, DirEntry as CacheFsDirEntry};
 pub use clipboard_event::*;
 pub use clock::*;
+pub use engine_version::{EngineVersionStateError, EngineVersionStatePort};
 pub use first_sync_state::{FirstSyncStateError, FirstSyncStatePort};
 pub use hash::*;
 pub use timer::TimerPort;
@@ -127,11 +128,6 @@ pub use pairing_invitation::{
 };
 pub use peer_address::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
 pub use presence::{PresenceError, PresenceEvent, PresencePort, ReachabilityState};
-pub use profile_lifecycle::{
-    ClearProfileStatePort, FactoryResetPhaseV1, ProfileFactoryResetCapabilityError,
-    ProfileLifecycleError, ProfileLifecycleMarkerV1, ProfileLifecyclePort, StopProfileRuntimePort,
-    WipeProfileKeysPort, PROFILE_LIFECYCLE_MARKER_FORMAT_V1,
-};
 pub use receive_artifact_log::{
     CleanupReceiveArtifactsPort, GetReceiveArtifactRecordPort, ListUnsettledReceiveArtifactsPort,
     ReceiveArtifact, ReceiveArtifactLogError, ReceiveArtifactOwnership, ReceiveArtifactPhase,
@@ -144,4 +140,3 @@ pub use security::secure_storage::{SecureStorageError, SecureStoragePort};
 pub use security::transfer_cipher::{TransferCipherError, TransferCipherPort};
 pub use security::{BlobCipherError, BlobCipherPort};
 pub use settings::{SettingsMigrationPort, SettingsPort};
-pub use setup::SetupStatusPort;

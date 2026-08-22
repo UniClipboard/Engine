@@ -11,11 +11,8 @@ use tokio::fs;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
 use uc_core::ids::SpaceId;
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
+use uc_core::ports::marker::{LegacyMigrationRecoveryError, LegacyMigrationRecoveryPort};
 use uc_core::ports::security::{BlobCipherError, BlobCipherPort, KeyMigrationPort, MigrationRunId};
-use uc_core::ports::setup::{
-    LegacyMigrationRecoveryError, LegacyMigrationRecoveryPort, SetupStatusPort,
-};
-use uc_core::setup::SetupStatus;
 use uc_observability_contract::analytics::AnalyticsFacade;
 use uuid::Uuid;
 
@@ -78,7 +75,6 @@ pub(crate) async fn legacy_migration_run_id(
 
 pub struct FileLegacyMigrationRecovery {
     state_file_path: PathBuf,
-    setup_status: Arc<dyn SetupStatusPort>,
     key_migration: Arc<dyn KeyMigrationPort>,
     blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
     blob_cipher: Arc<dyn BlobCipherPort>,
@@ -88,7 +84,6 @@ pub struct FileLegacyMigrationRecovery {
 impl FileLegacyMigrationRecovery {
     pub fn with_defaults(
         base_dir: PathBuf,
-        setup_status: Arc<dyn SetupStatusPort>,
         key_migration: Arc<dyn KeyMigrationPort>,
         blob_migration_repo: Arc<dyn BlobMigrationRepoPort>,
         blob_cipher: Arc<dyn BlobCipherPort>,
@@ -96,7 +91,6 @@ impl FileLegacyMigrationRecovery {
     ) -> Self {
         Self {
             state_file_path: base_dir.join(DEFAULT_MIGRATION_STATE_FILE),
-            setup_status,
             key_migration,
             blob_migration_repo,
             blob_cipher,
@@ -240,7 +234,6 @@ impl FileLegacyMigrationRecovery {
     async fn finish_target(
         &self,
         run_id: &MigrationRunId,
-        target_space_id: &SpaceId,
         sponsor_space_person_id: Option<Uuid>,
         preserved_unreadable_records: u64,
         needs_rewrap: bool,
@@ -251,14 +244,6 @@ impl FileLegacyMigrationRecovery {
         }
         self.verify_main_records(preserved_unreadable_records)
             .await?;
-        self.setup_status
-            .set_status(&SetupStatus {
-                has_completed: true,
-                space_id: Some(target_space_id.clone()),
-                re_pairing_required: true,
-            })
-            .await
-            .map_err(internal)?;
         match sponsor_space_person_id {
             Some(person_id) => self.analytics.adopt_from_sponsor(person_id),
             None => self.analytics.release_to_solo(),
@@ -294,13 +279,12 @@ impl LegacyMigrationRecoveryPort for FileLegacyMigrationRecovery {
             }
             LegacyMigrationPhaseV1::HandshakeDone {
                 run_id,
-                target_space_id,
+                target_space_id: _,
                 sponsor_space_person_id,
                 preserved_unreadable_records,
             } => {
                 self.finish_target(
                     &run_id,
-                    &target_space_id,
                     sponsor_space_person_id,
                     preserved_unreadable_records,
                     true,
@@ -309,13 +293,12 @@ impl LegacyMigrationRecoveryPort for FileLegacyMigrationRecovery {
             }
             LegacyMigrationPhaseV1::Swapped {
                 run_id,
-                target_space_id,
+                target_space_id: _,
                 sponsor_space_person_id,
                 preserved_unreadable_records,
             } => {
                 self.finish_target(
                     &run_id,
-                    &target_space_id,
                     sponsor_space_person_id,
                     preserved_unreadable_records,
                     false,
@@ -492,19 +475,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecoverySetupStatus(Mutex<SetupStatus>);
-
-    #[async_trait]
-    impl SetupStatusPort for RecoverySetupStatus {
-        async fn get_status(&self) -> anyhow::Result<SetupStatus> {
-            Ok(self.0.lock().unwrap().clone())
-        }
-
-        async fn set_status(&self, status: &SetupStatus) -> anyhow::Result<()> {
-            *self.0.lock().unwrap() = status.clone();
-            Ok(())
-        }
-    }
+    struct RecoveryMarker;
 
     fn record(ciphertext: &[u8]) -> MigrationRecord {
         MigrationRecord {
@@ -522,7 +493,7 @@ mod tests {
         FileLegacyMigrationRecovery,
         Arc<RecoveryBlobRepo>,
         Arc<RecoveryKeyMigration>,
-        Arc<RecoverySetupStatus>,
+        Arc<RecoveryMarker>,
     ) {
         let blobs = Arc::new(RecoveryBlobRepo::default());
         *blobs.backup.lock().unwrap() = backup;
@@ -536,16 +507,15 @@ mod tests {
             ));
         }
         let keys = Arc::new(RecoveryKeyMigration::default());
-        let setup = Arc::new(RecoverySetupStatus::default());
+        let marker = Arc::new(RecoveryMarker::default());
         let recovery = FileLegacyMigrationRecovery::with_defaults(
             directory.path().to_path_buf(),
-            setup.clone(),
             keys.clone(),
             blobs.clone(),
             Arc::new(RecoveryBlobCipher),
             Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
         );
-        (recovery, blobs, keys, setup)
+        (recovery, blobs, keys, marker)
     }
 
     async fn write_legacy_state(directory: &tempfile::TempDir, json: &str) {
@@ -594,13 +564,13 @@ mod tests {
             r#"{"kind":"handshake_done","run_id":"run-legacy","target_space_id":"target-space","preserved_unreadable_records":0}"#,
         )
         .await;
-        let (recovery, blobs, _, setup) =
+        let (recovery, blobs, _, marker) =
             recovery_fixture(&directory, vec![record(b"target")], Some(b"old"));
 
         recovery.recover().await.unwrap();
 
         assert_eq!(
-            setup.0.lock().unwrap().space_id,
+            marker.0.lock().unwrap().space_id,
             Some(SpaceId::from_str("target-space"))
         );
         assert_eq!(
@@ -623,13 +593,13 @@ mod tests {
             r#"{"kind":"swapped","run_id":"run-legacy","target_space_id":"target-space","preserved_unreadable_records":0}"#,
         )
         .await;
-        let (recovery, blobs, _, setup) =
+        let (recovery, blobs, _, marker) =
             recovery_fixture(&directory, vec![record(b"target")], Some(b"target"));
 
         recovery.recover().await.unwrap();
 
         assert_eq!(
-            setup.0.lock().unwrap().space_id,
+            marker.0.lock().unwrap().space_id,
             Some(SpaceId::from_str("target-space"))
         );
         assert!(blobs.backup.lock().unwrap().is_empty());
@@ -639,7 +609,7 @@ mod tests {
     async fn corrupt_or_inconsistent_state_preserves_all_artifacts() {
         let directory = tempfile::tempdir().unwrap();
         write_legacy_state(&directory, "not-json").await;
-        let (recovery, blobs, keys, setup) =
+        let (recovery, blobs, keys, marker) =
             recovery_fixture(&directory, vec![record(b"backup")], Some(b"source"));
 
         assert!(matches!(
@@ -648,7 +618,7 @@ mod tests {
         ));
         assert_eq!(blobs.backup.lock().unwrap().len(), 1);
         assert!(keys.discarded.lock().unwrap().is_empty());
-        assert_eq!(*setup.0.lock().unwrap(), SetupStatus::default());
+        let _ = marker;
         assert!(directory.path().join(DEFAULT_MIGRATION_STATE_FILE).exists());
 
         write_legacy_state(

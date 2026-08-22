@@ -53,7 +53,7 @@ fn map_create_space_error(error: InitializeSpaceError) -> EngineError {
             EngineErrorCategory::Conflict,
             false,
         ),
-        InitializeSpaceError::StorageFailed(_) | InitializeSpaceError::Internal(_) => {
+        InitializeSpaceError::StorageFailed { .. } | InitializeSpaceError::Internal { .. } => {
             error!(error = %error, "create space failed");
             EngineError::new(
                 CREATE_SPACE_FAILED_CODE,

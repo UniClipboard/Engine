@@ -43,11 +43,12 @@ use uc_core::ports::clipboard::{
     LoadActiveClipboardPort, TouchClipboardEntryPort, UpdateRepresentationProcessingResultPort,
 };
 use uc_core::ports::security::TransferCipherPort;
-use uc_core::ports::space::IsSpaceUnlockedPort;
 use uc_core::ports::{
     ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, PresencePort, SettingsPort,
 };
 use uc_core::{blob::ports::BlobReaderPort, MemberRepositoryPort};
+
+use crate::space::session::IsSpaceUnlockedPort;
 
 use crate::clipboard::inbound::{
     InboundClipboardApplyInput, InboundClipboardApplyOutcome, InboundClipboardApplyPort,

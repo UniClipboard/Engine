@@ -21,9 +21,11 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use uc_application::deps::{
-    AppDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts, DevicePorts,
-    DirectoryReceivePorts, FileTransferPorts, SearchPorts, SecurityPorts, SpaceAccessPorts,
-    StoragePorts, SystemPorts,
+    AppDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
+    CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts, FileTransferPorts,
+    InitialSpaceActivationPort, PortableCurrentSpaceIdentityPort, PrepareProfileLifecycleUseCase,
+    ProfileLifecycleRepositoryPort, ProfileLifecycleState, RePairingStateStorePort, SearchPorts,
+    SecurityPorts, SpaceAccessPorts, SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
 use uc_application::facade::{ConfigMigrationDeps, ConfigMigrationFacade, HostEventEmitterPort};
 use uc_core::app_dirs::AppPaths;
@@ -64,19 +66,18 @@ use uc_infra::db::repositories::{
     EncryptedMembershipOutboxRepository, EncryptedRelationshipStore,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
+use uc_infra::fs::VaultLayout;
 use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::search::{HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex};
 use uc_infra::security::{
-    space_generation_directory, ActiveSpaceManifestStore, AdmissionKeyManager, Argon2PinHasher,
-    Blake3Hasher, DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
-    EncryptingInboundReceiveCommit, InMemorySession, KeyMaterialStore, ProfileLifecycleManager,
-    Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
+    space_generation_directory, ActiveSpaceGenerationManifestStore, AdmissionKeyManager,
+    Argon2PinHasher, Blake3Hasher, DecryptingClipboardRepresentationRepository,
+    EncryptingClipboardEventWriter, EncryptingInboundReceiveCommit, InMemorySession,
+    KeyMaterialStore, ProfileLifecycleRepository, Sha256IdentityFingerprintFactory,
+    Sha256ShortCodeGenerator,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
-use uc_infra::{
-    FileAppVersionStateRepository, FileFirstSyncStateRepository, FileSetupStatusRepository,
-    SystemClock,
-};
+use uc_infra::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
 use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 
 #[cfg(feature = "lan-compat")]
@@ -123,8 +124,7 @@ struct InfraLayer {
     // Settings
     settings_repo: Arc<dyn SettingsPort>,
 
-    // Setup status
-    setup_status: Arc<dyn SetupStatusPort>,
+    space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort>,
 
     // 升级游标（"上次运行版本"）。落点 = app_data_root/upgrade-cursor.json，
     // 与 vault/keyring/settings.json 同级，profile 隔离由调用方上层保证。
@@ -223,26 +223,43 @@ pub fn wire_dependencies_from_inputs(
     let settings_path = paths.settings_path;
     let app_data_root = paths.app_data_root_dir.clone();
     let generation_root = app_data_root.join("space-generations");
-    let profile_lifecycle = Arc::new(ProfileLifecycleManager::new(Arc::clone(&secure_storage)));
-    let profile_marker = profile_lifecycle
-        .load_or_initialize()
-        .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
+    let profile_lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort> =
+        Arc::new(ProfileLifecycleRepository::new(Arc::clone(&secure_storage)));
+    let profile_lifecycle =
+        PrepareProfileLifecycleUseCase::new(Arc::clone(&profile_lifecycle_repository))
+            .execute()
+            .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
     let admission_keys = Arc::new(AdmissionKeyManager::new(
         Arc::clone(&secure_storage),
-        profile_marker.profile_generation,
+        profile_lifecycle.generation().into_bytes(),
     ));
-    let active_manifest_store = Arc::new(ActiveSpaceManifestStore::new(
+    let active_generation_manifest_store = Arc::new(ActiveSpaceGenerationManifestStore::new(
         vault_path.clone(),
         Arc::clone(&admission_keys),
     ));
-    let active_manifest = if profile_marker.factory_reset_phase == FactoryResetPhaseV1::None {
-        active_manifest_store
+    let current_space_resolver = Arc::new(uc_infra::space::CurrentSpaceResolver::new(
+        Arc::clone(&active_generation_manifest_store),
+        VaultLayout::new(vault_path.clone()).legacy_current_space_id_path(),
+        Arc::clone(&admission_keys),
+    ));
+    let current_space_identity: Arc<dyn CurrentSpaceIdentityPort> = current_space_resolver.clone();
+    let initial_space_activation: Arc<dyn InitialSpaceActivationPort> =
+        current_space_resolver.clone();
+    let portable_current_space_identity: Arc<dyn PortableCurrentSpaceIdentityPort> =
+        current_space_resolver.clone();
+    let re_pairing_state_store: Arc<dyn RePairingStateStorePort> =
+        Arc::new(uc_infra::space::EncryptedRePairingStateStore::new(
+            VaultLayout::new(vault_path.clone()).re_pairing_state_path(),
+            Arc::clone(&admission_keys),
+        ));
+    let active_generation_manifest = if profile_lifecycle.state() == ProfileLifecycleState::Ready {
+        active_generation_manifest_store
             .load_sync()
             .map_err(|error| WiringError::DatabaseInit(error.to_string()))?
     } else {
         None
     };
-    let (db_path, blob_store_dir) = match active_manifest.as_ref() {
+    let (db_path, blob_store_dir) = match active_generation_manifest.as_ref() {
         Some(manifest) => {
             let directory = space_generation_directory(
                 &generation_root,
@@ -276,11 +293,6 @@ pub fn wire_dependencies_from_inputs(
         &app_data_root,
         secure_storage.clone(),
     )?;
-    infra.setup_status = Arc::new(uc_infra::ManifestProjectingSetupStatusRepository::new(
-        Arc::clone(&infra.setup_status),
-        Arc::clone(&active_manifest_store),
-    ));
-
     let storage_config = Arc::new(ClipboardStorageConfig::defaults());
     let source_blob_root = blob_store_dir.clone();
     let profile_salt = profile_id.inner().as_bytes().to_vec();
@@ -304,6 +316,7 @@ pub fn wire_dependencies_from_inputs(
             &platform.session,
             &infra.db_executor,
         );
+    let profile_key_access_probe = space_access_adapter.clone();
     let membership_session = Arc::clone(&platform.session);
     let workspace_convergence_repository: Arc<
         dyn uc_core::membership::WorkspaceConvergenceRepositoryPort,
@@ -323,7 +336,7 @@ pub fn wire_dependencies_from_inputs(
             generation_root,
             profile_salt,
             Arc::clone(&platform.blob_generation_store),
-            Arc::clone(&active_manifest_store),
+            Arc::clone(&active_generation_manifest_store),
             space_access_adapter,
             Arc::clone(&platform.session),
             Arc::clone(&platform.current_profile),
@@ -570,7 +583,7 @@ pub fn wire_dependencies_from_inputs(
         uc_infra::security::DefaultKeyMigrationAdapter::new(Arc::clone(&platform.secure_storage)),
     );
     let profile_reset = ProfileResetDeps {
-        lifecycle: profile_lifecycle,
+        lifecycle_repository: profile_lifecycle_repository,
         keys: Arc::new(uc_infra::security::ProfileKeyWiper::new(
             admission_keys.as_ref().clone(),
             profile_reset_secure_storage,
@@ -588,7 +601,6 @@ pub fn wire_dependencies_from_inputs(
     let legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort> =
         Arc::new(uc_infra::FileLegacyMigrationRecovery::with_defaults(
             vault_path.clone(),
-            Arc::clone(&infra.setup_status),
             Arc::clone(&key_migration_for_wiring),
             Arc::clone(&infra.blob_migration_repo),
             blob_cipher.clone(),
@@ -605,7 +617,8 @@ pub fn wire_dependencies_from_inputs(
         &iroh_identity_storage,
         db_pool_for_config_migration,
         &infra.clock,
-        &infra.setup_status,
+        &current_space_identity,
+        &portable_current_space_identity,
         &space_access_ports,
         app_version,
         config_source_mode,
@@ -651,6 +664,7 @@ pub fn wire_dependencies_from_inputs(
         security: SecurityPorts {
             current_profile: platform.current_profile,
             secure_storage: platform.secure_storage,
+            profile_key_access_probe,
             space_access_ports,
             blob_cipher: blob_cipher.clone(),
             transfer_cipher: transfer_cipher.clone(),
@@ -662,7 +676,11 @@ pub fn wire_dependencies_from_inputs(
             device_identity: platform.device_identity,
             member_repo: Arc::clone(&member_repo),
         },
-        setup_status: infra.setup_status,
+        space_rebuild_progress: infra.space_rebuild_progress,
+        re_pairing_state_store,
+        current_space_identity,
+        initial_space_activation,
+        portable_current_space_identity,
         config_migration,
         app_version_state: infra.app_version_state,
         first_sync_state: infra.first_sync_state,

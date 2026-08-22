@@ -1,4 +1,4 @@
-mod active_space_manifest;
+mod active_space_generation_manifest;
 mod admission;
 mod admission_attempt;
 mod admission_content_key_catalog;
@@ -16,7 +16,9 @@ mod revocation;
 mod versioned_membership_history;
 mod workspace_convergence;
 
-pub use active_space_manifest::{ActiveSpaceManifestV2, ACTIVE_SPACE_MANIFEST_FORMAT_V2};
+pub use active_space_generation_manifest::{
+    ActiveSpaceGenerationManifestV2, ACTIVE_SPACE_GENERATION_MANIFEST_FORMAT_V2,
+};
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
 pub use admission_attempt::{
     AdmissionAttemptId, AdmissionAttemptRoleStateV1, AdmissionAttemptV1,
@@ -57,8 +59,7 @@ pub use error::{
     MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
     MembershipGossipTransportError, MembershipHistoryExchangeError, MembershipInitializationError,
     MembershipOutboxRepositoryError, MembershipSecurityUpdateError, RelationshipStateResetError,
-    SpaceMembershipRebuildError, SpaceSecurityStateResetError, VerifiedPeerPromotionError,
-    WorkspaceConvergenceRepositoryError,
+    SpaceSecurityStateResetError, VerifiedPeerPromotionError, WorkspaceConvergenceRepositoryError,
 };
 pub use gossip::{
     CandidateEffect, CandidateEvent, CandidateFailure, CandidateMergeError, CandidateMergeOutcome,
@@ -99,8 +100,8 @@ pub use ports::{
     MembershipGossipTransportPort, MembershipHistoryExchangeEndpointPort,
     MembershipHistoryExchangePort, MembershipOutboxRepositoryPort, MembershipSecurityState,
     MembershipSecurityUpdatePort, PrepareSponsorAdmissionSecurityPort, RelationshipStateResetPort,
-    RevocationRepositoryPort, SpaceMembershipInitializerPort, SpaceMembershipRebuildPort,
-    SpaceSecurityStateResetPort, SponsorAdmissionSecurityDelivery,
+    RevocationRepositoryPort, SpaceMembershipInitializerPort, SpaceSecurityStateResetPort,
+    SponsorAdmissionSecurityDelivery,
     SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
     SponsorPreparedAdmissionSecurity, SponsorPreparedSecurityTransition, VerifiedPeerPromotionPort,
     WorkspaceConvergenceRepositoryPort,

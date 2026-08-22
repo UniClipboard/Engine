@@ -1,7 +1,7 @@
 //! Command / result payloads for the Slice 1 application facade.
 //!
-//! Each pair models one external-facing application action; keep them free
-//! of cross-cutting domain types and do not add query shape here.
+//! These are external-facing facade inputs and views. Typed use-case requests
+//! and results live with their owning `space/*` modules.
 
 use chrono::{DateTime, Utc};
 
@@ -23,40 +23,6 @@ pub struct InitializeSpaceInput {
     pub device_name: Option<String>,
 }
 
-/// Internal command for [`crate::space::lifecycle::initialize_space::InitializeSpaceUseCase`].
-#[derive(Debug)]
-pub(crate) struct InitializeSpaceCommand {
-    /// User-entered passphrase protecting the new space.
-    pub passphrase: Passphrase,
-    /// Confirmation copy — must equal [`passphrase`](Self::passphrase).
-    pub passphrase_confirm: Passphrase,
-    /// Display name for this device as seen by future members.
-    ///
-    /// * `Some(name)` — persist to `Settings.general.device_name` and use
-    ///   for the owner `SpaceMember` record.
-    /// * `None` — fall back to the currently-persisted `device_name`;
-    ///   caller-level UI must have collected it beforehand.
-    pub device_name: Option<String>,
-}
-
-impl From<InitializeSpaceInput> for InitializeSpaceCommand {
-    fn from(input: InitializeSpaceInput) -> Self {
-        Self {
-            passphrase: Passphrase::new(input.passphrase),
-            passphrase_confirm: Passphrase::new(input.passphrase_confirm),
-            device_name: input.device_name,
-        }
-    }
-}
-
-/// Output of a successful A1 initialise.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InitializeSpaceResult {
-    pub space_id: SpaceId,
-    pub self_device_id: DeviceId,
-    pub fingerprint: IdentityFingerprint,
-}
-
 // ---------------------------------------------------------------------------
 // A2 · UnlockSpace
 // ---------------------------------------------------------------------------
@@ -65,20 +31,6 @@ pub struct InitializeSpaceResult {
 #[derive(Debug)]
 pub struct UnlockSpaceInput {
     pub passphrase: String,
-}
-
-/// Internal command for [`crate::space::lifecycle::unlock_space::UnlockSpaceUseCase`].
-#[derive(Debug)]
-pub(crate) struct UnlockSpaceCommand {
-    pub passphrase: Passphrase,
-}
-
-impl From<UnlockSpaceInput> for UnlockSpaceCommand {
-    fn from(input: UnlockSpaceInput) -> Self {
-        Self {
-            passphrase: Passphrase::new(input.passphrase),
-        }
-    }
 }
 
 /// Output of a successful A2 unlock.

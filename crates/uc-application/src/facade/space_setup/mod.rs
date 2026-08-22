@@ -14,16 +14,18 @@ mod deps;
 mod errors;
 mod facade;
 
+pub use crate::space::initialize_space::{InitializeSpaceError, InitializeSpaceResult};
+pub use crate::space::reset_space::ResetSpaceError;
+pub use crate::space::unlock_space::UnlockSpaceError;
 pub use commands::{
-    CurrentInvitation, InitializeSpaceInput, InitializeSpaceResult, InvitationAvailability,
-    IssuePairingInvitationResult, PairingInvitationAddressCandidate, RedeemPairingInvitationInput,
-    RedeemPairingInvitationResult, SetupStateView, UnlockSpaceInput, UnlockSpaceResult,
+    CurrentInvitation, InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationResult,
+    PairingInvitationAddressCandidate, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
+    SetupStateView, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps};
 pub use errors::{
-    CancelInvitationError, FactoryResetError, InitializeSpaceError, IssuePairingInvitationError,
-    QuerySetupStateError, RedeemPairingInvitationError, ResetSpaceError, TryResumeSessionError,
-    UnlockSpaceError,
+    CancelInvitationError, IssuePairingInvitationError, QuerySetupStateError,
+    RedeemPairingInvitationError,
 };
 pub use facade::SpaceFacade;
 pub use uc_observability_contract::analytics::PairingFailureReason;
@@ -36,6 +38,6 @@ pub(crate) fn legacy_space_id() -> uc_core::ids::SpaceId {
 
 // T10:CLI `members` 入口需要 report / error 类型才能展示 probe 摘要;
 // usecase 本身保持 `pub(crate)`(§11.4),此处只透出两个值对象。
-pub use crate::space::convergence::connectivity::reachability::{
+pub use crate::space::connectivity::reachability::{
     EnsureReachableAllError, EnsureReachableAllReport,
 };

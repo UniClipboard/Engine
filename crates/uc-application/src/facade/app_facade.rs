@@ -39,28 +39,30 @@ use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
     IssuePairingInvitationResult, PairingInvitationAddressCandidate, QuerySetupStateError,
     RedeemPairingInvitationError, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
-    SetupStateView, TryResumeSessionError, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    SetupStateView, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 use crate::facade::upgrade::UpgradeFacade;
 use crate::facade::{
     BlobTransferError, BlobTransferFacade, ClipboardCaptureFacade, ClipboardHistoryFacade,
     ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade, ClipboardSyncError,
-    ClipboardSyncFacade, DeviceFacade, DiagnosticsFacade, DispatchEntryOutcome, EncryptionFacade,
-    EncryptionFacadeError, EncryptionStateView, FetchBlobCommand, FetchBlobResult,
-    FetchBlobToPathCommand, FetchBlobToPathResult, HistoryMaintenanceRuntime, MemberRosterFacade,
-    PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult, ResendEntryCommand,
-    ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
-    SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
-    SettingsFacadeError, SpaceFacade, StorageFacade,
+    ClipboardSyncFacade, DiagnosticsFacade, DispatchEntryOutcome, FetchBlobCommand,
+    FetchBlobResult, FetchBlobToPathCommand, FetchBlobToPathResult, HistoryMaintenanceRuntime,
+    LocalDeviceInfo, MemberRosterFacade, ProbeProfileKeyAccessError, ProbeProfileKeyAccessUseCase,
+    PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult, QueryLocalDeviceUseCase,
+    QuerySpaceAccessStateError, QuerySpaceAccessStateUseCase, ResendEntryCommand, ResendEntryError,
+    ResendReport, ResourceFacade, SearchFacade, SearchFacadeError, SearchPageView,
+    SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
+    SettingsFacadeError, SpaceAccessState, SpaceFacade, StorageFacade,
 };
 use crate::space::admission::coordinator::SpaceAdmissionCoordinator;
-use crate::space::convergence::network_recovery::{
+use crate::space::connectivity::network_recovery::{
     NetworkRecoveryFacade, NetworkRecoveryRequestError, NetworkRecoveryStatus,
 };
-use crate::space::lifecycle::session::{
-    build_space_session_coordinator, RecoverSpaceSessionResult, SpaceSessionAccessDeps,
-    SpaceSessionActivityDeps, SpaceSessionCoordinator, SpaceSessionError,
+use crate::space::lock_space_session::{LockSpaceSessionError, LockSpaceSessionUseCase};
+use crate::space::recover_space_session::{
+    RecoverSpaceSessionError, RecoverSpaceSessionResult, RecoverSpaceSessionUseCase,
 };
+use crate::space::session::SpaceSessionActivity;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{PresenceError, PresenceEvent, ReachabilityState};
 use uc_core::ClipboardChangeOrigin;
@@ -72,10 +74,13 @@ use uc_core::SystemClipboardSnapshot;
 /// 因此运行期拿到的对象始终可以立即处理所有稳定 Engine 动作。
 pub struct AppFacade {
     space: Arc<SpaceFacade>,
-    space_session: Arc<SpaceSessionCoordinator>,
+    space_session_activity: Arc<SpaceSessionActivity>,
+    lock_space_session: Arc<LockSpaceSessionUseCase>,
+    recover_space_session: Arc<RecoverSpaceSessionUseCase>,
     space_admission: Arc<SpaceAdmissionCoordinator>,
     member_roster: Arc<MemberRosterFacade>,
-    encryption: Arc<EncryptionFacade>,
+    query_space_access_state: Arc<QuerySpaceAccessStateUseCase>,
+    probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     resource: Arc<ResourceFacade>,
     clipboard_history: Arc<ClipboardHistoryFacade>,
     clipboard_capture: Arc<ClipboardCaptureFacade>,
@@ -87,7 +92,7 @@ pub struct AppFacade {
     search: Arc<SearchFacade>,
     settings: Arc<SettingsFacade>,
     diagnostics: Arc<DiagnosticsFacade>,
-    device: Arc<DeviceFacade>,
+    query_local_device: Arc<QueryLocalDeviceUseCase>,
     storage: Arc<StorageFacade>,
     config_migration: Arc<ConfigMigrationFacade>,
     upgrade: Arc<UpgradeFacade>,
@@ -107,22 +112,19 @@ impl AppFacade {
     /// Bootstrap builds each sub-facade from its own `*Deps` bundle and
     /// hands them here — the aggregator never sees raw ports.
     pub fn new(parts: AppFacadeParts) -> Self {
-        let space_session = build_space_session_coordinator(
-            Arc::clone(&parts.space),
-            Arc::clone(&parts.search),
-            parts.space_session_activity,
-            parts.space_session_access,
-        );
         let space_admission = Arc::new(SpaceAdmissionCoordinator::new(
             Arc::clone(&parts.space),
             Arc::clone(&parts.settings),
         ));
         Self {
             space: parts.space,
-            space_session,
+            space_session_activity: parts.space_session_activity,
+            lock_space_session: parts.lock_space_session,
+            recover_space_session: parts.recover_space_session,
             space_admission,
             member_roster: parts.member_roster,
-            encryption: parts.encryption,
+            query_space_access_state: parts.query_space_access_state,
+            probe_profile_key_access: parts.probe_profile_key_access,
             resource: parts.resource,
             clipboard_history: parts.clipboard_history,
             clipboard_capture: parts.clipboard_capture,
@@ -134,7 +136,7 @@ impl AppFacade {
             search: parts.search,
             settings: parts.settings,
             diagnostics: parts.diagnostics,
-            device: parts.device,
+            query_local_device: parts.query_local_device,
             storage: parts.storage,
             config_migration: parts.config_migration,
             upgrade: parts.upgrade,
@@ -276,7 +278,12 @@ impl AppFacade {
         &self,
         input: InitializeSpaceInput,
     ) -> Result<InitializeSpaceResult, InitializeSpaceError> {
-        self.space_session.initialize_space(input).await
+        let result = self.space.initialize_space(input).await?;
+        self.space_session_activity
+            .resume_after_session_ready()
+            .await
+            .map_err(|error| InitializeSpaceError::internal(anyhow::anyhow!(error)))?;
+        Ok(result)
     }
 
     /// A2: unlock a space through the top-level application facade.
@@ -284,20 +291,22 @@ impl AppFacade {
         &self,
         input: UnlockSpaceInput,
     ) -> Result<UnlockSpaceResult, UnlockSpaceError> {
-        self.space_session.unlock_space(input).await
+        let result = self.space.unlock_space(input).await?;
+        self.space_session_activity
+            .resume_after_session_ready()
+            .await
+            .map_err(|error| UnlockSpaceError::Internal(error.to_string()))?;
+        Ok(result)
     }
 
     pub async fn recover_space_session(
         &self,
-        allow_secure_storage_unlock: bool,
-    ) -> Result<RecoverSpaceSessionResult, SpaceSessionError> {
-        self.space_session
-            .recover_session(allow_secure_storage_unlock)
-            .await
+    ) -> Result<RecoverSpaceSessionResult, RecoverSpaceSessionError> {
+        self.recover_space_session.execute().await
     }
 
-    pub async fn lock_space_session(&self) -> Result<(), SpaceSessionError> {
-        self.space_session.lock_space().await
+    pub async fn lock_space_session(&self) -> Result<(), LockSpaceSessionError> {
+        self.lock_space_session.execute().await
     }
 
     pub async fn join_space(
@@ -319,10 +328,6 @@ impl AppFacade {
         self.space.query_setup_state().await
     }
 
-    pub async fn factory_reset_space(&self) -> Result<(), crate::facade::FactoryResetError> {
-        self.space_session.factory_reset().await
-    }
-
     pub async fn reset_space(&self) -> Result<(), crate::facade::ResetSpaceError> {
         self.space.reset().await
     }
@@ -334,8 +339,11 @@ impl AppFacade {
     }
 
     /// 尝试静默恢复空间会话。
-    pub async fn try_resume_session(&self) -> Result<bool, TryResumeSessionError> {
-        self.space.try_resume_session().await
+    pub async fn try_resume_session(&self) -> Result<bool, RecoverSpaceSessionError> {
+        self.recover_space_session
+            .execute()
+            .await
+            .map(|result| result.resumed)
     }
 
     /// 刷新成员在线状态。
@@ -402,8 +410,8 @@ impl AppFacade {
         input: RedeemPairingInvitationInput,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
         let result = self.space_admission.redeem_invitation(input).await?;
-        self.space_session
-            .recover_session(true)
+        self.recover_space_session
+            .execute()
             .await
             .map_err(|error| {
                 RedeemPairingInvitationError::Internal(format!("activate paired space: {error}"))
@@ -595,18 +603,16 @@ impl AppFacade {
     }
 
     /// 查询加密/初始化状态。
-    pub async fn encryption_state(&self) -> Result<EncryptionStateView, EncryptionFacadeError> {
-        self.encryption.state().await
+    pub async fn encryption_state(&self) -> Result<SpaceAccessState, QuerySpaceAccessStateError> {
+        self.query_space_access_state.execute().await
     }
 
-    pub async fn verify_secure_storage_access(&self) -> Result<bool, EncryptionFacadeError> {
-        self.encryption.verify_keychain_access().await
+    pub async fn verify_secure_storage_access(&self) -> Result<bool, ProbeProfileKeyAccessError> {
+        self.probe_profile_key_access.execute().await
     }
 
-    pub async fn local_device_info(
-        &self,
-    ) -> Result<crate::facade::LocalDeviceInfoView, crate::facade::DeviceFacadeError> {
-        self.device.local_device_info().await
+    pub async fn local_device_info(&self) -> LocalDeviceInfo {
+        self.query_local_device.execute().await
     }
 
     pub async fn settings(&self) -> Result<crate::facade::SettingsView, SettingsFacadeError> {
@@ -897,10 +903,12 @@ fn reachability_state_to_string(state: ReachabilityState) -> String {
 
 pub struct AppFacadeParts {
     pub space: Arc<SpaceFacade>,
-    pub space_session_activity: SpaceSessionActivityDeps,
-    pub space_session_access: SpaceSessionAccessDeps,
+    pub space_session_activity: Arc<SpaceSessionActivity>,
+    pub lock_space_session: Arc<LockSpaceSessionUseCase>,
+    pub recover_space_session: Arc<RecoverSpaceSessionUseCase>,
     pub member_roster: Arc<MemberRosterFacade>,
-    pub encryption: Arc<EncryptionFacade>,
+    pub query_space_access_state: Arc<QuerySpaceAccessStateUseCase>,
+    pub probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     pub resource: Arc<ResourceFacade>,
     pub clipboard_history: Arc<ClipboardHistoryFacade>,
     pub clipboard_capture: Arc<ClipboardCaptureFacade>,
@@ -912,7 +920,7 @@ pub struct AppFacadeParts {
     pub search: Arc<SearchFacade>,
     pub settings: Arc<SettingsFacade>,
     pub diagnostics: Arc<DiagnosticsFacade>,
-    pub device: Arc<DeviceFacade>,
+    pub query_local_device: Arc<QueryLocalDeviceUseCase>,
     pub storage: Arc<StorageFacade>,
     pub config_migration: Arc<ConfigMigrationFacade>,
     pub upgrade: Arc<UpgradeFacade>,

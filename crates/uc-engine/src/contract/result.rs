@@ -495,7 +495,7 @@ pub enum OperationResult {
     },
     Devices(Vec<DeviceSummary>),
     MemberSyncPreferences(MemberSyncPreferencesSummary),
-    WorkspaceConvergence(WorkspaceConvergenceSummary),
+    WorkspaceMembership(WorkspaceConvergenceSummary),
     DeviceTrust(DeviceTrustSnapshotSummary),
     DeviceTrustDecision(DeviceTrustDecisionSummary),
     SpaceProtection(SpaceProtectionSummary),
@@ -678,7 +678,7 @@ impl fmt::Debug for OperationResult {
             Self::MemberSyncPreferences(preferences) => debug
                 .field("kind", &"member_sync_preferences")
                 .field("preferences", preferences),
-            Self::WorkspaceConvergence(summary) => debug
+            Self::WorkspaceMembership(summary) => debug
                 .field("kind", &"workspace_convergence")
                 .field("summary", summary),
             Self::DeviceTrust(summary) => debug

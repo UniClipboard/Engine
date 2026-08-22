@@ -1,4 +1,5 @@
-mod active_space_manifest_store;
+mod active_space_generation_manifest_store;
+mod adapters;
 mod admission_key_manager;
 mod admission_proof;
 mod admission_security_transition;
@@ -29,7 +30,10 @@ mod session;
 mod space_access_adapter;
 pub(crate) mod v1_aead;
 
-pub use active_space_manifest_store::{ActiveSpaceManifestStore, ActiveSpaceManifestStoreError};
+pub use active_space_generation_manifest_store::{
+    ActiveSpaceGenerationManifestStore, ActiveSpaceGenerationManifestStoreError,
+};
+pub use adapters::SpaceSessionRebindAdapter;
 pub use admission_key_manager::{
     AdmissionKeyError, AdmissionKeyManager, WrappedAdmissionAttemptDataKey,
 };
@@ -58,9 +62,7 @@ pub use key_material::KeyMaterialStore;
 pub use key_migration_adapter::DefaultKeyMigrationAdapter;
 pub use membership_security_update_adapter::DefaultMembershipSecurityUpdateAdapter;
 pub use peer_admission_adapter::MlsPeerAdmissionAdapter;
-pub use profile_lifecycle::{
-    FactoryResetPhaseV1, ProfileLifecycleError, ProfileLifecycleManager, ProfileLifecycleMarkerV1,
-};
+pub use profile_lifecycle::ProfileLifecycleRepository;
 pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
 pub(crate) use secrets::MasterKey;
 pub use session::InMemorySession;

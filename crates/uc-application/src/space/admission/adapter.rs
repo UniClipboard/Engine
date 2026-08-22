@@ -23,7 +23,7 @@ use uc_core::pairing::JoinerRequest;
 use uc_core::ports::space::GroupAdmissionPort;
 use uc_core::space_access::PreparedGroupJoin;
 
-use crate::space::convergence::{WorkspaceConvergence, WorkspaceConvergenceError};
+use crate::space::workspace_membership::{WorkspaceConvergenceError, WorkspaceMembership};
 
 pub(crate) fn stable_join_request_binding(
     device_id: &DeviceId,
@@ -55,7 +55,7 @@ pub(crate) enum DurableJoinerCompletion {
 }
 
 /// The workspace-owner side of the admission seam. Implemented by
-/// [`WorkspaceConvergence`]; consumed only by the pairing channel inside
+/// [`WorkspaceMembership`]; consumed only by the pairing channel inside
 /// this module.
 #[async_trait]
 pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
@@ -185,19 +185,23 @@ pub(crate) trait WorkspaceAdmissionOwnerPort: Send + Sync {
 }
 
 #[async_trait]
-impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
+impl WorkspaceAdmissionOwnerPort for crate::space::admission::SpaceAdmission {
     async fn preflight_local_join_source(
         &self,
         preserve_unreadable_history: bool,
     ) -> Result<(), WorkspaceConvergenceError> {
-        WorkspaceConvergence::preflight_local_join_source(self, preserve_unreadable_history).await
+        crate::space::admission::SpaceAdmission::preflight_local_join_source(
+            self,
+            preserve_unreadable_history,
+        )
+        .await
     }
 
     async fn validate_join_request(
         &self,
         request: &JoinerRequest,
     ) -> Result<(), WorkspaceConvergenceError> {
-        WorkspaceConvergence::validate_join_request(self, request).await
+        crate::space::admission::SpaceAdmission::validate_join_request(self, request).await
     }
 
     async fn prepare_local_join_before_network(
@@ -209,7 +213,7 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         stable_request_binding: &[u8],
         preserve_unreadable_history: bool,
     ) -> Result<DurableLocalJoinPreparation, WorkspaceConvergenceError> {
-        WorkspaceConvergence::prepare_local_join_before_network(
+        crate::space::admission::SpaceAdmission::prepare_local_join_before_network(
             self,
             preparation,
             local_device_id,
@@ -226,21 +230,25 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         attempt_id: [u8; 32],
         reason: uc_core::membership::AdmissionRejectionReasonV1,
     ) -> Result<(), WorkspaceConvergenceError> {
-        WorkspaceConvergence::reject_local_join_before_candidate(self, attempt_id, reason).await
+        crate::space::admission::SpaceAdmission::reject_local_join_before_candidate(
+            self, attempt_id, reason,
+        )
+        .await
     }
 
     async fn reject_superseded_join_cleanup(
         &self,
         frame: &uc_core::pairing::DurableAdmissionFrame,
     ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
-        WorkspaceConvergence::reject_superseded_join_cleanup(self, frame).await
+        crate::space::admission::SpaceAdmission::reject_superseded_join_cleanup(self, frame).await
     }
 
     async fn confirm_superseded_join_cleanup_sent(
         &self,
         frame: &uc_core::pairing::DurableAdmissionFrame,
     ) -> Result<(), WorkspaceConvergenceError> {
-        WorkspaceConvergence::confirm_superseded_join_cleanup_sent(self, frame).await
+        crate::space::admission::SpaceAdmission::confirm_superseded_join_cleanup_sent(self, frame)
+            .await
     }
 
     async fn admission_decision_for_joiner(
@@ -248,23 +256,20 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         invitation_generation: u64,
         joiner_device_id: &DeviceId,
     ) -> MembershipAdmissionDecision {
-        WorkspaceConvergence::admission_decision_for_joiner(
-            self,
-            invitation_generation,
-            joiner_device_id,
-        )
-        .await
+        self.membership
+            .admission_decision_for_joiner(invitation_generation, joiner_device_id)
+            .await
     }
 
     async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
-        WorkspaceConvergence::synchronize_chain(self).await
+        self.membership.synchronize_chain().await
     }
 
     async fn prepare_sponsor_candidate(
         &self,
         request: &JoinerRequest,
     ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
-        WorkspaceConvergence::prepare_sponsor_candidate(self, request).await
+        crate::space::admission::SpaceAdmission::prepare_sponsor_candidate(self, request).await
     }
 
     async fn prepare_joiner_candidate(
@@ -274,7 +279,7 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         target_access: &(dyn uc_core::ports::space::PrepareAdmissionTargetAccessPort + Send + Sync),
         passphrase: &uc_core::crypto::domain::Passphrase,
     ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
-        WorkspaceConvergence::prepare_joiner_candidate(
+        crate::space::admission::SpaceAdmission::prepare_joiner_candidate(
             self,
             frame,
             proof_signer,
@@ -288,7 +293,7 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         &self,
         frame: &uc_core::pairing::DurableAdmissionFrame,
     ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
-        WorkspaceConvergence::commit_sponsor_prepared(self, frame).await
+        crate::space::admission::SpaceAdmission::commit_sponsor_prepared(self, frame).await
     }
 
     async fn apply_joiner_commit(
@@ -296,27 +301,28 @@ impl WorkspaceAdmissionOwnerPort for WorkspaceConvergence {
         frame: &uc_core::pairing::DurableAdmissionFrame,
         receipt_signer: &(dyn GroupAdmissionPort + Send + Sync),
     ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
-        WorkspaceConvergence::apply_joiner_commit(self, frame, receipt_signer).await
+        crate::space::admission::SpaceAdmission::apply_joiner_commit(self, frame, receipt_signer)
+            .await
     }
 
     async fn complete_sponsor_applied(
         &self,
         frame: &uc_core::pairing::DurableAdmissionFrame,
     ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
-        WorkspaceConvergence::complete_sponsor_applied(self, frame).await
+        crate::space::admission::SpaceAdmission::complete_sponsor_applied(self, frame).await
     }
 
     async fn activate_joiner_complete(
         &self,
         frame: &uc_core::pairing::DurableAdmissionFrame,
     ) -> Result<DurableJoinerCompletion, WorkspaceConvergenceError> {
-        WorkspaceConvergence::activate_joiner_complete(self, frame).await
+        crate::space::admission::SpaceAdmission::activate_joiner_complete(self, frame).await
     }
 
     async fn confirm_sponsor_complete_ack(
         &self,
         frame: &uc_core::pairing::DurableAdmissionFrame,
     ) -> Result<(), WorkspaceConvergenceError> {
-        WorkspaceConvergence::confirm_sponsor_complete_ack(self, frame).await
+        crate::space::admission::SpaceAdmission::confirm_sponsor_complete_ack(self, frame).await
     }
 }

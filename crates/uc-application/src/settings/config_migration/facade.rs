@@ -15,12 +15,9 @@ use uc_core::ports::config_migration::{
     ConfigImportPreview, ConfigMigrationError, ExportConfigBundlePort, PreviewConfigImportPort,
     StageConfigImportPort, StagedConfigImport,
 };
-use uc_core::ports::setup::SetupStatusPort;
-use uc_core::ports::space::IsSpaceUnlockedPort;
 
-/// Logical space identity used for the single-space deployment, mirroring the
-/// constant the encryption facade gates on so both read the same session.
-const DEFAULT_SPACE_ID: &str = "space";
+use crate::space::current_space::{CurrentSpaceIdentityPort, PortableCurrentSpaceIdentityPort};
+use crate::space::session::IsSpaceUnlockedPort;
 
 /// Ports consumed by [`ConfigMigrationFacade`].
 ///
@@ -38,7 +35,8 @@ pub struct ConfigMigrationDeps {
     pub stage_import: Arc<dyn StageConfigImportPort>,
     /// Source of truth for whether this installation has completed setup
     /// (i.e. holds configuration). Shared with the encryption facade.
-    pub setup_status: Arc<dyn SetupStatusPort>,
+    pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
+    pub portable_current_space_identity: Arc<dyn PortableCurrentSpaceIdentityPort>,
     /// Reports whether the in-memory session is currently unlocked.
     pub is_unlocked: Arc<dyn IsSpaceUnlockedPort>,
 }
@@ -75,12 +73,17 @@ impl ConfigMigrationFacade {
     /// On success returns the path the bundle was written to.
     #[instrument(skip_all)]
     pub async fn export_config(&self, destination: &Path) -> Result<PathBuf, ConfigMigrationError> {
-        if !self.is_initialized().await? {
-            return Err(ConfigMigrationError::NotInitialized);
-        }
-        if !self.deps.is_unlocked.is_unlocked(&default_space_id()).await {
+        let space_id = self.current_space_id().await?;
+        if !self.deps.is_unlocked.is_unlocked(&space_id).await {
             return Err(ConfigMigrationError::Locked);
         }
+        self.deps
+            .portable_current_space_identity
+            .prepare_portable_identity()
+            .await
+            .map_err(|error| ConfigMigrationError::Internal {
+                details: format!("preparing portable current Space identity failed: {error}"),
+            })?;
 
         self.deps.export_bundle.export_bundle(destination).await
     }
@@ -124,20 +127,16 @@ impl ConfigMigrationFacade {
     /// Reads the same `has_completed` flag the encryption facade treats as the
     /// "initialized" truth, mapping a read failure to
     /// [`ConfigMigrationError::Internal`] (never surfacing secret material).
-    async fn is_initialized(&self) -> Result<bool, ConfigMigrationError> {
+    async fn current_space_id(&self) -> Result<SpaceId, ConfigMigrationError> {
         self.deps
-            .setup_status
-            .get_status()
+            .current_space_identity
+            .current_space_id()
             .await
-            .map(|status| status.has_completed)
             .map_err(|err| ConfigMigrationError::Internal {
-                details: format!("failed to read setup status: {err}"),
-            })
+                details: format!("failed to read current Space identity: {err}"),
+            })?
+            .ok_or(ConfigMigrationError::NotInitialized)
     }
-}
-
-fn default_space_id() -> SpaceId {
-    SpaceId::from(DEFAULT_SPACE_ID)
 }
 
 #[cfg(test)]
@@ -150,48 +149,57 @@ mod tests {
     use async_trait::async_trait;
     use uc_core::ids::ProfileId;
     use uc_core::ports::config_migration::ConfigSourceMode;
-    use uc_core::setup::SetupStatus;
-
-    /// In-memory `SetupStatusPort` whose `has_completed` flag drives the
-    /// initialized gate.
-    struct FakeSetupStatus {
-        status: Mutex<SetupStatus>,
+    struct FakeCurrentSpace {
+        space_id: Option<SpaceId>,
+        portable_calls: Mutex<u32>,
     }
 
-    impl FakeSetupStatus {
+    impl FakeCurrentSpace {
         fn new(has_completed: bool) -> Arc<Self> {
             Arc::new(Self {
-                status: Mutex::new(SetupStatus {
-                    has_completed,
-                    ..SetupStatus::default()
-                }),
+                space_id: has_completed.then(|| SpaceId::from("space")),
+                portable_calls: Mutex::new(0),
             })
         }
     }
 
     #[async_trait]
-    impl SetupStatusPort for FakeSetupStatus {
-        async fn get_status(&self) -> anyhow::Result<SetupStatus> {
-            Ok(self.status.lock().expect("status lock").clone())
+    impl CurrentSpaceIdentityPort for FakeCurrentSpace {
+        async fn current_space_id(
+            &self,
+        ) -> Result<Option<SpaceId>, crate::space::current_space::CurrentSpaceIdentityError>
+        {
+            Ok(self.space_id.clone())
         }
+    }
 
-        async fn set_status(&self, status: &SetupStatus) -> anyhow::Result<()> {
-            *self.status.lock().expect("status lock") = status.clone();
+    #[async_trait]
+    impl PortableCurrentSpaceIdentityPort for FakeCurrentSpace {
+        async fn prepare_portable_identity(
+            &self,
+        ) -> Result<(), crate::space::current_space::CurrentSpaceIdentityError> {
+            *self.portable_calls.lock().expect("portable calls") += 1;
             Ok(())
         }
     }
 
-    /// `SetupStatusPort` that always fails its read, to exercise the
-    /// `Internal` mapping.
-    struct FailingSetupStatus;
+    struct FailingCurrentSpace;
 
     #[async_trait]
-    impl SetupStatusPort for FailingSetupStatus {
-        async fn get_status(&self) -> anyhow::Result<SetupStatus> {
-            Err(anyhow::anyhow!("status backend down"))
+    impl CurrentSpaceIdentityPort for FailingCurrentSpace {
+        async fn current_space_id(
+            &self,
+        ) -> Result<Option<SpaceId>, crate::space::current_space::CurrentSpaceIdentityError>
+        {
+            Err(crate::space::current_space::CurrentSpaceIdentityError::Unavailable)
         }
+    }
 
-        async fn set_status(&self, _status: &SetupStatus) -> anyhow::Result<()> {
+    #[async_trait]
+    impl PortableCurrentSpaceIdentityPort for FailingCurrentSpace {
+        async fn prepare_portable_identity(
+            &self,
+        ) -> Result<(), crate::space::current_space::CurrentSpaceIdentityError> {
             Ok(())
         }
     }
@@ -261,11 +269,13 @@ mod tests {
         unlocked: bool,
         ports: Arc<SpyMigrationPorts>,
     ) -> ConfigMigrationFacade {
+        let current_space = FakeCurrentSpace::new(initialized);
         ConfigMigrationFacade::new(ConfigMigrationDeps {
             export_bundle: ports.clone(),
             preview_import: ports.clone(),
             stage_import: ports.clone(),
-            setup_status: FakeSetupStatus::new(initialized),
+            current_space_identity: current_space.clone(),
+            portable_current_space_identity: current_space,
             is_unlocked: Arc::new(FakeIsUnlocked { unlocked }),
         })
     }
@@ -323,7 +333,8 @@ mod tests {
             export_bundle: ports.clone(),
             preview_import: ports.clone(),
             stage_import: ports.clone(),
-            setup_status: Arc::new(FailingSetupStatus),
+            current_space_identity: Arc::new(FailingCurrentSpace),
+            portable_current_space_identity: Arc::new(FailingCurrentSpace),
             is_unlocked: Arc::new(FakeIsUnlocked { unlocked: true }),
         });
 

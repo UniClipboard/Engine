@@ -6,7 +6,7 @@
 use crate::error_codes::*;
 
 use tracing::error;
-use uc_application::facade::{AppFacade, SpaceActivityError, SpaceSessionError};
+use uc_application::facade::{AppFacade, RecoverSpaceSessionError, SpaceActivityError};
 
 use crate::{EngineError, EngineErrorCategory, OperationResult, RecoverSessionInput};
 
@@ -14,8 +14,15 @@ pub async fn execute_recover_session(
     facade: &AppFacade,
     input: RecoverSessionInput,
 ) -> Result<OperationResult, EngineError> {
+    if !input.allow_secure_storage_unlock {
+        return Ok(OperationResult::SessionRecovered {
+            unlocked: false,
+            resumed: false,
+        });
+    }
+
     let result = facade
-        .recover_space_session(input.allow_secure_storage_unlock)
+        .recover_space_session()
         .await
         .map_err(map_recover_session_error)?;
 
@@ -25,10 +32,10 @@ pub async fn execute_recover_session(
     })
 }
 
-fn map_recover_session_error(error: SpaceSessionError) -> EngineError {
+fn map_recover_session_error(error: RecoverSpaceSessionError) -> EngineError {
     if matches!(
         error,
-        SpaceSessionError::Activity(SpaceActivityError::Receive(_))
+        RecoverSpaceSessionError::Activity(SpaceActivityError::Receive(_))
     ) {
         return recover_session_error(
             RECOVER_SESSION_RECEIVE_UNAVAILABLE_CODE,

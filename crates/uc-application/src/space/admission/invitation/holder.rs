@@ -21,6 +21,8 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::space::reset_space::ports::PendingSpaceInvitationResetPort;
+
 use uc_core::pairing::invitation::{
     ConsumeError, InvitationCode, InvitationState, PairingInvitation,
 };
@@ -131,6 +133,13 @@ impl InMemoryPairingInvitationHolder {
     #[cfg(test)]
     pub(crate) async fn get_for_test(&self, code: &InvitationCode) -> Option<PairingInvitation> {
         self.by_code.lock().await.get(code).cloned()
+    }
+}
+
+#[async_trait::async_trait]
+impl PendingSpaceInvitationResetPort for InMemoryPairingInvitationHolder {
+    async fn cancel_all(&self) -> usize {
+        InMemoryPairingInvitationHolder::cancel_all(self).await
     }
 }
 

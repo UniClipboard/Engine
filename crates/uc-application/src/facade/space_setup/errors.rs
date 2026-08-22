@@ -4,51 +4,6 @@ use std::net::IpAddr;
 
 use thiserror::Error;
 
-/// Failure modes of A1 `InitializeSpaceUseCase`.
-///
-/// Kept narrower than the ports' native error types so callers can branch
-/// on **what action to take next** (ask user again / surface a support
-/// message / crash-logs) without having to understand cryptographic
-/// details.
-#[derive(Debug, Error)]
-pub enum InitializeSpaceError {
-    /// `passphrase` and `passphrase_confirm` differed. UI should keep the
-    /// user on the current form.
-    #[error("passphrase and confirmation do not match")]
-    PassphraseMismatch,
-
-    /// No device name available — neither in the command nor in
-    /// `Settings.general.device_name`.
-    #[error("device name is required but not provided")]
-    DeviceNameRequired,
-
-    /// The local space has already been initialised. User should unlock
-    /// (A2) instead, or run a factory reset first.
-    #[error("space is already initialised")]
-    AlreadyInitialized,
-
-    /// Setup was already completed for this device. Distinct from
-    /// [`AlreadyInitialized`](Self::AlreadyInitialized) at the port layer:
-    /// this variant is raised up-front by the use case when
-    /// `SetupStatus.has_completed == true`, so it fires even if the
-    /// keyslot is somehow missing. Identity lifetime is a bootstrap-time
-    /// concern (the iroh endpoint binds its Ed25519 secret before any A1
-    /// can run), so the "fresh install" guard keys off setup status
-    /// rather than identity existence.
-    #[error("setup has already been completed on this device")]
-    AlreadySetup,
-
-    /// Failed to read or persist settings / membership / setup-status —
-    /// message carries adapter-level context for logs.
-    #[error("storage failure: {0}")]
-    StorageFailed(String),
-
-    /// Any other uncategorised failure (adapter internal / infra-layer
-    /// bug). Treat as fatal for the current action.
-    #[error("internal error: {0}")]
-    Internal(String),
-}
-
 /// Failure modes of B1 `IssuePairingInvitationUseCase`.
 ///
 /// Mirrors
@@ -181,31 +136,6 @@ pub enum RedeemPairingInvitationError {
     Internal(String),
 }
 
-/// Failure modes of A2 `UnlockSpaceUseCase`.
-#[derive(Debug, Error)]
-pub enum UnlockSpaceError {
-    /// Setup has not been completed — there is no space to unlock yet.
-    #[error("setup has not been completed")]
-    SetupNotCompleted,
-
-    /// Space exists only logically (setup marked complete) but the
-    /// underlying keyslot is missing / corrupted.
-    #[error("space is not initialised")]
-    SpaceNotInitialized,
-
-    /// Passphrase did not unwrap the stored master key.
-    #[error("wrong passphrase")]
-    WrongPassphrase,
-
-    /// Stored keyslot was corrupted or in an unsupported format.
-    #[error("space key material corrupted")]
-    CorruptedKeyMaterial,
-
-    /// Uncategorised infra / adapter failure.
-    #[error("internal error: {0}")]
-    Internal(String),
-}
-
 /// Failure modes of [`crate::facade::space_setup::SpaceFacade::cancel_invitation`]
 /// (Slice4 P3 T3.2).
 #[derive(Debug, Error)]
@@ -221,91 +151,13 @@ pub enum CancelInvitationError {
     Internal(String),
 }
 
-/// Failure modes of [`crate::facade::space_setup::SpaceFacade::reset`]
-/// (Slice4 P3 T3.2).
-#[derive(Debug, Error)]
-pub enum ResetSpaceError {
-    #[error("failed to prepare device management reset: {0}")]
-    PreparationFailed(String),
-
-    #[error("failed to stage device management reset: {0}")]
-    StagingFailed(String),
-
-    #[error("failed to rebuild the single-device space: {0}")]
-    RebuildFailed(String),
-
-    #[error("failed to commit device management reset: {0}")]
-    CommitFailed(String),
-
-    #[error("device management reset committed but finalization failed: {0}")]
-    FinalizationFailed(String),
-
-    /// Uncategorised infra / adapter failure.
-    #[error("internal error: {0}")]
-    Internal(String),
-}
-
-/// Failure modes of [`crate::facade::space_setup::SpaceFacade::factory_reset`].
-///
-/// 用户级"重置并重新开始"的失败原因。与 `ResetSpaceError` 不同,本路径
-/// 还会调 `FactoryResetSpacePort::factory_reset` 删 keyslot + KEK,所以多了
-/// `KeyMaterialWipeFailed` 变体——磁盘上残留的 keyslot 会让后续
-/// `InitializeSpaceUseCase` 撞到 `AlreadyInitialized`,把用户卡死,所以
-/// 这一步失败必须显式上抛而不是吞掉。
-///
-/// 步骤顺序: (1) wipe key material → (2) clear prior-space peer state →
-/// (3) clear setup status → (4) cancel invitations。前一步失败时后一步不执行,
-/// 避免出现"setup_status 已清但 keyslot 残留"的更糟状态。
-#[derive(Debug, Error)]
-pub enum FactoryResetError {
-    /// `FactoryResetSpacePort::factory_reset` 失败 —— keyslot / KEK 删除出错,
-    /// 后续重新 setup 会撞 `AlreadyInitialized`。
-    #[error("failed to wipe key material: {0}")]
-    KeyMaterialWipeFailed(String),
-
-    /// Failed to clear `SetupStatus` — key material 已清但 setup_status
-    /// 没清,UI 会卡在"已 setup 但 session 解不开"。
-    #[error("failed to clear setup status: {0}")]
-    StorageFailed(String),
-
-    /// Uncategorised infra / adapter failure.
-    #[error("internal error: {0}")]
-    Internal(String),
-}
-
 /// Failure modes of [`crate::facade::space_setup::SpaceFacade::query_setup_state`]
 /// (Slice4 P3 T3.2).
 #[derive(Debug, Error)]
 pub enum QuerySetupStateError {
-    /// Failed to read `SetupStatus` from persistent storage.
-    #[error("failed to read setup status: {0}")]
+    /// Failed to read the current Space identity or another setup projection.
+    #[error("failed to read setup state: {0}")]
     StorageFailed(String),
-
-    /// Uncategorised infra / adapter failure.
-    #[error("internal error: {0}")]
-    Internal(String),
-}
-
-/// Failure modes of [`crate::facade::space_setup::SpaceFacade::try_resume_session`].
-///
-/// Kept narrow on purpose: "nothing to resume" (setup never completed
-/// or keyslot absent) is a **normal** signal returned as `Ok(false)`,
-/// not an error. Only genuine problems — corrupt key material, a
-/// missing keyring entry that blocks silent resume despite the keyslot
-/// being on disk, or an unexpected adapter fault — surface as errors.
-#[derive(Debug, Error)]
-pub enum TryResumeSessionError {
-    /// The keyslot exists on disk but the keyring entry needed to
-    /// unwrap it is missing or rejected (typically: user wiped the
-    /// system keychain item, or permission was denied). Caller should
-    /// fall back to a passphrase-based `unlock` once that CLI surface
-    /// exists; until then the operator must re-init the profile.
-    #[error("cached master key is not available from the keyring")]
-    KeyringMiss,
-
-    /// Stored keyslot was corrupted or in an unsupported format.
-    #[error("space key material corrupted")]
-    CorruptedKeyMaterial,
 
     /// Uncategorised infra / adapter failure.
     #[error("internal error: {0}")]

@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use uc_core::ports::{AppVersionStatePort, SetupStatusPort};
+use uc_core::ports::AppVersionStatePort;
+
+use crate::space::current_space::CurrentSpaceIdentityPort;
 
 use crate::settings::upgrade::acknowledge::{
     AcknowledgeError as InnerAcknowledgeError, AcknowledgeUseCase,
@@ -39,7 +41,7 @@ pub enum DetectUpgradeError {
     ReadCursor(String),
 
     #[error("read setup status failed: {0}")]
-    ReadSetupStatus(String),
+    ReadCurrentSpace(String),
 }
 
 impl From<InnerDetectUpgradeError> for DetectUpgradeError {
@@ -47,7 +49,7 @@ impl From<InnerDetectUpgradeError> for DetectUpgradeError {
         match value {
             InnerDetectUpgradeError::CurrentVersionMalformed(s) => Self::CurrentVersionMalformed(s),
             InnerDetectUpgradeError::ReadCursor(e) => Self::ReadCursor(e.to_string()),
-            InnerDetectUpgradeError::ReadSetupStatus(s) => Self::ReadSetupStatus(s),
+            InnerDetectUpgradeError::ReadCurrentSpace(s) => Self::ReadCurrentSpace(s),
         }
     }
 }
@@ -74,7 +76,7 @@ impl From<InnerAcknowledgeError> for AcknowledgeUpgradeError {
 /// 构造 `UpgradeFacade` 所需的端口集合。
 pub struct UpgradeFacadeDeps {
     pub app_version_state: Arc<dyn AppVersionStatePort>,
-    pub setup_status: Arc<dyn SetupStatusPort>,
+    pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
 }
 
 /// 升级检测 facade。线程安全，可放入 `Arc`。
@@ -87,10 +89,10 @@ impl UpgradeFacade {
     pub fn new(deps: UpgradeFacadeDeps) -> Self {
         let UpgradeFacadeDeps {
             app_version_state,
-            setup_status,
+            current_space_identity,
         } = deps;
         Self {
-            detect: DetectUpgradeUseCase::new(app_version_state.clone(), setup_status),
+            detect: DetectUpgradeUseCase::new(app_version_state.clone(), current_space_identity),
             acknowledge: AcknowledgeUseCase::new(app_version_state),
         }
     }
@@ -122,7 +124,6 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Mutex;
     use uc_core::ports::AppVersionStateError;
-    use uc_core::setup::SetupStatus;
 
     struct FakeVersionState {
         value: Mutex<Option<String>>,
@@ -145,17 +146,16 @@ mod tests {
         }
     }
 
-    struct FakeSetupStatus(bool);
+    struct FakeCurrentSpace(bool);
     #[async_trait]
-    impl SetupStatusPort for FakeSetupStatus {
-        async fn get_status(&self) -> anyhow::Result<SetupStatus> {
-            Ok(SetupStatus {
-                has_completed: self.0,
-                ..SetupStatus::default()
-            })
-        }
-        async fn set_status(&self, _: &SetupStatus) -> anyhow::Result<()> {
-            unreachable!()
+    impl CurrentSpaceIdentityPort for FakeCurrentSpace {
+        async fn current_space_id(
+            &self,
+        ) -> Result<
+            Option<uc_core::ids::SpaceId>,
+            crate::space::current_space::CurrentSpaceIdentityError,
+        > {
+            Ok(self.0.then(|| uc_core::ids::SpaceId::from("space")))
         }
     }
 
@@ -164,7 +164,7 @@ mod tests {
         let port = FakeVersionState::new(None);
         let facade = UpgradeFacade::new(UpgradeFacadeDeps {
             app_version_state: port.clone(),
-            setup_status: Arc::new(FakeSetupStatus(true)),
+            current_space_identity: Arc::new(FakeCurrentSpace(true)),
         });
 
         // First call: missing cursor + completed setup → unknown upgrade.

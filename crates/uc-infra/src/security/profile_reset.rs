@@ -4,11 +4,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
-use uc_core::app_dirs::AppPaths;
-use uc_core::ports::{
-    ClearProfileStatePort, ProfileFactoryResetCapabilityError, SecureStoragePort,
+use uc_application::deps::{
+    ClearProfileStatePort, ProfileFactoryResetCapabilityError, ProfileGeneration,
     WipeProfileKeysPort,
 };
+use uc_core::app_dirs::AppPaths;
+use uc_core::ports::SecureStoragePort;
 
 use crate::db::pool::DbPool;
 
@@ -93,9 +94,9 @@ impl ProfileKeyWiper {
 impl WipeProfileKeysPort for ProfileKeyWiper {
     async fn wipe_and_verify_profile_keys(
         &self,
-        profile_generation: [u8; 16],
+        profile_generation: ProfileGeneration,
     ) -> Result<(), ProfileFactoryResetCapabilityError> {
-        if self.admission_keys.profile_generation() != profile_generation {
+        if self.admission_keys.profile_generation() != profile_generation.into_bytes() {
             return Err(capability_error());
         }
         self.wipe_active_space_keys()?;
@@ -231,7 +232,6 @@ impl ProfileStateCleaner {
 impl ClearProfileStatePort for ProfileStateCleaner {
     async fn clear_and_verify_profile_state(
         &self,
-        _profile_generation: [u8; 16],
     ) -> Result<(), ProfileFactoryResetCapabilityError> {
         self.clear_database()?;
         self.database
@@ -273,10 +273,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use diesel::{Connection, RunQueryDsl, SqliteConnection};
+    use uc_application::deps::{ClearProfileStatePort, WipeProfileKeysPort};
     use uc_core::app_dirs::AppPaths;
     use uc_core::ports::security::secure_storage::{SecureStorageError, SecureStoragePort};
     use uc_core::ports::security::MigrationRunId;
-    use uc_core::ports::{ClearProfileStatePort, WipeProfileKeysPort};
 
     use super::{ProfileKeyWiper, ProfileStateCleaner};
 
@@ -339,7 +339,7 @@ mod tests {
         );
 
         wiper
-            .wipe_and_verify_profile_keys([0x77; 16])
+            .wipe_and_verify_profile_keys(ProfileGeneration::from_bytes([0x77; 16]))
             .await
             .unwrap();
 
@@ -398,10 +398,7 @@ mod tests {
         let pool = crate::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();
         let cleaner = ProfileStateCleaner::new(pool, paths.clone(), paths.db_path.clone());
 
-        cleaner
-            .clear_and_verify_profile_state([0x44; 16])
-            .await
-            .unwrap();
+        cleaner.clear_and_verify_profile_state().await.unwrap();
 
         assert!(!paths.db_path.exists());
         assert!(!paths.vault_dir.exists());

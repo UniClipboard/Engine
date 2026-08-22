@@ -50,10 +50,9 @@ use uc_application::facade::{
     BlobTransferFacade, ClipboardLiveIndexDeps, ClipboardLiveIndexPort, ClipboardLiveIndexer,
     ClipboardSnapshotDeps, ClipboardSyncDeps, ClipboardSyncFacade, HostEvent, HostEventBus,
     InboundClipboardApplyPort, MemberRosterDeps, MemberRosterFacade, MembershipConnectivityDeps,
-    MembershipConvergenceDeps, SpaceAdmissionDeps, SpaceApplicationRuntime,
-    SpaceConvergenceAssembly, SpaceConvergenceDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps,
-    SpaceTransitionDeps, TransferHostEvent, UpgradeFacade, UpgradeFacadeDeps,
-    WorkspaceConvergenceDeps,
+    MembershipConvergenceDeps, SpaceAdmissionDeps, SpaceApplicationRuntime, SpaceFacade,
+    SpaceFacadeDeps, SpaceModules, SpaceModulesDeps, SpaceSessionDeps, SpaceTransitionDeps,
+    TransferHostEvent, UpgradeFacade, UpgradeFacadeDeps, WorkspaceMembershipDeps,
 };
 use uc_application::facade::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
@@ -187,7 +186,7 @@ pub struct SyncEngineAssembly {
     /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
     /// 与 sync assembly 同生命周期。
     outbound_progress_translator: OutboundProgressRuntime,
-    convergence_assembly: Arc<SpaceConvergenceAssembly>,
+    convergence_assembly: Arc<SpaceModules>,
     space_application_runtime: SpaceApplicationRuntime,
 }
 
@@ -275,10 +274,8 @@ impl SyncEngineAssembly {
         self.convergence_assembly.space_transition_recovery()
     }
 
-    pub(crate) fn workspace_convergence(
-        &self,
-    ) -> Arc<uc_application::facade::WorkspaceConvergence> {
-        self.convergence_assembly.workspace_convergence()
+    pub(crate) fn workspace_convergence(&self) -> Arc<uc_application::facade::WorkspaceMembership> {
+        self.convergence_assembly.workspace_membership()
     }
 
     /// Coordinated teardown. Order matters:
@@ -597,7 +594,7 @@ pub async fn build_sync_engine_assembly(
 ) -> Result<SyncEngineAssembly, SyncEngineAssemblyError> {
     let upgrade = UpgradeFacade::new(UpgradeFacadeDeps {
         app_version_state: Arc::clone(&deps.app_version_state),
-        setup_status: Arc::clone(&deps.setup_status),
+        current_space_identity: Arc::clone(&deps.current_space_identity),
     });
     let upgrade_status = upgrade.detect_on_startup(current_app_version).await?;
     if matches!(
@@ -687,8 +684,8 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.security.fingerprint),
         Arc::clone(&deps.system.clock),
     );
-    let convergence_assembly = SpaceConvergenceAssembly::new(SpaceConvergenceDeps {
-        workspace: WorkspaceConvergenceDeps {
+    let convergence_assembly = SpaceModules::new(SpaceModulesDeps {
+        workspace: WorkspaceMembershipDeps {
             initial_state_origin,
             repository: Arc::clone(&space_setup.workspace_convergence_repository),
             admission_attempts: Arc::clone(&space_setup.admission_attempt_repository),
@@ -923,11 +920,12 @@ pub async fn build_sync_engine_assembly(
     let facade = Arc::new(SpaceFacade::new(SpaceFacadeDeps {
         session: SpaceSessionDeps {
             space_access: deps.security.space_access_ports.clone(),
-            setup_status: Arc::clone(&deps.setup_status),
             mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
             legacy_profile_isolation_required,
             app_version_state: Arc::clone(&deps.app_version_state),
             current_app_version: current_app_version.to_owned(),
+            current_space_identity: Arc::clone(&deps.current_space_identity),
+            initial_space_activation: Arc::clone(&deps.initial_space_activation),
         },
         admission: SpaceAdmissionDeps {
             local_identity: Arc::clone(&local_identity),
@@ -948,9 +946,12 @@ pub async fn build_sync_engine_assembly(
             convergence: Arc::clone(&convergence_assembly),
         },
         transition: SpaceTransitionDeps {
+            admission_attempts: Arc::clone(&space_setup.admission_attempt_repository),
             device_management_reset_data: Arc::clone(&space_setup.device_management_reset_data),
             relationship_reset: Arc::clone(&space_setup.relationship_reset),
             space_security_reset: Arc::clone(&space_setup.space_security_reset),
+            space_rebuild_progress: Arc::clone(&deps.space_rebuild_progress),
+            re_pairing_state_store: Arc::clone(&deps.re_pairing_state_store),
         },
     }));
 

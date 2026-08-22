@@ -52,7 +52,7 @@ use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::admission::invitation::holder::{
     InMemoryPairingInvitationHolder, TakeMatchingError,
 };
-use crate::space::convergence::WorkspaceConvergenceError;
+use crate::space::workspace_membership::WorkspaceConvergenceError;
 
 /// Drives sponsor-side inbound pairing events.
 pub(crate) struct PairingInboundOrchestrator {
@@ -676,9 +676,7 @@ mod tests {
     use uc_core::ports::pairing::{DialError, DialOutcome, PairingSessionPort, SessionError};
     use uc_core::ports::pairing_invitation::{InvitationError, IssuedInvitation};
     use uc_core::ports::space::{PrepareAdmissionOfferPort, ProofPort, SpaceAccessError};
-    use uc_core::ports::{
-        ClockPort, ConsumeInvitationError, PairingInvitationPort, SetupStatusPort,
-    };
+    use uc_core::ports::{ClockPort, ConsumeInvitationError, PairingInvitationPort};
     use uc_core::security::IdentityFingerprint;
     use uc_core::space_access::domain::{
         PreparedAdmissionOffer, ProofDerivedKey, SpaceAccessProofArtifact,
@@ -689,9 +687,9 @@ mod tests {
 
     use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
     use crate::space::admission::invitation::holder::InMemoryPairingInvitationHolder;
-    use crate::space::convergence::WorkspaceConvergenceError;
+    use crate::space::workspace_membership::WorkspaceConvergenceError;
 
-    use crate::space::convergence::membership::group_update_delivery::GroupUpdateDeliveryPort;
+    use crate::space::workspace_membership::membership::group_update_delivery::GroupUpdateDeliveryPort;
 
     // ── fakes ────────────────────────────────────────────────────────────
 
@@ -996,18 +994,14 @@ mod tests {
         }
     }
 
-    struct OrchestratorStubSetupStatus;
+    struct OrchestratorStubCurrentSpace;
     #[async_trait]
-    impl SetupStatusPort for OrchestratorStubSetupStatus {
-        async fn get_status(&self) -> anyhow::Result<uc_core::setup::SetupStatus> {
-            Ok(uc_core::setup::SetupStatus {
-                has_completed: true,
-                space_id: None,
-                re_pairing_required: false,
-            })
-        }
-        async fn set_status(&self, _s: &uc_core::setup::SetupStatus) -> anyhow::Result<()> {
-            Ok(())
+    impl crate::space::current_space::CurrentSpaceIdentityPort for OrchestratorStubCurrentSpace {
+        async fn current_space_id(
+            &self,
+        ) -> Result<Option<SpaceId>, crate::space::current_space::CurrentSpaceIdentityError>
+        {
+            Ok(Some(SpaceId::from("orchestrator-space")))
         }
     }
 
@@ -1110,7 +1104,7 @@ mod tests {
                 space_access,
                 noop_delivery(),
                 Arc::new(ScriptedProof(StdMutex::new(self.proof_verdicts))),
-                Arc::new(OrchestratorStubSetupStatus),
+                Arc::new(OrchestratorStubCurrentSpace),
                 std::time::Duration::from_secs(3600),
             );
             let orch = Arc::new(PairingInboundOrchestrator::new(

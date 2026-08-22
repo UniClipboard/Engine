@@ -261,22 +261,11 @@ fn legacy_space_setup_types_are_removed() {
 }
 
 #[test]
-fn encryption_facade_does_not_duplicate_space_lifecycle_actions() {
+fn encryption_facade_is_removed() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let encryption = std::fs::read_to_string(
-        workspace_root.join("crates/uc-application/src/space/lifecycle/encryption/mod.rs"),
-    )
-    .expect("encryption facade source must be readable");
-    for forbidden in [
-        "pub async fn initialize(",
-        "pub async fn unlock(",
-        "pub async fn lock(",
-    ] {
-        assert!(
-            !encryption.contains(forbidden),
-            "space lifecycle action must not remain on EncryptionFacade: {forbidden}"
-        );
-    }
+    assert!(!workspace_root
+        .join("crates/uc-application/src/space/lifecycle/encryption/mod.rs")
+        .exists());
 }
 
 #[test]

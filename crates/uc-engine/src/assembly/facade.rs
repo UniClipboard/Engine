@@ -14,16 +14,18 @@ use uc_application::facade::settings::{
 use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
 use uc_application::facade::ApplyInboundClipboardUseCase;
+use uc_application::facade::{
+    build_space_session_activity, AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade,
+    ClipboardCaptureFacade, ClipboardHistoryFacade, ClipboardHistoryFacadeDeps,
+    ClipboardOutboundFacade, ClipboardRestoreFacade, ClipboardRestoreFacadeDeps,
+    ClipboardSyncFacade, DiagnosticsFacade, DiagnosticsFacadeDeps, LockSpaceSessionUseCase,
+    MemberRosterFacade, ProbeProfileKeyAccessUseCase, QueryLocalDeviceUseCase,
+    QuerySpaceAccessStateUseCase, RecoverSpaceSessionUseCase, ResourceFacade, ResourceFacadeDeps,
+    SearchFacade, SettingsFacade, SpaceSessionActivityDeps, StorageFacade, StorageFacadeDeps,
+    UpgradeFacade, UpgradeFacadeDeps,
+};
 #[cfg(feature = "lan-compat")]
 use uc_application::facade::{ActiveClipboardFacade, FileTransferFacade};
-use uc_application::facade::{
-    AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardCaptureFacade,
-    ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardOutboundFacade,
-    ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade, DeviceFacade,
-    DiagnosticsFacade, DiagnosticsFacadeDeps, EncryptionFacade, EncryptionFacadeDeps,
-    MemberRosterFacade, ResourceFacade, ResourceFacadeDeps, SearchFacade, SettingsFacade,
-    StorageFacade, StorageFacadeDeps, UpgradeFacade, UpgradeFacadeDeps,
-};
 use uc_core::clipboard::ClipboardIntegrationMode;
 #[cfg(feature = "lan-compat")]
 use uc_infra::fs::FsInboundFileTarget;
@@ -250,30 +252,38 @@ pub fn build_app_facade_from_deps(
         integration_mode: runtime.clipboard_restore.integration_mode,
     }));
 
-    let space_session_activity = uc_application::facade::SpaceSessionActivityDeps {
-        membership: runtime.space_application.membership_activity(),
-        receive: runtime.space_receive_activity,
-    };
+    let space_session_activity = build_space_session_activity(
+        Arc::clone(&runtime.search),
+        SpaceSessionActivityDeps {
+            membership: runtime.space_application.membership_activity(),
+            receive: runtime.space_receive_activity,
+        },
+    );
+    let lock_space_session = Arc::new(LockSpaceSessionUseCase::new(
+        Arc::clone(&deps.current_space_identity),
+        Arc::clone(&deps.security.space_access_ports.lock),
+        Arc::clone(&space_session_activity),
+    ));
+    let recover_space_session = Arc::new(RecoverSpaceSessionUseCase::new(
+        Arc::clone(&deps.current_space_identity),
+        Arc::clone(&deps.security.space_access_ports.resume_session),
+        runtime.space.session_readiness(),
+        Arc::clone(&space_session_activity),
+    ));
 
     Arc::new(AppFacade::new(AppFacadeParts {
         space: runtime.space,
         space_session_activity,
-        space_session_access: uc_application::facade::SpaceSessionAccessDeps {
-            setup_status: Arc::clone(&deps.setup_status),
-            resume_session: Arc::clone(&deps.security.space_access_ports.resume_session),
-            lock: Arc::clone(&deps.security.space_access_ports.lock),
-            mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
-        },
+        lock_space_session,
+        recover_space_session,
         member_roster: runtime.member_roster,
-        encryption: Arc::new(EncryptionFacade::new(EncryptionFacadeDeps {
-            setup_status: deps.setup_status.clone(),
-            is_unlocked: deps.security.space_access_ports.is_unlocked.clone(),
-            verify_keychain_access: deps
-                .security
-                .space_access_ports
-                .verify_keychain_access
-                .clone(),
-        })),
+        query_space_access_state: Arc::new(QuerySpaceAccessStateUseCase::new(
+            deps.current_space_identity.clone(),
+            deps.security.space_access_ports.is_unlocked.clone(),
+        )),
+        probe_profile_key_access: Arc::new(ProbeProfileKeyAccessUseCase::new(
+            deps.security.profile_key_access_probe.clone(),
+        )),
         resource: Arc::new(ResourceFacade::new(ResourceFacadeDeps {
             representation_by_blob_id: deps.clipboard.representation_ports.get_by_blob_id.clone(),
             representations_for_event: deps.clipboard.representation_ports.list_for_event.clone(),
@@ -335,7 +345,7 @@ pub fn build_app_facade_from_deps(
             logs_dir: storage_paths.logs_dir.clone(),
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         })),
-        device: Arc::new(DeviceFacade::new(
+        query_local_device: Arc::new(QueryLocalDeviceUseCase::new(
             deps.device.device_identity.clone(),
             deps.settings.clone(),
         )),
@@ -352,7 +362,7 @@ pub fn build_app_facade_from_deps(
         config_migration: deps.config_migration.clone(),
         upgrade: Arc::new(UpgradeFacade::new(UpgradeFacadeDeps {
             app_version_state: deps.app_version_state.clone(),
-            setup_status: deps.setup_status.clone(),
+            current_space_identity: deps.current_space_identity.clone(),
         })),
         network_recovery: runtime.network_recovery,
     }))

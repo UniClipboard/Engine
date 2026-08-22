@@ -5,10 +5,12 @@
 //! groupings). Everything else is `pub(crate)`.
 
 pub mod deps;
-pub mod facade;
 mod error;
+pub mod facade;
+mod profile;
 
 pub(crate) mod clipboard;
+pub(crate) mod device;
 pub(crate) mod search;
 pub(crate) mod settings;
 pub(crate) mod space;

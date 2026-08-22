@@ -5,7 +5,7 @@ use crate::operations::device::member::join_space_status;
 use crate::{CancelJoinSpaceInput, EngineError, EngineErrorCategory, OperationResult};
 
 pub async fn execute_cancel_join_space(
-    convergence: &uc_application::facade::ProfileWorkspaceConvergence,
+    convergence: &uc_application::facade::ProfileSpaceAdmission,
     input: CancelJoinSpaceInput,
 ) -> Result<OperationResult, EngineError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD

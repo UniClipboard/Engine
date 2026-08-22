@@ -1,0 +1,76 @@
+use std::sync::Arc;
+
+use uc_core::ports::space::SpaceAccessError;
+
+use crate::space::current_space::CurrentSpaceIdentityPort;
+use crate::space::session::{ResumeSpaceSessionPort, SpaceSessionActivity};
+use crate::space::unlock_space::PostSessionReadiness;
+
+use super::{RecoverSpaceSessionError, RecoverSpaceSessionResult};
+
+pub struct RecoverSpaceSessionUseCase {
+    current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
+    resume_session: Arc<dyn ResumeSpaceSessionPort>,
+    readiness: Arc<PostSessionReadiness>,
+    activity: Arc<SpaceSessionActivity>,
+}
+
+impl RecoverSpaceSessionUseCase {
+    pub fn new(
+        current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
+        resume_session: Arc<dyn ResumeSpaceSessionPort>,
+        readiness: Arc<PostSessionReadiness>,
+        activity: Arc<SpaceSessionActivity>,
+    ) -> Self {
+        Self {
+            current_space_identity,
+            resume_session,
+            readiness,
+            activity,
+        }
+    }
+
+    pub async fn execute(&self) -> Result<RecoverSpaceSessionResult, RecoverSpaceSessionError> {
+        let Some(space_id) = self
+            .current_space_identity
+            .current_space_id()
+            .await
+            .map_err(|error| RecoverSpaceSessionError::CurrentSpace(error.to_string()))?
+        else {
+            return Ok(not_recovered());
+        };
+
+        let resumed = match self.resume_session.try_resume_session(&space_id).await {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(SpaceAccessError::CorruptedKeyMaterial) => {
+                return Err(RecoverSpaceSessionError::CorruptedKeyMaterial);
+            }
+            Err(SpaceAccessError::NotInitialized) | Err(SpaceAccessError::WrongPassphrase) => {
+                return Err(RecoverSpaceSessionError::KeyringMiss);
+            }
+            Err(error) => return Err(RecoverSpaceSessionError::Internal(error.to_string())),
+        };
+        if !resumed {
+            return Ok(not_recovered());
+        }
+
+        self.readiness
+            .complete_after_resume()
+            .await
+            .map_err(RecoverSpaceSessionError::Internal)?;
+        self.activity.resume_after_session_ready().await?;
+
+        Ok(RecoverSpaceSessionResult {
+            unlocked: true,
+            resumed: true,
+        })
+    }
+}
+
+fn not_recovered() -> RecoverSpaceSessionResult {
+    RecoverSpaceSessionResult {
+        unlocked: false,
+        resumed: false,
+    }
+}

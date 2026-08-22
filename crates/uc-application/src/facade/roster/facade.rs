@@ -34,7 +34,7 @@ use crate::facade::roster::commands::{
     RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
 };
 use crate::facade::roster::errors::RosterError;
-use crate::space::convergence::WorkspaceConvergenceError;
+use crate::space::workspace_membership::WorkspaceConvergenceError;
 use uc_core::membership::WorkspaceSnapshot;
 
 /// 构造 `MemberRosterFacade` 时需要的 port 束。对齐 `SpaceFacadeDeps`
@@ -56,7 +56,7 @@ pub struct MemberRosterFacade {
     presence: Arc<dyn PresencePort>,
     connection_channel: Option<Arc<dyn ConnectionChannelPort>>,
     space_protection: Option<Arc<dyn SpaceProtectionStatusPort>>,
-    workspace_convergence: Option<Arc<crate::space::convergence::WorkspaceConvergence>>,
+    workspace_convergence: Option<Arc<crate::space::workspace_membership::WorkspaceMembership>>,
     peer_scope: Option<Arc<dyn CurrentWorkspacePeerScopePort>>,
 }
 
@@ -83,10 +83,10 @@ impl MemberRosterFacade {
 
     pub fn with_convergence(
         mut self,
-        convergence: Arc<crate::space::convergence::assembly::SpaceConvergenceAssembly>,
+        convergence: Arc<crate::space::assembly::SpaceModules>,
     ) -> Self {
         self.peer_scope = Some(convergence.current_peer_scope());
-        self.workspace_convergence = Some(Arc::clone(&convergence.workspace));
+        self.workspace_convergence = Some(convergence.workspace_membership());
         self
     }
 

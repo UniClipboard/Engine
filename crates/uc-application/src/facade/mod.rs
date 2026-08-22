@@ -24,27 +24,37 @@ pub mod space_setup;
 pub mod storage;
 pub mod upgrade;
 
+pub use crate::device::query_local_device::{LocalDeviceInfo, QueryLocalDeviceUseCase};
+pub use crate::profile::factory_reset::{
+    ProfileFactoryResetError, ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
+    ProfileFactoryResetUseCase,
+};
+pub use crate::profile::probe_profile_key_access::{
+    ProbeProfileKeyAccessError, ProbeProfileKeyAccessUseCase,
+};
 pub use crate::space::admission::coordinator::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
-pub use crate::space::convergence::connectivity::membership::{
+pub use crate::space::connectivity::membership::{
     start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
 };
-pub use crate::space::convergence::network_recovery::{
+pub use crate::space::connectivity::network_recovery::{
     NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
     NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,
 };
-pub use crate::space::lifecycle::device::{DeviceFacade, DeviceFacadeError, LocalDeviceInfoView};
-pub use crate::space::lifecycle::encryption::{
-    EncryptionFacade, EncryptionFacadeDeps, EncryptionFacadeError, EncryptionStateView,
+pub use crate::space::lock_space_session::{
+    LockSpacePort, LockSpaceSessionError, LockSpaceSessionUseCase,
 };
-pub use crate::space::lifecycle::profile_reset::{
-    ProfileFactoryReset, ProfileFactoryResetError, ProfileFactoryResetResult,
+pub use crate::space::query_space_access_state::{
+    QuerySpaceAccessStateError, QuerySpaceAccessStateUseCase, SpaceAccessState,
 };
-pub use crate::space::lifecycle::session::{
-    RecoverSpaceSessionResult, SpaceActivityError, SpaceSessionAccessDeps,
-    SpaceSessionActivityDeps, SpaceSessionError,
+pub use crate::space::recover_space_session::{
+    RecoverSpaceSessionError, RecoverSpaceSessionResult, RecoverSpaceSessionUseCase,
 };
-pub use crate::space::lifecycle::setup_status::SetupStatusFacade;
 pub use crate::space::runtime::{SpaceApplicationHandle, SpaceApplicationRuntime};
+pub use crate::space::session::{
+    build_space_session_activity, ResumeSpaceSessionPort, SpaceActivityError, SpaceSessionActivity,
+    SpaceSessionActivityDeps,
+};
+pub use crate::space::unlock_space::PostSessionReadiness;
 
 pub use crate::clipboard::active::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
@@ -99,18 +109,21 @@ pub use crate::search::live_index::{
     ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardLiveIndexPort,
     ClipboardLiveIndexer,
 };
-pub use crate::space::convergence::assembly::{SpaceConvergenceAssembly, SpaceConvergenceDeps};
-pub use crate::space::convergence::discovery::MembershipConvergenceDeps;
-pub use crate::space::convergence::{
-    ActionUnavailableReason, CurrentJoinStatus, DeviceCompatibility, DeviceMembership,
-    DeviceTrustAction, DeviceTrustChange, DeviceTrustChoice, DeviceTrustDecisionResult,
-    DeviceTrustImpact, DeviceTrustRelationship, DeviceTrustSnapshot, GroupRelationship,
-    JoinedSpace, PendingInboundMember, PendingJoinerCompleteAck, RecoveryAvailability,
+pub use crate::space::admission::{
+    CurrentJoinStatus, JoinedSpace, PendingInboundMember, PendingJoinerCompleteAck,
+    ProfileSpaceAdmission, SpaceTransitionRecoveryPort,
+};
+pub use crate::space::assembly::{SpaceModules, SpaceModulesDeps};
+pub use crate::space::workspace_membership::discovery::MembershipConvergenceDeps;
+pub use crate::space::workspace_membership::{
+    ActionUnavailableReason, DeviceCompatibility, DeviceMembership, DeviceTrustAction,
+    DeviceTrustChange, DeviceTrustChoice, DeviceTrustDecisionResult, DeviceTrustImpact,
+    DeviceTrustRelationship, DeviceTrustSnapshot, GroupRelationship, RecoveryAvailability,
     SyncRelationship,
 };
-pub use crate::space::convergence::{
-    ProfileWorkspaceConvergence, SpaceTransitionRecoveryPort, WorkspaceConvergence,
-    WorkspaceConvergenceDeps, WorkspaceConvergenceError, WorkspaceConvergenceStateOrigin,
+pub use crate::space::workspace_membership::{
+    WorkspaceConvergenceError, WorkspaceConvergenceStateOrigin, WorkspaceMembership,
+    WorkspaceMembershipDeps,
 };
 pub use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
@@ -179,12 +192,12 @@ pub use settings::{
 };
 
 pub use space_setup::{
-    CancelInvitationError, CurrentInvitation, FactoryResetError, InitializeSpaceError,
-    InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
-    IssuePairingInvitationResult, PairingInvitationAddressCandidate, QuerySetupStateError,
-    RedeemPairingInvitationError, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
-    ResetSpaceError, SetupStateView, SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps,
-    SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    CancelInvitationError, CurrentInvitation, InitializeSpaceError, InitializeSpaceInput,
+    InitializeSpaceResult, IssuePairingInvitationError, IssuePairingInvitationResult,
+    PairingInvitationAddressCandidate, QuerySetupStateError, RedeemPairingInvitationError,
+    RedeemPairingInvitationInput, RedeemPairingInvitationResult, ResetSpaceError, SetupStateView,
+    SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
+    UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use storage::{
     ClearCacheResultView, StorageFacade, StorageFacadeDeps, StorageFacadeError, StorageStatsView,

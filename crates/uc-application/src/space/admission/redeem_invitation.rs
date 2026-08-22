@@ -12,7 +12,7 @@
 //! Cross-Space joins remain Pending until the Engine drains the source
 //! session and resumes the saved transition.
 //!
-//! `setup_status` is flipped only after local activation, because
+//! current-Space and re-pairing state change only after local activation, because
 //! `has_completed=true` is the marker `UnlockSpaceUseCase` keys off on the
 //! next launch.
 //!
@@ -28,9 +28,6 @@ use std::sync::Arc;
 
 use tracing::{info, instrument};
 
-use uc_core::ports::space::ResumeSpaceSessionPort;
-use uc_core::ports::SetupStatusPort;
-use uc_core::setup::SetupStatus;
 use uc_observability_contract::analytics::events::{Event, PairingFailureReason, PairingMethod};
 use uc_observability_contract::analytics::AnalyticsFacade;
 
@@ -39,11 +36,13 @@ use crate::facade::space_setup::{RedeemPairingInvitationError, RedeemPairingInvi
 use crate::space::admission::joiner::joiner_handshake::{
     JoinerHandshakeCoordinator, JoinerHandshakeOutcome,
 };
+use crate::space::re_pairing::RePairingState;
+use crate::space::session::ResumeSpaceSessionPort;
 
 pub(crate) struct RedeemPairingInvitationUseCase {
     handshake: Arc<JoinerHandshakeCoordinator>,
-    setup_status: Arc<dyn SetupStatusPort>,
     resume_session: Arc<dyn ResumeSpaceSessionPort>,
+    re_pairing_state: Arc<RePairingState>,
     /// Joiner-side analytics: fires `pairing_started` on entry,
     /// `pairing_failed` on failure. The success funnel no longer exists:
     /// join results are expressed through the workspace state.
@@ -55,14 +54,14 @@ pub(crate) struct RedeemPairingInvitationUseCase {
 impl RedeemPairingInvitationUseCase {
     pub(crate) fn new(
         handshake: Arc<JoinerHandshakeCoordinator>,
-        setup_status: Arc<dyn SetupStatusPort>,
         resume_session: Arc<dyn ResumeSpaceSessionPort>,
+        re_pairing_state: Arc<RePairingState>,
         analytics: Arc<dyn AnalyticsFacade>,
     ) -> Self {
         Self {
             handshake,
-            setup_status,
             resume_session,
+            re_pairing_state,
             analytics,
         }
     }
@@ -139,15 +138,13 @@ impl RedeemPairingInvitationUseCase {
         requires_session_transition: bool,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
         if !requires_session_transition {
-            self.setup_status
-                .set_status(&SetupStatus {
-                    has_completed: true,
-                    space_id: Some(outcome.space_id.clone()),
-                    re_pairing_required: false,
-                })
+            self.re_pairing_state
+                .resolve_after_successful_pairing()
                 .await
-                .map_err(|e| {
-                    RedeemPairingInvitationError::Internal(format!("setup_status.set_status: {e}"))
+                .map_err(|error| {
+                    RedeemPairingInvitationError::Internal(format!(
+                        "re-pairing state update failed: {error}"
+                    ))
                 })?;
         }
 
@@ -254,22 +251,19 @@ mod tests {
         SessionError,
     };
     use uc_core::ports::space::{
-        DeriveAdmissionProofKeyPort, GroupAdmissionPort, ProofPort, ResumeSpaceSessionPort,
-        SpaceAccessError,
+        DeriveAdmissionProofKeyPort, GroupAdmissionPort, ProofPort, SpaceAccessError,
     };
-    use uc_core::ports::{
-        DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort, SetupStatusPort,
-    };
+    use uc_core::ports::{DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort};
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
-    use uc_core::setup::SetupStatus;
     use uc_core::space_access::domain::{
         AdmissionOffer, GroupAdmission, PreparedGroupJoin, ProofDerivedKey,
         SpaceAccessProofArtifact,
     };
 
     use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
-    use crate::space::convergence::WorkspaceConvergenceError;
+    use crate::space::session::ResumeSpaceSessionPort;
+    use crate::space::workspace_membership::WorkspaceConvergenceError;
 
     // ── wire fakes (produce a happy-path outcome) ─────────────────────────
 
@@ -493,38 +487,6 @@ mod tests {
         }
     }
 
-    struct RecordingSetupStatus {
-        fail_next: StdMutex<bool>,
-        set_calls: StdMutex<Vec<bool>>,
-    }
-    impl RecordingSetupStatus {
-        fn ok() -> Self {
-            Self {
-                fail_next: StdMutex::new(false),
-                set_calls: StdMutex::new(Vec::new()),
-            }
-        }
-        fn failing() -> Self {
-            Self {
-                fail_next: StdMutex::new(true),
-                set_calls: StdMutex::new(Vec::new()),
-            }
-        }
-    }
-    #[async_trait]
-    impl SetupStatusPort for RecordingSetupStatus {
-        async fn get_status(&self) -> anyhow::Result<SetupStatus> {
-            Ok(SetupStatus::default())
-        }
-        async fn set_status(&self, s: &SetupStatus) -> anyhow::Result<()> {
-            if *self.fail_next.lock().unwrap() {
-                return Err(anyhow::anyhow!("setup-status backend down"));
-            }
-            self.set_calls.lock().unwrap().push(s.has_completed);
-            Ok(())
-        }
-    }
-
     struct ReadyResume;
     #[async_trait]
     impl ResumeSpaceSessionPort for ReadyResume {
@@ -675,7 +637,7 @@ mod tests {
             None,
             vec![0x45; 64],
         );
-        let candidate = crate::space::convergence::admission::DurableAdmissionCandidateV1 {
+        let candidate = crate::space::admission::durable::DurableAdmissionCandidateV1 {
             lineage_id: "space-xyz".to_owned(),
             base_history_position: Vec::new(),
             candidate_event: postcard::to_stdvec(&event).unwrap(),
@@ -701,13 +663,12 @@ mod tests {
             staged_security_state: vec![9],
             identity_binding: vec![10],
         };
-        let payload =
-            crate::space::convergence::admission::DurableAdmissionCandidatePayloadV1::new(
-                Vec::new(),
-                candidate,
-            )
-            .encode()
-            .unwrap();
+        let payload = crate::space::admission::durable::DurableAdmissionCandidatePayloadV1::new(
+            Vec::new(),
+            candidate,
+        )
+        .encode()
+        .unwrap();
         durable_frame(
             uc_core::pairing::DurableAdmissionMessageKind::Candidate,
             payload,
@@ -748,10 +709,30 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct InMemoryRePairingStateStore {
+        required: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl crate::deps::RePairingStateStorePort for InMemoryRePairingStateStore {
+        async fn is_required(&self) -> Result<bool, crate::deps::RePairingStateError> {
+            Ok(*self.required.lock().unwrap())
+        }
+
+        async fn set_required(
+            &self,
+            required: bool,
+        ) -> Result<(), crate::deps::RePairingStateError> {
+            *self.required.lock().unwrap() = required;
+            Ok(())
+        }
+    }
+
     struct Harness {
         session: Arc<HappySession>,
         owner: Arc<RecordingOwner>,
-        setup_status: Arc<RecordingSetupStatus>,
+        re_pairing_store: Arc<InMemoryRePairingStateStore>,
         analytics: Arc<CapturingAnalyticsSink>,
     }
 
@@ -759,7 +740,6 @@ mod tests {
         fn build(
             session: Arc<HappySession>,
             owner: Arc<RecordingOwner>,
-            setup_status: Arc<RecordingSetupStatus>,
         ) -> (RedeemPairingInvitationUseCase, Self) {
             let space_access = happy_space_access();
             let handshake = JoinerHandshakeCoordinator::new(
@@ -782,10 +762,14 @@ mod tests {
                     Arc::new(uc_observability_contract::analytics::NoopAnalyticsIdentity),
                 ),
             );
+            let re_pairing_store = Arc::new(InMemoryRePairingStateStore::default());
+            *re_pairing_store.required.lock().unwrap() = true;
             let uc = RedeemPairingInvitationUseCase::new(
                 handshake,
-                setup_status.clone(),
                 Arc::new(ReadyResume),
+                Arc::new(crate::space::re_pairing::RePairingState::new(
+                    re_pairing_store.clone(),
+                )),
                 facade,
             );
             (
@@ -793,7 +777,7 @@ mod tests {
                 Self {
                     session,
                     owner,
-                    setup_status,
+                    re_pairing_store,
                     analytics,
                 },
             )
@@ -803,7 +787,6 @@ mod tests {
             Self::build(
                 Arc::new(HappySession::primed()),
                 Arc::new(RecordingOwner::default()),
-                Arc::new(RecordingSetupStatus::ok()),
             )
         }
     }
@@ -829,17 +812,13 @@ mod tests {
                 "activate_joiner_complete",
             ]
         );
+        assert!(!*h.re_pairing_store.required.lock().unwrap());
         let sent = h.session.sent.lock().unwrap().clone();
         assert!(sent.iter().any(|message| matches!(
             message,
             PairingSessionMessage::DurableAdmission(frame)
                 if frame.kind == uc_core::pairing::DurableAdmissionMessageKind::CompleteAck
         )));
-        assert_eq!(
-            *h.setup_status.set_calls.lock().unwrap(),
-            vec![true],
-            "setup_status flipped exactly once to has_completed=true"
-        );
         // 成功不再产生配对成功分析事件；只有开始事件。
         let events = h.analytics.snapshot();
         assert_eq!(events.len(), 1, "expected [PairingStarted], got {events:?}");
@@ -852,14 +831,10 @@ mod tests {
             requires_session_transition: true,
             ..Default::default()
         });
-        let (uc, h) = Harness::build(
-            Arc::new(HappySession::primed()),
-            owner,
-            Arc::new(RecordingSetupStatus::ok()),
-        );
+        let (uc, h) = Harness::build(Arc::new(HappySession::primed()), owner);
         let result = uc.execute(cmd("X")).await.unwrap();
         assert_eq!(result.space_id.inner(), "space-xyz");
-        assert!(h.setup_status.set_calls.lock().unwrap().is_empty());
+        assert!(*h.re_pairing_store.required.lock().unwrap());
         let sent = h.session.sent.lock().unwrap().clone();
         assert!(sent.iter().all(|message| !matches!(
             message,
@@ -881,35 +856,12 @@ mod tests {
             .push_back(PairingSessionMessage::Reject(PairingReject {
                 reason: PairingRejectReason::AdmissionUnavailable,
             }));
-        let (uc, _h) = Harness::build(
-            session,
-            Arc::new(RecordingOwner::default()),
-            Arc::new(RecordingSetupStatus::ok()),
-        );
+        let (uc, _h) = Harness::build(session, Arc::new(RecordingOwner::default()));
         let err = uc.execute(cmd("X")).await.unwrap_err();
         assert!(matches!(
             err,
             RedeemPairingInvitationError::SponsorAdmissionUnavailable
         ));
-    }
-
-    #[tokio::test]
-    async fn setup_status_failure_surfaces_internal() {
-        let (uc, h) = Harness::build(
-            Arc::new(HappySession::primed()),
-            Arc::new(RecordingOwner::default()),
-            Arc::new(RecordingSetupStatus::failing()),
-        );
-        let err = uc.execute(cmd("X")).await.unwrap_err();
-        match err {
-            RedeemPairingInvitationError::Internal(m) => {
-                assert!(m.contains("setup_status.set_status"), "msg = {m}")
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
-        assert!(h.setup_status.set_calls.lock().unwrap().is_empty());
-        let events = h.analytics.snapshot();
-        assert_eq!(events.len(), 2, "expected [PairingStarted, PairingFailed]");
     }
 
     /// 锁死 `RedeemPairingInvitationError` → `PairingFailureReason`

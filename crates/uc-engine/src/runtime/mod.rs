@@ -16,8 +16,12 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 use tracing::{error, warn};
+use uc_application::deps::{ProfileFactoryResetCapabilityError, StopProfileRuntimePort};
 use uc_application::facade::clipboard_write::LocalActiveRegisterAdvancer;
-use uc_application::facade::{AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent};
+use uc_application::facade::{
+    AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent, ProfileFactoryResetOutcome,
+    ProfileFactoryResetRequest, ProfileFactoryResetUseCase,
+};
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
 
@@ -48,8 +52,8 @@ const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 pub(crate) struct ProductionRuntime {
     app_version: String,
     session_supervisor: Arc<SessionSupervisor>,
-    profile_convergence: Arc<uc_application::facade::ProfileWorkspaceConvergence>,
-    profile_reset: Arc<uc_application::facade::ProfileFactoryReset>,
+    profile_convergence: Arc<uc_application::facade::ProfileSpaceAdmission>,
+    profile_reset: Arc<ProfileFactoryResetUseCase>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     task_registry: Arc<TaskRegistry>,
     #[cfg(feature = "lan-compat")]
@@ -73,7 +77,7 @@ struct SessionFactory {
     iroh_bind_port_override: Option<u16>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     recovery_generation: Arc<AtomicU64>,
-    profile_convergence: Arc<uc_application::facade::ProfileWorkspaceConvergence>,
+    profile_convergence: Arc<uc_application::facade::ProfileSpaceAdmission>,
 }
 
 struct ProductionSession {
@@ -93,14 +97,12 @@ struct ProductionProfileRuntimeStopper {
 }
 
 #[async_trait::async_trait]
-impl uc_core::ports::StopProfileRuntimePort for ProductionProfileRuntimeStopper {
-    async fn stop_profile_runtime(
-        &self,
-    ) -> Result<(), uc_core::ports::ProfileFactoryResetCapabilityError> {
+impl StopProfileRuntimePort for ProductionProfileRuntimeStopper {
+    async fn stop_profile_runtime(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
         self.session_supervisor
             .suspend()
             .await
-            .map_err(|_| uc_core::ports::ProfileFactoryResetCapabilityError)?;
+            .map_err(|_| ProfileFactoryResetCapabilityError)?;
         self.session_supervisor.clear_factory();
         self.tasks.shutdown(Duration::from_millis(500)).await;
         Ok(())
@@ -293,7 +295,7 @@ impl ProductionRuntime {
             .map_err(|error| startup_error("dependency wiring", error))?;
 
         let session = Arc::new(Mutex::new(None));
-        let profile_convergence = uc_application::facade::ProfileWorkspaceConvergence::new(
+        let profile_convergence = uc_application::facade::ProfileSpaceAdmission::new(
             Arc::clone(&wired.sync_engine.admission_attempt_repository),
             wired.deps.device.device_identity.current_device_id(),
             Arc::clone(&wired.deps.system.clock),
@@ -303,22 +305,22 @@ impl ProductionRuntime {
             Arc::clone(&wired.shared.file_transfer_facade),
         ));
         let task_registry = Arc::new(TaskRegistry::new());
-        let profile_runtime: Arc<dyn uc_core::ports::StopProfileRuntimePort> =
+        let profile_runtime: Arc<dyn StopProfileRuntimePort> =
             Arc::new(ProductionProfileRuntimeStopper {
                 session_supervisor: Arc::clone(&session_supervisor),
                 tasks: Arc::clone(&task_registry),
             });
-        let profile_reset = Arc::new(uc_application::facade::ProfileFactoryReset::new(
-            Arc::clone(&wired.profile_reset.lifecycle),
+        let profile_reset = Arc::new(ProfileFactoryResetUseCase::new(
+            Arc::clone(&wired.profile_reset.lifecycle_repository),
             profile_runtime,
             Arc::clone(&wired.profile_reset.keys),
             Arc::clone(&wired.profile_reset.state),
         ));
         if profile_reset
-            .recover_if_needed()
+            .execute(ProfileFactoryResetRequest::ResumeIfNeeded)
             .await
             .map_err(crate::operations::space::factory_reset::map_profile_factory_reset_error)?
-            .is_some()
+            == ProfileFactoryResetOutcome::Completed
         {
             return Err(EngineError::new(
                 crate::error_codes::FACTORY_RESET_UNAVAILABLE_CODE,

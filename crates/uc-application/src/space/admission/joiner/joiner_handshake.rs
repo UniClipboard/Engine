@@ -5,7 +5,7 @@
 //! proof → send ChallengeResponse → recv Confirm. Returns a structured
 //! [`JoinerHandshakeOutcome`] with the sponsor's identity facts. Does
 //! **not** touch persistence (`SpaceMember` / `TrustedPeer` /
-//! `SetupStatus`) — that's composed in the outer
+//! current-Space activation) — that's composed in the outer
 //! [`RedeemPairingInvitationUseCase`].
 //!
 //! Symmetric to [`crate::pairing_inbound::sponsor_handshake::
@@ -463,7 +463,7 @@ impl JoinerHandshakeCoordinator {
             }
         };
         let candidate_payload =
-            crate::space::convergence::admission::DurableAdmissionCandidatePayloadV1::decode(
+            crate::space::admission::durable::DurableAdmissionCandidatePayloadV1::decode(
                 &candidate.payload,
             )
             .map_err(|error| {
@@ -712,13 +712,13 @@ fn durable_rejection_reason(
 }
 
 fn map_workspace_preflight_error(
-    error: crate::space::convergence::WorkspaceConvergenceError,
+    error: crate::space::workspace_membership::WorkspaceConvergenceError,
 ) -> RedeemPairingInvitationError {
     match error {
-        crate::space::convergence::WorkspaceConvergenceError::UnreadableHistoryRequiresConfirmation => {
+        crate::space::workspace_membership::WorkspaceConvergenceError::UnreadableHistoryRequiresConfirmation => {
             RedeemPairingInvitationError::UnreadableHistoryRequiresConfirmation
         }
-        crate::space::convergence::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded => {
+        crate::space::workspace_membership::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded => {
             RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded
         }
         other => RedeemPairingInvitationError::Internal(format!(
@@ -728,10 +728,10 @@ fn map_workspace_preflight_error(
 }
 
 fn map_local_join_preparation_error(
-    error: crate::space::convergence::WorkspaceConvergenceError,
+    error: crate::space::workspace_membership::WorkspaceConvergenceError,
 ) -> RedeemPairingInvitationError {
     match error {
-        crate::space::convergence::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded => {
+        crate::space::workspace_membership::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded => {
             RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded
         }
         other => RedeemPairingInvitationError::Internal(format!(
@@ -1083,10 +1083,10 @@ mod tests {
         async fn preflight_local_join_source(
             &self,
             preserve_unreadable_history: bool,
-        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+        ) -> Result<(), crate::space::workspace_membership::WorkspaceConvergenceError> {
             assert!(!preserve_unreadable_history);
             Err(
-                crate::space::convergence::WorkspaceConvergenceError::UnreadableHistoryRequiresConfirmation,
+                crate::space::workspace_membership::WorkspaceConvergenceError::UnreadableHistoryRequiresConfirmation,
             )
         }
 
@@ -1100,7 +1100,7 @@ mod tests {
 
         async fn synchronize_chain(
             &self,
-        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+        ) -> Result<(), crate::space::workspace_membership::WorkspaceConvergenceError> {
             unreachable!()
         }
     }
@@ -1110,9 +1110,9 @@ mod tests {
         async fn preflight_local_join_source(
             &self,
             _preserve_unreadable_history: bool,
-        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+        ) -> Result<(), crate::space::workspace_membership::WorkspaceConvergenceError> {
             Err(
-                crate::space::convergence::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded,
+                crate::space::workspace_membership::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded,
             )
         }
 
@@ -1126,7 +1126,7 @@ mod tests {
 
         async fn synchronize_chain(
             &self,
-        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+        ) -> Result<(), crate::space::workspace_membership::WorkspaceConvergenceError> {
             unreachable!()
         }
     }
@@ -1143,13 +1143,13 @@ mod tests {
             _preserve_unreadable_history: bool,
         ) -> Result<
             crate::space::admission::adapter::DurableLocalJoinPreparation,
-            crate::space::convergence::WorkspaceConvergenceError,
+            crate::space::workspace_membership::WorkspaceConvergenceError,
         > {
             let prepared_group_join = preparation
                 .prepare_group_join(local_device_id)
                 .await
                 .map_err(|error| {
-                    crate::space::convergence::WorkspaceConvergenceError::AdmissionStorage(
+                    crate::space::workspace_membership::WorkspaceConvergenceError::AdmissionStorage(
                         error.to_string(),
                     )
                 })?;
@@ -1168,7 +1168,7 @@ mod tests {
             &self,
             _attempt_id: [u8; 32],
             _reason: uc_core::membership::AdmissionRejectionReasonV1,
-        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+        ) -> Result<(), crate::space::workspace_membership::WorkspaceConvergenceError> {
             Ok(())
         }
 
@@ -1180,7 +1180,7 @@ mod tests {
             _passphrase: &Passphrase,
         ) -> Result<
             uc_core::pairing::DurableAdmissionFrame,
-            crate::space::convergence::WorkspaceConvergenceError,
+            crate::space::workspace_membership::WorkspaceConvergenceError,
         > {
             Ok(durable_frame(
                 uc_core::pairing::DurableAdmissionMessageKind::Prepared,
@@ -1194,7 +1194,7 @@ mod tests {
             _receipt_signer: &(dyn GroupAdmissionPort + Send + Sync),
         ) -> Result<
             uc_core::pairing::DurableAdmissionFrame,
-            crate::space::convergence::WorkspaceConvergenceError,
+            crate::space::workspace_membership::WorkspaceConvergenceError,
         > {
             Ok(durable_frame(
                 uc_core::pairing::DurableAdmissionMessageKind::Applied,
@@ -1207,7 +1207,7 @@ mod tests {
             _frame: &uc_core::pairing::DurableAdmissionFrame,
         ) -> Result<
             crate::space::admission::adapter::DurableJoinerCompletion,
-            crate::space::convergence::WorkspaceConvergenceError,
+            crate::space::workspace_membership::WorkspaceConvergenceError,
         > {
             if self.requires_session_transition {
                 Ok(crate::space::admission::adapter::DurableJoinerCompletion::SpaceTransitionRequired)
@@ -1233,7 +1233,7 @@ mod tests {
 
         async fn synchronize_chain(
             &self,
-        ) -> Result<(), crate::space::convergence::WorkspaceConvergenceError> {
+        ) -> Result<(), crate::space::workspace_membership::WorkspaceConvergenceError> {
             unreachable!()
         }
     }
@@ -1286,7 +1286,7 @@ mod tests {
             None,
             vec![0x45; 64],
         );
-        let candidate = crate::space::convergence::admission::DurableAdmissionCandidateV1 {
+        let candidate = crate::space::admission::durable::DurableAdmissionCandidateV1 {
             lineage_id: "space-xyz".to_owned(),
             base_history_position: Vec::new(),
             candidate_event: postcard::to_stdvec(&event).unwrap(),
@@ -1312,13 +1312,12 @@ mod tests {
             staged_security_state: vec![9],
             identity_binding: vec![10],
         };
-        let payload =
-            crate::space::convergence::admission::DurableAdmissionCandidatePayloadV1::new(
-                Vec::new(),
-                candidate,
-            )
-            .encode()
-            .unwrap();
+        let payload = crate::space::admission::durable::DurableAdmissionCandidatePayloadV1::new(
+            Vec::new(),
+            candidate,
+        )
+        .encode()
+        .unwrap();
         durable_frame(
             uc_core::pairing::DurableAdmissionMessageKind::Candidate,
             payload,

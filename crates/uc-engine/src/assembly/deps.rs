@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
 
-use uc_application::deps::AppDeps;
+use uc_application::deps::{
+    AppDeps, ClearProfileStatePort, ProfileLifecycleRepositoryPort, WipeProfileKeysPort,
+};
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::RepresentationId;
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
@@ -167,9 +169,9 @@ pub struct SharedRuntimeDeps {
 
 #[derive(Clone)]
 pub struct ProfileResetDeps {
-    pub lifecycle: Arc<dyn uc_core::ports::ProfileLifecyclePort>,
-    pub keys: Arc<dyn uc_core::ports::WipeProfileKeysPort>,
-    pub state: Arc<dyn uc_core::ports::ClearProfileStatePort>,
+    pub lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort>,
+    pub keys: Arc<dyn WipeProfileKeysPort>,
+    pub state: Arc<dyn ClearProfileStatePort>,
 }
 
 /// 进程级一次性装配产出的"持久"部分:进程内常驻的 `deps` 与按消费者归类的

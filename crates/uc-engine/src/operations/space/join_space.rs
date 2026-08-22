@@ -5,7 +5,7 @@ use crate::error_codes::*;
 use tracing::error;
 use uc_application::facade::{
     AppFacade, JoinSpaceError as AppJoinSpaceError, JoinSpaceInput as AppJoinSpaceInput,
-    ProfileWorkspaceConvergence, RedeemPairingInvitationError,
+    ProfileSpaceAdmission, RedeemPairingInvitationError,
 };
 
 use crate::operations::device::member::join_space_status;
@@ -14,7 +14,7 @@ use crate::{EngineError, EngineErrorCategory, JoinSpaceInput, OperationResult};
 
 pub async fn execute_join_space(
     facade: &AppFacade,
-    convergence: &ProfileWorkspaceConvergence,
+    convergence: &ProfileSpaceAdmission,
     input: JoinSpaceInput,
 ) -> Result<OperationResult, EngineError> {
     facade
@@ -30,7 +30,7 @@ pub async fn execute_join_space(
 }
 
 pub(crate) async fn current_join_result(
-    convergence: &ProfileWorkspaceConvergence,
+    convergence: &ProfileSpaceAdmission,
 ) -> Result<OperationResult, EngineError> {
     convergence
         .current_join()

@@ -3,15 +3,15 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::facade::space_setup::SpaceFacade;
-use crate::space::convergence::assembly::SpaceConvergenceAssembly;
-use crate::space::convergence::connectivity::membership::{
+use crate::space::assembly::SpaceModules;
+use crate::space::connectivity::membership::{
     start_membership_connectivity, MembershipConnectivityActivity, MembershipConnectivityDeps,
     MembershipConnectivityRuntime,
 };
-use crate::space::convergence::discovery::{
+use crate::space::workspace_membership::discovery::{
     MembershipConvergenceActivity, MembershipConvergenceRuntime,
 };
-use crate::space::convergence::{WorkspaceConvergenceActivity, WorkspaceConvergenceRuntime};
+use crate::space::workspace_membership::{WorkspaceMembershipActivity, WorkspaceMembershipRuntime};
 use uc_core::ports::PresenceEvent;
 
 #[derive(Clone)]
@@ -28,12 +28,12 @@ impl SpaceApplicationHandle {
 #[derive(Clone)]
 pub struct SpaceMembershipActivity {
     membership: MembershipConvergenceActivity,
-    workspace: WorkspaceConvergenceActivity,
+    workspace: WorkspaceMembershipActivity,
     connectivity: MembershipConnectivityActivity,
 }
 
 #[async_trait::async_trait]
-impl crate::space::convergence::discovery::MembershipConvergenceActivityPort
+impl crate::space::workspace_membership::discovery::MembershipConvergenceActivityPort
     for SpaceMembershipActivity
 {
     async fn pause(&self) -> Result<(), String> {
@@ -61,7 +61,7 @@ pub struct SpaceApplicationRuntime {
     handle: SpaceApplicationHandle,
     membership_runtime: MembershipConvergenceRuntime,
     connectivity_runtime: MembershipConnectivityRuntime,
-    convergence_runtime: WorkspaceConvergenceRuntime,
+    convergence_runtime: WorkspaceMembershipRuntime,
     setup: Arc<SpaceFacade>,
 }
 
@@ -70,7 +70,7 @@ impl SpaceApplicationRuntime {
     /// subscribed by each runtime; the assembly owns the convergence,
     /// membership gossip, connectivity and legacy-upgrade owners.
     pub fn start(
-        assembly: Arc<SpaceConvergenceAssembly>,
+        assembly: Arc<SpaceModules>,
         connectivity: MembershipConnectivityDeps,
         presence_events: broadcast::Receiver<PresenceEvent>,
         setup: Arc<SpaceFacade>,

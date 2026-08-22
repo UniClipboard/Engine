@@ -6,7 +6,7 @@
 //! AEAD 算法走 `super::v1_aead` helper。
 //!
 //! 该 adapter 实现内层聚合 trait `SpaceAccessStore`,并把每个窄意图 port
-//! (`InitializeSpacePort` / `UnlockSpacePort` / … )经 UFCS 委托给它
+//! application/core intent ports are delegated through narrow implementations
 //! (ports.md §8.3);全部方法签名保持稳定。字节级行为与历史
 //! `EncryptionRepository` 一致——V1 加密协议 (Argon2id KDF +
 //! XChaCha20-Poly1305 wrap/unwrap) ironclad 保留。
@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use zeroize::Zeroize;
 
+use uc_application::deps::{ProfileKeyAccessProbe, ProfileKeyAccessProbePortError};
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 
@@ -48,7 +49,7 @@ use uc_core::membership::{
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
-use uc_core::ports::space::{RebindSpaceSessionPort, SpaceAccessError, SpaceAccessStore};
+use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
 use uc_core::space_access::{
     AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
     PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
@@ -73,13 +74,11 @@ pub struct DefaultSpaceAccessAdapter {
     ///
     /// 一旦置位（`do_first_time_init` / `try_resume_session` /
     /// `derive_master_key_for_proof` 成功，或 `unlock` 完成首次刷新写入后），
-    /// 后续的 `verify_keychain_access` 直接返回 `Ok(true)`，`unlock` 路径上
+    /// 后续的 profile key access probe 直接返回 `Available`，`unlock` 路径上
     /// 的"刷新写入"也跳过——避免在 macOS 上重复触发 keychain 授权弹窗
     /// （首次使用场景下原本会因 `try_resume_session` →
-    /// `verify_keychain_access` → `unlock.store_kek refresh` 三次独立访问
+    /// profile key access probe → `unlock.store_kek refresh` 三次独立访问
     /// 而连弹三次）。
-    ///
-    /// `factory_reset` 删除 KEK 后必须复位为 `false`。
     kek_observed: AtomicBool,
 }
 
@@ -1574,7 +1573,7 @@ impl DefaultSpaceAccessAdapter {
         // session 写入是 in-memory 操作,不会失败——直接写。
         // Phase C 起不再写 `.initialized_encryption` marker 文件;"已初始化"
         // 真相由磁盘 keyslot 存在性 (`key_material.keyslot_exists()`) 回答,
-        // setup 完成事实由 `SetupStatusPort.has_completed` 承载。
+        // Profile readiness is committed by the current-Space identity owner.
         if let Err(error) = self.activate_session(space_id, master_key).await {
             self.session.clear();
             if let Err(rollback_error) = self.key_material.delete_keyslot(scope).await {
@@ -1716,49 +1715,6 @@ impl SpaceAccessStore for DefaultSpaceAccessAdapter {
         Ok(())
     }
 
-    async fn factory_reset(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError> {
-        const PATH: &str = "factory_reset";
-        let span = info_span!("infra.space_access.factory_reset", space_id = %space_id);
-        async {
-            info!(path = PATH, "factory reset requested");
-
-            let profile = self.current_profile.current_profile().await.map_err(|e| {
-                error!(path = PATH, error = %e, "current_profile resolution failed");
-                SpaceAccessError::Internal(e.to_string())
-            })?;
-            let scope = key_scope_from_profile(&profile);
-            debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
-
-            // 幂等: 不存在的物料视为已经删除,不报错。
-            match self.key_material.delete_keyslot(&scope).await {
-                Ok(()) => debug!(path = PATH, "keyslot deleted"),
-                Err(EncryptionError::KeyNotFound) => {
-                    debug!(path = PATH, "keyslot already absent (idempotent)")
-                }
-                Err(e) => {
-                    error!(path = PATH, error = %e, "delete_keyslot failed");
-                    return Err(map_encryption_error(e));
-                }
-            }
-            match self.key_material.delete_kek(&scope).await {
-                Ok(()) => debug!(path = PATH, "KEK deleted from keyring"),
-                Err(EncryptionError::KeyNotFound) => {
-                    debug!(path = PATH, "KEK already absent in keyring (idempotent)")
-                }
-                Err(e) => {
-                    error!(path = PATH, error = %e, "delete_kek failed");
-                    return Err(map_encryption_error(e));
-                }
-            }
-            self.kek_observed.store(false, Ordering::Release);
-            self.session.clear();
-            info!(path = PATH, "factory reset completed");
-            Ok(())
-        }
-        .instrument(span)
-        .await
-    }
-
     async fn try_resume_session(
         &self,
         space_id: &SpaceId,
@@ -1769,7 +1725,7 @@ impl SpaceAccessStore for DefaultSpaceAccessAdapter {
             info!("attempting silent session resume from keyring");
 
             // session 已经在内存中(典型场景:用户刚 `initialize` 完成,前端
-            // setup 后的 onSetupComplete 回调又调了一次 `EncryptionFacade::unlock`
+            // setup 后的 onSetupComplete 回调又触发了一次 unlock flow
             // → 这里)。已经有 master_key,没必要再走 load_kek + unwrap +
             // set_master_key 这一整圈——尤其是 load_kek 在 macOS 上每次都可能
             // 触发 keychain 授权弹窗。直接返回 Ok(Some) 表达"会话已就绪"。
@@ -1822,7 +1778,7 @@ impl SpaceAccessStore for DefaultSpaceAccessAdapter {
                 .map_err(|e| map_and_log_unwrap_aead_error(e, PATH))?;
 
             // load_kek 成功 + unwrap 成功 ⇒ keychain 中 KEK 与本机 keyslot 匹配。
-            // 标记本进程已观察到该 KEK,后续 verify_keychain_access /
+            // 标记本进程已观察到该 KEK,后续 profile key access probe /
             // unlock 路径无需再次访问 keychain。
             self.kek_observed.store(true, Ordering::Release);
 
@@ -1830,59 +1786,6 @@ impl SpaceAccessStore for DefaultSpaceAccessAdapter {
 
             info!("session resumed from keyring");
             Ok(Some(ActiveSpace::new(space_id.clone())))
-        }
-        .instrument(span)
-        .await
-    }
-
-    async fn verify_keychain_access(&self) -> Result<bool, SpaceAccessError> {
-        const PATH: &str = "verify_keychain_access";
-        let span = info_span!("infra.space_access.verify_keychain_access");
-        async {
-            // 缓存命中:本进程内已成功 load_kek / store_kek 过——keychain
-            // 已经为本应用授予访问权限,无需再次探测。再次探测在 macOS 上
-            // 等价于一次 set_secret/get_secret 系统调用,可能触发新一轮
-            // 授权弹窗。
-            if self.kek_observed.load(Ordering::Acquire) {
-                debug!(path = PATH, "kek_observed cached, skip keychain probe");
-                return Ok(true);
-            }
-
-            let profile = self
-                .current_profile
-                .current_profile()
-                .await
-                .map_err(|e| {
-                    error!(path = PATH, error = %e, "current_profile resolution failed");
-                    SpaceAccessError::Internal(e.to_string())
-                })?;
-            let scope = key_scope_from_profile(&profile);
-
-            // 探测: 把"权限被拒绝"和"keyring 暂时不可用"都视为 "Always Allow 未授予"
-            // (Ok(false));只有"KEK 不存在"才升格成 NotInitialized 报错给上层。
-            match self.key_material.load_kek(&scope).await {
-                Ok(_) => {
-                    self.kek_observed.store(true, Ordering::Release);
-                    debug!(path = PATH, "keychain access verified via load_kek probe");
-                    Ok(true)
-                }
-                Err(EncryptionError::PermissionDenied) => {
-                    info!(path = PATH, "keychain access denied (Always Allow not granted)");
-                    Ok(false)
-                }
-                Err(EncryptionError::KeyringError(msg)) => {
-                    warn!(path = PATH, error = %msg, "keyring transiently unavailable; treat as not-granted");
-                    Ok(false)
-                }
-                Err(EncryptionError::KeyNotFound) => {
-                    info!(path = PATH, "no KEK in keychain for current profile");
-                    Err(SpaceAccessError::NotInitialized)
-                }
-                Err(other) => {
-                    error!(path = PATH, error = %other, "unexpected load_kek failure during keychain probe");
-                    Err(SpaceAccessError::Internal(other.to_string()))
-                }
-            }
         }
         .instrument(span)
         .await
@@ -2087,19 +1990,50 @@ impl SpaceAccessStore for DefaultSpaceAccessAdapter {
     }
 }
 
-#[async_trait]
-impl RebindSpaceSessionPort for DefaultSpaceAccessAdapter {
-    async fn rebind_to_space(
+impl DefaultSpaceAccessAdapter {
+    async fn probe_profile_key_access(
         &self,
-        space_id: &SpaceId,
-    ) -> Result<ActiveSpace, SpaceAccessError> {
-        let master_key = self
-            .session
-            .get_master_key()
-            .map_err(map_encryption_error)?;
-        self.session
-            .set_master_key_for_space(space_id.clone(), master_key);
-        Ok(ActiveSpace::new(space_id.clone()))
+    ) -> Result<ProfileKeyAccessProbe, ProfileKeyAccessProbePortError> {
+        const PATH: &str = "probe_profile_key_access";
+        let span = info_span!("infra.space_access.probe_profile_key_access");
+        async {
+            if self.kek_observed.load(Ordering::Acquire) {
+                debug!(path = PATH, "kek_observed cached, skip keychain probe");
+                return Ok(ProfileKeyAccessProbe::Available);
+            }
+
+            let profile = self.current_profile.current_profile().await.map_err(|error| {
+                error!(path = PATH, error = %error, "current_profile resolution failed");
+                ProfileKeyAccessProbePortError
+            })?;
+            let scope = key_scope_from_profile(&profile);
+
+            match self.key_material.load_kek(&scope).await {
+                Ok(_) => {
+                    self.kek_observed.store(true, Ordering::Release);
+                    debug!(path = PATH, "profile key access verified");
+                    Ok(ProfileKeyAccessProbe::Available)
+                }
+                Err(EncryptionError::PermissionDenied) => {
+                    info!(path = PATH, "profile key access denied");
+                    Ok(ProfileKeyAccessProbe::PermissionDenied)
+                }
+                Err(EncryptionError::KeyringError(message)) => {
+                    warn!(path = PATH, error = %message, "profile key store temporarily unavailable");
+                    Ok(ProfileKeyAccessProbe::TemporarilyUnavailable)
+                }
+                Err(EncryptionError::KeyNotFound) => {
+                    info!(path = PATH, "profile key is missing");
+                    Ok(ProfileKeyAccessProbe::Missing)
+                }
+                Err(error) => {
+                    error!(path = PATH, error = %error, "unexpected profile key access failure");
+                    Err(ProfileKeyAccessProbePortError)
+                }
+            }
+        }
+        .instrument(span)
+        .await
     }
 }
 
@@ -2115,12 +2049,14 @@ impl RebindSpaceSessionPort for DefaultSpaceAccessAdapter {
 // aggregate store); trait-impl coherence still applies crate-wide.
 mod intent_ports {
     use super::*;
+    use uc_application::deps::{
+        InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, ProbeProfileKeyAccessPort,
+        ResumeSpaceSessionPort,
+    };
     use uc_core::ports::space::{
         CurrentSessionProofKeyPort, DeriveAdmissionProofKeyPort, DeriveProofKeyPort,
-        DeriveSpaceSubkeyPort, FactoryResetSpacePort, GroupAdmissionPort, InitializeSpacePort,
-        IsSpaceUnlockedPort, LockSpacePort, PrepareAdmissionOfferPort,
-        PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort, ResumeSpaceSessionPort,
-        UnlockSpacePort, VerifyKeychainAccessPort,
+        DeriveSpaceSubkeyPort, GroupAdmissionPort, PrepareAdmissionOfferPort,
+        PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort,
     };
 
     #[async_trait]
@@ -2147,17 +2083,6 @@ mod intent_ports {
     }
 
     #[async_trait]
-    impl UnlockSpacePort for DefaultSpaceAccessAdapter {
-        async fn unlock(
-            &self,
-            space_id: &SpaceId,
-            passphrase: &DomainPassphrase,
-        ) -> Result<ActiveSpace, SpaceAccessError> {
-            SpaceAccessStore::unlock(self, space_id, passphrase).await
-        }
-    }
-
-    #[async_trait]
     impl IsSpaceUnlockedPort for DefaultSpaceAccessAdapter {
         async fn is_unlocked(&self, space_id: &SpaceId) -> bool {
             SpaceAccessStore::is_unlocked(self, space_id).await
@@ -2172,13 +2097,6 @@ mod intent_ports {
     }
 
     #[async_trait]
-    impl FactoryResetSpacePort for DefaultSpaceAccessAdapter {
-        async fn factory_reset(&self, space_id: &SpaceId) -> Result<(), SpaceAccessError> {
-            SpaceAccessStore::factory_reset(self, space_id).await
-        }
-    }
-
-    #[async_trait]
     impl ResumeSpaceSessionPort for DefaultSpaceAccessAdapter {
         async fn try_resume_session(
             &self,
@@ -2189,9 +2107,11 @@ mod intent_ports {
     }
 
     #[async_trait]
-    impl VerifyKeychainAccessPort for DefaultSpaceAccessAdapter {
-        async fn verify_keychain_access(&self) -> Result<bool, SpaceAccessError> {
-            SpaceAccessStore::verify_keychain_access(self).await
+    impl ProbeProfileKeyAccessPort for DefaultSpaceAccessAdapter {
+        async fn probe_profile_key_access(
+            &self,
+        ) -> Result<ProfileKeyAccessProbe, ProfileKeyAccessProbePortError> {
+            DefaultSpaceAccessAdapter::probe_profile_key_access(self).await
         }
     }
 

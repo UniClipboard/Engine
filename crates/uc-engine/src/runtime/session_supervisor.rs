@@ -235,7 +235,7 @@ impl SessionSupervisor {
         if resume_space_activities {
             let recovered = session
                 .facade
-                .recover_space_session(true)
+                .recover_space_session()
                 .await
                 .map_err(|error| {
                     operation_error_with_code(1103, "activate transitioned space session", error)

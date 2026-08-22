@@ -191,14 +191,14 @@ pub enum CurrentMembershipIdentityError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum RelationshipStateResetError {
-    #[error("relationship state reset failed: {0}")]
+pub enum SpaceSecurityStateResetError {
+    #[error("space security state reset failed: {0}")]
     Repository(String),
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum SpaceSecurityStateResetError {
-    #[error("space security state reset failed: {0}")]
+pub enum RelationshipStateResetError {
+    #[error("relationship state reset failed: {0}")]
     Repository(String),
 }
 
@@ -238,14 +238,5 @@ pub enum MembershipInitializationError {
     Unavailable,
 
     #[error("space membership initialization state is inconsistent")]
-    Inconsistent,
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum SpaceMembershipRebuildError {
-    #[error("space membership rebuild is unavailable")]
-    Unavailable,
-
-    #[error("space membership rebuild state is inconsistent")]
     Inconsistent,
 }

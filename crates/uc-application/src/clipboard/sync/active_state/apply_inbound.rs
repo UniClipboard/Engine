@@ -44,13 +44,13 @@ use uc_core::ports::clipboard::{
     ActiveClipboardReceiverPort, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
     FindEntryIdBySnapshotHashPort, InboundActiveClipboardState, LoadActiveClipboardPort,
 };
-use uc_core::ports::space::IsSpaceUnlockedPort;
 use uc_core::ports::{ClockPort, PeerAddressRepositoryPort, PresencePort};
 use uc_core::MemberRepositoryPort;
 
 use crate::clipboard::write::{
     ClipboardWriteCoordinator, ClipboardWriteIntent, MobileConsumabilityProbe,
 };
+use crate::space::session::IsSpaceUnlockedPort;
 
 use super::super::receive_gate::MemberReceiveGate;
 use super::super::send_gate::MemberSendGate;

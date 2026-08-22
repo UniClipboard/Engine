@@ -17,6 +17,7 @@ test-util = []
 [dependencies]
 # ===== Workspace crates =====
 uc-core = { path = "../uc-core" }
+uc-application = { path = "../uc-application" }
 # Portable panic-visible supervision for detached tasks that have no natural
 # handle owner (for example, the pairing receive pump).
 uc-observability-contract = { path = "../uc-observability-contract" }

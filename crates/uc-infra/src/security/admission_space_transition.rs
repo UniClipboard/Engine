@@ -11,7 +11,7 @@ use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
 use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
 use uc_core::membership::DeviceManagementResetDataPort;
 use uc_core::membership::{
-    ActiveSpaceManifestV2, AdmissionContentKeyCatalogV1, AdmissionSpaceTransitionError,
+    ActiveSpaceGenerationManifestV2, AdmissionContentKeyCatalogV1, AdmissionSpaceTransitionError,
     AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
     AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionV2,
     ContentKeyId, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
@@ -42,8 +42,9 @@ use crate::file_transfer::persistence_cipher::TransferPersistenceCipher;
 use crate::search::render_payload::RenderPayloadCodec;
 
 use super::{
-    active_space_manifest_store::DeviceManagementResetJournalV1, ActiveSpaceManifestStore,
-    BlobCipherAdapter, DefaultSpaceAccessAdapter, EncryptedBlobStore, InMemorySession,
+    active_space_generation_manifest_store::DeviceManagementResetJournalV1,
+    ActiveSpaceGenerationManifestStore, BlobCipherAdapter, DefaultSpaceAccessAdapter,
+    EncryptedBlobStore, InMemorySession,
 };
 
 struct TargetSessionSubkeyDeriver(InMemorySession);
@@ -78,7 +79,7 @@ pub struct DurableAdmissionSpaceTransition {
     generations: SqliteSpaceGenerationStore,
     source_pool: DbPool,
     blob_store: Arc<SwitchableFilesystemBlobStore>,
-    manifest_store: Arc<ActiveSpaceManifestStore>,
+    generation_manifest_store: Arc<ActiveSpaceGenerationManifestStore>,
     space_access: Arc<DefaultSpaceAccessAdapter>,
     session: Arc<InMemorySession>,
     current_profile: Arc<dyn CurrentProfilePort>,
@@ -151,7 +152,7 @@ impl DurableAdmissionSpaceTransition {
         generation_root: PathBuf,
         profile_salt: Vec<u8>,
         blob_store: Arc<SwitchableFilesystemBlobStore>,
-        manifest_store: Arc<ActiveSpaceManifestStore>,
+        generation_manifest_store: Arc<ActiveSpaceGenerationManifestStore>,
         space_access: Arc<DefaultSpaceAccessAdapter>,
         session: Arc<InMemorySession>,
         current_profile: Arc<dyn CurrentProfilePort>,
@@ -165,7 +166,7 @@ impl DurableAdmissionSpaceTransition {
             ),
             source_pool,
             blob_store,
-            manifest_store,
+            generation_manifest_store,
             space_access,
             session,
             current_profile,
@@ -376,24 +377,24 @@ impl DurableAdmissionSpaceTransition {
         Ok(state)
     }
 
-    fn active_manifest(
+    fn active_generation_manifest(
         &self,
         transition: &CrossSpaceTransitionV2,
-    ) -> Result<ActiveSpaceManifestV2, AdmissionSpaceTransitionError> {
-        self.active_manifest_for(
+    ) -> Result<ActiveSpaceGenerationManifestV2, AdmissionSpaceTransitionError> {
+        self.active_generation_manifest_for(
             transition.attempt_id,
             &transition.target_space_id,
             transition.target_generation,
         )
     }
 
-    fn active_manifest_for(
+    fn active_generation_manifest_for(
         &self,
         attempt_id: uc_core::membership::AdmissionAttemptId,
         target_space_id: &str,
         target_generation: [u8; 16],
-    ) -> Result<ActiveSpaceManifestV2, AdmissionSpaceTransitionError> {
-        ActiveSpaceManifestV2::new(
+    ) -> Result<ActiveSpaceGenerationManifestV2, AdmissionSpaceTransitionError> {
+        ActiveSpaceGenerationManifestV2::new(
             target_space_id.to_owned(),
             self.generation(attempt_id.as_bytes(), b"target-keyslot"),
             target_generation,
@@ -462,8 +463,8 @@ impl DurableAdmissionSpaceTransition {
                 )
                 .await?;
                 copy_profile_recovery_state(&self.source_pool, &target_database)?;
-                self.manifest_store
-                    .promote(&self.active_manifest_for(
+                self.generation_manifest_store
+                    .promote(&self.active_generation_manifest_for(
                         transition.attempt_id,
                         &transition.target_space_id,
                         transition.target_generation,
@@ -573,8 +574,8 @@ impl DurableAdmissionSpaceTransition {
                     &self.generations.source_blob_root,
                     &directory.join("blobs"),
                 )?;
-                self.manifest_store
-                    .promote(&self.active_manifest_for(
+                self.generation_manifest_store
+                    .promote(&self.active_generation_manifest_for(
                         transition.attempt_id,
                         &transition.target_space_id,
                         transition.target_generation,
@@ -911,12 +912,12 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         &self,
         target_space_id: &SpaceId,
     ) -> Result<(), AdmissionSpaceTransitionError> {
-        let active_manifest = self
-            .manifest_store
+        let active_generation_manifest = self
+            .generation_manifest_store
             .load()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
-        if active_manifest
+        if active_generation_manifest
             .as_ref()
             .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
         {
@@ -945,7 +946,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         let source_generation = self.generation(&reset_id, b"device-reset-source");
         let target_generation = self.generation(&reset_id, b"device-reset-target-database");
         let journal = match self
-            .manifest_store
+            .generation_manifest_store
             .load_device_reset_journal()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?
@@ -961,15 +962,15 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
                 format_version: 1,
                 target_space_id: target_space_id.as_ref().to_owned(),
                 target_generation,
-                source_space_id: active_manifest
+                source_space_id: active_generation_manifest
                     .as_ref()
                     .map(|manifest| manifest.space_id.clone()),
-                source_generation: active_manifest
+                source_generation: active_generation_manifest
                     .as_ref()
                     .map(|manifest| manifest.database_generation),
             },
         };
-        self.manifest_store
+        self.generation_manifest_store
             .save_device_reset_journal(&journal)
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
@@ -998,7 +999,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         target_space_id: &SpaceId,
     ) -> Result<(), AdmissionSpaceTransitionError> {
         if self
-            .manifest_store
+            .generation_manifest_store
             .load()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?
@@ -1039,7 +1040,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         target_space_id: &SpaceId,
     ) -> Result<(), AdmissionSpaceTransitionError> {
         if self
-            .manifest_store
+            .generation_manifest_store
             .load()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?
@@ -1085,14 +1086,14 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             )
             .await
             .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
-        let manifest = ActiveSpaceManifestV2::new(
+        let manifest = ActiveSpaceGenerationManifestV2::new(
             target_space_id.as_ref().to_owned(),
             self.generation(&prepared.reset_id, b"device-reset-keyslot"),
             prepared.target_generation,
             self.generation(&prepared.reset_id, b"device-reset-security"),
         )
         .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
-        self.manifest_store
+        self.generation_manifest_store
             .promote(&manifest)
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
@@ -1113,17 +1114,17 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         &self,
         target_space_id: &SpaceId,
     ) -> Result<(), AdmissionSpaceTransitionError> {
-        let active_manifest = self
-            .manifest_store
+        let active_generation_manifest = self
+            .generation_manifest_store
             .load()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?
             .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
-        if active_manifest.space_id != target_space_id.as_ref() {
+        if active_generation_manifest.space_id != target_space_id.as_ref() {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
         }
         let Some(journal) = self
-            .manifest_store
+            .generation_manifest_store
             .load_device_reset_journal()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?
@@ -1131,7 +1132,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             return Ok(());
         };
         if journal.target_space_id != target_space_id.as_ref()
-            || journal.target_generation != active_manifest.database_generation
+            || journal.target_generation != active_generation_manifest.database_generation
         {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
         }
@@ -1161,7 +1162,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         );
         remove_file_if_present(&target_directory.join("source-final.sqlite"))?;
         remove_sqlite_database_if_present(&target_directory.join("reset-working.sqlite"))?;
-        self.manifest_store
+        self.generation_manifest_store
             .clear_device_reset_journal()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)
@@ -1190,8 +1191,8 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         &self,
         input: &AdmissionSpaceTransitionPreparationV2,
     ) -> Result<AdmissionSpaceTransitionV2, AdmissionSpaceTransitionError> {
-        let active_manifest = self
-            .manifest_store
+        let active_generation_manifest = self
+            .generation_manifest_store
             .load()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
@@ -1203,7 +1204,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         {
             let target_workspace_ref =
                 self.stage_target_workspace(input, &target_generation, self.session.as_ref())?;
-            let source_generation = active_manifest
+            let source_generation = active_generation_manifest
                 .as_ref()
                 .filter(|manifest| manifest.space_id == input.target_space_id)
                 .map(|manifest| manifest.database_generation)
@@ -1234,7 +1235,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         let source_space = match source_space {
             Some(source_space) => source_space,
             None => {
-                if active_manifest.is_some() {
+                if active_generation_manifest.is_some() {
                     return Err(AdmissionSpaceTransitionError::Locked);
                 }
                 let directory =
@@ -1257,7 +1258,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 }));
             }
         };
-        let source_generation = active_manifest
+        let source_generation = active_generation_manifest
             .filter(|manifest| manifest.space_id == source_space.as_ref())
             .map(|manifest| manifest.database_generation)
             .unwrap_or_else(|| self.generation(input.attempt_id.as_bytes(), b"legacy-source"));
@@ -1411,8 +1412,8 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 )
                 .await?;
                 copy_profile_recovery_state(&self.source_pool, &target_database)?;
-                let manifest = self.active_manifest(transition)?;
-                self.manifest_store
+                let manifest = self.active_generation_manifest(transition)?;
+                self.generation_manifest_store
                     .promote(&manifest)
                     .await
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
@@ -1472,7 +1473,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 return Err(AdmissionSpaceTransitionError::Inconsistent);
             }
             if self
-                .manifest_store
+                .generation_manifest_store
                 .load()
                 .await
                 .map_err(|_| AdmissionSpaceTransitionError::Storage)?
@@ -1495,7 +1496,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 return Err(AdmissionSpaceTransitionError::Inconsistent);
             }
             if self
-                .manifest_store
+                .generation_manifest_store
                 .load()
                 .await
                 .map_err(|_| AdmissionSpaceTransitionError::Storage)?
@@ -1523,7 +1524,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
         }
         if self
-            .manifest_store
+            .generation_manifest_store
             .load()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?
@@ -2742,9 +2743,9 @@ mod tests {
     use crate::fs::key_slot_store::JsonKeySlotStore;
     use crate::search::render_payload::{RenderFields, RenderPayloadCodec};
     use crate::security::{
-        ActiveSpaceManifestStore, AdmissionKeyManager, BlobCipherAdapter, DefaultCurrentProfile,
-        DefaultSpaceAccessAdapter, EncryptedBlobStore, InMemorySession, KeyMaterialStore,
-        MasterKey,
+        ActiveSpaceGenerationManifestStore, AdmissionKeyManager, BlobCipherAdapter,
+        DefaultCurrentProfile, DefaultSpaceAccessAdapter, EncryptedBlobStore, InMemorySession,
+        KeyMaterialStore, MasterKey,
     };
 
     use super::{
@@ -2954,7 +2955,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let manifest_store = Arc::new(ActiveSpaceManifestStore::new(
+        let generation_manifest_store = Arc::new(ActiveSpaceGenerationManifestStore::new(
             vault,
             Arc::new(AdmissionKeyManager::new(
                 Arc::clone(&secure_storage),
@@ -2967,7 +2968,7 @@ mod tests {
             generation_root.clone(),
             b"default".to_vec(),
             Arc::new(SwitchableFilesystemBlobStore::new(source_blob_root.clone())),
-            Arc::clone(&manifest_store),
+            Arc::clone(&generation_manifest_store),
             Arc::clone(&access),
             Arc::clone(&session),
             Arc::new(DefaultCurrentProfile::new()),
@@ -3008,7 +3009,7 @@ mod tests {
             generation_root,
             b"default".to_vec(),
             Arc::new(SwitchableFilesystemBlobStore::new(source_blob_root)),
-            manifest_store,
+            generation_manifest_store,
             access,
             session,
             Arc::new(DefaultCurrentProfile::new()),
@@ -3095,7 +3096,7 @@ mod tests {
         );
 
         let blob_store = Arc::new(SwitchableFilesystemBlobStore::new(source_blob_root.clone()));
-        let manifest_store = Arc::new(ActiveSpaceManifestStore::new(
+        let generation_manifest_store = Arc::new(ActiveSpaceGenerationManifestStore::new(
             vault,
             Arc::new(AdmissionKeyManager::new(
                 Arc::clone(&secure_storage),
@@ -3108,7 +3109,7 @@ mod tests {
             generation_root,
             b"default".to_vec(),
             Arc::clone(&blob_store),
-            Arc::clone(&manifest_store),
+            Arc::clone(&generation_manifest_store),
             Arc::clone(&access),
             Arc::clone(&session),
             Arc::new(DefaultCurrentProfile::new()),
@@ -3236,7 +3237,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![DeviceId::new("target-peer")]
         );
-        let manifest = manifest_store.load().await.unwrap().unwrap();
+        let manifest = generation_manifest_store.load().await.unwrap().unwrap();
         assert_eq!(manifest.space_id, target_space.as_ref());
         assert_eq!(
             blob_store.current_root(),
@@ -3311,7 +3312,7 @@ mod tests {
         let blob_store = Arc::new(SwitchableFilesystemBlobStore::new(
             profile_blob_root.clone(),
         ));
-        let manifest_store = Arc::new(ActiveSpaceManifestStore::new(
+        let generation_manifest_store = Arc::new(ActiveSpaceGenerationManifestStore::new(
             vault,
             Arc::new(AdmissionKeyManager::new(
                 Arc::clone(&secure_storage),
@@ -3324,7 +3325,7 @@ mod tests {
             generation_root,
             b"default".to_vec(),
             Arc::clone(&blob_store),
-            Arc::clone(&manifest_store),
+            Arc::clone(&generation_manifest_store),
             Arc::clone(&access),
             Arc::clone(&session),
             Arc::clone(&current_profile),
@@ -3369,7 +3370,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let manifest = manifest_store.load().await.unwrap().unwrap();
+        let manifest = generation_manifest_store.load().await.unwrap().unwrap();
         assert_eq!(manifest.space_id, target_space.as_ref());
         assert_eq!(session.current_space_id().unwrap(), target_space);
         let security_repository = DieselSpaceSecurityStore::new(
@@ -3473,7 +3474,7 @@ mod tests {
         );
 
         let blob_store = Arc::new(SwitchableFilesystemBlobStore::new(source_blob_root.clone()));
-        let manifest_store = Arc::new(ActiveSpaceManifestStore::new(
+        let generation_manifest_store = Arc::new(ActiveSpaceGenerationManifestStore::new(
             vault,
             Arc::new(AdmissionKeyManager::new(
                 Arc::clone(&secure_storage),
@@ -3486,7 +3487,7 @@ mod tests {
             generation_root,
             b"default".to_vec(),
             Arc::clone(&blob_store),
-            Arc::clone(&manifest_store),
+            Arc::clone(&generation_manifest_store),
             Arc::clone(&access),
             Arc::clone(&session),
             Arc::new(DefaultCurrentProfile::new()),
@@ -3557,7 +3558,12 @@ mod tests {
             .unwrap();
         assert_eq!(plaintext.as_bytes(), b"same-space content remains readable");
         assert_eq!(
-            manifest_store.load().await.unwrap().unwrap().space_id,
+            generation_manifest_store
+                .load()
+                .await
+                .unwrap()
+                .unwrap()
+                .space_id,
             "same-space"
         );
     }

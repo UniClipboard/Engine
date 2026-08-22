@@ -50,8 +50,8 @@ mod tests {
     use uc_core::security::IdentityFingerprint;
 
     use super::staging::{
-        PendingImportMarker, SecretsFile, StagingLayout, DEVICE_ID_MEMBER, IROH_IDENTITY_PREFIX,
-        KEYSLOT_MEMBER, SETUP_STATUS_MEMBER,
+        PendingImportMarker, SecretsFile, StagingLayout, CURRENT_SPACE_ID_MEMBER, DEVICE_ID_MEMBER,
+        IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER,
     };
     use super::{ConfigMigrationAdapter, ConfigMigrationPaths};
     use crate::db::pool::init_db_pool;
@@ -162,8 +162,8 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            vault.join(".setup_status"),
-            b"{\"has_completed\":true,\"space_id\":null}",
+            vault.join(".current-space-id-v1"),
+            b"encrypted-current-space-id",
         )
         .unwrap();
         std::fs::write(data_root.join("settings.json"), b"{\"schema_version\":1}").unwrap();
@@ -295,13 +295,13 @@ mod tests {
         assert!(staged_identity.exists());
         assert_eq!(std::fs::read(staged_identity).unwrap(), vec![7u8; 32]);
 
-        // The setup-status marker travels through the bundle into staging so a
+        // The current-Space identity travels through the bundle into staging so a
         // later apply keeps the installation flagged as initialized.
-        let staged_setup_status = layout.staging_dir().join(SETUP_STATUS_MEMBER);
-        assert!(staged_setup_status.exists());
+        let staged_current_space_id = layout.staging_dir().join(CURRENT_SPACE_ID_MEMBER);
+        assert!(staged_current_space_id.exists());
         assert_eq!(
-            std::fs::read(staged_setup_status).unwrap(),
-            b"{\"has_completed\":true,\"space_id\":null}"
+            std::fs::read(staged_current_space_id).unwrap(),
+            b"encrypted-current-space-id"
         );
     }
 

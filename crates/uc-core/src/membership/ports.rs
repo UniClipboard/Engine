@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::ids::{DeviceId, SpaceId};
-use crate::membership::error::{MembershipInitializationError, SpaceMembershipRebuildError};
+use crate::membership::error::MembershipInitializationError;
 
 use super::admission_attempt::{
     AdmissionAttemptId, AdmissionAttemptV1, AdmissionInboxRecordV1, AdmissionOutboxMessageV1,
@@ -268,7 +268,9 @@ pub enum LocalJoinStartMutationV1 {
 
 #[async_trait]
 pub trait AdmissionAttemptRepositoryPort: Send + Sync {
-    async fn reset_for_device_management(
+    /// Atomically clear the persisted admission profile while preserving its
+    /// monotonic metadata.
+    async fn reset_admission_profile(
         &self,
     ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
         Err(AdmissionAttemptRepositoryError::Repository(
@@ -1104,15 +1106,4 @@ pub trait MembershipAdmissionGatePort: Send + Sync {
 #[async_trait]
 pub trait SpaceMembershipInitializerPort: Send + Sync {
     async fn initialize(&self) -> Result<(), MembershipInitializationError>;
-}
-
-#[async_trait]
-pub trait SpaceMembershipRebuildPort: Send + Sync {
-    /// 将成员状态重建为仅包含 `local_member` 的完整基线
-    ///
-    /// 成功后，除 `local_member` 外的成员、成员关系和遗 留本机准入状态
-    /// 均不再保留；`local_member` 已被保存，成员资格基 线可用于后续准入。
-    ///
-    /// 对相同成员重复调用必须成功。
-    async fn rebuild(&self, local_member: &SpaceMember) -> Result<(), SpaceMembershipRebuildError>;
 }

@@ -3135,11 +3135,18 @@ async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new
 
     let lifecycle_storage =
         crate::assembly::host::adapt_secure_storage(Box::new(secure_storage.clone()));
-    let lifecycle = uc_infra::security::ProfileLifecycleManager::new(lifecycle_storage);
-    let initial = lifecycle.load_or_initialize().unwrap();
-    lifecycle
-        .begin_factory_reset(initial.profile_generation)
+    let lifecycle = uc_infra::security::ProfileLifecycleRepository::new(lifecycle_storage);
+    let initial = uc_application::deps::ProfileLifecycleRepositoryPort::load(&lifecycle)
+        .unwrap()
         .unwrap();
+    let mut resetting = initial.clone();
+    resetting.begin_factory_reset(initial.generation()).unwrap();
+    uc_application::deps::ProfileLifecycleRepositoryPort::compare_and_swap(
+        &lifecycle,
+        Some(&initial),
+        &resetting,
+    )
+    .unwrap();
 
     let recovering_host = HostCapabilities::new(
         directories(),

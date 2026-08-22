@@ -20,7 +20,6 @@ pub mod ports;
 pub mod search;
 pub mod security;
 pub mod settings;
-pub mod setup;
 pub mod space_access;
 #[cfg(feature = "task-registry")]
 pub mod task_registry;

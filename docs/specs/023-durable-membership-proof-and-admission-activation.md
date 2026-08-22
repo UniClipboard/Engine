@@ -619,7 +619,7 @@ Space 的本地捕获、接收、文件传输、成员后台任务、搜索写�
 `final_source_revision`。新建、修改和删除都进入最终清单；不能只处理 J1 时已经存在的行。每个迁移条目
 使用稳定记录标识和来源修订去重，逐条重封装可以重放，但运行入口在全部条目和清单摘要核对前保持关闭。
 
-目标 keyslot、安全状态、收敛状态和关系先按 `target_generation` 保存并完整重开验证。`ActiveSpaceManifestV2`
+目标 keyslot、安全状态、收敛状态和关系先按 `target_generation` 保存并完整重开验证。`ActiveSpaceGenerationManifestV2`
 是唯一活动指针，至少绑定 SpaceId、keyslot generation、数据库 generation、安全 generation 和 manifest
 digest；所有被引用世代先持久且可读，再以一次原子替换提升该 manifest。setup 状态只从 manifest 投影，
 不能再独立决定活动 Space。内存 session 从已提升 manifest 重新加载，加载成功并恢复目标运行入口后才可
@@ -1205,7 +1205,7 @@ J3 是准入负责人的内部子事务，不是新的产品流程。三类本�
 
 | 类型 | J3 行为 |
 | --- | --- |
-| `Fresh` | 验证目标暂存世代，创建首个 `ActiveSpaceManifestV2`，从 manifest 加载 session 和运行入口 |
+| `Fresh` | 验证目标暂存世代，创建首个 `ActiveSpaceGenerationManifestV2`，从 manifest 加载 session 和运行入口 |
 | `SameSpace` | 不备份或重封装本地历史；在当前 Space 内提升同一 AddDevice、证明和目标安全世代，仍遵守 Complete 前门禁 |
 | `CrossSpace` | 恢复 `CrossSpaceTransitionV2`，排空来源写入、补齐最终备份、重封装、提升目标 manifest，再恢复目标运行入口 |
 
@@ -1220,7 +1220,7 @@ Cross-Space 的固定执行顺序：
    目标摘要幂等。全部条目、不可读保留项和最终清单核对成功后进入 `DataRewrapped`。中途主表或暂存表
    混合不可见，因为活动 manifest 尚未改变且运行入口关闭。
 4. 使用生产读取入口重开并验证目标 keyslot、V3 工作空间状态、关系、安全状态、内容和搜索投影。把来源
-   清理意图、目标世代引用和 manifest 摘要写入同一激活日志，再原子替换 `ActiveSpaceManifestV2`，进入
+   清理意图、目标世代引用和 manifest 摘要写入同一激活日志，再原子替换 `ActiveSpaceGenerationManifestV2`，进入
    `TargetPromoted`。setup 状态由新 manifest 同事务投影；任何独立 setup JSON 不得先行切换。
 5. 从新 manifest 加载内存 session，验证 SpaceId、MasterKey/keyslot、OpenMLS group/epoch、安全承诺和
    WorkspaceConvergence 摘要一致。确认本机取消已在 Commit 时稳定归类为 `TooLateCommitted` 后，恢复目标
@@ -1469,7 +1469,7 @@ Candidate -> Complete、精确历史验签和当前成员接收者；再补每�
 三类迁移结果、激活基线、加密尝试、outbox、终态压缩和写前恢复。迁移器必须先旁路写 V3，再用生产
 入口重新打开验证，最后原子发布 pointer 与 guard。复用 `SecureStoragePort` 的一次性迁移密钥模式实现
 `ProfileAdmissionMasterKey` 加 wrapped `AdmissionAttemptDataKey`，增加世代化目标 keyslot/workspace 暂存
-和 `ActiveSpaceManifestV2`，并让目标
+和 `ActiveSpaceGenerationManifestV2`，并让目标
 Space 仓储显式按 attempt/Space/generation/key 访问，不依赖活动 session。准入仓储同时加密保存
 `local_join_ordinal`、`join_projection_floor_ordinal` 和跨 Space 单调的 DeviceTrust revision；它们只选择或
 标记现有尝试投影，不形成独立状态索引。扩展 secure-storage 清除能力，使其能按固定 profile 加密密钥
@@ -1514,7 +1514,7 @@ AdmissionUnavailable 只保留原 Pending 和 JoinRequest。实现按 purpose/re
 **Change:** 先实现一次性 `LegacySwitchSpaceRecovery`，按旧 phase 收束并重开验证已有状态；再以
 `AdmissionSpaceTransitionPort` 替换独立 `MigrationPhase` 写入。J1 保存来源初始备份和目标暂存世代；J3
 由一个深模块取得 Space 切换租约，排空所有来源写入、补齐最终 revision、幂等重封装、验证目标世代、
-一次性提升 ActiveSpaceManifest、重开 session/运行入口并继续清理。删除 `SwitchSpaceUseCase::resume_pending`
+一次性提升 ActiveSpaceGenerationManifest、重开 session/运行入口并继续清理。删除 `SwitchSpaceUseCase::resume_pending`
 从 try_resume/unlock 的独立接线。旧 `.migration_state` 的布局解析只保留在 `uc-infra` 私有只读 importer；
 导入结束后删除公开 `MigrationStatePort`、`MigrationPhase`、装配依赖和旧恢复测试，不保留兼容别名。
 

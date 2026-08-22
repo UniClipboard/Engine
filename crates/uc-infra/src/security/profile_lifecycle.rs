@@ -1,158 +1,140 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use uc_application::deps::{
+    FactoryResetPhase, ProfileGeneration, ProfileLifecycle, ProfileLifecycleRepositoryError,
+    ProfileLifecycleRepositoryPort, ProfileLifecycleState,
+};
 use uc_core::ports::SecureStoragePort;
-pub use uc_core::ports::{FactoryResetPhaseV1, ProfileLifecycleError, ProfileLifecycleMarkerV1};
-use uc_core::ports::{ProfileLifecyclePort, PROFILE_LIFECYCLE_MARKER_FORMAT_V1};
 
 const PROFILE_LIFECYCLE_MARKER_NAME: &str = "profile_lifecycle_marker:v1";
+const PROFILE_LIFECYCLE_MARKER_FORMAT_V1: u16 = 1;
 
-pub struct ProfileLifecycleManager {
-    secure_storage: Arc<dyn SecureStoragePort>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FactoryResetPhaseV1 {
+    None,
+    WipingKeys,
+    ClearingState,
 }
 
-impl ProfileLifecycleManager {
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct ProfileLifecycleMarkerV1 {
+    marker_format_version: u16,
+    profile_generation: [u8; 16],
+    factory_reset_phase: FactoryResetPhaseV1,
+}
+
+pub struct ProfileLifecycleRepository {
+    secure_storage: Arc<dyn SecureStoragePort>,
+    write_lock: Mutex<()>,
+}
+
+impl ProfileLifecycleRepository {
     pub fn new(secure_storage: Arc<dyn SecureStoragePort>) -> Self {
-        Self { secure_storage }
-    }
-
-    pub fn load_or_initialize(&self) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
-        if let Some(marker) = self.load()? {
-            return Ok(marker);
+        Self {
+            secure_storage,
+            write_lock: Mutex::new(()),
         }
-        let marker = ProfileLifecycleMarkerV1 {
-            marker_format_version: PROFILE_LIFECYCLE_MARKER_FORMAT_V1,
-            profile_generation: random_generation(),
-            factory_reset_phase: FactoryResetPhaseV1::None,
-        };
-        self.persist(marker)
     }
 
-    pub fn begin_factory_reset(
+    fn load_marker(
         &self,
-        expected_generation: [u8; 16],
-    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
-        let current = self.load()?.ok_or(ProfileLifecycleError::PhaseConflict)?;
-        if current.profile_generation != expected_generation {
-            return Err(ProfileLifecycleError::PhaseConflict);
-        }
-        match current.factory_reset_phase {
-            FactoryResetPhaseV1::None => self.persist(ProfileLifecycleMarkerV1 {
-                factory_reset_phase: FactoryResetPhaseV1::WipingKeys,
-                ..current
-            }),
-            FactoryResetPhaseV1::WipingKeys => Ok(current),
-            FactoryResetPhaseV1::ClearingState => Err(ProfileLifecycleError::PhaseConflict),
-        }
-    }
-
-    pub fn mark_keys_wiped(
-        &self,
-        expected_generation: [u8; 16],
-    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
-        let current = self.load()?.ok_or(ProfileLifecycleError::PhaseConflict)?;
-        if current.profile_generation != expected_generation
-            || current.factory_reset_phase != FactoryResetPhaseV1::WipingKeys
-        {
-            return Err(ProfileLifecycleError::PhaseConflict);
-        }
-        self.persist(ProfileLifecycleMarkerV1 {
-            factory_reset_phase: FactoryResetPhaseV1::ClearingState,
-            ..current
-        })
-    }
-
-    pub fn complete_state_clear(
-        &self,
-        expected_generation: [u8; 16],
-    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
-        let current = self.load()?.ok_or(ProfileLifecycleError::PhaseConflict)?;
-        if current.profile_generation != expected_generation
-            || current.factory_reset_phase != FactoryResetPhaseV1::ClearingState
-        {
-            return Err(ProfileLifecycleError::PhaseConflict);
-        }
-        self.persist(ProfileLifecycleMarkerV1 {
-            marker_format_version: PROFILE_LIFECYCLE_MARKER_FORMAT_V1,
-            profile_generation: random_generation(),
-            factory_reset_phase: FactoryResetPhaseV1::None,
-        })
-    }
-
-    fn load(&self) -> Result<Option<ProfileLifecycleMarkerV1>, ProfileLifecycleError> {
+    ) -> Result<Option<ProfileLifecycleMarkerV1>, ProfileLifecycleRepositoryError> {
         let Some(bytes) = self
             .secure_storage
             .get(PROFILE_LIFECYCLE_MARKER_NAME)
-            .map_err(|_| ProfileLifecycleError::SecureStorage)?
+            .map_err(|_| ProfileLifecycleRepositoryError::Unavailable)?
         else {
             return Ok(None);
         };
         let marker: ProfileLifecycleMarkerV1 =
-            postcard::from_bytes(&bytes).map_err(|_| ProfileLifecycleError::Corrupt)?;
+            postcard::from_bytes(&bytes).map_err(|_| ProfileLifecycleRepositoryError::Corrupt)?;
         if marker.marker_format_version != PROFILE_LIFECYCLE_MARKER_FORMAT_V1 {
-            return Err(ProfileLifecycleError::Corrupt);
+            return Err(ProfileLifecycleRepositoryError::Corrupt);
         }
         Ok(Some(marker))
     }
 
-    fn persist(
-        &self,
-        marker: ProfileLifecycleMarkerV1,
-    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
-        let bytes = postcard::to_stdvec(&marker).map_err(|_| ProfileLifecycleError::Corrupt)?;
+    fn persist(&self, lifecycle: &ProfileLifecycle) -> Result<(), ProfileLifecycleRepositoryError> {
+        let marker = marker_from_lifecycle(lifecycle);
+        let bytes =
+            postcard::to_stdvec(&marker).map_err(|_| ProfileLifecycleRepositoryError::Corrupt)?;
         self.secure_storage
             .set(PROFILE_LIFECYCLE_MARKER_NAME, &bytes)
-            .map_err(|_| ProfileLifecycleError::SecureStorage)?;
-        let reopened = self.load()?.ok_or(ProfileLifecycleError::SecureStorage)?;
+            .map_err(|_| ProfileLifecycleRepositoryError::Unavailable)?;
+        let reopened = self
+            .load_marker()?
+            .ok_or(ProfileLifecycleRepositoryError::Unavailable)?;
         if reopened != marker {
-            return Err(ProfileLifecycleError::Corrupt);
+            return Err(ProfileLifecycleRepositoryError::Corrupt);
         }
-        Ok(reopened)
+        Ok(())
     }
 }
 
-impl ProfileLifecyclePort for ProfileLifecycleManager {
-    fn load_or_initialize(&self) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
-        ProfileLifecycleManager::load_or_initialize(self)
+impl ProfileLifecycleRepositoryPort for ProfileLifecycleRepository {
+    fn load(&self) -> Result<Option<ProfileLifecycle>, ProfileLifecycleRepositoryError> {
+        Ok(self.load_marker()?.map(lifecycle_from_marker))
     }
 
-    fn begin_factory_reset(
+    fn compare_and_swap(
         &self,
-        expected_generation: [u8; 16],
-    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
-        ProfileLifecycleManager::begin_factory_reset(self, expected_generation)
-    }
-
-    fn mark_keys_wiped(
-        &self,
-        expected_generation: [u8; 16],
-    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
-        ProfileLifecycleManager::mark_keys_wiped(self, expected_generation)
-    }
-
-    fn complete_state_clear(
-        &self,
-        expected_generation: [u8; 16],
-    ) -> Result<ProfileLifecycleMarkerV1, ProfileLifecycleError> {
-        ProfileLifecycleManager::complete_state_clear(self, expected_generation)
+        expected: Option<&ProfileLifecycle>,
+        next: &ProfileLifecycle,
+    ) -> Result<(), ProfileLifecycleRepositoryError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| ProfileLifecycleRepositoryError::Unavailable)?;
+        let current = self.load()?;
+        if current.as_ref() != expected {
+            return Err(ProfileLifecycleRepositoryError::Conflict);
+        }
+        self.persist(next)
     }
 }
 
-fn random_generation() -> [u8; 16] {
-    let mut generation = [0u8; 16];
-    rand::rng().fill_bytes(&mut generation);
-    generation
+fn lifecycle_from_marker(marker: ProfileLifecycleMarkerV1) -> ProfileLifecycle {
+    let state = match marker.factory_reset_phase {
+        FactoryResetPhaseV1::None => ProfileLifecycleState::Ready,
+        FactoryResetPhaseV1::WipingKeys => {
+            ProfileLifecycleState::FactoryReset(FactoryResetPhase::Started)
+        }
+        FactoryResetPhaseV1::ClearingState => {
+            ProfileLifecycleState::FactoryReset(FactoryResetPhase::KeysWiped)
+        }
+    };
+    ProfileLifecycle::restore(
+        ProfileGeneration::from_bytes(marker.profile_generation),
+        state,
+    )
+}
+
+fn marker_from_lifecycle(lifecycle: &ProfileLifecycle) -> ProfileLifecycleMarkerV1 {
+    let factory_reset_phase = match lifecycle.state() {
+        ProfileLifecycleState::Ready => FactoryResetPhaseV1::None,
+        ProfileLifecycleState::FactoryReset(FactoryResetPhase::Started) => {
+            FactoryResetPhaseV1::WipingKeys
+        }
+        ProfileLifecycleState::FactoryReset(FactoryResetPhase::KeysWiped) => {
+            FactoryResetPhaseV1::ClearingState
+        }
+    };
+    ProfileLifecycleMarkerV1 {
+        marker_format_version: PROFILE_LIFECYCLE_MARKER_FORMAT_V1,
+        profile_generation: lifecycle.generation().into_bytes(),
+        factory_reset_phase,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
 
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
-    use crate::security::AdmissionKeyManager;
 
     #[derive(Default)]
     struct MemorySecureStorage {
@@ -179,36 +161,46 @@ mod tests {
     }
 
     #[test]
-    fn factory_reset_phase_survives_restart_and_generation_changes_only_after_clear() {
+    fn repository_preserves_each_checkpoint_across_restart() {
         let storage = Arc::new(MemorySecureStorage::default());
-        let lifecycle = ProfileLifecycleManager::new(storage.clone());
-        let initial = lifecycle.load_or_initialize().unwrap();
-        let keys = AdmissionKeyManager::new(storage.clone(), initial.profile_generation);
-        let _ = keys.create_wrapped_attempt_key([0x41; 32]).unwrap();
-        assert!(keys.profile_key_exists().unwrap());
+        let repository = ProfileLifecycleRepository::new(storage.clone());
+        let generation = ProfileGeneration::from_bytes([1; 16]);
+        let ready = ProfileLifecycle::new(generation);
+        repository.compare_and_swap(None, &ready).unwrap();
 
-        let wiping = lifecycle
-            .begin_factory_reset(initial.profile_generation)
-            .unwrap();
-        assert_eq!(wiping.factory_reset_phase, FactoryResetPhaseV1::WipingKeys);
-        let reopened = ProfileLifecycleManager::new(storage.clone())
-            .load_or_initialize()
-            .unwrap();
-        assert_eq!(reopened, wiping);
+        let mut started = ready.clone();
+        started.begin_factory_reset(generation).unwrap();
+        repository.compare_and_swap(Some(&ready), &started).unwrap();
+        assert_eq!(
+            ProfileLifecycleRepository::new(storage.clone())
+                .load()
+                .unwrap(),
+            Some(started.clone())
+        );
 
-        keys.delete_profile_key().unwrap();
-        let clearing = lifecycle
-            .mark_keys_wiped(initial.profile_generation)
+        let mut keys_wiped = started.clone();
+        keys_wiped.mark_keys_wiped(generation).unwrap();
+        repository
+            .compare_and_swap(Some(&started), &keys_wiped)
             .unwrap();
         assert_eq!(
-            clearing.factory_reset_phase,
-            FactoryResetPhaseV1::ClearingState
+            ProfileLifecycleRepository::new(storage).load().unwrap(),
+            Some(keys_wiped)
         );
-        let fresh = lifecycle
-            .complete_state_clear(initial.profile_generation)
-            .unwrap();
-        assert_ne!(fresh.profile_generation, initial.profile_generation);
-        assert_eq!(fresh.factory_reset_phase, FactoryResetPhaseV1::None);
-        assert!(!keys.profile_key_exists().unwrap());
+    }
+
+    #[test]
+    fn repository_rejects_a_stale_expected_state() {
+        let storage = Arc::new(MemorySecureStorage::default());
+        let repository = ProfileLifecycleRepository::new(storage);
+        let generation = ProfileGeneration::from_bytes([1; 16]);
+        let ready = ProfileLifecycle::new(generation);
+        repository.compare_and_swap(None, &ready).unwrap();
+
+        let stale = ProfileLifecycle::new(ProfileGeneration::from_bytes([9; 16]));
+        assert_eq!(
+            repository.compare_and_swap(Some(&stale), &ready),
+            Err(ProfileLifecycleRepositoryError::Conflict)
+        );
     }
 }

@@ -7258,6 +7258,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uc-application",
  "uc-core",
  "uc-observability-contract",
  "unicode-normalization",

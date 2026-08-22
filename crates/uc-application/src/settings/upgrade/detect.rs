@@ -20,7 +20,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, warn};
 
-use uc_core::ports::{AppVersionStateError, AppVersionStatePort, SetupStatusPort};
+use uc_core::ports::{AppVersionStateError, AppVersionStatePort};
+
+use crate::space::current_space::CurrentSpaceIdentityPort;
 
 use super::status::UpgradeStatus;
 
@@ -32,25 +34,23 @@ pub(crate) enum DetectUpgradeError {
     #[error("read app version cursor failed: {0}")]
     ReadCursor(#[from] AppVersionStateError),
 
-    /// `SetupStatusPort.get_status` 失败。fallback 推断需要它，
-    /// 读取失败时返回错误而不是默默走 `FreshInstall`，避免误判老用户为新用户。
-    #[error("read setup status failed: {0}")]
-    ReadSetupStatus(String),
+    #[error("read current Space identity failed: {0}")]
+    ReadCurrentSpace(String),
 }
 
 pub(crate) struct DetectUpgradeUseCase {
     app_version_state: Arc<dyn AppVersionStatePort>,
-    setup_status: Arc<dyn SetupStatusPort>,
+    current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
 }
 
 impl DetectUpgradeUseCase {
     pub(crate) fn new(
         app_version_state: Arc<dyn AppVersionStatePort>,
-        setup_status: Arc<dyn SetupStatusPort>,
+        current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     ) -> Self {
         Self {
             app_version_state,
-            setup_status,
+            current_space_identity,
         }
     }
 
@@ -70,11 +70,11 @@ impl DetectUpgradeUseCase {
         match stored {
             None => {
                 let has_completed = self
-                    .setup_status
-                    .get_status()
+                    .current_space_identity
+                    .current_space_id()
                     .await
-                    .map_err(|e| DetectUpgradeError::ReadSetupStatus(e.to_string()))?
-                    .has_completed;
+                    .map_err(|e| DetectUpgradeError::ReadCurrentSpace(e.to_string()))?
+                    .is_some();
 
                 if has_completed {
                     debug!(
@@ -151,7 +151,6 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::sync::Mutex;
-    use uc_core::setup::SetupStatus;
 
     struct FakeVersionState {
         value: Mutex<Option<String>>,
@@ -174,26 +173,27 @@ mod tests {
         }
     }
 
-    struct FakeSetupStatus {
+    struct FakeCurrentSpace {
         has_completed: bool,
     }
     #[async_trait]
-    impl SetupStatusPort for FakeSetupStatus {
-        async fn get_status(&self) -> anyhow::Result<SetupStatus> {
-            Ok(SetupStatus {
-                has_completed: self.has_completed,
-                ..SetupStatus::default()
-            })
-        }
-        async fn set_status(&self, _status: &SetupStatus) -> anyhow::Result<()> {
-            unreachable!("detect-side test does not write setup status")
+    impl CurrentSpaceIdentityPort for FakeCurrentSpace {
+        async fn current_space_id(
+            &self,
+        ) -> Result<
+            Option<uc_core::ids::SpaceId>,
+            crate::space::current_space::CurrentSpaceIdentityError,
+        > {
+            Ok(self
+                .has_completed
+                .then(|| uc_core::ids::SpaceId::from("space")))
         }
     }
 
     fn build(cursor: Option<&str>, has_completed: bool) -> DetectUpgradeUseCase {
         DetectUpgradeUseCase::new(
             FakeVersionState::new(cursor),
-            Arc::new(FakeSetupStatus { has_completed }),
+            Arc::new(FakeCurrentSpace { has_completed }),
         )
     }
 
