@@ -1199,6 +1199,12 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         })?;
         let target_generation = self.generation(input.attempt_id.as_bytes(), b"target-database");
         let source_space = self.session.current_space_id().ok();
+        tracing::error!(
+            source_space = ?source_space,
+            target_space_id = %input.target_space_id,
+            manifest_present = active_manifest.is_some(),
+            "space transition: branch decision"
+        );
         if source_space
             .as_ref()
             .is_some_and(|space| space.as_ref() == input.target_space_id)
@@ -1276,7 +1282,15 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         let prepared = self
             .generations
             .prepare_source(*input.attempt_id.as_bytes(), source_generation)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    source_generation = %hex::encode(source_generation),
+                    attempt_id = %hex::encode(input.attempt_id.as_bytes()),
+                    "space transition: prepare_source failed"
+                );
+                AdmissionSpaceTransitionError::Storage
+            })?;
         let source_revision_at_backup = self
             .source_pool
             .persistent_revision()

@@ -47,8 +47,19 @@ pub fn snapshot_to_bytes(pool: &DbPool, scratch_path: &Path) -> Result<Vec<u8>, 
     // Single-quote escaping for the SQL string literal path.
     let path_str = scratch_path.to_string_lossy().replace('\'', "''");
     let sql = format!("VACUUM INTO '{path_str}'");
-    conn.batch_execute(&sql)
-        .map_err(|_| DbSnapshotError::Query)?;
+    conn.batch_execute(&sql).map_err(|error| {
+        // Collapsed to a unit error for the port surface, but the real
+        // diesel/sqlite detail (e.g. "cannot VACUUM from within a
+        // transaction", "database is locked") is what diagnoses Windows
+        // joiner failures — never drop it silently.
+        tracing::error!(
+            error = %error,
+            scratch_path = %scratch_path.display(),
+            sql = %sql,
+            "db snapshot: VACUUM INTO failed"
+        );
+        DbSnapshotError::Query
+    })?;
     drop(conn);
 
     let bytes = std::fs::read(scratch_path).map_err(|_| DbSnapshotError::Io)?;
