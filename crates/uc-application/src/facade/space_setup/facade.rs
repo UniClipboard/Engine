@@ -1597,7 +1597,9 @@ mod tests {
         ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
             if self.fail_promotion.swap(false, Ordering::AcqRel) {
                 self.staged.store(false, Ordering::Release);
-                return Err(uc_core::membership::AdmissionSpaceTransitionError::Storage);
+                return Err(uc_core::membership::AdmissionSpaceTransitionError::storage(
+                    "space transition storage failed",
+                ));
             }
             Ok(())
         }
