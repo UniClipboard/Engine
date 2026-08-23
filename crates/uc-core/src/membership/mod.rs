@@ -59,7 +59,7 @@ pub use error::{
     MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
     MembershipGossipTransportError, MembershipHistoryExchangeError, MembershipInitializationError,
     MembershipOutboxRepositoryError, MembershipSecurityUpdateError, RelationshipStateResetError,
-    SpaceSecurityStateResetError, VerifiedPeerPromotionError, WorkspaceConvergenceRepositoryError,
+    SpaceSecurityStateResetError, VerifiedPeerPromotionError,
 };
 pub use gossip::{
     CandidateEffect, CandidateEvent, CandidateFailure, CandidateMergeError, CandidateMergeOutcome,
@@ -101,10 +101,9 @@ pub use ports::{
     MembershipHistoryExchangePort, MembershipOutboxRepositoryPort, MembershipSecurityState,
     MembershipSecurityUpdatePort, PrepareSponsorAdmissionSecurityPort, RelationshipStateResetPort,
     RevocationRepositoryPort, SpaceMembershipInitializerPort, SpaceSecurityStateResetPort,
-    SponsorAdmissionSecurityDelivery,
-    SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
-    SponsorPreparedAdmissionSecurity, SponsorPreparedSecurityTransition, VerifiedPeerPromotionPort,
-    WorkspaceConvergenceRepositoryPort,
+    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRecipient,
+    SponsorAdmissionSecurityRequest, SponsorPreparedAdmissionSecurity,
+    SponsorPreparedSecurityTransition, VerifiedPeerPromotionPort,
 };
 pub use preferences::MemberSyncPreferences;
 pub use protection::{
@@ -138,7 +137,7 @@ pub use versioned_membership_history::{
 pub use workspace_convergence::{
     AdmissionChangeFacts, AdmissionSavedFacts, PendingAdmissionRecord,
     PendingAppliedMembershipEffect, PendingMembershipDecisionDelivery,
-    PendingMembershipHistoryTransferV2, WorkspaceConvergenceError, WorkspaceConvergenceEvent,
-    WorkspaceConvergenceState, WorkspaceDigest, WorkspaceEffect, WorkspaceFailureCategory,
+    PendingMembershipHistoryTransferV2, SpaceMembershipState, WorkspaceConvergenceError,
+    WorkspaceConvergenceEvent, WorkspaceDigest, WorkspaceEffect, WorkspaceFailureCategory,
     WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
 };

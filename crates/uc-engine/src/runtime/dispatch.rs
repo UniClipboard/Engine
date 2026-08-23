@@ -10,7 +10,7 @@ use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
     execute_decide_device_trust_change, execute_list_devices,
-    execute_query_member_sync_preferences, execute_query_profile_device_trust,
+    execute_query_member_sync_preferences, execute_query_space_membership_status,
     execute_query_space_protection, execute_remove_member, execute_update_member_sync_preferences,
 };
 #[cfg(feature = "dev-tools")]
@@ -80,7 +80,8 @@ impl EngineRuntime for ProductionRuntime {
     ) -> Result<OperationResult, EngineError> {
         match operation {
             Operation::QueryDeviceTrust => {
-                return execute_query_profile_device_trust(self.profile_convergence.as_ref()).await;
+                return execute_query_space_membership_status(self.profile_convergence.as_ref())
+                    .await;
             }
             Operation::CancelJoinSpace(input) => {
                 return execute_cancel_join_space(self.profile_convergence.as_ref(), input).await;

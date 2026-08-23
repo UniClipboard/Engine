@@ -12,7 +12,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
 use uc_application::deps::{
-    AppDeps, ClearProfileStatePort, ProfileLifecycleRepositoryPort, WipeProfileKeysPort,
+    AppDeps, ClearProfileStatePort, ProfileLifecycleRepositoryPort,
+    SpaceMembershipStateRepositoryPort, WipeProfileKeysPort,
 };
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::RepresentationId;
@@ -89,8 +90,7 @@ pub struct SyncEngineDeps {
     /// The same unlocked session used by space access and encrypted storage.
     pub membership_session: Arc<uc_infra::security::InMemorySession>,
     /// Encrypted persistence for the unified workspace convergence state.
-    pub workspace_convergence_repository:
-        Arc<dyn uc_core::membership::WorkspaceConvergenceRepositoryPort>,
+    pub workspace_convergence_repository: Arc<dyn SpaceMembershipStateRepositoryPort>,
     /// Profile-scoped encrypted persistence for durable admission attempts.
     pub admission_attempt_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
     pub admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort>,

@@ -210,7 +210,7 @@ impl WorkspaceMembership {
 
     async fn receive_membership_history_v2(
         &self,
-        state: &mut WorkspaceConvergenceState,
+        state: &mut SpaceMembershipState,
         source_device_id: &DeviceId,
         page: uc_core::membership::MembershipHistoryPageV2,
         now_ms: i64,

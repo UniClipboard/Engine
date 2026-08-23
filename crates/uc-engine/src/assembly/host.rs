@@ -787,7 +787,7 @@ mod tests {
                 .workspace_convergence_repository
                 .load_state()
                 .await,
-            Err(uc_core::membership::WorkspaceConvergenceRepositoryError::Locked)
+            Err(uc_application::deps::SpaceMembershipStateRepositoryError::Locked)
         );
     }
 

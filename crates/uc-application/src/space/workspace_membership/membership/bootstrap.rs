@@ -39,19 +39,6 @@ impl WorkspaceMembership {
         }
     }
 
-    pub(crate) async fn recover_legacy_migration_marker(
-        &self,
-    ) -> Result<(), WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
-        let (mut state, was_persisted) = self.load_state_with_presence().await?;
-        let initialized_missing_legacy_state = !was_persisted && state.migrated_from_pre_adr_020;
-        if initialized_missing_legacy_state
-            || Self::clear_legacy_migration_marker_if_current_history_exists(&mut state)
-        {
-            self.persist(&state).await?;
-        }
-        Ok(())
-    }
     /// Build the locally signed facts that a joiner returns after its group
     /// session is active. The facts remain inside the pairing exchange until
     /// the sponsor commits the admission chain.
@@ -371,7 +358,7 @@ impl WorkspaceMembership {
 
     async fn record_local_admission_history(
         &self,
-        state: &mut WorkspaceConvergenceState,
+        state: &mut SpaceMembershipState,
         facts: &uc_core::membership::AdmissionChangeFacts,
         security_state_digest: [u8; 32],
         security_update_payload: Vec<u8>,
@@ -446,26 +433,9 @@ impl WorkspaceMembership {
         Ok(())
     }
 
-    fn clear_legacy_migration_marker_if_current_history_exists(
-        state: &mut WorkspaceConvergenceState,
-    ) -> bool {
-        if !state.migrated_from_pre_adr_020 {
-            return false;
-        }
-        if state
-            .membership_reconciliation
-            .as_ref()
-            .is_some_and(|history| history.applied_head().is_some())
-        {
-            state.migrated_from_pre_adr_020 = false;
-            return true;
-        }
-        false
-    }
-
     pub(super) async fn record_local_removal_history(
         &self,
-        state: &mut WorkspaceConvergenceState,
+        state: &mut SpaceMembershipState,
         removed_member: uc_core::membership::MemberInstanceId,
         security_state_digest: [u8; 32],
     ) -> Result<(), WorkspaceConvergenceError> {
@@ -559,7 +529,7 @@ impl WorkspaceMembership {
                 .is_some_and(|previous| previous != own_instance)
         {
             let lineage = state.space_lineage.clone();
-            state = WorkspaceConvergenceState::fresh(lineage, now_ms);
+            state = SpaceMembershipState::fresh(lineage, now_ms);
             self.persist(&state).await?;
         }
         let (outcome, effect) = state
@@ -642,7 +612,6 @@ impl WorkspaceMembership {
             )
             .await?;
         }
-        Self::clear_legacy_migration_marker_if_current_history_exists(&mut state);
         self.persist(&state).await?;
         self.publish(&state);
         self.notify();
@@ -683,7 +652,7 @@ impl WorkspaceMembership {
             .to_owned();
         {
             let _guard = self.state_lock.lock().await;
-            let state = WorkspaceConvergenceState::fresh(lineage, self.deps.clock.now_ms());
+            let state = SpaceMembershipState::fresh(lineage, self.deps.clock.now_ms());
             self.persist(&state).await?;
         }
         self.initialize_legacy_space_membership(true).await?;

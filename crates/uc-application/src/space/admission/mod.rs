@@ -65,10 +65,8 @@ pub(crate) struct SpaceAdmission {
 pub struct ProfileSpaceAdmission {
     admission: durable::DurableAdmissionProjection,
     admission_attempts: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
-    own_device: uc_core::DeviceId,
-    clock: Arc<dyn uc_core::ports::ClockPort>,
-    active:
-        tokio::sync::RwLock<Option<Arc<crate::space::workspace_membership::WorkspaceMembership>>>,
+    query_space_membership_status:
+        crate::space::query_space_membership_status::QuerySpaceMembershipStatusUseCase,
     active_event_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     events: tokio::sync::broadcast::Sender<u64>,
 }

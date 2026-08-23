@@ -319,7 +319,7 @@ pub fn wire_dependencies_from_inputs(
     let profile_key_access_probe = space_access_adapter.clone();
     let membership_session = Arc::clone(&platform.session);
     let workspace_convergence_repository: Arc<
-        dyn uc_core::membership::WorkspaceConvergenceRepositoryPort,
+        dyn uc_application::deps::SpaceMembershipStateRepositoryPort,
     > = Arc::new(DieselWorkspaceConvergenceStore::new(
         Arc::clone(&infra.db_executor),
         platform.session.as_ref().clone(),

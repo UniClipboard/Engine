@@ -299,25 +299,12 @@ impl MemberRosterFacade {
             .map_err(map_workspace_convergence_error)
     }
 
-    pub async fn query_device_trust(
-        &self,
-    ) -> Result<crate::facade::DeviceTrustSnapshot, RosterError> {
-        let convergence = self
-            .workspace_convergence
-            .as_ref()
-            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
-        convergence
-            .query_device_trust()
-            .await
-            .map_err(map_workspace_convergence_error)
-    }
-
     pub async fn decide_device_trust_change(
         &self,
         change_id: MembershipEventId,
-        choice: crate::facade::DeviceTrustChoice,
+        choice: crate::facade::SpaceMembershipChangeChoice,
         confirm_local_removal: bool,
-    ) -> Result<crate::facade::DeviceTrustDecisionResult, RosterError> {
+    ) -> Result<crate::facade::SpaceMembershipChangeDecisionResult, RosterError> {
         let convergence = self
             .workspace_convergence
             .as_ref()
@@ -395,10 +382,10 @@ fn map_workspace_convergence_error(error: WorkspaceConvergenceError) -> RosterEr
     match error {
         WorkspaceConvergenceError::Locked
         | WorkspaceConvergenceError::Repository(
-            uc_core::membership::WorkspaceConvergenceRepositoryError::Locked,
+            crate::space::membership_state::SpaceMembershipStateRepositoryError::Locked,
         ) => RosterError::MembershipReconciliationLocked,
         WorkspaceConvergenceError::Repository(
-            uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt,
+            crate::space::membership_state::SpaceMembershipStateRepositoryError::Corrupt,
         ) => RosterError::MembershipReconciliationCorrupt,
         WorkspaceConvergenceError::SelfTarget => RosterError::MemberRemovalInvalidInput,
         WorkspaceConvergenceError::UnknownTarget => RosterError::MemberRemovalTargetNotFound,
@@ -421,7 +408,7 @@ mod tests {
         for error in [
             WorkspaceConvergenceError::Locked,
             WorkspaceConvergenceError::Repository(
-                uc_core::membership::WorkspaceConvergenceRepositoryError::Locked,
+                crate::space::membership_state::SpaceMembershipStateRepositoryError::Locked,
             ),
         ] {
             assert!(matches!(
@@ -434,7 +421,7 @@ mod tests {
     #[test]
     fn corrupt_device_trust_state_keeps_a_distinct_invalid_state_error() {
         let error = map_workspace_convergence_error(WorkspaceConvergenceError::Repository(
-            uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt,
+            crate::space::membership_state::SpaceMembershipStateRepositoryError::Corrupt,
         ));
 
         assert!(matches!(

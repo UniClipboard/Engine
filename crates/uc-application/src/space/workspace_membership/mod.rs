@@ -36,7 +36,19 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 use crate::space::admission::durable as admission;
-use crate::space::admission::{CurrentJoinStatus, PendingInboundMember};
+use crate::space::membership_state::{
+    SpaceMembershipStateRepositoryError, SpaceMembershipStateRepositoryPort,
+};
+pub(crate) use crate::space::query_space_membership_status::{
+    build_active_space_status, ActiveSpaceStatusFacts, ActiveSpaceStatusResult, DeviceMembership,
+    SpaceMembershipChangeChoice, SpaceMembershipChangeDecisionResult,
+};
+#[cfg(test)]
+pub(crate) use crate::space::query_space_membership_status::{
+    ActionUnavailableReason, DeviceCompatibility, GroupRelationship, PendingSpaceMembershipChange,
+    RecoveryAvailability, SpaceMemberRelationship, SpaceMembershipAction,
+    SpaceMembershipChangeImpact, SpaceMembershipStatus, SyncRelationship,
+};
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -46,13 +58,13 @@ use uc_core::membership::{
     MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
     MembershipHistoryRelationship, MembershipOperation, MembershipOperationV2,
     MembershipSecurityUpdateError, MembershipSecurityUpdatePort, RemovalDecision,
-    SpaceProtectionStatusPort, WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
-    WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState, WorkspaceMergeOutcome,
-    WorkspacePhase, WorkspaceSnapshot, MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
+    SpaceMembershipState, SpaceProtectionStatusPort, WorkspaceConvergenceEvent,
+    WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot, MEMBERSHIP_DECISION_FORMAT_V2,
+    MEMBERSHIP_EVENT_FORMAT_V2,
 };
-use uc_core::ports::{
-    ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, PresencePort, ReachabilityState,
-};
+#[cfg(test)]
+use uc_core::ports::ReachabilityState;
+use uc_core::ports::{ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, PresencePort};
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
 pub(crate) use runtime::WorkspaceMembershipActivity;
@@ -63,7 +75,7 @@ pub enum WorkspaceConvergenceError {
     #[error("workspace convergence state is locked")]
     Locked,
     #[error("workspace convergence state could not be persisted: {0}")]
-    Repository(#[from] WorkspaceConvergenceRepositoryError),
+    Repository(#[from] SpaceMembershipStateRepositoryError),
     #[error("workspace convergence security update failed: {0}")]
     SecurityUpdate(#[from] MembershipSecurityUpdateError),
     #[error("current membership identity is unavailable")]
@@ -100,9 +112,24 @@ pub enum WorkspaceConvergenceError {
     Unavailable,
 }
 
+impl WorkspaceConvergenceError {
+    pub(crate) fn is_locked(&self) -> bool {
+        matches!(
+            self,
+            Self::Locked | Self::Repository(SpaceMembershipStateRepositoryError::Locked)
+        )
+    }
+
+    pub(crate) fn is_corrupt(&self) -> bool {
+        matches!(
+            self,
+            Self::Repository(SpaceMembershipStateRepositoryError::Corrupt)
+        )
+    }
+}
+
 pub struct WorkspaceMembershipDeps {
-    pub initial_state_origin: WorkspaceConvergenceStateOrigin,
-    pub repository: Arc<dyn WorkspaceConvergenceRepositoryPort>,
+    pub repository: Arc<dyn SpaceMembershipStateRepositoryPort>,
     pub admission_attempts: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
     pub historical_membership_signatures:
         Arc<dyn uc_core::membership::HistoricalMembershipSignatureVerifier>,
@@ -139,164 +166,6 @@ pub struct WorkspaceMembershipDeps {
     pub own_device: DeviceId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceConvergenceStateOrigin {
-    CurrentInstallation,
-    UpgradeWithoutConvergenceState,
-}
-
-impl WorkspaceConvergenceStateOrigin {
-    pub fn from_version_transition(previous: Option<&str>, _current: &str) -> Self {
-        if previous.is_some() {
-            Self::UpgradeWithoutConvergenceState
-        } else {
-            Self::CurrentInstallation
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceMembership {
-    Active,
-    Removed,
-    Unavailable,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupRelationship {
-    Consistent,
-    PendingLocalDecision,
-    Diverged,
-    Unverifiable,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceCompatibility {
-    Compatible,
-    UpgradeRequired,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncRelationship {
-    Usable,
-    WaitingForLocalDecision,
-    PausedGroupDiverged,
-    PausedUpgradeRequired,
-    PausedUnverifiable,
-    RemovedLocalDevice,
-    RemovedPeerDevice,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceTrustChoice {
-    ApplyChange,
-    KeepCurrentDeviceGroup,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceTrustAction {
-    ApplyCurrentChange,
-    KeepCurrentDeviceGroup,
-    ConfirmApplyRemovesLocalDevice,
-    RejoinDeviceGroup,
-    UpdateThisDevice,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActionUnavailableReason {
-    NoCurrentChange,
-    ChangeNoLongerCurrent,
-    LocalDeviceConfirmationRequired,
-    LocalDeviceRemoved,
-    RecoveryNotAvailableInThisVersion,
-    PeerUpgradeRequired,
-    DeviceFactsUnverifiable,
-    EngineUnavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecoveryAvailability {
-    NotAvailableInThisVersion,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeviceTrustDecisionResult {
-    Applied {
-        change_id: MembershipEventId,
-        snapshot: DeviceTrustSnapshot,
-    },
-    KeptCurrentDeviceGroup {
-        change_id: MembershipEventId,
-        snapshot: DeviceTrustSnapshot,
-    },
-    AlreadyCompleted {
-        change_id: MembershipEventId,
-        completed_choice: DeviceTrustChoice,
-        snapshot: DeviceTrustSnapshot,
-    },
-    StateChanged {
-        current_change_id: Option<MembershipEventId>,
-        snapshot: DeviceTrustSnapshot,
-    },
-    LocalDeviceConfirmationRequired {
-        change_id: MembershipEventId,
-        snapshot: DeviceTrustSnapshot,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceTrustImpact {
-    pub usable_device_ids: Vec<DeviceId>,
-    pub paused_device_ids: Vec<DeviceId>,
-    pub local_device_outcome: DeviceMembership,
-    pub requires_rejoin_device_ids: Vec<DeviceId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceTrustChange {
-    pub change_id: MembershipEventId,
-    pub proposed_by_device_id: DeviceId,
-    pub target_device_ids: Vec<DeviceId>,
-    pub includes_local_device: bool,
-    pub apply_impact: DeviceTrustImpact,
-    pub keep_current_impact: DeviceTrustImpact,
-    pub allowed_choices: Vec<DeviceTrustChoice>,
-    pub blocked_reason: Option<ActionUnavailableReason>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceTrustRelationship {
-    pub device_id: DeviceId,
-    pub display_name: String,
-    pub is_local: bool,
-    pub reachability: ReachabilityState,
-    pub membership: DeviceMembership,
-    pub group_relationship: GroupRelationship,
-    pub compatibility: DeviceCompatibility,
-    pub sync_relationship: SyncRelationship,
-    pub available_actions: Vec<DeviceTrustAction>,
-    pub blocked_reason: Option<ActionUnavailableReason>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceTrustSnapshot {
-    pub revision: u64,
-    pub local_device_id: DeviceId,
-    pub local_membership: DeviceMembership,
-    pub current_change: Option<DeviceTrustChange>,
-    pub current_join: Option<CurrentJoinStatus>,
-    pub pending_inbound_member: Option<PendingInboundMember>,
-    pub devices: Vec<DeviceTrustRelationship>,
-    pub recovery: RecoveryAvailability,
-    pub allowed_actions: Vec<DeviceTrustAction>,
-    pub blocked_reason: Option<ActionUnavailableReason>,
-    pub updated_at_ms: i64,
-}
-
 /// The unified workspace convergence owner.
 pub struct WorkspaceMembership {
     pub(in crate::space) deps: WorkspaceMembershipDeps,
@@ -327,7 +196,7 @@ impl WorkspaceMembership {
         })
     }
 
-    pub(in crate::space) fn admission_generation(state: &WorkspaceConvergenceState) -> u64 {
+    pub(in crate::space) fn admission_generation(state: &SpaceMembershipState) -> u64 {
         state
             .membership_reconciliation
             .as_ref()
@@ -354,7 +223,7 @@ impl WorkspaceMembership {
     }
 
     pub(in crate::space) fn admission_decision_for_state(
-        state: &WorkspaceConvergenceState,
+        state: &SpaceMembershipState,
         invitation_generation: u64,
     ) -> uc_core::membership::MembershipAdmissionDecision {
         if state.phase == WorkspacePhase::RecoveryRequired {
@@ -383,7 +252,7 @@ impl WorkspaceMembership {
 
     async fn load_state_with_presence(
         &self,
-    ) -> Result<(WorkspaceConvergenceState, bool), WorkspaceConvergenceError> {
+    ) -> Result<(SpaceMembershipState, bool), WorkspaceConvergenceError> {
         let lineage = self
             .deps
             .membership_identity
@@ -395,15 +264,7 @@ impl WorkspaceMembership {
         let was_persisted = persisted.is_some();
         let mut state = match persisted {
             Some(state) => state,
-            None => {
-                let mut state =
-                    WorkspaceConvergenceState::fresh(lineage.clone(), self.deps.clock.now_ms());
-                state.migrated_from_pre_adr_020 = matches!(
-                    self.deps.initial_state_origin,
-                    WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState
-                );
-                state
-            }
+            None => SpaceMembershipState::fresh(lineage.clone(), self.deps.clock.now_ms()),
         };
         if state.space_lineage.is_empty() {
             state.space_lineage = lineage;
@@ -411,19 +272,16 @@ impl WorkspaceMembership {
         Ok((state, was_persisted))
     }
 
-    async fn load_state(&self) -> Result<WorkspaceConvergenceState, WorkspaceConvergenceError> {
+    async fn load_state(&self) -> Result<SpaceMembershipState, WorkspaceConvergenceError> {
         Ok(self.load_state_with_presence().await?.0)
     }
 
-    async fn persist(
-        &self,
-        state: &WorkspaceConvergenceState,
-    ) -> Result<(), WorkspaceConvergenceError> {
+    async fn persist(&self, state: &SpaceMembershipState) -> Result<(), WorkspaceConvergenceError> {
         self.deps.repository.save_state(state).await?;
         Ok(())
     }
 
-    fn publish(&self, state: &WorkspaceConvergenceState) {
+    fn publish(&self, state: &SpaceMembershipState) {
         let _ = self.events.send(state.snapshot());
     }
 }

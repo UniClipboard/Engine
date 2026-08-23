@@ -1,17 +1,16 @@
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
-use uc_core::membership::{WorkspaceConvergenceRepositoryError, WorkspaceSnapshot};
 use uc_core::ports::ClockPort;
 use uc_core::DeviceId;
 
 use super::durable::{self as admission, complete_ack_frame};
 use super::{CurrentJoinStatus, PendingJoinerCompleteAck, ProfileSpaceAdmission};
-use crate::space::workspace_membership::{
-    ActionUnavailableReason, DeviceCompatibility, DeviceMembership, DeviceTrustAction,
-    DeviceTrustRelationship, DeviceTrustSnapshot, GroupRelationship, RecoveryAvailability,
-    SyncRelationship, WorkspaceConvergenceError, WorkspaceMembership,
+use crate::space::query_space_membership_status::{
+    QuerySpaceMembershipStatusDeps, QuerySpaceMembershipStatusError,
+    QuerySpaceMembershipStatusUseCase, SpaceMembershipStatus,
 };
+use crate::space::workspace_membership::WorkspaceConvergenceError;
 
 impl ProfileSpaceAdmission {
     pub fn new(
@@ -20,23 +19,37 @@ impl ProfileSpaceAdmission {
         clock: Arc<dyn ClockPort>,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(64);
+        let query_space_membership_status =
+            QuerySpaceMembershipStatusUseCase::new(QuerySpaceMembershipStatusDeps {
+                admission_attempts: Arc::clone(&admission_attempts),
+                own_device,
+                clock,
+            });
         Arc::new(Self {
             admission: admission::DurableAdmissionProjection::new(Arc::clone(&admission_attempts)),
             admission_attempts,
-            own_device,
-            clock,
-            active: tokio::sync::RwLock::new(None),
+            query_space_membership_status,
             active_event_task: tokio::sync::Mutex::new(None),
             events,
         })
     }
 
-    pub async fn attach_active(self: &Arc<Self>, active: Option<Arc<WorkspaceMembership>>) {
-        *self.active.write().await = active.clone();
+    pub async fn attach_active(
+        self: &Arc<Self>,
+        active: Option<Arc<crate::space::assembly::SpaceModules>>,
+    ) {
+        self.query_space_membership_status
+            .replace_active_space(
+                active
+                    .as_ref()
+                    .map(|active| active.membership_status_deps()),
+            )
+            .await;
         if let Some(task) = self.active_event_task.lock().await.take() {
             task.abort();
         }
         if let Some(active) = active {
+            let active = active.workspace_membership();
             let mut changes = active.subscribe();
             let events = self.events.clone();
             let admission_attempts = Arc::clone(&self.admission_attempts);
@@ -53,8 +66,34 @@ impl ProfileSpaceAdmission {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn attach_workspace_membership_for_test(
+        self: &Arc<Self>,
+        active: Arc<crate::space::workspace_membership::WorkspaceMembership>,
+    ) {
+        self.query_space_membership_status
+            .replace_active_space(Some(
+                crate::space::query_space_membership_status::ActiveSpaceMembershipStatusDeps {
+                    state_repository: Arc::clone(&active.deps.repository),
+                    historical_signatures: Arc::clone(
+                        &active.deps.historical_membership_signatures,
+                    ),
+                    member_signatures: Arc::clone(&active.deps.member_signatures),
+                    member_repo: Arc::clone(&active.deps.member_repo),
+                    presence: Arc::clone(&active.deps.presence),
+                },
+            ))
+            .await;
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<u64> {
         self.events.subscribe()
+    }
+
+    pub async fn query_space_membership_status(
+        &self,
+    ) -> Result<SpaceMembershipStatus, QuerySpaceMembershipStatusError> {
+        self.query_space_membership_status.execute().await
     }
 
     pub async fn current_join(
@@ -129,54 +168,5 @@ impl ProfileSpaceAdmission {
             .device_trust_revision;
         let _ = self.events.send(revision);
         Ok(result)
-    }
-
-    pub async fn query_device_trust(
-        &self,
-    ) -> Result<DeviceTrustSnapshot, WorkspaceConvergenceError> {
-        if let Some(active) = self.active.read().await.clone() {
-            return match active.query_device_trust().await {
-                Ok(snapshot) => Ok(snapshot),
-                Err(WorkspaceConvergenceError::Locked)
-                | Err(WorkspaceConvergenceError::Repository(
-                    WorkspaceConvergenceRepositoryError::Locked,
-                )) => Ok(self.unavailable_device_trust_snapshot()),
-                Err(error) => Err(error),
-            };
-        }
-        let metadata = self
-            .admission_attempts
-            .profile_metadata()
-            .await
-            .map_err(admission::map_repository_error)?;
-        Ok(DeviceTrustSnapshot {
-            revision: metadata.device_trust_revision,
-            local_device_id: self.own_device.clone(),
-            local_membership: DeviceMembership::Unavailable,
-            current_change: None,
-            current_join: self.admission.current_local_join().await?,
-            pending_inbound_member: None,
-            devices: Vec::new(),
-            recovery: RecoveryAvailability::NotAvailableInThisVersion,
-            allowed_actions: Vec::new(),
-            blocked_reason: None,
-            updated_at_ms: self.clock.now_ms(),
-        })
-    }
-
-    fn unavailable_device_trust_snapshot(&self) -> DeviceTrustSnapshot {
-        DeviceTrustSnapshot {
-            revision: 0,
-            local_device_id: self.own_device.clone(),
-            local_membership: DeviceMembership::Unavailable,
-            current_change: None,
-            current_join: None,
-            pending_inbound_member: None,
-            devices: Vec::new(),
-            recovery: RecoveryAvailability::NotAvailableInThisVersion,
-            allowed_actions: Vec::new(),
-            blocked_reason: Some(ActionUnavailableReason::EngineUnavailable),
-            updated_at_ms: self.clock.now_ms(),
-        }
     }
 }

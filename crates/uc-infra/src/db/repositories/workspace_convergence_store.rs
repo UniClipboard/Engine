@@ -15,13 +15,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use uc_application::deps::{
+    SpaceMembershipStateRepositoryError, SpaceMembershipStateRepositoryPort,
+};
 use uc_core::crypto::EncryptionError;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
     AdmissionChangeFacts, MemberInstanceId, MembershipHistoryRelationship, PendingAdmissionRecord,
-    PendingAppliedMembershipEffect, PendingMembershipDecisionDelivery,
-    WorkspaceConvergenceRepositoryError, WorkspaceConvergenceRepositoryPort,
-    WorkspaceConvergenceState, WorkspaceFailureCategory, WorkspacePhase,
+    PendingAppliedMembershipEffect, PendingMembershipDecisionDelivery, SpaceMembershipState,
+    WorkspaceFailureCategory, WorkspacePhase,
 };
 use uc_core::ports::pairing::PairingSessionId;
 
@@ -64,16 +66,11 @@ struct WorkspaceConvergenceStateV2 {
     removed: bool,
     updated_at_ms: i64,
     #[serde(default)]
-    migrated_from_pre_adr_020: bool,
+    _migrated_from_pre_adr_020: bool,
 }
 
-impl From<WorkspaceConvergenceStateV2> for WorkspaceConvergenceState {
+impl From<WorkspaceConvergenceStateV2> for SpaceMembershipState {
     fn from(state: WorkspaceConvergenceStateV2) -> Self {
-        let migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
-            || state
-                .membership_reconciliation
-                .as_ref()
-                .is_none_or(|history| history.applied_head().is_none());
         Self {
             space_lineage: state.space_lineage,
             own_instance: state.own_instance,
@@ -88,7 +85,6 @@ impl From<WorkspaceConvergenceStateV2> for WorkspaceConvergenceState {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020,
         }
     }
 }
@@ -108,12 +104,8 @@ struct DeviceTrustInitialWorkspaceState {
     updated_at_ms: i64,
 }
 
-impl From<UnversionedCurrentWorkspaceState> for WorkspaceConvergenceState {
+impl From<UnversionedCurrentWorkspaceState> for SpaceMembershipState {
     fn from(state: UnversionedCurrentWorkspaceState) -> Self {
-        let migrated_from_pre_adr_020 = state
-            .membership_reconciliation
-            .as_ref()
-            .is_none_or(|history| history.applied_head().is_none());
         Self {
             space_lineage: state.space_lineage,
             own_instance: state.own_instance,
@@ -128,17 +120,12 @@ impl From<UnversionedCurrentWorkspaceState> for WorkspaceConvergenceState {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020,
         }
     }
 }
 
-impl From<DeviceTrustInitialWorkspaceState> for WorkspaceConvergenceState {
+impl From<DeviceTrustInitialWorkspaceState> for SpaceMembershipState {
     fn from(state: DeviceTrustInitialWorkspaceState) -> Self {
-        let migrated_from_pre_adr_020 = state
-            .membership_reconciliation
-            .as_ref()
-            .is_none_or(|history| history.applied_head().is_none());
         Self {
             space_lineage: state.space_lineage,
             own_instance: state.own_instance,
@@ -153,7 +140,6 @@ impl From<DeviceTrustInitialWorkspaceState> for WorkspaceConvergenceState {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020,
         }
     }
 }
@@ -297,7 +283,7 @@ struct LegacyWorkspaceConvergenceState {
 }
 
 impl LegacyWorkspaceConvergenceState {
-    fn into_current(self) -> WorkspaceConvergenceState {
+    fn into_current(self) -> SpaceMembershipState {
         let mut effective_members = std::collections::BTreeSet::new();
         for change in &self.changes {
             if let Some(admission) = &change.admission {
@@ -323,7 +309,7 @@ impl LegacyWorkspaceConvergenceState {
             peer_history_relationships.clear();
         }
 
-        WorkspaceConvergenceState {
+        SpaceMembershipState {
             space_lineage: self.space_lineage,
             own_instance: self.own_instance,
             peer_history_relationships,
@@ -337,7 +323,6 @@ impl LegacyWorkspaceConvergenceState {
             revision: self.revision,
             removed: self.removed,
             updated_at_ms: self.updated_at_ms,
-            migrated_from_pre_adr_020: true,
         }
     }
 }
@@ -381,8 +366,8 @@ struct WorkspaceConvergenceStateV3Payload {
     migrated_from_pre_adr_020: bool,
 }
 
-impl From<WorkspaceConvergenceState> for WorkspaceConvergenceStateV3Payload {
-    fn from(state: WorkspaceConvergenceState) -> Self {
+impl From<SpaceMembershipState> for WorkspaceConvergenceStateV3Payload {
+    fn from(state: SpaceMembershipState) -> Self {
         Self {
             space_lineage: state.space_lineage,
             own_instance: state.own_instance,
@@ -397,23 +382,13 @@ impl From<WorkspaceConvergenceState> for WorkspaceConvergenceStateV3Payload {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020: state.migrated_from_pre_adr_020,
+            migrated_from_pre_adr_020: false,
         }
     }
 }
 
-impl From<WorkspaceConvergenceStateV3Payload> for WorkspaceConvergenceState {
+impl From<WorkspaceConvergenceStateV3Payload> for SpaceMembershipState {
     fn from(state: WorkspaceConvergenceStateV3Payload) -> Self {
-        let migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
-            || (!state.removed
-                && state.phase != WorkspacePhase::RecoveryRequired
-                && state.failure_category.is_none()
-                && state.own_instance.is_some()
-                && !state.peer_history_relationships.is_empty()
-                && state
-                    .membership_reconciliation
-                    .as_ref()
-                    .is_none_or(|history| history.applied_head().is_none()));
         Self {
             space_lineage: state.space_lineage,
             own_instance: state.own_instance,
@@ -428,7 +403,6 @@ impl From<WorkspaceConvergenceStateV3Payload> for WorkspaceConvergenceState {
             revision: state.revision,
             removed: state.removed,
             updated_at_ms: state.updated_at_ms,
-            migrated_from_pre_adr_020,
         }
     }
 }
@@ -451,14 +425,14 @@ struct WorkspaceConvergenceMigrationV3 {
     target_plaintext_digest: Option<[u8; 32]>,
 }
 
-fn repository_error(error: impl std::fmt::Display) -> WorkspaceConvergenceRepositoryError {
-    WorkspaceConvergenceRepositoryError::Repository(error.to_string())
+fn repository_error(_error: impl std::fmt::Display) -> SpaceMembershipStateRepositoryError {
+    SpaceMembershipStateRepositoryError::Unavailable
 }
 
-fn session_error(error: EncryptionError) -> WorkspaceConvergenceRepositoryError {
+fn session_error(error: EncryptionError) -> SpaceMembershipStateRepositoryError {
     match error {
         EncryptionError::NotInitialized | EncryptionError::Locked => {
-            WorkspaceConvergenceRepositoryError::Locked
+            SpaceMembershipStateRepositoryError::Locked
         }
         error => repository_error(error),
     }
@@ -473,7 +447,7 @@ fn seal_prefixed_payload<T: Serialize>(
     prefix: &[u8],
     value: &T,
     aad: &[u8],
-) -> Result<Vec<u8>, WorkspaceConvergenceRepositoryError> {
+) -> Result<Vec<u8>, SpaceMembershipStateRepositoryError> {
     let encoded = postcard::to_stdvec(value).map_err(repository_error)?;
     let mut plaintext = Vec::with_capacity(prefix.len() + encoded.len());
     plaintext.extend_from_slice(prefix);
@@ -487,22 +461,22 @@ fn open_workspace_plaintext(
     master_key: &MasterKey,
     ciphertext: &[u8],
     aad: &[u8],
-) -> Result<Vec<u8>, WorkspaceConvergenceRepositoryError> {
+) -> Result<Vec<u8>, SpaceMembershipStateRepositoryError> {
     let encrypted: EncryptedBlob = serde_json::from_slice(ciphertext)
-        .map_err(|_| WorkspaceConvergenceRepositoryError::Corrupt)?;
+        .map_err(|_| SpaceMembershipStateRepositoryError::Corrupt)?;
     v1_aead::decrypt_blob_xchacha(master_key, &encrypted.nonce, &encrypted.ciphertext, aad)
-        .map_err(|_| WorkspaceConvergenceRepositoryError::Corrupt)
+        .map_err(|_| SpaceMembershipStateRepositoryError::Corrupt)
 }
 
 fn decode_v2_workspace_payload(
     plaintext: &[u8],
-) -> Result<WorkspaceConvergenceState, WorkspaceConvergenceRepositoryError> {
+) -> Result<SpaceMembershipState, SpaceMembershipStateRepositoryError> {
     let encoded = plaintext
         .strip_prefix(WORKSPACE_STATE_V2_PREFIX)
         .unwrap_or(plaintext);
     postcard::from_bytes::<WorkspaceConvergenceStateV2>(encoded)
-        .map(WorkspaceConvergenceState::from)
-        .map_err(|_| WorkspaceConvergenceRepositoryError::Corrupt)
+        .map(SpaceMembershipState::from)
+        .map_err(|_| SpaceMembershipStateRepositoryError::Corrupt)
 }
 
 #[derive(QueryableByName)]
@@ -536,13 +510,13 @@ enum WorkspaceTransactionError {
     #[error(transparent)]
     Diesel(#[from] diesel::result::Error),
     #[error(transparent)]
-    Workspace(WorkspaceConvergenceRepositoryError),
+    Workspace(SpaceMembershipStateRepositoryError),
 }
 
 fn run_workspace_transaction<T>(
     conn: &mut SqliteConnection,
-    operation: impl FnOnce(&mut SqliteConnection) -> Result<T, WorkspaceConvergenceRepositoryError>,
-) -> Result<T, WorkspaceConvergenceRepositoryError> {
+    operation: impl FnOnce(&mut SqliteConnection) -> Result<T, SpaceMembershipStateRepositoryError>,
+) -> Result<T, SpaceMembershipStateRepositoryError> {
     conn.immediate_transaction::<_, WorkspaceTransactionError, _>(|conn| {
         operation(conn).map_err(WorkspaceTransactionError::Workspace)
     })
@@ -564,11 +538,11 @@ impl<E> DieselWorkspaceConvergenceStore<E> {
 }
 
 impl<E: DbExecutor> DieselWorkspaceConvergenceStore<E> {
-    fn master_key(&self) -> Result<MasterKey, WorkspaceConvergenceRepositoryError> {
+    fn master_key(&self) -> Result<MasterKey, SpaceMembershipStateRepositoryError> {
         self.session.get_master_key().map_err(session_error)
     }
 
-    fn current_space_id(&self) -> Result<SpaceId, WorkspaceConvergenceRepositoryError> {
+    fn current_space_id(&self) -> Result<SpaceId, SpaceMembershipStateRepositoryError> {
         self.session.current_space_id().map_err(session_error)
     }
 }
@@ -576,11 +550,9 @@ impl<E: DbExecutor> DieselWorkspaceConvergenceStore<E> {
 fn validate_current_space(
     requested_space: &SpaceId,
     current_space: &SpaceId,
-) -> Result<(), WorkspaceConvergenceRepositoryError> {
+) -> Result<(), SpaceMembershipStateRepositoryError> {
     if requested_space != current_space {
-        return Err(WorkspaceConvergenceRepositoryError::Repository(
-            "workspace convergence state belongs to a different space".to_owned(),
-        ));
+        return Err(SpaceMembershipStateRepositoryError::Corrupt);
     }
     Ok(())
 }
@@ -598,7 +570,7 @@ fn open_v3_slot_payload(
     space_id: &SpaceId,
     slot_id: &str,
     row: &WorkspaceV3SlotRow,
-) -> Result<(WorkspaceConvergenceState, [u8; 32]), WorkspaceConvergenceRepositoryError> {
+) -> Result<(SpaceMembershipState, [u8; 32]), SpaceMembershipStateRepositoryError> {
     let plaintext = open_workspace_plaintext(
         master_key,
         &row.encrypted_payload,
@@ -606,13 +578,13 @@ fn open_v3_slot_payload(
     )?;
     let encoded = plaintext
         .strip_prefix(WORKSPACE_STATE_V3_PREFIX)
-        .ok_or(WorkspaceConvergenceRepositoryError::Corrupt)?;
+        .ok_or(SpaceMembershipStateRepositoryError::Corrupt)?;
     let stored: WorkspaceConvergenceStateV3 =
-        postcard::from_bytes(encoded).map_err(|_| WorkspaceConvergenceRepositoryError::Corrupt)?;
+        postcard::from_bytes(encoded).map_err(|_| SpaceMembershipStateRepositoryError::Corrupt)?;
     if stored.storage_version != WORKSPACE_STATE_V3_STORAGE_VERSION {
-        return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+        return Err(SpaceMembershipStateRepositoryError::Corrupt);
     }
-    let state = WorkspaceConvergenceState::from(stored.state);
+    let state = SpaceMembershipState::from(stored.state);
     validate_loaded_state(&state, space_id, row.updated_at_ms)?;
     Ok((state, Sha256::digest(&plaintext).into()))
 }
@@ -622,7 +594,7 @@ fn load_v3_state_on(
     master_key: &MasterKey,
     space_id: &SpaceId,
     lookup_token: &str,
-) -> Result<Option<WorkspaceConvergenceState>, WorkspaceConvergenceRepositoryError> {
+) -> Result<Option<SpaceMembershipState>, SpaceMembershipStateRepositoryError> {
     let active = sql_query(
         "SELECT slot_id, generation FROM workspace_convergence_v3_active \
          WHERE space_lookup_token = ?",
@@ -635,7 +607,7 @@ fn load_v3_state_on(
         return Ok(None);
     };
     if active.generation <= 0 {
-        return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+        return Err(SpaceMembershipStateRepositoryError::Corrupt);
     }
     let slot = sql_query(
         "SELECT encrypted_payload, updated_at_ms FROM workspace_convergence_v3_slots \
@@ -646,7 +618,7 @@ fn load_v3_state_on(
     .get_result::<WorkspaceV3SlotRow>(conn)
     .optional()
     .map_err(repository_error)?
-    .ok_or(WorkspaceConvergenceRepositoryError::Corrupt)?;
+    .ok_or(SpaceMembershipStateRepositoryError::Corrupt)?;
     open_v3_slot_payload(master_key, space_id, &active.slot_id, &slot).map(|(state, _)| Some(state))
 }
 
@@ -655,7 +627,7 @@ fn recover_v3_storage_on(
     master_key: &MasterKey,
     space_id: &SpaceId,
     lookup_token: &str,
-) -> Result<(), WorkspaceConvergenceRepositoryError> {
+) -> Result<(), SpaceMembershipStateRepositoryError> {
     let active = sql_query(
         "SELECT slot_id, generation FROM workspace_convergence_v3_active \
          WHERE space_lookup_token = ?",
@@ -666,7 +638,7 @@ fn recover_v3_storage_on(
     .map_err(repository_error)?;
     if let Some(active) = active {
         if active.generation <= 0 {
-            return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+            return Err(SpaceMembershipStateRepositoryError::Corrupt);
         }
         let row = sql_query(
             "SELECT encrypted_payload, updated_at_ms FROM workspace_convergence_v3_slots \
@@ -677,7 +649,7 @@ fn recover_v3_storage_on(
         .get_result::<WorkspaceV3SlotRow>(conn)
         .optional()
         .map_err(repository_error)?
-        .ok_or(WorkspaceConvergenceRepositoryError::Corrupt)?;
+        .ok_or(SpaceMembershipStateRepositoryError::Corrupt)?;
         let _ = open_v3_slot_payload(master_key, space_id, &active.slot_id, &row)?;
         sql_query(
             "DELETE FROM workspace_convergence_v3_slots \
@@ -708,7 +680,7 @@ fn write_v3_migration_phase(
     migration_id: &str,
     migration: &WorkspaceConvergenceMigrationV3,
     updated_at_ms: i64,
-) -> Result<(), WorkspaceConvergenceRepositoryError> {
+) -> Result<(), SpaceMembershipStateRepositoryError> {
     let encrypted = seal_prefixed_payload(
         master_key,
         WORKSPACE_STATE_V3_PREFIX,
@@ -733,9 +705,9 @@ fn write_v3_migration_phase(
 fn save_v3_state_on(
     conn: &mut SqliteConnection,
     master_key: &MasterKey,
-    state: &WorkspaceConvergenceState,
+    state: &SpaceMembershipState,
     source_encrypted_payload: Option<Vec<u8>>,
-) -> Result<(), WorkspaceConvergenceRepositoryError> {
+) -> Result<(), SpaceMembershipStateRepositoryError> {
     let space_id = SpaceId::from_str(state.space_lineage.as_str());
     let lookup_token = space_lookup_token(master_key, &space_id).map_err(repository_error)?;
     let slot_id = Uuid::new_v4().to_string();
@@ -794,7 +766,7 @@ fn save_v3_state_on(
     let (reopened, verified_digest) =
         open_v3_slot_payload(master_key, &space_id, &slot_id, &inserted)?;
     if reopened != *state {
-        return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+        return Err(SpaceMembershipStateRepositoryError::Corrupt);
     }
     if let (Some(migration_id), Some(migration)) = (&migration_id, &mut migration) {
         migration.phase = WorkspaceConvergenceMigrationV3Phase::TargetVerified;
@@ -822,7 +794,7 @@ fn save_v3_state_on(
         active
             .generation
             .checked_add(1)
-            .ok_or(WorkspaceConvergenceRepositoryError::Corrupt)
+            .ok_or(SpaceMembershipStateRepositoryError::Corrupt)
     })?;
     sql_query(
         "INSERT INTO workspace_convergence_v3_active (space_lookup_token, slot_id, generation) \
@@ -882,7 +854,7 @@ fn load_state_on(
     conn: &mut SqliteConnection,
     master_key: &MasterKey,
     space_id: &SpaceId,
-) -> Result<Option<WorkspaceConvergenceState>, WorkspaceConvergenceRepositoryError> {
+) -> Result<Option<SpaceMembershipState>, SpaceMembershipStateRepositoryError> {
     let lookup_token = space_lookup_token(master_key, space_id).map_err(repository_error)?;
     run_workspace_transaction(conn, |conn| {
         recover_v3_storage_on(conn, master_key, space_id, &lookup_token)
@@ -919,10 +891,10 @@ fn load_state_on(
     for state in [
         postcard::from_bytes::<UnversionedCurrentWorkspaceState>(&plaintext)
             .ok()
-            .map(WorkspaceConvergenceState::from),
+            .map(SpaceMembershipState::from),
         postcard::from_bytes::<DeviceTrustInitialWorkspaceState>(&plaintext)
             .ok()
-            .map(WorkspaceConvergenceState::from),
+            .map(SpaceMembershipState::from),
     ] {
         if let Some(state) = state {
             if validate_loaded_state(&state, space_id, row.updated_at_ms).is_ok() {
@@ -936,9 +908,9 @@ fn load_state_on(
     }
 
     let legacy: LegacyWorkspaceConvergenceState = postcard::from_bytes(&plaintext)
-        .map_err(|_| WorkspaceConvergenceRepositoryError::Corrupt)?;
+        .map_err(|_| SpaceMembershipStateRepositoryError::Corrupt)?;
     if legacy.space_lineage != space_id.as_ref() || legacy.updated_at_ms != row.updated_at_ms {
-        return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+        return Err(SpaceMembershipStateRepositoryError::Corrupt);
     }
     let state = legacy.into_current();
     validate_loaded_state(&state, space_id, row.updated_at_ms)?;
@@ -949,12 +921,12 @@ fn load_state_on(
 }
 
 fn validate_loaded_state(
-    state: &WorkspaceConvergenceState,
+    state: &SpaceMembershipState,
     space_id: &SpaceId,
     updated_at_ms: i64,
-) -> Result<(), WorkspaceConvergenceRepositoryError> {
+) -> Result<(), SpaceMembershipStateRepositoryError> {
     if state.space_lineage != space_id.as_ref() || state.updated_at_ms != updated_at_ms {
-        return Err(WorkspaceConvergenceRepositoryError::Corrupt);
+        return Err(SpaceMembershipStateRepositoryError::Corrupt);
     }
     Ok(())
 }
@@ -962,19 +934,19 @@ fn validate_loaded_state(
 fn save_state_on(
     conn: &mut SqliteConnection,
     master_key: &MasterKey,
-    state: &WorkspaceConvergenceState,
-) -> Result<(), WorkspaceConvergenceRepositoryError> {
+    state: &SpaceMembershipState,
+) -> Result<(), SpaceMembershipStateRepositoryError> {
     save_v3_state_on(conn, master_key, state, None)
 }
 
 #[async_trait]
-impl<E: DbExecutor + Send + Sync> WorkspaceConvergenceRepositoryPort
+impl<E: DbExecutor + Send + Sync> SpaceMembershipStateRepositoryPort
     for DieselWorkspaceConvergenceStore<E>
 {
     async fn save_state(
         &self,
-        state: &WorkspaceConvergenceState,
-    ) -> Result<(), WorkspaceConvergenceRepositoryError> {
+        state: &SpaceMembershipState,
+    ) -> Result<(), SpaceMembershipStateRepositoryError> {
         let master_key = self.master_key()?;
         let space_id = self.current_space_id()?;
         validate_current_space(&SpaceId::from_str(state.space_lineage.as_str()), &space_id)?;
@@ -993,7 +965,7 @@ impl<E: DbExecutor + Send + Sync> WorkspaceConvergenceRepositoryPort
 
     async fn load_state(
         &self,
-    ) -> Result<Option<WorkspaceConvergenceState>, WorkspaceConvergenceRepositoryError> {
+    ) -> Result<Option<SpaceMembershipState>, SpaceMembershipStateRepositoryError> {
         let master_key = self.master_key()?;
         let space_id = self.current_space_id()?;
         self.executor
@@ -1011,14 +983,17 @@ mod tests {
     use diesel::sql_types::Binary;
     use diesel::QueryableByName;
     use tempfile::{tempdir, TempDir};
+    use uc_application::deps::{
+        SpaceMembershipStateRepositoryError, SpaceMembershipStateRepositoryPort,
+    };
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
         AdmissionChangeFacts, MemberInstanceId, MembershipActivationBaselineV2,
         MembershipCredential, MembershipEvent, MembershipHistoryRelationship, MembershipOperation,
         MembershipReconciliation, PendingAdmissionRecord, PendingAppliedMembershipEffect,
         PendingMembershipDecisionDelivery, PendingMembershipHistoryTransferV2,
-        VersionedMembershipHistory, WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState,
-        WorkspacePhase, ED25519_SIGNATURE_ALGORITHM_V1,
+        SpaceMembershipState, VersionedMembershipHistory, WorkspacePhase,
+        ED25519_SIGNATURE_ALGORITHM_V1,
     };
 
     use super::DieselWorkspaceConvergenceStore;
@@ -1077,11 +1052,11 @@ mod tests {
     #[derive(serde::Serialize)]
     struct Rc4WorkspaceConvergenceStateV3 {
         storage_version: u16,
-        state: WorkspaceConvergenceState,
+        state: SpaceMembershipState,
     }
 
-    impl From<WorkspaceConvergenceState> for Rc3WorkspaceConvergenceState {
-        fn from(state: WorkspaceConvergenceState) -> Self {
+    impl From<SpaceMembershipState> for Rc3WorkspaceConvergenceState {
+        fn from(state: SpaceMembershipState) -> Self {
             Self {
                 space_lineage: state.space_lineage,
                 own_instance: state.own_instance,
@@ -1096,7 +1071,7 @@ mod tests {
                 revision: state.revision,
                 removed: state.removed,
                 updated_at_ms: state.updated_at_ms,
-                migrated_from_pre_adr_020: state.migrated_from_pre_adr_020,
+                migrated_from_pre_adr_020: false,
             }
         }
     }
@@ -1133,7 +1108,7 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_rc4_v3_state(pool: &DbPool, state: &WorkspaceConvergenceState) {
+    fn insert_rc4_v3_state(pool: &DbPool, state: &SpaceMembershipState) {
         let master_key = MasterKey::from_bytes(&[0x57; 32]).unwrap();
         let space_id = SpaceId::from_str(SPACE);
         let lookup_token = super::space_lookup_token(&master_key, &space_id).unwrap();
@@ -1171,20 +1146,15 @@ mod tests {
         .unwrap();
     }
 
-    fn rc3_v2_plaintext(state: &WorkspaceConvergenceState) -> Vec<u8> {
+    fn rc3_v2_plaintext(state: &SpaceMembershipState) -> Vec<u8> {
         let rc3_state = Rc3WorkspaceConvergenceState::from(state.clone());
         let mut plaintext = super::WORKSPACE_STATE_V2_PREFIX.to_vec();
         plaintext.extend(postcard::to_stdvec(&rc3_state).unwrap());
         plaintext
     }
 
-    fn expected_rc3_state(mut state: WorkspaceConvergenceState) -> WorkspaceConvergenceState {
+    fn expected_rc3_state(mut state: SpaceMembershipState) -> SpaceMembershipState {
         state.pending_membership_history_transfers.clear();
-        state.migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020
-            || state
-                .membership_reconciliation
-                .as_ref()
-                .is_none_or(|history| history.applied_head().is_none());
         state
     }
 
@@ -1201,8 +1171,8 @@ mod tests {
         DieselWorkspaceConvergenceStore::new(DieselSqliteExecutor::new(pool), session())
     }
 
-    fn persisted_state() -> WorkspaceConvergenceState {
-        let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 123);
+    fn persisted_state() -> SpaceMembershipState {
+        let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 123);
         state.peer_history_relationships = BTreeMap::from([(
             DeviceId::new("workspace-state-sensitive-marker"),
             MembershipHistoryRelationship::PendingRemovalDecision,
@@ -1406,10 +1376,9 @@ mod tests {
         for event in [genesis, addition, removal] {
             history.receive_verified(event).unwrap();
         }
-        let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 123);
+        let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 123);
         state.own_instance = Some(local);
         state.membership_reconciliation = Some(history);
-        state.migrated_from_pre_adr_020 = true;
 
         store.save_state(&state).await.unwrap();
 
@@ -1419,7 +1388,6 @@ mod tests {
             .unwrap()
             .unwrap();
         let loaded_history = loaded.membership_reconciliation.as_ref().unwrap();
-        assert!(loaded.migrated_from_pre_adr_020);
         assert!(loaded_history.applied_head().is_some());
         assert!(
             !loaded_history.is_device_effective(&DeviceId::new("removed-device-sensitive-marker"))
@@ -1543,7 +1511,6 @@ mod tests {
         assert_eq!(loaded.own_instance, Some(local));
         assert_eq!(loaded.peer_history_relationships, expected_relationships);
         assert_eq!(loaded.revision, 9);
-        assert!(loaded.migrated_from_pre_adr_020);
         let reopened = reopen_store(pool);
         assert_eq!(reopened.load_state().await.unwrap(), Some(loaded));
     }
@@ -1574,7 +1541,6 @@ mod tests {
         let loaded = store.load_state().await.unwrap().unwrap();
 
         assert!(loaded.membership_reconciliation.is_none());
-        assert!(loaded.migrated_from_pre_adr_020);
         let reopened = reopen_store(pool);
         assert_eq!(reopened.load_state().await.unwrap(), Some(loaded));
     }
@@ -1586,7 +1552,7 @@ mod tests {
 
         assert_eq!(
             store.load_state().await,
-            Err(uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt)
+            Err(SpaceMembershipStateRepositoryError::Corrupt)
         );
     }
 
@@ -1600,7 +1566,7 @@ mod tests {
 
         assert_eq!(
             store.load_state().await,
-            Err(uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt)
+            Err(SpaceMembershipStateRepositoryError::Corrupt)
         );
     }
 
@@ -1653,7 +1619,7 @@ mod tests {
         let encoded = plaintext
             .strip_prefix(super::WORKSPACE_STATE_V2_PREFIX)
             .unwrap();
-        assert!(postcard::from_bytes::<WorkspaceConvergenceState>(encoded).is_err());
+        assert!(postcard::from_bytes::<SpaceMembershipState>(encoded).is_err());
 
         assert_eq!(store.load_state().await.unwrap(), Some(expected.clone()));
 
@@ -1666,14 +1632,12 @@ mod tests {
         let (store, pool, _directory) = make_store();
         let mut expected = expected_rc3_state(persisted_state());
         expected.membership_reconciliation = None;
-        expected.migrated_from_pre_adr_020 = false;
         let plaintext = rc3_v2_plaintext(&expected);
         insert_encrypted_plaintext(&pool, &plaintext, expected.updated_at_ms);
 
         let loaded = store.load_state().await.unwrap().unwrap();
 
         assert!(loaded.membership_reconciliation.is_none());
-        assert!(loaded.migrated_from_pre_adr_020);
         let reopened = reopen_store(pool);
         assert_eq!(reopened.load_state().await.unwrap(), Some(loaded));
     }
@@ -1690,7 +1654,7 @@ mod tests {
         let stored: super::WorkspaceConvergenceStateV3 = postcard::from_bytes(&encoded).unwrap();
 
         assert_eq!(stored.storage_version, rc4.storage_version);
-        assert_eq!(WorkspaceConvergenceState::from(stored.state), expected);
+        assert_eq!(SpaceMembershipState::from(stored.state), expected);
     }
 
     #[tokio::test]
@@ -1700,12 +1664,9 @@ mod tests {
         affected.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
         affected.phase = WorkspacePhase::LocallyApplied;
         affected.membership_reconciliation = None;
-        affected.migrated_from_pre_adr_020 = false;
         insert_rc4_v3_state(&pool, &affected);
 
         let recovered = reopen_store(pool).load_state().await.unwrap().unwrap();
-
-        assert!(recovered.migrated_from_pre_adr_020);
     }
 
     #[tokio::test]
@@ -1715,12 +1676,9 @@ mod tests {
         affected.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
         affected.phase = WorkspacePhase::Converging;
         affected.membership_reconciliation = None;
-        affected.migrated_from_pre_adr_020 = false;
         insert_rc4_v3_state(&pool, &affected);
 
         let recovered = reopen_store(pool).load_state().await.unwrap().unwrap();
-
-        assert!(recovered.migrated_from_pre_adr_020);
     }
 
     #[test]
@@ -1729,12 +1687,9 @@ mod tests {
         affected.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
         affected.phase = WorkspacePhase::Complete;
         affected.membership_reconciliation = None;
-        affected.migrated_from_pre_adr_020 = false;
         let stored = super::WorkspaceConvergenceStateV3Payload::from(affected);
 
-        let recovered = WorkspaceConvergenceState::from(stored);
-
-        assert!(recovered.migrated_from_pre_adr_020);
+        let recovered = SpaceMembershipState::from(stored);
     }
 
     #[test]
@@ -1742,7 +1697,6 @@ mod tests {
         let mut incomplete = persisted_state();
         incomplete.own_instance = Some(MemberInstanceId::from_bytes([0x24; 32]));
         incomplete.membership_reconciliation = None;
-        incomplete.migrated_from_pre_adr_020 = false;
 
         let mut missing_identity = incomplete.clone();
         missing_identity.own_instance = None;
@@ -1768,10 +1722,8 @@ mod tests {
             recovery_required,
             integrity_failure,
         ] {
-            let recovered = WorkspaceConvergenceState::from(
-                super::WorkspaceConvergenceStateV3Payload::from(state),
-            );
-            assert!(!recovered.migrated_from_pre_adr_020);
+            let recovered =
+                SpaceMembershipState::from(super::WorkspaceConvergenceStateV3Payload::from(state));
         }
     }
 
@@ -1800,7 +1752,7 @@ mod tests {
 
         assert_eq!(
             store.load_state().await,
-            Err(uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt)
+            Err(SpaceMembershipStateRepositoryError::Corrupt)
         );
 
         let mut connection = pool.get().unwrap();

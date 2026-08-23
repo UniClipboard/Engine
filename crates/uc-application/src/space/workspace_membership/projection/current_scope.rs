@@ -3,7 +3,7 @@ use super::super::*;
 impl WorkspaceMembership {
     pub(in crate::space) async fn v2_current_peer_snapshot(
         &self,
-        state: &WorkspaceConvergenceState,
+        state: &SpaceMembershipState,
     ) -> Result<
         Option<uc_core::membership::CurrentWorkspacePeerSnapshot>,
         uc_core::membership::CurrentWorkspacePeerScopeError,
@@ -158,10 +158,10 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceMembership 
 
         let state = self.load_state().await.map_err(|error| match error {
             WorkspaceConvergenceError::Repository(
-                uc_core::membership::WorkspaceConvergenceRepositoryError::Locked,
+                crate::space::membership_state::SpaceMembershipStateRepositoryError::Locked,
             ) => CurrentWorkspacePeerScopeError::Locked,
             WorkspaceConvergenceError::Repository(
-                uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt,
+                crate::space::membership_state::SpaceMembershipStateRepositoryError::Corrupt,
             ) => CurrentWorkspacePeerScopeError::Corrupt,
             _ => CurrentWorkspacePeerScopeError::Unavailable,
         })?;
@@ -173,82 +173,11 @@ impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceMembership 
             .as_ref()
             .filter(|history| history.applied_head().is_some());
         let Some(history) = history else {
-            let members = self.deps.member_repo.list().await.map_err(|_| {
-                tracing::warn!(
-                    error_kind = "current_peer_scope_legacy_member_roster_read",
-                    "current peer scope unavailable"
-                );
-                CurrentWorkspacePeerScopeError::Unavailable
-            })?;
-            let member_ids = members
-                .iter()
-                .map(|member| member.device_id)
-                .collect::<Vec<_>>();
-            let mut protection_member_ids = member_ids.clone();
-            protection_member_ids.push(self.deps.own_device);
-            protection_member_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-            protection_member_ids.dedup();
-            let protection = self
-                .deps
-                .space_protection
-                .query_space_protection(&protection_member_ids)
-                .await
-                .map_err(|error| match error {
-                    uc_core::membership::SpaceProtectionError::Corrupted => {
-                        tracing::warn!(
-                            error_kind = "current_peer_scope_legacy_protection_read",
-                            error_category = "corrupt",
-                            "current peer scope unavailable"
-                        );
-                        CurrentWorkspacePeerScopeError::Corrupt
-                    }
-                    _ => {
-                        tracing::warn!(
-                            error_kind = "current_peer_scope_legacy_protection_read",
-                            error_category = "unavailable",
-                            "current peer scope unavailable"
-                        );
-                        CurrentWorkspacePeerScopeError::Unavailable
-                    }
-                })?;
-            if protection.mode != uc_core::membership::SpaceProtectionMode::Legacy
-                && !state.migrated_from_pre_adr_020
-            {
-                tracing::warn!(
-                    error_kind = "current_peer_scope_current_history_absent",
-                    protection_mode = ?protection.mode,
-                    migrated_from_pre_adr_020 = state.migrated_from_pre_adr_020,
-                    member_record_count = member_ids.len(),
-                    "current peer scope unavailable"
-                );
-                return Err(CurrentWorkspacePeerScopeError::Unavailable);
-            }
-            let local_is_member = protection.mode
-                == uc_core::membership::SpaceProtectionMode::Legacy
-                || protection.members.iter().any(|member| {
-                    member.device_id == self.deps.own_device
-                        && member.status == uc_core::membership::MemberProtectionStatus::Protected
-                });
-            let mut peer_device_ids = if local_is_member {
-                member_ids
-                    .into_iter()
-                    .filter(|device| *device != self.deps.own_device)
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            peer_device_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-            peer_device_ids.dedup();
-            return Ok(CurrentWorkspacePeerSnapshot {
-                revision: state.revision,
-                source: CurrentWorkspacePeerScopeSource::Legacy,
-                local_membership: if local_is_member {
-                    CurrentWorkspaceLocalMembership::Active
-                } else {
-                    CurrentWorkspaceLocalMembership::Removed
-                },
-                peer_device_ids,
-            });
+            tracing::warn!(
+                error_kind = "current_peer_scope_current_history_absent",
+                "current peer scope unavailable until single-device isolation completes"
+            );
+            return Err(CurrentWorkspacePeerScopeError::Unavailable);
         };
         let local_membership = if state.removed
             || state

@@ -22,14 +22,16 @@ use uc_core::membership::{
     MemberRepositoryPort, MembershipAdmissionDecision, MembershipAdmissionGatePort,
     MembershipHistoryMessage, MembershipHistoryV2Ack, MembershipOperation,
     MembershipReconciliation, MembershipSecurityUpdateError, MembershipSecurityUpdatePort,
-    RemovalDecision, SpaceProtectionError, SpaceProtectionMode, SpaceProtectionSnapshot,
-    SpaceProtectionStatusPort, WorkspaceConvergenceEvent, WorkspaceConvergenceRepositoryError,
-    WorkspaceConvergenceRepositoryPort, WorkspaceConvergenceState,
+    RemovalDecision, SpaceMembershipState, SpaceProtectionError, SpaceProtectionMode,
+    SpaceProtectionSnapshot, SpaceProtectionStatusPort, WorkspaceConvergenceEvent,
 };
 use uc_core::ports::{ClockPort, DeviceIdentityPort};
 use uc_core::ports::{PresenceError, PresenceEvent, PresencePort, ReachabilityState};
 
 use super::*;
+use crate::space::membership_state::{
+    SpaceMembershipStateRepositoryError, SpaceMembershipStateRepositoryPort,
+};
 
 const SPACE: &str = "test-workspace";
 
@@ -273,16 +275,16 @@ impl uc_core::membership::MembershipHistoryExchangePort for UnusedExchange {
 
 #[derive(Clone, Default)]
 pub(crate) struct MemoryWorkspaceRepository {
-    state: Arc<Mutex<Option<WorkspaceConvergenceState>>>,
-    failure: Arc<Mutex<Option<WorkspaceConvergenceRepositoryError>>>,
+    state: Arc<Mutex<Option<SpaceMembershipState>>>,
+    failure: Arc<Mutex<Option<SpaceMembershipStateRepositoryError>>>,
 }
 
 #[async_trait]
-impl WorkspaceConvergenceRepositoryPort for MemoryWorkspaceRepository {
+impl SpaceMembershipStateRepositoryPort for MemoryWorkspaceRepository {
     async fn save_state(
         &self,
-        state: &WorkspaceConvergenceState,
-    ) -> Result<(), WorkspaceConvergenceRepositoryError> {
+        state: &SpaceMembershipState,
+    ) -> Result<(), SpaceMembershipStateRepositoryError> {
         if let Some(error) = self.failure.lock().unwrap().clone() {
             return Err(error);
         }
@@ -292,7 +294,7 @@ impl WorkspaceConvergenceRepositoryPort for MemoryWorkspaceRepository {
 
     async fn load_state(
         &self,
-    ) -> Result<Option<WorkspaceConvergenceState>, WorkspaceConvergenceRepositoryError> {
+    ) -> Result<Option<SpaceMembershipState>, SpaceMembershipStateRepositoryError> {
         Ok(self.state.lock().unwrap().clone())
     }
 }
@@ -300,18 +302,18 @@ impl WorkspaceConvergenceRepositoryPort for MemoryWorkspaceRepository {
 struct LockedWorkspaceRepository;
 
 #[async_trait]
-impl WorkspaceConvergenceRepositoryPort for LockedWorkspaceRepository {
+impl SpaceMembershipStateRepositoryPort for LockedWorkspaceRepository {
     async fn save_state(
         &self,
-        _state: &WorkspaceConvergenceState,
-    ) -> Result<(), WorkspaceConvergenceRepositoryError> {
-        Err(WorkspaceConvergenceRepositoryError::Locked)
+        _state: &SpaceMembershipState,
+    ) -> Result<(), SpaceMembershipStateRepositoryError> {
+        Err(SpaceMembershipStateRepositoryError::Locked)
     }
 
     async fn load_state(
         &self,
-    ) -> Result<Option<WorkspaceConvergenceState>, WorkspaceConvergenceRepositoryError> {
-        Err(WorkspaceConvergenceRepositoryError::Locked)
+    ) -> Result<Option<SpaceMembershipState>, SpaceMembershipStateRepositoryError> {
+        Err(SpaceMembershipStateRepositoryError::Locked)
     }
 }
 
@@ -1184,12 +1186,11 @@ async fn runtime_pause_interrupts_an_in_flight_recovery() {
 /// the repository and the recovery view. Shared with other test modules in
 /// this crate (`pub(crate)` under `cfg(test)`).
 pub(crate) fn test_deps(
-    repository: Arc<dyn WorkspaceConvergenceRepositoryPort>,
+    repository: Arc<dyn SpaceMembershipStateRepositoryPort>,
     own_device: &str,
     _members: Vec<(DeviceId, MemberInstanceId)>,
 ) -> WorkspaceMembershipDeps {
     WorkspaceMembershipDeps {
-        initial_state_origin: super::WorkspaceConvergenceStateOrigin::CurrentInstallation,
         repository,
         admission_attempts: Arc::new(LockedAdmissionRepository {
             allow_empty_history_reads: true,

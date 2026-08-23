@@ -6,11 +6,12 @@ use base64::Engine as _;
 use tracing::{error, info};
 use uc_application::facade::{
     ActionUnavailableReason, AppFacade, ContentTypesPatch as AppContentTypesPatch,
-    CurrentJoinStatus, DeviceCompatibility, DeviceMembership, DeviceTrustAction, DeviceTrustChoice,
-    DeviceTrustDecisionResult, DeviceTrustImpact, DeviceTrustSnapshot, GroupRelationship,
+    CurrentJoinStatus, DeviceCompatibility, DeviceMembership, GroupRelationship,
     MemberProtectionStatusView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, RecoveryAvailability, RosterError, SpaceProtectionModeView,
-    SpaceProtectionView, SyncRelationship,
+    MemberSyncPreferencesView, ProfileSpaceAdmission, QuerySpaceMembershipStatusError,
+    RecoveryAvailability, RosterError, SpaceMembershipAction, SpaceMembershipChangeChoice,
+    SpaceMembershipChangeDecisionResult, SpaceMembershipChangeImpact, SpaceMembershipStatus,
+    SpaceProtectionModeView, SpaceProtectionView, SyncRelationship,
 };
 use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ReachabilityState;
@@ -94,13 +95,13 @@ pub async fn execute_query_workspace_convergence(
     ))
 }
 
-pub async fn execute_query_profile_device_trust(
-    convergence: &uc_application::facade::ProfileSpaceAdmission,
+pub async fn execute_query_space_membership_status(
+    facade: &ProfileSpaceAdmission,
 ) -> Result<OperationResult, EngineError> {
-    let snapshot = convergence
-        .query_device_trust()
+    let snapshot = facade
+        .query_space_membership_status()
         .await
-        .map_err(map_workspace_convergence_error)?;
+        .map_err(map_query_space_membership_status_error)?;
     Ok(OperationResult::DeviceTrust(device_trust_snapshot(
         snapshot,
     )))
@@ -119,9 +120,9 @@ pub async fn execute_decide_device_trust_change(
             )
         })?;
     let choice = match input.choice {
-        DeviceTrustChoiceSummary::ApplyChange => DeviceTrustChoice::ApplyChange,
+        DeviceTrustChoiceSummary::ApplyChange => SpaceMembershipChangeChoice::ApplyChange,
         DeviceTrustChoiceSummary::KeepCurrentDeviceGroup => {
-            DeviceTrustChoice::KeepCurrentDeviceGroup
+            SpaceMembershipChangeChoice::KeepCurrentDeviceGroup
         }
     };
     let result = facade
@@ -133,23 +134,25 @@ pub async fn execute_decide_device_trust_change(
     )))
 }
 
-fn device_trust_decision(result: DeviceTrustDecisionResult) -> DeviceTrustDecisionSummary {
+fn device_trust_decision(
+    result: SpaceMembershipChangeDecisionResult,
+) -> DeviceTrustDecisionSummary {
     match result {
-        DeviceTrustDecisionResult::Applied {
+        SpaceMembershipChangeDecisionResult::Applied {
             change_id,
             snapshot,
         } => DeviceTrustDecisionSummary::Applied {
             change_id: change_id.to_hex(),
             snapshot: Box::new(device_trust_snapshot(snapshot)),
         },
-        DeviceTrustDecisionResult::KeptCurrentDeviceGroup {
+        SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup {
             change_id,
             snapshot,
         } => DeviceTrustDecisionSummary::KeptCurrentDeviceGroup {
             change_id: change_id.to_hex(),
             snapshot: Box::new(device_trust_snapshot(snapshot)),
         },
-        DeviceTrustDecisionResult::AlreadyCompleted {
+        SpaceMembershipChangeDecisionResult::AlreadyCompleted {
             change_id,
             completed_choice,
             snapshot,
@@ -158,14 +161,14 @@ fn device_trust_decision(result: DeviceTrustDecisionResult) -> DeviceTrustDecisi
             completed_choice: device_trust_choice(completed_choice),
             snapshot: Box::new(device_trust_snapshot(snapshot)),
         },
-        DeviceTrustDecisionResult::StateChanged {
+        SpaceMembershipChangeDecisionResult::StateChanged {
             current_change_id,
             snapshot,
         } => DeviceTrustDecisionSummary::StateChanged {
             current_change_id: current_change_id.map(|change_id| change_id.to_hex()),
             snapshot: Box::new(device_trust_snapshot(snapshot)),
         },
-        DeviceTrustDecisionResult::LocalDeviceConfirmationRequired {
+        SpaceMembershipChangeDecisionResult::LocalDeviceConfirmationRequired {
             change_id,
             snapshot,
         } => DeviceTrustDecisionSummary::LocalDeviceConfirmationRequired {
@@ -352,7 +355,7 @@ pub(crate) fn workspace_convergence_summary(
     }
 }
 
-pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustSnapshot) -> DeviceTrustSnapshotSummary {
+pub(crate) fn device_trust_snapshot(snapshot: SpaceMembershipStatus) -> DeviceTrustSnapshotSummary {
     DeviceTrustSnapshotSummary {
         revision: snapshot.revision,
         local_device_id: snapshot.local_device_id.to_string(),
@@ -537,7 +540,7 @@ fn device_ids(device_ids: Vec<uc_core::DeviceId>) -> Vec<String> {
         .collect()
 }
 
-fn device_trust_impact(impact: DeviceTrustImpact) -> DeviceTrustImpactSummary {
+fn device_trust_impact(impact: SpaceMembershipChangeImpact) -> DeviceTrustImpactSummary {
     DeviceTrustImpactSummary {
         usable_device_ids: device_ids(impact.usable_device_ids),
         paused_device_ids: device_ids(impact.paused_device_ids),
@@ -555,26 +558,26 @@ fn device_membership(membership: DeviceMembership) -> DeviceMembershipSummary {
     }
 }
 
-fn device_trust_choice(choice: DeviceTrustChoice) -> DeviceTrustChoiceSummary {
+fn device_trust_choice(choice: SpaceMembershipChangeChoice) -> DeviceTrustChoiceSummary {
     match choice {
-        DeviceTrustChoice::ApplyChange => DeviceTrustChoiceSummary::ApplyChange,
-        DeviceTrustChoice::KeepCurrentDeviceGroup => {
+        SpaceMembershipChangeChoice::ApplyChange => DeviceTrustChoiceSummary::ApplyChange,
+        SpaceMembershipChangeChoice::KeepCurrentDeviceGroup => {
             DeviceTrustChoiceSummary::KeepCurrentDeviceGroup
         }
     }
 }
 
-fn device_trust_action(action: DeviceTrustAction) -> DeviceTrustActionSummary {
+fn device_trust_action(action: SpaceMembershipAction) -> DeviceTrustActionSummary {
     match action {
-        DeviceTrustAction::ApplyCurrentChange => DeviceTrustActionSummary::ApplyCurrentChange,
-        DeviceTrustAction::KeepCurrentDeviceGroup => {
+        SpaceMembershipAction::ApplyCurrentChange => DeviceTrustActionSummary::ApplyCurrentChange,
+        SpaceMembershipAction::KeepCurrentDeviceGroup => {
             DeviceTrustActionSummary::KeepCurrentDeviceGroup
         }
-        DeviceTrustAction::ConfirmApplyRemovesLocalDevice => {
+        SpaceMembershipAction::ConfirmApplyRemovesLocalDevice => {
             DeviceTrustActionSummary::ConfirmApplyRemovesLocalDevice
         }
-        DeviceTrustAction::RejoinDeviceGroup => DeviceTrustActionSummary::RejoinDeviceGroup,
-        DeviceTrustAction::UpdateThisDevice => DeviceTrustActionSummary::UpdateThisDevice,
+        SpaceMembershipAction::RejoinDeviceGroup => DeviceTrustActionSummary::RejoinDeviceGroup,
+        SpaceMembershipAction::UpdateThisDevice => DeviceTrustActionSummary::UpdateThisDevice,
     }
 }
 
@@ -757,20 +760,40 @@ fn map_workspace_convergence_error(
     match error {
         uc_application::facade::WorkspaceConvergenceError::Locked
         | uc_application::facade::WorkspaceConvergenceError::Repository(
-            uc_core::membership::WorkspaceConvergenceRepositoryError::Locked,
+            uc_application::facade::SpaceMembershipStateRepositoryError::Locked,
         ) => EngineError::new(
             QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             false,
         ),
         uc_application::facade::WorkspaceConvergenceError::Repository(
-            uc_core::membership::WorkspaceConvergenceRepositoryError::Corrupt,
+            uc_application::facade::SpaceMembershipStateRepositoryError::Corrupt,
         ) => EngineError::new(
             QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
             EngineErrorCategory::InvalidState,
             false,
         ),
         _ => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+        ),
+    }
+}
+
+fn map_query_space_membership_status_error(error: QuerySpaceMembershipStatusError) -> EngineError {
+    match error {
+        QuerySpaceMembershipStatusError::Unavailable => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            false,
+        ),
+        QuerySpaceMembershipStatusError::Corrupt => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+        ),
+        QuerySpaceMembershipStatusError::Failed => EngineError::new(
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             false,

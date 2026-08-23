@@ -173,16 +173,6 @@ pub enum MembershipAttestationEndpointError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum WorkspaceConvergenceRepositoryError {
-    #[error("workspace convergence storage is locked")]
-    Locked,
-    #[error("workspace convergence storage is corrupt")]
-    Corrupt,
-    #[error("workspace convergence repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CurrentMembershipIdentityError {
     #[error("current membership identity is unavailable")]
     Unavailable,

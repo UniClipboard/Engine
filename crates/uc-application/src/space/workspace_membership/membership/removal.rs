@@ -1,6 +1,52 @@
 use super::super::*;
 
 impl WorkspaceMembership {
+    pub(crate) async fn build_current_space_membership_status(
+        &self,
+    ) -> Result<ActiveSpaceStatusResult, WorkspaceConvergenceError> {
+        let state = self.load_state().await?;
+        let encoded_history = self
+            .deps
+            .admission_attempts
+            .load_membership_history_v2()
+            .await
+            .map_err(admission::map_repository_error)?
+            .ok_or(WorkspaceConvergenceError::Unavailable)?;
+        let history = uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
+            &encoded_history,
+            self.deps.historical_membership_signatures.as_ref(),
+        )
+        .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
+        let own_instance = self
+            .deps
+            .member_signatures
+            .current_member_instance(&self.deps.own_device)
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+        let local_membership = if history.active_members().contains(&own_instance) {
+            DeviceMembership::Active
+        } else {
+            DeviceMembership::Removed
+        };
+        let roster = self
+            .deps
+            .member_repo
+            .list()
+            .await
+            .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
+
+        Ok(build_active_space_status(ActiveSpaceStatusFacts {
+            state,
+            history,
+            own_instance,
+            local_membership,
+            roster,
+            presence: Arc::clone(&self.deps.presence),
+            local_device_id: self.deps.own_device.clone(),
+        })
+        .await)
+    }
+
     pub async fn decide_membership_removal(
         &self,
         removal_event_id: MembershipEventId,
@@ -282,9 +328,9 @@ impl WorkspaceMembership {
     pub async fn decide_device_trust_change(
         &self,
         change_id: MembershipEventId,
-        choice: DeviceTrustChoice,
+        choice: SpaceMembershipChangeChoice,
         confirm_local_removal: bool,
-    ) -> Result<DeviceTrustDecisionResult, WorkspaceConvergenceError> {
+    ) -> Result<SpaceMembershipChangeDecisionResult, WorkspaceConvergenceError> {
         let _decision_guard = self.device_trust_decision_lock.lock().await;
         if let Some(encoded_history) = self
             .deps
@@ -306,18 +352,18 @@ impl WorkspaceMembership {
                 .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
             if let Some(completed) = history.decision_for(change_id, own) {
                 let completed_choice = match completed.decision {
-                    RemovalDecision::Accept => DeviceTrustChoice::ApplyChange,
-                    RemovalDecision::Reject => DeviceTrustChoice::KeepCurrentDeviceGroup,
+                    RemovalDecision::Accept => SpaceMembershipChangeChoice::ApplyChange,
+                    RemovalDecision::Reject => SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
                 };
-                let snapshot = self.query_device_trust().await?;
+                let snapshot = self.build_current_space_membership_status().await?.status;
                 return if completed_choice == choice {
-                    Ok(DeviceTrustDecisionResult::AlreadyCompleted {
+                    Ok(SpaceMembershipChangeDecisionResult::AlreadyCompleted {
                         change_id,
                         completed_choice,
                         snapshot,
                     })
                 } else {
-                    Ok(DeviceTrustDecisionResult::StateChanged {
+                    Ok(SpaceMembershipChangeDecisionResult::StateChanged {
                         current_change_id: snapshot
                             .current_change
                             .as_ref()
@@ -327,8 +373,8 @@ impl WorkspaceMembership {
                 };
             }
             if history.pending_removal_decision(own) != Some(change_id) {
-                let snapshot = self.query_device_trust().await?;
-                return Ok(DeviceTrustDecisionResult::StateChanged {
+                let snapshot = self.build_current_space_membership_status().await?.status;
+                return Ok(SpaceMembershipChangeDecisionResult::StateChanged {
                     current_change_id: snapshot
                         .current_change
                         .as_ref()
@@ -342,15 +388,20 @@ impl WorkspaceMembership {
                     MembershipOperationV2::RemoveDevice { member } if member == own
                 )
             });
-            if choice == DeviceTrustChoice::ApplyChange && removes_local && !confirm_local_removal {
-                return Ok(DeviceTrustDecisionResult::LocalDeviceConfirmationRequired {
-                    change_id,
-                    snapshot: self.query_device_trust().await?,
-                });
+            if choice == SpaceMembershipChangeChoice::ApplyChange
+                && removes_local
+                && !confirm_local_removal
+            {
+                return Ok(
+                    SpaceMembershipChangeDecisionResult::LocalDeviceConfirmationRequired {
+                        change_id,
+                        snapshot: self.build_current_space_membership_status().await?.status,
+                    },
+                );
             }
             let decision = match choice {
-                DeviceTrustChoice::ApplyChange => RemovalDecision::Accept,
-                DeviceTrustChoice::KeepCurrentDeviceGroup => RemovalDecision::Reject,
+                SpaceMembershipChangeChoice::ApplyChange => RemovalDecision::Accept,
+                SpaceMembershipChangeChoice::KeepCurrentDeviceGroup => RemovalDecision::Reject,
             };
             self.decide_membership_removal_v2(change_id, decision)
                 .await?
@@ -359,93 +410,28 @@ impl WorkspaceMembership {
                         "current V2 removal disappeared".to_owned(),
                     )
                 })?;
-            let snapshot = self.query_device_trust().await?;
+            let snapshot = self.build_current_space_membership_status().await?.status;
             return Ok(match choice {
-                DeviceTrustChoice::ApplyChange => DeviceTrustDecisionResult::Applied {
-                    change_id,
-                    snapshot,
-                },
-                DeviceTrustChoice::KeepCurrentDeviceGroup => {
-                    DeviceTrustDecisionResult::KeptCurrentDeviceGroup {
+                SpaceMembershipChangeChoice::ApplyChange => {
+                    SpaceMembershipChangeDecisionResult::Applied {
+                        change_id,
+                        snapshot,
+                    }
+                }
+                SpaceMembershipChangeChoice::KeepCurrentDeviceGroup => {
+                    SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup {
                         change_id,
                         snapshot,
                     }
                 }
             });
         }
-        let state = self.load_state().await?;
-        let history = state
-            .membership_reconciliation
-            .as_ref()
-            .ok_or(WorkspaceConvergenceError::NotAMember)?;
-        if let Some(completed) = history.local_removal_decision(change_id) {
-            let completed_choice = match completed {
-                RemovalDecision::Accept => DeviceTrustChoice::ApplyChange,
-                RemovalDecision::Reject => DeviceTrustChoice::KeepCurrentDeviceGroup,
-            };
-            let snapshot = self.query_device_trust().await?;
-            return if completed_choice == choice {
-                Ok(DeviceTrustDecisionResult::AlreadyCompleted {
-                    change_id,
-                    completed_choice,
-                    snapshot,
-                })
-            } else {
-                Ok(DeviceTrustDecisionResult::StateChanged {
-                    current_change_id: snapshot
-                        .current_change
-                        .as_ref()
-                        .map(|change| change.change_id),
-                    snapshot,
-                })
-            };
-        }
-        let pending = history.pending_removal_facts();
-        if pending.as_ref().map(|facts| facts.removal_event_id) != Some(change_id) {
-            let snapshot = self.query_device_trust().await?;
-            return Ok(DeviceTrustDecisionResult::StateChanged {
-                current_change_id: snapshot
-                    .current_change
-                    .as_ref()
-                    .map(|change| change.change_id),
-                snapshot,
-            });
-        }
-        let removes_local = pending.is_some_and(|facts| {
-            state
-                .own_instance
-                .is_some_and(|member| facts.includes_member(member))
-        });
-        if choice == DeviceTrustChoice::ApplyChange && removes_local && !confirm_local_removal {
-            return Ok(DeviceTrustDecisionResult::LocalDeviceConfirmationRequired {
-                change_id,
-                snapshot: self.query_device_trust().await?,
-            });
-        }
-        let decision = match choice {
-            DeviceTrustChoice::ApplyChange => RemovalDecision::Accept,
-            DeviceTrustChoice::KeepCurrentDeviceGroup => RemovalDecision::Reject,
-        };
-        self.decide_membership_removal_locked(change_id, decision)
-            .await?;
-        let snapshot = self.query_device_trust().await?;
-        Ok(match choice {
-            DeviceTrustChoice::ApplyChange => DeviceTrustDecisionResult::Applied {
-                change_id,
-                snapshot,
-            },
-            DeviceTrustChoice::KeepCurrentDeviceGroup => {
-                DeviceTrustDecisionResult::KeptCurrentDeviceGroup {
-                    change_id,
-                    snapshot,
-                }
-            }
-        })
+        Err(WorkspaceConvergenceError::Unavailable)
     }
 
     pub(super) fn update_peer_history_relationship(
         &self,
-        state: &mut WorkspaceConvergenceState,
+        state: &mut SpaceMembershipState,
         peer: DeviceId,
         relationship: MembershipHistoryRelationship,
         now_ms: i64,

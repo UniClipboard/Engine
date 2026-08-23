@@ -114,16 +114,17 @@ pub use crate::space::admission::{
     ProfileSpaceAdmission, SpaceTransitionRecoveryPort,
 };
 pub use crate::space::assembly::{SpaceModules, SpaceModulesDeps};
-pub use crate::space::workspace_membership::discovery::MembershipConvergenceDeps;
-pub use crate::space::workspace_membership::{
-    ActionUnavailableReason, DeviceCompatibility, DeviceMembership, DeviceTrustAction,
-    DeviceTrustChange, DeviceTrustChoice, DeviceTrustDecisionResult, DeviceTrustImpact,
-    DeviceTrustRelationship, DeviceTrustSnapshot, GroupRelationship, RecoveryAvailability,
+pub use crate::space::membership_state::SpaceMembershipStateRepositoryError;
+pub use crate::space::query_space_membership_status::{
+    ActionUnavailableReason, DeviceCompatibility, DeviceMembership, GroupRelationship,
+    PendingSpaceMembershipChange, QuerySpaceMembershipStatusError, RecoveryAvailability,
+    SpaceMemberRelationship, SpaceMembershipAction, SpaceMembershipChangeChoice,
+    SpaceMembershipChangeDecisionResult, SpaceMembershipChangeImpact, SpaceMembershipStatus,
     SyncRelationship,
 };
+pub use crate::space::workspace_membership::discovery::MembershipConvergenceDeps;
 pub use crate::space::workspace_membership::{
-    WorkspaceConvergenceError, WorkspaceConvergenceStateOrigin, WorkspaceMembership,
-    WorkspaceMembershipDeps,
+    WorkspaceConvergenceError, WorkspaceMembership, WorkspaceMembershipDeps,
 };
 pub use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,

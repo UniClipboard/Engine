@@ -33,7 +33,7 @@ async fn unknown_v2_member_may_introduce_a_complete_activated_extension() {
         unreachable!("fixture always creates AddDevice")
     };
     let repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(candidate.lineage_id.clone(), 1);
+    let mut state = SpaceMembershipState::fresh(candidate.lineage_id.clone(), 1);
     state.own_instance = Some(candidate.author_member_instance_id);
     repository.save_state(&state).await.unwrap();
     let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
@@ -100,7 +100,7 @@ async fn paged_history_resumes_after_restart_and_applies_only_when_complete() {
         .await
         .unwrap();
     let workspace_repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(joiner_credential.member_instance_id(&DeviceId::new("joiner")));
     workspace_repository.save_state(&state).await.unwrap();
     let receiver = paged_receiver(
@@ -208,7 +208,7 @@ async fn paged_history_rejects_a_conflicting_transfer_and_clears_progress() {
         .await
         .unwrap();
     let workspace_repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(joiner_credential.member_instance_id(&DeviceId::new("joiner")));
     workspace_repository.save_state(&state).await.unwrap();
     let receiver = paged_receiver(
@@ -263,7 +263,7 @@ async fn paged_history_transfers_257_events_end_to_end() {
         .await
         .unwrap();
     let receiver_workspace = MemoryWorkspaceRepository::default();
-    let mut receiver_state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut receiver_state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     receiver_state.own_instance =
         Some(joiner_credential.member_instance_id(&DeviceId::new("joiner")));
     receiver_workspace
@@ -288,7 +288,7 @@ async fn paged_history_transfers_257_events_end_to_end() {
         .await
         .unwrap();
     let sender_workspace = MemoryWorkspaceRepository::default();
-    let mut sender_state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut sender_state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     sender_state.own_instance =
         Some(sponsor_credential.member_instance_id(&DeviceId::new("sponsor")));
     sender_workspace.save_state(&sender_state).await.unwrap();
@@ -333,7 +333,7 @@ async fn concurrent_online_events_run_one_reconciliation_per_peer() {
     deps.membership_history_exchange = exchange.clone();
     let own_instance = install_current_history(&mut deps, &directory, 0xb5).await;
     let owner = WorkspaceMembership::new(deps);
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(own_instance);
     repository.save_state(&state).await.unwrap();
 
@@ -392,7 +392,7 @@ async fn pre_admission_history_synchronization_uses_one_ten_second_total_budget(
     });
     let own_instance = install_current_history(&mut deps, &directory, 0xc6).await;
     let owner = WorkspaceMembership::new(deps);
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(own_instance);
     repository.save_state(&state).await.unwrap();
 
@@ -476,7 +476,7 @@ async fn persisted_v2_removal_decision_is_retried_after_restart_for_a_diverged_a
         .unwrap();
 
     let repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(removal.lineage_id.clone(), 1);
+    let mut state = SpaceMembershipState::fresh(removal.lineage_id.clone(), 1);
     state.own_instance = Some(local_member);
     state.peer_history_relationships.insert(
         DeviceId::new("sponsor"),
@@ -522,7 +522,7 @@ async fn persisted_v2_removal_decision_is_retried_after_restart_for_a_diverged_a
 
 #[tokio::test]
 async fn concurrent_matching_device_trust_decisions_save_only_one_completion() {
-    use crate::space::workspace_membership::DeviceTrustDecisionResult;
+    use crate::space::workspace_membership::SpaceMembershipChangeDecisionResult;
 
     let a = instance(0x0a);
     let c = instance(0x0c);
@@ -552,7 +552,7 @@ async fn concurrent_matching_device_trust_decisions_save_only_one_completion() {
     history.receive_verified(genesis).unwrap();
     history.receive_verified(c_addition).unwrap();
     history.receive_verified(removal.clone()).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     harness.repository.save_state(&state).await.unwrap();
@@ -562,12 +562,12 @@ async fn concurrent_matching_device_trust_decisions_save_only_one_completion() {
     let (first, second) = tokio::join!(
         first_owner.decide_device_trust_change(
             removal.event_id(),
-            crate::space::workspace_membership::DeviceTrustChoice::KeepCurrentDeviceGroup,
+            crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
             false,
         ),
         second_owner.decide_device_trust_change(
             removal.event_id(),
-            crate::space::workspace_membership::DeviceTrustChoice::KeepCurrentDeviceGroup,
+            crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
             false,
         ),
     );
@@ -577,7 +577,7 @@ async fn concurrent_matching_device_trust_decisions_save_only_one_completion() {
             .iter()
             .filter(|result| matches!(
                 result,
-                DeviceTrustDecisionResult::KeptCurrentDeviceGroup { .. }
+                SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup { .. }
             ))
             .count(),
         1
@@ -585,7 +585,10 @@ async fn concurrent_matching_device_trust_decisions_save_only_one_completion() {
     assert_eq!(
         results
             .iter()
-            .filter(|result| matches!(result, DeviceTrustDecisionResult::AlreadyCompleted { .. }))
+            .filter(|result| matches!(
+                result,
+                SpaceMembershipChangeDecisionResult::AlreadyCompleted { .. }
+            ))
             .count(),
         1
     );
@@ -593,7 +596,9 @@ async fn concurrent_matching_device_trust_decisions_save_only_one_completion() {
 
 #[tokio::test]
 async fn legacy_and_device_trust_decisions_share_idempotent_completion() {
-    use crate::space::convergence::{DeviceTrustChoice, DeviceTrustDecisionResult};
+    use crate::space::convergence::{
+        SpaceMembershipChangeChoice, SpaceMembershipChangeDecisionResult,
+    };
 
     let a = instance(0x0a);
     let c = instance(0x0c);
@@ -624,7 +629,7 @@ async fn legacy_and_device_trust_decisions_share_idempotent_completion() {
         history.receive_verified(event).unwrap();
     }
     history.receive_verified(removal.clone()).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     harness.repository.save_state(&state).await.unwrap();
@@ -634,12 +639,12 @@ async fn legacy_and_device_trust_decisions_share_idempotent_completion() {
             .owner
             .decide_device_trust_change(
                 removal.event_id(),
-                DeviceTrustChoice::KeepCurrentDeviceGroup,
+                SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
                 false,
             )
             .await
             .unwrap(),
-        DeviceTrustDecisionResult::KeptCurrentDeviceGroup { .. }
+        SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup { .. }
     ));
     assert!(harness
         .owner
@@ -650,7 +655,7 @@ async fn legacy_and_device_trust_decisions_share_idempotent_completion() {
 
 #[tokio::test]
 async fn applying_a_change_that_removes_the_local_device_requires_explicit_confirmation() {
-    use crate::space::workspace_membership::DeviceTrustDecisionResult;
+    use crate::space::workspace_membership::SpaceMembershipChangeDecisionResult;
 
     let a = instance(0x0a);
     let c = instance(0x0c);
@@ -681,7 +686,7 @@ async fn applying_a_change_that_removes_the_local_device_requires_explicit_confi
         history.receive_verified(event).unwrap();
     }
     history.receive_verified(removal.clone()).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     harness.repository.save_state(&state).await.unwrap();
@@ -691,12 +696,12 @@ async fn applying_a_change_that_removes_the_local_device_requires_explicit_confi
             .owner
             .decide_device_trust_change(
                 removal.event_id(),
-                crate::space::workspace_membership::DeviceTrustChoice::ApplyChange,
+                crate::space::workspace_membership::SpaceMembershipChangeChoice::ApplyChange,
                 false,
             )
             .await
             .unwrap(),
-        DeviceTrustDecisionResult::LocalDeviceConfirmationRequired { .. }
+        SpaceMembershipChangeDecisionResult::LocalDeviceConfirmationRequired { .. }
     ));
     assert_eq!(
         harness
@@ -715,12 +720,12 @@ async fn applying_a_change_that_removes_the_local_device_requires_explicit_confi
             .owner
             .decide_device_trust_change(
                 removal.event_id(),
-                crate::space::workspace_membership::DeviceTrustChoice::ApplyChange,
+                crate::space::workspace_membership::SpaceMembershipChangeChoice::ApplyChange,
                 true,
             )
             .await
             .unwrap(),
-        DeviceTrustDecisionResult::Applied { .. }
+        SpaceMembershipChangeDecisionResult::Applied { .. }
     ));
 }
 
@@ -740,7 +745,7 @@ async fn removing_an_unknown_or_self_target_fails_without_saving() {
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
     history.receive_verified(genesis.clone()).unwrap();
     history.receive_verified(addition.clone()).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(a);
     state.membership_reconciliation = Some(history);
     let before = state.clone();
@@ -774,7 +779,7 @@ async fn membership_history_advancement_invalidates_an_older_invitation() {
     let genesis = membership_event(None, 0, a, a, "device-a", 1);
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
     history.receive_verified(genesis).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(a);
     state.membership_reconciliation = Some(history);
     harness.repository.save_state(&state).await.unwrap();
@@ -783,143 +788,6 @@ async fn membership_history_advancement_invalidates_an_older_invitation() {
         harness.owner.admission_decision(0).await,
         MembershipAdmissionDecision::SupersededInvitation
     );
-}
-
-#[tokio::test]
-async fn migrated_workspace_with_applied_history_does_not_restore_a_removed_peer() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let c = instance(0x0c);
-    let repository = MemoryWorkspaceRepository::default();
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let b_addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
-    let c_addition = membership_event(Some(b_addition.event_id()), 2, a, c, "device-c", 3);
-    let removal = uc_core::membership::MembershipEvent::new(
-        SPACE.to_owned(),
-        Some(c_addition.event_id()),
-        3,
-        [4; 16],
-        a,
-        MembershipOperation::RemoveDevice { member: b },
-        [4; 32],
-        [5; 32],
-        Vec::new(),
-        None,
-        vec![4],
-    );
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
-    for event in [genesis, b_addition, c_addition, removal] {
-        history.receive_verified(event).unwrap();
-    }
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(a);
-    state.membership_reconciliation = Some(history);
-    state.migrated_from_pre_adr_020 = true;
-    repository.save_state(&state).await.unwrap();
-    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![
-        legacy_member("device-a"),
-        legacy_member("device-b"),
-        legacy_member("device-c"),
-    ]));
-    deps.space_protection = Arc::new(ProtectsQueriedMembers::default());
-    let owner = WorkspaceMembership::new(deps);
-
-    let snapshot = owner.snapshot().await.unwrap();
-
-    assert_eq!(
-        snapshot.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory
-    );
-    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-c")]);
-}
-
-#[tokio::test]
-async fn runtime_clears_a_stale_legacy_marker_after_current_history_exists() {
-    let a = instance(0x0a);
-    let repository = MemoryWorkspaceRepository::default();
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
-    history
-        .receive_verified(membership_event(None, 0, a, a, "device-a", 1))
-        .unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(a);
-    state.membership_reconciliation = Some(history);
-    state.migrated_from_pre_adr_020 = true;
-    repository.save_state(&state).await.unwrap();
-    let owner = WorkspaceMembership::new(test_deps(
-        Arc::new(repository.clone()),
-        "device-a",
-        Vec::new(),
-    ));
-    let (_presence_tx, presence_events) = tokio::sync::broadcast::channel(1);
-
-    let runtime = Arc::clone(&owner).start(presence_events);
-    for _ in 0..100 {
-        if !repository
-            .load_state()
-            .await
-            .unwrap()
-            .unwrap()
-            .migrated_from_pre_adr_020
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    runtime.shutdown().await;
-
-    let repaired = repository.load_state().await.unwrap().unwrap();
-    assert!(!repaired.migrated_from_pre_adr_020);
-
-    owner.recover_legacy_migration_marker().await.unwrap();
-    assert_eq!(repository.load_state().await.unwrap().unwrap(), repaired);
-}
-
-#[test]
-fn existing_installation_without_convergence_state_keeps_upgrade_origin() {
-    assert_eq!(
-        WorkspaceConvergenceStateOrigin::from_version_transition(Some("1.1.0-rc.4"), "1.1.0-rc.4"),
-        WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState
-    );
-}
-
-#[tokio::test]
-async fn recovery_persists_missing_state_for_an_existing_installation() {
-    let repository = MemoryWorkspaceRepository::default();
-    let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
-    deps.initial_state_origin = WorkspaceConvergenceStateOrigin::UpgradeWithoutConvergenceState;
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![
-        legacy_member("device-a"),
-        legacy_member("device-b"),
-    ]));
-    deps.space_protection = Arc::new(ProtectsQueriedMembers::default());
-    let owner = WorkspaceMembership::new(deps);
-
-    owner.recover_legacy_migration_marker().await.unwrap();
-
-    let recovered = repository.load_state().await.unwrap().unwrap();
-    assert!(recovered.migrated_from_pre_adr_020);
-    let snapshot = owner.snapshot().await.unwrap();
-    assert_eq!(
-        snapshot.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
-    );
-    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
-}
-
-#[tokio::test]
-async fn recovery_does_not_persist_missing_state_for_a_fresh_installation() {
-    let repository = MemoryWorkspaceRepository::default();
-    let owner = WorkspaceMembership::new(test_deps(
-        Arc::new(repository.clone()),
-        "device-a",
-        Vec::new(),
-    ));
-
-    owner.recover_legacy_migration_marker().await.unwrap();
-
-    assert!(repository.load_state().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -932,10 +800,9 @@ async fn isolated_legacy_profile_starts_with_fresh_single_member_history() {
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), old_a);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(addition).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(old_a);
     state.membership_reconciliation = Some(history);
-    state.migrated_from_pre_adr_020 = true;
     repository.save_state(&state).await.unwrap();
 
     let device_id = DeviceId::new("device-a");
@@ -951,7 +818,6 @@ async fn isolated_legacy_profile_starts_with_fresh_single_member_history() {
     owner.initialize_new_space_membership().await.unwrap();
 
     let repaired = repository.load_state().await.unwrap().unwrap();
-    assert!(!repaired.migrated_from_pre_adr_020);
     assert_eq!(repaired.own_instance, Some(expected_instance));
     assert_eq!(repaired.effective_members().len(), 1);
     let repaired_history = repaired.membership_reconciliation.as_ref().unwrap();
@@ -979,7 +845,7 @@ async fn unusable_isolated_profile_rebuilds_its_membership_baseline() {
     let device_id = DeviceId::new("device-a");
     let credential = uc_core::membership::MembershipCredential::new(1, vec![0x74; 32]);
     let expected_instance = credential.member_instance_id(&device_id);
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(expected_instance);
     state.membership_reconciliation = Some(MembershipReconciliation::new(
         SPACE.to_owned(),
@@ -1000,7 +866,6 @@ async fn unusable_isolated_profile_rebuilds_its_membership_baseline() {
         .unwrap();
 
     let repaired = repository.load_state().await.unwrap().unwrap();
-    assert!(!repaired.migrated_from_pre_adr_020);
     assert_eq!(repaired.effective_members(), [expected_instance].into());
     let repaired_history = admission_repository
         .load_membership_history_v2()
@@ -1020,55 +885,6 @@ async fn unusable_isolated_profile_rebuilds_its_membership_baseline() {
 }
 
 #[tokio::test]
-async fn session_resume_retries_a_legacy_marker_repair_deferred_while_locked() {
-    let a = instance(0x0a);
-    let repository = MemoryWorkspaceRepository::default();
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
-    history
-        .receive_verified(membership_event(None, 0, a, a, "device-a", 1))
-        .unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(a);
-    state.membership_reconciliation = Some(history);
-    state.migrated_from_pre_adr_020 = true;
-    repository.save_state(&state).await.unwrap();
-    *repository.failure.lock().unwrap() = Some(WorkspaceConvergenceRepositoryError::Locked);
-    let owner = WorkspaceMembership::new(test_deps(
-        Arc::new(repository.clone()),
-        "device-a",
-        Vec::new(),
-    ));
-    let (_presence_tx, presence_events) = tokio::sync::broadcast::channel(1);
-    let runtime = Arc::clone(&owner).start(presence_events);
-    tokio::task::yield_now().await;
-
-    *repository.failure.lock().unwrap() = None;
-    runtime.activity().resume().await.unwrap();
-    for _ in 0..100 {
-        if !repository
-            .load_state()
-            .await
-            .unwrap()
-            .unwrap()
-            .migrated_from_pre_adr_020
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    runtime.shutdown().await;
-
-    assert!(
-        !repository
-            .load_state()
-            .await
-            .unwrap()
-            .unwrap()
-            .migrated_from_pre_adr_020
-    );
-}
-
-#[tokio::test]
 async fn restart_recovery_completes_and_clears_pending_membership_effects() {
     let a = instance(0x0a);
     let b = instance(0x0b);
@@ -1078,7 +894,7 @@ async fn restart_recovery_completes_and_clears_pending_membership_effects() {
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(addition.clone()).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(a);
     state.membership_reconciliation = Some(history);
     state.pending_applied_membership_effects.push(
@@ -1107,7 +923,7 @@ async fn restart_recovery_completes_and_clears_pending_membership_effects() {
 
 #[tokio::test]
 async fn device_trust_decision_distinguishes_first_duplicate_and_conflicting_submissions() {
-    use crate::space::workspace_membership::DeviceTrustDecisionResult;
+    use crate::space::workspace_membership::SpaceMembershipChangeDecisionResult;
 
     let a = instance(0x0a);
     let c = instance(0x0c);
@@ -1138,7 +954,7 @@ async fn device_trust_decision_distinguishes_first_duplicate_and_conflicting_sub
         history.receive_verified(event).unwrap();
     }
     history.receive_verified(removal.clone()).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     harness.repository.save_state(&state).await.unwrap();
@@ -1148,24 +964,24 @@ async fn device_trust_decision_distinguishes_first_duplicate_and_conflicting_sub
             .owner
             .decide_device_trust_change(
                 removal.event_id(),
-                crate::space::workspace_membership::DeviceTrustChoice::KeepCurrentDeviceGroup,
+                crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
                 false,
             )
             .await
             .unwrap(),
-        DeviceTrustDecisionResult::KeptCurrentDeviceGroup { .. }
+        SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup { .. }
     ));
     assert!(matches!(
         harness
             .owner
             .decide_device_trust_change(
                 removal.event_id(),
-                crate::space::workspace_membership::DeviceTrustChoice::KeepCurrentDeviceGroup,
+                crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
                 false,
             )
             .await
             .unwrap(),
-        DeviceTrustDecisionResult::AlreadyCompleted { .. }
+        SpaceMembershipChangeDecisionResult::AlreadyCompleted { .. }
     ));
     let restarted = WorkspaceMembership::new(test_deps(
         Arc::new(harness.repository.clone()),
@@ -1179,22 +995,22 @@ async fn device_trust_decision_distinguishes_first_duplicate_and_conflicting_sub
         restarted
             .decide_device_trust_change(
                 removal.event_id(),
-                crate::space::workspace_membership::DeviceTrustChoice::KeepCurrentDeviceGroup,
+                crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
                 false,
             )
             .await
             .unwrap(),
-        DeviceTrustDecisionResult::AlreadyCompleted { .. }
+        SpaceMembershipChangeDecisionResult::AlreadyCompleted { .. }
     ));
     assert!(matches!(
         restarted
             .decide_device_trust_change(
                 removal.event_id(),
-                crate::space::workspace_membership::DeviceTrustChoice::ApplyChange,
+                crate::space::workspace_membership::SpaceMembershipChangeChoice::ApplyChange,
                 false,
             )
             .await
             .unwrap(),
-        DeviceTrustDecisionResult::StateChanged { .. }
+        SpaceMembershipChangeDecisionResult::StateChanged { .. }
     ));
 }

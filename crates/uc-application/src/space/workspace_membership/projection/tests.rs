@@ -10,7 +10,7 @@ async fn upgrade_required_peer_remains_blocked_after_owner_restart() {
         vec![(DeviceId::new("device-a"), a)],
     ));
     let peer = DeviceId::new("joiner");
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state
         .apply(
             WorkspaceConvergenceEvent::PeerHistoryRelationshipUpdated {
@@ -41,7 +41,7 @@ async fn upgrade_required_peer_remains_blocked_after_owner_restart() {
 }
 
 #[tokio::test]
-async fn profile_device_trust_is_explicitly_unavailable_while_active_space_is_locked() {
+async fn membership_status_is_explicitly_unavailable_while_active_space_is_locked() {
     let directory = tempfile::tempdir().unwrap();
     let admission_repository = durable_admission_repository(&directory, [0x6d; 16]);
     let mut deps = test_deps(Arc::new(LockedWorkspaceRepository), "device-a", Vec::new());
@@ -53,9 +53,9 @@ async fn profile_device_trust_is_explicitly_unavailable_while_active_space_is_lo
         DeviceId::new("device-a"),
         Arc::new(UnusedClock),
     );
-    profile.attach_active(Some(active)).await;
+    profile.attach_workspace_membership_for_test(active).await;
 
-    let snapshot = profile.query_device_trust().await.unwrap();
+    let snapshot = profile.query_space_membership_status().await.unwrap();
 
     assert_eq!(snapshot.local_device_id, DeviceId::new("device-a"));
     assert_eq!(
@@ -136,7 +136,7 @@ async fn pending_inbound_projection_shows_only_the_active_lineage_non_terminal_c
 }
 
 #[tokio::test]
-async fn device_trust_query_reports_a_consistent_compatible_peer_as_usable() {
+async fn membership_status_projection_reports_a_consistent_compatible_peer_as_usable() {
     use crate::space::workspace_membership::SyncRelationship;
 
     let a = instance(0x0a);
@@ -153,7 +153,7 @@ async fn device_trust_query_reports_a_consistent_compatible_peer_as_usable() {
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(c_addition).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     state.peer_history_relationships.insert(
@@ -162,7 +162,12 @@ async fn device_trust_query_reports_a_consistent_compatible_peer_as_usable() {
     );
     harness.repository.save_state(&state).await.unwrap();
 
-    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let snapshot = harness
+        .owner
+        .build_current_space_membership_status()
+        .await
+        .unwrap()
+        .status;
     let peer = snapshot
         .devices
         .iter()
@@ -172,8 +177,8 @@ async fn device_trust_query_reports_a_consistent_compatible_peer_as_usable() {
 }
 
 #[tokio::test]
-async fn device_trust_query_keeps_reachability_independent_from_a_usable_relationship() {
-    use crate::space::convergence::{GroupRelationship, SyncRelationship};
+async fn membership_status_projection_keeps_reachability_independent_from_a_usable_relationship() {
+    use crate::space::workspace_membership::{GroupRelationship, SyncRelationship};
 
     let a = instance(0x0a);
     let c = instance(0x0c);
@@ -195,7 +200,7 @@ async fn device_trust_query_keeps_reachability_independent_from_a_usable_relatio
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(c_addition).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     state.peer_history_relationships.insert(
@@ -204,7 +209,12 @@ async fn device_trust_query_keeps_reachability_independent_from_a_usable_relatio
     );
     harness.repository.save_state(&state).await.unwrap();
 
-    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let snapshot = harness
+        .owner
+        .build_current_space_membership_status()
+        .await
+        .unwrap()
+        .status;
     let peer = snapshot
         .devices
         .iter()
@@ -217,8 +227,10 @@ async fn device_trust_query_keeps_reachability_independent_from_a_usable_relatio
 }
 
 #[tokio::test]
-async fn device_trust_query_reports_invalid_peer_facts_as_unverifiable_and_paused() {
-    use crate::space::convergence::{ActionUnavailableReason, GroupRelationship, SyncRelationship};
+async fn membership_status_projection_reports_invalid_peer_facts_as_unverifiable_and_paused() {
+    use crate::space::workspace_membership::{
+        ActionUnavailableReason, GroupRelationship, SyncRelationship,
+    };
 
     let a = instance(0x0a);
     let c = instance(0x0c);
@@ -234,7 +246,7 @@ async fn device_trust_query_reports_invalid_peer_facts_as_unverifiable_and_pause
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(c_addition).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     state.peer_history_relationships.insert(
@@ -243,7 +255,12 @@ async fn device_trust_query_reports_invalid_peer_facts_as_unverifiable_and_pause
     );
     harness.repository.save_state(&state).await.unwrap();
 
-    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let snapshot = harness
+        .owner
+        .build_current_space_membership_status()
+        .await
+        .unwrap()
+        .status;
     let peer = snapshot
         .devices
         .iter()
@@ -258,8 +275,10 @@ async fn device_trust_query_reports_invalid_peer_facts_as_unverifiable_and_pause
 }
 
 #[tokio::test]
-async fn device_trust_query_fails_closed_when_the_workspace_facts_are_unverifiable() {
-    use crate::space::convergence::{ActionUnavailableReason, GroupRelationship, SyncRelationship};
+async fn membership_status_projection_fails_closed_when_the_workspace_facts_are_unverifiable() {
+    use crate::space::workspace_membership::{
+        ActionUnavailableReason, GroupRelationship, SyncRelationship,
+    };
 
     let a = instance(0x0a);
     let c = instance(0x0c);
@@ -275,7 +294,7 @@ async fn device_trust_query_fails_closed_when_the_workspace_facts_are_unverifiab
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(c_addition).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     state.peer_history_relationships.insert(
@@ -285,7 +304,12 @@ async fn device_trust_query_fails_closed_when_the_workspace_facts_are_unverifiab
     state.failure_category = Some(uc_core::membership::WorkspaceFailureCategory::DigestConflict);
     harness.repository.save_state(&state).await.unwrap();
 
-    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let snapshot = harness
+        .owner
+        .build_current_space_membership_status()
+        .await
+        .unwrap()
+        .status;
     let peer = snapshot
         .devices
         .iter()
@@ -337,7 +361,7 @@ async fn content_gate_blocks_only_pending_or_diverged_history_peers() {
     for event in [genesis, pending_addition, unaffected_addition] {
         history.receive_verified(event).unwrap();
     }
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(a);
     state.membership_reconciliation = Some(history);
     state
@@ -410,7 +434,7 @@ async fn pending_cross_space_join_keeps_the_source_space_scope() {
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), own);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(addition).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(own);
     state.membership_reconciliation = Some(history);
     let repository = MemoryWorkspaceRepository::default();
@@ -440,7 +464,7 @@ async fn unrelated_pending_join_does_not_hide_a_v2_lineage_mismatch() {
     let genesis = membership_event(None, 0, own, own, "joiner", 1);
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), own);
     history.receive_verified(genesis).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(own);
     state.membership_reconciliation = Some(history);
     let repository = MemoryWorkspaceRepository::default();
@@ -507,7 +531,7 @@ async fn rejected_cross_space_join_restores_the_source_space_scope() {
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), own);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(addition).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(own);
     state.membership_reconciliation = Some(history);
     let repository = MemoryWorkspaceRepository::default();
@@ -522,8 +546,9 @@ async fn rejected_cross_space_join_restores_the_source_space_scope() {
 }
 
 #[tokio::test]
-async fn device_trust_query_returns_complete_pending_change_and_per_device_relationships() {
-    use crate::space::convergence::{
+async fn membership_status_projection_returns_complete_pending_change_and_per_device_relationships()
+{
+    use crate::space::workspace_membership::{
         DeviceCompatibility, DeviceMembership, GroupRelationship, SyncRelationship,
     };
 
@@ -563,7 +588,7 @@ async fn device_trust_query_returns_complete_pending_change_and_per_device_relat
         history.receive_verified(event).unwrap();
     }
     history.receive_verified(removal.clone()).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     state.peer_history_relationships.insert(
@@ -572,7 +597,12 @@ async fn device_trust_query_returns_complete_pending_change_and_per_device_relat
     );
     harness.repository.save_state(&state).await.unwrap();
 
-    let snapshot = harness.owner.query_device_trust().await.unwrap();
+    let snapshot = harness
+        .owner
+        .build_current_space_membership_status()
+        .await
+        .unwrap()
+        .status;
     let change = snapshot.current_change.expect("one current change");
     assert_eq!(change.change_id, removal.event_id());
     assert_eq!(change.proposed_by_device_id, DeviceId::new("device-a"));
@@ -747,42 +777,6 @@ async fn current_peer_scope_fails_closed_when_v2_history_is_locked() {
 }
 
 #[tokio::test]
-async fn device_trust_query_returns_a_migrated_workspace_as_upgrade_required() {
-    use crate::space::convergence::{DeviceCompatibility, SyncRelationship};
-
-    let repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(instance(0x0a));
-    state.migrated_from_pre_adr_020 = true;
-    state.peer_history_relationships.insert(
-        DeviceId::new("device-b"),
-        uc_core::membership::MembershipHistoryRelationship::UpgradeRequired,
-    );
-    repository.save_state(&state).await.unwrap();
-    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![
-        legacy_member("device-a"),
-        legacy_member("device-b"),
-    ]));
-    let owner = WorkspaceMembership::new(deps);
-
-    let snapshot = owner.query_device_trust().await.unwrap();
-    let peer = snapshot
-        .devices
-        .iter()
-        .find(|device| device.device_id == DeviceId::new("device-b"))
-        .unwrap();
-
-    assert_eq!(snapshot.local_device_id, DeviceId::new("device-a"));
-    assert_eq!(snapshot.devices.len(), 2);
-    assert_eq!(peer.compatibility, DeviceCompatibility::UpgradeRequired);
-    assert_eq!(
-        peer.sync_relationship,
-        SyncRelationship::PausedUpgradeRequired
-    );
-}
-
-#[tokio::test]
 async fn current_peer_scope_does_not_infer_legacy_mode_from_missing_history() {
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
@@ -811,7 +805,7 @@ async fn current_peer_scope_hides_addition_until_pending_effects_finish() {
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(addition.clone()).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(a);
     state.membership_reconciliation = Some(history);
     state.pending_applied_membership_effects.push(
@@ -848,41 +842,8 @@ async fn v2_current_peer_scope_requires_a_permanent_activation_receipt() {
 }
 
 #[tokio::test]
-async fn current_peer_scope_accepts_a_legacy_roster_that_only_stores_remote_members() {
-    let repository = MemoryWorkspaceRepository::default();
-    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-b")]));
-    deps.space_protection = Arc::new(FixedSpaceProtection(SpaceProtectionMode::Legacy));
-    let owner = WorkspaceMembership::new(deps);
-
-    let snapshot = owner.snapshot().await.unwrap();
-
-    assert_eq!(
-        snapshot.local_membership,
-        uc_core::membership::CurrentWorkspaceLocalMembership::Active
-    );
-    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
-}
-
-#[tokio::test]
-async fn device_trust_uses_the_legacy_scope_for_a_fresh_workspace() {
-    use crate::space::workspace_membership::DeviceMembership;
-
-    let repository = MemoryWorkspaceRepository::default();
-    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-a")]));
-    deps.space_protection = Arc::new(FixedSpaceProtection(SpaceProtectionMode::Legacy));
-    let owner = WorkspaceMembership::new(deps);
-
-    let snapshot = owner.query_device_trust().await.unwrap();
-
-    assert_eq!(snapshot.local_membership, DeviceMembership::Active);
-    assert_eq!(snapshot.devices.len(), 1);
-    assert_eq!(snapshot.devices[0].membership, DeviceMembership::Active);
-}
-
-#[tokio::test]
-async fn device_trust_does_not_infer_membership_without_legacy_or_current_history() {
+async fn membership_status_projection_does_not_infer_membership_without_legacy_or_current_history()
+{
     use crate::space::workspace_membership::DeviceMembership;
 
     let repository = MemoryWorkspaceRepository::default();
@@ -891,61 +852,16 @@ async fn device_trust_does_not_infer_membership_without_legacy_or_current_histor
     deps.space_protection = Arc::new(FixedSpaceProtection(SpaceProtectionMode::Ready));
     let owner = WorkspaceMembership::new(deps);
 
-    let snapshot = owner.query_device_trust().await.unwrap();
+    let snapshot = owner
+        .build_current_space_membership_status()
+        .await
+        .unwrap()
+        .status;
 
     assert_eq!(snapshot.local_membership, DeviceMembership::Unavailable);
     assert_eq!(
         snapshot.devices[0].membership,
         DeviceMembership::Unavailable
-    );
-}
-
-#[tokio::test]
-async fn current_peer_scope_keeps_a_migrated_pre_adr_020_workspace_in_legacy_upgrade() {
-    let repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(instance(0x0a));
-    state.migrated_from_pre_adr_020 = true;
-    repository.save_state(&state).await.unwrap();
-    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![
-        legacy_member("device-a"),
-        legacy_member("device-b"),
-    ]));
-    deps.space_protection = Arc::new(ProtectsQueriedMembers::default());
-    let owner = WorkspaceMembership::new(deps);
-
-    let snapshot = owner.snapshot().await.unwrap();
-
-    assert_eq!(
-        snapshot.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
-    );
-    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
-}
-
-#[tokio::test]
-async fn migrated_remote_only_roster_checks_local_protection_before_membership() {
-    let repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
-    state.migrated_from_pre_adr_020 = true;
-    repository.save_state(&state).await.unwrap();
-    let protection = Arc::new(ProtectsQueriedMembers::default());
-    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![legacy_member("device-b")]));
-    deps.space_protection = protection.clone();
-    let owner = WorkspaceMembership::new(deps);
-
-    let snapshot = owner.snapshot().await.unwrap();
-
-    assert_eq!(
-        snapshot.local_membership,
-        uc_core::membership::CurrentWorkspaceLocalMembership::Active
-    );
-    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
-    assert_eq!(
-        protection.queries.lock().unwrap().as_slice(),
-        &[vec![DeviceId::new("device-a"), DeviceId::new("device-b")]]
     );
 }
 
@@ -961,7 +877,7 @@ async fn workspace_query_uses_the_persisted_v2_history_as_its_current_truth() {
         .unwrap();
     let repository = MemoryWorkspaceRepository::default();
     repository
-        .save_state(&WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1))
+        .save_state(&SpaceMembershipState::fresh(SPACE.to_owned(), 1))
         .await
         .unwrap();
     let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
@@ -1010,7 +926,7 @@ async fn current_peer_scope_excludes_an_accepted_removal() {
     for event in [genesis, b_addition, c_addition, removal] {
         history.receive_verified(event).unwrap();
     }
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(a);
     state.membership_reconciliation = Some(history);
     harness.repository.save_state(&state).await.unwrap();
@@ -1044,7 +960,7 @@ async fn current_peer_scope_keeps_a_removal_pending_local_decision() {
     for event in [genesis, addition, removal] {
         history.receive_verified(event).unwrap();
     }
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(b);
     state.membership_reconciliation = Some(history);
     harness.repository.save_state(&state).await.unwrap();
@@ -1064,7 +980,7 @@ async fn current_peer_scope_is_empty_after_local_removal() {
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), b);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(addition).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(b);
     state.removed = true;
     state.membership_reconciliation = Some(history);
@@ -1077,24 +993,4 @@ async fn current_peer_scope_is_empty_after_local_removal() {
         snapshot.local_membership,
         uc_core::membership::CurrentWorkspaceLocalMembership::Removed
     );
-}
-
-#[tokio::test]
-async fn current_peer_scope_uses_legacy_members_only_in_explicit_legacy_mode() {
-    let repository = MemoryWorkspaceRepository::default();
-    let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
-    deps.member_repo = Arc::new(FixedMemberRepo(vec![
-        legacy_member("device-a"),
-        legacy_member("device-b"),
-    ]));
-    deps.space_protection = Arc::new(FixedSpaceProtection(SpaceProtectionMode::Legacy));
-    let owner = WorkspaceMembership::new(deps);
-
-    let snapshot = owner.snapshot().await.unwrap();
-
-    assert_eq!(
-        snapshot.source,
-        uc_core::membership::CurrentWorkspacePeerScopeSource::Legacy
-    );
-    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-b")]);
 }

@@ -2,7 +2,7 @@ use super::super::*;
 
 impl WorkspaceMembership {
     pub(super) fn enqueue_applied_membership_effects(
-        state: &mut WorkspaceConvergenceState,
+        state: &mut SpaceMembershipState,
         events: &[MembershipEvent],
     ) {
         for event in events {
@@ -29,7 +29,7 @@ impl WorkspaceMembership {
 
     pub(super) async fn execute_pending_membership_effects(
         &self,
-        state: &mut WorkspaceConvergenceState,
+        state: &mut SpaceMembershipState,
         now_ms: i64,
     ) -> Result<(), WorkspaceConvergenceError> {
         for index in 0..state.pending_applied_membership_effects.len() {

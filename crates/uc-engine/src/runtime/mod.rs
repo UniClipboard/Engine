@@ -514,7 +514,7 @@ impl ProductionRuntime {
 
         factory
             .profile_convergence
-            .attach_active(Some(sync_engine.workspace_convergence()))
+            .attach_active(Some(sync_engine.space_modules()))
             .await;
 
         Ok(ProductionSession {

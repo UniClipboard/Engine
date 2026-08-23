@@ -48,6 +48,8 @@ pub struct SpaceModules {
     pub(crate) admission_owner: Arc<SpaceAdmission>,
     pub(crate) membership: Arc<MembershipConvergence>,
     pub(crate) group_update_delivery: Arc<dyn GroupUpdateDeliveryPort>,
+    membership_status_deps:
+        crate::space::query_space_membership_status::ActiveSpaceMembershipStatusDeps,
 }
 
 impl SpaceModules {
@@ -64,6 +66,14 @@ impl SpaceModules {
             group_revocation,
             group_update_dispatch,
         } = deps;
+        let membership_status_deps =
+            crate::space::query_space_membership_status::ActiveSpaceMembershipStatusDeps {
+                state_repository: Arc::clone(&workspace.repository),
+                historical_signatures: Arc::clone(&workspace.historical_membership_signatures),
+                member_signatures: Arc::clone(&workspace.member_signatures),
+                member_repo: Arc::clone(&workspace.member_repo),
+                presence: Arc::clone(&workspace.presence),
+            };
         let membership_owner = WorkspaceMembership::new(workspace);
         let admission_owner = SpaceAdmission::new(Arc::clone(&membership_owner));
         let membership = build_membership_convergence(membership);
@@ -80,7 +90,14 @@ impl SpaceModules {
             admission_owner,
             membership,
             group_update_delivery,
+            membership_status_deps,
         }
+    }
+
+    pub(crate) fn membership_status_deps(
+        &self,
+    ) -> crate::space::query_space_membership_status::ActiveSpaceMembershipStatusDeps {
+        self.membership_status_deps.clone()
     }
 
     /// Member-history endpoint installed on the authenticated member channel.

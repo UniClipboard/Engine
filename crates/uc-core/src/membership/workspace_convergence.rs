@@ -171,7 +171,7 @@ pub enum WorkspaceConvergenceError {
 /// Complete encrypted state for one workspace. Membership history is the
 /// sole source of member instances and the local applied branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceConvergenceState {
+pub struct SpaceMembershipState {
     pub space_lineage: String,
     pub own_instance: Option<MemberInstanceId>,
     pub peer_history_relationships: BTreeMap<DeviceId, MembershipHistoryRelationship>,
@@ -189,14 +189,9 @@ pub struct WorkspaceConvergenceState {
     pub revision: u64,
     pub removed: bool,
     pub updated_at_ms: i64,
-    /// Set only when the final pre-ADR-020 persisted layout was migrated.
-    /// It keeps the existing workspace on the explicit legacy-upgrade path
-    /// until signed membership history covers the retained legacy roster.
-    #[serde(default)]
-    pub migrated_from_pre_adr_020: bool,
 }
 
-impl Default for WorkspaceConvergenceState {
+impl Default for SpaceMembershipState {
     fn default() -> Self {
         Self {
             space_lineage: String::new(),
@@ -212,7 +207,6 @@ impl Default for WorkspaceConvergenceState {
             revision: 0,
             removed: false,
             updated_at_ms: 0,
-            migrated_from_pre_adr_020: false,
         }
     }
 }
@@ -254,7 +248,7 @@ pub struct WorkspaceSnapshot {
     pub failure_category: Option<WorkspaceFailureCategory>,
 }
 
-impl WorkspaceConvergenceState {
+impl SpaceMembershipState {
     pub fn fresh(lineage: String, now_ms: i64) -> Self {
         Self {
             space_lineage: lineage,
@@ -504,7 +498,7 @@ mod tests {
     #[test]
     fn local_admission_creates_the_only_membership_history_source() {
         let own = MemberInstanceId::from_bytes([7; 32]);
-        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let mut state = SpaceMembershipState::fresh("lineage".to_owned(), 1);
         state
             .apply(
                 WorkspaceConvergenceEvent::LocalAdmissionReady { own_instance: own },
@@ -555,7 +549,7 @@ mod tests {
         assert!(history.receive_verified(addition.clone()).is_ok());
         assert!(history.receive_verified(removal).is_ok());
 
-        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let mut state = SpaceMembershipState::fresh("lineage".to_owned(), 1);
         state.membership_reconciliation = Some(history);
 
         assert!(state.is_device_removed(&DeviceId::new("device-b")));
@@ -565,7 +559,7 @@ mod tests {
     #[test]
     fn upgrade_required_peer_blocks_normal_exchange_and_is_visible_in_snapshot() {
         let peer = DeviceId::new("device-b");
-        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let mut state = SpaceMembershipState::fresh("lineage".to_owned(), 1);
 
         state
             .apply(
@@ -629,7 +623,7 @@ mod tests {
         assert!(history.receive_verified(removal).is_ok());
         assert!(history.receive_verified(later_addition).is_ok());
 
-        let mut state = WorkspaceConvergenceState::fresh("lineage".to_owned(), 1);
+        let mut state = SpaceMembershipState::fresh("lineage".to_owned(), 1);
         state.membership_reconciliation = Some(history);
 
         assert!(!state.is_device_removed(&DeviceId::new("device-c")));

@@ -174,14 +174,6 @@ async fn run_recovery(owner: Arc<WorkspaceMembership>, trigger: RecoveryTrigger)
         RecoveryTrigger::Resume => "resume",
         RecoveryTrigger::Periodic => "periodic",
     };
-    if owner.recover_legacy_migration_marker().await.is_err() {
-        warn!(
-            error_kind = "legacy_migration_marker_recovery",
-            retryable = true,
-            recovery_context = context,
-            "workspace convergence: legacy migration marker recovery deferred"
-        );
-    }
     if let Err(error) = owner.recover_pending_admissions().await {
         warn!(error = %error, recovery_context = context, "workspace convergence: pending admissions deferred");
     }

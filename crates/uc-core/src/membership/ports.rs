@@ -16,7 +16,7 @@ use super::error::{
     MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
     MembershipGossipTransportError, MembershipHistoryExchangeError,
     MembershipOutboxRepositoryError, MembershipSecurityUpdateError, RelationshipStateResetError,
-    SpaceSecurityStateResetError, VerifiedPeerPromotionError, WorkspaceConvergenceRepositoryError,
+    SpaceSecurityStateResetError, VerifiedPeerPromotionError,
 };
 use super::gossip::{
     DeviceAnnouncement, PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate,
@@ -229,28 +229,6 @@ pub trait MembershipAttestationEndpointPort: Send + Sync {
         &self,
         peer: VerifiedMembershipPeer,
     ) -> Result<(), MembershipAttestationEndpointError>;
-}
-
-/// 工作空间收敛状态的加密持久化。
-///
-/// 保存语义:工作空间变化、确认、待交接记录与本机安全效果必须在同一提交
-/// 点保存;加载后必须校验状态属于请求的空间,不允许跨空间复用。任何已保存
-/// 变化在崩溃恢复后必须仍然可见且顺序不变。
-#[async_trait]
-pub trait WorkspaceConvergenceRepositoryPort: Send + Sync {
-    /// 保存完整收敛状态(变化链、确认、待交接记录、等待成员、阶段)。
-    async fn save_state(
-        &self,
-        state: &super::workspace_convergence::WorkspaceConvergenceState,
-    ) -> Result<(), WorkspaceConvergenceRepositoryError>;
-
-    /// 加载当前空间的收敛状态。
-    async fn load_state(
-        &self,
-    ) -> Result<
-        Option<super::workspace_convergence::WorkspaceConvergenceState>,
-        WorkspaceConvergenceRepositoryError,
-    >;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

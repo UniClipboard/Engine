@@ -3313,7 +3313,7 @@ async fn durable_join_starts_once_and_survives_owner_restart() {
         DeviceId::new("joiner"),
         Arc::new(UnusedClock),
     );
-    let fresh_snapshot = profile.query_device_trust().await.unwrap();
+    let fresh_snapshot = profile.query_space_membership_status().await.unwrap();
     assert!(fresh_snapshot.revision > 0);
     assert!(fresh_snapshot.devices.is_empty());
     assert!(matches!(
@@ -4469,7 +4469,7 @@ async fn sponsor_candidate_uses_only_members_active_in_verified_history() {
         .unwrap();
 
     let workspace_repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(sponsor_member);
     workspace_repository.save_state(&state).await.unwrap();
     let security = Arc::new(RecordingSponsorAdmissionSecurity::default());
@@ -4561,7 +4561,7 @@ async fn sponsor_rejects_admission_when_persisted_and_current_local_instances_di
     let old_a = instance(0x0b);
     let current_a = instance(0x0a);
     let repository = MemoryWorkspaceRepository::default();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     let genesis = membership_event(None, 0, old_a, old_a, "device-a", 1);
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), old_a);
     history.receive_verified(genesis).unwrap();
@@ -4900,7 +4900,7 @@ async fn sponsor_rejects_a_joiner_with_an_active_member_instance() {
     let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
     history.receive_verified(genesis).unwrap();
     history.receive_verified(addition).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     harness.repository.save_state(&state).await.unwrap();
@@ -4944,7 +4944,7 @@ async fn sponsor_allows_a_removed_device_to_rejoin_with_a_new_instance() {
     history.receive_verified(genesis).unwrap();
     history.receive_verified(addition).unwrap();
     history.receive_verified(removal).unwrap();
-    let mut state = WorkspaceConvergenceState::fresh(SPACE.to_owned(), 1);
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
     state.own_instance = Some(c);
     state.membership_reconciliation = Some(history);
     harness.repository.save_state(&state).await.unwrap();

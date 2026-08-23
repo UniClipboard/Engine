@@ -55,6 +55,9 @@ pub use crate::space::current_space::{
 };
 pub use crate::space::initialize_space::InitializeSpacePort;
 pub use crate::space::lock_space_session::LockSpacePort;
+pub use crate::space::membership_state::{
+    SpaceMembershipStateRepositoryError, SpaceMembershipStateRepositoryPort,
+};
 pub use crate::space::re_pairing::{RePairingStateError, RePairingStateStorePort};
 pub use crate::space::rebuild_space::{
     RebindSpaceSessionPort, SpaceRebuildProgressError, SpaceRebuildProgressPort,

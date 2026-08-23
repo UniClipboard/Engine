@@ -92,6 +92,45 @@ impl DurableAdmissionProjection {
         Self { repository }
     }
 
+    pub(crate) async fn pending_inbound_member(
+        &self,
+        active_lineage_id: &str,
+    ) -> Result<Option<PendingInboundMember>, WorkspaceConvergenceError> {
+        let mut matching = self
+            .repository
+            .scan_recoverable()
+            .await
+            .map_err(map_repository_error)?
+            .into_iter()
+            .filter(|attempt| {
+                !attempt.is_terminal()
+                    && matches!(attempt.role_state, AdmissionAttemptRoleStateV1::Sponsor(_))
+                    && attempt.lineage_id.as_deref() == Some(active_lineage_id)
+            });
+        let Some(attempt) = matching.next() else {
+            return Ok(None);
+        };
+        if matching.next().is_some() {
+            return Err(WorkspaceConvergenceError::RecoveryRequired);
+        }
+        let event: MembershipEventV2 = postcard::from_bytes(
+            attempt
+                .candidate_event
+                .as_deref()
+                .ok_or_else(|| inconsistent("pending inbound candidate event is missing"))?,
+        )
+        .map_err(admission_storage)?;
+        let MembershipOperationV2::AddDevice { admission } = event.operation else {
+            return Err(inconsistent(
+                "pending inbound candidate is not an AddDevice",
+            ));
+        };
+        Ok(Some(PendingInboundMember {
+            device_id: admission.facts.device_id,
+            display_name: admission.facts.device_name,
+        }))
+    }
+
     pub(crate) async fn current_local_join(
         &self,
     ) -> Result<Option<CurrentJoinStatus>, WorkspaceConvergenceError> {
@@ -2574,45 +2613,6 @@ impl DurableAdmissionTransaction {
             }
         }
         Ok(report)
-    }
-
-    pub(crate) async fn pending_inbound_member(
-        &self,
-        active_lineage_id: &str,
-    ) -> Result<Option<PendingInboundMember>, WorkspaceConvergenceError> {
-        let mut matching = self
-            .repository
-            .scan_recoverable()
-            .await
-            .map_err(map_repository_error)?
-            .into_iter()
-            .filter(|attempt| {
-                !attempt.is_terminal()
-                    && matches!(attempt.role_state, AdmissionAttemptRoleStateV1::Sponsor(_))
-                    && attempt.lineage_id.as_deref() == Some(active_lineage_id)
-            });
-        let Some(attempt) = matching.next() else {
-            return Ok(None);
-        };
-        if matching.next().is_some() {
-            return Err(WorkspaceConvergenceError::RecoveryRequired);
-        }
-        let event: MembershipEventV2 = postcard::from_bytes(
-            attempt
-                .candidate_event
-                .as_deref()
-                .ok_or_else(|| inconsistent("pending inbound candidate event is missing"))?,
-        )
-        .map_err(admission_storage)?;
-        let MembershipOperationV2::AddDevice { admission } = event.operation else {
-            return Err(inconsistent(
-                "pending inbound candidate is not an AddDevice",
-            ));
-        };
-        Ok(Some(PendingInboundMember {
-            device_id: admission.facts.device_id,
-            display_name: admission.facts.device_name,
-        }))
     }
 
     pub(crate) async fn current_local_join(

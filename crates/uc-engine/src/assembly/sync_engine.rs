@@ -191,6 +191,10 @@ pub struct SyncEngineAssembly {
 }
 
 impl SyncEngineAssembly {
+    pub(crate) fn space_modules(&self) -> Arc<SpaceModules> {
+        Arc::clone(&self.convergence_assembly)
+    }
+
     pub(crate) fn current_peer_scope(
         &self,
     ) -> Arc<dyn uc_core::membership::CurrentWorkspacePeerScopePort> {
@@ -603,15 +607,6 @@ pub async fn build_sync_engine_assembly(
     ) {
         upgrade.acknowledge(current_app_version).await?;
     }
-    let previous_installation = !matches!(
-        upgrade_status,
-        uc_application::facade::UpgradeStatus::FreshInstall
-    );
-    let initial_state_origin =
-        uc_application::facade::WorkspaceConvergenceStateOrigin::from_version_transition(
-            previous_installation.then_some(current_app_version),
-            current_app_version,
-        );
     let legacy_profile_isolation_required = upgrade_status.requires_legacy_profile_isolation();
     // IdentityFingerprintFactory is stateless — the one in SecurityPorts is
     // the same `Sha256IdentityFingerprintFactory` ZST, but we construct a
@@ -686,7 +681,6 @@ pub async fn build_sync_engine_assembly(
     );
     let convergence_assembly = SpaceModules::new(SpaceModulesDeps {
         workspace: WorkspaceMembershipDeps {
-            initial_state_origin,
             repository: Arc::clone(&space_setup.workspace_convergence_repository),
             admission_attempts: Arc::clone(&space_setup.admission_attempt_repository),
             historical_membership_signatures: Arc::new(
