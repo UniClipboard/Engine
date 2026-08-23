@@ -1190,11 +1190,13 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         &self,
         input: &AdmissionSpaceTransitionPreparationV2,
     ) -> Result<AdmissionSpaceTransitionV2, AdmissionSpaceTransitionError> {
-        let active_manifest = self
-            .manifest_store
-            .load()
-            .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let active_manifest = self.manifest_store.load().await.map_err(|error| {
+            tracing::error!(
+                error = %error,
+                "space transition: manifest store load failed"
+            );
+            AdmissionSpaceTransitionError::Storage
+        })?;
         let target_generation = self.generation(input.attempt_id.as_bytes(), b"target-database");
         let source_space = self.session.current_space_id().ok();
         if source_space
@@ -1240,12 +1242,22 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 let directory =
                     self.target_generation_directory(&input.target_space_id, &target_generation);
                 let target_database = directory.join("target.sqlite");
-                init_db_pool(
-                    target_database
-                        .to_str()
-                        .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                )
-                .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                let database_url = target_database
+                    .to_str()
+                    .ok_or(AdmissionSpaceTransitionError::Storage)?;
+                init_db_pool(database_url).map_err(|error| {
+                    // Surface the underlying diesel/libsqlite error before
+                    // collapsing to the unit `Storage` variant — otherwise a
+                    // Windows-only open/WAL failure is invisible in logs.
+                    tracing::error!(
+                        error = %error,
+                        database_url,
+                        target_dir = %directory.display(),
+                        target_space_id = %input.target_space_id,
+                        "space transition: init target database pool failed"
+                    );
+                    AdmissionSpaceTransitionError::Storage
+                })?;
                 return Ok(AdmissionSpaceTransitionV2::Fresh(FreshSpaceTransitionV1 {
                     transition_format_version: FRESH_SPACE_TRANSITION_FORMAT_V1,
                     attempt_id: input.attempt_id,
