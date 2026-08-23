@@ -59,6 +59,7 @@ use crate::operations::settings::upgrade::{
 };
 use crate::operations::space::cancel_invitation::execute_cancel_invitation;
 use crate::operations::space::cancel_join_space::execute_cancel_join_space;
+use crate::operations::space::clear_stale_admission::execute_clear_stale_admission;
 use crate::operations::space::create_space::execute_create_space;
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
@@ -87,6 +88,9 @@ impl EngineRuntime for ProductionRuntime {
             }
             Operation::FactoryResetSpace => {
                 return execute_factory_reset_space(self.profile_reset.as_ref()).await;
+            }
+            Operation::ClearStaleAdmission => {
+                return execute_clear_stale_admission(self.profile_convergence.as_ref()).await;
             }
             Operation::RecoverNetwork => {
                 return self
@@ -332,7 +336,8 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QueryDeviceTrust
                 | Operation::CancelJoinSpace(_)
-                | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
+                | Operation::FactoryResetSpace
+                | Operation::ClearStaleAdmission => Err(super::operation_unavailable_error()),
                 Operation::DecideDeviceTrustChange(input) => {
                     execute_decide_device_trust_change(self.current_facade().await?.as_ref(), input)
                         .await

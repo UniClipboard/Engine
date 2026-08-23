@@ -275,6 +275,21 @@ pub trait AdmissionAttemptRepositoryPort: Send + Sync {
         ))
     }
 
+    /// Clear only the *pending* (non-terminal) admission attempts — joins and
+    /// sponsorships that never completed. Used by the lightweight
+    /// "clear stale pairing state" recovery: a crash mid-admission leaves a
+    /// durable "admission in progress" record that blocks every later pairing
+    /// attempt, and clearing it must NOT touch terminals, membership history,
+    /// consumed invitations or the device trust revision (those are completed
+    /// facts of an intact space).
+    async fn clear_pending_admissions(
+        &self,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        Err(AdmissionAttemptRepositoryError::Repository(
+            "clear pending admissions storage is unavailable".to_owned(),
+        ))
+    }
+
     async fn commit_local_join_start(
         &self,
         _mutation: LocalJoinStartMutationV1,

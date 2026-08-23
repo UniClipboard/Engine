@@ -583,6 +583,30 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
             .map_err(executor_error)
     }
 
+    async fn clear_pending_admissions(
+        &self,
+    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_on(conn)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    // Pending attempts are the "in progress" facts that can
+                    // outlive a crashed process and block re-pairing. Terminals,
+                    // membership history, consumed invitations, the projection
+                    // floor and the device trust revision are completed facts of
+                    // an intact space and must survive.
+                    state.attempts.clear();
+                    state.metadata.completion_recovery_challenges.clear();
+                    self.save_state_on(conn, &state)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    Ok(state.metadata)
+                })
+            })
+            .map_err(executor_error)
+    }
+
     async fn commit_local_join_start(
         &self,
         mutation: LocalJoinStartMutationV1,

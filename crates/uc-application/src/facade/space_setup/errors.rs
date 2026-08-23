@@ -268,6 +268,12 @@ pub enum FactoryResetError {
     #[error("failed to clear setup status: {0}")]
     StorageFailed(String),
 
+    /// Failed to clear persisted admission state (pending joins / sponsorships)
+    /// after the key wipe. A stale "admission in progress" record blocks every
+    /// future pairing attempt, so this must surface rather than be swallowed.
+    #[error("failed to clear admission state: {0}")]
+    AdmissionStateResetFailed(String),
+
     /// Uncategorised infra / adapter failure.
     #[error("internal error: {0}")]
     Internal(String),

@@ -411,6 +411,18 @@ impl WorkspaceConvergence {
         Ok(())
     }
 
+    /// Clear stale *pending* admission attempts without touching any completed
+    /// admission facts (terminals, membership history, trust revision). See
+    /// [`AdmissionAttemptRepositoryPort::clear_pending_admissions`].
+    pub async fn clear_pending_admissions(&self) -> Result<(), WorkspaceConvergenceError> {
+        self.deps
+            .admission_attempts
+            .clear_pending_admissions()
+            .await
+            .map_err(admission::map_repository_error)?;
+        Ok(())
+    }
+
     fn admission_generation(state: &WorkspaceConvergenceState) -> u64 {
         state
             .membership_reconciliation

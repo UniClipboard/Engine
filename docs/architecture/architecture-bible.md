@@ -950,6 +950,12 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-08-23：新增轻量“清理残留配对状态”恢复操作（`Operation::ClearStaleAdmission`）。配对中断（崩溃/蓝屏）会在本地留下非终态的 pending admission 记录，阻断后续一切配对；此前只能通过隐藏的忘记口令重置（且会连空间一起清）来恢复。新操作仅清除非终态 admission attempts（含完成恢复挑战），保留终态记录、成员历史、已消费邀请与设备信任修订号。调用链：`uc-engine` 操作 → `ProfileWorkspaceConvergence::clear_stale_admission` → admission 存储 `clear_pending_admissions`；桌面侧新增 `POST /v2/setup/clear-stale-admission` 与设置页按钮。不改变公开入口语义、持久化格式或分层。
+
+- 2026-08-23：忘记口令（factory reset）路径补清 admission 持久状态。应用崩溃或蓝屏中断加入流程会遗留“admission in progress”记录，此前的 factory reset 只擦钥匙和关系、不清该记录，导致重置后仍无法重新配对（sponsor/joiner 两侧均报 `another workspace admission is already in progress`）。现 factory reset 与设备管理重置共用同一清理入口，重置后可直接重新配对；清理失败会显式上报，不再静默。不改变公开入口、持久化格式或分层。
+
+- 2026-08-21：自写回显归因从一次性消费改为按单次写入的回显集吸收多次系统剪贴板事件。远程推送的 next-change fallback 拥有两次同内容类别吸收预算，内容命中消耗配对 fallback 的一次预算而非删除，且首次回显后剩余预算只保留 5 秒；本地恢复保持一次性语义。该修改补齐“一次程序化写入产生多个系统事件”的归因，避免第二个事件被误判为本地捕获并回传对端形成 A↔B 图片回环；不改变分层、公开接口或持久化格式。
+
 - 2026-08-20：单条历史记录的发送视图在返回任何结果前确认当前成员范围，并用该范围与历史可信关系的交集组装本机发送情况；历史关系和旧发送事实继续保留，当前范围不可用时查询失败。该修改补齐既有当前成员范围规则，不改变分层或所有权。
 - 2026-08-21：补充当前成员范围不可用时的脱敏原因分类，区分旧成员记录读取、空间保护关系读取以及缺少当前成员历史；只记录固定类别、保护模式、布尔值和数量，不记录设备名称、文件名、路径或用户内容。不改变成员判断、持久化或对外接口。
 

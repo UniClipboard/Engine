@@ -301,11 +301,12 @@ impl DurableAdmissionSpaceTransition {
             &plaintext,
             &Self::target_workspace_aad(&input.target_space_id, target_generation),
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let bytes = serde_json::to_vec(&encrypted)
             .map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
         let path = self.target_workspace_path(&input.target_space_id, target_generation);
-        write_new_file(&path, &bytes).map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        write_new_file(&path, &bytes)
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let reference = digest(&bytes).to_vec();
         self.open_target_workspace(
             &input.target_space_id,
@@ -324,7 +325,7 @@ impl DurableAdmissionSpaceTransition {
         target_session: &InMemorySession,
     ) -> Result<TargetWorkspaceGenerationV1, AdmissionSpaceTransitionError> {
         let bytes = std::fs::read(self.target_workspace_path(target_space_id, generation))
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         if digest(&bytes).as_slice() != expected_reference {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
         }
@@ -444,11 +445,11 @@ impl DurableAdmissionSpaceTransition {
                 );
                 let target_database = directory.join("target.sqlite");
                 init_db_pool(
-                    target_database
-                        .to_str()
-                        .ok_or(AdmissionSpaceTransitionError::Storage)?,
+                    target_database.to_str().ok_or_else(|| {
+                        AdmissionSpaceTransitionError::storage("value unavailable")
+                    })?,
                 )
-                .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
                 self.install_and_reopen_target_security(
                     &target_database,
                     &target_workspace,
@@ -469,13 +470,11 @@ impl DurableAdmissionSpaceTransition {
                         transition.target_generation,
                     )?)
                     .await
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
                 self.source_pool
-                    .replace_database(
-                        target_database
-                            .to_str()
-                            .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                    )
+                    .replace_database(target_database.to_str().ok_or_else(|| {
+                        AdmissionSpaceTransitionError::storage("value unavailable")
+                    })?)
                     .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
                 self.blob_store.replace_root(directory.join("blobs"));
                 advanced(FreshSpaceTransitionPhaseV1::TargetPromoted)
@@ -487,11 +486,9 @@ impl DurableAdmissionSpaceTransition {
                 );
                 let target_database = directory.join("target.sqlite");
                 self.source_pool
-                    .replace_database(
-                        target_database
-                            .to_str()
-                            .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                    )
+                    .replace_database(target_database.to_str().ok_or_else(|| {
+                        AdmissionSpaceTransitionError::storage("value unavailable")
+                    })?)
                     .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
                 self.blob_store.replace_root(directory.join("blobs"));
                 self.space_access
@@ -550,13 +547,13 @@ impl DurableAdmissionSpaceTransition {
                     &transition.target_generation,
                 );
                 std::fs::create_dir_all(&directory)
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
                 let scratch = directory.join("same-space.snapshot.tmp");
                 let source_bytes = db_snapshot::snapshot_to_bytes(&self.source_pool, &scratch)
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
                 let target_database = directory.join("target.sqlite");
                 write_new_file(&target_database, &source_bytes)
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
                 self.install_and_reopen_security_material(
                     &target_database,
                     &target_material,
@@ -580,13 +577,11 @@ impl DurableAdmissionSpaceTransition {
                         transition.target_generation,
                     )?)
                     .await
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
                 self.source_pool
-                    .replace_database(
-                        target_database
-                            .to_str()
-                            .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                    )
+                    .replace_database(target_database.to_str().ok_or_else(|| {
+                        AdmissionSpaceTransitionError::storage("value unavailable")
+                    })?)
                     .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
                 self.blob_store.replace_root(directory.join("blobs"));
                 advanced(SameSpaceTransitionPhaseV1::TargetPromoted)
@@ -598,11 +593,9 @@ impl DurableAdmissionSpaceTransition {
                 );
                 let target_database = directory.join("target.sqlite");
                 self.source_pool
-                    .replace_database(
-                        target_database
-                            .to_str()
-                            .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                    )
+                    .replace_database(target_database.to_str().ok_or_else(|| {
+                        AdmissionSpaceTransitionError::storage("value unavailable")
+                    })?)
                     .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
                 self.blob_store.replace_root(directory.join("blobs"));
                 self.reopen_active_target_security(&transition.target_space_id)
@@ -639,9 +632,9 @@ impl DurableAdmissionSpaceTransition {
         let target_pool = init_db_pool(
             target_database
                 .to_str()
-                .ok_or(AdmissionSpaceTransitionError::Storage)?,
+                .ok_or_else(|| AdmissionSpaceTransitionError::storage("value unavailable"))?,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         clear_source_space_runtime_state(&target_pool)?;
         let repository = DieselSpaceSecurityStore::new(
             Arc::new(DieselSqliteExecutor::new(target_pool)),
@@ -650,11 +643,11 @@ impl DurableAdmissionSpaceTransition {
         repository
             .save_space_material(material)
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let reopened = repository
             .load_space_material(material.state().space_id())
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
             .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
         if &reopened != material {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
@@ -690,7 +683,7 @@ impl DurableAdmissionSpaceTransition {
         if let Some(previous) = current_repository
             .load_space_material(&SpaceId::from_str(&target_workspace.target_space_id))
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
         {
             return self
                 .session
@@ -764,9 +757,9 @@ impl DurableAdmissionSpaceTransition {
         let target_pool = init_db_pool(
             target_database
                 .to_str()
-                .ok_or(AdmissionSpaceTransitionError::Storage)?,
+                .ok_or_else(|| AdmissionSpaceTransitionError::storage("value unavailable"))?,
         )
-        .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let store = EncryptedRelationshipStore::new(
             Arc::new(DieselSqliteExecutor::new(target_pool)),
             Arc::new(TargetSessionSubkeyDeriver(target_session.clone())),
@@ -786,7 +779,7 @@ impl DurableAdmissionSpaceTransition {
                     sync_preferences: MemberSyncPreferences::default(),
                 })
                 .await
-                .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
             if facts.device_id != target_workspace.local_device_id {
                 store
                     .save_trusted_peer(&TrustedPeer {
@@ -796,7 +789,7 @@ impl DurableAdmissionSpaceTransition {
                         trusted_at: timestamp,
                     })
                     .await
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
                 store
                     .save_peer_address(&PeerAddressRecord {
                         device_id: facts.device_id.clone(),
@@ -804,7 +797,7 @@ impl DurableAdmissionSpaceTransition {
                         observed_at: timestamp,
                     })
                     .await
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
             }
         }
         let expected_members = target_workspace
@@ -815,7 +808,7 @@ impl DurableAdmissionSpaceTransition {
         let stored_members = store
             .list_members()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
             .into_iter()
             .map(|member| member.device_id)
             .collect::<std::collections::BTreeSet<_>>();
@@ -827,14 +820,14 @@ impl DurableAdmissionSpaceTransition {
         let stored_peers = store
             .list_trusted_peers()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
             .into_iter()
             .map(|peer| peer.peer_device_id)
             .collect::<std::collections::BTreeSet<_>>();
         let stored_addresses = store
             .list_peer_addresses()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
             .into_iter()
             .map(|address| address.device_id)
             .collect::<std::collections::BTreeSet<_>>();
@@ -915,7 +908,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         if active_manifest
             .as_ref()
             .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
@@ -930,7 +923,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             return Ok(());
         }
         std::fs::create_dir_all(&self.generations.generation_root)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let required_space =
             reset_required_free_bytes(&self.source_pool, &self.generations.source_blob_root)?;
         ensure_reset_capacity(
@@ -948,7 +941,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load_device_reset_journal()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
         {
             Some(journal)
                 if journal.target_space_id == target_space_id.as_ref()
@@ -972,7 +965,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         self.manifest_store
             .save_device_reset_journal(&journal)
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let reset_source_directory = self
             .generations
             .generation_directory(&reset_id, &source_generation);
@@ -981,7 +974,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         let prepared = self
             .generations
             .prepare_source(reset_id, source_generation)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         *source = Some(DeviceResetSource {
             target_space_id: target_space_id.clone(),
             reset_id,
@@ -1001,7 +994,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
             .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
         {
             return Ok(());
@@ -1012,24 +1005,24 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .filter(|source| &source.target_space_id == target_space_id)
             .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
         verify_existing_snapshot(&source.prepared.backup_path, source.prepared.backup_digest)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let target_directory = self.generations.generation_directory(
             target_space_id.as_ref().as_bytes(),
             &source.target_generation,
         );
         std::fs::create_dir_all(&target_directory)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let working_database = target_directory.join("reset-working.sqlite");
         remove_sqlite_database_if_present(&working_database)?;
         let source_bytes = std::fs::read(&source.prepared.backup_path)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         write_new_file(&working_database, &source_bytes)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         self.source_pool
             .replace_database(
                 working_database
                     .to_str()
-                    .ok_or(AdmissionSpaceTransitionError::Storage)?,
+                    .ok_or_else(|| AdmissionSpaceTransitionError::storage("value unavailable"))?,
             )
             .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)
     }
@@ -1042,7 +1035,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
             .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
         {
             return Ok(());
@@ -1065,7 +1058,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
                 target_space_id,
                 prepared.target_generation,
             )
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let target_directory = self.generations.generation_directory(
             target_space_id.as_ref().as_bytes(),
             &prepared.target_generation,
@@ -1095,13 +1088,13 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         self.manifest_store
             .promote(&manifest)
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         self.source_pool
             .replace_database(
                 finalized
                     .database_path
                     .to_str()
-                    .ok_or(AdmissionSpaceTransitionError::Storage)?,
+                    .ok_or_else(|| AdmissionSpaceTransitionError::storage("value unavailable"))?,
             )
             .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
         self.blob_store.replace_root(target_directory.join("blobs"));
@@ -1117,7 +1110,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
             .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
         if active_manifest.space_id != target_space_id.as_ref() {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
@@ -1126,7 +1119,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load_device_reset_journal()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
         else {
             return Ok(());
         };
@@ -1164,7 +1157,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         self.manifest_store
             .clear_device_reset_journal()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))
     }
 }
 
@@ -1190,13 +1183,21 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         &self,
         input: &AdmissionSpaceTransitionPreparationV2,
     ) -> Result<AdmissionSpaceTransitionV2, AdmissionSpaceTransitionError> {
-        let active_manifest = self
-            .manifest_store
-            .load()
-            .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let active_manifest = self.manifest_store.load().await.map_err(|error| {
+            tracing::error!(
+                error = %error,
+                "space transition: manifest store load failed"
+            );
+            AdmissionSpaceTransitionError::storage(format!("{error}"))
+        })?;
         let target_generation = self.generation(input.attempt_id.as_bytes(), b"target-database");
         let source_space = self.session.current_space_id().ok();
+        tracing::error!(
+            source_space = ?source_space,
+            target_space_id = %input.target_space_id,
+            manifest_present = active_manifest.is_some(),
+            "space transition: branch decision"
+        );
         if source_space
             .as_ref()
             .is_some_and(|space| space.as_ref() == input.target_space_id)
@@ -1240,12 +1241,22 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 let directory =
                     self.target_generation_directory(&input.target_space_id, &target_generation);
                 let target_database = directory.join("target.sqlite");
-                init_db_pool(
-                    target_database
-                        .to_str()
-                        .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                )
-                .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                let database_url = target_database
+                    .to_str()
+                    .ok_or_else(|| AdmissionSpaceTransitionError::storage("value unavailable"))?;
+                init_db_pool(database_url).map_err(|error| {
+                    // Surface the underlying diesel/libsqlite error before
+                    // collapsing to the unit `Storage` variant — otherwise a
+                    // Windows-only open/WAL failure is invisible in logs.
+                    tracing::error!(
+                        error = %error,
+                        database_url,
+                        target_dir = %directory.display(),
+                        target_space_id = %input.target_space_id,
+                        "space transition: init target database pool failed"
+                    );
+                    AdmissionSpaceTransitionError::storage(format!("{error}"))
+                })?;
                 return Ok(AdmissionSpaceTransitionV2::Fresh(FreshSpaceTransitionV1 {
                     transition_format_version: FRESH_SPACE_TRANSITION_FORMAT_V1,
                     attempt_id: input.attempt_id,
@@ -1264,11 +1275,19 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         let prepared = self
             .generations
             .prepare_source(*input.attempt_id.as_bytes(), source_generation)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    source_generation = %hex::encode(source_generation),
+                    attempt_id = %hex::encode(input.attempt_id.as_bytes()),
+                    "space transition: prepare_source failed"
+                );
+                AdmissionSpaceTransitionError::storage(format!("{error}"))
+            })?;
         let source_revision_at_backup = self
             .source_pool
             .persistent_revision()
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         Ok(AdmissionSpaceTransitionV2::CrossSpace(
             CrossSpaceTransitionV2 {
                 transition_format_version: CROSS_SPACE_TRANSITION_FORMAT_V2,
@@ -1325,14 +1344,13 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                         &SpaceId::from_str(&transition.target_space_id),
                         transition.target_generation,
                     )
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
                 let mut next = transition.clone();
                 next.phase = CrossSpaceTransitionPhaseV2::SourceFinalized;
-                next.final_source_revision = Some(
-                    self.source_pool
-                        .persistent_revision()
-                        .map_err(|_| AdmissionSpaceTransitionError::Storage)?,
-                );
+                next.final_source_revision =
+                    Some(self.source_pool.persistent_revision().map_err(|error| {
+                        AdmissionSpaceTransitionError::storage(format!("{error}"))
+                    })?);
                 next.final_manifest_digest = Some(finalized.digest);
                 transition
                     .can_advance_to(&next)
@@ -1415,13 +1433,11 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 self.manifest_store
                     .promote(&manifest)
                     .await
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
                 self.source_pool
-                    .replace_database(
-                        target_database
-                            .to_str()
-                            .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                    )
+                    .replace_database(target_database.to_str().ok_or_else(|| {
+                        AdmissionSpaceTransitionError::storage("value unavailable")
+                    })?)
                     .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
                 self.blob_store.replace_root(directory.join("blobs"));
                 self.advanced(transition, CrossSpaceTransitionPhaseV2::TargetPromoted)
@@ -1430,11 +1446,9 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 let directory = self.target_directory(transition);
                 let target_database = directory.join("target.sqlite");
                 self.source_pool
-                    .replace_database(
-                        target_database
-                            .to_str()
-                            .ok_or(AdmissionSpaceTransitionError::Storage)?,
-                    )
+                    .replace_database(target_database.to_str().ok_or_else(|| {
+                        AdmissionSpaceTransitionError::storage("value unavailable")
+                    })?)
                     .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
                 self.blob_store.replace_root(directory.join("blobs"));
                 self.space_access
@@ -1475,7 +1489,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 .manifest_store
                 .load()
                 .await
-                .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+                .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
                 .is_some_and(|manifest| manifest.space_id == fresh.target_space_id)
             {
                 return Err(AdmissionSpaceTransitionError::RecoveryRequired);
@@ -1485,7 +1499,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
             return match std::fs::remove_dir_all(target) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(_) => Err(AdmissionSpaceTransitionError::Storage),
+                Err(_) => Err(AdmissionSpaceTransitionError::storage("operation failed")),
             };
         }
         if let AdmissionSpaceTransitionV2::SameSpace(same) = transition {
@@ -1498,7 +1512,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 .manifest_store
                 .load()
                 .await
-                .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+                .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
                 .is_some_and(|manifest| {
                     manifest.space_id == same.target_space_id
                         && manifest.database_generation == same.target_generation
@@ -1511,7 +1525,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
             return match std::fs::remove_dir_all(target) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(_) => Err(AdmissionSpaceTransitionError::Storage),
+                Err(_) => Err(AdmissionSpaceTransitionError::storage("operation failed")),
             };
         }
         let AdmissionSpaceTransitionV2::CrossSpace(transition) = transition else {
@@ -1526,7 +1540,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
             .is_some_and(|manifest| manifest.space_id == transition.target_space_id)
         {
             return Err(AdmissionSpaceTransitionError::RecoveryRequired);
@@ -1537,7 +1551,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
         match std::fs::remove_dir_all(target) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(AdmissionSpaceTransitionError::Storage),
+            Err(_) => Err(AdmissionSpaceTransitionError::storage("operation failed")),
         }
     }
 }
@@ -1558,17 +1572,17 @@ fn copy_profile_recovery_state(
     .get_result::<ProfileRecoveryRow>(
         &mut source_pool
             .get()
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?,
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?,
     )
     .optional()
-    .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
     .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
     let target_pool = init_db_pool(
         target_database
             .to_str()
-            .ok_or(AdmissionSpaceTransitionError::Storage)?,
+            .ok_or_else(|| AdmissionSpaceTransitionError::storage("value unavailable"))?,
     )
-    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
     diesel::sql_query(
         "INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, ?) \
          ON CONFLICT(singleton_id) DO UPDATE SET encrypted_payload = excluded.encrypted_payload",
@@ -1577,9 +1591,9 @@ fn copy_profile_recovery_state(
     .execute(
         &mut target_pool
             .get()
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?,
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?,
     )
-    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
     Ok(())
 }
 
@@ -1588,7 +1602,7 @@ fn clear_source_space_runtime_state(
 ) -> Result<(), AdmissionSpaceTransitionError> {
     target_pool
         .get()
-        .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
         .immediate_transaction::<_, diesel::result::Error, _>(|connection| {
             connection.batch_execute(
                 "DELETE FROM encrypted_relationship;
@@ -1601,14 +1615,14 @@ fn clear_source_space_runtime_state(
                  DELETE FROM workspace_convergence_state;",
             )
         })
-        .map_err(|_| AdmissionSpaceTransitionError::Storage)
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))
 }
 
 fn remove_file_if_present(path: &Path) -> Result<(), AdmissionSpaceTransitionError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(AdmissionSpaceTransitionError::Storage),
+        Err(_) => Err(AdmissionSpaceTransitionError::storage("operation failed")),
     }
 }
 
@@ -1617,7 +1631,7 @@ fn remove_sqlite_database_if_present(path: &Path) -> Result<(), AdmissionSpaceTr
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or(AdmissionSpaceTransitionError::Storage)?;
+        .ok_or_else(|| AdmissionSpaceTransitionError::storage("value unavailable"))?;
     for suffix in ["-wal", "-shm"] {
         remove_file_if_present(&path.with_file_name(format!("{file_name}{suffix}")))?;
     }
@@ -1628,7 +1642,7 @@ fn remove_directory_if_present(path: &Path) -> Result<(), AdmissionSpaceTransiti
     match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(AdmissionSpaceTransitionError::Storage),
+        Err(_) => Err(AdmissionSpaceTransitionError::storage("operation failed")),
     }
 }
 
@@ -1658,14 +1672,14 @@ fn reset_required_free_bytes(
 
     let mut connection = source_pool
         .get()
-        .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
     let page_count = diesel::sql_query("PRAGMA page_count")
         .get_result::<PageCountRow>(&mut connection)
-        .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
         .page_count;
     let page_size = diesel::sql_query("PRAGMA page_size")
         .get_result::<PageSizeRow>(&mut connection)
-        .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
         .page_size;
     let database_bytes = u64::try_from(page_count)
         .ok()
@@ -1674,7 +1688,7 @@ fn reset_required_free_bytes(
                 .ok()
                 .map(|size| count.saturating_mul(size))
         })
-        .ok_or(AdmissionSpaceTransitionError::Storage)?;
+        .ok_or_else(|| AdmissionSpaceTransitionError::storage("value unavailable"))?;
     let blob_bytes = directory_file_bytes(source_blob_root)?;
 
     Ok(database_bytes
@@ -1687,25 +1701,26 @@ fn directory_file_bytes(path: &Path) -> Result<u64, AdmissionSpaceTransitionErro
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(_) => return Err(AdmissionSpaceTransitionError::Storage),
+        Err(_) => return Err(AdmissionSpaceTransitionError::storage("operation failed")),
     };
     let mut total = 0_u64;
     for entry in entries {
-        let entry = entry.map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let entry =
+            entry.map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let file_type = entry
             .file_type()
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         if file_type.is_dir() {
             total = total.saturating_add(directory_file_bytes(&entry.path())?);
         } else if file_type.is_file() {
             total = total.saturating_add(
                 entry
                     .metadata()
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+                    .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?
                     .len(),
             );
         } else {
-            return Err(AdmissionSpaceTransitionError::Storage);
+            return Err(AdmissionSpaceTransitionError::storage("statvfs failed"));
         }
     }
     Ok(total)
@@ -1716,11 +1731,11 @@ fn available_space_bytes(path: &Path) -> Result<u64, AdmissionSpaceTransitionErr
     use std::os::unix::ffi::OsStrExt;
 
     let path = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
     if result != 0 {
-        return Err(AdmissionSpaceTransitionError::Storage);
+        return Err(AdmissionSpaceTransitionError::storage("statvfs failed"));
     }
     let stats = unsafe { stats.assume_init() };
     Ok(u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize)))
@@ -1744,7 +1759,7 @@ fn available_space_bytes(path: &Path) -> Result<u64, AdmissionSpaceTransitionErr
     };
     (result != 0)
         .then_some(available)
-        .ok_or(AdmissionSpaceTransitionError::Storage)
+        .ok_or_else(|| AdmissionSpaceTransitionError::storage("value unavailable"))
 }
 
 fn copy_directory_contents(
@@ -1754,24 +1769,27 @@ fn copy_directory_contents(
     if source == destination {
         return Ok(());
     }
-    std::fs::create_dir_all(destination).map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+    std::fs::create_dir_all(destination)
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
     let entries = match std::fs::read_dir(source) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(AdmissionSpaceTransitionError::Storage),
+        Err(_) => return Err(AdmissionSpaceTransitionError::storage("operation failed")),
     };
     for entry in entries {
-        let entry = entry.map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let entry =
+            entry.map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let file_type = entry
             .file_type()
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         let target = destination.join(entry.file_name());
         if file_type.is_dir() {
             copy_directory_contents(&entry.path(), &target)?;
         } else if file_type.is_file() {
-            let bytes =
-                std::fs::read(entry.path()).map_err(|_| AdmissionSpaceTransitionError::Storage)?;
-            write_new_file(&target, &bytes).map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            let bytes = std::fs::read(entry.path())
+                .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
+            write_new_file(&target, &bytes)
+                .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
         } else {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
         }
@@ -2519,7 +2537,8 @@ async fn preflight_source_inline_history(
     source_session: Arc<InMemorySession>,
     preserve_unreadable_history: bool,
 ) -> Result<(), AdmissionSpaceTransitionError> {
-    let rows = load_inline_rows(pool).map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+    let rows = load_inline_rows(pool)
+        .map_err(|error| AdmissionSpaceTransitionError::storage(format!("{error}")))?;
     let source_cipher = BlobCipherAdapter::new(source_session);
     for row in rows {
         let event_id = EventId::from_string(row.event_id);
@@ -2540,7 +2559,7 @@ async fn preflight_source_inline_history(
                 return Err(AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation);
             }
             Err(uc_core::ports::security::BlobCipherError::InvalidCiphertext) => {}
-            Err(_) => return Err(AdmissionSpaceTransitionError::Storage),
+            Err(_) => return Err(AdmissionSpaceTransitionError::storage("operation failed")),
         }
     }
     Ok(())
@@ -2643,10 +2662,26 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     drop(file);
     replace_file_atomically(&temporary, path)
         .map_err(|_| "replace existing generation".to_owned())?;
-    let directory = std::fs::File::open(parent).map_err(|_| "open generation parent".to_owned())?;
-    directory
-        .sync_all()
-        .map_err(|_| "sync generation parent".to_owned())
+    sync_parent_directory(parent).map_err(|_| "sync generation parent".to_owned())
+}
+
+/// fsync a directory so a just-renamed generation survives a crash.
+///
+/// On Unix this requires opening the directory read-only, which is allowed.
+/// Windows requires `FILE_FLAG_BACKUP_SEMANTICS` to open a directory;
+/// `std::fs::File::open` does not pass it and fails with access denied, so the
+/// directory fsync is skipped there — mirroring
+/// `active_space_manifest_store::sync_parent_directory`. The rename itself is
+/// already durable on Windows via `MOVEFILE_WRITE_THROUGH`
+/// ([`replace_file_atomically`]).
+#[cfg(not(windows))]
+fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(not(windows))]

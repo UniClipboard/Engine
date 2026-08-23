@@ -98,14 +98,23 @@ pub enum AdmissionSpaceTransitionError {
     Locked,
     #[error("space transition is unavailable")]
     Unavailable,
-    #[error("space transition storage failed")]
-    Storage,
+    #[error("space transition storage failed: {0}")]
+    Storage(String),
     #[error("insufficient storage for space transition")]
     InsufficientStorage,
     #[error("space transition state is inconsistent")]
     Inconsistent,
     #[error("space transition requires recovery")]
     RecoveryRequired,
+}
+
+impl AdmissionSpaceTransitionError {
+    /// Collapse any underlying storage failure into the `Storage` variant
+    /// while keeping the real error text — otherwise Windows-only
+    /// sqlite/diesel failures are invisible in diagnostics.
+    pub fn storage(context: impl std::fmt::Display) -> Self {
+        Self::Storage(context.to_string())
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

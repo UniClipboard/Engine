@@ -615,6 +615,9 @@ fn operation_response(result: OperationResult) -> Value {
             json!({"ok": true, "kind": "invitation_cancelled"})
         }
         OperationResult::SpaceReset => json!({"ok": true, "kind": "space_reset"}),
+        OperationResult::StaleAdmissionCleared => {
+            json!({"ok": true, "kind": "stale_admission_cleared"})
+        }
         OperationResult::SpaceFactoryReset => {
             json!({"ok": true, "kind": "space_factory_reset"})
         }

@@ -436,6 +436,7 @@ pub enum OperationResult {
     },
     InvitationCancelled,
     SpaceReset,
+    StaleAdmissionCleared,
     SpaceFactoryReset,
     SetupState(SetupStateSummary),
     StorageStats(StorageStatsSummary),
@@ -551,6 +552,7 @@ impl fmt::Debug for OperationResult {
             Self::InvitationIssued { .. } => debug.field("kind", &"invitation_issued"),
             Self::InvitationCancelled => debug.field("kind", &"invitation_cancelled"),
             Self::SpaceReset => debug.field("kind", &"space_reset"),
+            Self::StaleAdmissionCleared => debug.field("kind", &"stale_admission_cleared"),
             Self::SpaceFactoryReset => debug.field("kind", &"space_factory_reset"),
             Self::SetupState(state) => debug.field("kind", &"setup_state").field("state", state),
             Self::StorageStats(stats) => {

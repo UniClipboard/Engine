@@ -1981,7 +1981,9 @@ impl uc_core::membership::AdmissionSpaceTransitionPort for SimulatedAdmissionSpa
             self.fail_once_at.lock().unwrap().front().copied() == Some(transition.phase);
         if should_fail {
             self.fail_once_at.lock().unwrap().pop_front();
-            return Err(uc_core::membership::AdmissionSpaceTransitionError::Storage);
+            return Err(uc_core::membership::AdmissionSpaceTransitionError::storage(
+                "space transition storage failed",
+            ));
         }
         if transition.phase == CrossSpaceTransitionPhaseV2::CleanupPending {
             let result = CrossSpaceTransitionResultV2::from_cleanup_pending(transition)
