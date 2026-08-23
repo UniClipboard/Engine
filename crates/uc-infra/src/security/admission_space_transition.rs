@@ -2662,10 +2662,26 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     drop(file);
     replace_file_atomically(&temporary, path)
         .map_err(|_| "replace existing generation".to_owned())?;
-    let directory = std::fs::File::open(parent).map_err(|_| "open generation parent".to_owned())?;
-    directory
-        .sync_all()
-        .map_err(|_| "sync generation parent".to_owned())
+    sync_parent_directory(parent).map_err(|_| "sync generation parent".to_owned())
+}
+
+/// fsync a directory so a just-renamed generation survives a crash.
+///
+/// On Unix this requires opening the directory read-only, which is allowed.
+/// Windows requires `FILE_FLAG_BACKUP_SEMANTICS` to open a directory;
+/// `std::fs::File::open` does not pass it and fails with access denied, so the
+/// directory fsync is skipped there — mirroring
+/// `active_space_manifest_store::sync_parent_directory`. The rename itself is
+/// already durable on Windows via `MOVEFILE_WRITE_THROUGH`
+/// ([`replace_file_atomically`]).
+#[cfg(not(windows))]
+fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(not(windows))]
