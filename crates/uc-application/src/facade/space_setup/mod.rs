@@ -25,7 +25,7 @@ pub use errors::{
     QuerySetupStateError, RedeemPairingInvitationError, ResetSpaceError, TryResumeSessionError,
     UnlockSpaceError,
 };
-pub use facade::SpaceFacade;
+pub use facade::{PairingInvitationRuntime, SpaceFacade};
 pub use uc_observability_contract::analytics::PairingFailureReason;
 
 pub(crate) const LEGACY_SPACE_ID: &str = "space";
