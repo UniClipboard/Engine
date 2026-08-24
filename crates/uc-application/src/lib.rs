@@ -5,9 +5,9 @@
 //! groupings). Everything else is `pub(crate)`.
 
 pub mod deps;
-mod error;
+pub(crate) mod error;
 pub mod facade;
-mod profile;
+pub(crate) mod profile;
 
 pub(crate) mod clipboard;
 pub(crate) mod device;

@@ -11,7 +11,7 @@
 //!    challenge response, and emits `Confirm` / `Reject` on the wire.
 //! 3. **Workspace owner handover** — every decision (admit or reject) and
 //!    every save boundary belongs to the workspace owner via
-//!    [`super::super::adapter::WorkspaceAdmissionOwnerPort`]: the owner
+//!    [`super::SponsorAdmissionOwnerPort`]: the owner
 //!    saves the in-flight admission record before the joiner's readiness,
 //!    commits the admission change + pending handoff facts + confirmation
 //!    material in one save commit when readiness arrives, and the channel
@@ -48,10 +48,10 @@ use uc_observability_contract::analytics::{
 };
 
 use super::sponsor_handshake::{JoinerFacts, SponsorHandshakeCoordinator, Verdict};
-use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::admission::invitation::holder::{
     InMemoryPairingInvitationHolder, TakeMatchingError,
 };
+use crate::space::admission::sponsor::SponsorAdmissionOwnerPort;
 use crate::space::workspace_membership::WorkspaceConvergenceError;
 
 /// Drives sponsor-side inbound pairing events.
@@ -63,7 +63,7 @@ pub(crate) struct PairingInboundOrchestrator {
     handshake: Arc<SponsorHandshakeCoordinator>,
     /// The workspace owner behind the admission seam. Never `None`: the
     /// assembly layer guarantees the owner always exists.
-    workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
+    workspace_convergence: Arc<dyn SponsorAdmissionOwnerPort>,
     /// Failure telemetry for `pairing_failed`. `pairing_started` is fired
     /// upstream by `IssuePairingInvitationUseCase`; the orchestrator no
     /// longer emits any pairing-success event.
@@ -84,7 +84,7 @@ impl PairingInboundOrchestrator {
         holder: Arc<InMemoryPairingInvitationHolder>,
         clock: Arc<dyn ClockPort>,
         handshake: Arc<SponsorHandshakeCoordinator>,
-        workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
+        workspace_convergence: Arc<dyn SponsorAdmissionOwnerPort>,
         analytics: Arc<dyn AnalyticsFacade>,
     ) -> Self {
         Self {
@@ -685,8 +685,8 @@ mod tests {
         AnalyticsFacade, AnalyticsPort, DefaultAnalyticsFacade, NoopAnalyticsIdentity,
     };
 
-    use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
     use crate::space::admission::invitation::holder::InMemoryPairingInvitationHolder;
+    use crate::space::admission::sponsor::SponsorAdmissionOwnerPort;
     use crate::space::workspace_membership::WorkspaceConvergenceError;
 
     use crate::space::workspace_membership::membership::group_update_delivery::GroupUpdateDeliveryPort;
@@ -747,7 +747,7 @@ mod tests {
         }
     }
     #[async_trait]
-    impl WorkspaceAdmissionOwnerPort for RecordingOwner {
+    impl SponsorAdmissionOwnerPort for RecordingOwner {
         async fn validate_join_request(
             &self,
             request: &JoinerRequest,
@@ -1113,7 +1113,7 @@ mod tests {
                 self.holder.clone(),
                 Arc::new(FakeClock(self.clock_ms)) as Arc<dyn ClockPort>,
                 handshake,
-                Arc::clone(&self.owner) as Arc<dyn WorkspaceAdmissionOwnerPort>,
+                Arc::clone(&self.owner) as Arc<dyn SponsorAdmissionOwnerPort>,
                 Arc::new(DefaultAnalyticsFacade::new(
                     self.analytics.clone(),
                     Arc::new(NoopAnalyticsIdentity),

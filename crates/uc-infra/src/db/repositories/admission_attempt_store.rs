@@ -5,13 +5,15 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::Binary;
 use serde::{Deserialize, Serialize};
+use uc_application::deps::{
+    AdmissionAttemptRepositoryError, AdmissionAttemptRepositoryPort, CurrentLocalJoinProjectionV1,
+    LocalJoinStartMutationV1, MembershipHistoryRepositoryError, MembershipHistoryRepositoryPort,
+};
 use uc_core::membership::{
-    AdmissionAttemptId, AdmissionAttemptRepositoryError, AdmissionAttemptRepositoryPort,
-    AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionOutboxPurposeV1,
+    AdmissionAttemptId, AdmissionAttemptRoleStateV1, AdmissionAttemptV1, AdmissionOutboxPurposeV1,
     AdmissionProfileMetadataV1, AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
-    AdmissionTerminalResultV1, CompletionHelperAdmissionStageV1, CurrentLocalJoinProjectionV1,
-    JoinerAdmissionStageV1, LocalJoinStartMutationV1, SponsorAdmissionStageV1,
-    TerminalAdmissionAttemptV1, TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
+    AdmissionTerminalResultV1, CompletionHelperAdmissionStageV1, JoinerAdmissionStageV1,
+    SponsorAdmissionStageV1, TerminalAdmissionAttemptV1, TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
 };
 
 use crate::db::ports::DbExecutor;
@@ -87,6 +89,24 @@ fn executor_error(error: anyhow::Error) -> AdmissionAttemptRepositoryError {
         .downcast_ref::<AdmissionAttemptRepositoryError>()
         .cloned()
         .unwrap_or_else(|| repository_error(error))
+}
+
+fn membership_history_repository_error(
+    error: AdmissionAttemptRepositoryError,
+) -> MembershipHistoryRepositoryError {
+    match error {
+        AdmissionAttemptRepositoryError::Locked => MembershipHistoryRepositoryError::Locked,
+        AdmissionAttemptRepositoryError::Corrupt => MembershipHistoryRepositoryError::Corrupt,
+        AdmissionAttemptRepositoryError::VersionConflict => {
+            MembershipHistoryRepositoryError::Conflict
+        }
+        AdmissionAttemptRepositoryError::AlreadyExists
+        | AdmissionAttemptRepositoryError::NotFound
+        | AdmissionAttemptRepositoryError::PreviousJoinCannotBeSuperseded
+        | AdmissionAttemptRepositoryError::Repository(_) => {
+            MembershipHistoryRepositoryError::Unavailable
+        }
+    }
 }
 
 fn decode_space_transition(
@@ -1154,55 +1174,6 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
             .map_err(executor_error)
     }
 
-    async fn compare_and_replace_membership_history_v2(
-        &self,
-        expected_membership_history_v2: Option<&[u8]>,
-        membership_history_v2: &[u8],
-    ) -> Result<AdmissionProfileMetadataV1, AdmissionAttemptRepositoryError> {
-        if membership_history_v2.is_empty() {
-            return Err(AdmissionAttemptRepositoryError::Corrupt);
-        }
-        let expected_membership_history_v2 = expected_membership_history_v2.map(ToOwned::to_owned);
-        let membership_history_v2 = membership_history_v2.to_vec();
-        self.executor
-            .run(|conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    let mut state = self
-                        .load_state_on(conn)
-                        .map_err(|error| anyhow::anyhow!(error))?;
-                    if state.membership_history_v2.as_deref()
-                        != expected_membership_history_v2.as_deref()
-                    {
-                        return Err(anyhow::anyhow!(
-                            AdmissionAttemptRepositoryError::VersionConflict
-                        ));
-                    }
-                    state.membership_history_v2 = Some(membership_history_v2);
-                    state.metadata.device_trust_revision = state
-                        .metadata
-                        .device_trust_revision
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
-                    self.save_state_on(conn, &state)
-                        .map_err(|error| anyhow::anyhow!(error))?;
-                    Ok(state.metadata)
-                })
-            })
-            .map_err(executor_error)
-    }
-
-    async fn load_membership_history_v2(
-        &self,
-    ) -> Result<Option<Vec<u8>>, AdmissionAttemptRepositoryError> {
-        self.executor
-            .run(|conn| {
-                self.load_state_on(conn)
-                    .map(|state| state.membership_history_v2)
-                    .map_err(|error| anyhow::anyhow!(error))
-            })
-            .map_err(executor_error)
-    }
-
     async fn scan_recoverable(
         &self,
     ) -> Result<Vec<AdmissionAttemptV1>, AdmissionAttemptRepositoryError> {
@@ -1431,6 +1402,62 @@ impl<E: DbExecutor + Send + Sync> AdmissionAttemptRepositoryPort
     }
 }
 
+#[async_trait]
+impl<E: DbExecutor + Send + Sync> MembershipHistoryRepositoryPort
+    for DieselAdmissionAttemptStore<E>
+{
+    async fn load_membership_history(
+        &self,
+    ) -> Result<Option<Vec<u8>>, MembershipHistoryRepositoryError> {
+        self.executor
+            .run(|conn| {
+                self.load_state_on(conn)
+                    .map(|state| state.membership_history_v2)
+                    .map_err(|error| anyhow::anyhow!(error))
+            })
+            .map_err(executor_error)
+            .map_err(membership_history_repository_error)
+    }
+
+    async fn compare_and_replace_membership_history(
+        &self,
+        expected_membership_history_v2: Option<&[u8]>,
+        membership_history_v2: &[u8],
+    ) -> Result<u64, MembershipHistoryRepositoryError> {
+        if membership_history_v2.is_empty() {
+            return Err(MembershipHistoryRepositoryError::Corrupt);
+        }
+        let expected_membership_history_v2 = expected_membership_history_v2.map(ToOwned::to_owned);
+        let membership_history_v2 = membership_history_v2.to_vec();
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_on(conn)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    if state.membership_history_v2.as_deref()
+                        != expected_membership_history_v2.as_deref()
+                    {
+                        return Err(anyhow::anyhow!(
+                            AdmissionAttemptRepositoryError::VersionConflict
+                        ));
+                    }
+                    state.membership_history_v2 = Some(membership_history_v2);
+                    state.metadata.device_trust_revision = state
+                        .metadata
+                        .device_trust_revision
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!(AdmissionAttemptRepositoryError::Corrupt))?;
+                    self.save_state_on(conn, &state)
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    Ok(state.metadata.device_trust_revision)
+                })
+            })
+            .map_err(executor_error)
+            .map_err(membership_history_repository_error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1439,13 +1466,17 @@ mod tests {
 
     use diesel::RunQueryDsl;
     use tempfile::tempdir;
+    use uc_application::deps::LocalJoinStartMutationV1;
+    use uc_application::deps::{
+        AdmissionAttemptRepositoryPort, MembershipHistoryRepositoryError,
+        MembershipHistoryRepositoryPort,
+    };
     use uc_core::membership::{
-        AdmissionAttemptId, AdmissionAttemptRepositoryPort, AdmissionAttemptRoleStateV1,
-        AdmissionAttemptV1, AdmissionInboxRecordV1, AdmissionOutboxMessageV1,
-        AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1, AdmissionSpaceTransitionResultV2,
-        AdmissionSpaceTransitionV2, AdmissionTerminalResultV1, CrossSpaceTransitionPhaseV2,
-        CrossSpaceTransitionResultV2, CrossSpaceTransitionV2, JoinerAdmissionStageV1,
-        LocalJoinStartMutationV1, MemberInstanceId, SponsorAdmissionStageV1,
+        AdmissionAttemptId, AdmissionAttemptRoleStateV1, AdmissionAttemptV1,
+        AdmissionInboxRecordV1, AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1,
+        AdmissionRejectionReasonV1, AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+        AdmissionTerminalResultV1, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
+        CrossSpaceTransitionV2, JoinerAdmissionStageV1, MemberInstanceId, SponsorAdmissionStageV1,
         SponsorAdmissionStateV1, CROSS_SPACE_TRANSITION_FORMAT_V2,
     };
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
@@ -1641,7 +1672,7 @@ mod tests {
         assert!(reset.consumed_invitation_attempts.is_empty());
         assert!(reset.completion_recovery_challenges.is_empty());
         assert!(store.load(attempt_id).await.unwrap().is_none());
-        assert!(store.load_membership_history_v2().await.unwrap().is_none());
+        assert!(store.load_membership_history().await.unwrap().is_none());
         assert!(store.scan_recoverable().await.unwrap().is_empty());
         assert!(store.project_current_local_join().await.unwrap().is_none());
     }
@@ -1779,7 +1810,7 @@ mod tests {
                     replacement: replacement.clone(),
                 })
                 .await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::VersionConflict)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::VersionConflict)
         );
         assert_eq!(store.profile_metadata().await.unwrap(), before);
         assert_eq!(
@@ -1864,7 +1895,7 @@ mod tests {
                         replacement,
                     })
                     .await,
-                Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+                Err(uc_application::deps::AdmissionAttemptRepositoryError::Locked)
             );
             assert_eq!(store.profile_metadata().await.unwrap(), before);
             assert_eq!(store.load(previous_id).await.unwrap(), Some(previous));
@@ -1919,7 +1950,7 @@ mod tests {
                     replacement,
                 })
                 .await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::Corrupt)
         );
         assert_eq!(
             store.load(previous_id).await.unwrap(),
@@ -1951,7 +1982,7 @@ mod tests {
                     replacement,
                 })
                 .await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::Corrupt)
         );
         assert_eq!(
             store.load(previous_id).await.unwrap(),
@@ -1992,7 +2023,7 @@ mod tests {
                     replacement,
                 })
                 .await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::Corrupt)
         );
         assert_eq!(
             store.load(previous_id).await.unwrap(),
@@ -2028,7 +2059,7 @@ mod tests {
             store
                 .create(&replacement, Some(invitation_digest), None)
                 .await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::AlreadyExists)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::AlreadyExists)
         );
         assert_eq!(store.load(replacement_id).await.unwrap(), None);
         assert_eq!(
@@ -2100,7 +2131,7 @@ mod tests {
 
         assert_eq!(
             store.profile_metadata().await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::Corrupt)
         );
     }
 
@@ -2136,7 +2167,7 @@ mod tests {
 
         assert_eq!(
             store.profile_metadata().await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::Corrupt)
         );
 
         let mut state = super::AdmissionRepositoryStateV1::fresh(generation);
@@ -2158,7 +2189,7 @@ mod tests {
 
         assert_eq!(
             store.profile_metadata().await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::Corrupt)
         );
     }
 
@@ -2177,7 +2208,7 @@ mod tests {
         let initial = store.profile_metadata().await.unwrap();
         assert_eq!(
             store.advance_projection_floor(1).await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::VersionConflict)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::VersionConflict)
         );
         assert_eq!(store.profile_metadata().await.unwrap(), initial);
 
@@ -2200,9 +2231,9 @@ mod tests {
 
         assert_eq!(
             store
-                .compare_and_replace_membership_history_v2(None, b"target-space-history")
+                .compare_and_replace_membership_history(None, b"target-space-history")
                 .await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+            Err(MembershipHistoryRepositoryError::Corrupt)
         );
         assert_eq!(
             store
@@ -2212,7 +2243,7 @@ mod tests {
                 .device_trust_revision,
             u64::MAX
         );
-        assert_eq!(store.load_membership_history_v2().await.unwrap(), None);
+        assert_eq!(store.load_membership_history().await.unwrap(), None);
 
         let mut state = super::AdmissionRepositoryStateV1::fresh(generation);
         state.metadata.next_local_join_ordinal = u64::MAX;
@@ -2240,7 +2271,7 @@ mod tests {
         attempt.local_join_ordinal = Some(u64::MAX);
         assert_eq!(
             store.create(&attempt, None, None).await,
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Corrupt)
+            Err(uc_application::deps::AdmissionAttemptRepositoryError::Corrupt)
         );
         assert_eq!(store.load(attempt_id).await.unwrap(), None);
         let metadata = store.profile_metadata().await.unwrap();
@@ -2608,7 +2639,7 @@ mod tests {
         );
         assert_eq!(reopened.load(attempt_id).await.unwrap(), Some(initiated));
         assert_eq!(
-            reopened.load_membership_history_v2().await.unwrap(),
+            reopened.load_membership_history().await.unwrap(),
             Some(b"base-membership-history".to_vec())
         );
     }

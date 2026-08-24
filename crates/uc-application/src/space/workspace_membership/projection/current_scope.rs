@@ -8,26 +8,31 @@ impl WorkspaceMembership {
         Option<uc_core::membership::CurrentWorkspacePeerSnapshot>,
         uc_core::membership::CurrentWorkspacePeerScopeError,
     > {
+        use crate::deps::AdmissionAttemptRepositoryError;
         use uc_core::membership::{
-            AdmissionAttemptRepositoryError, AdmissionTerminalResultV1,
-            CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
-            CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot,
-            MembershipHistoryV2Error, VersionedMembershipHistory,
+            AdmissionTerminalResultV1, CurrentWorkspaceLocalMembership,
+            CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopeSource,
+            CurrentWorkspacePeerSnapshot, MembershipHistoryV2Error, VersionedMembershipHistory,
         };
 
-        let map_repository_error = |error| match error {
+        let map_history_repository_error = |error| match error {
+            MembershipHistoryRepositoryError::Locked => CurrentWorkspacePeerScopeError::Locked,
+            MembershipHistoryRepositoryError::Corrupt => CurrentWorkspacePeerScopeError::Corrupt,
+            _ => CurrentWorkspacePeerScopeError::Unavailable,
+        };
+        let map_admission_repository_error = |error| match error {
             AdmissionAttemptRepositoryError::Locked => CurrentWorkspacePeerScopeError::Locked,
             AdmissionAttemptRepositoryError::Corrupt => CurrentWorkspacePeerScopeError::Corrupt,
             _ => CurrentWorkspacePeerScopeError::Unavailable,
         };
         let Some(encoded_history) = self
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
-            .map_err(map_repository_error)?
+            .map_err(map_history_repository_error)?
         else {
-            return Ok(None);
+            return Err(CurrentWorkspacePeerScopeError::Unavailable);
         };
         let history = VersionedMembershipHistory::decode_persisted_v2(
             &encoded_history,
@@ -44,7 +49,7 @@ impl WorkspaceMembership {
             .admission_attempts
             .project_current_local_join()
             .await
-            .map_err(map_repository_error)?;
+            .map_err(map_admission_repository_error)?;
         if history.lineage_id() != state.space_lineage {
             if let Some(join) = &local_join {
                 if join.terminal_result.is_none() {
@@ -53,7 +58,7 @@ impl WorkspaceMembership {
                         .admission_attempts
                         .load(join.attempt_id)
                         .await
-                        .map_err(map_repository_error)?
+                        .map_err(map_admission_repository_error)?
                         .ok_or(CurrentWorkspacePeerScopeError::Corrupt)?;
                     let transition = attempt
                         .space_transition
@@ -78,7 +83,7 @@ impl WorkspaceMembership {
                         .admission_attempts
                         .load_terminal(join.attempt_id)
                         .await
-                        .map_err(map_repository_error)?
+                        .map_err(map_admission_repository_error)?
                         .ok_or(CurrentWorkspacePeerScopeError::Corrupt)?;
                     if terminal
                         .candidate_event_id
@@ -244,8 +249,8 @@ impl WorkspaceMembership {
         }
         match self
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
         {
             Ok(Some(_)) => {

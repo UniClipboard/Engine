@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
 use uc_application::deps::{
-    AppDeps, ClearProfileStatePort, ProfileLifecycleRepositoryPort,
-    SpaceMembershipStateRepositoryPort, WipeProfileKeysPort,
+    AppDeps, ClearProfileStatePort, MembershipHistoryRepositoryPort,
+    ProfileLifecycleRepositoryPort, SpaceMembershipStateRepositoryPort, WipeProfileKeysPort,
 };
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::RepresentationId;
@@ -92,9 +92,10 @@ pub struct SyncEngineDeps {
     /// Encrypted persistence for the unified workspace convergence state.
     pub workspace_convergence_repository: Arc<dyn SpaceMembershipStateRepositoryPort>,
     /// Profile-scoped encrypted persistence for durable admission attempts.
-    pub admission_attempt_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
-    pub admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort>,
-    pub device_management_reset_data: Arc<dyn uc_core::membership::DeviceManagementResetDataPort>,
+    pub admission_attempt_repository: Arc<dyn uc_application::deps::AdmissionAttemptRepositoryPort>,
+    pub membership_history_repository: Arc<dyn MembershipHistoryRepositoryPort>,
+    pub admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort>,
+    pub device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort>,
     pub legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort>,
     /// plaintext-hash → ciphertext-digest dedupe cache (Slice 3 Phase 1).
     pub blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,

@@ -14,19 +14,25 @@ mod deps;
 mod errors;
 mod facade;
 
+pub use crate::space::admission::complete_pending_space_transition::CompletePendingSpaceTransitionError;
+pub use crate::space::admission::invitation::cancel::CancelInvitationError;
+pub use crate::space::admission::invitation::query_addresses::{
+    PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
+};
+pub use crate::space::admission::query_pending_space_transition::QueryPendingSpaceTransitionError;
 pub use crate::space::initialize_space::{InitializeSpaceError, InitializeSpaceResult};
+pub use crate::space::query_space_setup_state::{
+    CurrentInvitation, QuerySetupStateError, SetupStateView,
+};
 pub use crate::space::reset_space::ResetSpaceError;
 pub use crate::space::unlock_space::UnlockSpaceError;
 pub use commands::{
-    CurrentInvitation, InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationResult,
-    PairingInvitationAddressCandidate, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
-    SetupStateView, UnlockSpaceInput, UnlockSpaceResult,
+    InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationResult,
+    RedeemPairingInvitationInput, RedeemPairingInvitationResult, UnlockSpaceInput,
+    UnlockSpaceResult,
 };
 pub use deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps};
-pub use errors::{
-    CancelInvitationError, IssuePairingInvitationError, QuerySetupStateError,
-    RedeemPairingInvitationError,
-};
+pub use errors::{IssuePairingInvitationError, RedeemPairingInvitationError};
 pub use facade::SpaceFacade;
 pub use uc_observability_contract::analytics::PairingFailureReason;
 

@@ -272,12 +272,6 @@ impl SyncEngineAssembly {
         self.convergence_assembly.removal_gate()
     }
 
-    pub(crate) fn space_transition_recovery(
-        &self,
-    ) -> Arc<dyn uc_application::facade::SpaceTransitionRecoveryPort> {
-        self.convergence_assembly.space_transition_recovery()
-    }
-
     pub(crate) fn workspace_convergence(&self) -> Arc<uc_application::facade::WorkspaceMembership> {
         self.convergence_assembly.workspace_membership()
     }
@@ -683,6 +677,7 @@ pub async fn build_sync_engine_assembly(
         workspace: WorkspaceMembershipDeps {
             repository: Arc::clone(&space_setup.workspace_convergence_repository),
             admission_attempts: Arc::clone(&space_setup.admission_attempt_repository),
+            membership_history_repo: Arc::clone(&space_setup.membership_history_repository),
             historical_membership_signatures: Arc::new(
                 uc_infra::security::OpenMlsHistoricalSignatureVerifier,
             ),
@@ -941,6 +936,7 @@ pub async fn build_sync_engine_assembly(
         },
         transition: SpaceTransitionDeps {
             admission_attempts: Arc::clone(&space_setup.admission_attempt_repository),
+            admission_space_transition: Arc::clone(&space_setup.admission_space_transition),
             device_management_reset_data: Arc::clone(&space_setup.device_management_reset_data),
             relationship_reset: Arc::clone(&space_setup.relationship_reset),
             space_security_reset: Arc::clone(&space_setup.space_security_reset),

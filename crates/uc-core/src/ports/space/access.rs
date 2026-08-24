@@ -18,11 +18,10 @@ use async_trait::async_trait;
 
 use crate::crypto::domain::{ActiveSpace, Passphrase};
 use crate::ids::{DeviceId, SessionId, SpaceId};
-use crate::membership::MembershipCredential;
 use crate::pairing::InvitationCode;
 use crate::space_access::{
-    AdmissionOffer, GroupAdmission, JoinOffer, PreparedAdmissionOffer,
-    PreparedAdmissionTargetAccess, PreparedGroupJoin, ProofDerivedKey,
+    AdmissionOffer, JoinOffer, PreparedAdmissionOffer, PreparedAdmissionTargetAccess,
+    ProofDerivedKey,
 };
 
 /// 业务语义级的空间访问失败。
@@ -262,56 +261,4 @@ pub trait DeriveAdmissionProofKeyPort: Send + Sync {
         invitation: &InvitationCode,
         pairing_session_id: &SessionId,
     ) -> Result<ProofDerivedKey, SpaceAccessError>;
-}
-
-/// Owns the opaque MLS member-add flow and the encrypted content-key catalog.
-/// Protocol state and key material never cross this boundary in plaintext.
-#[async_trait]
-pub trait GroupAdmissionPort: Send + Sync {
-    async fn prepare_group_join(
-        &self,
-        device_id: &DeviceId,
-    ) -> Result<PreparedGroupJoin, SpaceAccessError>;
-
-    /// Read the public membership credential bound to a prepared join. The
-    /// private signer remains inside the opaque prepared state.
-    async fn prepared_join_membership_credential(
-        &self,
-        _pending: &PreparedGroupJoin,
-    ) -> Result<MembershipCredential, SpaceAccessError> {
-        Err(SpaceAccessError::Internal(
-            "prepared join credential is unavailable".to_owned(),
-        ))
-    }
-
-    /// Sign pre-admission facts with the exact member signer stored in the
-    /// prepared join. This does not activate a group or install a Space.
-    async fn sign_prepared_join_payload(
-        &self,
-        _pending: &PreparedGroupJoin,
-        _payload: &[u8],
-    ) -> Result<Vec<u8>, SpaceAccessError> {
-        Err(SpaceAccessError::Internal(
-            "prepared join signing is unavailable".to_owned(),
-        ))
-    }
-
-    async fn admit_group_member(
-        &self,
-        space_id: &SpaceId,
-        sponsor_device_id: &DeviceId,
-        joiner_device_id: &DeviceId,
-        existing_member_ids: &[DeviceId],
-        key_package: &[u8],
-    ) -> Result<GroupAdmission, SpaceAccessError>;
-
-    async fn install_group_join(
-        &self,
-        space_id: &SpaceId,
-        passphrase: &Passphrase,
-        pending: PreparedGroupJoin,
-        welcome: &[u8],
-        encrypted_key_catalog: &[u8],
-        group_epoch: u64,
-    ) -> Result<(), SpaceAccessError>;
 }

@@ -29,6 +29,9 @@ use uc_core::ports::{ClockPort, DeviceIdentityPort};
 use uc_core::ports::{PresenceError, PresenceEvent, PresencePort, ReachabilityState};
 
 use super::*;
+use crate::space::membership_history::{
+    MembershipHistoryRepositoryError, MembershipHistoryRepositoryPort,
+};
 use crate::space::membership_state::{
     SpaceMembershipStateRepositoryError, SpaceMembershipStateRepositoryPort,
 };
@@ -70,7 +73,7 @@ struct LoopbackHistoryExchange {
 }
 
 #[async_trait]
-impl uc_core::membership::AdmissionCompletionRecoveryPort for UnusedAdmissionCompletionRecovery {
+impl crate::deps::AdmissionCompletionRecoveryPort for UnusedAdmissionCompletionRecovery {
     async fn request_completion_recovery_challenge(
         &self,
         _helper: &DeviceId,
@@ -79,9 +82,9 @@ impl uc_core::membership::AdmissionCompletionRecoveryPort for UnusedAdmissionCom
         _joiner_last_message_id: [u8; 32],
     ) -> Result<
         uc_core::membership::AdmissionCompletionRecoveryChallengeV1,
-        uc_core::membership::AdmissionCompletionRecoveryTransportError,
+        crate::deps::AdmissionCompletionRecoveryTransportError,
     > {
-        Err(uc_core::membership::AdmissionCompletionRecoveryTransportError::Offline)
+        Err(crate::deps::AdmissionCompletionRecoveryTransportError::Offline)
     }
 
     async fn submit_completion_recovery_response(
@@ -92,9 +95,9 @@ impl uc_core::membership::AdmissionCompletionRecoveryPort for UnusedAdmissionCom
         _response: uc_core::membership::AdmissionCompletionRecoveryResponseV1,
     ) -> Result<
         uc_core::pairing::DurableAdmissionFrame,
-        uc_core::membership::AdmissionCompletionRecoveryTransportError,
+        crate::deps::AdmissionCompletionRecoveryTransportError,
     > {
-        Err(uc_core::membership::AdmissionCompletionRecoveryTransportError::Offline)
+        Err(crate::deps::AdmissionCompletionRecoveryTransportError::Offline)
     }
 }
 
@@ -127,60 +130,56 @@ impl uc_core::ports::setup::LegacyMigrationRecoveryPort for RecordingLegacyMigra
 }
 
 #[async_trait]
-impl uc_core::membership::AdmissionOutboxDeliveryPort for DeferredAdmissionDelivery {
+impl crate::deps::AdmissionOutboxDeliveryPort for DeferredAdmissionDelivery {
     async fn deliver(
         &self,
         _attempt_id: uc_core::membership::AdmissionAttemptId,
         _message: &uc_core::membership::AdmissionOutboxMessageV1,
-        _route: Option<&uc_core::membership::AdmissionOutboxDeliveryRouteV1>,
+        _route: Option<&crate::deps::AdmissionOutboxDeliveryRouteV1>,
     ) -> Result<
-        uc_core::membership::AdmissionOutboxDeliveryResultV1,
-        uc_core::membership::AdmissionOutboxDeliveryError,
+        crate::deps::AdmissionOutboxDeliveryResultV1,
+        crate::deps::AdmissionOutboxDeliveryError,
     > {
-        Ok(uc_core::membership::AdmissionOutboxDeliveryResultV1::Deferred)
+        Ok(crate::deps::AdmissionOutboxDeliveryResultV1::Deferred)
     }
 }
 
 #[async_trait]
-impl uc_core::membership::AdmissionOutboxDeliveryPort for ConfirmingAdmissionDelivery {
+impl crate::deps::AdmissionOutboxDeliveryPort for ConfirmingAdmissionDelivery {
     async fn deliver(
         &self,
         attempt_id: uc_core::membership::AdmissionAttemptId,
         message: &uc_core::membership::AdmissionOutboxMessageV1,
-        _route: Option<&uc_core::membership::AdmissionOutboxDeliveryRouteV1>,
+        _route: Option<&crate::deps::AdmissionOutboxDeliveryRouteV1>,
     ) -> Result<
-        uc_core::membership::AdmissionOutboxDeliveryResultV1,
-        uc_core::membership::AdmissionOutboxDeliveryError,
+        crate::deps::AdmissionOutboxDeliveryResultV1,
+        crate::deps::AdmissionOutboxDeliveryError,
     > {
         if message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::InvitationConsume {
             return Ok(
-                uc_core::membership::AdmissionOutboxDeliveryResultV1::InvitationConsume(
-                    uc_core::membership::InvitationConsumeDeliveryResultV1::Consumed,
+                crate::deps::AdmissionOutboxDeliveryResultV1::InvitationConsume(
+                    crate::deps::InvitationConsumeDeliveryResultV1::Consumed,
                 ),
             );
         }
         if message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested {
-            return Ok(
-                uc_core::membership::AdmissionOutboxDeliveryResultV1::Rejected(
-                    super::admission::durable_admission_message(
-                        attempt_id,
-                        uc_core::membership::AdmissionOutboxPurposeV1::Rejected,
-                        &message.recipient,
-                        Some(message.message_id),
-                        &postcard::to_stdvec(&(
-                            uc_core::membership::AdmissionRejectionReasonV1::Cancelled,
-                            b"cancelled".to_vec(),
-                        ))
-                        .unwrap(),
-                    ),
+            return Ok(crate::deps::AdmissionOutboxDeliveryResultV1::Rejected(
+                super::admission::durable_admission_message(
+                    attempt_id,
+                    uc_core::membership::AdmissionOutboxPurposeV1::Rejected,
+                    &message.recipient,
+                    Some(message.message_id),
+                    &postcard::to_stdvec(&(
+                        uc_core::membership::AdmissionRejectionReasonV1::Cancelled,
+                        b"cancelled".to_vec(),
+                    ))
+                    .unwrap(),
                 ),
-            );
+            ));
         }
-        Ok(
-            uc_core::membership::AdmissionOutboxDeliveryResultV1::Persisted(
-                super::admission::admission_acknowledgment(message),
-            ),
-        )
+        Ok(crate::deps::AdmissionOutboxDeliveryResultV1::Persisted(
+            super::admission::admission_acknowledgment(message),
+        ))
     }
 }
 
@@ -322,19 +321,19 @@ struct LockedAdmissionRepository {
 }
 
 #[async_trait]
-impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepository {
+impl crate::deps::AdmissionAttemptRepositoryPort for LockedAdmissionRepository {
     async fn reset_admission_profile(
         &self,
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         if self.allow_empty_history_reads {
             Ok(uc_core::membership::AdmissionProfileMetadataV1::fresh(
                 [0; 16],
             ))
         } else {
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+            Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
         }
     }
 
@@ -345,9 +344,9 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo
         _initial_membership_history_v2: Option<&[u8]>,
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
     }
 
     async fn load(
@@ -355,9 +354,9 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo
         _attempt_id: uc_core::membership::AdmissionAttemptId,
     ) -> Result<
         Option<uc_core::membership::AdmissionAttemptV1>,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
     }
 
     async fn compare_and_advance(
@@ -367,9 +366,9 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo
         _next: &uc_core::membership::AdmissionAttemptV1,
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
     }
 
     async fn compare_and_advance_with_membership_history_v2(
@@ -381,42 +380,21 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo
         _membership_history_v2: &[u8],
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
-    }
-
-    async fn compare_and_replace_membership_history_v2(
-        &self,
-        _expected_membership_history_v2: Option<&[u8]>,
-        _membership_history_v2: &[u8],
-    ) -> Result<
-        uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
-    > {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
-    }
-
-    async fn load_membership_history_v2(
-        &self,
-    ) -> Result<Option<Vec<u8>>, uc_core::membership::AdmissionAttemptRepositoryError> {
-        if self.allow_empty_history_reads {
-            Ok(None)
-        } else {
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
-        }
+        Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
     }
 
     async fn scan_recoverable(
         &self,
     ) -> Result<
         Vec<uc_core::membership::AdmissionAttemptV1>,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         if self.allow_empty_history_reads {
             Ok(Vec::new())
         } else {
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+            Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
         }
     }
 
@@ -426,9 +404,9 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo
         _expected_record_version: u64,
     ) -> Result<
         uc_core::membership::TerminalAdmissionAttemptV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
     }
 
     async fn load_terminal(
@@ -436,36 +414,36 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo
         _attempt_id: uc_core::membership::AdmissionAttemptId,
     ) -> Result<
         Option<uc_core::membership::TerminalAdmissionAttemptV1>,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
     }
 
     async fn profile_metadata(
         &self,
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         if self.allow_empty_history_reads {
             Ok(uc_core::membership::AdmissionProfileMetadataV1::fresh(
                 [0; 16],
             ))
         } else {
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+            Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
         }
     }
 
     async fn project_current_local_join(
         &self,
     ) -> Result<
-        Option<uc_core::membership::CurrentLocalJoinProjectionV1>,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        Option<crate::deps::CurrentLocalJoinProjectionV1>,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         if self.allow_empty_history_reads {
             Ok(None)
         } else {
-            Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+            Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
         }
     }
 
@@ -474,9 +452,30 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for LockedAdmissionRepo
         _expected_device_trust_revision: u64,
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
-        Err(uc_core::membership::AdmissionAttemptRepositoryError::Locked)
+        Err(crate::deps::AdmissionAttemptRepositoryError::Locked)
+    }
+}
+
+#[async_trait]
+impl MembershipHistoryRepositoryPort for LockedAdmissionRepository {
+    async fn load_membership_history(
+        &self,
+    ) -> Result<Option<Vec<u8>>, MembershipHistoryRepositoryError> {
+        if self.allow_empty_history_reads {
+            Ok(None)
+        } else {
+            Err(MembershipHistoryRepositoryError::Locked)
+        }
+    }
+
+    async fn compare_and_replace_membership_history(
+        &self,
+        _expected_membership_history_v2: Option<&[u8]>,
+        _membership_history_v2: &[u8],
+    ) -> Result<u64, MembershipHistoryRepositoryError> {
+        Err(MembershipHistoryRepositoryError::Locked)
     }
 }
 
@@ -502,10 +501,20 @@ impl uc_core::ports::SecureStoragePort for TestAdmissionSecureStorage {
     }
 }
 
-fn durable_admission_repository(
+pub(crate) trait TestAdmissionRepository:
+    crate::deps::AdmissionAttemptRepositoryPort + MembershipHistoryRepositoryPort
+{
+}
+
+impl<T> TestAdmissionRepository for T where
+    T: crate::deps::AdmissionAttemptRepositoryPort + MembershipHistoryRepositoryPort + ?Sized
+{
+}
+
+pub(crate) fn durable_admission_repository(
     directory: &tempfile::TempDir,
     generation: [u8; 16],
-) -> Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort> {
+) -> Arc<dyn TestAdmissionRepository> {
     let path = directory.path().join("admission.sqlite3");
     let pool = uc_infra::db::pool::init_db_pool(path.to_str().unwrap()).unwrap();
     Arc::new(
@@ -520,17 +529,21 @@ fn durable_admission_repository(
 }
 
 fn durable_admission_owner(
-    repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    repository: Arc<dyn TestAdmissionRepository>,
 ) -> crate::space::admission::durable::DurableAdmissionTransaction {
     durable_admission_owner_with_space_transition(repository, Arc::new(NoAdmissionSpaceTransition))
 }
 
 fn durable_admission_owner_with_space_transition(
-    repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
-    space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort>,
+    repository: Arc<dyn TestAdmissionRepository>,
+    space_transition: Arc<dyn crate::deps::AdmissionSpaceTransitionPort>,
 ) -> crate::space::admission::durable::DurableAdmissionTransaction {
+    let admission_attempts: Arc<dyn crate::deps::AdmissionAttemptRepositoryPort> =
+        Arc::clone(&repository);
+    let membership_history: Arc<dyn MembershipHistoryRepositoryPort> = repository;
     crate::space::admission::durable::DurableAdmissionTransaction::new(
-        repository,
+        admission_attempts,
+        membership_history,
         Arc::new(DeterministicHistoricalVerifier),
         Arc::new(EchoAdmissionSecurityTransition::default()),
         space_transition,
@@ -538,13 +551,13 @@ fn durable_admission_owner_with_space_transition(
 }
 
 struct HistoryRaceAdmissionRepository {
-    inner: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    inner: Arc<dyn TestAdmissionRepository>,
     inject_once: AtomicBool,
     replacement_history: Vec<u8>,
 }
 
 #[async_trait]
-impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissionRepository {
+impl crate::deps::AdmissionAttemptRepositoryPort for HistoryRaceAdmissionRepository {
     async fn create(
         &self,
         attempt: &uc_core::membership::AdmissionAttemptV1,
@@ -552,7 +565,7 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
         initial_membership_history_v2: Option<&[u8]>,
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         self.inner
             .create(
@@ -568,7 +581,7 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
         attempt_id: uc_core::membership::AdmissionAttemptId,
     ) -> Result<
         Option<uc_core::membership::AdmissionAttemptV1>,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         self.inner.load(attempt_id).await
     }
@@ -580,7 +593,7 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
         next: &uc_core::membership::AdmissionAttemptV1,
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         self.inner
             .compare_and_advance(attempt_id, expected_record_version, next)
@@ -596,17 +609,36 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
         membership_history_v2: &[u8],
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         if self.inject_once.swap(false, Ordering::SeqCst) {
             let mut concurrent = self
                 .inner
                 .load(attempt_id)
                 .await?
-                .ok_or(uc_core::membership::AdmissionAttemptRepositoryError::NotFound)?;
+                .ok_or(crate::deps::AdmissionAttemptRepositoryError::NotFound)?;
             let concurrent_version = concurrent.record_version;
             concurrent.record_version += 1;
-            let current_history = self.inner.load_membership_history_v2().await?;
+            let current_history = self
+                .inner
+                .load_membership_history()
+                .await
+                .map_err(|error| match error {
+                    MembershipHistoryRepositoryError::Locked => {
+                        crate::deps::AdmissionAttemptRepositoryError::Locked
+                    }
+                    MembershipHistoryRepositoryError::Corrupt => {
+                        crate::deps::AdmissionAttemptRepositoryError::Corrupt
+                    }
+                    MembershipHistoryRepositoryError::Conflict => {
+                        crate::deps::AdmissionAttemptRepositoryError::VersionConflict
+                    }
+                    MembershipHistoryRepositoryError::Unavailable => {
+                        crate::deps::AdmissionAttemptRepositoryError::Repository(
+                            "membership history unavailable".to_owned(),
+                        )
+                    }
+                })?;
             self.inner
                 .compare_and_advance_with_membership_history_v2(
                     attempt_id,
@@ -628,33 +660,11 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
             .await
     }
 
-    async fn compare_and_replace_membership_history_v2(
-        &self,
-        expected_membership_history_v2: Option<&[u8]>,
-        membership_history_v2: &[u8],
-    ) -> Result<
-        uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
-    > {
-        self.inner
-            .compare_and_replace_membership_history_v2(
-                expected_membership_history_v2,
-                membership_history_v2,
-            )
-            .await
-    }
-
-    async fn load_membership_history_v2(
-        &self,
-    ) -> Result<Option<Vec<u8>>, uc_core::membership::AdmissionAttemptRepositoryError> {
-        self.inner.load_membership_history_v2().await
-    }
-
     async fn scan_recoverable(
         &self,
     ) -> Result<
         Vec<uc_core::membership::AdmissionAttemptV1>,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         self.inner.scan_recoverable().await
     }
@@ -665,7 +675,7 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
         expected_record_version: u64,
     ) -> Result<
         uc_core::membership::TerminalAdmissionAttemptV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         self.inner
             .compact_terminal(attempt_id, expected_record_version)
@@ -677,7 +687,7 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
         attempt_id: uc_core::membership::AdmissionAttemptId,
     ) -> Result<
         Option<uc_core::membership::TerminalAdmissionAttemptV1>,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         self.inner.load_terminal(attempt_id).await
     }
@@ -686,7 +696,7 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
         &self,
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         self.inner.profile_metadata().await
     }
@@ -694,8 +704,8 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
     async fn project_current_local_join(
         &self,
     ) -> Result<
-        Option<uc_core::membership::CurrentLocalJoinProjectionV1>,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        Option<crate::deps::CurrentLocalJoinProjectionV1>,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         self.inner.project_current_local_join().await
     }
@@ -705,10 +715,32 @@ impl uc_core::membership::AdmissionAttemptRepositoryPort for HistoryRaceAdmissio
         expected_device_trust_revision: u64,
     ) -> Result<
         uc_core::membership::AdmissionProfileMetadataV1,
-        uc_core::membership::AdmissionAttemptRepositoryError,
+        crate::deps::AdmissionAttemptRepositoryError,
     > {
         self.inner
             .advance_projection_floor(expected_device_trust_revision)
+            .await
+    }
+}
+
+#[async_trait]
+impl MembershipHistoryRepositoryPort for HistoryRaceAdmissionRepository {
+    async fn load_membership_history(
+        &self,
+    ) -> Result<Option<Vec<u8>>, MembershipHistoryRepositoryError> {
+        self.inner.load_membership_history().await
+    }
+
+    async fn compare_and_replace_membership_history(
+        &self,
+        expected_membership_history_v2: Option<&[u8]>,
+        membership_history_v2: &[u8],
+    ) -> Result<u64, MembershipHistoryRepositoryError> {
+        self.inner
+            .compare_and_replace_membership_history(
+                expected_membership_history_v2,
+                membership_history_v2,
+            )
             .await
     }
 }
@@ -794,9 +826,9 @@ impl CurrentMemberSignaturePort for FixedSigner {
 }
 
 #[derive(Clone)]
-struct CredentialBackedSigner {
-    device_id: DeviceId,
-    credential: uc_core::membership::MembershipCredential,
+pub(crate) struct CredentialBackedSigner {
+    pub(crate) device_id: DeviceId,
+    pub(crate) credential: uc_core::membership::MembershipCredential,
 }
 
 #[async_trait]
@@ -908,65 +940,59 @@ impl uc_core::membership::GroupBootstrapPort for UnusedGroupBootstrap {
 struct UnavailableSponsorAdmissionSecurity;
 
 #[async_trait]
-impl uc_core::membership::PrepareSponsorAdmissionSecurityPort
-    for UnavailableSponsorAdmissionSecurity
-{
+impl crate::deps::PrepareSponsorAdmissionSecurityPort for UnavailableSponsorAdmissionSecurity {
     async fn prepare_sponsor_admission_security(
         &self,
-        _request: uc_core::membership::SponsorAdmissionSecurityRequest,
+        _request: crate::deps::SponsorAdmissionSecurityRequest,
     ) -> Result<
-        uc_core::membership::SponsorPreparedAdmissionSecurity,
-        uc_core::membership::AdmissionSecurityTransitionError,
+        crate::deps::SponsorPreparedAdmissionSecurity,
+        crate::deps::AdmissionSecurityTransitionError,
     > {
-        Err(uc_core::membership::AdmissionSecurityTransitionError::InvalidState)
+        Err(crate::deps::AdmissionSecurityTransitionError::InvalidState)
     }
 }
 
 #[async_trait]
-impl uc_core::membership::ActivateSponsorAdmissionSecurityPort
-    for UnavailableSponsorAdmissionSecurity
-{
+impl crate::deps::ActivateSponsorAdmissionSecurityPort for UnavailableSponsorAdmissionSecurity {
     async fn activate_sponsor_admission_security(
         &self,
-        _request: uc_core::membership::ActivateSponsorAdmissionSecurityRequest,
-    ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError> {
-        Err(uc_core::membership::AdmissionSecurityTransitionError::InvalidState)
+        _request: crate::deps::ActivateSponsorAdmissionSecurityRequest,
+    ) -> Result<(), crate::deps::AdmissionSecurityTransitionError> {
+        Err(crate::deps::AdmissionSecurityTransitionError::InvalidState)
     }
 }
 
 #[async_trait]
-impl uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort
+impl crate::deps::ActivateCompletionHelperAdmissionSecurityPort
     for UnavailableSponsorAdmissionSecurity
 {
     async fn activate_completion_helper_admission_security(
         &self,
-        _request: uc_core::membership::ActivateCompletionHelperAdmissionSecurityRequest,
-    ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError> {
-        Err(uc_core::membership::AdmissionSecurityTransitionError::InvalidState)
+        _request: crate::deps::ActivateCompletionHelperAdmissionSecurityRequest,
+    ) -> Result<(), crate::deps::AdmissionSecurityTransitionError> {
+        Err(crate::deps::AdmissionSecurityTransitionError::InvalidState)
     }
 }
 
 #[async_trait]
-impl uc_core::membership::ActivateSponsorAdmissionSecurityPort
-    for RecordingSponsorAdmissionSecurity
-{
+impl crate::deps::ActivateSponsorAdmissionSecurityPort for RecordingSponsorAdmissionSecurity {
     async fn activate_sponsor_admission_security(
         &self,
-        request: uc_core::membership::ActivateSponsorAdmissionSecurityRequest,
-    ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError> {
+        request: crate::deps::ActivateSponsorAdmissionSecurityRequest,
+    ) -> Result<(), crate::deps::AdmissionSecurityTransitionError> {
         self.activation_requests.lock().unwrap().push(request);
         Ok(())
     }
 }
 
 #[async_trait]
-impl uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort
+impl crate::deps::ActivateCompletionHelperAdmissionSecurityPort
     for RecordingSponsorAdmissionSecurity
 {
     async fn activate_completion_helper_admission_security(
         &self,
-        request: uc_core::membership::ActivateCompletionHelperAdmissionSecurityRequest,
-    ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError> {
+        request: crate::deps::ActivateCompletionHelperAdmissionSecurityRequest,
+    ) -> Result<(), crate::deps::AdmissionSecurityTransitionError> {
         self.helper_activation_requests
             .lock()
             .unwrap()
@@ -977,26 +1003,25 @@ impl uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort
 
 #[derive(Default)]
 struct RecordingSponsorAdmissionSecurity {
-    requests: Mutex<Vec<uc_core::membership::SponsorAdmissionSecurityRequest>>,
-    activation_requests: Mutex<Vec<uc_core::membership::ActivateSponsorAdmissionSecurityRequest>>,
+    requests: Mutex<Vec<crate::deps::SponsorAdmissionSecurityRequest>>,
+    activation_requests: Mutex<Vec<crate::deps::ActivateSponsorAdmissionSecurityRequest>>,
     helper_activation_requests:
-        Mutex<Vec<uc_core::membership::ActivateCompletionHelperAdmissionSecurityRequest>>,
+        Mutex<Vec<crate::deps::ActivateCompletionHelperAdmissionSecurityRequest>>,
 }
 
 #[async_trait]
-impl uc_core::membership::PrepareSponsorAdmissionSecurityPort
-    for RecordingSponsorAdmissionSecurity
-{
+impl crate::deps::PrepareSponsorAdmissionSecurityPort for RecordingSponsorAdmissionSecurity {
     async fn prepare_sponsor_admission_security(
         &self,
-        request: uc_core::membership::SponsorAdmissionSecurityRequest,
+        request: crate::deps::SponsorAdmissionSecurityRequest,
     ) -> Result<
-        uc_core::membership::SponsorPreparedAdmissionSecurity,
-        uc_core::membership::AdmissionSecurityTransitionError,
+        crate::deps::SponsorPreparedAdmissionSecurity,
+        crate::deps::AdmissionSecurityTransitionError,
     > {
+        use crate::deps::SponsorPreparedAdmissionSecurity;
         use uc_core::membership::{
             AdmissionSecurityCommitmentV1, SponsorAdmissionSecurityDelivery,
-            SponsorPreparedAdmissionSecurity, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+            ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
         };
         let catalog = admission_key_catalog();
         let commitment = AdmissionSecurityCommitmentV1::new(
@@ -1085,7 +1110,7 @@ impl MembershipSecurityUpdatePort for UnusedSecurityUpdates {
 }
 
 #[derive(Clone, Default)]
-struct UnusedClock;
+pub(crate) struct UnusedClock;
 
 #[async_trait]
 impl ClockPort for UnusedClock {
@@ -1111,7 +1136,7 @@ struct Harness {
 }
 
 #[derive(Clone, Default)]
-struct FixedPresence {
+pub(crate) struct FixedPresence {
     states: Arc<Mutex<std::collections::BTreeMap<DeviceId, ReachabilityState>>>,
 }
 
@@ -1166,8 +1191,13 @@ async fn runtime_pause_interrupts_an_in_flight_recovery() {
         started: Arc::clone(&started),
     });
     let owner = WorkspaceMembership::new(deps);
+    let admission_recovery = Arc::new(
+        crate::space::admission::RecoverPendingAdmissionsUseCase::new(
+            crate::space::admission::SpaceAdmission::new(Arc::clone(&owner)),
+        ),
+    );
     let (presence_tx, presence_rx) = tokio::sync::broadcast::channel(1);
-    let runtime = owner.start(presence_rx);
+    let runtime = owner.start(admission_recovery, presence_rx);
     started.notified().await;
 
     tokio::time::timeout(
@@ -1190,11 +1220,16 @@ pub(crate) fn test_deps(
     own_device: &str,
     _members: Vec<(DeviceId, MemberInstanceId)>,
 ) -> WorkspaceMembershipDeps {
+    let admission_attempts = Arc::new(LockedAdmissionRepository {
+        allow_empty_history_reads: true,
+    });
+    let admission_repository: Arc<dyn crate::deps::AdmissionAttemptRepositoryPort> =
+        admission_attempts.clone();
+    let membership_history: Arc<dyn MembershipHistoryRepositoryPort> = admission_attempts;
     WorkspaceMembershipDeps {
         repository,
-        admission_attempts: Arc::new(LockedAdmissionRepository {
-            allow_empty_history_reads: true,
-        }),
+        admission_attempts: admission_repository,
+        membership_history_repo: membership_history,
         historical_membership_signatures: Arc::new(DeterministicHistoricalVerifier),
         admission_security_transition: Arc::new(EchoAdmissionSecurityTransition::default()),
         prepare_sponsor_admission_security: Arc::new(UnavailableSponsorAdmissionSecurity),
@@ -1256,12 +1291,13 @@ async fn install_current_history(
         .verify_and_record_activation_receipt(receipt, &DeterministicHistoricalVerifier)
         .unwrap();
     admission_repository
-        .compare_and_replace_membership_history_v2(None, &history.encode_persisted_v2().unwrap())
+        .compare_and_replace_membership_history(None, &history.encode_persisted_v2().unwrap())
         .await
         .unwrap();
     let own_instance = *history.active_members().iter().next().unwrap();
     let credential = history.credential_for(own_instance).unwrap().clone();
-    deps.admission_attempts = admission_repository;
+    deps.admission_attempts = Arc::clone(&admission_repository);
+    deps.membership_history_repo = admission_repository;
     deps.member_signatures = Arc::new(CredentialBackedSigner {
         device_id: DeviceId::new("sponsor"),
         credential,
@@ -1478,7 +1514,7 @@ impl MemberRepositoryPort for RecordingMemberRepo {
     }
 }
 
-struct FixedMemberRepo(Vec<uc_core::membership::SpaceMember>);
+pub(crate) struct FixedMemberRepo(pub(crate) Vec<uc_core::membership::SpaceMember>);
 
 #[async_trait]
 impl MemberRepositoryPort for FixedMemberRepo {
@@ -1515,7 +1551,7 @@ impl MemberRepositoryPort for FixedMemberRepo {
     }
 }
 
-fn legacy_member(device_id: &str) -> uc_core::membership::SpaceMember {
+pub(crate) fn legacy_member(device_id: &str) -> uc_core::membership::SpaceMember {
     uc_core::membership::SpaceMember {
         device_id: DeviceId::new(device_id),
         device_name: device_id.to_owned(),
@@ -1781,11 +1817,12 @@ fn paged_runtime_history_fixture(
 
 fn paged_receiver(
     workspace_repository: MemoryWorkspaceRepository,
-    admission_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    admission_repository: Arc<dyn TestAdmissionRepository>,
     joiner_credential: uc_core::membership::MembershipCredential,
 ) -> Arc<WorkspaceMembership> {
     let mut deps = test_deps(Arc::new(workspace_repository), "joiner", Vec::new());
-    deps.admission_attempts = admission_repository;
+    deps.admission_attempts = Arc::clone(&admission_repository);
+    deps.membership_history_repo = admission_repository;
     deps.member_signatures = Arc::new(CredentialBackedSigner {
         device_id: DeviceId::new("joiner"),
         credential: joiner_credential,
@@ -1833,18 +1870,18 @@ fn paged_receiver(
 // Flow: cancellation and formal commit have one persisted winner. A saved
 // cancellation before commit rejects without a formal add; a saved commit
 // makes cancellation too late and the same attempt continues forward.
-struct DeterministicHistoricalVerifier;
+pub(crate) struct DeterministicHistoricalVerifier;
 
 struct NoAdmissionSpaceTransition;
 
 #[async_trait]
-impl uc_core::membership::AdmissionSpaceTransitionPort for NoAdmissionSpaceTransition {
+impl crate::deps::AdmissionSpaceTransitionPort for NoAdmissionSpaceTransition {
     async fn prepare_if_needed(
         &self,
-        input: &uc_core::membership::AdmissionSpaceTransitionPreparationV2,
+        input: &crate::deps::AdmissionSpaceTransitionPreparationV2,
     ) -> Result<
         uc_core::membership::AdmissionSpaceTransitionV2,
-        uc_core::membership::AdmissionSpaceTransitionError,
+        crate::deps::AdmissionSpaceTransitionError,
     > {
         Ok(uc_core::membership::AdmissionSpaceTransitionV2::Fresh(
             uc_core::membership::FreshSpaceTransitionV1 {
@@ -1863,15 +1900,16 @@ impl uc_core::membership::AdmissionSpaceTransitionPort for NoAdmissionSpaceTrans
         &self,
         transition: &uc_core::membership::AdmissionSpaceTransitionV2,
     ) -> Result<
-        uc_core::membership::AdmissionSpaceTransitionStepV2,
-        uc_core::membership::AdmissionSpaceTransitionError,
+        crate::deps::AdmissionSpaceTransitionStepV2,
+        crate::deps::AdmissionSpaceTransitionError,
     > {
+        use crate::deps::AdmissionSpaceTransitionStepV2;
         use uc_core::membership::{
-            AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionStepV2,
-            AdmissionSpaceTransitionV2, FreshSpaceTransitionPhaseV1,
+            AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+            FreshSpaceTransitionPhaseV1,
         };
         let AdmissionSpaceTransitionV2::Fresh(fresh) = transition else {
-            return Err(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent);
+            return Err(crate::deps::AdmissionSpaceTransitionError::Inconsistent);
         };
         let next_phase = match fresh.phase {
             FreshSpaceTransitionPhaseV1::TargetStaged => {
@@ -1901,7 +1939,7 @@ impl uc_core::membership::AdmissionSpaceTransitionPort for NoAdmissionSpaceTrans
     async fn discard_pre_activation(
         &self,
         _transition: &uc_core::membership::AdmissionSpaceTransitionV2,
-    ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+    ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
         Ok(())
     }
 }
@@ -1931,13 +1969,13 @@ impl SimulatedAdmissionSpaceTransition {
 }
 
 #[async_trait]
-impl uc_core::membership::AdmissionSpaceTransitionPort for SimulatedAdmissionSpaceTransition {
+impl crate::deps::AdmissionSpaceTransitionPort for SimulatedAdmissionSpaceTransition {
     async fn prepare_if_needed(
         &self,
-        input: &uc_core::membership::AdmissionSpaceTransitionPreparationV2,
+        input: &crate::deps::AdmissionSpaceTransitionPreparationV2,
     ) -> Result<
         uc_core::membership::AdmissionSpaceTransitionV2,
-        uc_core::membership::AdmissionSpaceTransitionError,
+        crate::deps::AdmissionSpaceTransitionError,
     > {
         assert_eq!(input.target_access_state, b"joiner-target-access");
         Ok(uc_core::membership::AdmissionSpaceTransitionV2::CrossSpace(
@@ -1967,26 +2005,27 @@ impl uc_core::membership::AdmissionSpaceTransitionPort for SimulatedAdmissionSpa
         &self,
         transition: &uc_core::membership::AdmissionSpaceTransitionV2,
     ) -> Result<
-        uc_core::membership::AdmissionSpaceTransitionStepV2,
-        uc_core::membership::AdmissionSpaceTransitionError,
+        crate::deps::AdmissionSpaceTransitionStepV2,
+        crate::deps::AdmissionSpaceTransitionError,
     > {
+        use crate::deps::AdmissionSpaceTransitionStepV2;
         use uc_core::membership::{
-            AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionStepV2,
-            AdmissionSpaceTransitionV2, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
+            AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+            CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
         };
         let AdmissionSpaceTransitionV2::CrossSpace(transition) = transition else {
-            return Err(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent);
+            return Err(crate::deps::AdmissionSpaceTransitionError::Inconsistent);
         };
         self.advances.lock().unwrap().push(transition.phase);
         let should_fail =
             self.fail_once_at.lock().unwrap().front().copied() == Some(transition.phase);
         if should_fail {
             self.fail_once_at.lock().unwrap().pop_front();
-            return Err(uc_core::membership::AdmissionSpaceTransitionError::Storage);
+            return Err(crate::deps::AdmissionSpaceTransitionError::Storage);
         }
         if transition.phase == CrossSpaceTransitionPhaseV2::CleanupPending {
             let result = CrossSpaceTransitionResultV2::from_cleanup_pending(transition)
-                .ok_or(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent)?;
+                .ok_or(crate::deps::AdmissionSpaceTransitionError::Inconsistent)?;
             return Ok(AdmissionSpaceTransitionStepV2::Finished(
                 AdmissionSpaceTransitionResultV2::CrossSpace(result),
             ));
@@ -1995,7 +2034,7 @@ impl uc_core::membership::AdmissionSpaceTransitionPort for SimulatedAdmissionSpa
         next.phase = transition
             .phase
             .successor()
-            .ok_or(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent)?;
+            .ok_or(crate::deps::AdmissionSpaceTransitionError::Inconsistent)?;
         if next.phase == CrossSpaceTransitionPhaseV2::SourceFinalized {
             next.final_source_revision = Some(9);
             next.final_manifest_digest = Some([0xc4; 32]);
@@ -2012,15 +2051,15 @@ impl uc_core::membership::AdmissionSpaceTransitionPort for SimulatedAdmissionSpa
     async fn discard_pre_activation(
         &self,
         transition: &uc_core::membership::AdmissionSpaceTransitionV2,
-    ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+    ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
         let uc_core::membership::AdmissionSpaceTransitionV2::CrossSpace(transition) = transition
         else {
-            return Err(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent);
+            return Err(crate::deps::AdmissionSpaceTransitionError::Inconsistent);
         };
         if transition.phase.rank()
             >= uc_core::membership::CrossSpaceTransitionPhaseV2::ActivationStarted.rank()
         {
-            return Err(uc_core::membership::AdmissionSpaceTransitionError::Inconsistent);
+            return Err(crate::deps::AdmissionSpaceTransitionError::Inconsistent);
         }
         self.discards.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -2032,16 +2071,16 @@ struct EchoAdmissionSecurityTransition {
     stage_joiner_calls: AtomicUsize,
 }
 
-impl uc_core::membership::AdmissionSecurityTransitionPort for EchoAdmissionSecurityTransition {
+impl crate::deps::AdmissionSecurityTransitionPort for EchoAdmissionSecurityTransition {
     fn prepare_sponsor(
         &self,
         _sponsor_state: &[u8],
         _candidate_identity: &[u8],
         _key_package: &[u8],
-        _input: &uc_core::membership::AdmissionSecurityTransitionInput,
+        _input: &crate::deps::AdmissionSecurityTransitionInput,
     ) -> Result<
-        uc_core::membership::SponsorPreparedSecurityTransition,
-        uc_core::membership::AdmissionSecurityTransitionError,
+        crate::deps::SponsorPreparedSecurityTransition,
+        crate::deps::AdmissionSecurityTransitionError,
     > {
         unreachable!("sponsor preparation is not used by this test")
     }
@@ -2053,13 +2092,13 @@ impl uc_core::membership::AdmissionSecurityTransitionPort for EchoAdmissionSecur
         _expected_space_id: &[u8],
         welcome: &[u8],
         _commit: &[u8],
-        _input: &uc_core::membership::AdmissionSecurityTransitionInput,
+        _input: &crate::deps::AdmissionSecurityTransitionInput,
     ) -> Result<
-        uc_core::membership::JoinerStagedSecurityTransition,
-        uc_core::membership::AdmissionSecurityTransitionError,
+        crate::deps::JoinerStagedSecurityTransition,
+        crate::deps::AdmissionSecurityTransitionError,
     > {
         self.stage_joiner_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(uc_core::membership::JoinerStagedSecurityTransition {
+        Ok(crate::deps::JoinerStagedSecurityTransition {
             staged_state: b"joiner-staged-state".to_vec(),
             public_commitment: postcard::from_bytes(welcome).unwrap(),
         })
@@ -2069,10 +2108,10 @@ impl uc_core::membership::AdmissionSecurityTransitionPort for EchoAdmissionSecur
         &self,
         _staged_state: &[u8],
         _commit: &[u8],
-        _input: &uc_core::membership::AdmissionSecurityTransitionInput,
+        _input: &crate::deps::AdmissionSecurityTransitionInput,
     ) -> Result<
         uc_core::membership::AdmissionSecurityCommitmentV1,
-        uc_core::membership::AdmissionSecurityTransitionError,
+        crate::deps::AdmissionSecurityTransitionError,
     > {
         unreachable!("direct derivation is not used by this test")
     }
@@ -2082,8 +2121,8 @@ impl uc_core::membership::AdmissionSecurityTransitionPort for EchoAdmissionSecur
         staged_state: Vec<u8>,
         _commit: &[u8],
         _expected: &uc_core::membership::AdmissionSecurityCommitmentV1,
-        _input: &uc_core::membership::AdmissionSecurityTransitionInput,
-    ) -> Result<Vec<u8>, uc_core::membership::AdmissionSecurityTransitionError> {
+        _input: &crate::deps::AdmissionSecurityTransitionInput,
+    ) -> Result<Vec<u8>, crate::deps::AdmissionSecurityTransitionError> {
         Ok(staged_state)
     }
 
@@ -2243,7 +2282,7 @@ fn admission_verification_fixture_for_lineage(
 }
 
 async fn seed_v2_scope_history(
-    repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    repository: Arc<dyn TestAdmissionRepository>,
     record_receipt: bool,
     pending_local_join: bool,
 ) {
@@ -2252,7 +2291,7 @@ async fn seed_v2_scope_history(
 }
 
 async fn seed_v2_scope_history_for_lineage(
-    repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    repository: Arc<dyn TestAdmissionRepository>,
     lineage_id: &str,
     record_receipt: bool,
     pending_local_join: bool,
@@ -2355,7 +2394,7 @@ async fn seed_v2_scope_history_for_lineage(
         .unwrap();
 }
 
-fn durable_candidate_verification_fixture(
+pub(crate) fn durable_candidate_verification_fixture(
     attempt_id: uc_core::membership::AdmissionAttemptId,
 ) -> (
     super::admission::DurableAdmissionCandidateV1,
@@ -2468,7 +2507,7 @@ fn admission_identity_binding(
     .unwrap()
 }
 
-fn durable_candidate_removal_fixture(
+pub(crate) fn durable_candidate_removal_fixture(
     attempt_id: uc_core::membership::AdmissionAttemptId,
 ) -> uc_core::membership::MembershipEventV2 {
     use uc_core::membership::{

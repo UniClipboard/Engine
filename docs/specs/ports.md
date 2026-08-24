@@ -2,7 +2,7 @@
 
 ## 1. Scope
 
-This specification applies to all abstraction interfaces for external capabilities in `uc-core`, including but not limited to:
+This specification applies to abstraction interfaces for external capabilities in both `uc-core` and `uc-application`, including but not limited to:
 
 - repository / store
 - network
@@ -47,6 +47,16 @@ Default strategy:
 
 Prefer multiple small traits over fewer large interfaces.
 In Rust, once a trait is widely depended upon, the cost of adding methods grows rapidly.
+
+### 2.5 The consumer owns the Port
+
+A Port belongs to the layer that directly needs the capability:
+
+- A domain rule directly using a capability defines its Port in `uc-core`.
+- An application workflow directly using a capability defines its Port in `uc-application`.
+- `uc-infra` implements those Ports; implementation location never decides ownership.
+
+Keeping domain models in `uc-core` does not require their repository or workflow Ports to live there. An application-owned repository Port may use core-owned state types while preserving the dependency direction `infra -> application -> core`.
 
 ## 3. Port Classification
 

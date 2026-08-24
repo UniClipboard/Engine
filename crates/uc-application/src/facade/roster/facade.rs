@@ -252,25 +252,6 @@ impl MemberRosterFacade {
         Ok(updated.sync_preferences.into())
     }
 
-    /// 提交一次目标成员移除(ADR-016 调用方唯一提交入口)。
-    ///
-    /// 返回的完整工作空间快照只表示本机已生效、正在收敛;完成以保留成员
-    /// 实际取得同一安全状态为准。
-    pub async fn submit_member_removal(
-        &self,
-        target: &str,
-    ) -> Result<WorkspaceSnapshot, RosterError> {
-        let convergence = self
-            .workspace_convergence
-            .as_ref()
-            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
-        let target = DeviceId::new(target);
-        convergence
-            .submit_removal(&target)
-            .await
-            .map_err(map_workspace_convergence_error)
-    }
-
     /// 记录本机对已收到成员移除的唯一决定。
     pub async fn decide_membership_removal(
         &self,
@@ -295,22 +276,6 @@ impl MemberRosterFacade {
             .ok_or(RosterError::MembershipReconciliationUnavailable)?;
         convergence
             .query()
-            .await
-            .map_err(map_workspace_convergence_error)
-    }
-
-    pub async fn decide_device_trust_change(
-        &self,
-        change_id: MembershipEventId,
-        choice: crate::facade::SpaceMembershipChangeChoice,
-        confirm_local_removal: bool,
-    ) -> Result<crate::facade::SpaceMembershipChangeDecisionResult, RosterError> {
-        let convergence = self
-            .workspace_convergence
-            .as_ref()
-            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
-        convergence
-            .decide_device_trust_change(change_id, choice, confirm_local_removal)
             .await
             .map_err(map_workspace_convergence_error)
     }

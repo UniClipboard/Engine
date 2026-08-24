@@ -13,7 +13,7 @@ impl crate::space::admission::SpaceAdmission {
             AdmissionAttemptId, AdmissionCompletionRecoveryHelloV1, MembershipEventV2,
             MembershipOperationV2,
         };
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         let attempt = self
             .admission
             .load(AdmissionAttemptId::from_bytes(attempt_id))
@@ -62,15 +62,11 @@ impl crate::space::admission::SpaceAdmission {
             AdmissionCompletionRecoveryChallengeV1, MembershipOperationV2,
             VersionedMembershipHistory,
         };
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         hello
             .validate()
             .map_err(|_| WorkspaceConvergenceError::InvalidConfirmation)?;
-        if let Some(existing) = self
-            .admission
-            .load_completion_recovery_challenge(hello.attempt_id)
-            .await?
-        {
+        if let Some(existing) = self.load_recovery_challenge(hello.attempt_id).await? {
             if existing.hello_digest == hello.digest()
                 && existing.transport_binding == transport_binding
                 && existing.joiner_last_message_id == joiner_last_message_id
@@ -80,11 +76,12 @@ impl crate::space::admission::SpaceAdmission {
             }
         }
         let history_bytes = self
+            .membership
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
-            .map_err(transaction::map_repository_error)?
+            .map_err(WorkspaceConvergenceError::from)?
             .ok_or(WorkspaceConvergenceError::RecoveryRequired)?;
         let history = VersionedMembershipHistory::decode_persisted_v2(
             &history_bytes,
@@ -142,8 +139,7 @@ impl crate::space::admission::SpaceAdmission {
             .current_position()
             .map_err(|_| WorkspaceConvergenceError::RecoveryRequired)?;
         let previous_counter = self
-            .admission
-            .load_completion_recovery_challenge(hello.attempt_id)
+            .load_recovery_challenge(hello.attempt_id)
             .await?
             .map(|challenge| challenge.challenge_counter)
             .unwrap_or(0);
@@ -170,8 +166,7 @@ impl crate::space::admission::SpaceAdmission {
             .sign_current_member_payload(&challenge.signing_payload())
             .await
             .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-        self.admission
-            .save_completion_recovery_challenge(hello.attempt_id, &challenge)
+        self.save_recovery_challenge(hello.attempt_id, &challenge)
             .await?;
         Ok(challenge)
     }
@@ -188,7 +183,7 @@ impl crate::space::admission::SpaceAdmission {
             AdmissionCompletionRecoveryResponseV1, MembershipOperationV2,
             VersionedMembershipHistory,
         };
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         challenge
             .validate()
             .map_err(|_| WorkspaceConvergenceError::InvalidConfirmation)?;
@@ -324,13 +319,12 @@ impl crate::space::admission::SpaceAdmission {
             MembershipActivationReceiptStoreOutcome, MembershipEventV2, MembershipOperationV2,
             VersionedMembershipHistory,
         };
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         response
             .validate()
             .map_err(|_| WorkspaceConvergenceError::InvalidConfirmation)?;
         let saved_challenge = self
-            .admission
-            .load_completion_recovery_challenge(hello.attempt_id)
+            .load_recovery_challenge(hello.attempt_id)
             .await?
             .ok_or(WorkspaceConvergenceError::InvalidConfirmation)?;
         if response.hello_digest != hello.digest()
@@ -363,11 +357,12 @@ impl crate::space::admission::SpaceAdmission {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         };
         let history_bytes = self
+            .membership
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
-            .map_err(transaction::map_repository_error)?
+            .map_err(WorkspaceConvergenceError::from)?
             .ok_or(WorkspaceConvergenceError::RecoveryRequired)?;
         let history = VersionedMembershipHistory::decode_persisted_v2(
             &history_bytes,
@@ -469,23 +464,22 @@ impl crate::space::admission::SpaceAdmission {
             }
             Some(_) => return Err(WorkspaceConvergenceError::InvalidConfirmation),
             None => {
-                self.admission
-                    .create_completion_helper(
-                        hello.attempt_id,
-                        &saved_challenge,
-                        response,
-                        &hello.lineage_id,
-                        *hello.event_id.as_bytes(),
-                        event.resulting_members_digest,
-                    )
-                    .await?
+                self.create_helper_attempt(
+                    hello.attempt_id,
+                    &saved_challenge,
+                    response,
+                    &hello.lineage_id,
+                    *hello.event_id.as_bytes(),
+                    event.resulting_members_digest,
+                )
+                .await?
             }
         };
         self.membership
             .deps
             .activate_completion_helper_admission_security
             .activate_completion_helper_admission_security(
-                uc_core::membership::ActivateCompletionHelperAdmissionSecurityRequest {
+                crate::deps::ActivateCompletionHelperAdmissionSecurityRequest {
                     space_id: uc_core::ids::SpaceId::from_string(hello.lineage_id.clone()),
                     attempt_id: *hello.attempt_id.as_bytes(),
                     helper_device_id: self.membership.deps.own_device.clone(),
@@ -524,8 +518,7 @@ impl crate::space::admission::SpaceAdmission {
             .save_member_facts(&admission.facts, self.membership.deps.clock.now_ms())
             .await?;
         let complete = self
-            .admission
-            .complete_as_helper(
+            .finish_helper_attempt(
                 attempt,
                 &completion_bytes,
                 admission.facts.device_id.as_str().as_bytes(),
@@ -590,114 +583,131 @@ impl crate::space::admission::SpaceAdmission {
         self.activate_joiner_complete(&complete).await
     }
 
-    pub(in crate::space) async fn recover_pending_admissions(
+    async fn save_recovery_challenge(
         &self,
-    ) -> Result<usize, WorkspaceConvergenceError> {
+        attempt_id: uc_core::membership::AdmissionAttemptId,
+        challenge: &uc_core::membership::AdmissionCompletionRecoveryChallengeV1,
+    ) -> Result<(), WorkspaceConvergenceError> {
+        let encoded = postcard::to_stdvec(challenge).map_err(admission_storage)?;
         self.membership
             .deps
-            .legacy_migration_recovery
-            .recover()
+            .admission_attempts
+            .save_completion_recovery_challenge(attempt_id, &encoded)
             .await
-            .map_err(|_| WorkspaceConvergenceError::RecoveryRequired)?;
-        let recoverable = self.admission.recoverable().await?;
-        let mut recovered_completions = 0usize;
-        for attempt in &recoverable {
-            if !attempt.is_joiner()
-                || attempt.stage_rank() != Some(5)
-                || attempt.completion.is_some()
-            {
-                continue;
-            }
-            let Some(event_bytes) = attempt.candidate_event.as_deref() else {
-                continue;
-            };
-            let Ok(event) =
-                postcard::from_bytes::<uc_core::membership::MembershipEventV2>(event_bytes)
-            else {
-                continue;
-            };
-            let uc_core::membership::MembershipOperationV2::AddDevice { admission } =
-                &event.operation
-            else {
-                continue;
-            };
-            let Some(relationships) = attempt.target_relationships.as_deref() else {
-                continue;
-            };
-            for helper in relationships.iter().filter(|facts| {
-                facts.member_instance != event.author_member_instance_id
-                    && facts.member_instance != admission.facts.member_instance
-            }) {
-                if self
-                    .recover_completion_with_helper(
-                        *attempt.attempt_id.as_bytes(),
-                        &helper.device_id,
-                        helper.member_instance,
-                        &helper.transport_address_blob,
-                    )
-                    .await
-                    .is_ok()
-                {
-                    recovered_completions += 1;
-                    break;
-                }
-            }
+            .map_err(super::map_repository_error)?;
+        Ok(())
+    }
+
+    async fn load_recovery_challenge(
+        &self,
+        attempt_id: uc_core::membership::AdmissionAttemptId,
+    ) -> Result<
+        Option<uc_core::membership::AdmissionCompletionRecoveryChallengeV1>,
+        WorkspaceConvergenceError,
+    > {
+        self.membership
+            .deps
+            .admission_attempts
+            .load_completion_recovery_challenge(attempt_id)
+            .await
+            .map_err(super::map_repository_error)?
+            .map(|encoded| postcard::from_bytes(&encoded).map_err(admission_storage))
+            .transpose()
+    }
+
+    async fn create_helper_attempt(
+        &self,
+        attempt_id: uc_core::membership::AdmissionAttemptId,
+        challenge: &uc_core::membership::AdmissionCompletionRecoveryChallengeV1,
+        response: &uc_core::membership::AdmissionCompletionRecoveryResponseV1,
+        lineage_id: &str,
+        event_id: [u8; 32],
+        target_members_digest: [u8; 32],
+    ) -> Result<uc_core::membership::AdmissionAttemptV1, WorkspaceConvergenceError> {
+        let challenge_bytes = postcard::to_stdvec(challenge).map_err(admission_storage)?;
+        let response_bytes = postcard::to_stdvec(response).map_err(admission_storage)?;
+        let mut attempt =
+            uc_core::membership::AdmissionAttemptV1::new_completion_helper(attempt_id);
+        attempt.lineage_id = Some(lineage_id.to_owned());
+        attempt.base_history_position = Some(
+            postcard::to_stdvec(&challenge.helper_history_position).map_err(admission_storage)?,
+        );
+        attempt.candidate_event = Some(response.bundle.candidate_event.clone());
+        attempt.candidate_event_id = Some(event_id);
+        attempt.candidate_key_package = Some(response.bundle.candidate_key_package.clone());
+        attempt.target_members_digest = Some(target_members_digest);
+        attempt.security_commitment = Some(response.bundle.security_commitment.clone());
+        attempt.security_commit = Some(response.bundle.security_commit.clone());
+        attempt.security_welcome = Some(response.bundle.security_welcome.clone());
+        attempt.target_protection_group_id =
+            Some(response.bundle.target_protection_group_id.clone());
+        attempt.target_key_catalog = Some(response.bundle.target_key_catalog.clone());
+        attempt.existing_member_security_deliveries =
+            Some(response.bundle.existing_member_deliveries.clone());
+        attempt.activation_receipt = Some(response.bundle.activation_receipt.clone());
+        attempt.resume_public_key = Some(response.bundle.resume_public_key.clone());
+        attempt.resume_peers.push(challenge_bytes.clone());
+        attempt.completion_recovery_deliveries.push(response_bytes);
+        self.membership
+            .deps
+            .admission_attempts
+            .create_completion_helper(&attempt, &challenge_bytes)
+            .await
+            .map_err(super::map_repository_error)?;
+        Ok(attempt)
+    }
+
+    async fn finish_helper_attempt(
+        &self,
+        mut attempt: uc_core::membership::AdmissionAttemptV1,
+        completion: &[u8],
+        recipient: &[u8],
+        joiner_last_message_id: [u8; 32],
+    ) -> Result<uc_core::membership::AdmissionOutboxMessageV1, WorkspaceConvergenceError> {
+        use uc_core::membership::{
+            AdmissionAttemptRoleStateV1, AdmissionOutboxPurposeV1, AdmissionTerminalResultV1,
+            CompletionHelperAdmissionStageV1, CompletionHelperAdmissionStateV1,
+        };
+
+        if !matches!(
+            attempt.role_state,
+            AdmissionAttemptRoleStateV1::CompletionHelper(CompletionHelperAdmissionStateV1 {
+                stage: CompletionHelperAdmissionStageV1::Applied,
+            })
+        ) {
+            return Err(inconsistent("completion helper is not awaiting completion"));
         }
-        for attempt in recoverable {
-            if !matches!(
-                attempt.role_state,
-                uc_core::membership::AdmissionAttemptRoleStateV1::Sponsor(
-                    uc_core::membership::SponsorAdmissionStateV1 {
-                        stage: uc_core::membership::SponsorAdmissionStageV1::Committed,
-                    },
-                )
-            ) {
-                continue;
-            }
-            let Some(receipt_payload) = attempt.write_ahead_recovery.clone() else {
-                continue;
-            };
-            let commit_id = attempt
-                .outboxes
-                .iter()
-                .find(|message| {
-                    message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::Commit
-                })
-                .map(|message| message.message_id)
-                .ok_or_else(|| {
-                    WorkspaceConvergenceError::Inconsistent(
-                        "recoverable sponsor activation has no Commit".to_owned(),
-                    )
-                })?;
-            let applied = transaction::durable_admission_message(
-                attempt.attempt_id,
-                uc_core::membership::AdmissionOutboxPurposeV1::Applied,
-                self.membership.deps.own_device.as_str().as_bytes(),
-                Some(commit_id),
-                &receipt_payload,
-            );
-            let frame = uc_core::pairing::DurableAdmissionFrame {
-                attempt_id: *attempt.attempt_id.as_bytes(),
-                kind: uc_core::pairing::DurableAdmissionMessageKind::Applied,
-                message_id: applied.message_id,
-                predecessor_message_id: applied.predecessor_message_id,
-                payload: receipt_payload,
-            };
-            self.complete_sponsor_applied(&frame).await?;
-        }
-        let report = self
-            .admission
-            .recover_with(self.membership.deps.admission_outbox_delivery.as_ref())
-            .await?;
-        if report.deliveries_confirmed > 0 || report.attempts_compacted > 0 {
-            self.membership.notify();
-        }
-        Ok(report.deliveries_attempted + recovered_completions)
+        let message = transaction::durable_admission_message(
+            attempt.attempt_id,
+            AdmissionOutboxPurposeV1::Complete,
+            recipient,
+            Some(joiner_last_message_id),
+            completion,
+        );
+        attempt.completion = Some(completion.to_vec());
+        attempt.outboxes.push(message.clone());
+        attempt.terminal_result = Some(AdmissionTerminalResultV1::Completed);
+        attempt.role_state =
+            AdmissionAttemptRoleStateV1::CompletionHelper(CompletionHelperAdmissionStateV1 {
+                stage: CompletionHelperAdmissionStageV1::Completed,
+            });
+
+        let expected_version = attempt.record_version;
+        attempt.record_version = expected_version
+            .checked_add(1)
+            .ok_or_else(|| inconsistent("admission record version overflow"))?;
+        self.membership
+            .deps
+            .admission_attempts
+            .compare_and_advance(attempt.attempt_id, expected_version, &attempt)
+            .await
+            .map_err(super::map_repository_error)?;
+        Ok(message)
     }
 }
 
 #[async_trait]
-impl uc_core::membership::AdmissionCompletionRecoveryEndpointPort
+impl crate::deps::AdmissionCompletionRecoveryEndpointPort
     for crate::space::admission::SpaceAdmission
 {
     async fn handle_completion_recovery_hello(
@@ -708,7 +718,7 @@ impl uc_core::membership::AdmissionCompletionRecoveryEndpointPort
         helper_last_message_id: [u8; 32],
     ) -> Result<
         uc_core::membership::AdmissionCompletionRecoveryChallengeV1,
-        uc_core::membership::AdmissionCompletionRecoveryTransportError,
+        crate::deps::AdmissionCompletionRecoveryTransportError,
     > {
         self.challenge_completion_recovery(
             &hello,
@@ -717,7 +727,7 @@ impl uc_core::membership::AdmissionCompletionRecoveryEndpointPort
             helper_last_message_id,
         )
         .await
-        .map_err(|_| uc_core::membership::AdmissionCompletionRecoveryTransportError::Rejected)
+        .map_err(|_| crate::deps::AdmissionCompletionRecoveryTransportError::Rejected)
     }
 
     async fn handle_completion_recovery_response(
@@ -727,32 +737,39 @@ impl uc_core::membership::AdmissionCompletionRecoveryEndpointPort
         transport_binding: uc_core::membership::AdmissionCompletionRecoveryTransportBindingV1,
     ) -> Result<
         uc_core::pairing::DurableAdmissionFrame,
-        uc_core::membership::AdmissionCompletionRecoveryTransportError,
+        crate::deps::AdmissionCompletionRecoveryTransportError,
     > {
         let saved = self
-            .admission
-            .load_completion_recovery_challenge(hello.attempt_id)
+            .load_recovery_challenge(hello.attempt_id)
             .await
-            .map_err(|_| uc_core::membership::AdmissionCompletionRecoveryTransportError::Rejected)?
-            .ok_or(uc_core::membership::AdmissionCompletionRecoveryTransportError::Rejected)?;
+            .map_err(|_| crate::deps::AdmissionCompletionRecoveryTransportError::Rejected)?
+            .ok_or(crate::deps::AdmissionCompletionRecoveryTransportError::Rejected)?;
         if saved.transport_binding != transport_binding {
-            return Err(uc_core::membership::AdmissionCompletionRecoveryTransportError::Rejected);
+            return Err(crate::deps::AdmissionCompletionRecoveryTransportError::Rejected);
         }
         self.complete_recovered_admission(&hello, &response)
             .await
-            .map_err(|_| uc_core::membership::AdmissionCompletionRecoveryTransportError::Rejected)
+            .map_err(|_| crate::deps::AdmissionCompletionRecoveryTransportError::Rejected)
     }
 }
 
+fn admission_storage(error: impl std::fmt::Display) -> WorkspaceConvergenceError {
+    WorkspaceConvergenceError::AdmissionStorage(error.to_string())
+}
+
+fn inconsistent(message: impl Into<String>) -> WorkspaceConvergenceError {
+    WorkspaceConvergenceError::Inconsistent(message.into())
+}
+
 fn map_completion_recovery_transport_error(
-    error: uc_core::membership::AdmissionCompletionRecoveryTransportError,
+    error: crate::deps::AdmissionCompletionRecoveryTransportError,
 ) -> WorkspaceConvergenceError {
     match error {
-        uc_core::membership::AdmissionCompletionRecoveryTransportError::Offline
-        | uc_core::membership::AdmissionCompletionRecoveryTransportError::Transport => {
+        crate::deps::AdmissionCompletionRecoveryTransportError::Offline
+        | crate::deps::AdmissionCompletionRecoveryTransportError::Transport => {
             WorkspaceConvergenceError::Unavailable
         }
-        uc_core::membership::AdmissionCompletionRecoveryTransportError::Rejected => {
+        crate::deps::AdmissionCompletionRecoveryTransportError::Rejected => {
             WorkspaceConvergenceError::InvalidConfirmation
         }
     }

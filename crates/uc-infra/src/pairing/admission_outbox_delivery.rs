@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::time::timeout;
-use uc_core::membership::{
-    AdmissionAttemptId, AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort,
-    AdmissionOutboxDeliveryResultV1, AdmissionOutboxDeliveryRouteV1, AdmissionOutboxMessageV1,
-    AdmissionOutboxPurposeV1,
+use uc_application::deps::{
+    AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1,
+    AdmissionOutboxDeliveryRouteV1,
 };
+use uc_core::membership::{AdmissionAttemptId, AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1};
 use uc_core::pairing::{
     DurableAdmissionFrame, DurableAdmissionMessageKind, InvitationCode, PairingSessionMessage,
 };

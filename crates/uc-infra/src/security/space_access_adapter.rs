@@ -23,7 +23,14 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use zeroize::Zeroize;
 
-use uc_application::deps::{ProfileKeyAccessProbe, ProfileKeyAccessProbePortError};
+use uc_application::deps::{
+    ActivateCompletionHelperAdmissionSecurityPort,
+    ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
+    ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
+    AdmissionSecurityTransitionInput, PrepareSponsorAdmissionSecurityPort, ProfileKeyAccessProbe,
+    ProfileKeyAccessProbePortError, SponsorAdmissionSecurityRequest,
+    SponsorPreparedAdmissionSecurity,
+};
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 
@@ -31,21 +38,16 @@ use super::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
 use super::secrets::{Kek, MasterKey};
 use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
 use uc_core::membership::{
-    ActivateCompletionHelperAdmissionSecurityPort,
-    ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
-    ActivateSponsorAdmissionSecurityRequest, AdmissionReplayId, AdmissionSecurityTransitionError,
-    AdmissionSecurityTransitionInput, BeginRevocationOutcome, BootstrapError, BootstrapId,
+    AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId,
     CurrentMemberSignatureError, CurrentMemberSignaturePort, GroupBootstrapPort,
     GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
     LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
     LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus, MembershipCredential,
-    PendingGroupUpdate, PrepareSponsorAdmissionSecurityPort, PreparedRevocationResolution,
-    ProtectionGroupAdmission, ProtectionGroupId, RevocationId, RevocationOutboxMessage,
-    RevocationRecord, RevocationRepositoryPort, RevocationStage, RevocationStatus,
-    SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError, SpaceProtectionMode,
-    SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
-    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRequest,
-    SponsorPreparedAdmissionSecurity,
+    PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId,
+    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
+    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError,
+    SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
+    SponsorAdmissionSecurityDelivery,
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
@@ -2050,13 +2052,13 @@ impl DefaultSpaceAccessAdapter {
 mod intent_ports {
     use super::*;
     use uc_application::deps::{
-        InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, ProbeProfileKeyAccessPort,
-        ResumeSpaceSessionPort,
+        GroupAdmissionPort, InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort,
+        ProbeProfileKeyAccessPort, ResumeSpaceSessionPort,
     };
     use uc_core::ports::space::{
         CurrentSessionProofKeyPort, DeriveAdmissionProofKeyPort, DeriveProofKeyPort,
-        DeriveSpaceSubkeyPort, GroupAdmissionPort, PrepareAdmissionOfferPort,
-        PrepareAdmissionTargetAccessPort, PrepareJoinOfferPort,
+        DeriveSpaceSubkeyPort, PrepareAdmissionOfferPort, PrepareAdmissionTargetAccessPort,
+        PrepareJoinOfferPort,
     };
 
     #[async_trait]
@@ -2228,46 +2230,6 @@ mod intent_ports {
                 payload,
             )
             .map_err(|error| SpaceAccessError::Internal(error.to_string()))
-        }
-
-        async fn admit_group_member(
-            &self,
-            space_id: &SpaceId,
-            sponsor_device_id: &DeviceId,
-            joiner_device_id: &DeviceId,
-            existing_member_ids: &[DeviceId],
-            key_package: &[u8],
-        ) -> Result<GroupAdmission, SpaceAccessError> {
-            DefaultSpaceAccessAdapter::admit_group_member(
-                self,
-                space_id,
-                sponsor_device_id,
-                joiner_device_id,
-                existing_member_ids,
-                key_package,
-            )
-            .await
-        }
-
-        async fn install_group_join(
-            &self,
-            space_id: &SpaceId,
-            passphrase: &DomainPassphrase,
-            pending: PreparedGroupJoin,
-            welcome: &[u8],
-            encrypted_key_catalog: &[u8],
-            group_epoch: u64,
-        ) -> Result<(), SpaceAccessError> {
-            DefaultSpaceAccessAdapter::install_group_join(
-                self,
-                space_id,
-                passphrase,
-                pending,
-                welcome,
-                encrypted_key_catalog,
-                group_epoch,
-            )
-            .await
         }
     }
 }
@@ -4228,11 +4190,13 @@ mod admission_tests {
 
     #[tokio::test]
     async fn sponsor_admission_preparation_is_complete_and_has_no_active_side_effect() {
-        use uc_core::membership::{
+        use uc_application::deps::{
             ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
-            BaseMembershipHistoryPositionV1, MembershipCredential,
             PrepareSponsorAdmissionSecurityPort, SponsorAdmissionSecurityRecipient,
-            SponsorAdmissionSecurityRequest, ED25519_SIGNATURE_ALGORITHM_V1,
+            SponsorAdmissionSecurityRequest,
+        };
+        use uc_core::membership::{
+            BaseMembershipHistoryPositionV1, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
         };
 
         let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
@@ -4329,13 +4293,14 @@ mod admission_tests {
 
     #[tokio::test]
     async fn completion_helper_applies_only_its_bound_admission_update() {
-        use uc_core::membership::{
+        use uc_application::deps::{
             ActivateCompletionHelperAdmissionSecurityPort,
             ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
-            ActivateSponsorAdmissionSecurityRequest, BaseMembershipHistoryPositionV1,
-            MembershipCredential, PrepareSponsorAdmissionSecurityPort,
+            ActivateSponsorAdmissionSecurityRequest, PrepareSponsorAdmissionSecurityPort,
             SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
-            ED25519_SIGNATURE_ALGORITHM_V1,
+        };
+        use uc_core::membership::{
+            BaseMembershipHistoryPositionV1, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
         };
 
         let (adapter, session, repository, space_id, _directory) = sponsor_fixture();

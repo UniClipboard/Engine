@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    AdmissionAttemptRepositoryPort, DeviceManagementResetDataPort, MemberRepositoryPort,
-    RelationshipStateResetPort, SpaceSecurityStateResetPort,
+    MemberRepositoryPort, RelationshipStateResetPort, SpaceSecurityStateResetPort,
 };
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
 use uc_core::ports::pairing_invitation::{
@@ -17,6 +16,9 @@ use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard::write::MobileConsumableBackfill;
+use crate::deps::{
+    AdmissionAttemptRepositoryPort, AdmissionSpaceTransitionPort, DeviceManagementResetDataPort,
+};
 use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
@@ -55,6 +57,7 @@ pub struct SpaceAdmissionDeps {
 
 pub struct SpaceTransitionDeps {
     pub admission_attempts: Arc<dyn AdmissionAttemptRepositoryPort>,
+    pub admission_space_transition: Arc<dyn AdmissionSpaceTransitionPort>,
     pub device_management_reset_data: Arc<dyn DeviceManagementResetDataPort>,
     pub relationship_reset: Arc<dyn RelationshipStateResetPort>,
     pub space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,

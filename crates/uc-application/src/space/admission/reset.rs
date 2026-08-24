@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use crate::deps::AdmissionAttemptRepositoryError;
 use async_trait::async_trait;
 use thiserror::Error;
-use uc_core::membership::{AdmissionAttemptRepositoryError, AdmissionAttemptRepositoryPort};
+
+use crate::deps::AdmissionAttemptRepositoryPort;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SpaceAdmissionResetError {

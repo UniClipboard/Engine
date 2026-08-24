@@ -10,7 +10,7 @@ impl WorkspaceMembership {
         source_device_id: &DeviceId,
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
         let response = match message {
@@ -55,7 +55,7 @@ impl WorkspaceMembership {
         &self,
         peer: &DeviceId,
     ) -> Result<(), WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
         if matches!(
@@ -71,7 +71,6 @@ impl WorkspaceMembership {
             )?;
             self.persist(&state).await?;
             self.publish(&state);
-            self.notify();
         }
         Ok(())
     }
@@ -90,7 +89,7 @@ impl WorkspaceMembership {
         peer_role: ReconciliationPeerRole,
     ) -> Result<(), WorkspaceConvergenceError> {
         let pages = {
-            let _guard = self.state_lock.lock().await;
+            let _guard = self.state_write_lock.lock().await;
             let state = self.load_state().await?;
             let restricted_decision_delivery = matches!(
                 peer_role,
@@ -111,10 +110,10 @@ impl WorkspaceMembership {
             }
             let Some(encoded) = self
                 .deps
-                .admission_attempts
-                .load_membership_history_v2()
+                .membership_history_repo
+                .load_membership_history()
                 .await
-                .map_err(admission::map_repository_error)?
+                .map_err(WorkspaceConvergenceError::from)?
             else {
                 return Err(WorkspaceConvergenceError::RecoveryRequired);
             };
@@ -317,10 +316,10 @@ impl WorkspaceMembership {
 
         let current_encoded = self
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
-            .map_err(admission::map_repository_error)?;
+            .map_err(WorkspaceConvergenceError::from)?;
         if current_encoded.as_deref()
             == Some(
                 incoming
@@ -396,10 +395,10 @@ impl WorkspaceMembership {
             .encode_persisted_v2()
             .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
         self.deps
-            .admission_attempts
-            .compare_and_replace_membership_history_v2(current_encoded.as_deref(), &replacement)
+            .membership_history_repo
+            .compare_and_replace_membership_history(current_encoded.as_deref(), &replacement)
             .await
-            .map_err(admission::map_repository_error)?;
+            .map_err(WorkspaceConvergenceError::from)?;
         for member in merged.active_members() {
             if let Some(facts) = merged.admission_facts_for(member) {
                 self.save_member_facts(facts, now_ms).await?;
@@ -423,7 +422,6 @@ impl WorkspaceMembership {
             .remove(source_device_id);
         self.persist(state).await?;
         self.publish(state);
-        self.notify();
         Ok(MembershipHistoryMessage::AckV2(if changed {
             MembershipHistoryV2Ack::UpdatesApplied
         } else {
@@ -445,7 +443,7 @@ impl WorkspaceMembership {
             std::time::Duration::from_secs(10);
 
         let history_candidates = {
-            let _guard = self.state_lock.lock().await;
+            let _guard = self.state_write_lock.lock().await;
             let state = self.load_state().await?;
             if state.removed {
                 return Ok(());

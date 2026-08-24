@@ -87,7 +87,7 @@ impl SessionSupervisor {
     pub(super) async fn transition_session(
         &self,
         current_operation: SessionOperationLease,
-    ) -> Result<(), EngineError> {
+    ) -> Result<uc_application::facade::CurrentJoinStatus, EngineError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.operations
             .close_and_wait(Some(current_operation))
@@ -98,15 +98,16 @@ impl SessionSupervisor {
             .await
             .take()
             .ok_or_else(super::operation_unavailable_error)?;
-        let convergence = session.sync_engine.space_transition_recovery();
+        let facade = Arc::clone(&session.facade);
         session
             .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
             .await;
-        convergence
-            .recover_after_session_drain()
+        let status = facade
+            .complete_pending_space_transition()
             .await
             .map_err(|error| operation_error_with_code(1103, "recover space transition", error))?;
-        self.install_new_session(true).await
+        self.install_new_session(true).await?;
+        Ok(status)
     }
 
     pub(super) async fn reset_space(
@@ -212,19 +213,20 @@ impl SessionSupervisor {
             .ok_or_else(super::operation_unavailable_error)?;
         let mut session = ProductionRuntime::build_session(&factory).await?;
         let mut resume_space_activities = resume_space_activities;
-        let convergence = session.sync_engine.space_transition_recovery();
-        if convergence
-            .requires_session_transition()
+        if session
+            .facade
+            .has_pending_space_transition()
             .await
             .map_err(|error| {
                 operation_error_with_code(1103, "inspect pending space transition", error)
             })?
         {
+            let facade = Arc::clone(&session.facade);
             session
                 .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
                 .await;
-            convergence
-                .recover_after_session_drain()
+            facade
+                .complete_pending_space_transition()
                 .await
                 .map_err(|error| {
                     operation_error_with_code(1103, "recover pending space transition", error)
@@ -249,8 +251,8 @@ impl SessionSupervisor {
             }
         }
         if let Some(pending) = factory
-            .profile_convergence
-            .pending_joiner_complete_ack()
+            .space_join
+            .recover_completion()
             .await
             .map_err(|error| {
                 operation_error_with_code(1103, "rebuild join completion acknowledgment", error)

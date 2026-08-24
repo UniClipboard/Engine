@@ -135,31 +135,3 @@ pub enum RedeemPairingInvitationError {
     #[error("internal error: {0}")]
     Internal(String),
 }
-
-/// Failure modes of [`crate::facade::space_setup::SpaceFacade::cancel_invitation`]
-/// (Slice4 P3 T3.2).
-#[derive(Debug, Error)]
-pub enum CancelInvitationError {
-    /// No in-flight invitation to cancel — the holder is empty. Maps
-    /// to HTTP 409 Conflict at the daemon boundary so the UI can
-    /// distinguish "nothing to cancel" from a transport error.
-    #[error("no in-flight invitation to cancel")]
-    NotIssued,
-
-    /// Uncategorised infra / adapter failure.
-    #[error("internal error: {0}")]
-    Internal(String),
-}
-
-/// Failure modes of [`crate::facade::space_setup::SpaceFacade::query_setup_state`]
-/// (Slice4 P3 T3.2).
-#[derive(Debug, Error)]
-pub enum QuerySetupStateError {
-    /// Failed to read the current Space identity or another setup projection.
-    #[error("failed to read setup state: {0}")]
-    StorageFailed(String),
-
-    /// Uncategorised infra / adapter failure.
-    #[error("internal error: {0}")]
-    Internal(String),
-}

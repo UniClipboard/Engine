@@ -62,7 +62,7 @@ use crate::operations::space::cancel_join_space::execute_cancel_join_space;
 use crate::operations::space::create_space::execute_create_space;
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
-use crate::operations::space::join_space::{current_join_result, execute_join_space};
+use crate::operations::space::join_space::{execute_join_space, join_status_result};
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
@@ -80,11 +80,14 @@ impl EngineRuntime for ProductionRuntime {
     ) -> Result<OperationResult, EngineError> {
         match operation {
             Operation::QueryDeviceTrust => {
-                return execute_query_space_membership_status(self.profile_convergence.as_ref())
+                return execute_query_space_membership_status(self.space_membership.as_ref()).await;
+            }
+            Operation::DecideDeviceTrustChange(input) => {
+                return execute_decide_device_trust_change(self.space_membership.as_ref(), input)
                     .await;
             }
             Operation::CancelJoinSpace(input) => {
-                return execute_cancel_join_space(self.profile_convergence.as_ref(), input).await;
+                return execute_cancel_join_space(self.space_join.as_ref(), input).await;
             }
             Operation::FactoryResetSpace => {
                 return execute_factory_reset_space(self.profile_reset.as_ref()).await;
@@ -139,7 +142,7 @@ impl EngineRuntime for ProductionRuntime {
             .as_ref()
             .ok_or_else(super::operation_unavailable_error)?
             .cancellation();
-        let may_require_session_transition = matches!(&operation, Operation::JoinSpace(_));
+        let mut join_requires_session_transition = false;
         let operation_kind = operation.kind();
         let operation = async {
             match operation {
@@ -153,12 +156,10 @@ impl EngineRuntime for ProductionRuntime {
                     execute_recover_session(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::JoinSpace(input) => {
-                    execute_join_space(
-                        self.current_facade().await?.as_ref(),
-                        self.profile_convergence.as_ref(),
-                        input,
-                    )
-                    .await
+                    let joined =
+                        execute_join_space(self.current_facade().await?.as_ref(), input).await?;
+                    join_requires_session_transition = joined.requires_session_transition;
+                    Ok(joined.result)
                 }
                 Operation::IssueInvitation => {
                     execute_issue_invitation(self.current_facade().await?.as_ref()).await
@@ -334,10 +335,7 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::QueryDeviceTrust
                 | Operation::CancelJoinSpace(_)
                 | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
-                Operation::DecideDeviceTrustChange(input) => {
-                    execute_decide_device_trust_change(self.current_facade().await?.as_ref(), input)
-                        .await
-                }
+                Operation::DecideDeviceTrustChange(_) => Err(super::operation_unavailable_error()),
                 Operation::QueryMemberSyncPreferences(input) => {
                     execute_query_member_sync_preferences(
                         self.current_facade().await?.as_ref(),
@@ -353,7 +351,7 @@ impl EngineRuntime for ProductionRuntime {
                     .await
                 }
                 Operation::RemoveMember(input) => {
-                    execute_remove_member(self.current_facade().await?.as_ref(), input).await
+                    execute_remove_member(self.space_membership.as_ref(), input).await
                 }
                 #[cfg(feature = "dev-tools")]
                 Operation::DecideMembershipRemoval(input) => {
@@ -511,26 +509,16 @@ impl EngineRuntime for ProductionRuntime {
                 }
             }
         }
-        if may_require_session_transition && result.is_ok() {
-            let convergence = self
-                .current_session_field(|session| session.sync_engine.space_transition_recovery())
+        if join_requires_session_transition && result.is_ok() {
+            let status = self
+                .session_supervisor
+                .transition_session(
+                    session_lease
+                        .take()
+                        .ok_or_else(super::operation_unavailable_error)?,
+                )
                 .await?;
-            if convergence
-                .requires_session_transition()
-                .await
-                .map_err(|error| {
-                    super::operation_error_with_code(1103, "inspect join space transition", error)
-                })?
-            {
-                self.session_supervisor
-                    .transition_session(
-                        session_lease
-                            .take()
-                            .ok_or_else(super::operation_unavailable_error)?,
-                    )
-                    .await?;
-                return current_join_result(self.profile_convergence.as_ref()).await;
-            }
+            return Ok(join_status_result(status));
         }
         drop(session_lease);
         result

@@ -99,33 +99,43 @@ Relationship: 这些文件已经按明确职责拆开；本次不重组其业务
 ### 目标目录
 
 ```text
-crates/uc-application/src/space/convergence/
+crates/uc-application/src/space/
 ├── mod.rs
 ├── assembly.rs
 ├── runtime.rs
-├── network_recovery.rs
-├── discovery/
 ├── admission/
 │   ├── mod.rs
-│   ├── transaction.rs
-│   ├── flow.rs
-│   ├── completion_recovery.rs
-│   └── tests.rs
-├── membership/
+│   ├── join_space/
+│   ├── cancel_space_join/
+│   ├── complete_pending_space_transition/
+│   ├── query_pending_space_transition/
+│   ├── joiner/
+│   │   ├── durable_flow.rs
+│   │   └── owner.rs
+│   ├── sponsor/
+│   │   ├── durable_flow.rs
+│   │   └── owner.rs
+│   └── durable/
+│       ├── transaction.rs
+│       ├── completion_recovery.rs
+│       └── tests.rs
+├── workspace_membership/
 │   ├── mod.rs
-│   ├── history.rs
-│   ├── removal.rs
-│   ├── effects.rs
-│   ├── bootstrap.rs
-│   ├── legacy_upgrade.rs
-│   ├── group_update_delivery.rs
-│   └── tests.rs
-├── projection/
+│   ├── runtime.rs
+│   ├── discovery/
+│   ├── membership/
+│   │   ├── history.rs
+│   │   ├── removal.rs
+│   │   ├── effects.rs
+│   │   └── bootstrap.rs
+│   └── projection/
+├── query_space_membership_status/
 │   ├── mod.rs
-│   ├── profile.rs
-│   ├── device_trust.rs
-│   ├── current_scope.rs
-│   └── tests.rs
+│   ├── deps.rs
+│   ├── error.rs
+│   ├── model.rs
+│   ├── active_space_status.rs
+│   └── use_case.rs
 ├── connectivity/
 │   ├── mod.rs
 │   ├── reachability.rs
@@ -138,9 +148,9 @@ crates/uc-application/src/space/convergence/
 
 ### Admission
 
-`admission/` 负责从加入请求到 Active、Pending 或 Rejected 的完整工作。`transaction.rs` 是现有 `admission_transaction.rs` 的迁移目标，继续唯一负责可恢复尝试的存取和状态转换。`flow.rs` 负责请求验证、基础历史验证、候选、准备、正式提交、应用、完成、确认、取消、来源检查和本机加入准备。`completion_recovery.rs` 负责完成消息丢失或发起方不可用时的帮助设备恢复。
+`admission/` 负责从加入请求到 Active、Pending 或 Rejected 的完整工作。`durable/transaction.rs` 继续唯一负责可恢复尝试的存取和状态转换。加入方的来源检查、候选、应用与激活归入 `joiner/durable_flow.rs`；邀请方的请求验证、基础历史验证、候选、提交、完成与确认归入 `sponsor/durable_flow.rs`。取消加入和会话关闭后的空间切换分别由标准用例负责。`durable/completion_recovery.rs` 负责完成消息丢失或邀请方不可用时的恢复调度，并复用两侧可靠推进规则。
 
-`admission/mod.rs` 是此领域的唯一入口；它协调持久尝试、正常流程和完成恢复。领域外代码不得分别调用候选、提交或恢复步骤。
+`admission/mod.rs` 只选择并导出此领域模块。加入方握手只依赖加入方内部接口，邀请方运行期只依赖邀请方内部接口；领域外代码不得分别调用候选、提交或恢复步骤。
 
 ### Membership
 
@@ -150,7 +160,7 @@ crates/uc-application/src/space/convergence/
 
 ### Projection
 
-`projection/` 只将已保存事实转换为稳定查询和运行范围。`profile.rs` 承载 `ProfileWorkspaceConvergence` 的构造、活动负责人附着、加入状态投影、取消、无活动 Space 的设备信任结果和版本变化转发。设备管理重置由空间生命周期负责人完整执行，不属于查询投影。`device_trust.rs` 负责完整设备信任查询。`current_scope.rs` 负责当前成员运行范围、内容交换门禁和相应受限端点。
+查询模块只将已保存事实转换为稳定查询和运行范围。profile 范围的加入状态查询、取消和完成确认恢复由 `SpaceJoinFacade` 组合；成员状态查询、活动负责人附着、成员移除动作和版本变化转发由 `SpaceMembershipFacade` 组合。设备管理重置由空间生命周期负责人完整执行，不属于查询投影。当前成员运行范围、内容交换门禁和相应受限端点继续属于成员投影。
 
 `projection/mod.rs` 是投影领域入口。它只能读取既有加密状态或转交活动负责人的完整查询；成员资料、地址、在线状态和安全组关系只能作为独立事实，不能授予普通成员资格。
 
@@ -183,7 +193,7 @@ crates/uc-application/src/space/convergence/
 | --- | --- |
 | `WorkspaceConvergence` 的成员动作、查询和订阅 | 对活动 Space 返回完整成员收敛结果 |
 | `ProfileWorkspaceConvergence` 的加入、取消、重置门禁和设备信任查询 | 在无活动 Space 或活动切换期间维持稳定投影 |
-| `SpaceTransitionRecoveryPort` | 继续由同一负责人判断并恢复空间切换 |
+| `CompletePendingSpaceTransitionUseCase` | 当前会话关闭后继续推进已保存的跨 Space 加入；Engine 只通过 Space Facade 调用 |
 | `MembershipHistoryExchangeEndpointPort` 与完成恢复端点 | 继续只接收受限、已认证的内部消息 |
 | `CurrentWorkspacePeerScopePort` 与内容交换门禁 | 继续从已接受成员历史给出唯一普通运行范围 |
 

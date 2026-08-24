@@ -69,7 +69,7 @@ impl WorkspaceMembership {
     pub(crate) async fn recover_pending_membership_effects(
         &self,
     ) -> Result<(), WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let mut state = self.load_state().await?;
         if state.pending_applied_membership_effects.is_empty() {
             return Ok(());
@@ -77,7 +77,6 @@ impl WorkspaceMembership {
         self.execute_pending_membership_effects(&mut state, self.deps.clock.now_ms())
             .await?;
         self.publish(&state);
-        self.notify();
         Ok(())
     }
     pub(crate) async fn deliver_pending_membership_decisions(
@@ -91,10 +90,10 @@ impl WorkspaceMembership {
     ) -> Result<(), WorkspaceConvergenceError> {
         let Some(encoded) = self
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
-            .map_err(admission::map_repository_error)?
+            .map_err(WorkspaceConvergenceError::from)?
         else {
             return Ok(());
         };

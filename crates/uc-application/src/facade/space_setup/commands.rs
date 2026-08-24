@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::pairing::InvitationCode;
-pub use uc_core::ports::pairing_invitation::PairingInvitationAddressCandidate;
 use uc_core::security::IdentityFingerprint;
 
 // ---------------------------------------------------------------------------
@@ -76,7 +75,7 @@ pub struct RedeemPairingInvitationInput {
     pub preserve_unreadable_history: bool,
 }
 
-/// Internal command for [`crate::space::admission::redeem_invitation::RedeemPairingInvitationUseCase`].
+/// Internal command for [`crate::space::admission::joiner::RedeemPairingInvitationUseCase`].
 ///
 /// Joiner-side UX gathers both fields up front: the user types the
 /// invitation code the sponsor shared and the space passphrase the sponsor
@@ -99,42 +98,6 @@ impl From<RedeemPairingInvitationInput> for RedeemPairingInvitationCommand {
             preserve_unreadable_history: input.preserve_unreadable_history,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Setup state query (Slice4 P3 T3.2)
-// ---------------------------------------------------------------------------
-
-/// Read-only view of setup state surfaced by
-/// [`crate::facade::space_setup::SpaceFacade::query_setup_state`].
-///
-/// Replaces the legacy stateful FSM snapshot exposed via
-/// `SetupFacade::get_state`. The new shape carries only what the
-/// stateless v2 UI flow needs: whether onboarding is done, what
-/// invitation (if any) is currently parked on the sponsor side, and
-/// the local device name to prefill confirmation copy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetupStateView {
-    /// `true` when this device has completed A1 (`InitializeSpace`) or
-    /// B2 (`RedeemPairingInvitation`); `false` on a fresh install.
-    pub has_completed: bool,
-    /// Canonical persisted space identifier for restart restoration.
-    pub space_id: Option<SpaceId>,
-    /// `Some(_)` when the sponsor has a Pending invitation parked in
-    /// the in-memory holder; `None` when there is no in-flight code.
-    /// Multi-pending policy is "earliest-expiring wins".
-    pub current_invitation: Option<CurrentInvitation>,
-    /// Display name persisted in `Settings.general.device_name`, or
-    /// `None` when unset on a fresh install.
-    pub device_name: Option<String>,
-    pub re_pairing_required: bool,
-}
-
-/// Companion to [`SetupStateView::current_invitation`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CurrentInvitation {
-    pub code: InvitationCode,
-    pub expires_at: DateTime<Utc>,
 }
 
 /// Output of a successful B2 redemption.

@@ -1,8 +1,9 @@
-use uc_core::membership::{
-    AdmissionSecurityCommitmentV1, AdmissionSecurityTransitionError,
-    AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
-    JoinerStagedSecurityTransition, SponsorPreparedSecurityTransition,
+use uc_application::deps::{
+    AdmissionSecurityTransitionError, AdmissionSecurityTransitionInput,
+    AdmissionSecurityTransitionPort, JoinerStagedSecurityTransition,
+    SponsorPreparedSecurityTransition,
 };
+use uc_core::membership::AdmissionSecurityCommitmentV1;
 use zeroize::Zeroize;
 
 use super::mls_group::{MlsClientState, MlsGroupEngine, PendingMlsJoin};

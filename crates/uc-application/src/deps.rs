@@ -31,8 +31,7 @@ use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::search::search_key::SearchKeyDerivationPort;
 use uc_core::ports::search::search_pipeline::SearchPipelinePort;
 use uc_core::ports::space::{
-    DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, GroupAdmissionPort,
-    PrepareAdmissionOfferPort,
+    DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, PrepareAdmissionOfferPort,
 };
 use uc_core::ports::*;
 use uc_core::MemberRepositoryPort;
@@ -49,12 +48,38 @@ pub use crate::profile::probe_profile_key_access::{
     ProbeProfileKeyAccessPort, ProbeProfileKeyAccessUseCase, ProfileKeyAccessProbe,
     ProfileKeyAccessProbePortError,
 };
+pub use crate::space::admission::durable::{
+    AdmissionAttemptRepositoryError, AdmissionAttemptRepositoryPort,
+    AdmissionCompletionRecoveryEndpointPort, AdmissionCompletionRecoveryPort,
+    AdmissionCompletionRecoveryTransportError, AdmissionOutboxDeliveryError,
+    AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1, AdmissionOutboxDeliveryRouteV1,
+    CurrentLocalJoinProjectionV1, InvitationConsumeDeliveryResultV1, LocalJoinStartMutationV1,
+};
+pub use crate::space::admission::joiner::GroupAdmissionPort;
+pub use crate::space::admission::security_transition::{
+    ActivateCompletionHelperAdmissionSecurityPort,
+    ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
+    ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
+    AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
+    JoinerStagedSecurityTransition, PrepareSponsorAdmissionSecurityPort,
+    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRecipient,
+    SponsorAdmissionSecurityRequest, SponsorPreparedAdmissionSecurity,
+    SponsorPreparedSecurityTransition,
+};
+pub use crate::space::admission::space_transition::{
+    AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
+    AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
+    DeviceManagementResetDataPort,
+};
 pub use crate::space::current_space::{
     CurrentSpaceIdentityError, CurrentSpaceIdentityPort, InitialSpaceActivationPort,
     PortableCurrentSpaceIdentityPort,
 };
 pub use crate::space::initialize_space::InitializeSpacePort;
 pub use crate::space::lock_space_session::LockSpacePort;
+pub use crate::space::membership_history::{
+    MembershipHistoryRepositoryError, MembershipHistoryRepositoryPort,
+};
 pub use crate::space::membership_state::{
     SpaceMembershipStateRepositoryError, SpaceMembershipStateRepositoryPort,
 };
@@ -184,12 +209,10 @@ pub struct SpaceAccessPorts {
     pub prepare_admission_target_access:
         Arc<dyn uc_core::ports::space::PrepareAdmissionTargetAccessPort>,
     pub group_admission: Arc<dyn GroupAdmissionPort>,
-    pub prepare_sponsor_admission_security:
-        Arc<dyn uc_core::membership::PrepareSponsorAdmissionSecurityPort>,
-    pub activate_sponsor_admission_security:
-        Arc<dyn uc_core::membership::ActivateSponsorAdmissionSecurityPort>,
+    pub prepare_sponsor_admission_security: Arc<dyn PrepareSponsorAdmissionSecurityPort>,
+    pub activate_sponsor_admission_security: Arc<dyn ActivateSponsorAdmissionSecurityPort>,
     pub activate_completion_helper_admission_security:
-        Arc<dyn uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort>,
+        Arc<dyn ActivateCompletionHelperAdmissionSecurityPort>,
     pub group_revocation: Arc<dyn GroupRevocationPort>,
     pub group_bootstrap: Arc<dyn uc_core::membership::GroupBootstrapPort>,
     pub space_protection: Arc<dyn uc_core::membership::SpaceProtectionStatusPort>,

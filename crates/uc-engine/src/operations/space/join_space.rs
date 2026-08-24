@@ -5,19 +5,23 @@ use crate::error_codes::*;
 use tracing::error;
 use uc_application::facade::{
     AppFacade, JoinSpaceError as AppJoinSpaceError, JoinSpaceInput as AppJoinSpaceInput,
-    ProfileSpaceAdmission, RedeemPairingInvitationError,
+    RedeemPairingInvitationError,
 };
 
 use crate::operations::device::member::join_space_status;
 
 use crate::{EngineError, EngineErrorCategory, JoinSpaceInput, OperationResult};
 
+pub(crate) struct JoinSpaceExecution {
+    pub(crate) result: OperationResult,
+    pub(crate) requires_session_transition: bool,
+}
+
 pub async fn execute_join_space(
     facade: &AppFacade,
-    convergence: &ProfileSpaceAdmission,
     input: JoinSpaceInput,
-) -> Result<OperationResult, EngineError> {
-    facade
+) -> Result<JoinSpaceExecution, EngineError> {
+    let joined = facade
         .join_space(AppJoinSpaceInput {
             invitation_code: input.invitation_code,
             device_name: input.device_name,
@@ -26,26 +30,25 @@ pub async fn execute_join_space(
         })
         .await
         .map_err(map_join_space_error)?;
-    current_join_result(convergence).await
+    Ok(JoinSpaceExecution {
+        result: join_status_result(joined.status),
+        requires_session_transition: joined.requires_session_transition,
+    })
 }
 
-pub(crate) async fn current_join_result(
-    convergence: &ProfileSpaceAdmission,
-) -> Result<OperationResult, EngineError> {
-    convergence
-        .current_join()
-        .await
-        .map_err(|error| join_internal_error("query joined space", error))?
-        .map(join_space_status)
-        .map(OperationResult::JoinSpace)
-        .ok_or_else(|| join_internal_error("query joined space", "join result was not persisted"))
+pub(crate) fn join_status_result(
+    status: uc_application::facade::CurrentJoinStatus,
+) -> OperationResult {
+    OperationResult::JoinSpace(join_space_status(status))
 }
 
 fn map_join_space_error(error: AppJoinSpaceError) -> EngineError {
     match error {
         AppJoinSpaceError::DeviceNameRequired => device_name_required_error(),
         AppJoinSpaceError::Admission(error) => map_fresh_join_error(error),
-        AppJoinSpaceError::Settings(_) => join_internal_error("join space", error),
+        AppJoinSpaceError::Settings(_) | AppJoinSpaceError::SavedState(_) => {
+            join_internal_error("join space", error)
+        }
     }
 }
 

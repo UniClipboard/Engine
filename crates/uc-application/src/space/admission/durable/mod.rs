@@ -1,39 +1,36 @@
 mod completion_recovery;
-mod flow;
-mod transaction;
+mod completion_recovery_ports;
+mod error;
+mod ports;
+pub(in crate::space::admission) mod transaction;
 
-use async_trait::async_trait;
-
-pub(in crate::space) use transaction::DurableAdmissionCandidatePayloadV1;
-pub(in crate::space) use transaction::{
-    map_repository_error, DurableAdmissionProjection, DurableAdmissionTransaction,
+pub use completion_recovery_ports::{
+    AdmissionCompletionRecoveryEndpointPort, AdmissionCompletionRecoveryPort,
+    AdmissionCompletionRecoveryTransportError,
 };
+pub use ports::{
+    AdmissionAttemptRepositoryError, AdmissionAttemptRepositoryPort, AdmissionOutboxDeliveryError,
+    AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1, AdmissionOutboxDeliveryRouteV1,
+    CurrentLocalJoinProjectionV1, InvitationConsumeDeliveryResultV1, LocalJoinStartMutationV1,
+};
+
+pub(in crate::space) use transaction::admission_acknowledgment;
+pub(in crate::space) use transaction::DurableAdmissionCandidatePayloadV1;
+pub(in crate::space) use transaction::{map_repository_error, DurableAdmissionTransaction};
 
 #[cfg(test)]
 pub(in crate::space) use transaction::DurableAdmissionCandidateV1;
 
 #[cfg(test)]
 pub(super) use transaction::{
-    admission_acknowledgment, durable_admission_message, verify_candidate_preparation,
-    DurableJoinRecoveryMaterialV1, InvitationConsumeResultV1, JoinerActivationOutcomeV1,
-    PendingMemberRemovalOutcomeV1,
+    durable_admission_message, verify_candidate_preparation, DurableJoinRecoveryMaterialV1,
+    JoinerActivationOutcomeV1, PendingMemberRemovalOutcomeV1,
 };
 
 use super::*;
 use crate::space::workspace_membership::*;
 
-#[async_trait]
-impl SpaceTransitionRecoveryPort for crate::space::admission::SpaceAdmission {
-    async fn requires_session_transition(&self) -> Result<bool, WorkspaceConvergenceError> {
-        crate::space::admission::SpaceAdmission::requires_session_transition(self).await
-    }
-
-    async fn recover_after_session_drain(&self) -> Result<usize, WorkspaceConvergenceError> {
-        self.recover_space_transition_after_session_drain().await
-    }
-}
-
-fn admission_invitation_digest(invitation: &str) -> [u8; 32] {
+pub(in crate::space::admission) fn admission_invitation_digest(invitation: &str) -> [u8; 32] {
     let mut hasher = sha2::Sha256::new();
     hasher.update(b"uniclipboard/admission-invitation-claim/v1\0");
     hasher.update((invitation.len() as u64).to_be_bytes());
@@ -49,7 +46,9 @@ pub(in crate::space) fn admission_resume_public_key_digest(public_key: &[u8]) ->
     hasher.finalize().into()
 }
 
-fn admission_operation_id(attempt_id: uc_core::membership::AdmissionAttemptId) -> [u8; 16] {
+pub(in crate::space::admission) fn admission_operation_id(
+    attempt_id: uc_core::membership::AdmissionAttemptId,
+) -> [u8; 16] {
     let mut hasher = sha2::Sha256::new();
     hasher.update(b"uniclipboard/admission-operation/v1\0");
     hasher.update(attempt_id.as_bytes());
@@ -59,8 +58,8 @@ fn admission_operation_id(attempt_id: uc_core::membership::AdmissionAttemptId) -
     operation_id
 }
 
-fn common_existing_member_delivery_payload(
-    deliveries: &[uc_core::membership::SponsorAdmissionSecurityDelivery],
+pub(in crate::space::admission) fn common_existing_member_delivery_payload(
+    deliveries: &[crate::deps::SponsorAdmissionSecurityDelivery],
 ) -> Result<Vec<u8>, WorkspaceConvergenceError> {
     let Some(first) = deliveries.first() else {
         return Ok(Vec::new());
@@ -78,7 +77,7 @@ fn common_existing_member_delivery_payload(
     Ok(first.payload.clone())
 }
 
-fn validate_candidate_request(
+pub(in crate::space::admission) fn validate_candidate_request(
     candidate: &transaction::DurableAdmissionCandidateV1,
     request: &uc_core::pairing::JoinerRequest,
 ) -> Result<(), WorkspaceConvergenceError> {
@@ -101,7 +100,7 @@ fn validate_candidate_request(
     Ok(())
 }
 
-fn candidate_frame(
+pub(in crate::space::admission) fn candidate_frame(
     attempt_id: uc_core::membership::AdmissionAttemptId,
     message: &uc_core::membership::AdmissionOutboxMessageV1,
 ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
@@ -119,7 +118,7 @@ fn candidate_frame(
     })
 }
 
-fn durable_frame_from_outbox(
+pub(in crate::space::admission) fn durable_frame_from_outbox(
     attempt_id: uc_core::membership::AdmissionAttemptId,
     kind: uc_core::pairing::DurableAdmissionMessageKind,
     purpose: uc_core::membership::AdmissionOutboxPurposeV1,

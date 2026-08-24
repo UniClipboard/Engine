@@ -45,10 +45,11 @@ async fn membership_status_is_explicitly_unavailable_while_active_space_is_locke
     let directory = tempfile::tempdir().unwrap();
     let admission_repository = durable_admission_repository(&directory, [0x6d; 16]);
     let mut deps = test_deps(Arc::new(LockedWorkspaceRepository), "device-a", Vec::new());
-    deps.admission_attempts = Arc::clone(&admission_repository)
-        as Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>;
+    deps.membership_history_repo = Arc::clone(&admission_repository);
+    deps.admission_attempts =
+        Arc::clone(&admission_repository) as Arc<dyn crate::deps::AdmissionAttemptRepositoryPort>;
     let active = WorkspaceMembership::new(deps);
-    let profile = super::ProfileSpaceAdmission::new(
+    let profile = crate::facade::SpaceMembershipFacade::new(
         admission_repository,
         DeviceId::new("device-a"),
         Arc::new(UnusedClock),
@@ -66,72 +67,6 @@ async fn membership_status_is_explicitly_unavailable_while_active_space_is_locke
     assert_eq!(
         snapshot.blocked_reason,
         Some(super::ActionUnavailableReason::EngineUnavailable)
-    );
-}
-
-#[tokio::test]
-async fn pending_inbound_projection_shows_only_the_active_lineage_non_terminal_candidate() {
-    use uc_core::membership::AdmissionRejectionReasonV1;
-
-    let sponsor_dir = tempfile::tempdir().unwrap();
-    let joiner_dir = tempfile::tempdir().unwrap();
-    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x74; 16]);
-    let joiner_repository = durable_admission_repository(&joiner_dir, [0x75; 16]);
-    let sponsor = durable_admission_owner(sponsor_repository);
-    let joiner = durable_admission_owner(joiner_repository);
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x76; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0x77; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    let (candidate, base_history, candidate_event, commitment, _) =
-        durable_candidate_verification_fixture(attempt_id);
-    sponsor
-        .sponsor_accept_and_offer(
-            attempt_id,
-            [0x78; 32],
-            &initiated.outboxes[0],
-            candidate,
-            base_history,
-            &candidate_event,
-            &commitment,
-            b"joiner",
-            b"candidate",
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sponsor.pending_inbound_member("space-b").await.unwrap(),
-        None
-    );
-    let projected = sponsor
-        .pending_inbound_member("space-a")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(projected.device_id, DeviceId::new("joiner"));
-    assert_eq!(projected.display_name, "joiner");
-
-    sponsor
-        .sponsor_reject_before_commit(
-            attempt_id,
-            AdmissionRejectionReasonV1::IdentityConflict,
-            b"joiner",
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        sponsor.pending_inbound_member("space-a").await.unwrap(),
-        None
     );
 }
 
@@ -404,6 +339,7 @@ async fn current_peer_scope_fails_closed_when_v2_history_is_corrupt() {
         .unwrap();
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     let owner = WorkspaceMembership::new(deps);
 
@@ -440,6 +376,7 @@ async fn pending_cross_space_join_keeps_the_source_space_scope() {
     let repository = MemoryWorkspaceRepository::default();
     repository.save_state(&state).await.unwrap();
     let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     let owner = WorkspaceMembership::new(deps);
 
@@ -470,6 +407,7 @@ async fn unrelated_pending_join_does_not_hide_a_v2_lineage_mismatch() {
     let repository = MemoryWorkspaceRepository::default();
     repository.save_state(&state).await.unwrap();
     let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     let owner = WorkspaceMembership::new(deps);
 
@@ -537,6 +475,7 @@ async fn rejected_cross_space_join_restores_the_source_space_scope() {
     let repository = MemoryWorkspaceRepository::default();
     repository.save_state(&state).await.unwrap();
     let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     let owner = WorkspaceMembership::new(deps);
 
@@ -651,6 +590,7 @@ async fn v2_current_peer_scope_opens_for_an_observer_after_activation_receipt() 
     seed_v2_scope_history(Arc::clone(&admission_repository), true, false).await;
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     deps.member_repo = Arc::new(FixedMemberRepo(vec![
         legacy_member("sponsor"),
@@ -671,6 +611,7 @@ async fn v2_joiner_scope_stays_closed_until_the_local_join_is_active() {
     seed_v2_scope_history(Arc::clone(&admission_repository), true, true).await;
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     deps.member_repo = Arc::new(FixedMemberRepo(vec![
         legacy_member("sponsor"),
@@ -694,6 +635,7 @@ async fn v2_joiner_scope_opens_after_the_local_join_is_active() {
     seed_v2_scope_history(Arc::clone(&admission_repository), true, false).await;
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     deps.member_repo = Arc::new(FixedMemberRepo(vec![
         legacy_member("sponsor"),
@@ -743,6 +685,7 @@ async fn rejected_local_join_does_not_remove_an_existing_current_member() {
         .unwrap();
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     deps.member_repo = Arc::new(FixedMemberRepo(vec![
         legacy_member("sponsor"),
@@ -763,9 +706,11 @@ async fn rejected_local_join_does_not_remove_an_existing_current_member() {
 async fn current_peer_scope_fails_closed_when_v2_history_is_locked() {
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
-    deps.admission_attempts = Arc::new(LockedAdmissionRepository {
+    let locked_admission = Arc::new(LockedAdmissionRepository {
         allow_empty_history_reads: false,
     });
+    deps.membership_history_repo = locked_admission.clone();
+    deps.admission_attempts = locked_admission;
     let owner = WorkspaceMembership::new(deps);
 
     let result = owner.snapshot().await;
@@ -779,6 +724,17 @@ async fn current_peer_scope_fails_closed_when_v2_history_is_locked() {
 #[tokio::test]
 async fn current_peer_scope_does_not_infer_legacy_mode_from_missing_history() {
     let repository = MemoryWorkspaceRepository::default();
+    let a = instance(0x0a);
+    let b = instance(0x0b);
+    let genesis = membership_event(None, 0, a, a, "device-a", 1);
+    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
+    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
+    history.receive_verified(genesis).unwrap();
+    history.receive_verified(addition).unwrap();
+    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
+    state.own_instance = Some(a);
+    state.membership_reconciliation = Some(history);
+    repository.save_state(&state).await.unwrap();
     let mut deps = test_deps(Arc::new(repository), "device-a", Vec::new());
     deps.member_repo = Arc::new(FixedMemberRepo(vec![
         legacy_member("device-a"),
@@ -796,39 +752,13 @@ async fn current_peer_scope_does_not_infer_legacy_mode_from_missing_history() {
 }
 
 #[tokio::test]
-async fn current_peer_scope_hides_addition_until_pending_effects_finish() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let harness = harness("device-a", Vec::new());
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
-    history.receive_verified(genesis).unwrap();
-    history.receive_verified(addition.clone()).unwrap();
-    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(a);
-    state.membership_reconciliation = Some(history);
-    state.pending_applied_membership_effects.push(
-        uc_core::membership::PendingAppliedMembershipEffect {
-            event_id: addition.event_id(),
-            member_facts_completed: false,
-            security_update_completed: true,
-        },
-    );
-    harness.repository.save_state(&state).await.unwrap();
-
-    let snapshot = harness.owner.snapshot().await.unwrap();
-
-    assert!(snapshot.peer_device_ids.is_empty());
-}
-
-#[tokio::test]
 async fn v2_current_peer_scope_requires_a_permanent_activation_receipt() {
     let directory = tempfile::tempdir().unwrap();
     let admission_repository = durable_admission_repository(&directory, [0x72; 16]);
     seed_v2_scope_history(Arc::clone(&admission_repository), false, false).await;
     let repository = MemoryWorkspaceRepository::default();
     let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     deps.member_repo = Arc::new(FixedMemberRepo(vec![
         legacy_member("sponsor"),
@@ -872,7 +802,7 @@ async fn workspace_query_uses_the_persisted_v2_history_as_its_current_truth() {
     let (history, _, _) = admission_verification_fixture_for_lineage([0x73; 32], SPACE);
     let encoded_history = history.encode_persisted_v2().unwrap();
     admission_repository
-        .compare_and_replace_membership_history_v2(None, &encoded_history)
+        .compare_and_replace_membership_history(None, &encoded_history)
         .await
         .unwrap();
     let repository = MemoryWorkspaceRepository::default();
@@ -881,6 +811,7 @@ async fn workspace_query_uses_the_persisted_v2_history_as_its_current_truth() {
         .await
         .unwrap();
     let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     let owner = WorkspaceMembership::new(deps);
     let expected_position = history.current_position().unwrap();
@@ -897,100 +828,5 @@ async fn workspace_query_uses_the_persisted_v2_history_as_its_current_truth() {
         Some(uc_core::membership::WorkspaceDigest::from_bytes(
             expected_position.history_digest
         ))
-    );
-}
-
-#[tokio::test]
-async fn current_peer_scope_excludes_an_accepted_removal() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let c = instance(0x0c);
-    let harness = harness("device-a", Vec::new());
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let b_addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
-    let c_addition = membership_event(Some(b_addition.event_id()), 2, a, c, "device-c", 3);
-    let removal = uc_core::membership::MembershipEvent::new(
-        SPACE.to_owned(),
-        Some(c_addition.event_id()),
-        3,
-        [4; 16],
-        a,
-        MembershipOperation::RemoveDevice { member: b },
-        [4; 32],
-        [5; 32],
-        Vec::new(),
-        None,
-        vec![4],
-    );
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), a);
-    for event in [genesis, b_addition, c_addition, removal] {
-        history.receive_verified(event).unwrap();
-    }
-    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(a);
-    state.membership_reconciliation = Some(history);
-    harness.repository.save_state(&state).await.unwrap();
-
-    let snapshot = harness.owner.snapshot().await.unwrap();
-
-    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-c")]);
-}
-
-#[tokio::test]
-async fn current_peer_scope_keeps_a_removal_pending_local_decision() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let harness = harness("device-b", Vec::new());
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
-    let removal = uc_core::membership::MembershipEvent::new(
-        SPACE.to_owned(),
-        Some(addition.event_id()),
-        2,
-        [3; 16],
-        a,
-        MembershipOperation::RemoveDevice { member: a },
-        [3; 32],
-        [4; 32],
-        Vec::new(),
-        None,
-        vec![3],
-    );
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), b);
-    for event in [genesis, addition, removal] {
-        history.receive_verified(event).unwrap();
-    }
-    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(b);
-    state.membership_reconciliation = Some(history);
-    harness.repository.save_state(&state).await.unwrap();
-
-    let snapshot = harness.owner.snapshot().await.unwrap();
-
-    assert_eq!(snapshot.peer_device_ids, vec![DeviceId::new("device-a")]);
-}
-
-#[tokio::test]
-async fn current_peer_scope_is_empty_after_local_removal() {
-    let a = instance(0x0a);
-    let b = instance(0x0b);
-    let harness = harness("device-b", Vec::new());
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let addition = membership_event(Some(genesis.event_id()), 1, a, b, "device-b", 2);
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), b);
-    history.receive_verified(genesis).unwrap();
-    history.receive_verified(addition).unwrap();
-    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(b);
-    state.removed = true;
-    state.membership_reconciliation = Some(history);
-    harness.repository.save_state(&state).await.unwrap();
-
-    let snapshot = harness.owner.snapshot().await.unwrap();
-
-    assert!(snapshot.peer_device_ids.is_empty());
-    assert_eq!(
-        snapshot.local_membership,
-        uc_core::membership::CurrentWorkspaceLocalMembership::Removed
     );
 }

@@ -52,7 +52,8 @@ const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 pub(crate) struct ProductionRuntime {
     app_version: String,
     session_supervisor: Arc<SessionSupervisor>,
-    profile_convergence: Arc<uc_application::facade::ProfileSpaceAdmission>,
+    space_join: Arc<uc_application::facade::SpaceJoinFacade>,
+    space_membership: Arc<uc_application::facade::SpaceMembershipFacade>,
     profile_reset: Arc<ProfileFactoryResetUseCase>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     task_registry: Arc<TaskRegistry>,
@@ -77,7 +78,8 @@ struct SessionFactory {
     iroh_bind_port_override: Option<u16>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     recovery_generation: Arc<AtomicU64>,
-    profile_convergence: Arc<uc_application::facade::ProfileSpaceAdmission>,
+    space_join: Arc<uc_application::facade::SpaceJoinFacade>,
+    space_membership: Arc<uc_application::facade::SpaceMembershipFacade>,
 }
 
 struct ProductionSession {
@@ -155,13 +157,14 @@ fn re_pairing_scope_for_setup_state(
         .then_some(crate::RePairingScope::AllDevices)
 }
 
-async fn spawn_profile_workspace_events(
+async fn spawn_space_events(
+    task_name: &'static str,
     mut changes: tokio::sync::broadcast::Receiver<u64>,
     tasks: &Arc<TaskRegistry>,
     events: EventSender,
 ) {
     tasks
-        .spawn("workspace_convergence_events", move |cancel| async move {
+        .spawn(task_name, move |cancel| async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
@@ -295,7 +298,10 @@ impl ProductionRuntime {
             .map_err(|error| startup_error("dependency wiring", error))?;
 
         let session = Arc::new(Mutex::new(None));
-        let profile_convergence = uc_application::facade::ProfileSpaceAdmission::new(
+        let space_join = uc_application::facade::SpaceJoinFacade::new(Arc::clone(
+            &wired.sync_engine.admission_attempt_repository,
+        ));
+        let space_membership = uc_application::facade::SpaceMembershipFacade::new(
             Arc::clone(&wired.sync_engine.admission_attempt_repository),
             wired.deps.device.device_identity.current_device_id(),
             Arc::clone(&wired.deps.system.clock),
@@ -344,14 +350,23 @@ impl ProductionRuntime {
             iroh_bind_port_override,
             network_recovery: Arc::clone(&network_recovery),
             recovery_generation: Arc::new(AtomicU64::new(0)),
-            profile_convergence: Arc::clone(&profile_convergence),
+            space_join: Arc::clone(&space_join),
+            space_membership: Arc::clone(&space_membership),
         });
         session_supervisor.configure_factory(Arc::clone(&session_factory));
         session_supervisor.resume().await?;
         spawn_network_recovery_events(network_recovery.subscribe(), &task_registry, events.clone())
             .await;
-        spawn_profile_workspace_events(
-            profile_convergence.subscribe(),
+        spawn_space_events(
+            "space_join_events",
+            space_join.subscribe(),
+            &task_registry,
+            events.clone(),
+        )
+        .await;
+        spawn_space_events(
+            "space_membership_events",
+            space_membership.subscribe(),
             &task_registry,
             events.clone(),
         )
@@ -388,7 +403,8 @@ impl ProductionRuntime {
         Ok(Self {
             app_version,
             session_supervisor,
-            profile_convergence,
+            space_join,
+            space_membership,
             profile_reset,
             network_recovery,
             task_registry,
@@ -513,7 +529,7 @@ impl ProductionRuntime {
             .await;
 
         factory
-            .profile_convergence
+            .space_membership
             .attach_active(Some(sync_engine.space_modules()))
             .await;
 
@@ -677,7 +693,7 @@ mod tests {
         let (changes, change_stream) = tokio::sync::broadcast::channel(8);
         let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
         let tasks = Arc::new(TaskRegistry::new());
-        spawn_profile_workspace_events(change_stream, &tasks, events).await;
+        spawn_space_events("test_space_events", change_stream, &tasks, events).await;
         changes.send(1).unwrap();
 
         assert_eq!(
@@ -693,7 +709,7 @@ mod tests {
         let (changes, change_stream) = tokio::sync::broadcast::channel(1);
         let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
         let tasks = Arc::new(TaskRegistry::new());
-        spawn_profile_workspace_events(change_stream, &tasks, events).await;
+        spawn_space_events("test_space_events", change_stream, &tasks, events).await;
         changes.send(1).unwrap();
         changes.send(2).unwrap();
 

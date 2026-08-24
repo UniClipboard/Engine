@@ -1,1127 +1,700 @@
-# `uc-app/AGENTS.md`
+# Clean Architecture 必须遵循的规则
 
-## 1. 文档目的
+## 规则 1：依赖只能向内
 
-`uc-app` 是 UniClipboard 的应用层，负责把 `uc-core` 中定义的领域能力，组织成可执行的用例、流程和对外服务接口。
+这是最高优先级规则。
 
-本规范用于约束所有开发者和 AI Agent 在修改 `uc-app` 时的设计与编码行为，确保：
-
-* 应用层只做流程编排，不定义底层业务真相
-* 不侵入 `uc-core` 的领域边界
-* 不下沉到 `uc-infra` 的实现细节
-* 用例、状态机、orchestrator、facade 职责清晰
-* 对 UI / CLI / daemon API 提供稳定、明确、可演化的应用接口
-
-**任何修改 `uc-app` 的提交，都必须遵循本规范并完成自我审查。**
-
----
-
-## 2. `uc-app` 的定位
-
-### 2.1 核心职责
-
-`uc-app` 只负责以下事情：
-
-1. **用例编排**
-
-   * 将多个 domain object、ports、policies 串起来完成一个用户可感知动作
-
-2. **应用流程控制**
-
-   * 例如 setup、join space、clipboard capture、sync、search 等流程推进
-
-3. **状态机与流程状态管理**
-
-   * 管理复杂的应用阶段与状态转换
-   * 但状态机表达的是流程，而不是底层技术协议
-
-4. **事务边界与一致性协调**
-
-   * 决定某个 use case 内哪些步骤属于同一次应用动作
-
-5. **面向上层提供 facade / application service**
-
-   * 给 UI、CLI、daemon API 提供稳定接口
-   * 隐藏 `uc-core` 和 `uc-infra` 的细节
-
-6. **应用层事件协调**
-
-   * 处理来自 infra / core 的信号，并驱动流程推进
-
----
-
-### 2.2 非职责
-
-以下内容**不属于** `uc-app`：
-
-| 类别      | 示例                                          |
-| ------- | ------------------------------------------- |
-| 领域真相定义  | `ClipboardEntry` 的核心业务规则                    |
-| 基础设施实现  | SQLite、libp2p、文件系统、HTTP client              |
-| 平台细节    | AppData、Windows Clipboard、Keychain          |
-| 表示层逻辑   | HTTP DTO、前端 ViewModel、Tauri command request |
-| 启动装配    | wiring、bootstrap、main 入口                    |
-| 第三方类型传播 | 直接暴露 `sqlx::Error`、`libp2p::PeerId`         |
-
----
-
-## 3. 分层关系
+固定依赖方向：
 
 ```text
-UI / CLI / Daemon API
-        ↓
-      uc-app
-        ↓
-      uc-core
-        ↑
-      uc-infra
+Infrastructure
+      ↓
+Application
+      ↓
+Domain/Core
 ```
 
-### 强制规则
+也就是说：
 
-* `uc-app` **可以依赖** `uc-core`
-* `uc-app` **可以依赖** `uc-core` 中定义的 ports
-* `uc-app` **不可以依赖**具体 infra 实现类型
-* `uc-app` **不可以自己重新定义领域真相**
-* `uc-app` **不可以承担表示层职责**
-* 对外只暴露 `src/facade/` 目录下的 **Facade**（以及经 Facade 转发的 Command / Query / Result / Error / 状态枚举）作为应用层入口；业务子模块（`space/`、`clipboard/`、`transfer/`、`search/`、`settings/` 等）与 UseCase / Orchestrator / StateMachine / SessionManager 等实现细节一律 `pub(crate)`，外部 crate 不得直接访问 —— 详见 §11.4
+```text
+domain
+    不依赖 application
+    不依赖 infrastructure
+
+application
+    可以依赖 domain
+    不依赖 infrastructure
+
+infrastructure
+    可以依赖 application
+    可以依赖 domain
+```
+
+Rust crate 必须满足：
+
+```text
+uc-core
+   ↑
+uc-application
+   ↑
+uc-infra
+```
+
+严禁：
+
+```text
+uc-core        → uc-application
+uc-core        → uc-infra
+uc-application → uc-infra
+```
+
+这是第一条检查项。
 
 ---
 
-## 4. 应用层的核心原则
+# 规则 2：UseCase 必须属于 Application
 
-## 4.1 编排，而不是定义业务真相
+只要代码表达的是：
 
-`uc-app` 的职责是把已有业务能力组织起来，而不是重新发明业务规则。
+> 用户或系统发起一个业务动作，然后协调多个能力完成这个动作。
 
-错误示例：
+它就是 UseCase。
 
-* 在 use case 中重新定义“什么叫已配对”
-* 在 orchestrator 中私自决定“哪些记录应同步”
-* 在 façade 中直接构造业务规则，绕开 core policy
+例如：
 
-正确做法：
+```text
+RebuildSpaceUseCase
+JoinSpaceUseCase
+RemoveDeviceUseCase
+PairDeviceUseCase
+SendClipboardUseCase
+```
 
-* 业务规则归 `uc-core`
-* 应用层只负责“什么时候调用、按什么顺序调用、如何汇总结果”
+必须放：
+
+```text
+application/
+```
+
+不要放：
+
+```text
+core/
+infra/
+```
+
+UseCase 负责：
+
+```text
+流程编排
+顺序
+事务边界
+业务级失败处理
+调用多个领域对象 / Port
+```
+
+UseCase 不负责：
+
+```text
+SQL
+HTTP
+QUIC
+iroh
+文件系统
+操作系统 API
+序列化实现
+```
 
 ---
 
-## 4.2 面向用例，不面向技术堆栈
+# 规则 3：Port 归“需要它的人”所有
 
-`uc-app` 里的模块应围绕用户动作和业务流程组织，而不是围绕技术实现组织。
+这是你现在最需要固定下来的规则。
 
-推荐：
+判断：
 
-* `setup`
-* `space_access`
-* `clipboard_capture`
-* `clipboard_sync`
-* `search`
-* `settings`
-* `facade`
+> 谁提出“我需要这个能力”，Port 就定义在哪一层。
+
+例如：
+
+```rust
+RebuildSpaceUseCase
+    ↓ needs
+RebindSpaceSessionPort
+```
+
+那么：
+
+```text
+RebindSpaceSessionPort
+```
+
+属于：
+
+```text
+application
+```
+
+因为是 Application 需要这个能力。
+
+反过来：
+
+```rust
+ExpirationPolicy
+    ↓ needs
+Clock
+```
+
+如果 `ExpirationPolicy` 是 Domain：
+
+```text
+ClockPort
+```
+
+属于：
+
+```text
+domain/core
+```
+
+所以不要按“它最终由 infra 实现”来决定 Port 放哪。
+
+必须按：
+
+```text
+谁消费接口
+```
+
+来决定。
+
+---
+
+# 规则 4：只有 Domain 真正使用的 Port 才能进入 Core
+
+这条可以作为 code review 的硬检查。
+
+一个 Port 想进入 `uc-core`，必须回答：
+
+> 是否存在 core/domain 中的代码直接依赖这个 trait？
+
+例如：
+
+```rust
+pub struct ExpirationPolicy {
+    clock: Arc<dyn Clock>,
+}
+```
+
+那么：
+
+```rust
+trait Clock
+```
+
+可以在 core。
+
+但如果：
+
+```rust
+trait RebindSpaceSessionPort
+```
+
+只有：
+
+```rust
+RebuildSpaceUseCase
+```
+
+在使用：
+
+```rust
+pub struct RebuildSpaceUseCase {
+    session: Arc<dyn RebindSpaceSessionPort>,
+}
+```
+
+那么它不能放 core。
+
+必须放 application。
+
+---
+
+# 规则 5：禁止建立“公共 Port 仓库”
+
+不要出现这种结构：
+
+```text
+uc-core/
+└── ports/
+    ├── SettingsPort
+    ├── DeviceIdentityPort
+    ├── NetworkPort
+    ├── RebuildPort
+    ├── SessionPort
+    ├── ClipboardPort
+    └── ...
+```
+
+如果这些 Port 实际属于完全不同的 UseCase，这种结构会迅速失去业务语义。
+
+优先：
+
+```text
+application/
+├── rebuild_space/
+│   ├── use_case.rs
+│   ├── ports.rs
+│   └── error.rs
+│
+├── join_space/
+│   ├── use_case.rs
+│   ├── ports.rs
+│   └── error.rs
+│
+└── sync_clipboard/
+    ├── use_case.rs
+    ├── ports.rs
+    └── error.rs
+```
+
+即：
+
+> UseCase-specific Port 必须和对应 UseCase 放在同一个业务模块附近。
+
+---
+
+# 规则 6：Domain 不允许出现技术词汇
+
+`core/domain` 里看到以下词汇，要高度警惕：
+
+```text
+Sqlite
+HTTP
+REST
+QUIC
+Iroh
+TCP
+Redis
+JSON
+Tauri
+Android
+iOS
+Windows
+Keychain
+Filesystem
+```
+
+Domain 应该说：
+
+```text
+Space
+Membership
+Device
+Identity
+Invitation
+Peer
+ClipboardItem
+Authorization
+```
+
+例如：
+
+不好：
+
+```rust
+SqliteSpaceRepository
+HttpDeviceClient
+IrohSessionManager
+```
+
+Domain 里应该只出现：
+
+```rust
+SpaceRepository
+DeviceDirectory
+SessionBinding
+```
+
+具体技术实现全部在 infra。
+
+---
+
+# 规则 7：Application Port 必须描述“能力”，不能描述实现
+
+Port：
+
+```rust
+trait RebindSpaceSessionPort
+```
+
+可以。
+
+因为它描述的是：
+
+> 重新绑定 Space Session 的能力。
 
 不推荐：
 
-* `database_logic`
-* `network_flow`
-* `http_service`
-* `libp2p_orchestrator`
-
----
-
-## 4.3 上层只看见“应用动作”和“应用状态”
-
-UI / CLI / daemon API 不应直接理解：
-
-* 多个 repository 的调用顺序
-* 多个 port 的协调方式
-* 复杂的底层 domain 细节拼装
-* infra 失败细节
-
-`uc-app` 应对上层暴露：
-
-* 清晰的命令
-* 清晰的查询
-* 清晰的状态
-* 清晰的错误语义
-
----
-
-## 4.4 应用层必须显式承担流程复杂性
-
-复杂性不能靠“散在各个 handler 里”来消化。
-
-当一个流程涉及：
-
-* 多步骤推进
-* 用户输入
-* 异步事件
-* 超时
-* 取消
-* 外部系统结果回调
-
-就应该明确建模为：
-
-* state machine
-* orchestrator
-* coordinator
-* application service
-
-而不是几个函数随手串一下。
-
----
-
-## 5. `uc-app` 中允许包含的内容
-
-### 5.1 Use Case
-
-例如：
-
-* `StartNewSpaceUseCase`
-* `StartJoinSpaceUseCase`
-* `SubmitSpacePassphraseUseCase`
-* `CaptureClipboardUseCase`
-* `SearchClipboardUseCase`
-* `UpdateSettingsUseCase`
-
----
-
-### 5.2 Orchestrator / Coordinator
-
-适用于跨多个 port、多个阶段的长流程。
-
-例如：
-
-* `SetupOrchestrator`
-* `FileTransferOrchestrator`
-* `PairingInboundOrchestrator`
-
----
-
-### 5.3 State Machine
-
-适用于流程状态显式化。
-
-例如：
-
-* onboarding / setup 状态机
-* pairing 状态机
-* transfer 会话状态机
-
----
-
-### 5.4 Application Facade
-
-用于向 UI / CLI / daemon API 提供稳定入口。
-
-例如：
-
-* `SetupFacade`
-* `ClipboardFacade`
-* `SearchFacade`
-
----
-
-### 5.5 Command / Query Model
-
-面向上层应用调用的输入输出模型。
-
-注意：这里是**应用层模型**，不是 HTTP DTO，也不是数据库 model。
-
----
-
-### 5.6 应用层错误
-
-例如：
-
-* `SetupError`
-* `ClipboardCaptureError`
-* `SearchError`
-
-这些错误应表达**应用动作失败**，而不是底层库错误。
-
----
-
-## 6. `uc-app` 中禁止包含的内容
-
-## 6.1 禁止直接写 infra 实现逻辑
-
-不允许在 `uc-app` 中：
-
-* 直接访问 SQLite schema
-* 直接读写文件
-* 直接操作 libp2p protocol
-* 直接使用平台 API
-* 直接使用加密算法库
-
-`uc-app` 必须通过 `uc-core` 定义的 port 与外界交互。
-
----
-
-## 6.2 禁止直接暴露表示层模型
-
-不允许把这些东西放进 `uc-app` 作为公共真相：
-
-* HTTP request / response DTO
-* Tauri command 入参 / 出参
-* 前端页面状态对象
-* CLI 参数 parser 类型
-
-这些属于表示层或入口层。
-
----
-
-## 6.3 禁止把应用层写成“巨型 service”
-
-高度警惕以下命名：
-
-* `AppService`
-* `SystemService`
-* `GlobalCoordinator`
-* `MainUseCase`
-* `EverythingFacade`
-
-如果一个对象同时做：
-
-* 状态机
-* repository 调用
-* cache
-* 日志聚合
-* 事件发布
-* UI 输出转换
-
-说明已经失控，必须拆分。
-
----
-
-## 6.4 禁止让 `uc-app` 反向定义 `uc-core`
-
-错误方向：
-
-* 因为某个 use case 写起来方便，就给 domain 塞奇怪字段
-* 因为 UI 需要一个状态，就把 UI 状态直接写进 core entity
-* 因为 API 返回需要，就修改 core model 结构
-
-正确方向：
-
-* app 适配 core
-* 上层也适配 app
-* 不让 core 为某一层临时需求变形
-
----
-
-## 7. 模块组织规范
-
-### 7.1 根目录只表达稳定分类
-
-`src/` 根目录不是历史功能的堆放处。一个目录只能回答一个问题：它是对外入口、某个业务领域的完整流程、持续运行的流程、组装数据，还是小型共享能力。
-
-目标结构如下；实现迁移时按一个业务领域完整移动，不能只搬一半文件后保留旧路径。
-
-```text
-uc-app/
-  src/
-    facade/         # 唯一对外入口；按业务领域提供稳定接口
-    clipboard/      # 捕获、历史、恢复、出入站、活动剪贴板
-    space/          # lifecycle、admission、roster、convergence
-    transfer/       # 内容与文件传输的完整流程
-    search/         # 查询、索引和维护
-    settings/       # 设置、升级与配置迁移
-    deps.rs         # 仅保存组装所需的依赖分组，不含流程
-    support/        # 小型、无业务所有权的共用能力
+```rust
+trait IrohRebindPort
 ```
 
-领域目录内部可以按职责继续细分，例如 `usecase.rs`、`coordinator.rs`、`runtime.rs`、`commands.rs`、`queries.rs`、`errors.rs`。文件名服务于领域，不得让同一领域同时分散在根目录、集中或嵌套的 `usecases/` 和 `facade/` 三处。`facade/` 只保存稳定入口与外部需要理解的类型；运行期、协调器、会话、缓存、事件总线、投影构建和内部适配必须留在所属领域或 `support/`。
+因为 `iroh` 是实现细节。
 
-不推荐按“技术角色”切碎，例如：
-
-```text
-services/
-repositories/
-managers/
-helpers/
-handlers/
-```
-
-这种结构后面很容易失焦。
-
-### 7.2 目录归属的判断顺序
-
-新增代码前依次回答：
-
-1. 这是谁的完整结果？先归入对应业务领域，不能先按“它是一个 use case”决定目录。
-2. 调用结束后流程是否仍会等待事件、重试或跨重启继续？是则归该领域的 `runtime` / `coordinator`，否则才是短动作 use case。
-3. 外部调用方是否需要理解它？需要时只在 `facade/` 暴露意图、结果、查询或订阅；实现仍留在业务领域。
-4. 它是否只有组装意义、没有业务顺序？只有这种情况才进入 `deps.rs`；实际装配仍属于 `uc-engine`。
-
-`workspace_convergence`、`trusted_peer`、`pairing`、`clipboard_capture` 这类已有根目录模块在迁移时必须归入一个明确的空间、成员或剪贴板领域。禁止以“先保留原位置”为由长期形成两套入口。
-
----
-
-## 8. Use Case 设计规范
-
-## 8.1 一个 use case 表达一个明确动作
-
-一个 use case 应该回答：
-
-> “用户或系统到底想完成什么？”
-
-例如：
-
-* 启动新空间
-* 提交加入空间口令
-* 捕获当前剪切板
-* 查询最近记录
-* 更新设置
-
-而不是：
-
-* `HandleClipboard`
-* `ProcessData`
-* `DoSetup`
-
----
-
-## 8.2 Use Case 应显式定义输入与输出
-
-不要让 use case 靠“读全局状态 + 改全局状态”工作。
-
-推荐：
+也不推荐：
 
 ```rust
-pub struct StartJoinSpaceCommand {
-    pub sponsor_device_id: DeviceId,
-}
+trait HttpSpaceApi
+```
 
-pub struct StartJoinSpaceResult {
-    pub status: SetupStatus,
+除非 HTTP 本身就是业务概念，这种情况很少。
+
+---
+
+# 规则 8：Infrastructure 只能实现规则，不能决定业务流程
+
+Infra 可以：
+
+```rust
+impl RebindSpaceSessionPort for IrohSessionAdapter
+```
+
+但是 Infra 里面不能出现：
+
+```rust
+if rebuild_completed {
+    rebuild_membership();
+    mark_setup_finished();
 }
 ```
 
-这样边界清晰，也方便测试。
+如果这表达的是业务流程，它必须回到 Application。
 
----
-
-## 8.3 Use Case、Coordinator 与 Facade 的分工
-
-三者不能按文件大小或是否给上层调用区分，必须按完整职责区分：
-
-| 类型 | 唯一职责 | 可以做什么 | 不可以做什么 |
-| --- | --- | --- | --- |
-| Use Case | 完成一个明确且短暂的用户或系统动作 | 调用多个 port，决定本次动作顺序、事务边界和稳定结果 | 对外暴露内部构造、长期等待事件、持有重试或会话状态 |
-| Coordinator / Runtime | 持续推进一个需要事件、超时、重试、暂停、恢复或关闭的完整流程 | 持有流程状态，统一处理事件、重试和关闭 | 把步骤暴露给 facade、调用方或其他领域手工拼接 |
-| Facade | 提供调用方只需理解一次的稳定入口 | 选择一个内部负责人，转换为稳定命令、查询、结果或订阅 | 实现业务判断、状态推进、循环、退避、超时、持久化或协议处理 |
-
-一个动作若只需调用单个 use case，facade 仍可以是薄入口：它的价值是稳定接口，不是重复实现。一个 facade 若需要根据中间结果决定下一步，必须先建立或扩展私有的 use case / coordinator，再由 facade 调用它。
-
----
-
-## 8.4 Use Case 应避免承担长生命周期状态
-
-短动作适合 `UseCase`。
-
-长流程适合：
-
-* `Orchestrator`
-* `StateMachine`
-* `Coordinator`
-
-如果一个 use case 要记住：
-
-* 当前步骤
-* 等待用户输入
-* 超时
-* 异步回调
-* 重试次数
-
-那通常已经不是单纯 use case 了。
-
----
-
-## 9. Orchestrator 设计规范
-
-## 9.1 Orchestrator 的职责是“推进流程”
-
-适用于：
-
-* 多步流程
-* 事件驱动推进
-* 需要维护应用状态
-* 跨多个 port 和 domain object
-
-例如：
-
-* setup
-* pairing
-* file transfer session
-* join flow
-
----
-
-## 9.2 Orchestrator 不是万能垃圾桶
-
-不允许一个 orchestrator 同时负责：
-
-* 用户输入校验
-* 全部业务规则判断
-* repository 实现细节
-* UI 显示状态组装
-* API DTO 转换
-* 所有日志与监控格式拼装
-
-Orchestrator 只做一件事：
-
-> **在应用层推进一个复杂流程**
-
----
-
-## 9.3 Orchestrator 必须显式定义状态与事件
-
-如果是长流程，必须明确：
-
-* 当前状态是什么
-* 接收什么事件
-* 每个事件下允许哪些转移
-* 哪些动作在转移时触发
-* 哪些错误可恢复，哪些不可恢复
-
-不允许靠大量布尔值和 if-else 链撑流程。
-
----
-
-## 10. State Machine 设计规范
-
-## 10.1 状态机表达的是应用流程，不是协议实现
-
-例如 `setup` 状态机可以表达：
-
-* Idle
-* WaitingForDeviceSelection
-* WaitingForPassphrase
-* WaitingForProof
-* Completed
-* Failed
-
-但不应直接表达：
-
-* libp2p stream open
-* websocket frame ack
-* tcp reconnecting
-
-这些是 infra 细节。
-
----
-
-## 10.2 状态机必须有单一真相来源
-
-UI、CLI、daemon API 应从统一的 `ApplicationStatus` 或流程状态模型读取状态。
-
-不允许：
-
-* UI 自己推断一半
-* handler 自己判断一半
-* orchestrator 自己藏一半
-* infra 事件里再带一半
-
-状态真相必须单点收口。
-
----
-
-## 10.3 状态机必须显式支持失败、取消、超时
-
-不能只建 happy path。
-
-必须考虑：
-
-* 用户取消
-* 对端断开
-* 超时
-* 输入错误
-* 中途重试
-* 资源不可用
-* 会话失效
-
----
-
-## 11. Facade 设计规范
-
-## 11.1 Facade 是给上层的稳定入口
-
-Facade 的目标：
-
-* 降低 UI / CLI / daemon API 对内部结构的理解成本
-* 隐藏多个 use case / orchestrator / repository 的协调细节
-* 提供一致的命令与查询接口
-
-例如：
-
-* `get_status()`
-* `start_new_space()`
-* `start_join_space()`
-* `submit_passphrase()`
-* `cancel()`
-
----
-
-## 11.2 Facade 不应重新承载复杂业务流程
-
-Facade 应该是入口，不应成为另一个巨型 orchestrator。
-
-Facade 内部可以调用：
-
-* use case
-* orchestrator
-* query service
-
-但不应自己塞满：
-
-* 状态流转逻辑
-* 多阶段流程细节
-* 大量领域判断
-
-`AppFacade` 只负责聚合业务领域入口，不能成为所有动作的平铺转发清单。它应让调用方通过少量领域入口理解系统，例如空间（含成员）、剪贴板、传输、搜索和设置；每个领域 facade 再提供该领域完整的命令、查询和订阅。
-
----
-
-## 11.3 Facade 输出应面向应用语义，而不是领域内部细节
-
-对 UI 暴露：
-
-* `SetupStatus`
-* `SearchResultPage`
-* `ClipboardPreview`
-
-而不是直接暴露：
-
-* 十几个 domain object 拼装结果
-* 底层 repository raw data
-* infra event 原始消息
-
----
-
-## 11.4 对外边界：`src/facade/` 是 uc-application 的唯一对外出口
-
-### 11.4.1 强制铁律（必读）
-
-**外部 crate（daemon / tauri / CLI / bootstrap / 任何非 `uc-application` 的消费者）访问 `uc-application` 的业务能力，唯一合法路径是 `src/facade/` 下暴露的 Facade、命令、查询、结果、错误和状态。**
-
-换言之：
-
-* 外部消费者只能 `use uc_application::facade::...`（或等价的顶层 `pub use` 再导出，但再导出的来源必须是 `src/facade/`）
-* 外部消费者 **不得** `use uc_application::space::...` / `uc_application::clipboard::...` / `uc_application::transfer::...` 等业务子模块的任何类型、函数、构造器
-* 业务子模块（如 `space/`、`clipboard/`、`transfer/`、`search/`、`settings/`）对外 crate 的默认可见性应为 `pub(crate)`；它们的实现只能由 crate 内部使用
-* `deps.rs` 是唯一例外：它只允许公开 Engine 组装所需的数据分组；不得公开业务动作、流程状态或内部负责人。Engine 通过它取得依赖后，仍只能调用 facade 的业务入口。
-
-一句话记忆：
-
-> **“外部看 `uc-application`，眼里只有 `facade/`。其他模块不存在。”**
+Infra 负责：
 
 ```text
-External (daemon / tauri / CLI / bootstrap)
-        ↓     只能从这里进入
-    src/facade/                     ← 唯一对外入口目录
-      ├── app_facade.rs             (AppFacade: 顶层聚合)
-      ├── <domain>.rs               (DomainFacade 与公开合同)
-      └── 事件、状态、命令、查询、结果和错误
-        ↓
-    业务子模块 (clipboard/ space/ transfer/ search/ settings/...)
-        ↓     pub(crate)，对外 crate 不可见
-    用例 / 协调器 / 运行期 / 会话 / 私有适配
-        ↓
-    Ports (uc-core)
+怎么完成
 ```
 
-### 11.4.2 Facade 目录的组织规则
+Application 负责：
 
-* 所有 Facade 类型和其公开合同必须定义在 `src/facade/` 目录下；Facade 所调用的流程实现不在该目录
-* 顶层 `AppFacade` 聚合各域 Facade；每个域 Facade（`SpaceFacade`、`ClipboardFacade`、`TransferFacade` 等）暴露该域的应用动作
-* `src/facade/mod.rs` 的 `pub use` 是 crate 对外的**白名单**。只允许导出：
-  * Facade 类型本身（`AppFacade`、`<Domain>Facade`）
-  * Facade 方法的输入输出类型：Command / Query / Result / Error / 显式状态枚举
-  * 外部需订阅的事件类型 / event port trait
-* Facade 的组装数据只放在 `deps.rs`；`facade/` 不保存 `*Deps` 构造组、事件总线、缓存或具体适配
-* **禁止**在 `src/facade/mod.rs` 里 `pub use` 任何 `*Orchestrator` / `*SessionManager` / `*StateMachine` / `*Handler` / 业务子模块内部类型
-* UseCase 类型若需要被外部以"无状态动作"形式直接调用，也必须通过 Facade 目录下某个 Facade 的方法转发；不鼓励把裸 UseCase 当作对外 API 暴露
-
-### 11.4.3 Crate 根 `lib.rs` 的纪律
-
-* `lib.rs` 的顶层 `pub mod` / `pub use` **只允许**暴露 `facade` 模块（或从 `facade` 再导出的符号）以及 `deps.rs` 的纯组装数据
-* 业务子模块在 `lib.rs` 中必须是 `pub(crate) mod <domain>;` 或完全不 `pub`
-* 如需为测试开放内部可见性，使用 `pub(crate)` + `#[cfg(test)]` 或独立的 `mod tests`，**绝不**为了测试把业务子模块整体升级为 `pub`
-
-### 11.4.4 构造与持有
-
-* Facade 内部持有 `Arc<Orchestrator>` / `Arc<UseCase>` / Ports 的方式由 Facade 自行决定
-* bootstrap 层只允许持有 `Arc<AppFacade>` 或 `Arc<<Domain>Facade>`；**不得**持有 `Arc<*Orchestrator>` / `Arc<*SessionManager>` 等内部类型
-* 同一业务模块内部允许 UseCase 与 Orchestrator 以 `pub(crate)` 互相持有引用，这类依赖不穿越 crate 边界
-* 若某方法语义上只是"读一下 orchestrator 状态"，也必须在 Facade 上加一个 thin method 转发；**不得**通过 `pub(crate)` 或任何 trick 把 Orchestrator 引用泄露给外部
-
-### 11.4.5 反模式
-
-* 外部代码里出现 `use uc_application::space::...` / `use uc_application::clipboard::...` 等绕过 `facade/` 的 import
-* 在 `lib.rs` 写 `pub mod space;` / `pub mod clipboard;` 让业务子模块直接对外
-* 在业务子模块的 `mod.rs` 写 `pub use orchestrator::*Orchestrator` 把内部类型顶出去
-* 在 bootstrap context 里暴露 `space_coordinator: Arc<SpaceCoordinator>`（应为 `space_facade: Arc<SpaceFacade>`，且 `SpaceFacade` 定义在 `src/facade/` 下）
-* 外部 crate 同时拿到 `Arc<Facade>` 和 `Arc<Orchestrator>` —— 封装等于装饰
-* 为了测试方便把 Orchestrator 改成 `pub` —— 正确做法是 crate 内对 Orchestrator 写单元测试，crate 外只通过 Facade 写集成测试
-
-### 11.4.6 理由
-
-让 `src/facade/` 成为唯一对外出口，换来的是：
-
-1. **封装稳定**。Orchestrator / StateMachine / 内部 UseCase 的签名变更不再是 breaking change —— 只要 Facade 公开方法签名不变，外部一律无感
-2. **真相来源单点收口**（呼应 §10.2）。流程状态只能通过 Facade 查询，不会出现"外面走 Facade、内部直接调 Orchestrator"两条演进路径的真相分裂
-3. **依赖方向清晰**。外部 crate 的 import 只会出现 `uc_application::facade::*`，grep / code review 一眼就能识别越界访问
-4. **重构摩擦最小**。业务子模块目录结构调整、模块拆分合并、orchestrator 改名，全部是 crate 内部事务
-
-### 11.4.7 迁移现状与新实现要求
-
-当前代码库**尚未完全符合本节规则**：部分外部消费者仍然直接从 `uc_application::<业务子模块>::...` 导入类型。这是历史欠账，会逐步迁移到 `src/facade/` 下。
-
-但从本条规则写入本文件起：
-
-* **所有新增的对外入口、新增业务模块、新增 Facade / UseCase，必须严格遵循 §11.4.1–§11.4.5**
-* **所有对现有模块的修改**，若触及对外可见性，优先把不该对外的符号下沉回 `pub(crate)`，并在 `src/facade/` 下补齐对应 Facade 方法
-* 任何 PR 若新增 `use uc_application::<非 facade 子模块>::...` 形式的外部调用，视为违规，必须在评审中阻止并改为通过 `src/facade/` 访问
-* 历史欠账的清理工作以独立 PR / phase 推进，不得作为"新功能顺手引入新越界调用"的借口
+```text
+什么时候完成
+按什么顺序完成
+失败后业务上怎么办
+```
 
 ---
 
-## 12. 命令、查询与结果模型规范
+# 规则 9：业务顺序必须能从 UseCase 中直接读出来
 
-## 12.1 命令模型与查询模型分离
+例如正确：
 
-不要混用一个对象既做“命令输入”又做“查询结果”。
+```rust
+pub async fn execute(&self) -> Result<()> {
+    let prepared = self.transition.prepare(...).await?;
+
+    self.session.rebind(...).await?;
+
+    self.membership.rebuild(...).await?;
+
+    self.transition.commit(prepared).await?;
+
+    self.setup_status.mark_completed().await?;
+
+    Ok(())
+}
+```
+
+只看这段代码，就应该能理解：
+
+```text
+prepare
+↓
+rebind
+↓
+rebuild membership
+↓
+commit
+↓
+mark completed
+```
+
+不要写成：
+
+```rust
+self.rebuild_service.run().await?;
+```
+
+然后所有业务流程实际上藏在 infra 或某个巨大 service 里面。
+
+否则 Application 失去存在意义。
+
+---
+
+# 规则 10：Port 不应该只是为了 mock 而创建
+
+不能因为：
+
+> 这个东西测试时我要 mock。
+
+就创建 Port。
+
+必须存在一个真正的架构边界。
+
+例如：
+
+```rust
+trait Clock
+```
+
+合理，因为时间是外部世界。
+
+```rust
+trait RandomGenerator
+```
+
+可能合理。
+
+但是这种：
+
+```rust
+trait MembershipValidatorPort
+```
+
+如果 `MembershipValidator` 其实只是纯业务逻辑：
+
+```rust
+fn validate(membership: &Membership) -> Result<()>
+```
+
+那它应该直接作为 Domain Service / function，而不是 Port。
+
+原则：
+
+```text
+纯业务逻辑 → Domain code
+跨边界能力 → Port
+```
+
+---
+
+# 规则 11：Entity / Value Object 不允许依赖 Port，除非这是明确的 Domain Service
+
+通常 Entity 应尽量保持：
+
+```rust
+Space
+Membership
+DeviceId
+SpaceId
+```
+
+纯净。
+
+不要：
+
+```rust
+impl Space {
+    async fn rebuild(&self, repo: &dyn SpaceRepository)
+}
+```
+
+除非你经过明确设计认为这是 Domain Service 的职责。
+
+更常见的是：
+
+```text
+Entity / Value Object
+        ↑
+Domain Service
+        ↑
+Application UseCase
+```
+
+而不是让 Entity 到处拿 Port。
+
+---
+
+# 规则 12：Composition Root 是唯一知道具体实现的地方
+
+最终：
+
+```rust
+let session = Arc::new(IrohSessionAdapter::new(...));
+
+let use_case = RebuildSpaceUseCase::new(
+    session,
+    ...
+);
+```
+
+这种 wiring 必须集中在最外层。
+
+例如：
+
+```text
+runtime/
+bootstrap/
+desktop/
+mobile/
+daemon/
+```
+
+这里可以同时知道：
+
+```text
+Application trait
++
+Infrastructure implementation
+```
+
+Application 自己不能：
+
+```rust
+IrohSessionAdapter::new()
+```
+
+否则依赖方向被破坏。
+
+---
+
+# 规则 13：Application Error 和 Domain Error 分开
+
+Domain Error 表达领域规则失败：
+
+```rust
+MembershipError::DeviceAlreadyMember
+SpaceError::InvalidState
+InvitationError::Expired
+```
+
+Application Error 表达 UseCase 执行失败：
+
+```rust
+RebuildSpaceError::PreparationFailed
+RebuildSpaceError::RebindFailed
+RebuildSpaceError::CommitFailed
+```
+
+Application 可以包装 Domain Error：
+
+```text
+Domain Error
+    ↓
+Application Error
+```
+
+反过来绝对不允许：
+
+```text
+Domain Error
+    ↓ depends on
+Application Error
+```
+
+---
+
+# 规则 14：不要按“技术层”组织 Application，按业务能力组织
+
+不要：
+
+```text
+application/
+├── services/
+├── ports/
+├── DTOs/
+├── errors/
+└── usecases/
+```
+
+项目大了以后很难追业务。
 
 推荐：
 
-* `StartJoinSpaceCommand`
-* `GetSetupStatusQuery`
-* `SearchClipboardQuery`
-* `SearchClipboardResult`
+```text
+application/
+├── rebuild_space/
+│   ├── use_case.rs
+│   ├── ports.rs
+│   ├── error.rs
+│   └── model.rs
+│
+├── join_space/
+│   ├── use_case.rs
+│   ├── ports.rs
+│   └── error.rs
+│
+└── remove_device/
+```
+
+这是 vertical slice。
 
 ---
 
-## 12.2 应用模型不等于 DTO
+# 给你一个最终判断表
 
-应用模型是 `uc-app` 对外的稳定接口语义。
+以后遇到任何新代码，可以按这个表决定：
 
-它不应该直接等于：
-
-* HTTP JSON schema
-* Tauri invoke payload
-* CLI 参数结构
-
-这些都应在更外层适配。
-
----
-
-## 12.3 结果模型应优先表达“上层真正关心的内容”
-
-不要把底层细节全抛给 UI 再自己拼。
-
-例如 Setup 状态，UI 真正关心的是：
-
-* 当前阶段
-* 是否需要用户输入
-* 是否可取消
-* 错误提示类型
-* 下一步动作
-
-而不是：
-
-* 所有低层事件日志
-* 所有底层 port 响应对象
+| 问题                                    | Yes                 | No       |
+| --------------------------------------- | ------------------- | -------- |
+| 它是纯业务概念/规则吗？                 | Domain              | 继续     |
+| 它描述一个完整业务动作吗？              | Application UseCase | 继续     |
+| 是 UseCase 为完成任务需要的外部能力吗？ | Application Port    | 继续     |
+| 是 Domain 本身需要的外部能力吗？        | Domain Port         | 继续     |
+| 是 SQL/网络/文件/OS/第三方 SDK 实现吗？ | Infrastructure      | 继续     |
+| 是实例创建、依赖注入、wiring 吗？       | Composition Root    | 重新检查 |
 
 ---
 
-## 13. 错误处理规范
+# 对你当前 `RebuildSpaceUseCase` 的直接判断
 
-## 13.1 应用层错误必须表达“动作失败语义”
+你之前这几个：
 
-不允许把底层错误直接当作应用错误。
+```rust
+SettingsPort
+LocalIdentityPort
+DeviceIdentityPort
+SpaceRebuildTransitionPort
+RebindSpaceSessionPort
+SpaceMembershipRebuildPort
+ClockPort
+SetupStatusPort
+```
 
-错误示例：
+不能全部因为叫 `Port` 就放 core。
 
-* `sqlx::Error`
-* `std::io::Error`
-* `libp2p::TransportError`
+你应该逐个问：
 
-正确示例：
+```text
+谁直接使用它？
+```
 
-* `SetupError::PairingUnavailable`
-* `SetupError::InvalidPassphrase`
-* `CaptureClipboardError::PersistenceFailed`
-* `SearchError::IndexUnavailable`
+如果都是：
 
----
+```rust
+RebuildSpaceUseCase
+```
 
-## 13.2 应用层必须做错误翻译与归类
+直接使用，那么默认应该是：
 
-`uc-app` 是非常重要的“错误收口层”。
+```text
+application/rebuild_space/ports.rs
+```
 
-它应把：
+例如我初步会这样判断：
 
-* core 错误
-* infra 错误
-* 流程错误
+```text
+SpaceRebuildTransitionPort      → Application
+RebindSpaceSessionPort          → Application
+SpaceMembershipRebuildPort      → Application
+SetupStatusPort                 → Application
+SettingsPort                    → 看消费者
+LocalIdentityPort               → 看消费者
+DeviceIdentityPort              → 看消费者
+ClockPort                       → 看 Domain 是否直接依赖
+```
 
-翻译成上层可理解的动作语义。
+不要因为 `ClockPort` 看起来“很底层”就自动放 core。
 
----
-
-## 13.3 禁止静默吞错
-
-不允许：
-
-* 某步失败后继续当没事
-* 异步任务失败但不更新状态
-* 错误被 log 一下就结束
-* 返回“空结果”伪装成功
-
-应用层失败必须要么：
-
-* 显式进入失败状态
-* 显式返回错误
-* 显式触发补救流程
-
----
-
-## 14. 事件处理规范
-
-## 14.1 应用层可以处理事件，但事件必须服务于流程推进
-
-事件不是为了“哪里都能发点东西”。
-
-只保留两类有价值的事件：
-
-* 驱动流程推进的事件
-* 对状态一致性有帮助的事件
-
----
-
-## 14.2 应用层事件必须有明确来源和去向
-
-回答清楚：
-
-* 这个事件是谁发的
-* 谁消费
-* 触发什么状态变化
-* 是否幂等
-* 重复到达怎么办
-* 丢失怎么办
-
----
-
-## 14.3 不允许事件泛滥替代结构化设计
-
-不要把一切都做成 event bus 然后谁都能监听。
-
-否则最后很容易变成：
-
-* 隐式耦合
-* 难以测试
-* 难以追踪
-* 状态来源不清
-
----
-
-## 15. 并发、异步与后台任务规范
-
-## 15.1 应用层可以管理后台流程，但必须可控
-
-所有后台任务都必须：
-
-* 可追踪
-* 可取消
-* 可观察失败
-* 有明确生命周期
-* 与应用状态同步
-
-不允许“spawn 了就不管”。
-
----
-
-## 15.2 异步流程失败必须回写应用状态
-
-例如：
-
-* pairing loop 崩了
-* file transfer session 中断了
-* background watcher 停了
-
-必须反映到：
-
-* 应用状态
-* facade 查询结果
-* 日志与 tracing
-
----
-
-## 15.3 不允许把运行时细节扩散到业务模型
-
-例如不要因为用了 tokio，就让 core/app 模型里充满：
-
-* channel sender
-* join handle
-* runtime handle
-* oneshot receiver
-
-这些应尽量收敛在 orchestrator 或内部实现中。
-
----
-
-## 16. 日志与 tracing 规范
-
-## 16.1 `uc-app` 必须可观测
-
-关键流程必须有 tracing，尤其是：
-
-* setup
-* join
-* pairing
-* clipboard capture
-* sync
-* search
-
-至少覆盖：
-
-* 命令入口
-* 状态变化
-* port 调用前后
-* 失败路径
-* 重试路径
-* 取消路径
-* 超时路径
-
----
-
-## 16.2 日志要面向流程排障
-
-日志要能回答：
-
-* 当前是什么 use case / orchestrator
-* 输入命令是什么
-* 当前状态是什么
-* 触发了什么转移
-* 调用了哪些 ports
-* 哪一步失败
-* 失败后进入了什么状态
-
----
-
-## 16.3 不得泄露敏感数据
-
-严禁打印：
-
-* 明文剪切板内容
-* 明文 passphrase
-* 明文密钥
-* 大段用户私有 payload
-
-允许打印：
-
-* id
-* type
-* size
-* 状态
-* hash 截断
-* 错误类别
-
----
-
-## 17. 测试规范
-
-## 17.1 `uc-app` 的核心测试对象是“流程正确性”
-
-测试重点不是某个函数有没有调用，而是：
-
-* 用例是否按预期推进
-* 状态机是否覆盖正确
-* 错误时是否进入正确状态
-* 超时 / 取消 / 重试是否行为正确
-
----
-
-## 17.2 Use Case 测试必须围绕应用动作
-
-例如：
-
-* 调用 `start_join_space()` 后状态是否变成 `WaitingForSelection`
-* 提交 passphrase 后是否进入 `WaitingForProof`
-* proof 失败后是否进入 `Failed(InvalidPassphrase)`
-
----
-
-## 17.3 Orchestrator / State Machine 必须重测异常路径
-
-必须覆盖：
-
-* 非法状态转移
-* 重复事件
-* 延迟事件
-* 取消后又收到回调
-* 超时后又收到成功结果
-* 幂等性场景
-
----
-
-## 17.4 测试依赖 port mock，而不是 mock 具体 infra
-
-`uc-app` 测试应依赖：
-
-* `uc-core` port mock
-* fake repository / fake service
-
-而不是直接依赖 sqlite/libp2p 等具体实现。
-
----
-
-## 18. 命名规范
-
-| 类型           | 规则              | 示例                        |
-| ------------ | --------------- | ------------------------- |
-| Use Case     | `*UseCase`      | `CaptureClipboardUseCase` |
-| Orchestrator | `*Orchestrator` | `SetupOrchestrator`       |
-| Facade       | `*Facade`       | `SetupFacade`             |
-| Command      | `*Command`      | `StartJoinSpaceCommand`   |
-| Query        | `*Query`        | `GetSetupStatusQuery`     |
-| Result       | `*Result`       | `SearchClipboardResult`   |
-| Error        | `*Error`        | `SetupError`              |
-| State        | `*State` / 具体枚举 | `SetupState`              |
-
-避免模糊命名：
-
-* `Manager`
-* `Service`
-* `Processor`
-* `Handler`
-* `Coordinator`（除非真的在做协调）
-
----
-
-## 19. 提交前自我审查清单
-
-每次修改 `uc-app`，必须逐项自查：
-
-### 19.1 边界检查
-
-* [ ] 这次修改是否属于应用层编排，而不是 core 业务真相或 infra 实现？
-* [ ] 是否绕过 port 直接依赖了 infra 具体实现？
-* [ ] 是否引入了 HTTP / Tauri / CLI / 前端表示层模型？
-
-### 19.2 用例检查
-
-* [ ] 这个模块是否明确表达了一个应用动作或流程？
-* [ ] 是否存在职责过大的 use case / orchestrator / facade？
-* [ ] 是否把长流程与短动作正确区分？
-
-### 19.3 状态检查
-
-* [ ] 是否有统一状态真相来源？
-* [ ] 是否考虑了取消、失败、超时、重复事件？
-* [ ] 是否存在 UI 自己推断流程状态的风险？
-
-### 19.4 错误检查
-
-* [ ] 是否把底层错误翻译成了应用层错误？
-* [ ] 是否存在静默吞错？
-* [ ] 后台流程失败是否能被状态和日志感知？
-
-### 19.5 可观测性检查
-
-* [ ] 是否为关键流程增加了 tracing？
-* [ ] 日志是否足以排查状态推进过程？
-* [ ] 是否避免打印敏感数据？
-
-### 19.6 测试检查
-
-* [ ] 是否覆盖 happy path 以外的状态流转？
-* [ ] 是否测试了取消、超时、重复输入、异常回调？
-* [ ] 是否依赖 port mock 而不是具体 infra？
-
----
-
-## 20. Code Review 重点
-
-评审 `uc-app` 时，优先检查：
-
-1. 是否越权定义了 core 规则
-2. 是否直接依赖具体 infra
-3. 是否把 façade / orchestrator 写成上帝对象
-4. 是否状态机不完整
-5. 是否错误未收口
-6. 是否后台任务不可控
-7. 是否上层接口暴露了过多内部细节
-
----
-
-## 21. 反模式清单
-
-### 21.1 Use Case 变成“万能函数”
-
-一个 use case 同时负责：
-
-* 参数解析
-* 业务判断
-* repository 访问
-* UI 输出拼装
-* telemetry 汇总
-
-这说明边界已经坏了。
-
----
-
-### 21.2 Facade 变成“第二个 app 层”
-
-Facade 应该薄而稳定，不应成为另一个巨型协调中心。
-
----
-
-### 21.3 状态分散在多个地方
-
-* orchestrator 有一份
-* UI 自己推一份
-* handler 再拼一份
-* repository 里还藏一份
-
-这是最危险的失控源。
-
----
-
-### 21.4 为了好写，直接把 infra 类型往上带
-
-例如：
-
-* 用 libp2p peer id 直接做应用状态
-* 用 DB row 直接当结果返回
-* 用 HTTP DTO 直接当 use case 输入
-
-都会导致长期耦合。
-
----
-
-### 21.5 事件总线化一切
-
-看到什么都发事件、到处监听，最后流程不可追踪。
-
----
-
-## 22. 总原则
-
-`uc-app` 必须遵守这四条：
-
-### 22.1 不定义业务真相，只组织业务动作
-
-### 22.2 不实现基础设施，只依赖抽象 port
-
-### 22.3 不暴露内部复杂性，只输出稳定应用接口
-
-### 22.4 不回避流程复杂性，要把状态和转移显式建模
-
----
-
-## 23. 一句话原则
-
-> `uc-app` 的职责不是“写几个能跑的调用链”，而是“把 `uc-core` 的能力组织成清晰、稳定、可观测、可测试的应用流程”。
+**消费者在哪一层，它就优先属于哪一层。**

@@ -73,31 +73,6 @@ pub enum RecoveryAvailability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpaceMembershipChangeDecisionResult {
-    Applied {
-        change_id: MembershipEventId,
-        snapshot: SpaceMembershipStatus,
-    },
-    KeptCurrentDeviceGroup {
-        change_id: MembershipEventId,
-        snapshot: SpaceMembershipStatus,
-    },
-    AlreadyCompleted {
-        change_id: MembershipEventId,
-        completed_choice: SpaceMembershipChangeChoice,
-        snapshot: SpaceMembershipStatus,
-    },
-    StateChanged {
-        current_change_id: Option<MembershipEventId>,
-        snapshot: SpaceMembershipStatus,
-    },
-    LocalDeviceConfirmationRequired {
-        change_id: MembershipEventId,
-        snapshot: SpaceMembershipStatus,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceMembershipChangeImpact {
     pub usable_device_ids: Vec<DeviceId>,
     pub paused_device_ids: Vec<DeviceId>,

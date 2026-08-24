@@ -1,67 +1,147 @@
-# Space Rebuild Refactor Findings
+# Workspace Convergence Refactor Findings
 
-## Existing Workflow
+## Approved Ownership
 
-The current `DeviceManagementResetUseCase` is defined in `crates/uc-application/src/facade/space_setup/facade.rs`.
+```text
+SpaceFacade
+|- SpaceAdmission
+|- WorkspaceMembership
+|- SpaceConnectivity
+`- SpaceLifecycle
+```
 
-It currently combines two distinct actions:
+- `SpaceAdmission` owns invitation, handshake, join attempts, durable recovery,
+  and the final admission result.
+- `WorkspaceMembership` owns membership history, admission of verified members,
+  removal, user decisions, reconciliation, and current-member scope.
+- `SpaceConnectivity` owns connections and network recovery for the current
+  effective member scope.
+- `SpaceLifecycle` owns create, unlock, rebuild, reset, and Engine-version
+  migrations.
+- `SpaceFacade` only composes and forwards complete actions.
 
-1. User-requested reset through `SpaceFacade::reset()`.
-2. Upgrade-triggered legacy profile isolation after successful session resume or unlock.
+## Current Architecture Problem
 
-The user reset entry point cancels pending invitations, then invokes `execute_user_requested()`.
+ADR-021 successfully grouped implementation files, but retained one broad
+`WorkspaceConvergence` type as the owner of admission, membership, projections,
+connectivity, recovery, and lifecycle hooks. The interface and dependency set
+remain close to the full implementation complexity, so callers and tests still
+need knowledge from several business areas.
 
-## Shared Rebuild Sequence
+## Existing State and Assembly
 
-The reusable rebuild sequence is currently implemented by `execute_reset(pending_isolation_target)`:
+- `WorkspaceConvergenceDeps` currently combines convergence state storage,
+  profile-level admission attempts, admission security transitions, membership
+  history exchange, member persistence, trusted peers, peer addresses,
+  presence, security updates, group bootstrap, and legacy migration recovery.
+- `SpaceConvergenceAssembly` constructs the broad owner and casts it to history,
+  recovery, current-scope, content-gate, and lifecycle recovery interfaces.
+- `space/admission/adapter.rs` exposes many protocol-step methods by forwarding
+  them to `WorkspaceConvergence`; this is a shallow interface that leaks the
+  admission state machine.
 
-1. Resolve a non-empty local device name.
-2. Ensure the local identity fingerprint.
-3. Reuse the persisted target or mint and persist a new target `SpaceId`.
-4. Prepare and stage reset data.
-5. Adopt the isolated space.
-6. Reset admission, relationships, and remote members.
-7. Persist the local member and initialize single-device membership.
-8. Promote transition data.
-9. Clear old security state and finalize transition data.
-10. Persist completed setup state and clear the pending target.
+## Lifecycle Migration State
 
-## Rebuild Target Checkpoint
+- Draft modules exist at `space/rebuild_space`, `space/reset_space`, and
+  `space/upgrade_space` and contain user-written changes.
+- Rebuild currently depends on `SpaceRebuildAdmissionStatePort` to clear state
+  inherited from the previous Space.
+- `AdmissionAttemptRepositoryPort::reset_for_device_management` is misleading:
+  the store includes join attempts plus membership history, consumed
+  invitations, recovery challenges, and trust revision. The operation clears
+  prior-Space admission and membership-history state.
+- The rebuild owner should request the result "clear prior-Space admission
+  state". A private adapter should translate that to the existing storage.
+  `WorkspaceConvergence` must not implement this lifecycle-facing interface.
 
-`set_device_management_reset_target` is a durable checkpoint, not the reset operation itself. It records the selected target `SpaceId` before irreversible work. A retry must reuse the target after interruption.
+## Verification Baseline
 
-The current core port places this progress state on `SetupStatusPort` and uses historical device-management terminology. The planned replacement is `SpaceRebuildCheckpointPort`, with semantic operations to load, save, and clear the pending rebuild target. The user created its core definition in `crates/uc-core/src/ports/space/rebuild.rs`.
+- The worktree is dirty and includes incomplete moves outside the new slice.
+- Previous checks found unrelated formatting and trailing-whitespace blockers;
+  all checks must be rerun against the current files before relying on them.
 
-The current infra implementation persists the target in a separate file. The repository security rule requires new persisted business payloads to be encrypted by default. The new port implementation must not introduce plaintext persistence for the target.
+## Inventory To Complete
 
-## Rebuild Method Boundaries
+- Public and crate-restricted methods and their callers.
+- Shared state fields, locks, repositories, and event publishers.
+- Network endpoint and runtime entry points.
+- Restart and retry entry points for admission, membership effects, and network
+  recovery.
+- Focused tests that prove each moved behavior before deleting its old path.
 
-The `RebuildSpaceError` categories define five workflow phases: preparation, staging, rebuild, commit, and finalization. `RebuildSpaceUseCase` should preserve them as separate methods: `prepare` resolves inputs and establishes the target, `stage` only stages target data, `rebuild` rebinds the session and reconstructs local membership, `commit` promotes target data, and `finalize` clears obsolete security/progress state and writes final setup state. The top-level `execute` must use `?` for methods that already return `RebuildSpaceError`; wrapping them again loses their phase-specific error category.
+## Completed Responsibility Inventory
 
-## Member State During Rebuild
+### SpaceAdmission
 
-Reuse `MemberRepositoryPort` directly. `RebuildSpaceUseCase` owns the application rule to retain the current device and remove every other `SpaceMember`; it should express the loop in a private `remove_remote_members` helper. Do not add a one-off bulk-clear port, because the repository already supplies the required list, remove, and upsert capabilities.
+- Owns `DurableAdmissionTransaction` and all invitation-to-terminal admission
+  stages currently in `convergence/admission/{transaction,flow,completion_recovery}`.
+- Owns profile-level admission attempts, consumed invitations, completion
+  recovery challenges, admission outbox delivery, and admission transition
+  recovery.
+- The current `WorkspaceAdmissionOwnerPort` exposes individual protocol stages;
+  it must become an internal implementation detail of the single admission
+  action, not a facade-facing orchestration surface.
 
-## Relationship State During Rebuild
+### WorkspaceMembership
 
-Reuse the existing `RelationshipStateResetPort::clear_all_relationships` for space rebuild. Its `EncryptedRelationshipStore` adapter deletes the complete encrypted relationship state, and factory reset also uses the same capability. Do not add a rebuild-specific relationship port or fold it into `SpaceRebuildDataTransitionPort`; the relationship store has its own state owner and the cleanup operation has independent reuse.
+- Owns `WorkspaceConvergenceState`, its encrypted repository, state lock,
+  decision lock, per-peer reconciliation locks, wake notification, and snapshot
+  events.
+- Owns member history exchange, verified membership effects, removal, device
+  trust decisions, bootstrap, legacy membership repair, current peer scope, and
+  content-exchange gating.
+- Restart work includes pending membership effects, pending decisions, legacy
+  marker repair, and membership history synchronization.
 
-## Workspace Convergence During Rebuild
+### SpaceConnectivity
 
-`WorkspaceConvergence::reset_admission_for_device_management()` resets durable admission-attempt state through its owned `AdmissionAttemptRepositoryPort`. It is required because a freshly rebuilt single-device space cannot retain an incomplete or completed admission attempt from the previous space. This is distinct from relationship cleanup and member-table rebuilding. `RebuildSpaceUseCase` should call the workspace owner instead of accessing the admission repository directly; the later `initialize_new_space_membership()` call establishes the new single-device baseline.
+- Owns reachability refresh, current-member connection maintenance,
+  authenticated discovery runtime, and `NetworkRecoveryFacade`.
+- It consumes `CurrentWorkspacePeerScopePort`; it must not infer membership
+  from addresses, presence, or transport success.
+- Runtime pause, resume, periodic retry, and shutdown belong here rather than
+  on a membership state owner.
 
-## Current Files
+### SpaceLifecycle
 
-- `crates/uc-application/src/space/lifecycle/rebuild_space.rs`: user-created draft for the shared rebuild workflow.
-- `crates/uc-application/src/space/lifecycle/errors.rs`: user-created `RebuildSpaceError` draft.
-- `crates/uc-application/src/space/lifecycle/reset_space.rs`: user-created reset use-case draft.
+- Owns initialize, unlock, rebuild, user reset, factory reset, and Engine
+  version transitions.
+- The rebuild transaction owns its persisted target and ordered prepare,
+  stage, rebuild, promote, security cleanup, setup-status update, and finalize
+  behavior.
+- Prior-Space admission cleanup is a lifecycle result requested through a
+  narrow internal interface; its adapter owns the low-level admission store.
 
-## Interface Decision
+### Current Callers and Wiring
 
-`RebuildSpaceUseCase` owns the checkpoint dependency. Its final `execute` method should load the pending target from `SpaceRebuildCheckpointPort` itself rather than accepting `Option<SpaceId>` from its caller. This prevents callers from knowing checkpoint persistence and gives the rebuild workflow a single recovery-state source.
+- `SpaceConvergenceAssembly` currently constructs one broad owner and casts it
+  to membership history, completion recovery, content gate, peer scope, and
+  lifecycle recovery interfaces.
+- `SpaceFacade` directly obtains the broad owner for initialization, invitation
+  gating, inbound and outbound admission orchestration, legacy reset recovery,
+  and peer scope.
+- `space/runtime.rs` and `convergence/runtime.rs` jointly start recovery,
+  membership synchronization, and connectivity work, so their ownership must
+  be split when the new owners are wired.
 
-## Known Intermediate Errors
+## Migration Invariants
 
-- `reset_space.rs` currently places an `async fn` inside a struct definition. Rust methods must live in an `impl ResetSpaceUseCase` block.
-- `rebuild_space.rs` currently stops after minting a `SpaceId`; it has no progress port yet and has an unfinished match expression and `todo!()`.
-- Compilation and tests have not been run because these draft modules are incomplete.
+- Keep encrypted repository formats and network messages unchanged.
+- Preserve lock scope: storage decisions happen under the existing state lock;
+  bounded network calls remain outside it; re-entry validates persisted state.
+- Preserve retry identity: admission attempt IDs, rebuild target Space IDs, and
+  saved membership event IDs are reused after interruption.
+- Move endpoint implementations with their business owner and remove the old
+  implementation in the same slice.
+
+## Unlock Ownership
+
+- `UnlockSpacePort` is consumed only by `UnlockSpaceUseCase`, so its seam now
+  belongs to `space/unlock_space` rather than `uc-core`.
+- `uc-core` retains the aggregate space-access store used by infrastructure;
+  the Engine composition root adapts that store to the application-owned
+  unlock capability without introducing an infrastructure-to-application
+  dependency cycle.
+- The unlock use case now owns interactive unlock, Engine-version transition,
+  mobile-consumable backfill, membership-storage validation, and best-effort
+  presence priming. `SpaceFacade` converts the public input and result only.

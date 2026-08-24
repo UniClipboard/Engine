@@ -55,15 +55,15 @@ use uc_core::ports::pairing::{
     DialError, DialOutcome, DiscoveryChannel, PairingSessionId, PairingSessionPort, SessionError,
 };
 use uc_core::ports::space::{
-    DeriveAdmissionProofKeyPort, GroupAdmissionPort, PrepareAdmissionTargetAccessPort, ProofPort,
-    SpaceAccessError,
+    DeriveAdmissionProofKeyPort, PrepareAdmissionTargetAccessPort, ProofPort, SpaceAccessError,
 };
 use uc_core::ports::{DeviceIdentityPort, LocalIdentityPort, SettingsPort};
 use uc_core::security::IdentityFingerprint;
 use uc_core::space_access::AdmissionOffer;
 
+use crate::deps::GroupAdmissionPort;
 use crate::facade::space_setup::RedeemPairingInvitationError;
-use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::space::admission::joiner::JoinerAdmissionOwnerPort;
 
 /// Facts handed to the use case after a successful joiner-side handshake.
 ///
@@ -129,7 +129,7 @@ pub(crate) struct JoinerHandshakeCoordinator {
     local_identity: Arc<dyn LocalIdentityPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     settings: Arc<dyn SettingsPort>,
-    workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
+    workspace_convergence: Arc<dyn JoinerAdmissionOwnerPort>,
     /// Per-`recv` TTL — not end-to-end handshake TTL. Independent of
     /// P7g's sponsor-side watchdog: this timer protects against silent
     /// sponsor, the sponsor's protects against silent joiner.
@@ -147,7 +147,7 @@ impl JoinerHandshakeCoordinator {
         local_identity: Arc<dyn LocalIdentityPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
         settings: Arc<dyn SettingsPort>,
-        workspace_convergence: Arc<dyn WorkspaceAdmissionOwnerPort>,
+        workspace_convergence: Arc<dyn JoinerAdmissionOwnerPort>,
         handshake_ttl: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -754,7 +754,7 @@ fn variant_name(message: &PairingSessionMessage) -> &'static str {
 mod tests {
     //! Wire + crypto tests live here. Composition (admit → trust →
     //! setup-status ordering) belongs to
-    //! [`crate::space::admission::redeem_invitation::tests`].
+    //! [`crate::space::admission::joiner::redeem_invitation::tests`].
     use super::*;
     use crate::space::admission::adapter::stable_join_request_binding;
 
@@ -764,15 +764,14 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Duration as ChronoDuration;
 
+    use crate::deps::GroupAdmissionPort;
     use uc_core::crypto::domain::Passphrase;
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::pairing::session_message::{
         JoinerChallengeResponse, JoinerRequest, PairingReject, SponsorAdmissionOffer,
     };
     use uc_core::ports::pairing::{DialError, DialOutcome, DiscoveryChannel, SessionError};
-    use uc_core::ports::space::{
-        DeriveAdmissionProofKeyPort, GroupAdmissionPort, SpaceAccessError,
-    };
+    use uc_core::ports::space::{DeriveAdmissionProofKeyPort, SpaceAccessError};
     use uc_core::ports::LocalIdentityError;
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -924,23 +923,6 @@ mod tests {
                 pending: &PreparedGroupJoin,
                 payload: &[u8],
             ) -> Result<Vec<u8>, SpaceAccessError>;
-            async fn admit_group_member(
-                &self,
-                space_id: &SpaceId,
-                sponsor_device_id: &DeviceId,
-                joiner_device_id: &DeviceId,
-                existing_member_ids: &[DeviceId],
-                key_package: &[u8],
-            ) -> Result<GroupAdmission, SpaceAccessError>;
-            async fn install_group_join(
-                &self,
-                space_id: &SpaceId,
-                passphrase: &Passphrase,
-                pending: PreparedGroupJoin,
-                welcome: &[u8],
-                encrypted_key_catalog: &[u8],
-                group_epoch: u64,
-            ) -> Result<(), SpaceAccessError>;
         }
     }
 
@@ -1079,7 +1061,7 @@ mod tests {
     struct UnsupersedableJoinAdmissionOwner;
 
     #[async_trait]
-    impl WorkspaceAdmissionOwnerPort for UnreadableHistoryAdmissionOwner {
+    impl JoinerAdmissionOwnerPort for UnreadableHistoryAdmissionOwner {
         async fn preflight_local_join_source(
             &self,
             preserve_unreadable_history: bool,
@@ -1089,24 +1071,10 @@ mod tests {
                 crate::space::workspace_membership::WorkspaceConvergenceError::UnreadableHistoryRequiresConfirmation,
             )
         }
-
-        async fn admission_decision_for_joiner(
-            &self,
-            _invitation_generation: u64,
-            _joiner_device_id: &DeviceId,
-        ) -> uc_core::membership::MembershipAdmissionDecision {
-            unreachable!()
-        }
-
-        async fn synchronize_chain(
-            &self,
-        ) -> Result<(), crate::space::workspace_membership::WorkspaceConvergenceError> {
-            unreachable!()
-        }
     }
 
     #[async_trait]
-    impl WorkspaceAdmissionOwnerPort for UnsupersedableJoinAdmissionOwner {
+    impl JoinerAdmissionOwnerPort for UnsupersedableJoinAdmissionOwner {
         async fn preflight_local_join_source(
             &self,
             _preserve_unreadable_history: bool,
@@ -1115,24 +1083,10 @@ mod tests {
                 crate::space::workspace_membership::WorkspaceConvergenceError::PreviousJoinCannotBeSuperseded,
             )
         }
-
-        async fn admission_decision_for_joiner(
-            &self,
-            _invitation_generation: u64,
-            _joiner_device_id: &DeviceId,
-        ) -> uc_core::membership::MembershipAdmissionDecision {
-            unreachable!()
-        }
-
-        async fn synchronize_chain(
-            &self,
-        ) -> Result<(), crate::space::workspace_membership::WorkspaceConvergenceError> {
-            unreachable!()
-        }
     }
 
     #[async_trait]
-    impl WorkspaceAdmissionOwnerPort for TestAdmissionOwner {
+    impl JoinerAdmissionOwnerPort for TestAdmissionOwner {
         async fn prepare_local_join_before_network(
             &self,
             preparation: &(dyn GroupAdmissionPort + Send + Sync),
@@ -1221,20 +1175,6 @@ mod tests {
                     ),
                 )
             }
-        }
-
-        async fn admission_decision_for_joiner(
-            &self,
-            _invitation_generation: u64,
-            _joiner_device_id: &DeviceId,
-        ) -> uc_core::membership::MembershipAdmissionDecision {
-            unreachable!()
-        }
-
-        async fn synchronize_chain(
-            &self,
-        ) -> Result<(), crate::space::workspace_membership::WorkspaceConvergenceError> {
-            unreachable!()
         }
     }
 

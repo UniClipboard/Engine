@@ -324,11 +324,16 @@ pub fn wire_dependencies_from_inputs(
         Arc::clone(&infra.db_executor),
         platform.session.as_ref().clone(),
     ));
-    let admission_attempt_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort> =
-        Arc::new(DieselAdmissionAttemptStore::new(
-            Arc::clone(&infra.db_executor),
-            admission_keys.as_ref().clone(),
-        ));
+    let admission_store = Arc::new(DieselAdmissionAttemptStore::new(
+        Arc::clone(&infra.db_executor),
+        admission_keys.as_ref().clone(),
+    ));
+    let admission_attempt_repository: Arc<
+        dyn uc_application::deps::AdmissionAttemptRepositoryPort,
+    > = admission_store.clone();
+    let membership_history_repository: Arc<
+        dyn uc_application::deps::MembershipHistoryRepositoryPort,
+    > = admission_store;
     let durable_space_transition =
         Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(
             db_pool_for_space_transition,
@@ -341,9 +346,9 @@ pub fn wire_dependencies_from_inputs(
             Arc::clone(&platform.session),
             Arc::clone(&platform.current_profile),
         ));
-    let admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort> =
+    let admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort> =
         durable_space_transition.clone();
-    let device_management_reset_data: Arc<dyn uc_core::membership::DeviceManagementResetDataPort> =
+    let device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort> =
         durable_space_transition;
     let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
 
@@ -758,6 +763,7 @@ pub fn wire_dependencies_from_inputs(
             membership_session,
             workspace_convergence_repository,
             admission_attempt_repository,
+            membership_history_repository,
             admission_space_transition,
             device_management_reset_data,
             legacy_migration_recovery,

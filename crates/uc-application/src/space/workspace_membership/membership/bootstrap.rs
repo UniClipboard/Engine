@@ -15,10 +15,10 @@ impl WorkspaceMembership {
             ) => {
                 let previous_history = self
                     .deps
-                    .admission_attempts
-                    .load_membership_history_v2()
+                    .membership_history_repo
+                    .load_membership_history()
                     .await
-                    .map_err(crate::space::admission::durable::map_repository_error)?;
+                    .map_err(WorkspaceConvergenceError::from)?;
                 self.rebuild_new_space_membership().await?;
                 let repaired_history = self
                     .verified_legacy_admission_base_history()
@@ -26,13 +26,13 @@ impl WorkspaceMembership {
                     .encode_persisted_v2()
                     .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
                 self.deps
-                    .admission_attempts
-                    .compare_and_replace_membership_history_v2(
+                    .membership_history_repo
+                    .compare_and_replace_membership_history(
                         previous_history.as_deref(),
                         &repaired_history,
                     )
                     .await
-                    .map_err(crate::space::admission::durable::map_repository_error)?;
+                    .map_err(WorkspaceConvergenceError::from)?;
                 Ok(())
             }
             Err(error) => Err(error),
@@ -96,7 +96,7 @@ impl WorkspaceMembership {
         joiner_device_id: &DeviceId,
         invitation_generation: u64,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
         if let Some(persisted_instance) = state.own_instance {
@@ -121,7 +121,6 @@ impl WorkspaceMembership {
                     })?;
                 self.persist(&state).await?;
                 self.publish(&state);
-                self.notify();
                 return Err(WorkspaceConvergenceError::Inconsistent(
                     "current member identity does not match persisted membership history"
                         .to_owned(),
@@ -143,7 +142,6 @@ impl WorkspaceMembership {
         if matches!(outcome, WorkspaceMergeOutcome::Updated) && effect.persist {
             self.persist(&state).await?;
         }
-        self.notify();
         Ok(state.snapshot())
     }
 
@@ -171,7 +169,7 @@ impl WorkspaceMembership {
         joiner: uc_core::membership::AdmissionChangeFacts,
         security_update_payload: Vec<u8>,
     ) -> Result<uc_core::membership::AdmissionSavedFacts, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
         if state.removed {
@@ -249,7 +247,6 @@ impl WorkspaceMembership {
         );
         self.persist(&state).await?;
         self.publish(&state);
-        self.notify();
         info!(joiner_device_id = %joiner.device_id.as_str(), "workspace admission change recorded");
         let history = state
             .membership_reconciliation
@@ -283,7 +280,7 @@ impl WorkspaceMembership {
         self.reconcile_membership_history_with_sponsor(&confirmation.sponsor_facts.device_id)
             .await?;
 
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let state = self.load_state().await?;
         let history = state
             .membership_reconciliation
@@ -520,7 +517,7 @@ impl WorkspaceMembership {
         &self,
         own_instance: uc_core::membership::MemberInstanceId,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
         if state.removed
@@ -584,7 +581,7 @@ impl WorkspaceMembership {
         digest.update(security_state.space_id.as_ref().as_bytes());
         digest.update(security_state.group_epoch.to_be_bytes());
 
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let now_ms = self.deps.clock.now_ms();
         let mut state = self.load_state().await?;
         if state.own_instance.is_none() {
@@ -614,7 +611,6 @@ impl WorkspaceMembership {
         }
         self.persist(&state).await?;
         self.publish(&state);
-        self.notify();
         Ok(state.snapshot())
     }
 
@@ -651,7 +647,7 @@ impl WorkspaceMembership {
             .as_ref()
             .to_owned();
         {
-            let _guard = self.state_lock.lock().await;
+            let _guard = self.state_write_lock.lock().await;
             let state = SpaceMembershipState::fresh(lineage, self.deps.clock.now_ms());
             self.persist(&state).await?;
         }

@@ -1,0 +1,61 @@
+# 进度：Application 用例全量梳理
+
+- 取消加入用例已直接读取当前加入记录、幂等保存取消请求、查询最终状态并发布修订，不再依赖 `DurableAdmissionProjection` 或收敛错误。可靠事务中的旧取消转发和 projection 内旧查询/取消方法已无生产调用，下一步可直接删除；projection 本身仍被成员状态查询用于读取待处理入站成员。
+- 当前加入状态查询已直接依赖准入记录仓储并自行解释等待、拒绝和活动结果；删除 `SpaceAdmission` 与可靠事务中的旧查询转发。取消加入暂时继续使用旧内部查询，待下一小步迁移。同步修正迁移时误带换行的错误文本。
+- 完成 transaction 首批表面清理：删除三个无生产调用的旧加入入口及其专用建档、重放匹配实现。保留的加入准备与恢复材料测试改走真实入口，取消、恢复、切换等测试改用直接预置记录的夹具；删除只验证旧入口重复调用的测试。旧名称残留、格式、Cargo 元数据和差异检查通过；按约定未运行构建和测试。
+- 复核 `admission/durable/transaction.rs`：确认它混合查询、两侧协议状态转换、取消、空间切换、恢复、终态压缩和消息编码，不应继续作为单一总对象。确定按“先清无生产调用入口，再拆查询/取消，再迁角色转换，最后收窄共享保存与恢复工具”的顺序推进。本步只形成分析与路线图，未修改运行代码。
+- 记录两次文档补丁定位失败：目标段落位置与预期不同；随后按当前稳定标题分别追加，失败补丁未写入文件。
+
+## 2026-08-23
+
+- 将加入方邀请兑换从 admission 根级迁入 `admission/joiner/`；旧根级模块删除，Facade 和 Join 用例只通过 `joiner` 模块使用该内部流程。
+- `JoinSpaceUseCase` 改为返回已保存状态和明确的会话切换要求；正常加入由 Engine 直接转换结果，不再重新查询状态或扫描切换记录。
+- 新增内部 `CompletePendingSpaceTransitionUseCase`；Engine 关闭旧会话后经 Space Facade 调用并取得最终活动状态，启动时的中断恢复也复用该入口。旧 `SpaceTransitionRecoveryPort` 及 Engine 直接装配出口删除。
+- 补充加入状态与切换要求必须一致的回归：活动状态不能要求切换，等待状态必须要求切换；邀请兑换回归同时验证它保留本次握手算出的切换要求。
+- 本步已通过 Cargo 元数据、Rust 格式和差异合法性检查；确认旧恢复接口、旧兑换路径和 Engine 成功后补查均无残留。按当前约束未运行构建、测试和会隐式构建的架构脚本。
+- 拆除 `admission/durable/flow.rs`：加入方 6 个可靠推进阶段迁入 `joiner/durable_flow.rs`，邀请方 9 个阶段迁入 `sponsor/durable_flow.rs`；共享事务和完成恢复位置不变。
+- 原 `WorkspaceAdmissionOwnerPort` 按角色拆为加入方与邀请方内部接口，握手、运行期和测试替身只看到各自所需能力。取消加入和待处理切换判断同时迁出共享流程。
+- 删除 `ProfileSpaceAdmission`：新增 `SpaceJoinFacade` 组合查询加入、取消加入和完成确认恢复；新增 `SpaceMembershipFacade` 组合成员状态查询、发起移除、决定移除和活动 Space 接入。Engine 字段、操作入口、启动恢复和事件转发已分别改接。
+- 既有持久加入回归改为通过 `SpaceJoinFacade` 查询、取消和验证未找到错误；既有成员状态与完成确认回归改接两个新门面。Cargo 元数据、格式、差异和旧名称残留检查通过；按当前约束未运行构建、测试和架构脚本。
+- 准入尝试仓储、待发送消息投递、完成恢复通信、跨 Space 切换、安全状态切换和加入方成员材料 Port 从 core 迁入 application；infra 实现和 Engine 组装统一改从 `uc_application::deps` 导入。core 只保留相关准入模型、错误和领域验证规则。
+- 精简加入方成员材料接口，删除没有 application 调用者的成员接纳和安装方法。格式、差异、Cargo 元数据和旧 core Port 路径检查通过；按当前约束未运行构建、测试和架构脚本。
+- 将准入 Port 配套的错误、原子变更、查询投影、投递结果及安全/空间切换请求结果全部迁入 application，infra 统一从 application 导入；core 删除重复定义和导出。随准入记录持久化的安全投递数据保留在 core 并迁入准入记录模块，序列化结构不变。Cargo 元数据、格式、差异和单一定义检查通过；按当前约束未运行构建、测试和架构脚本。
+- 删除浅层 `SpaceAdmissionCoordinator`，建立 `JoinSpaceUseCase` 作为加入 Space 的唯一 application 入口；设备名保存、加入前网络准备和邀请兑换由该用例完整负责，其余邀请操作由 `SpaceFacade` 直接调用各自用例。
+- `AppFacade` 不再持有第二个准入协调器；本步保持现有加入结果不变，持久加入状态和会话切换要求留到下一小步收口。
+
+- 用户调整目标：先完整梳理 `uc-application` 用例，再逐步向外实现 infra。
+- 停止继续验证、提交和 infra 改造。
+- 已确认此前启动的架构检查和其内部构建进程均已停止。
+- 初步扫描发现 14 个标准 `use_case.rs`，同时确认大量候选行为仍分布在其他文件形态中。
+- 建立新的独立路线图，下一步从生产入口反向生成全量行为清单。
+- 用户进一步收窄范围：先完整完成 Space，其余 application 领域全部不动。
+- 已扫描 Space 标准用例、Engine Space 操作、Space Facade、Profile Space Facade、运行期和旧成员负责人，确认 11 个标准文件之外仍有多类候选行为。
+- 完成 Space 生命周期第一批分类：lock、recover、reset、rebuild、upgrade、query access 可保持；initialize 与 unlock 仍由 Facade 补活动恢复；query setup 和 reset commit status 是藏在 Facade 中的完整查询。
+- 生命周期整改顺序确定为 query setup、initialize、unlock、reset commit query，最后复核 readiness 与 activity 的内部定位。
+- 完成 Space 准入第一批分类：普通签发与兑换已有深层负责人；取消邀请、取消加入和地址查询仍藏在 Facade；`SpaceAdmissionCoordinator` 只有 join 包含真实编排，其余均为转发。
+- 发现 Join Space 的稳定结果和跨 Space 切换判断仍由 Engine 在成功后重复查询；后续应让 application Join 结果直接携带持久状态与切换要求。
+- handshake、durable admission transaction 和 sponsor orchestrator 分别定位为内部协议流程、可恢复共享流程和后台运行期，不提取为用户用例。
+- 完成 Space 成员关系分类：三个新成员用例保持；设备列表、同步偏好和保护状态仍藏在 Engine/Roster Facade；旧 dev-tools 决定和收敛快照形成旁路。
+- 完成 Space 连接与运行期分类：EnsureReachableAll 保持标准用例；NetworkRecovery 保持深层状态负责人；MembershipConnectivity 与 SpaceApplication 保持 Runtime；两个无调用者 reachability 转发列为删除候选。
+- Space 全量行为清单阶段完成，进入逐项职责评估；优先从 Query Space Setup State 开始。
+- 提取 `QuerySpaceSetupStateUseCase`：模型、错误和当前 Space、邀请、设置、重新配对四项读取归入标准模块，Facade 改为单次 `execute()` 转发。
+- 新增三个用例级回归；格式、差异、单一定义和残留编排检查通过，构建与测试按约定未运行。
+- 提取 `CancelPairingInvitationUseCase`：取消规则和错误归入标准模块，Space Facade 改为单次 `execute()`，并删除 Facade 对 holder 的直接持有。
+- 新增无邀请冲突和全部取消两个用例级回归；Facade 测试改从 Setup 状态验证可见结果。
+- 将 invitation 相关行为内聚到 `space/admission/invitation/`：现有 issue 和新 cancel 各自成为子模块，共享 holder；删除旧顶层与 admission 根级路径。
+- 提取 `QueryPairingInvitationAddressesUseCase`：地址查询 Port 和行为从普通签发用例移除，新增查询专用错误并保持 Engine dev 结果不变。
+- 提取 dev-only `IssuePairingInvitationForAddressUseCase`；普通签发和按地址签发共享 `PairingInvitationIssuer`，普通用例不再持有 dev Port 或第二入口。
+- 删除可靠事务中已经被独立用例取代的加入状态查询、取消加入及其转发。成员状态查询改为复用 `QuerySpaceJoinStatusUseCase`，加入状态的解释规则只保留一份，并继续区分存储锁定、数据损坏和普通失败。
+- `DurableAdmissionProjection` 当前只剩待处理入站成员读取；下一步将这项读取收进成员状态查询后即可删除该对象。
+- 待处理入站成员读取已收进 `QuerySpaceMembershipStatusUseCase`，由该查询直接筛选当前 Space 的未完成邀请方记录并生成产品视图；重复记录或损坏内容继续失败关闭。
+- 删除无剩余职责的 `DurableAdmissionProjection` 及其导出。可靠事务不再承载任何产品查询投影。
+- `QueryPendingSpaceTransitionUseCase` 已直接读取未完成加入记录并判断是否等待会话切换，不再转发可靠事务方法。
+- `CompletePendingSpaceTransitionUseCase` 已完整负责逐阶段推进跨 Space 切换、原子保存成员历史与加入结果、终态压缩和最终活动状态确认。可靠事务中的查询、推进和恢复转发全部删除；跨 Space 回归改为验证两个真实用例入口。
+- 修复 `JoinSpaceUseCase` 遗留的旧状态查询调用，统一复用 `QuerySpaceJoinStatusUseCase`。
+- 简化两个 Space 切换用例的构造：删除接收整个 `SpaceAdmission` 后再转发到 `from_ports` / `from_repository` 的双入口，统一为单一 `new` 并直接接收准入记录仓储和必要的切换能力。生产组装与回归测试使用同一入口。
+- 完成确认恢复所需的挑战读取、挑战保存、帮助记录创建和帮助完成已迁入 `durable/completion_recovery.rs`，作为恢复流程私有步骤直接使用准入仓储。可靠事务删除对应四个方法，不再暴露恢复专用操作。
+- 邀请方的拒绝送达确认和完成送达确认迁入 `sponsor/durable_flow.rs`，实时握手、后台恢复和测试共用同一组邀请方规则。可靠事务删除 `sponsor_confirm_rejected` 与 `sponsor_confirm_active`，不再保存邀请方终态确认知识。
+- 邀请兑换结果迁入 `joiner/durable_flow.rs`：临时失败保留待重试记录，已兑换、不存在或冲突结束该记录。后台恢复只转交传输结果，可靠事务不再解释加入方的邀请兑换规则。
+- 可靠消息送达确认从 `transaction.rs` 拆出：旧加入被取代后的取消清理确认归入 `cancel_space_join`；五类常规消息的送达记录作为未完成准入恢复的私有步骤，收进 `durable/completion_recovery.rs`，不保留孤立消息模块，也没有按消息类型复制五套规则。
+- 建立 `RecoverPendingAdmissionsUseCase`，接管启动、恢复、周期和显式请求触发的全部未完成准入恢复入口。成员运行器显式持有该用例，不再调用一个并不存在于成员负责人的准入恢复方法；原 `SpaceAdmission::recover_pending_admissions` 入口已删除。
+- 未完成准入的消息扫描、重发、结果分派、送达记录和终态压缩已迁入 `RecoverPendingAdmissionsUseCase`。`transaction.rs` 删除生产恢复流程，只保留受测试条件限制的旧回归适配，实际运行不再经过它。

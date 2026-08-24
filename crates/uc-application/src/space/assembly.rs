@@ -13,14 +13,15 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use uc_core::membership::{
-    AdmissionCompletionRecoveryEndpointPort, ContentExchangeGatePort,
-    CurrentWorkspacePeerScopePort, GroupRevocationPort, GroupUpdateDispatchPort,
-    MembershipAttestationEndpointPort, MembershipGossipEndpointPort,
+    ContentExchangeGatePort, CurrentWorkspacePeerScopePort, GroupRevocationPort,
+    GroupUpdateDispatchPort, MembershipAttestationEndpointPort, MembershipGossipEndpointPort,
     MembershipHistoryExchangeEndpointPort,
 };
 use uc_core::ports::PresenceEvent;
 
-use crate::space::admission::SpaceAdmission;
+use crate::deps::AdmissionCompletionRecoveryEndpointPort;
+use crate::space::admission::{RecoverPendingAdmissionsUseCase, SpaceAdmission};
+use crate::space::membership_history::MembershipHistoryStore;
 use crate::space::workspace_membership::discovery::{
     build_membership_convergence, MembershipConvergence, MembershipConvergenceDeps,
     MembershipConvergenceRuntime,
@@ -46,10 +47,14 @@ pub struct SpaceModulesDeps {
 pub struct SpaceModules {
     pub(crate) membership_owner: Arc<WorkspaceMembership>,
     pub(crate) admission_owner: Arc<SpaceAdmission>,
+    admission_recovery: Arc<RecoverPendingAdmissionsUseCase>,
     pub(crate) membership: Arc<MembershipConvergence>,
     pub(crate) group_update_delivery: Arc<dyn GroupUpdateDeliveryPort>,
     membership_status_deps:
         crate::space::query_space_membership_status::ActiveSpaceMembershipStatusDeps,
+    membership_state_write_lock: Arc<tokio::sync::Mutex<()>>,
+    membership_state_events: crate::space::membership_state::SpaceMembershipStateEvents,
+    membership_recovery_requests: crate::space::membership_runtime::MembershipRecoveryRequests,
 }
 
 impl SpaceModules {
@@ -69,13 +74,29 @@ impl SpaceModules {
         let membership_status_deps =
             crate::space::query_space_membership_status::ActiveSpaceMembershipStatusDeps {
                 state_repository: Arc::clone(&workspace.repository),
-                historical_signatures: Arc::clone(&workspace.historical_membership_signatures),
+                membership_history: Arc::new(MembershipHistoryStore::new(
+                    Arc::clone(&workspace.membership_history_repo),
+                    Arc::clone(&workspace.historical_membership_signatures),
+                )),
                 member_signatures: Arc::clone(&workspace.member_signatures),
                 member_repo: Arc::clone(&workspace.member_repo),
                 presence: Arc::clone(&workspace.presence),
             };
-        let membership_owner = WorkspaceMembership::new(workspace);
+        let membership_state_write_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let membership_state_events =
+            crate::space::membership_state::SpaceMembershipStateEvents::new();
+        let membership_recovery_requests =
+            crate::space::membership_runtime::MembershipRecoveryRequests::new();
+        let membership_owner = WorkspaceMembership::new_with_state_coordination(
+            workspace,
+            Arc::clone(&membership_state_write_lock),
+            membership_state_events.clone(),
+            membership_recovery_requests.clone(),
+        );
         let admission_owner = SpaceAdmission::new(Arc::clone(&membership_owner));
+        let admission_recovery = Arc::new(RecoverPendingAdmissionsUseCase::new(Arc::clone(
+            &admission_owner,
+        )));
         let membership = build_membership_convergence(membership);
         let group_update_delivery: Arc<dyn GroupUpdateDeliveryPort> = Arc::new(
             GroupUpdateDelivery::new(
@@ -88,10 +109,30 @@ impl SpaceModules {
         Self {
             membership_owner,
             admission_owner,
+            admission_recovery,
             membership,
             group_update_delivery,
             membership_status_deps,
+            membership_state_write_lock,
+            membership_state_events,
+            membership_recovery_requests,
         }
+    }
+
+    pub(crate) fn membership_state_write_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.membership_state_write_lock)
+    }
+
+    pub(crate) fn membership_state_events(
+        &self,
+    ) -> crate::space::membership_state::SpaceMembershipStateEvents {
+        self.membership_state_events.clone()
+    }
+
+    pub(crate) fn membership_recovery_requests(
+        &self,
+    ) -> crate::space::membership_runtime::MembershipRecoveryRequests {
+        self.membership_recovery_requests.clone()
     }
 
     pub(crate) fn membership_status_deps(
@@ -146,16 +187,14 @@ impl SpaceModules {
         Arc::clone(&self.group_update_delivery)
     }
 
-    pub fn space_transition_recovery(&self) -> Arc<dyn crate::facade::SpaceTransitionRecoveryPort> {
-        Arc::clone(&self.admission_owner) as Arc<dyn crate::facade::SpaceTransitionRecoveryPort>
-    }
-
     /// Start the event-driven workspace convergence runtime.
     pub fn start_workspace_runtime(
         &self,
         presence_events: broadcast::Receiver<PresenceEvent>,
     ) -> crate::space::workspace_membership::WorkspaceMembershipRuntime {
-        self.membership_owner.clone().start(presence_events)
+        self.membership_owner
+            .clone()
+            .start(Arc::clone(&self.admission_recovery), presence_events)
     }
 
     /// Start the membership gossip runtime.

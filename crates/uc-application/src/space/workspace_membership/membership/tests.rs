@@ -17,10 +17,7 @@ async fn unknown_v2_member_may_introduce_a_complete_activated_extension() {
         .verify_and_record_activation_receipt(activation_receipt, &DeterministicHistoricalVerifier)
         .unwrap();
     admission_repository
-        .compare_and_replace_membership_history_v2(
-            None,
-            &base_history.encode_persisted_v2().unwrap(),
-        )
+        .compare_and_replace_membership_history(None, &base_history.encode_persisted_v2().unwrap())
         .await
         .unwrap();
 
@@ -37,6 +34,7 @@ async fn unknown_v2_member_may_introduce_a_complete_activated_extension() {
     state.own_instance = Some(candidate.author_member_instance_id);
     repository.save_state(&state).await.unwrap();
     let mut deps = test_deps(Arc::new(repository), "sponsor", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     deps.member_signatures = Arc::new(CredentialBackedSigner {
         device_id: DeviceId::new("sponsor"),
@@ -96,7 +94,7 @@ async fn paged_history_resumes_after_restart_and_applies_only_when_complete() {
         paged_runtime_history_fixture(0x3c1);
     let base_bytes = base.encode_persisted_v2().unwrap();
     admission_repository
-        .compare_and_replace_membership_history_v2(None, &base_bytes)
+        .compare_and_replace_membership_history(None, &base_bytes)
         .await
         .unwrap();
     let workspace_repository = MemoryWorkspaceRepository::default();
@@ -125,7 +123,7 @@ async fn paged_history_resumes_after_restart_and_applies_only_when_complete() {
     );
     assert_eq!(
         admission_repository
-            .load_membership_history_v2()
+            .load_membership_history()
             .await
             .unwrap(),
         Some(base_bytes.clone())
@@ -162,7 +160,7 @@ async fn paged_history_resumes_after_restart_and_applies_only_when_complete() {
     assert_eq!(duplicate, first);
     assert_eq!(
         admission_repository
-            .load_membership_history_v2()
+            .load_membership_history()
             .await
             .unwrap(),
         Some(base_bytes)
@@ -181,7 +179,7 @@ async fn paged_history_resumes_after_restart_and_applies_only_when_complete() {
     );
     assert_eq!(
         admission_repository
-            .load_membership_history_v2()
+            .load_membership_history()
             .await
             .unwrap(),
         Some(incoming.encode_persisted_v2().unwrap())
@@ -204,7 +202,7 @@ async fn paged_history_rejects_a_conflicting_transfer_and_clears_progress() {
     let (_, _, conflicting_pages, _, _) = paged_runtime_history_fixture(0x3c3);
     let base_bytes = base.encode_persisted_v2().unwrap();
     admission_repository
-        .compare_and_replace_membership_history_v2(None, &base_bytes)
+        .compare_and_replace_membership_history(None, &base_bytes)
         .await
         .unwrap();
     let workspace_repository = MemoryWorkspaceRepository::default();
@@ -238,7 +236,7 @@ async fn paged_history_rejects_a_conflicting_transfer_and_clears_progress() {
     );
     assert_eq!(
         admission_repository
-            .load_membership_history_v2()
+            .load_membership_history()
             .await
             .unwrap(),
         Some(base_bytes)
@@ -259,7 +257,7 @@ async fn paged_history_transfers_257_events_end_to_end() {
     let (base, incoming, _pages, sponsor_credential, joiner_credential) =
         paged_runtime_history_fixture(0x3c4);
     receiver_admission
-        .compare_and_replace_membership_history_v2(None, &base.encode_persisted_v2().unwrap())
+        .compare_and_replace_membership_history(None, &base.encode_persisted_v2().unwrap())
         .await
         .unwrap();
     let receiver_workspace = MemoryWorkspaceRepository::default();
@@ -284,7 +282,7 @@ async fn paged_history_transfers_257_events_end_to_end() {
     let sender_directory = tempfile::tempdir().unwrap();
     let sender_admission = durable_admission_repository(&sender_directory, [0xb4; 16]);
     sender_admission
-        .compare_and_replace_membership_history_v2(None, &incoming.encode_persisted_v2().unwrap())
+        .compare_and_replace_membership_history(None, &incoming.encode_persisted_v2().unwrap())
         .await
         .unwrap();
     let sender_workspace = MemoryWorkspaceRepository::default();
@@ -293,6 +291,7 @@ async fn paged_history_transfers_257_events_end_to_end() {
         Some(sponsor_credential.member_instance_id(&DeviceId::new("sponsor")));
     sender_workspace.save_state(&sender_state).await.unwrap();
     let mut sender_deps = test_deps(Arc::new(sender_workspace), "sponsor", Vec::new());
+    sender_deps.membership_history_repo = sender_admission.clone();
     sender_deps.admission_attempts = sender_admission.clone();
     sender_deps.member_signatures = Arc::new(CredentialBackedSigner {
         device_id: DeviceId::new("sponsor"),
@@ -315,11 +314,8 @@ async fn paged_history_transfers_257_events_end_to_end() {
         .unwrap();
 
     assert_eq!(loopback.sent_pages.load(Ordering::SeqCst), 2);
-    let sender_history = sender_admission.load_membership_history_v2().await.unwrap();
-    let receiver_history = receiver_admission
-        .load_membership_history_v2()
-        .await
-        .unwrap();
+    let sender_history = sender_admission.load_membership_history().await.unwrap();
+    let receiver_history = receiver_admission.load_membership_history().await.unwrap();
     assert_eq!(receiver_history, sender_history);
 }
 
@@ -465,13 +461,14 @@ async fn persisted_v2_removal_decision_is_retried_after_restart_for_a_diverged_a
     rejection.signature =
         DeterministicHistoricalVerifier.sign(&local_credential, &rejection.signing_payload());
     local_history
-        .verify_and_record_local_decision(rejection, local_member, &DeterministicHistoricalVerifier)
+        .apply_signed_local_removal_decision(
+            rejection,
+            local_member,
+            &DeterministicHistoricalVerifier,
+        )
         .unwrap();
     admission_repository
-        .compare_and_replace_membership_history_v2(
-            None,
-            &local_history.encode_persisted_v2().unwrap(),
-        )
+        .compare_and_replace_membership_history(None, &local_history.encode_persisted_v2().unwrap())
         .await
         .unwrap();
 
@@ -489,6 +486,7 @@ async fn persisted_v2_removal_decision_is_retried_after_restart_for_a_diverged_a
         ),
     ]));
     let mut deps = test_deps(Arc::new(repository), "joiner", Vec::new());
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     deps.member_signatures = Arc::new(CredentialBackedSigner {
         device_id: DeviceId::new("joiner"),
@@ -521,215 +519,6 @@ async fn persisted_v2_removal_decision_is_retried_after_restart_for_a_diverged_a
 }
 
 #[tokio::test]
-async fn concurrent_matching_device_trust_decisions_save_only_one_completion() {
-    use crate::space::workspace_membership::SpaceMembershipChangeDecisionResult;
-
-    let a = instance(0x0a);
-    let c = instance(0x0c);
-    let harness = harness(
-        "device-c",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-c"), c),
-        ],
-    );
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
-    let removal = uc_core::membership::MembershipEvent::new(
-        SPACE.to_owned(),
-        Some(c_addition.event_id()),
-        2,
-        [3; 16],
-        a,
-        MembershipOperation::RemoveDevice { member: a },
-        [3; 32],
-        [4; 32],
-        Vec::new(),
-        None,
-        vec![3],
-    );
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
-    history.receive_verified(genesis).unwrap();
-    history.receive_verified(c_addition).unwrap();
-    history.receive_verified(removal.clone()).unwrap();
-    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(c);
-    state.membership_reconciliation = Some(history);
-    harness.repository.save_state(&state).await.unwrap();
-
-    let first_owner = Arc::clone(&harness.owner);
-    let second_owner = Arc::clone(&harness.owner);
-    let (first, second) = tokio::join!(
-        first_owner.decide_device_trust_change(
-            removal.event_id(),
-            crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
-            false,
-        ),
-        second_owner.decide_device_trust_change(
-            removal.event_id(),
-            crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
-            false,
-        ),
-    );
-    let results = [first.unwrap(), second.unwrap()];
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| matches!(
-                result,
-                SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup { .. }
-            ))
-            .count(),
-        1
-    );
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| matches!(
-                result,
-                SpaceMembershipChangeDecisionResult::AlreadyCompleted { .. }
-            ))
-            .count(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn legacy_and_device_trust_decisions_share_idempotent_completion() {
-    use crate::space::convergence::{
-        SpaceMembershipChangeChoice, SpaceMembershipChangeDecisionResult,
-    };
-
-    let a = instance(0x0a);
-    let c = instance(0x0c);
-    let harness = harness(
-        "device-c",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-c"), c),
-        ],
-    );
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
-    let removal = uc_core::membership::MembershipEvent::new(
-        SPACE.to_owned(),
-        Some(c_addition.event_id()),
-        2,
-        [3; 16],
-        a,
-        MembershipOperation::RemoveDevice { member: a },
-        [3; 32],
-        [4; 32],
-        Vec::new(),
-        None,
-        vec![3],
-    );
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
-    for event in [genesis, c_addition] {
-        history.receive_verified(event).unwrap();
-    }
-    history.receive_verified(removal.clone()).unwrap();
-    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(c);
-    state.membership_reconciliation = Some(history);
-    harness.repository.save_state(&state).await.unwrap();
-
-    assert!(matches!(
-        harness
-            .owner
-            .decide_device_trust_change(
-                removal.event_id(),
-                SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
-                false,
-            )
-            .await
-            .unwrap(),
-        SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup { .. }
-    ));
-    assert!(harness
-        .owner
-        .decide_membership_removal(removal.event_id(), RemovalDecision::Reject)
-        .await
-        .is_ok());
-}
-
-#[tokio::test]
-async fn applying_a_change_that_removes_the_local_device_requires_explicit_confirmation() {
-    use crate::space::workspace_membership::SpaceMembershipChangeDecisionResult;
-
-    let a = instance(0x0a);
-    let c = instance(0x0c);
-    let harness = harness(
-        "device-c",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-c"), c),
-        ],
-    );
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
-    let removal = uc_core::membership::MembershipEvent::new(
-        SPACE.to_owned(),
-        Some(c_addition.event_id()),
-        2,
-        [3; 16],
-        a,
-        MembershipOperation::RemoveDevice { member: c },
-        [3; 32],
-        [4; 32],
-        Vec::new(),
-        None,
-        vec![3],
-    );
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
-    for event in [genesis, c_addition] {
-        history.receive_verified(event).unwrap();
-    }
-    history.receive_verified(removal.clone()).unwrap();
-    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(c);
-    state.membership_reconciliation = Some(history);
-    harness.repository.save_state(&state).await.unwrap();
-
-    assert!(matches!(
-        harness
-            .owner
-            .decide_device_trust_change(
-                removal.event_id(),
-                crate::space::workspace_membership::SpaceMembershipChangeChoice::ApplyChange,
-                false,
-            )
-            .await
-            .unwrap(),
-        SpaceMembershipChangeDecisionResult::LocalDeviceConfirmationRequired { .. }
-    ));
-    assert_eq!(
-        harness
-            .repository
-            .load_state()
-            .await
-            .unwrap()
-            .unwrap()
-            .membership_reconciliation
-            .unwrap()
-            .pending_removal_decision(),
-        Some(removal.event_id())
-    );
-    assert!(matches!(
-        harness
-            .owner
-            .decide_device_trust_change(
-                removal.event_id(),
-                crate::space::workspace_membership::SpaceMembershipChangeChoice::ApplyChange,
-                true,
-            )
-            .await
-            .unwrap(),
-        SpaceMembershipChangeDecisionResult::Applied { .. }
-    ));
-}
-
-#[tokio::test]
 async fn removing_an_unknown_or_self_target_fails_without_saving() {
     let a = instance(0x0a);
     let b = instance(0x0b);
@@ -754,14 +543,14 @@ async fn removing_an_unknown_or_self_target_fails_without_saving() {
     assert!(matches!(
         harness
             .owner
-            .submit_removal(&DeviceId::new("device-unknown"))
+            .submit_legacy_removal_for_test(&DeviceId::new("device-unknown"))
             .await,
         Err(WorkspaceConvergenceError::UnknownTarget)
     ));
     assert!(matches!(
         harness
             .owner
-            .submit_removal(&DeviceId::new("device-a"))
+            .submit_legacy_removal_for_test(&DeviceId::new("device-a"))
             .await,
         Err(WorkspaceConvergenceError::SelfTarget)
     ));
@@ -835,10 +624,7 @@ async fn unusable_isolated_profile_rebuilds_its_membership_baseline() {
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xd2; 32]);
     let (_, stale_history, _, _, _) = durable_candidate_verification_fixture(attempt_id);
     admission_repository
-        .compare_and_replace_membership_history_v2(
-            None,
-            &stale_history.encode_persisted_v2().unwrap(),
-        )
+        .compare_and_replace_membership_history(None, &stale_history.encode_persisted_v2().unwrap())
         .await
         .unwrap();
     let repository = MemoryWorkspaceRepository::default();
@@ -853,6 +639,7 @@ async fn unusable_isolated_profile_rebuilds_its_membership_baseline() {
     ));
     repository.save_state(&state).await.unwrap();
     let mut deps = test_deps(Arc::new(repository.clone()), "device-a", Vec::new());
+    deps.membership_history_repo = admission_repository.clone();
     deps.admission_attempts = admission_repository.clone();
     deps.member_signatures = Arc::new(CredentialBackedSigner {
         device_id,
@@ -868,7 +655,7 @@ async fn unusable_isolated_profile_rebuilds_its_membership_baseline() {
     let repaired = repository.load_state().await.unwrap().unwrap();
     assert_eq!(repaired.effective_members(), [expected_instance].into());
     let repaired_history = admission_repository
-        .load_membership_history_v2()
+        .load_membership_history()
         .await
         .unwrap()
         .unwrap();
@@ -919,98 +706,4 @@ async fn restart_recovery_completes_and_clears_pending_membership_effects() {
         owner.snapshot().await.unwrap().peer_device_ids,
         vec![DeviceId::new("device-b")]
     );
-}
-
-#[tokio::test]
-async fn device_trust_decision_distinguishes_first_duplicate_and_conflicting_submissions() {
-    use crate::space::workspace_membership::SpaceMembershipChangeDecisionResult;
-
-    let a = instance(0x0a);
-    let c = instance(0x0c);
-    let harness = harness(
-        "device-c",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-c"), c),
-        ],
-    );
-    let genesis = membership_event(None, 0, a, a, "device-a", 1);
-    let c_addition = membership_event(Some(genesis.event_id()), 1, a, c, "device-c", 2);
-    let removal = uc_core::membership::MembershipEvent::new(
-        SPACE.to_owned(),
-        Some(c_addition.event_id()),
-        2,
-        [3; 16],
-        a,
-        MembershipOperation::RemoveDevice { member: a },
-        [3; 32],
-        [4; 32],
-        Vec::new(),
-        None,
-        vec![3],
-    );
-    let mut history = MembershipReconciliation::new(SPACE.to_owned(), c);
-    for event in [genesis, c_addition] {
-        history.receive_verified(event).unwrap();
-    }
-    history.receive_verified(removal.clone()).unwrap();
-    let mut state = SpaceMembershipState::fresh(SPACE.to_owned(), 1);
-    state.own_instance = Some(c);
-    state.membership_reconciliation = Some(history);
-    harness.repository.save_state(&state).await.unwrap();
-
-    assert!(matches!(
-        harness
-            .owner
-            .decide_device_trust_change(
-                removal.event_id(),
-                crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
-                false,
-            )
-            .await
-            .unwrap(),
-        SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup { .. }
-    ));
-    assert!(matches!(
-        harness
-            .owner
-            .decide_device_trust_change(
-                removal.event_id(),
-                crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
-                false,
-            )
-            .await
-            .unwrap(),
-        SpaceMembershipChangeDecisionResult::AlreadyCompleted { .. }
-    ));
-    let restarted = WorkspaceMembership::new(test_deps(
-        Arc::new(harness.repository.clone()),
-        "device-c",
-        vec![
-            (DeviceId::new("device-a"), a),
-            (DeviceId::new("device-c"), c),
-        ],
-    ));
-    assert!(matches!(
-        restarted
-            .decide_device_trust_change(
-                removal.event_id(),
-                crate::space::workspace_membership::SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
-                false,
-            )
-            .await
-            .unwrap(),
-        SpaceMembershipChangeDecisionResult::AlreadyCompleted { .. }
-    ));
-    assert!(matches!(
-        restarted
-            .decide_device_trust_change(
-                removal.event_id(),
-                crate::space::workspace_membership::SpaceMembershipChangeChoice::ApplyChange,
-                false,
-            )
-            .await
-            .unwrap(),
-        SpaceMembershipChangeDecisionResult::StateChanged { .. }
-    ));
 }

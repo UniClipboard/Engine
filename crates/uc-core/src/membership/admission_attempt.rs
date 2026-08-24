@@ -9,7 +9,7 @@ use crate::security::IdentityFingerprint;
 
 use super::{
     AdmissionChangeFacts, BaseMembershipHistoryPositionV1, MemberInstanceId,
-    MembershipCredentialId, MembershipEventId, SponsorAdmissionSecurityDelivery,
+    MembershipCredentialId, MembershipEventId,
 };
 
 pub const ADMISSION_ATTEMPT_FORMAT_V1: u16 = 1;
@@ -17,6 +17,24 @@ pub const ADMISSION_PROFILE_METADATA_FORMAT_V1: u16 = 1;
 pub const TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1: u16 = 1;
 pub const ADMISSION_IDENTITY_BINDING_FORMAT_V1: u16 = 1;
 pub const ADMISSION_COMPLETION_RECOVERY_FORMAT_V1: u16 = 1;
+
+/// Security payload persisted with an admission attempt for later delivery.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SponsorAdmissionSecurityDelivery {
+    pub recipient: DeviceId,
+    pub credential_id: MembershipCredentialId,
+    pub payload: Vec<u8>,
+}
+
+impl fmt::Debug for SponsorAdmissionSecurityDelivery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SponsorAdmissionSecurityDelivery")
+            .field("recipient", &self.recipient)
+            .field("payload_len", &self.payload.len())
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionCompletionRecoveryValidationError {
@@ -967,16 +985,6 @@ impl AdmissionProfileMetadataV1 {
             completion_recovery_challenges: BTreeMap::new(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CurrentLocalJoinProjectionV1 {
-    pub device_trust_revision: u64,
-    pub attempt_id: AdmissionAttemptId,
-    pub join_id: [u8; 16],
-    pub local_join_ordinal: u64,
-    pub terminal_result: Option<AdmissionTerminalResultV1>,
-    pub rejection_reason: Option<AdmissionRejectionReasonV1>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

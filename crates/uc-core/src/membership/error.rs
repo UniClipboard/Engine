@@ -61,54 +61,6 @@ pub enum MembershipOutboxRepositoryError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum AdmissionAttemptRepositoryError {
-    #[error("admission attempt storage is locked")]
-    Locked,
-    #[error("admission attempt storage is corrupt")]
-    Corrupt,
-    #[error("admission attempt already exists")]
-    AlreadyExists,
-    #[error("admission attempt was not found")]
-    NotFound,
-    #[error("admission attempt version conflicts with persisted state")]
-    VersionConflict,
-    #[error("the previous local join cannot be superseded")]
-    PreviousJoinCannotBeSuperseded,
-    #[error("admission attempt repository failed: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[error("admission outbox delivery is temporarily unavailable")]
-pub struct AdmissionOutboxDeliveryError;
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum AdmissionSecurityTransitionError {
-    #[error("admission security state is invalid")]
-    InvalidState,
-    #[error("admission security commitment does not match")]
-    CommitmentMismatch,
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum AdmissionSpaceTransitionError {
-    #[error("unreadable history requires explicit confirmation")]
-    UnreadableHistoryRequiresConfirmation,
-    #[error("profile is locked")]
-    Locked,
-    #[error("space transition is unavailable")]
-    Unavailable,
-    #[error("space transition storage failed")]
-    Storage,
-    #[error("insufficient storage for space transition")]
-    InsufficientStorage,
-    #[error("space transition state is inconsistent")]
-    Inconsistent,
-    #[error("space transition requires recovery")]
-    RecoveryRequired,
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MembershipSecurityUpdateError {
     #[error("membership security state is unavailable")]
     Unavailable,

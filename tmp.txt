@@ -1,0 +1,88 @@
+下一阶段按下面顺序推进。
+
+1. 查询切换到共享读取
+
+修改 [use_case.rs](/Users/mark/MyProjects/uni/Engine/crates/uc-application/src/space/query_space_membership_status/use_case.rs:164)：
+
+```rust
+async fn load_current_verified_membership_history(
+    &self,
+    active_space: &ActiveSpaceMembershipStatusDeps,
+) -> Result<VersionedMembershipHistory, QuerySpaceMembershipStatusError> {
+    active_space
+        .membership_history
+        .load_verified_history()
+        .await
+        .map_err(map_membership_history_repository_error)?
+        .ok_or(QuerySpaceMembershipStatusError::Unavailable)
+        .map(LoadedMembershipHistory::into_history)
+}
+```
+
+同时导入：
+
+```rust
+use crate::space::membership_history::LoadedMembershipHistory;
+```
+
+删除这个方法中原来的：
+
+- 原始字节读取
+- 手动解码
+- 手动调用验证器
+
+完成标准：查询实现不再直接访问 `history_repository` 和 `historical_signatures`。
+
+2. 给共享历史增加可靠保存
+
+之后为 `LoadedMembershipHistory` 增加修改和提交能力：
+
+```text
+取得可修改历史
+→ 编码修改后的历史
+→ 使用 expected_bytes 比较保存
+→ 返回成功或冲突
+```
+
+这一阶段才开始使用现在保存着的 `expected_bytes`。
+
+3. 迁移发起成员移除
+
+把它的：
+
+```text
+读取
+验证解码
+编码
+版本比较保存
+```
+
+替换为共享历史对象。
+
+迁完后从发起用例依赖中删除：
+
+```text
+history_repo
+historical_signatures
+```
+
+改为一个：
+
+```text
+membership_history
+```
+
+4. 迁移决定成员移除
+
+按同样方式迁移决定用例，并统一并发冲突处理。
+
+5. 最终清理
+
+三个用例全部迁移后，再从 `ActiveSpaceMembershipStatusDeps` 删除临时保留的：
+
+```rust
+history_repository
+historical_signatures
+```
+
+当前马上要做的是第 1 步，只切换查询读取，不碰保存逻辑。

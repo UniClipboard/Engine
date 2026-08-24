@@ -1,10 +1,10 @@
-use super::transaction;
-use super::*;
-use super::{
+use crate::space::admission::durable::{
     admission_invitation_digest, admission_operation_id, admission_resume_public_key_digest,
     candidate_frame, common_existing_member_delivery_payload, complete_ack_frame,
-    durable_frame_from_outbox, validate_candidate_request,
+    durable_frame_from_outbox, transaction, validate_candidate_request,
 };
+use crate::space::admission::*;
+use crate::space::workspace_membership::*;
 
 impl crate::space::admission::SpaceAdmission {
     pub(crate) async fn validate_join_request(
@@ -15,6 +15,7 @@ impl crate::space::admission::SpaceAdmission {
             .validate_durable_identity()
             .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_owned()))?;
         let verified = self
+            .membership
             .deps
             .historical_membership_signatures
             .verify(
@@ -34,11 +35,12 @@ impl crate::space::admission::SpaceAdmission {
         &self,
     ) -> Result<uc_core::membership::VersionedMembershipHistory, WorkspaceConvergenceError> {
         if let Some(encoded) = self
+            .membership
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
-            .map_err(transaction::map_repository_error)?
+            .map_err(WorkspaceConvergenceError::from)?
         {
             let history = uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
                 &encoded,
@@ -50,6 +52,7 @@ impl crate::space::admission::SpaceAdmission {
             .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
             let state = self.membership.load_state().await?;
             let own_instance = self
+                .membership
                 .deps
                 .member_signatures
                 .current_member_instance(&self.membership.deps.own_device)
@@ -89,6 +92,7 @@ impl crate::space::admission::SpaceAdmission {
             WorkspaceConvergenceError::RecoveryRequired
         })?;
         let current_instance = self
+            .membership
             .deps
             .member_signatures
             .current_member_instance(&self.membership.deps.own_device)
@@ -102,6 +106,7 @@ impl crate::space::admission::SpaceAdmission {
             return Err(WorkspaceConvergenceError::RecoveryRequired);
         }
         let remote_members = self
+            .membership
             .deps
             .member_repo
             .list()
@@ -156,6 +161,7 @@ impl crate::space::admission::SpaceAdmission {
             return Err(WorkspaceConvergenceError::RecoveryRequired);
         }
         let credential = self
+            .membership
             .deps
             .member_signatures
             .current_membership_credential(&self.membership.deps.own_device)
@@ -163,6 +169,7 @@ impl crate::space::admission::SpaceAdmission {
             .map_err(|_| WorkspaceConvergenceError::RecoveryRequired)?;
         if credential.member_instance_id(&self.membership.deps.own_device) != own_instance
             || !self
+                .membership
                 .deps
                 .member_signatures
                 .verify_current_member_payload(
@@ -198,14 +205,14 @@ impl crate::space::admission::SpaceAdmission {
         &self,
         request: &uc_core::pairing::JoinerRequest,
     ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
+        use crate::deps::{SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest};
         use uc_core::membership::{
             AdmissionAttemptId, AdmissionIdentityBindingV1, AdmissionOutboxPurposeV1,
             MembershipAdmissionV2, MembershipEventV2, MembershipOperationV2,
-            SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
             MEMBERSHIP_EVENT_FORMAT_V2,
         };
 
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         self.validate_join_request(request).await?;
         let attempt_id = AdmissionAttemptId::from_bytes(request.attempt_id);
         let invitation_digest = admission_invitation_digest(request.invitation_code.as_str());
@@ -258,6 +265,7 @@ impl crate::space::admission::SpaceAdmission {
             .current_position()
             .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
         let own_credential = self
+            .membership
             .deps
             .member_signatures
             .current_membership_credential(&self.membership.deps.own_device)
@@ -344,6 +352,7 @@ impl crate::space::admission::SpaceAdmission {
             .admission_candidate_core_digest(request.attempt_id, &request.key_package)
             .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
         let prepared_security = self
+            .membership
             .deps
             .prepare_sponsor_admission_security
             .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
@@ -402,6 +411,7 @@ impl crate::space::admission::SpaceAdmission {
             ));
         }
         candidate_event.signature = self
+            .membership
             .deps
             .member_signatures
             .sign_current_member_payload(&candidate_event.signing_payload())
@@ -466,115 +476,6 @@ impl crate::space::admission::SpaceAdmission {
         candidate_frame(attempt_id, &candidate_message)
     }
 
-    pub(crate) async fn prepare_joiner_candidate(
-        &self,
-        frame: &uc_core::pairing::DurableAdmissionFrame,
-        proof_signer: &(dyn uc_core::ports::space::GroupAdmissionPort + Send + Sync),
-        target_access: &(dyn uc_core::ports::space::PrepareAdmissionTargetAccessPort + Send + Sync),
-        passphrase: &uc_core::crypto::domain::Passphrase,
-    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
-        use uc_core::membership::{
-            AdmissionAttemptId, AdmissionOutboxPurposeV1, AdmissionSecurityCommitmentV1,
-            MembershipEventV2, MembershipOperationV2, VersionedMembershipHistory,
-        };
-        if frame.kind != uc_core::pairing::DurableAdmissionMessageKind::Candidate {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let _guard = self.membership.state_lock.lock().await;
-        let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
-        let candidate_message = transaction::durable_admission_message(
-            attempt_id,
-            AdmissionOutboxPurposeV1::Candidate,
-            self.membership.deps.own_device.as_str().as_bytes(),
-            frame.predecessor_message_id,
-            &frame.payload,
-        );
-        if candidate_message.message_id != frame.message_id {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let Some(attempt) = self.admission.load(attempt_id).await? else {
-            if self.admission.is_compacted_superseded(attempt_id).await? {
-                return Err(WorkspaceConvergenceError::RecoveryRequired);
-            }
-            return Err(WorkspaceConvergenceError::JoinNotFound);
-        };
-        if attempt.terminal_result
-            == Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
-        {
-            self.admission
-                .record_superseded_protocol_contradiction(attempt_id, &candidate_message)
-                .await?;
-            return Err(WorkspaceConvergenceError::RecoveryRequired);
-        }
-        let payload = transaction::DurableAdmissionCandidatePayloadV1::decode(&frame.payload)?;
-        let base_history = VersionedMembershipHistory::decode_persisted_v2(
-            &payload.base_membership_history,
-            self.membership
-                .deps
-                .historical_membership_signatures
-                .as_ref(),
-        )
-        .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-        let candidate_event: MembershipEventV2 =
-            postcard::from_bytes(&payload.candidate.candidate_event)
-                .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        let sponsor_commitment: AdmissionSecurityCommitmentV1 =
-            postcard::from_bytes(&payload.candidate.security_commitment)
-                .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        let computed_core = candidate_event
-            .admission_candidate_core_digest(
-                frame.attempt_id,
-                &payload.candidate.candidate_key_package,
-            )
-            .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-        if computed_core != sponsor_commitment.candidate_core_digest {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let target_access_state = target_access
-            .prepare_target_access(
-                &uc_core::ids::SpaceId::from_string(payload.candidate.lineage_id.clone()),
-                passphrase,
-            )
-            .await
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?
-            .into_bytes();
-        let sponsor_device_id = payload
-            .candidate
-            .target_relationships
-            .iter()
-            .find(|facts| facts.member_instance == candidate_event.author_member_instance_id)
-            .map(|facts| facts.device_id.clone())
-            .ok_or(WorkspaceConvergenceError::InvalidConfirmation)?;
-        let MembershipOperationV2::AddDevice { admission } = &candidate_event.operation else {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        };
-        if admission.facts.device_id != self.membership.deps.own_device {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let prepared = self
-            .admission
-            .joiner_verify_and_prepare(
-                attempt_id,
-                &candidate_message,
-                payload.candidate,
-                base_history,
-                &candidate_event,
-                &sponsor_commitment,
-                &target_access_state,
-                &[],
-                Some(proof_signer),
-                sponsor_device_id.as_str().as_bytes(),
-                &[],
-            )
-            .await?;
-        durable_frame_from_outbox(
-            attempt_id,
-            uc_core::pairing::DurableAdmissionMessageKind::Prepared,
-            AdmissionOutboxPurposeV1::Prepared,
-            &prepared,
-        )
-    }
-
     pub(crate) async fn commit_sponsor_prepared(
         &self,
         frame: &uc_core::pairing::DurableAdmissionFrame,
@@ -586,7 +487,7 @@ impl crate::space::admission::SpaceAdmission {
         if frame.kind != uc_core::pairing::DurableAdmissionMessageKind::Prepared {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         }
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
         let attempt = self
             .admission
@@ -630,6 +531,7 @@ impl crate::space::admission::SpaceAdmission {
             || proof.joiner_member_instance_id != admission.facts.member_instance
             || proof.joiner_credential_id != admission.membership_credential.credential_id
             || !self
+                .membership
                 .deps
                 .historical_membership_signatures
                 .verify(
@@ -685,162 +587,6 @@ impl crate::space::admission::SpaceAdmission {
         )
     }
 
-    pub(crate) async fn apply_joiner_commit(
-        &self,
-        frame: &uc_core::pairing::DurableAdmissionFrame,
-        receipt_signer: &(dyn uc_core::ports::space::GroupAdmissionPort + Send + Sync),
-    ) -> Result<uc_core::pairing::DurableAdmissionFrame, WorkspaceConvergenceError> {
-        use uc_core::membership::{
-            AdmissionActivationReceipt, AdmissionAttemptId, AdmissionOutboxPurposeV1,
-            AdmissionSecurityCommitmentV1, AdmissionSecurityTransitionInput, MembershipEventV2,
-            MembershipOperationV2,
-        };
-        if frame.kind != uc_core::pairing::DurableAdmissionMessageKind::Commit {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let _guard = self.membership.state_lock.lock().await;
-        let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
-        let commit = transaction::durable_admission_message(
-            attempt_id,
-            AdmissionOutboxPurposeV1::Commit,
-            self.membership.deps.own_device.as_str().as_bytes(),
-            frame.predecessor_message_id,
-            &frame.payload,
-        );
-        if commit.message_id != frame.message_id {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let Some(attempt) = self.admission.load(attempt_id).await? else {
-            if self.admission.is_compacted_superseded(attempt_id).await? {
-                return Err(WorkspaceConvergenceError::RecoveryRequired);
-            }
-            return Err(WorkspaceConvergenceError::JoinNotFound);
-        };
-        if attempt.terminal_result
-            == Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
-        {
-            self.admission
-                .record_superseded_protocol_contradiction(attempt_id, &commit)
-                .await?;
-            return Err(WorkspaceConvergenceError::RecoveryRequired);
-        }
-        let commit_payload = transaction::DurableAdmissionCommitPayloadV1::decode(&frame.payload)?;
-        let candidate_event: MembershipEventV2 =
-            postcard::from_bytes(attempt.candidate_event.as_deref().ok_or_else(|| {
-                WorkspaceConvergenceError::Inconsistent("candidate event is missing".to_owned())
-            })?)
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        let commitment: AdmissionSecurityCommitmentV1 =
-            postcard::from_bytes(attempt.security_commitment.as_deref().ok_or_else(|| {
-                WorkspaceConvergenceError::Inconsistent(
-                    "candidate security commitment is missing".to_owned(),
-                )
-            })?)
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        if commit_payload.candidate_event_id != *candidate_event.event_id().as_bytes()
-            || commit_payload.security_commitment_id != commitment.security_commitment_id
-            || attempt.prepared_proof.as_deref() != Some(commit_payload.prepared_proof.as_slice())
-            || attempt.resume_public_key.as_deref()
-                != Some(commit_payload.resume_public_key.as_slice())
-            || attempt.existing_member_security_deliveries.as_deref()
-                != Some(commit_payload.existing_member_deliveries.as_slice())
-            || transaction::completion_recovery_routes(
-                attempt.target_relationships.as_deref().ok_or_else(|| {
-                    WorkspaceConvergenceError::Inconsistent(
-                        "completion recovery routes are missing".to_owned(),
-                    )
-                })?,
-            ) != commit_payload.completion_recovery_routes
-        {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let transition_input = AdmissionSecurityTransitionInput {
-            attempt_id: frame.attempt_id,
-            base_history_position: commitment.base_history_position.clone(),
-            candidate_core_digest: commitment.candidate_core_digest,
-            key_catalog_digest: commitment.key_catalog_digest,
-            admission_bundle_digest: commitment.admission_bundle_digest,
-        };
-        let rederived = self
-            .deps
-            .admission_security_transition
-            .derive_public_commitment(
-                attempt.staged_security_state.as_deref().ok_or_else(|| {
-                    WorkspaceConvergenceError::Inconsistent(
-                        "joiner staged security state is missing".to_owned(),
-                    )
-                })?,
-                attempt.security_commit.as_deref().ok_or_else(|| {
-                    WorkspaceConvergenceError::Inconsistent("security commit is missing".to_owned())
-                })?,
-                &transition_input,
-            )
-            .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-        if rederived != commitment {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let MembershipOperationV2::AddDevice { admission } = &candidate_event.operation else {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        };
-        let mut receipt = AdmissionActivationReceipt::new(
-            1,
-            frame.attempt_id,
-            candidate_event.event_id(),
-            candidate_event.resulting_members_digest,
-            commitment.security_commitment_id,
-            admission.facts.member_instance,
-            Vec::new(),
-        );
-        let prepared_join = uc_core::space_access::PreparedGroupJoin::new(
-            attempt.candidate_key_package.clone().ok_or_else(|| {
-                WorkspaceConvergenceError::Inconsistent(
-                    "candidate key package is missing".to_owned(),
-                )
-            })?,
-            attempt
-                .joiner_pending_security_state
-                .clone()
-                .ok_or_else(|| {
-                    WorkspaceConvergenceError::Inconsistent(
-                        "joiner signing state is missing".to_owned(),
-                    )
-                })?,
-        )
-        .with_member_instance(admission.facts.member_instance);
-        receipt.signature = receipt_signer
-            .sign_prepared_join_payload(&prepared_join, &receipt.signing_payload())
-            .await
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        let applied_payload = postcard::to_stdvec(&receipt)
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        let sponsor_device_id = attempt
-            .target_relationships
-            .as_deref()
-            .and_then(|relationships| {
-                relationships.iter().find(|facts| {
-                    facts.member_instance == candidate_event.author_member_instance_id
-                })
-            })
-            .map(|facts| facts.device_id.clone())
-            .ok_or(WorkspaceConvergenceError::InvalidConfirmation)?;
-        let applied = self
-            .admission
-            .joiner_apply(
-                attempt_id,
-                &commit,
-                &receipt,
-                sponsor_device_id.as_str().as_bytes(),
-                &applied_payload,
-            )
-            .await?;
-        durable_frame_from_outbox(
-            attempt_id,
-            uc_core::pairing::DurableAdmissionMessageKind::Applied,
-            AdmissionOutboxPurposeV1::Applied,
-            &applied,
-        )
-    }
-
     pub(crate) async fn complete_sponsor_applied(
         &self,
         frame: &uc_core::pairing::DurableAdmissionFrame,
@@ -853,7 +599,7 @@ impl crate::space::admission::SpaceAdmission {
         if frame.kind != uc_core::pairing::DurableAdmissionMessageKind::Applied {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         }
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
         let attempt = self
             .admission
@@ -886,11 +632,12 @@ impl crate::space::admission::SpaceAdmission {
             .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
         let mut completed_history = VersionedMembershipHistory::decode_persisted_v2(
             &self
+                .membership
                 .deps
-                .admission_attempts
-                .load_membership_history_v2()
+                .membership_history_repo
+                .load_membership_history()
                 .await
-                .map_err(transaction::map_repository_error)?
+                .map_err(WorkspaceConvergenceError::from)?
                 .ok_or_else(|| {
                     WorkspaceConvergenceError::Inconsistent(
                         "committed membership history is missing".to_owned(),
@@ -918,7 +665,7 @@ impl crate::space::admission::SpaceAdmission {
             .deps
             .activate_sponsor_admission_security
             .activate_sponsor_admission_security(
-                uc_core::membership::ActivateSponsorAdmissionSecurityRequest {
+                crate::deps::ActivateSponsorAdmissionSecurityRequest {
                     space_id: uc_core::ids::SpaceId::from_string(
                         candidate_event.lineage_id.clone(),
                     ),
@@ -941,6 +688,7 @@ impl crate::space::admission::SpaceAdmission {
             .current_position()
             .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
         let own_credential = self
+            .membership
             .deps
             .member_signatures
             .current_membership_credential(&self.membership.deps.own_device)
@@ -963,6 +711,7 @@ impl crate::space::admission::SpaceAdmission {
             Vec::new(),
         );
         completion.signature = self
+            .membership
             .deps
             .member_signatures
             .sign_current_member_payload(&completion.signing_payload())
@@ -999,134 +748,6 @@ impl crate::space::admission::SpaceAdmission {
         )
     }
 
-    pub(crate) async fn activate_joiner_complete(
-        &self,
-        frame: &uc_core::pairing::DurableAdmissionFrame,
-    ) -> Result<crate::space::admission::adapter::DurableJoinerCompletion, WorkspaceConvergenceError>
-    {
-        use uc_core::membership::{
-            AdmissionActivationReceipt, AdmissionAttemptId, AdmissionCompletionV1,
-            AdmissionOutboxPurposeV1, AdmissionSecurityCommitmentV1, MembershipEventV2,
-            VersionedMembershipHistory,
-        };
-        if frame.kind != uc_core::pairing::DurableAdmissionMessageKind::Complete {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let _guard = self.membership.state_lock.lock().await;
-        let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
-        let complete = transaction::durable_admission_message(
-            attempt_id,
-            AdmissionOutboxPurposeV1::Complete,
-            self.membership.deps.own_device.as_str().as_bytes(),
-            frame.predecessor_message_id,
-            &frame.payload,
-        );
-        if complete.message_id != frame.message_id {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let Some(attempt) = self.admission.load(attempt_id).await? else {
-            if self.admission.is_compacted_superseded(attempt_id).await? {
-                return Err(WorkspaceConvergenceError::RecoveryRequired);
-            }
-            return Err(WorkspaceConvergenceError::JoinNotFound);
-        };
-        if attempt.terminal_result
-            == Some(uc_core::membership::AdmissionTerminalResultV1::SupersededByNewJoin)
-        {
-            self.admission
-                .record_superseded_protocol_contradiction(attempt_id, &complete)
-                .await?;
-            return Err(WorkspaceConvergenceError::RecoveryRequired);
-        }
-        let completion: AdmissionCompletionV1 = postcard::from_bytes(&frame.payload)
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        let candidate_event: MembershipEventV2 =
-            postcard::from_bytes(attempt.candidate_event.as_deref().ok_or_else(|| {
-                WorkspaceConvergenceError::Inconsistent("candidate event is missing".to_owned())
-            })?)
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        let commitment: AdmissionSecurityCommitmentV1 =
-            postcard::from_bytes(attempt.security_commitment.as_deref().ok_or_else(|| {
-                WorkspaceConvergenceError::Inconsistent(
-                    "candidate security commitment is missing".to_owned(),
-                )
-            })?)
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        let receipt_bytes = attempt.activation_receipt.as_deref().ok_or_else(|| {
-            WorkspaceConvergenceError::Inconsistent("activation receipt is missing".to_owned())
-        })?;
-        let _: AdmissionActivationReceipt = postcard::from_bytes(receipt_bytes)
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        let history = VersionedMembershipHistory::decode_persisted_v2(
-            attempt
-                .verified_membership_history
-                .as_deref()
-                .ok_or_else(|| {
-                    WorkspaceConvergenceError::Inconsistent(
-                        "verified membership history is missing".to_owned(),
-                    )
-                })?,
-            self.membership
-                .deps
-                .historical_membership_signatures
-                .as_ref(),
-        )
-        .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-        let completer_credential = history
-            .credential_for(completion.completed_by_member_instance_id)
-            .ok_or(WorkspaceConvergenceError::InvalidConfirmation)?;
-        let receipt_digest: [u8; 32] = sha2::Sha256::digest(receipt_bytes).into();
-        if completion.completion_format_version
-            != uc_core::membership::ADMISSION_COMPLETION_FORMAT_V1
-            || completion.attempt_id != frame.attempt_id
-            || completion.event_id != candidate_event.event_id()
-            || completion.activation_receipt_digest != receipt_digest
-            || completion.security_commitment_id != commitment.security_commitment_id
-            || completion.completed_by_credential_id != completer_credential.credential_id
-            || completion.completed_history_position
-                != history
-                    .current_position()
-                    .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?
-            || !history
-                .active_members()
-                .contains(&completion.completed_by_member_instance_id)
-            || !self
-                .deps
-                .historical_membership_signatures
-                .verify(
-                    completer_credential.signature_algorithm_version,
-                    &completer_credential.public_key,
-                    &completion.signing_payload(),
-                    &completion.signature,
-                )
-                .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?
-        {
-            return Err(WorkspaceConvergenceError::InvalidConfirmation);
-        }
-        let acknowledgment = match self
-            .admission
-            .joiner_activate(attempt_id, &complete, &frame.payload)
-            .await?
-        {
-            transaction::JoinerActivationOutcomeV1::Active(acknowledgment) => {
-                self.admission.compact_if_settled(attempt_id).await?;
-                acknowledgment
-            }
-            transaction::JoinerActivationOutcomeV1::SpaceTransitionRequired => {
-                return Ok(crate::space::admission::adapter::DurableJoinerCompletion::SpaceTransitionRequired);
-            }
-        };
-        let payload = postcard::to_stdvec(&acknowledgment)
-            .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        Ok(
-            crate::space::admission::adapter::DurableJoinerCompletion::Active(complete_ack_frame(
-                attempt_id,
-                frame.message_id,
-                payload,
-            )),
-        )
-    }
-
     pub(crate) async fn confirm_sponsor_complete_ack(
         &self,
         frame: &uc_core::pairing::DurableAdmissionFrame,
@@ -1134,7 +755,7 @@ impl crate::space::admission::SpaceAdmission {
         if frame.kind != uc_core::pairing::DurableAdmissionMessageKind::CompleteAck {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         }
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes(frame.attempt_id);
         if complete_ack_frame(
             attempt_id,
@@ -1150,81 +771,12 @@ impl crate::space::admission::SpaceAdmission {
         let acknowledgment: uc_core::membership::AdmissionInboxRecordV1 =
             postcard::from_bytes(&frame.payload)
                 .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?;
-        self.admission
-            .sponsor_confirm_active(attempt_id, &acknowledgment)
-            .await
-    }
-
-    pub async fn cancel_join_space(
-        &self,
-        join_id: [u8; 16],
-    ) -> Result<CurrentJoinStatus, WorkspaceConvergenceError> {
-        self.admission.cancel_local_join(join_id).await
-    }
-
-    pub(crate) async fn preflight_local_join_source(
-        &self,
-        preserve_unreadable_history: bool,
-    ) -> Result<(), WorkspaceConvergenceError> {
-        self.admission
-            .preflight_join_source(preserve_unreadable_history)
-            .await
-    }
-
-    pub(crate) async fn prepare_local_join_before_network(
-        &self,
-        preparation: &(dyn uc_core::ports::space::GroupAdmissionPort + Send + Sync),
-        local_device_id: &DeviceId,
-        sponsor: &[u8],
-        sponsor_continuation_address: &[u8],
-        stable_request_binding: &[u8],
-        preserve_unreadable_history: bool,
-    ) -> Result<
-        crate::space::admission::adapter::DurableLocalJoinPreparation,
-        WorkspaceConvergenceError,
-    > {
-        let _guard = self.membership.state_lock.lock().await;
-        let start = self
-            .admission
-            .prepare_join_before_network(
-                preparation,
-                local_device_id,
-                sponsor,
-                sponsor_continuation_address,
-                stable_request_binding,
-                preserve_unreadable_history,
-            )
-            .await?;
-        let join_id = start.attempt.join_id.ok_or_else(|| {
-            WorkspaceConvergenceError::Inconsistent("local join id is missing".into())
-        })?;
-        Ok(
-            crate::space::admission::adapter::DurableLocalJoinPreparation {
-                attempt_id: *start.attempt.attempt_id.as_bytes(),
-                join_id,
-                request_message_id: start.request_message_id()?,
-                resume_public_key: self
-                    .admission
-                    .load_join_recovery_material(start.attempt.attempt_id)
-                    .await?
-                    .resume_public_key,
-                prepared_group_join: start.prepared_group_join,
-            },
+        confirm_complete_delivery(
+            self.membership.deps.admission_attempts.as_ref(),
+            attempt_id,
+            &acknowledgment,
         )
-    }
-
-    pub(crate) async fn reject_local_join_before_candidate(
-        &self,
-        attempt_id: [u8; 32],
-        reason: uc_core::membership::AdmissionRejectionReasonV1,
-    ) -> Result<(), WorkspaceConvergenceError> {
-        let _guard = self.membership.state_lock.lock().await;
-        self.admission
-            .joiner_reject_before_candidate(
-                uc_core::membership::AdmissionAttemptId::from_bytes(attempt_id),
-                reason,
-            )
-            .await
+        .await
     }
 
     pub(crate) async fn reject_superseded_join_cleanup(
@@ -1245,7 +797,7 @@ impl crate::space::admission::SpaceAdmission {
         {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         }
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
         let rejected = self
             .admission
@@ -1284,30 +836,155 @@ impl crate::space::admission::SpaceAdmission {
         {
             return Err(WorkspaceConvergenceError::InvalidConfirmation);
         }
-        let _guard = self.membership.state_lock.lock().await;
+        let _guard = self.membership.state_write_lock.lock().await;
         let attempt_id = AdmissionAttemptId::from_bytes(frame.attempt_id);
         let acknowledgment = transaction::admission_acknowledgment(&rejected);
-        self.admission
-            .sponsor_confirm_rejected(attempt_id, &acknowledgment)
-            .await?;
+        confirm_rejected_delivery(
+            self.membership.deps.admission_attempts.as_ref(),
+            attempt_id,
+            &acknowledgment,
+        )
+        .await?;
         self.admission.compact_if_settled(attempt_id).await?;
         Ok(())
     }
+}
 
-    pub async fn requires_session_transition(&self) -> Result<bool, WorkspaceConvergenceError> {
-        self.admission.requires_session_transition().await
-    }
+pub(in crate::space) async fn confirm_rejected_delivery(
+    repository: &dyn crate::deps::AdmissionAttemptRepositoryPort,
+    attempt_id: uc_core::membership::AdmissionAttemptId,
+    acknowledgment: &uc_core::membership::AdmissionInboxRecordV1,
+) -> Result<(), WorkspaceConvergenceError> {
+    use uc_core::membership::{
+        AdmissionAttemptRoleStateV1, AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1,
+        AdmissionTerminalResultV1, SponsorAdmissionStageV1, SponsorAdmissionStateV1,
+    };
 
-    pub async fn recover_space_transition_after_session_drain(
-        &self,
-    ) -> Result<usize, WorkspaceConvergenceError> {
-        let finished = self
-            .admission
-            .recover_space_transitions_after_session_drain()
-            .await?;
-        if finished > 0 {
-            self.membership.notify();
+    if let Some(terminal) = repository
+        .load_terminal(attempt_id)
+        .await
+        .map_err(crate::space::admission::durable::map_repository_error)?
+    {
+        if terminal.terminal_result == AdmissionTerminalResultV1::Rejected
+            && terminal.rejection_reason == Some(AdmissionRejectionReasonV1::Cancelled)
+            && terminal.acknowledgment_rebuild.contains(acknowledgment)
+        {
+            return Ok(());
         }
-        Ok(finished)
+        return Err(inconsistent("rejected acknowledgment does not match"));
     }
+
+    let mut attempt = load_required_attempt(repository, attempt_id).await?;
+    if !matches!(
+        attempt.role_state,
+        AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
+            stage: SponsorAdmissionStageV1::Rejected,
+        })
+    ) || attempt.terminal_result != Some(AdmissionTerminalResultV1::Rejected)
+    {
+        return Err(inconsistent("sponsor admission is not rejected"));
+    }
+    if attempt.inbox_dedup.contains(acknowledgment) {
+        return Ok(());
+    }
+    let rejected_index = attempt
+        .outboxes
+        .iter()
+        .position(|message| {
+            message.purpose == AdmissionOutboxPurposeV1::Rejected
+                && !message.superseded
+                && transaction::admission_acknowledgment(message) == *acknowledgment
+        })
+        .ok_or_else(|| inconsistent("rejected acknowledgment does not match"))?;
+    attempt.outboxes[rejected_index].superseded = true;
+    attempt.inbox_dedup.push(acknowledgment.clone());
+    persist_attempt(repository, attempt).await
+}
+
+pub(in crate::space) async fn confirm_complete_delivery(
+    repository: &dyn crate::deps::AdmissionAttemptRepositoryPort,
+    attempt_id: uc_core::membership::AdmissionAttemptId,
+    acknowledgment: &uc_core::membership::AdmissionInboxRecordV1,
+) -> Result<(), WorkspaceConvergenceError> {
+    use uc_core::membership::{
+        AdmissionAttemptRoleStateV1, AdmissionOutboxPurposeV1, AdmissionTerminalResultV1,
+        SponsorAdmissionStageV1, SponsorAdmissionStateV1,
+    };
+
+    if let Some(terminal) = repository
+        .load_terminal(attempt_id)
+        .await
+        .map_err(crate::space::admission::durable::map_repository_error)?
+    {
+        if terminal.terminal_result == AdmissionTerminalResultV1::Completed
+            && terminal.acknowledgment_rebuild.contains(acknowledgment)
+        {
+            return Ok(());
+        }
+        return Err(inconsistent(
+            "complete acknowledgment does not match compacted admission result",
+        ));
+    }
+
+    let mut attempt = load_required_attempt(repository, attempt_id).await?;
+    if attempt.terminal_result == Some(AdmissionTerminalResultV1::Completed)
+        && attempt.inbox_dedup.contains(acknowledgment)
+    {
+        return Ok(());
+    }
+    if !matches!(
+        attempt.role_state,
+        AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
+            stage: SponsorAdmissionStageV1::Completed,
+        })
+    ) {
+        return Err(inconsistent("sponsor admission message is out of order"));
+    }
+    let complete_index = attempt
+        .outboxes
+        .iter()
+        .position(|message| {
+            message.purpose == AdmissionOutboxPurposeV1::Complete && !message.superseded
+        })
+        .ok_or_else(|| inconsistent("complete outbox is missing"))?;
+    if transaction::admission_acknowledgment(&attempt.outboxes[complete_index]) != *acknowledgment {
+        return Err(inconsistent("complete acknowledgment does not match"));
+    }
+    attempt.outboxes[complete_index].superseded = true;
+    attempt.inbox_dedup.push(acknowledgment.clone());
+    attempt.terminal_result = Some(AdmissionTerminalResultV1::Completed);
+    attempt.role_state = AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
+        stage: SponsorAdmissionStageV1::Completed,
+    });
+    persist_attempt(repository, attempt).await
+}
+
+async fn load_required_attempt(
+    repository: &dyn crate::deps::AdmissionAttemptRepositoryPort,
+    attempt_id: uc_core::membership::AdmissionAttemptId,
+) -> Result<uc_core::membership::AdmissionAttemptV1, WorkspaceConvergenceError> {
+    repository
+        .load(attempt_id)
+        .await
+        .map_err(crate::space::admission::durable::map_repository_error)?
+        .ok_or_else(|| inconsistent("admission attempt was not found"))
+}
+
+async fn persist_attempt(
+    repository: &dyn crate::deps::AdmissionAttemptRepositoryPort,
+    mut attempt: uc_core::membership::AdmissionAttemptV1,
+) -> Result<(), WorkspaceConvergenceError> {
+    let expected_version = attempt.record_version;
+    attempt.record_version = expected_version
+        .checked_add(1)
+        .ok_or_else(|| inconsistent("admission record version overflow"))?;
+    repository
+        .compare_and_advance(attempt.attempt_id, expected_version, &attempt)
+        .await
+        .map_err(crate::space::admission::durable::map_repository_error)?;
+    Ok(())
+}
+
+fn inconsistent(message: impl Into<String>) -> WorkspaceConvergenceError {
+    WorkspaceConvergenceError::Inconsistent(message.into())
 }

@@ -1650,6 +1650,16 @@ impl VersionedMembershipHistory {
             .unwrap_or_default()
     }
 
+    /// Resolves an effective member only from signed admission facts retained
+    /// by the current history. External roster projections never grant
+    /// membership or supply missing identity facts.
+    pub fn effective_member_for_device(&self, device_id: &DeviceId) -> Option<MemberInstanceId> {
+        self.effective_members().into_iter().find(|member| {
+            self.admission_facts_for(*member)
+                .is_some_and(|facts| &facts.device_id == device_id)
+        })
+    }
+
     pub fn effective_members_at(&self, event_id: MembershipEventId) -> BTreeSet<MemberInstanceId> {
         self.snapshots
             .get(&event_id)
@@ -1859,7 +1869,98 @@ impl VersionedMembershipHistory {
             .find(|event_id| !self.peer_decisions.contains_key(&(*event_id, local_member)))
     }
 
-    pub fn verify_and_record_local_decision(
+    /// Builds a rule-complete removal event for the current local branch.
+    /// The caller must sign its payload before applying it to the history.
+    pub fn create_unsigned_local_removal_event(
+        &self,
+        author: MemberInstanceId,
+        author_credential: &MembershipCredential,
+        target: MemberInstanceId,
+        operation_id: [u8; 16],
+        security_state_digest: [u8; 32],
+    ) -> Result<MembershipEventV2, MembershipHistoryV2Error> {
+        if self.credentials.get(&author) != Some(author_credential) {
+            return Err(MembershipHistoryV2Error::InvalidCredential);
+        }
+        if !self.active_members().contains(&author) {
+            return Err(MembershipHistoryV2Error::UnauthorizedAuthor);
+        }
+        if author == target || !self.effective_members().contains(&target) {
+            return Err(MembershipHistoryV2Error::InvalidOperation);
+        }
+
+        let position = self.current_position()?;
+        let operation = MembershipOperationV2::RemoveDevice { member: target };
+        let resulting_members_digest =
+            self.expected_resulting_members_digest(position.event_id, &operation)?;
+
+        Ok(MembershipEventV2::new(
+            MEMBERSHIP_EVENT_FORMAT_V2,
+            self.lineage_id.clone(),
+            position.event_id,
+            position.depth.saturating_add(1),
+            operation_id,
+            author,
+            author_credential.credential_id,
+            author_credential.signature_algorithm_version,
+            operation,
+            resulting_members_digest,
+            security_state_digest,
+            Vec::new(),
+            None,
+            Vec::new(),
+        ))
+    }
+
+    /// Builds a rule-complete local decision for the current pending removal.
+    /// The caller must sign its payload before applying it to the history.
+    pub fn create_unsigned_local_removal_decision(
+        &self,
+        removal_event_id: MembershipEventId,
+        local_member: MemberInstanceId,
+        local_credential: &MembershipCredential,
+        decision: RemovalDecision,
+        decision_nonce: [u8; 16],
+    ) -> Result<MembershipDecisionV2, MembershipHistoryV2Error> {
+        if self.pending_removal_decision(local_member) != Some(removal_event_id) {
+            return Err(MembershipHistoryV2Error::InvalidDecision);
+        }
+        if self.credentials.get(&local_member) != Some(local_credential) {
+            return Err(MembershipHistoryV2Error::InvalidCredential);
+        }
+        let removal = self
+            .events
+            .get(&removal_event_id)
+            .ok_or(MembershipHistoryV2Error::UnknownRemoval)?;
+        let parent_id = removal
+            .parent_event_id
+            .ok_or(MembershipHistoryV2Error::InvalidDecision)?;
+        let resulting_members_digest = match decision {
+            RemovalDecision::Accept => removal.resulting_members_digest,
+            RemovalDecision::Reject => self
+                .events
+                .get(&parent_id)
+                .map(|event| event.resulting_members_digest)
+                .ok_or(MembershipHistoryV2Error::UnknownParent)?,
+        };
+
+        Ok(MembershipDecisionV2::new(
+            MEMBERSHIP_DECISION_FORMAT_V2,
+            self.lineage_id.clone(),
+            removal_event_id,
+            local_member,
+            local_credential.credential_id,
+            local_credential.signature_algorithm_version,
+            decision,
+            Some(parent_id),
+            resulting_members_digest,
+            decision_nonce,
+            Vec::new(),
+        ))
+    }
+
+    /// Verifies and applies a signed local decision to this membership branch.
+    pub fn apply_signed_local_removal_decision(
         &mut self,
         decision: MembershipDecisionV2,
         local_member: MemberInstanceId,

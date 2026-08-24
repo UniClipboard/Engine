@@ -2,13 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use uc_core::ids::SpaceId;
-use uc_core::membership::{
-    AdmissionSpaceTransitionError, DeviceManagementResetDataPort, SpaceSecurityStateResetError,
-    SpaceSecurityStateResetPort,
-};
+use uc_core::membership::{SpaceSecurityStateResetError, SpaceSecurityStateResetPort};
 
 use super::error::SpaceRebuildTransitionError;
 use super::ports::{SpaceRebuildPreparation, SpaceRebuildProgressPort, SpaceRebuildTransitionPort};
+use crate::deps::{AdmissionSpaceTransitionError, DeviceManagementResetDataPort};
 use crate::space::current_space::CurrentSpaceIdentityPort;
 use crate::space::re_pairing::RePairingState;
 

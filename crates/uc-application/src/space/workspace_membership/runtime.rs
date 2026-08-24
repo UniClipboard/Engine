@@ -14,6 +14,7 @@ use tracing::{debug, warn};
 use uc_core::ports::PresenceEvent;
 
 use super::WorkspaceMembership;
+use crate::space::admission::RecoverPendingAdmissionsUseCase;
 
 enum WorkspaceConvergenceRuntimeCommand {
     Pause(oneshot::Sender<()>),
@@ -26,22 +27,35 @@ enum RecoveryTrigger {
     Startup,
     Resume,
     Periodic,
+    Requested,
 }
 
 struct RecoveryTask(Option<JoinHandle<()>>);
 
 impl RecoveryTask {
-    fn startup(owner: Arc<WorkspaceMembership>) -> Self {
-        Self(Some(spawn_recovery(owner, RecoveryTrigger::Startup)))
+    fn startup(
+        owner: Arc<WorkspaceMembership>,
+        admission_recovery: Arc<RecoverPendingAdmissionsUseCase>,
+    ) -> Self {
+        Self(Some(spawn_recovery(
+            owner,
+            admission_recovery,
+            RecoveryTrigger::Startup,
+        )))
     }
 
     fn is_running(&self) -> bool {
         self.0.is_some()
     }
 
-    fn start(&mut self, owner: Arc<WorkspaceMembership>, trigger: RecoveryTrigger) {
+    fn start(
+        &mut self,
+        owner: Arc<WorkspaceMembership>,
+        admission_recovery: Arc<RecoverPendingAdmissionsUseCase>,
+        trigger: RecoveryTrigger,
+    ) {
         if self.0.is_none() {
-            self.0 = Some(spawn_recovery(owner, trigger));
+            self.0 = Some(spawn_recovery(owner, admission_recovery, trigger));
         }
     }
 
@@ -77,12 +91,14 @@ impl WorkspaceMembership {
     /// runtime keeps a clone of the owner.
     pub fn start(
         self: Arc<Self>,
+        admission_recovery: Arc<RecoverPendingAdmissionsUseCase>,
         mut presence_events: broadcast::Receiver<PresenceEvent>,
     ) -> WorkspaceMembershipRuntime {
         let (commands, mut command_rx) = mpsc::unbounded_channel();
         let owner = Arc::clone(&self);
         let task = tokio::spawn(async move {
-            let mut recovery_task = RecoveryTask::startup(Arc::clone(&owner));
+            let mut recovery_task =
+                RecoveryTask::startup(Arc::clone(&owner), Arc::clone(&admission_recovery));
             let mut resume_recovery_pending = false;
             let mut paused = false;
             let mut presence_open = true;
@@ -104,7 +120,11 @@ impl WorkspaceMembership {
                             resume_recovery_pending = true;
                             let _ = completed.send(());
                             if !recovery_task.is_running() {
-                                recovery_task.start(Arc::clone(&owner), RecoveryTrigger::Resume);
+                                recovery_task.start(
+                                    Arc::clone(&owner),
+                                    Arc::clone(&admission_recovery),
+                                    RecoveryTrigger::Resume,
+                                );
                                 resume_recovery_pending = false;
                             }
                         }
@@ -128,7 +148,11 @@ impl WorkspaceMembership {
                         }
                         recovery_task.0 = None;
                         if resume_recovery_pending && !paused {
-                            recovery_task.start(Arc::clone(&owner), RecoveryTrigger::Resume);
+                            recovery_task.start(
+                                Arc::clone(&owner),
+                                Arc::clone(&admission_recovery),
+                                RecoveryTrigger::Resume,
+                            );
                             resume_recovery_pending = false;
                         }
                     }
@@ -152,7 +176,18 @@ impl WorkspaceMembership {
                         }
                     },
                     _ = recovery_tick.tick(), if !paused && !recovery_task.is_running() => {
-                        recovery_task.start(Arc::clone(&owner), RecoveryTrigger::Periodic);
+                        recovery_task.start(
+                            Arc::clone(&owner),
+                            Arc::clone(&admission_recovery),
+                            RecoveryTrigger::Periodic,
+                        );
+                    }
+                    _ = owner.recovery_requests.notified(), if !paused && !recovery_task.is_running() => {
+                        recovery_task.start(
+                            Arc::clone(&owner),
+                            Arc::clone(&admission_recovery),
+                            RecoveryTrigger::Requested,
+                        );
                     }
                 }
             }
@@ -164,17 +199,26 @@ impl WorkspaceMembership {
     }
 }
 
-fn spawn_recovery(owner: Arc<WorkspaceMembership>, trigger: RecoveryTrigger) -> JoinHandle<()> {
-    tokio::spawn(run_recovery(owner, trigger))
+fn spawn_recovery(
+    owner: Arc<WorkspaceMembership>,
+    admission_recovery: Arc<RecoverPendingAdmissionsUseCase>,
+    trigger: RecoveryTrigger,
+) -> JoinHandle<()> {
+    tokio::spawn(run_recovery(owner, admission_recovery, trigger))
 }
 
-async fn run_recovery(owner: Arc<WorkspaceMembership>, trigger: RecoveryTrigger) {
+async fn run_recovery(
+    owner: Arc<WorkspaceMembership>,
+    admission_recovery: Arc<RecoverPendingAdmissionsUseCase>,
+    trigger: RecoveryTrigger,
+) {
     let context = match trigger {
         RecoveryTrigger::Startup => "startup",
         RecoveryTrigger::Resume => "resume",
         RecoveryTrigger::Periodic => "periodic",
+        RecoveryTrigger::Requested => "requested",
     };
-    if let Err(error) = owner.recover_pending_admissions().await {
+    if let Err(error) = admission_recovery.execute().await {
         warn!(error = %error, recovery_context = context, "workspace convergence: pending admissions deferred");
     }
     if let Err(error) = owner.recover_pending_membership_effects().await {
@@ -183,9 +227,12 @@ async fn run_recovery(owner: Arc<WorkspaceMembership>, trigger: RecoveryTrigger)
     if let Err(error) = owner.deliver_pending_membership_decisions().await {
         warn!(error = %error, recovery_context = context, "workspace convergence: pending membership decisions deferred");
     }
-    if matches!(trigger, RecoveryTrigger::Resume) {
+    if matches!(
+        trigger,
+        RecoveryTrigger::Resume | RecoveryTrigger::Requested
+    ) {
         if let Err(error) = owner.synchronize_chain().await {
-            warn!(error = %error, "workspace convergence: resumed membership history exchange deferred");
+            warn!(error = %error, "workspace convergence: requested membership history exchange deferred");
         }
     }
 }

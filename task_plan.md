@@ -1,36 +1,96 @@
-# Space Rebuild Refactor Plan
+# Workspace Convergence Responsibility Refactor
 
 ## Goal
 
-Move the reset-space rebuild workflow out of `facade/space_setup/facade.rs` into lifecycle modules while preserving reset recovery, phase-specific errors, and the stable facade contract.
+Replace `WorkspaceConvergence` with four business-owned modules while preserving
+the stable Engine contract, persisted state, restart recovery, and network
+protocol behavior.
+
+## Completion Criteria
+
+- `SpaceFacade` composes `SpaceAdmission`, `WorkspaceMembership`,
+  `SpaceConnectivity`, and `SpaceLifecycle`.
+- Rebuild, reset, and Engine-version upgrade do not depend on
+  `WorkspaceConvergence`.
+- Admission has one complete owner from invitation through durable completion
+  and recovery.
+- Membership has one complete owner for history, verified admission, removal,
+  decisions, reconciliation, and current-member scope.
+- Connectivity consumes the effective member scope and owns connection and
+  network recovery behavior.
+- `WorkspaceConvergence` and permanent forwarding adapters are deleted.
+- Existing public Engine behavior and persisted formats remain unchanged.
+- ADR-021, Spec-024, and the architecture bible describe the final ownership.
+- Focused tests, workspace checks, formatting, architecture checks, and diff
+  checks pass, or pre-existing blockers are documented with evidence.
 
 ## Constraints
 
-- `SpaceFacade` remains the only external application entry point.
-- `RebuildSpaceUseCase` is crate-private and owns only the shared single-device-space rebuild sequence.
-- User-requested reset and legacy-profile isolation recovery remain separate application actions.
-- The persisted rebuild target must survive interruption and reuse the same `SpaceId` on retry.
-- Any new persisted business payload, including a rebuild target, must follow the repository encrypted-persistence rule.
-- Do not retain `DeviceManagementResetUseCase` as a second implementation after migration.
-- Keep `factory_reset` out of this refactor.
+- Preserve all existing user changes in the dirty worktree.
+- Move one observable behavior slice at a time and remove its old path in the
+  same slice.
+- Tests exercise the new business interface, not internal step ordering.
+- Do not add new persistence formats, public protocol steps, dependencies, or
+  compatibility layers.
+- Keep sensitive persisted payloads encrypted and logs free of sensitive data.
 
 ## Phases
 
-- [x] Phase 1: Identify the existing reset workflow, public contract, and recovery paths.
-- [x] Phase 2: Define the shared rebuild responsibility, input, output, ordered phases, and error categories.
-- [ ] Phase 3: Define and implement `SpaceRebuildCheckpointPort` for durable pending-target progress, including encrypted infra persistence and adapter wiring.
-- [ ] Phase 4: Implement `RebuildSpaceUseCase` in `space/lifecycle/rebuild_space.rs` using the checkpoint and data-transition ports.
-- [ ] Phase 5: Implement `ResetSpaceUseCase` for the user-requested action.
-- [ ] Phase 6: Implement `RecoverLegacyProfileIsolationUseCase` for the upgrade migration action.
-- [ ] Phase 7: Wire the lifecycle use cases into `SpaceFacade`, migrate focused tests, and remove `DeviceManagementResetUseCase`.
-- [ ] Phase 8: Update architecture documentation, format, compile, and run focused regression tests.
+- [x] Phase 1: Freeze new responsibilities on `WorkspaceConvergence` and agree
+  the target ownership model.
+- [x] Phase 2: Inventory callers, public and restricted methods, state owners,
+  locks, persistence, restart paths, endpoints, runtimes, and tests.
+- [ ] Phase 3: Complete migration of Space rebuild, reset, and Engine upgrade
+  into `SpaceLifecycle`, including old-space admission-state cleanup.
+- [ ] Phase 4: Merge invitation and durable admission behavior into one
+  `SpaceAdmission` owner.
+- [ ] Phase 5: Move remaining membership history, admission effects, removal,
+  decisions, reconciliation, and current scope into `WorkspaceMembership`.
+- [ ] Phase 6: Move effective-scope connectivity and network recovery into
+  `SpaceConnectivity`.
+- [ ] Phase 7: Rewire assembly and facade, then delete `WorkspaceConvergence`
+  and obsolete forwarding interfaces.
+- [ ] Phase 8: Update ADR-021, Spec-024, architecture bible, run final review,
+  verification, and commit the completed refactor.
 
-## Open Decisions
+## Current Slice
 
-- Define one shared execution gate for user reset and legacy recovery so both flows cannot rebuild concurrently.
-- Decide whether invitation cancellation is owned by `ResetSpaceUseCase` through an internal application dependency or stays as a facade pre-step. The final design must retain one owner for the full user action.
-- Choose the exact `SpaceRebuildProgressPort` error type and encrypted infra representation.
+Phase 3 is active. Remove the mixed `SetupStatusPort` snapshot in six verified
+slices:
 
-## Current Status
+1. [x] Complete independent Space rebuild progress ownership and delete its
+   setup status methods. Implementation and source-level verification are
+   complete; focused runtime tests remain blocked by the wider application
+   compilation failures.
+2. [x] Extract durable re-pairing requirement ownership. The application owner,
+   encrypted V1 store, rebuild/upgrade/query/pairing wiring, and old field
+   deletion are complete; focused runtime tests remain blocked by the wider
+   application compilation failures.
+3. [x] Establish a canonical current-Space identity owner. The renamed
+   `ActiveSpaceGenerationManifest` remains only the atomic pointer to a fully
+   generated key/database/security set; the resolver uses it first and falls
+   back only when absent to a profile-encrypted Legacy ID. Production readers
+   and initial activation are wired; focused tests remain blocked by wider
+   application compilation failures.
+4. [x] Make current-Space identity the profile-readiness result and add an
+   idempotent factory-reset action that clears both generation and Legacy
+   identity records. Production reset wiring is complete; focused tests remain
+   blocked by the wider application compilation failures.
+5. [x] Remove the legacy setup-status file from runtime recovery,
+   configuration migration, and Engine wiring. Portable exports now carry the
+   encrypted current-Space identity instead of a setup marker.
+6. [x] Delete `SetupStatusPort`, `SetupStatus`, `SetupStatusFacade`, the
+   manifest projection wrapper, and all obsolete tests/fakes. The only retained
+   `.setup_status` text is the immutable interrupted-rebuild progress filename.
 
-Phase 3 is active. No behavior migration is complete yet.
+Each slice preserves interrupted rebuild recovery and existing file paths,
+move all readers before deleting the old writer, and leave no parallel runtime
+source of truth.
+
+## Errors Encountered
+
+| Error | Attempt | Resolution |
+| --- | --- | --- |
+| Existing root plan described only the earlier rebuild extraction | 1 | Replaced it with the approved end-to-end responsibility plan. |
+| Worktree contains extensive incomplete user edits | 1 | Treat current files as authoritative and avoid reverting unrelated changes. |
+| One patch tried to replace a file with delete and add operations together | 1 | Split each replacement into separate patch operations. |

@@ -7,10 +7,10 @@ impl WorkspaceMembership {
         let state = self.load_state().await?;
         let encoded_history = self
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
-            .map_err(admission::map_repository_error)?
+            .map_err(WorkspaceConvergenceError::from)?
             .ok_or(WorkspaceConvergenceError::Unavailable)?;
         let history = uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
             &encoded_history,
@@ -52,7 +52,6 @@ impl WorkspaceMembership {
         removal_event_id: MembershipEventId,
         decision: RemovalDecision,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _decision_guard = self.device_trust_decision_lock.lock().await;
         self.decide_membership_removal_locked(removal_event_id, decision)
             .await
     }
@@ -64,10 +63,10 @@ impl WorkspaceMembership {
     ) -> Result<Option<WorkspaceSnapshot>, WorkspaceConvergenceError> {
         let Some(encoded_history) = self
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
-            .map_err(admission::map_repository_error)?
+            .map_err(WorkspaceConvergenceError::from)?
         else {
             return Ok(None);
         };
@@ -105,30 +104,15 @@ impl WorkspaceMembership {
                 "membership removal is no longer pending".to_owned(),
             ));
         }
-        let parent = removal.parent_event_id.ok_or_else(|| {
-            WorkspaceConvergenceError::Inconsistent("membership removal has no parent".to_owned())
-        })?;
-        let resulting_members_digest = match decision {
-            RemovalDecision::Accept => removal.resulting_members_digest,
-            RemovalDecision::Reject => history.members_digest_at(parent).ok_or_else(|| {
-                WorkspaceConvergenceError::Inconsistent(
-                    "membership removal parent is unavailable".to_owned(),
-                )
-            })?,
-        };
-        let mut signed_decision = MembershipDecisionV2::new(
-            MEMBERSHIP_DECISION_FORMAT_V2,
-            history.lineage_id().to_owned(),
-            removal_event_id,
-            own,
-            own_credential.credential_id,
-            own_credential.signature_algorithm_version,
-            decision,
-            Some(parent),
-            resulting_members_digest,
-            uuid::Uuid::new_v4().into_bytes(),
-            Vec::new(),
-        );
+        let mut signed_decision = history
+            .create_unsigned_local_removal_decision(
+                removal_event_id,
+                own,
+                &own_credential,
+                decision,
+                uuid::Uuid::new_v4().into_bytes(),
+            )
+            .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
         signed_decision.signature = self
             .deps
             .member_signatures
@@ -136,7 +120,7 @@ impl WorkspaceMembership {
             .await
             .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
         history
-            .verify_and_record_local_decision(
+            .apply_signed_local_removal_decision(
                 signed_decision,
                 own,
                 self.deps.historical_membership_signatures.as_ref(),
@@ -146,13 +130,13 @@ impl WorkspaceMembership {
             .encode_persisted_v2()
             .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
 
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let mut state = self.load_state().await?;
         self.deps
-            .admission_attempts
-            .compare_and_replace_membership_history_v2(Some(&encoded_history), &replacement)
+            .membership_history_repo
+            .compare_and_replace_membership_history(Some(&encoded_history), &replacement)
             .await
-            .map_err(admission::map_repository_error)?;
+            .map_err(WorkspaceConvergenceError::from)?;
         let mut candidate_devices = self
             .deps
             .member_repo
@@ -179,7 +163,6 @@ impl WorkspaceMembership {
             self.persist(&state).await?;
         }
         self.publish(&state);
-        self.notify();
         drop(_guard);
         self.deliver_pending_membership_decisions().await?;
         self.query().await.map(Some)
@@ -197,7 +180,7 @@ impl WorkspaceMembership {
             return Ok(snapshot);
         }
         let (snapshot, recipients, signed_decision) = {
-            let _guard = self.state_lock.lock().await;
+            let _guard = self.state_write_lock.lock().await;
             let now_ms = self.deps.clock.now_ms();
             let mut state = self.load_state().await?;
             let own_member_instance_id = state
@@ -315,7 +298,6 @@ impl WorkspaceMembership {
             )?;
             self.persist(&state).await?;
             self.publish(&state);
-            self.notify();
             (state.snapshot(), recipients, signed_decision)
         };
 
@@ -323,110 +305,6 @@ impl WorkspaceMembership {
         let _ = signed_decision;
         self.deliver_pending_membership_decisions().await?;
         Ok(snapshot)
-    }
-
-    pub async fn decide_device_trust_change(
-        &self,
-        change_id: MembershipEventId,
-        choice: SpaceMembershipChangeChoice,
-        confirm_local_removal: bool,
-    ) -> Result<SpaceMembershipChangeDecisionResult, WorkspaceConvergenceError> {
-        let _decision_guard = self.device_trust_decision_lock.lock().await;
-        if let Some(encoded_history) = self
-            .deps
-            .admission_attempts
-            .load_membership_history_v2()
-            .await
-            .map_err(admission::map_repository_error)?
-        {
-            let history = uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
-                &encoded_history,
-                self.deps.historical_membership_signatures.as_ref(),
-            )
-            .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-            let own = self
-                .deps
-                .member_signatures
-                .current_member_instance(&self.deps.own_device)
-                .await
-                .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-            if let Some(completed) = history.decision_for(change_id, own) {
-                let completed_choice = match completed.decision {
-                    RemovalDecision::Accept => SpaceMembershipChangeChoice::ApplyChange,
-                    RemovalDecision::Reject => SpaceMembershipChangeChoice::KeepCurrentDeviceGroup,
-                };
-                let snapshot = self.build_current_space_membership_status().await?.status;
-                return if completed_choice == choice {
-                    Ok(SpaceMembershipChangeDecisionResult::AlreadyCompleted {
-                        change_id,
-                        completed_choice,
-                        snapshot,
-                    })
-                } else {
-                    Ok(SpaceMembershipChangeDecisionResult::StateChanged {
-                        current_change_id: snapshot
-                            .current_change
-                            .as_ref()
-                            .map(|change| change.change_id),
-                        snapshot,
-                    })
-                };
-            }
-            if history.pending_removal_decision(own) != Some(change_id) {
-                let snapshot = self.build_current_space_membership_status().await?.status;
-                return Ok(SpaceMembershipChangeDecisionResult::StateChanged {
-                    current_change_id: snapshot
-                        .current_change
-                        .as_ref()
-                        .map(|change| change.change_id),
-                    snapshot,
-                });
-            }
-            let removes_local = history.event(change_id).is_some_and(|event| {
-                matches!(
-                    event.operation,
-                    MembershipOperationV2::RemoveDevice { member } if member == own
-                )
-            });
-            if choice == SpaceMembershipChangeChoice::ApplyChange
-                && removes_local
-                && !confirm_local_removal
-            {
-                return Ok(
-                    SpaceMembershipChangeDecisionResult::LocalDeviceConfirmationRequired {
-                        change_id,
-                        snapshot: self.build_current_space_membership_status().await?.status,
-                    },
-                );
-            }
-            let decision = match choice {
-                SpaceMembershipChangeChoice::ApplyChange => RemovalDecision::Accept,
-                SpaceMembershipChangeChoice::KeepCurrentDeviceGroup => RemovalDecision::Reject,
-            };
-            self.decide_membership_removal_v2(change_id, decision)
-                .await?
-                .ok_or_else(|| {
-                    WorkspaceConvergenceError::Inconsistent(
-                        "current V2 removal disappeared".to_owned(),
-                    )
-                })?;
-            let snapshot = self.build_current_space_membership_status().await?.status;
-            return Ok(match choice {
-                SpaceMembershipChangeChoice::ApplyChange => {
-                    SpaceMembershipChangeDecisionResult::Applied {
-                        change_id,
-                        snapshot,
-                    }
-                }
-                SpaceMembershipChangeChoice::KeepCurrentDeviceGroup => {
-                    SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup {
-                        change_id,
-                        snapshot,
-                    }
-                }
-            });
-        }
-        Err(WorkspaceConvergenceError::Unavailable)
     }
 
     pub(super) fn update_peer_history_relationship(
@@ -447,129 +325,15 @@ impl WorkspaceMembership {
         Ok(())
     }
 
-    /// Submit a local member removal by appending one signed history event.
-    /// Other devices receive the event through history reconciliation and
-    /// decide for themselves; this path never emits an auto-applied intent.
-    pub async fn submit_removal(
+    #[cfg(test)]
+    pub(crate) async fn submit_legacy_removal_for_test(
         &self,
         target: &DeviceId,
     ) -> Result<WorkspaceSnapshot, WorkspaceConvergenceError> {
-        let _guard = self.state_lock.lock().await;
+        let _guard = self.state_write_lock.lock().await;
         let mut state = self.load_state().await?;
         if state.removed {
             return Err(WorkspaceConvergenceError::OwnInstanceRemoved);
-        }
-        if let Some(encoded_history) = self
-            .deps
-            .admission_attempts
-            .load_membership_history_v2()
-            .await
-            .map_err(admission::map_repository_error)?
-        {
-            let mut history = uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
-                &encoded_history,
-                self.deps.historical_membership_signatures.as_ref(),
-            )
-            .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-            let own_credential = self
-                .deps
-                .member_signatures
-                .current_membership_credential(&self.deps.own_device)
-                .await
-                .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-            let own = own_credential.member_instance_id(&self.deps.own_device);
-            if !history.active_members().contains(&own) {
-                return Err(WorkspaceConvergenceError::OwnInstanceRemoved);
-            }
-            let mut candidate_devices = self
-                .deps
-                .member_repo
-                .list()
-                .await
-                .map_err(|error| WorkspaceConvergenceError::AdmissionStorage(error.to_string()))?
-                .into_iter()
-                .map(|member| member.device_id)
-                .collect::<Vec<_>>();
-            candidate_devices.push(self.deps.own_device.clone());
-            candidate_devices.push(target.clone());
-            candidate_devices.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-            candidate_devices.dedup();
-            let removal_recipients = history
-                .active_members()
-                .iter()
-                .filter(|member| **member != own)
-                .filter_map(|member| history.device_for_member(member, &candidate_devices))
-                .collect::<Vec<_>>();
-            let target_member = history
-                .effective_members()
-                .into_iter()
-                .find(|member| {
-                    history
-                        .device_for_member(member, &candidate_devices)
-                        .as_ref()
-                        == Some(target)
-                })
-                .ok_or(WorkspaceConvergenceError::UnknownTarget)?;
-            if target_member == own {
-                return Err(WorkspaceConvergenceError::SelfTarget);
-            }
-            let operation = MembershipOperationV2::RemoveDevice {
-                member: target_member,
-            };
-            let position = history
-                .current_position()
-                .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-            let resulting_members_digest = history
-                .expected_resulting_members_digest(position.event_id, &operation)
-                .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-            let mut event = MembershipEventV2::new(
-                MEMBERSHIP_EVENT_FORMAT_V2,
-                history.lineage_id().to_owned(),
-                position.event_id,
-                position.depth.saturating_add(1),
-                uuid::Uuid::new_v4().into_bytes(),
-                own,
-                own_credential.credential_id,
-                own_credential.signature_algorithm_version,
-                operation,
-                resulting_members_digest,
-                state
-                    .current_digest()
-                    .map(|digest| *digest.as_bytes())
-                    .unwrap_or([0; 32]),
-                Vec::new(),
-                None,
-                Vec::new(),
-            );
-            event.signature = self
-                .deps
-                .member_signatures
-                .sign_current_member_payload(&event.signing_payload())
-                .await
-                .map_err(|_| WorkspaceConvergenceError::Unavailable)?;
-            history
-                .verify_and_receive_event(
-                    event,
-                    self.deps.historical_membership_signatures.as_ref(),
-                )
-                .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-            let replacement = history
-                .encode_persisted_v2()
-                .map_err(|error| WorkspaceConvergenceError::Inconsistent(error.to_string()))?;
-            self.deps
-                .admission_attempts
-                .compare_and_replace_membership_history_v2(Some(&encoded_history), &replacement)
-                .await
-                .map_err(admission::map_repository_error)?;
-            self.publish(&state);
-            self.notify();
-            drop(_guard);
-            for recipient in removal_recipients {
-                let _ = self
-                    .reconcile_membership_history_with_peer(&recipient)
-                    .await;
-            }
-            return self.query().await;
         }
         let own = state
             .own_instance
@@ -600,7 +364,6 @@ impl WorkspaceMembership {
             .await?;
         self.persist(&state).await?;
         self.publish(&state);
-        self.notify();
         Ok(state.snapshot())
     }
 }

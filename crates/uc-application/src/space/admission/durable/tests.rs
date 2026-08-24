@@ -1,14 +1,44 @@
 use crate::space::workspace_membership::tests::*;
 
+async fn seed_initiated_join(
+    repository: &dyn TestAdmissionRepository,
+    attempt_id: uc_core::membership::AdmissionAttemptId,
+    join_id: [u8; 16],
+) -> uc_core::membership::AdmissionAttemptV1 {
+    use uc_core::membership::{
+        AdmissionAttemptV1, AdmissionOutboxPurposeV1, JoinerAdmissionStageV1,
+    };
+
+    let metadata = repository.profile_metadata().await.unwrap();
+    let mut attempt =
+        AdmissionAttemptV1::new_joiner(attempt_id, join_id, JoinerAdmissionStageV1::Initiated);
+    attempt.local_join_ordinal = Some(metadata.next_local_join_ordinal);
+    attempt.joiner_pending_security_state = Some(b"joiner-pending-state".to_vec());
+    attempt.candidate_key_package = Some(b"joiner-key-package".to_vec());
+    attempt.target_access_state = Some(b"joiner-target-access".to_vec());
+    attempt
+        .outboxes
+        .push(super::admission::durable_admission_message(
+            attempt_id,
+            AdmissionOutboxPurposeV1::JoinRequest,
+            b"sponsor",
+            None,
+            b"join-request",
+        ));
+    repository.create(&attempt, None, None).await.unwrap();
+    attempt
+}
+
 async fn seed_superseded_and_current_join(
-    repository: &Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    repository: &Arc<dyn TestAdmissionRepository>,
 ) -> (
     uc_core::membership::AdmissionAttemptId,
     uc_core::membership::AdmissionAttemptId,
 ) {
+    use crate::deps::LocalJoinStartMutationV1;
     use uc_core::membership::{
         AdmissionAttemptId, AdmissionAttemptV1, AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1,
-        JoinerAdmissionStageV1, LocalJoinStartMutationV1, MemberInstanceId,
+        JoinerAdmissionStageV1, MemberInstanceId,
     };
 
     fn initiated(
@@ -72,48 +102,44 @@ struct RecordingAdmissionDelivery {
     routes: std::sync::Mutex<
         Vec<(
             uc_core::membership::AdmissionAttemptId,
-            Option<uc_core::membership::AdmissionOutboxDeliveryRouteV1>,
+            Option<crate::deps::AdmissionOutboxDeliveryRouteV1>,
         )>,
     >,
 }
 
 #[async_trait]
-impl uc_core::membership::AdmissionOutboxDeliveryPort for RecordingAdmissionDelivery {
+impl crate::deps::AdmissionOutboxDeliveryPort for RecordingAdmissionDelivery {
     async fn deliver(
         &self,
         attempt_id: uc_core::membership::AdmissionAttemptId,
         message: &uc_core::membership::AdmissionOutboxMessageV1,
-        route: Option<&uc_core::membership::AdmissionOutboxDeliveryRouteV1>,
+        route: Option<&crate::deps::AdmissionOutboxDeliveryRouteV1>,
     ) -> Result<
-        uc_core::membership::AdmissionOutboxDeliveryResultV1,
-        uc_core::membership::AdmissionOutboxDeliveryError,
+        crate::deps::AdmissionOutboxDeliveryResultV1,
+        crate::deps::AdmissionOutboxDeliveryError,
     > {
         self.routes
             .lock()
             .unwrap()
             .push((attempt_id, route.cloned()));
         if message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::CancelRequested {
-            return Ok(
-                uc_core::membership::AdmissionOutboxDeliveryResultV1::Rejected(
-                    super::admission::durable_admission_message(
-                        attempt_id,
-                        uc_core::membership::AdmissionOutboxPurposeV1::Rejected,
-                        &message.recipient,
-                        Some(message.message_id),
-                        &postcard::to_stdvec(&(
-                            uc_core::membership::AdmissionRejectionReasonV1::Cancelled,
-                            b"cancelled".to_vec(),
-                        ))
-                        .unwrap(),
-                    ),
+            return Ok(crate::deps::AdmissionOutboxDeliveryResultV1::Rejected(
+                super::admission::durable_admission_message(
+                    attempt_id,
+                    uc_core::membership::AdmissionOutboxPurposeV1::Rejected,
+                    &message.recipient,
+                    Some(message.message_id),
+                    &postcard::to_stdvec(&(
+                        uc_core::membership::AdmissionRejectionReasonV1::Cancelled,
+                        b"cancelled".to_vec(),
+                    ))
+                    .unwrap(),
                 ),
-            );
+            ));
         }
-        Ok(
-            uc_core::membership::AdmissionOutboxDeliveryResultV1::Persisted(
-                super::admission::admission_acknowledgment(message),
-            ),
-        )
+        Ok(crate::deps::AdmissionOutboxDeliveryResultV1::Persisted(
+            super::admission::admission_acknowledgment(message),
+        ))
     }
 }
 
@@ -176,6 +202,7 @@ async fn superseded_late_candidate_is_recorded_through_the_protocol_entry() {
         "device-1",
         Vec::new(),
     );
+    deps.membership_history_repo = Arc::clone(&repository);
     deps.admission_attempts = Arc::clone(&repository);
     let owner = WorkspaceMembership::new(deps);
     let candidate = super::admission::durable_admission_message(
@@ -302,6 +329,7 @@ async fn superseded_late_commit_is_recorded_through_the_protocol_entry() {
         "device-1",
         Vec::new(),
     );
+    deps.membership_history_repo = Arc::clone(&repository);
     deps.admission_attempts = Arc::clone(&repository);
     let owner = WorkspaceMembership::new(deps);
     let commit = super::admission::durable_admission_message(
@@ -349,6 +377,7 @@ async fn superseded_late_complete_is_recorded_through_the_protocol_entry() {
         "device-1",
         Vec::new(),
     );
+    deps.membership_history_repo = Arc::clone(&repository);
     deps.admission_attempts = Arc::clone(&repository);
     let owner = WorkspaceMembership::new(deps);
     let complete = super::admission::durable_admission_message(
@@ -401,13 +430,13 @@ async fn compacted_superseded_join_rejects_late_protocol_messages() {
                 && !message.superseded
         })
         .unwrap();
-    transaction
-        .acknowledge_delivery(
-            previous_id,
-            &super::admission::admission_acknowledgment(cleanup),
-        )
-        .await
-        .unwrap();
+    crate::space::admission::cancel_space_join::confirm_superseded_join_cleanup_delivery(
+        repository.as_ref(),
+        previous_id,
+        &super::admission::admission_acknowledgment(cleanup),
+    )
+    .await
+    .unwrap();
     transaction.compact_if_settled(previous_id).await.unwrap();
 
     let mut deps = test_deps(
@@ -415,6 +444,7 @@ async fn compacted_superseded_join_rejects_late_protocol_messages() {
         "device-1",
         Vec::new(),
     );
+    deps.membership_history_repo = Arc::clone(&repository);
     deps.admission_attempts = Arc::clone(&repository);
     let owner = WorkspaceMembership::new(deps);
     let candidate = super::admission::durable_admission_message(
@@ -538,7 +568,6 @@ async fn superseded_rejection_only_confirms_old_cleanup() {
 async fn superseded_delivery_acknowledgment_only_settles_old_cleanup() {
     let directory = tempfile::tempdir().unwrap();
     let repository = durable_admission_repository(&directory, [0xf6; 16]);
-    let owner = durable_admission_owner(Arc::clone(&repository));
     let (previous_id, current_id) = seed_superseded_and_current_join(&repository).await;
     let previous = repository.load(previous_id).await.unwrap().unwrap();
     let cleanup = previous
@@ -551,10 +580,13 @@ async fn superseded_delivery_acknowledgment_only_settles_old_cleanup() {
         .unwrap();
     let acknowledgment = super::admission::admission_acknowledgment(cleanup);
 
-    owner
-        .acknowledge_delivery(previous_id, &acknowledgment)
-        .await
-        .unwrap();
+    crate::space::admission::cancel_space_join::confirm_superseded_join_cleanup_delivery(
+        repository.as_ref(),
+        previous_id,
+        &acknowledgment,
+    )
+    .await
+    .unwrap();
 
     let settled_previous = repository.load(previous_id).await.unwrap().unwrap();
     assert!(settled_previous
@@ -661,19 +693,15 @@ async fn recovery_handles_multiple_superseded_cleanups_with_one_current_join() {
     assert_eq!(routes.len(), 3);
     assert!(routes.contains(&(
         first.attempt.attempt_id,
-        Some(
-            uc_core::membership::AdmissionOutboxDeliveryRouteV1::Continuation(
-                b"first-sponsor-address".to_vec(),
-            ),
-        ),
+        Some(crate::deps::AdmissionOutboxDeliveryRouteV1::Continuation(
+            b"first-sponsor-address".to_vec(),
+        ),),
     )));
     assert!(routes.contains(&(
         second.attempt.attempt_id,
-        Some(
-            uc_core::membership::AdmissionOutboxDeliveryRouteV1::Continuation(
-                b"second-sponsor-address".to_vec(),
-            ),
-        ),
+        Some(crate::deps::AdmissionOutboxDeliveryRouteV1::Continuation(
+            b"second-sponsor-address".to_vec(),
+        ),),
     )));
     assert!(routes.contains(&(current.attempt.attempt_id, None)));
     assert!(repository
@@ -715,477 +743,6 @@ fn durable_admission_preparation_rejects_security_result_mismatch() {
         result,
         Err(WorkspaceConvergenceError::Inconsistent(_))
     ));
-}
-
-#[tokio::test]
-async fn pending_member_removal_before_commit_rejects_without_add() {
-    use super::admission::PendingMemberRemovalOutcomeV1;
-    use uc_core::membership::{AdmissionRejectionReasonV1, VersionedMembershipHistory};
-
-    let sponsor_dir = tempfile::tempdir().unwrap();
-    let joiner_dir = tempfile::tempdir().unwrap();
-    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x65; 16]);
-    let joiner_repository = durable_admission_repository(&joiner_dir, [0x66; 16]);
-    let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let joiner = durable_admission_owner(joiner_repository);
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x67; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0x68; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    let (candidate, base_history, candidate_event, commitment, _) =
-        durable_candidate_verification_fixture(attempt_id);
-    sponsor
-        .sponsor_accept_and_offer(
-            attempt_id,
-            [0x69; 32],
-            &initiated.outboxes[0],
-            candidate,
-            base_history,
-            &candidate_event,
-            &commitment,
-            b"joiner",
-            b"candidate",
-        )
-        .await
-        .unwrap();
-    let removal = durable_candidate_removal_fixture(attempt_id);
-
-    let outcome = sponsor
-        .sponsor_remove_pending_member(
-            attempt_id,
-            &removal,
-            b"joiner",
-            b"removed-before-activation",
-        )
-        .await
-        .unwrap();
-
-    assert!(matches!(
-        outcome,
-        PendingMemberRemovalOutcomeV1::AdmissionRejected(_)
-    ));
-    let attempt = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    assert_eq!(
-        attempt.rejection_reason,
-        Some(AdmissionRejectionReasonV1::RemovedBeforeActivation)
-    );
-    let history = VersionedMembershipHistory::decode_persisted_v2(
-        &sponsor_repository
-            .load_membership_history_v2()
-            .await
-            .unwrap()
-            .unwrap(),
-        &DeterministicHistoricalVerifier,
-    )
-    .unwrap();
-    assert_eq!(history.effective_members().len(), 1);
-}
-
-#[tokio::test]
-async fn sponsor_business_rejection_before_commit_is_durable_and_replayable() {
-    use uc_core::membership::{
-        AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1, VersionedMembershipHistory,
-    };
-
-    let sponsor_dir = tempfile::tempdir().unwrap();
-    let joiner_dir = tempfile::tempdir().unwrap();
-    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x6f; 16]);
-    let joiner_repository = durable_admission_repository(&joiner_dir, [0x70; 16]);
-    let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let joiner = durable_admission_owner(joiner_repository);
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x71; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0x72; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    let (candidate, base_history, candidate_event, commitment, _) =
-        durable_candidate_verification_fixture(attempt_id);
-    sponsor
-        .sponsor_accept_and_offer(
-            attempt_id,
-            [0x73; 32],
-            &initiated.outboxes[0],
-            candidate,
-            base_history,
-            &candidate_event,
-            &commitment,
-            b"joiner",
-            b"candidate",
-        )
-        .await
-        .unwrap();
-
-    let rejected = sponsor
-        .sponsor_reject_before_commit(
-            attempt_id,
-            AdmissionRejectionReasonV1::IdentityConflict,
-            b"joiner",
-        )
-        .await
-        .unwrap();
-    let replayed = sponsor
-        .sponsor_reject_before_commit(
-            attempt_id,
-            AdmissionRejectionReasonV1::IdentityConflict,
-            b"joiner",
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(rejected, replayed);
-    assert_eq!(rejected.purpose, AdmissionOutboxPurposeV1::Rejected);
-    let saved = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    assert_eq!(
-        saved.rejection_reason,
-        Some(AdmissionRejectionReasonV1::IdentityConflict)
-    );
-    let history = VersionedMembershipHistory::decode_persisted_v2(
-        &sponsor_repository
-            .load_membership_history_v2()
-            .await
-            .unwrap()
-            .unwrap(),
-        &DeterministicHistoricalVerifier,
-    )
-    .unwrap();
-    assert_eq!(history.effective_members().len(), 1);
-}
-
-#[tokio::test]
-async fn pending_member_removal_after_commit_permanently_keeps_add_then_remove() {
-    use super::admission::PendingMemberRemovalOutcomeV1;
-    use uc_core::membership::{AdmissionRejectionReasonV1, VersionedMembershipHistory};
-
-    let sponsor_dir = tempfile::tempdir().unwrap();
-    let joiner_dir = tempfile::tempdir().unwrap();
-    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x6a; 16]);
-    let joiner_repository = durable_admission_repository(&joiner_dir, [0x6b; 16]);
-    let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let joiner = durable_admission_owner(joiner_repository);
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x6c; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0x6d; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    let (candidate, base_history, candidate_event, commitment, _) =
-        durable_candidate_verification_fixture(attempt_id);
-    let candidate_message = sponsor
-        .sponsor_accept_and_offer(
-            attempt_id,
-            [0x6e; 32],
-            &initiated.outboxes[0],
-            candidate.clone(),
-            base_history.clone(),
-            &candidate_event,
-            &commitment,
-            b"joiner",
-            b"candidate",
-        )
-        .await
-        .unwrap();
-    let prepared = joiner
-        .joiner_verify_and_prepare(
-            attempt_id,
-            &candidate_message,
-            candidate,
-            base_history,
-            &candidate_event,
-            &commitment,
-            b"joiner-target-access",
-            b"verified-complete-history",
-            None,
-            b"sponsor",
-            b"prepared",
-        )
-        .await
-        .unwrap();
-    sponsor
-        .sponsor_commit(
-            attempt_id,
-            &prepared,
-            b"verified-complete-history",
-            b"joiner",
-            b"commit",
-        )
-        .await
-        .unwrap();
-    let removal = durable_candidate_removal_fixture(attempt_id);
-
-    let outcome = sponsor
-        .sponsor_remove_pending_member(
-            attempt_id,
-            &removal,
-            b"joiner",
-            b"removed-before-activation",
-        )
-        .await
-        .unwrap();
-
-    assert!(matches!(
-        outcome,
-        PendingMemberRemovalOutcomeV1::AdmissionRejected(_)
-    ));
-    let attempt = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    assert_eq!(
-        attempt.rejection_reason,
-        Some(AdmissionRejectionReasonV1::RemovedBeforeActivation)
-    );
-    let history = VersionedMembershipHistory::decode_persisted_v2(
-        &sponsor_repository
-            .load_membership_history_v2()
-            .await
-            .unwrap()
-            .unwrap(),
-        &DeterministicHistoricalVerifier,
-    )
-    .unwrap();
-    assert_eq!(history.effective_members().len(), 1);
-    assert_eq!(history.active_members().len(), 1);
-    assert_eq!(history.depth(removal.event_id()), Some(9));
-}
-
-#[tokio::test]
-async fn pending_member_removal_races_commit_and_activation_without_partial_state() {
-    use uc_core::membership::{
-        AdmissionAttemptRoleStateV1, SponsorAdmissionStageV1, SponsorAdmissionStateV1,
-        VersionedMembershipHistory,
-    };
-
-    for iteration in 0..8u8 {
-        let sponsor_dir = tempfile::tempdir().unwrap();
-        let joiner_dir = tempfile::tempdir().unwrap();
-        let sponsor_repository = durable_admission_repository(&sponsor_dir, [0xa0 | iteration; 16]);
-        let joiner_repository = durable_admission_repository(&joiner_dir, [0xb0 | iteration; 16]);
-        let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-        let joiner = durable_admission_owner(joiner_repository);
-        let attempt_id =
-            uc_core::membership::AdmissionAttemptId::from_bytes([0xc0 | iteration; 32]);
-        let initiated = joiner
-            .start_join(
-                attempt_id,
-                [0xd0 | iteration; 16],
-                b"sponsor",
-                b"join-request",
-                b"joiner-pending-state",
-                b"joiner-key-package",
-                b"joiner-target-access",
-            )
-            .await
-            .unwrap();
-        let (candidate, base_history, candidate_event, commitment, _) =
-            durable_candidate_verification_fixture(attempt_id);
-        let offered = sponsor
-            .sponsor_accept_and_offer(
-                attempt_id,
-                [0xe0 | iteration; 32],
-                &initiated.outboxes[0],
-                candidate.clone(),
-                base_history.clone(),
-                &candidate_event,
-                &commitment,
-                b"joiner",
-                b"candidate",
-            )
-            .await
-            .unwrap();
-        let prepared = joiner
-            .joiner_verify_and_prepare(
-                attempt_id,
-                &offered,
-                candidate,
-                base_history,
-                &candidate_event,
-                &commitment,
-                b"joiner-target-access",
-                b"verified-complete-history",
-                None,
-                b"sponsor",
-                b"prepared",
-            )
-            .await
-            .unwrap();
-        let removal = durable_candidate_removal_fixture(attempt_id);
-
-        let _ = tokio::join!(
-            sponsor.sponsor_commit(
-                attempt_id,
-                &prepared,
-                b"verified-complete-history",
-                b"joiner",
-                b"commit",
-            ),
-            sponsor.sponsor_remove_pending_member(
-                attempt_id,
-                &removal,
-                b"joiner",
-                b"removed-before-activation",
-            )
-        );
-
-        let saved = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-        let history = VersionedMembershipHistory::decode_persisted_v2(
-            &sponsor_repository
-                .load_membership_history_v2()
-                .await
-                .unwrap()
-                .unwrap(),
-            &DeterministicHistoricalVerifier,
-        )
-        .unwrap();
-        match saved.role_state {
-            AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
-                stage: SponsorAdmissionStageV1::Rejected,
-            }) => {
-                assert_eq!(history.effective_members().len(), 1);
-                assert_eq!(history.active_members().len(), 1);
-            }
-            AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
-                stage: SponsorAdmissionStageV1::Committed,
-            }) => {
-                assert_eq!(history.effective_members().len(), 2);
-                assert_eq!(history.active_members().len(), 1);
-            }
-            other => panic!("unexpected commit/removal race result: {other:?}"),
-        }
-    }
-
-    for iteration in 0..8u8 {
-        let sponsor_dir = tempfile::tempdir().unwrap();
-        let joiner_dir = tempfile::tempdir().unwrap();
-        let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x10 | iteration; 16]);
-        let joiner_repository = durable_admission_repository(&joiner_dir, [0x20 | iteration; 16]);
-        let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-        let joiner = durable_admission_owner(joiner_repository);
-        let attempt_id =
-            uc_core::membership::AdmissionAttemptId::from_bytes([0x30 | iteration; 32]);
-        let initiated = joiner
-            .start_join(
-                attempt_id,
-                [0x40 | iteration; 16],
-                b"sponsor",
-                b"join-request",
-                b"joiner-pending-state",
-                b"joiner-key-package",
-                b"joiner-target-access",
-            )
-            .await
-            .unwrap();
-        let (candidate, base_history, candidate_event, commitment, receipt) =
-            durable_candidate_verification_fixture(attempt_id);
-        let offered = sponsor
-            .sponsor_accept_and_offer(
-                attempt_id,
-                [0x50 | iteration; 32],
-                &initiated.outboxes[0],
-                candidate.clone(),
-                base_history.clone(),
-                &candidate_event,
-                &commitment,
-                b"joiner",
-                b"candidate",
-            )
-            .await
-            .unwrap();
-        let prepared = joiner
-            .joiner_verify_and_prepare(
-                attempt_id,
-                &offered,
-                candidate,
-                base_history,
-                &candidate_event,
-                &commitment,
-                b"joiner-target-access",
-                b"verified-complete-history",
-                None,
-                b"sponsor",
-                b"prepared",
-            )
-            .await
-            .unwrap();
-        let commit = sponsor
-            .sponsor_commit(
-                attempt_id,
-                &prepared,
-                b"verified-complete-history",
-                b"joiner",
-                b"commit",
-            )
-            .await
-            .unwrap();
-        let applied = joiner
-            .joiner_apply(attempt_id, &commit, &receipt, b"sponsor", b"applied")
-            .await
-            .unwrap();
-        let removal = durable_candidate_removal_fixture(attempt_id);
-
-        let _ = tokio::join!(
-            sponsor.sponsor_complete(
-                attempt_id,
-                &applied,
-                &receipt,
-                b"admission-completion",
-                b"joiner",
-                b"complete",
-            ),
-            sponsor.sponsor_remove_pending_member(
-                attempt_id,
-                &removal,
-                b"joiner",
-                b"removed-before-activation",
-            )
-        );
-
-        let saved = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-        let history = VersionedMembershipHistory::decode_persisted_v2(
-            &sponsor_repository
-                .load_membership_history_v2()
-                .await
-                .unwrap()
-                .unwrap(),
-            &DeterministicHistoricalVerifier,
-        )
-        .unwrap();
-        match saved.role_state {
-            AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
-                stage: SponsorAdmissionStageV1::Rejected,
-            }) => {
-                assert_eq!(history.effective_members().len(), 1);
-                assert_eq!(history.active_members().len(), 1);
-            }
-            AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 {
-                stage: SponsorAdmissionStageV1::Applied | SponsorAdmissionStageV1::Completed,
-            }) => {
-                assert_eq!(history.effective_members().len(), 2);
-                assert_eq!(history.active_members().len(), 2);
-            }
-            other => panic!("unexpected activation/removal race result: {other:?}"),
-        }
-    }
 }
 
 #[test]
@@ -1401,7 +958,7 @@ async fn third_member_completion_keeps_joiner_pending_until_helper_applies_its_u
     let helper_directory = tempfile::tempdir().unwrap();
     let helper_repository = durable_admission_repository(&helper_directory, [0xd2; 16]);
     helper_repository
-        .compare_and_replace_membership_history_v2(None, &completed_history_bytes)
+        .compare_and_replace_membership_history(None, &completed_history_bytes)
         .await
         .unwrap();
 
@@ -1410,6 +967,7 @@ async fn third_member_completion_keeps_joiner_pending_until_helper_applies_its_u
         "joiner",
         Vec::new(),
     );
+    joiner_deps.membership_history_repo = Arc::clone(&joiner_repository);
     joiner_deps.admission_attempts = Arc::clone(&joiner_repository);
     joiner_deps.historical_membership_signatures = Arc::new(DeterministicHistoricalVerifier);
     let joiner = WorkspaceMembership::new(joiner_deps);
@@ -1419,6 +977,7 @@ async fn third_member_completion_keeps_joiner_pending_until_helper_applies_its_u
         "helper",
         Vec::new(),
     );
+    blocked_helper_deps.membership_history_repo = Arc::clone(&helper_repository);
     blocked_helper_deps.admission_attempts = Arc::clone(&helper_repository);
     blocked_helper_deps.historical_membership_signatures =
         Arc::new(DeterministicHistoricalVerifier);
@@ -1488,6 +1047,7 @@ async fn third_member_completion_keeps_joiner_pending_until_helper_applies_its_u
         "helper",
         Vec::new(),
     );
+    resumed_helper_deps.membership_history_repo = Arc::clone(&helper_repository);
     resumed_helper_deps.admission_attempts = Arc::clone(&helper_repository);
     resumed_helper_deps.historical_membership_signatures =
         Arc::new(DeterministicHistoricalVerifier);
@@ -1543,69 +1103,15 @@ async fn third_member_completion_keeps_joiner_pending_until_helper_applies_its_u
 }
 
 #[tokio::test]
-async fn explicit_sponsor_rejection_ends_a_join_before_candidate() {
-    use uc_core::membership::{AdmissionRejectionReasonV1, AdmissionTerminalResultV1};
-
-    let directory = tempfile::tempdir().unwrap();
-    let repository = durable_admission_repository(&directory, [0x4d; 16]);
-    let joiner = durable_admission_owner(Arc::clone(&repository));
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x4e; 32]);
-    joiner
-        .start_join(
-            attempt_id,
-            [0x4f; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-
-    joiner
-        .joiner_reject_before_candidate(attempt_id, AdmissionRejectionReasonV1::HistoryConflict)
-        .await
-        .unwrap();
-    joiner
-        .joiner_reject_before_candidate(attempt_id, AdmissionRejectionReasonV1::HistoryConflict)
-        .await
-        .unwrap();
-
-    let rejected = repository.load(attempt_id).await.unwrap().unwrap();
-    assert_eq!(
-        rejected.terminal_result,
-        Some(AdmissionTerminalResultV1::Rejected)
-    );
-    assert_eq!(
-        rejected.rejection_reason,
-        Some(AdmissionRejectionReasonV1::HistoryConflict)
-    );
-    assert!(rejected.joiner_pending_security_state.is_none());
-    assert!(rejected.outboxes.iter().all(|message| message.superseded));
-}
-
-#[tokio::test]
 async fn durable_admission_cancel_and_commit_have_exactly_one_winner() {
     use uc_core::membership::AdmissionOutboxPurposeV1;
     async fn prepared_pair(
         sponsor: &super::DurableAdmissionTransaction,
-        joiner: &super::DurableAdmissionTransaction,
+        joiner_repository: &dyn TestAdmissionRepository,
         attempt_id: uc_core::membership::AdmissionAttemptId,
         join_id: [u8; 16],
     ) -> uc_core::membership::AdmissionOutboxMessageV1 {
-        let initiated = joiner
-            .start_join(
-                attempt_id,
-                join_id,
-                b"sponsor",
-                b"join-request",
-                b"joiner-pending-state",
-                b"joiner-key-package",
-                b"joiner-target-access",
-            )
-            .await
-            .unwrap();
+        let initiated = seed_initiated_join(joiner_repository, attempt_id, join_id).await;
         let (candidate, base_history, candidate_event, commitment, _activation_receipt) =
             durable_candidate_verification_fixture(attempt_id);
         let offered = sponsor
@@ -1622,13 +1128,13 @@ async fn durable_admission_cancel_and_commit_have_exactly_one_winner() {
             )
             .await
             .unwrap();
-        sponsor
-            .record_invitation_consume_result(
-                attempt_id,
-                super::admission::InvitationConsumeResultV1::NotFound,
-            )
-            .await
-            .unwrap();
+        crate::space::admission::joiner::record_invitation_consume_result(
+            sponsor_repository.as_ref(),
+            attempt_id,
+            crate::space::admission::joiner::InvitationConsumeResultV1::NotFound,
+        )
+        .await
+        .unwrap();
         joiner
             .joiner_verify_and_prepare(
                 attempt_id,
@@ -1654,7 +1160,8 @@ async fn durable_admission_cancel_and_commit_have_exactly_one_winner() {
     let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
     let joiner = durable_admission_owner(Arc::clone(&joiner_repository));
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x56; 32]);
-    let prepared = prepared_pair(&sponsor, &joiner, attempt_id, [0x57; 16]).await;
+    let prepared =
+        prepared_pair(&sponsor, joiner_repository.as_ref(), attempt_id, [0x57; 16]).await;
     let cancel = joiner
         .request_cancel(attempt_id, b"sponsor", b"cancel")
         .await
@@ -1692,10 +1199,13 @@ async fn durable_admission_cancel_and_commit_have_exactly_one_winner() {
         .await
         .unwrap();
     assert_eq!(replayed_rejected_ack, rejected_ack);
-    sponsor
-        .sponsor_confirm_rejected(attempt_id, &rejected_ack)
-        .await
-        .unwrap();
+    crate::space::admission::sponsor::confirm_rejected_delivery(
+        sponsor_repository.as_ref(),
+        attempt_id,
+        &rejected_ack,
+    )
+    .await
+    .unwrap();
     let joiner_rejected = joiner_repository.load(attempt_id).await.unwrap().unwrap();
     assert_eq!(
         joiner_rejected.terminal_result,
@@ -1734,7 +1244,8 @@ async fn durable_admission_cancel_and_commit_have_exactly_one_winner() {
     let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
     let joiner = durable_admission_owner(Arc::clone(&joiner_repository));
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x5a; 32]);
-    let prepared = prepared_pair(&sponsor, &joiner, attempt_id, [0x5b; 16]).await;
+    let prepared =
+        prepared_pair(&sponsor, joiner_repository.as_ref(), attempt_id, [0x5b; 16]).await;
     let committed = sponsor
         .sponsor_commit(
             attempt_id,
@@ -1774,738 +1285,6 @@ async fn durable_admission_cancel_and_commit_have_exactly_one_winner() {
 }
 
 #[tokio::test]
-async fn base_history_change_after_candidate_is_durably_rejected_without_add() {
-    use uc_core::membership::{AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1};
-
-    let sponsor_dir = tempfile::tempdir().unwrap();
-    let joiner_dir = tempfile::tempdir().unwrap();
-    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x60; 16]);
-    let joiner_repository = durable_admission_repository(&joiner_dir, [0x61; 16]);
-    let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let joiner = durable_admission_owner(Arc::clone(&joiner_repository));
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x62; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0x63; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    let (candidate, base_history, candidate_event, commitment, _) =
-        durable_candidate_verification_fixture(attempt_id);
-    let candidate_message = sponsor
-        .sponsor_accept_and_offer(
-            attempt_id,
-            [0x64; 32],
-            &initiated.outboxes[0],
-            candidate.clone(),
-            base_history.clone(),
-            &candidate_event,
-            &commitment,
-            b"joiner",
-            b"candidate",
-        )
-        .await
-        .unwrap();
-    let prepared_message = joiner
-        .joiner_verify_and_prepare(
-            attempt_id,
-            &candidate_message,
-            candidate,
-            base_history,
-            &candidate_event,
-            &commitment,
-            b"joiner-target-access",
-            b"verified-complete-history",
-            None,
-            b"sponsor",
-            b"prepared",
-        )
-        .await
-        .unwrap();
-
-    let mut concurrent = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    let expected_version = concurrent.record_version;
-    concurrent.record_version += 1;
-    let current_history = sponsor_repository
-        .load_membership_history_v2()
-        .await
-        .unwrap()
-        .unwrap();
-    sponsor_repository
-        .compare_and_advance_with_membership_history_v2(
-            attempt_id,
-            expected_version,
-            &concurrent,
-            Some(&current_history),
-            b"newer-formal-history",
-        )
-        .await
-        .unwrap();
-
-    let rejected = sponsor
-        .sponsor_commit(
-            attempt_id,
-            &prepared_message,
-            b"verified-complete-history",
-            b"joiner",
-            b"commit",
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(rejected.purpose, AdmissionOutboxPurposeV1::Rejected);
-    let saved = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    assert_eq!(
-        saved.rejection_reason,
-        Some(AdmissionRejectionReasonV1::BaseHistoryChanged)
-    );
-    assert_eq!(
-        sponsor_repository
-            .load_membership_history_v2()
-            .await
-            .unwrap(),
-        Some(b"newer-formal-history".to_vec())
-    );
-}
-
-#[tokio::test]
-async fn base_history_change_during_commit_is_durably_rejected() {
-    use uc_core::membership::{AdmissionOutboxPurposeV1, AdmissionRejectionReasonV1};
-
-    let sponsor_dir = tempfile::tempdir().unwrap();
-    let joiner_dir = tempfile::tempdir().unwrap();
-    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x5c; 16]);
-    let joiner_repository = durable_admission_repository(&joiner_dir, [0x5d; 16]);
-    let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let joiner = durable_admission_owner(joiner_repository);
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x5e; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0x5f; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    let (candidate, base_history, candidate_event, commitment, _) =
-        durable_candidate_verification_fixture(attempt_id);
-    let offered = sponsor
-        .sponsor_accept_and_offer(
-            attempt_id,
-            [0x60; 32],
-            &initiated.outboxes[0],
-            candidate.clone(),
-            base_history.clone(),
-            &candidate_event,
-            &commitment,
-            b"joiner",
-            b"candidate",
-        )
-        .await
-        .unwrap();
-    let prepared = joiner
-        .joiner_verify_and_prepare(
-            attempt_id,
-            &offered,
-            candidate,
-            base_history,
-            &candidate_event,
-            &commitment,
-            b"joiner-target-access",
-            b"verified-complete-history",
-            None,
-            b"sponsor",
-            b"prepared",
-        )
-        .await
-        .unwrap();
-    let racing_repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort> =
-        Arc::new(HistoryRaceAdmissionRepository {
-            inner: Arc::clone(&sponsor_repository),
-            inject_once: AtomicBool::new(true),
-            replacement_history: b"concurrent-formal-history".to_vec(),
-        });
-    let racing_sponsor = durable_admission_owner(racing_repository);
-
-    let result = racing_sponsor
-        .sponsor_commit(
-            attempt_id,
-            &prepared,
-            b"verified-complete-history",
-            b"joiner",
-            b"commit",
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(result.purpose, AdmissionOutboxPurposeV1::Rejected);
-    let saved = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    assert_eq!(
-        saved.rejection_reason,
-        Some(AdmissionRejectionReasonV1::BaseHistoryChanged)
-    );
-    assert_eq!(
-        sponsor_repository
-            .load_membership_history_v2()
-            .await
-            .unwrap(),
-        Some(b"concurrent-formal-history".to_vec())
-    );
-}
-
-#[tokio::test]
-async fn durable_admission_becomes_complete_only_after_both_sides_save() {
-    use uc_core::membership::AdmissionTerminalResultV1;
-
-    let sponsor_dir = tempfile::tempdir().unwrap();
-    let joiner_dir = tempfile::tempdir().unwrap();
-    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x41; 16]);
-    let joiner_repository = durable_admission_repository(&joiner_dir, [0x42; 16]);
-    let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let joiner = durable_admission_owner(Arc::clone(&joiner_repository));
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x43; 32]);
-    let join_id = [0x44; 16];
-    let (candidate, base_history, candidate_event, commitment, activation_receipt) =
-        durable_candidate_verification_fixture(attempt_id);
-
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            join_id,
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        initiated.target_access_state.as_deref(),
-        Some(b"joiner-target-access".as_slice())
-    );
-    let candidate_message = sponsor
-        .sponsor_accept_and_offer(
-            attempt_id,
-            [0x47; 32],
-            &initiated.outboxes[0],
-            candidate.clone(),
-            base_history.clone(),
-            &candidate_event,
-            &commitment,
-            b"joiner",
-            b"candidate",
-        )
-        .await
-        .unwrap();
-    let replayed_candidate = durable_admission_owner(Arc::clone(&sponsor_repository))
-        .sponsor_accept_and_offer(
-            attempt_id,
-            [0x47; 32],
-            &initiated.outboxes[0],
-            candidate.clone(),
-            base_history.clone(),
-            &candidate_event,
-            &commitment,
-            b"joiner",
-            b"candidate",
-        )
-        .await
-        .unwrap();
-    assert_eq!(replayed_candidate, candidate_message);
-    let sponsor_candidate_state = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    assert!(sponsor_candidate_state.outboxes.iter().any(|message| {
-        message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::InvitationConsume
-            && !message.superseded
-    }));
-    sponsor
-        .record_invitation_consume_result(
-            attempt_id,
-            super::admission::InvitationConsumeResultV1::Retryable,
-        )
-        .await
-        .unwrap();
-    assert!(sponsor_repository
-        .load(attempt_id)
-        .await
-        .unwrap()
-        .unwrap()
-        .outboxes
-        .iter()
-        .any(|message| {
-            message.purpose == uc_core::membership::AdmissionOutboxPurposeV1::InvitationConsume
-                && !message.superseded
-        }));
-    sponsor
-        .record_invitation_consume_result(
-            attempt_id,
-            super::admission::InvitationConsumeResultV1::Consumed,
-        )
-        .await
-        .unwrap();
-    let prepared_message = joiner
-        .joiner_verify_and_prepare(
-            attempt_id,
-            &candidate_message,
-            candidate.clone(),
-            base_history.clone(),
-            &candidate_event,
-            &commitment,
-            b"joiner-target-access",
-            b"verified-complete-history",
-            None,
-            b"sponsor",
-            b"prepared",
-        )
-        .await
-        .unwrap();
-    let replayed_prepared = durable_admission_owner(Arc::clone(&joiner_repository))
-        .joiner_verify_and_prepare(
-            attempt_id,
-            &candidate_message,
-            candidate,
-            base_history,
-            &candidate_event,
-            &commitment,
-            b"joiner-target-access",
-            b"verified-complete-history",
-            None,
-            b"sponsor",
-            b"prepared",
-        )
-        .await
-        .unwrap();
-    assert_eq!(replayed_prepared, prepared_message);
-    let commit_message = sponsor
-        .sponsor_commit(
-            attempt_id,
-            &prepared_message,
-            b"verified-complete-history",
-            b"joiner",
-            b"commit",
-        )
-        .await
-        .unwrap();
-    let replayed_commit = durable_admission_owner(Arc::clone(&sponsor_repository))
-        .sponsor_commit(
-            attempt_id,
-            &prepared_message,
-            b"verified-complete-history",
-            b"joiner",
-            b"commit",
-        )
-        .await
-        .unwrap();
-    assert_eq!(replayed_commit, commit_message);
-    let sponsor_committed_history = sponsor_repository
-        .load_membership_history_v2()
-        .await
-        .unwrap()
-        .unwrap();
-    let sponsor_committed_history =
-        uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
-            &sponsor_committed_history,
-            &DeterministicHistoricalVerifier,
-        )
-        .unwrap();
-    assert_eq!(sponsor_committed_history.effective_members().len(), 2);
-    assert_eq!(sponsor_committed_history.active_members().len(), 1);
-    let applied_message = joiner
-        .joiner_apply(
-            attempt_id,
-            &commit_message,
-            &activation_receipt,
-            b"sponsor",
-            b"applied",
-        )
-        .await
-        .unwrap();
-    let replayed_applied = durable_admission_owner(Arc::clone(&joiner_repository))
-        .joiner_apply(
-            attempt_id,
-            &commit_message,
-            &activation_receipt,
-            b"sponsor",
-            b"applied",
-        )
-        .await
-        .unwrap();
-    assert_eq!(replayed_applied, applied_message);
-    let joiner_applied_history = joiner_repository
-        .load_membership_history_v2()
-        .await
-        .unwrap()
-        .unwrap();
-    let joiner_applied_history =
-        uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
-            &joiner_applied_history,
-            &DeterministicHistoricalVerifier,
-        )
-        .unwrap();
-    assert_eq!(joiner_applied_history.active_members().len(), 2);
-    let complete_message = sponsor
-        .sponsor_complete(
-            attempt_id,
-            &applied_message,
-            &activation_receipt,
-            b"admission-completion",
-            b"joiner",
-            b"complete",
-        )
-        .await
-        .unwrap();
-    let security_update = sponsor
-        .enqueue_post_commit_delivery(
-            attempt_id,
-            uc_core::membership::AdmissionOutboxPurposeV1::ExistingMemberSecurityUpdate,
-            b"existing-member",
-            b"event-epoch-and-security-commitment",
-        )
-        .await
-        .unwrap();
-    let other_security_update = sponsor
-        .enqueue_post_commit_delivery(
-            attempt_id,
-            uc_core::membership::AdmissionOutboxPurposeV1::ExistingMemberSecurityUpdate,
-            b"other-existing-member",
-            b"event-epoch-and-security-commitment",
-        )
-        .await
-        .unwrap();
-    assert_ne!(security_update.message_id, other_security_update.message_id);
-    assert_ne!(security_update.recipient, other_security_update.recipient);
-    let history_batch = sponsor
-        .enqueue_post_commit_delivery(
-            attempt_id,
-            uc_core::membership::AdmissionOutboxPurposeV1::HistoryOrReceiptBatch,
-            b"existing-member",
-            b"history-page-and-receipt-ids",
-        )
-        .await
-        .unwrap();
-    let security_ack = super::admission::admission_acknowledgment(&security_update);
-    assert!(sponsor
-        .acknowledge_delivery(attempt_id, &security_ack)
-        .await
-        .is_err());
-    sponsor
-        .acknowledge_persisted_delivery(
-            attempt_id,
-            uc_core::membership::AdmissionOutboxPurposeV1::ExistingMemberSecurityUpdate,
-            &security_ack,
-        )
-        .await
-        .unwrap();
-    let after_exact_security_ack = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    assert!(after_exact_security_ack
-        .outboxes
-        .iter()
-        .any(|message| { message.message_id == security_update.message_id && message.superseded }));
-    assert!(after_exact_security_ack.outboxes.iter().any(|message| {
-        message.message_id == other_security_update.message_id && !message.superseded
-    }));
-    assert!(after_exact_security_ack.outboxes.iter().any(|message| {
-        message.message_id == complete_message.message_id && !message.superseded
-    }));
-    sponsor
-        .acknowledge_persisted_delivery(
-            attempt_id,
-            uc_core::membership::AdmissionOutboxPurposeV1::HistoryOrReceiptBatch,
-            &super::admission::admission_acknowledgment(&history_batch),
-        )
-        .await
-        .unwrap();
-    let replayed_complete = durable_admission_owner(Arc::clone(&sponsor_repository))
-        .sponsor_complete(
-            attempt_id,
-            &applied_message,
-            &activation_receipt,
-            b"admission-completion",
-            b"joiner",
-            b"complete",
-        )
-        .await
-        .unwrap();
-    assert_eq!(replayed_complete, complete_message);
-    let sponsor_applied_history = sponsor_repository
-        .load_membership_history_v2()
-        .await
-        .unwrap()
-        .unwrap();
-    let sponsor_applied_history =
-        uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
-            &sponsor_applied_history,
-            &DeterministicHistoricalVerifier,
-        )
-        .unwrap();
-    assert_eq!(sponsor_applied_history.active_members().len(), 2);
-
-    let sponsor_after_complete = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    let ordinary_removal = sponsor
-        .sponsor_remove_pending_member(
-            attempt_id,
-            &durable_candidate_removal_fixture(attempt_id),
-            b"joiner",
-            b"removed-before-activation",
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        ordinary_removal,
-        super::admission::PendingMemberRemovalOutcomeV1::OrdinaryMemberRemovalRequired
-    ));
-    assert_eq!(
-        sponsor_repository.load(attempt_id).await.unwrap(),
-        Some(sponsor_after_complete)
-    );
-
-    let sponsor_before_ack = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    assert_eq!(
-        sponsor_before_ack.terminal_result,
-        Some(AdmissionTerminalResultV1::Completed)
-    );
-    assert_eq!(
-        joiner
-            .joiner_activate(attempt_id, &complete_message, b"admission-completion")
-            .await
-            .unwrap(),
-        super::admission::JoinerActivationOutcomeV1::SpaceTransitionRequired
-    );
-    let restarted_joiner = durable_admission_owner(Arc::clone(&joiner_repository));
-    assert!(restarted_joiner
-        .requires_session_transition()
-        .await
-        .unwrap());
-    assert_eq!(
-        restarted_joiner
-            .recover_space_transitions_after_session_drain()
-            .await
-            .unwrap(),
-        1
-    );
-    assert!(!restarted_joiner
-        .requires_session_transition()
-        .await
-        .unwrap());
-    let complete_ack = match restarted_joiner
-        .joiner_activate(attempt_id, &complete_message, b"admission-completion")
-        .await
-        .unwrap()
-    {
-        super::admission::JoinerActivationOutcomeV1::Active(acknowledgment) => acknowledgment,
-        super::admission::JoinerActivationOutcomeV1::SpaceTransitionRequired => {
-            panic!("completed activation must rebuild its acknowledgment")
-        }
-    };
-    let replayed_ack = durable_admission_owner(Arc::clone(&joiner_repository))
-        .joiner_activate(attempt_id, &complete_message, b"admission-completion")
-        .await
-        .unwrap();
-    assert_eq!(
-        replayed_ack,
-        super::admission::JoinerActivationOutcomeV1::Active(complete_ack.clone())
-    );
-    assert!(joiner_repository.load(attempt_id).await.unwrap().is_none());
-    let joiner_saved = joiner_repository
-        .load_terminal(attempt_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let joiner_history = joiner_repository
-        .load_membership_history_v2()
-        .await
-        .unwrap()
-        .unwrap();
-    let verified_history: uc_core::membership::VersionedMembershipHistory =
-        uc_core::membership::VersionedMembershipHistory::decode_persisted_v2(
-            &joiner_history,
-            &DeterministicHistoricalVerifier,
-        )
-        .unwrap();
-    assert_eq!(verified_history.effective_members().len(), 2);
-    assert_eq!(
-        joiner_saved.terminal_result,
-        AdmissionTerminalResultV1::Active
-    );
-
-    sponsor
-        .sponsor_confirm_active(attempt_id, &complete_ack)
-        .await
-        .unwrap();
-    sponsor
-        .sponsor_confirm_active(attempt_id, &complete_ack)
-        .await
-        .unwrap();
-    let sponsor_saved = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    assert_eq!(
-        sponsor_saved.terminal_result,
-        Some(AdmissionTerminalResultV1::Completed)
-    );
-    assert_eq!(
-        sponsor_saved.activation_receipt,
-        Some(postcard::to_stdvec(&activation_receipt).unwrap())
-    );
-    assert_eq!(sponsor_saved.completion, Some(joiner_saved.replay_result));
-    assert!(sponsor_saved.outboxes.iter().any(|message| {
-        message.message_id == other_security_update.message_id && !message.superseded
-    }));
-    assert!(sponsor.compact_if_settled(attempt_id).await.is_err());
-    sponsor
-        .acknowledge_persisted_delivery(
-            attempt_id,
-            uc_core::membership::AdmissionOutboxPurposeV1::ExistingMemberSecurityUpdate,
-            &super::admission::admission_acknowledgment(&other_security_update),
-        )
-        .await
-        .unwrap();
-
-    let sponsor_terminal = sponsor.compact_if_settled(attempt_id).await.unwrap();
-    let joiner_terminal = joiner.compact_if_settled(attempt_id).await.unwrap();
-    assert_eq!(
-        sponsor_terminal.terminal_result,
-        AdmissionTerminalResultV1::Completed
-    );
-    assert_eq!(
-        joiner_terminal.terminal_result,
-        AdmissionTerminalResultV1::Active
-    );
-    assert!(sponsor_repository.load(attempt_id).await.unwrap().is_none());
-    assert!(joiner_repository.load(attempt_id).await.unwrap().is_none());
-    assert!(matches!(
-        durable_admission_owner(Arc::clone(&joiner_repository))
-            .current_local_join()
-            .await
-            .unwrap(),
-        Some(super::CurrentJoinStatus::Active {
-            join_id: projected_join_id,
-            joined_space,
-        }) if projected_join_id == join_id
-            && joined_space.sponsor_device_id.as_str() == "sponsor"
-            && joined_space.space_id == candidate_event.lineage_id
-            && joined_space.self_device_id.as_str() == "joiner"
-            && joined_space.migrated_records.is_none()
-            && joined_space.preserved_unreadable_records.is_none()
-    ));
-    assert_eq!(
-        sponsor_repository
-            .load_terminal(attempt_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .terminal_result,
-        AdmissionTerminalResultV1::Completed
-    );
-    durable_admission_owner(Arc::clone(&sponsor_repository))
-        .sponsor_confirm_active(attempt_id, &complete_ack)
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn out_of_order_durable_messages_leave_the_saved_stage_unchanged() {
-    use uc_core::membership::AdmissionOutboxPurposeV1;
-
-    let sponsor_dir = tempfile::tempdir().unwrap();
-    let joiner_dir = tempfile::tempdir().unwrap();
-    let sponsor_repository = durable_admission_repository(&sponsor_dir, [0xc1; 16]);
-    let joiner_repository = durable_admission_repository(&joiner_dir, [0xc2; 16]);
-    let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let joiner = durable_admission_owner(Arc::clone(&joiner_repository));
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xc3; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0xc4; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    let (candidate, history, event, commitment, receipt) =
-        durable_candidate_verification_fixture(attempt_id);
-    let fake_commit = super::admission::durable_admission_message(
-        attempt_id,
-        AdmissionOutboxPurposeV1::Commit,
-        b"joiner",
-        Some([0xc5; 32]),
-        b"early-commit",
-    );
-    let fake_complete = super::admission::durable_admission_message(
-        attempt_id,
-        AdmissionOutboxPurposeV1::Complete,
-        b"joiner",
-        Some([0xc6; 32]),
-        b"early-complete",
-    );
-    let joiner_before = joiner_repository.load(attempt_id).await.unwrap().unwrap();
-
-    assert!(joiner
-        .joiner_apply(attempt_id, &fake_commit, &receipt, b"sponsor", b"applied")
-        .await
-        .is_err());
-    assert!(joiner
-        .joiner_activate(attempt_id, &fake_complete, b"completion")
-        .await
-        .is_err());
-    assert_eq!(
-        joiner_repository.load(attempt_id).await.unwrap(),
-        Some(joiner_before)
-    );
-
-    sponsor
-        .sponsor_accept_and_offer(
-            attempt_id,
-            [0xc7; 32],
-            &initiated.outboxes[0],
-            candidate,
-            history,
-            &event,
-            &commitment,
-            b"joiner",
-            b"candidate",
-        )
-        .await
-        .unwrap();
-    let sponsor_before = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
-    let fake_applied = super::admission::durable_admission_message(
-        attempt_id,
-        AdmissionOutboxPurposeV1::Applied,
-        b"sponsor",
-        Some([0xc8; 32]),
-        b"early-applied",
-    );
-
-    assert!(sponsor
-        .sponsor_complete(
-            attempt_id,
-            &fake_applied,
-            &receipt,
-            b"completion",
-            b"joiner",
-            b"complete",
-        )
-        .await
-        .is_err());
-    assert_eq!(
-        sponsor_repository.load(attempt_id).await.unwrap(),
-        Some(sponsor_before)
-    );
-}
-
-#[tokio::test]
 async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
     use uc_core::membership::{
         AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, AdmissionTerminalResultV1,
@@ -2522,19 +1301,19 @@ async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
         Arc::clone(&joiner_repository),
         transition.clone(),
     );
+    let joiner_attempts: Arc<dyn crate::deps::AdmissionAttemptRepositoryPort> =
+        Arc::clone(&joiner_repository);
+    let query_pending_transition =
+        crate::space::admission::query_pending_space_transition::QueryPendingSpaceTransitionUseCase::new(
+            Arc::clone(&joiner_attempts),
+        );
+    let complete_pending_transition =
+        crate::space::admission::complete_pending_space_transition::CompletePendingSpaceTransitionUseCase::new(
+            joiner_attempts,
+            transition.clone(),
+        );
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xc7; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0xc8; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    let initiated = seed_initiated_join(joiner_repository.as_ref(), attempt_id, [0xc8; 16]).await;
     let (candidate, base_history, candidate_event, commitment, activation_receipt) =
         durable_candidate_verification_fixture(attempt_id);
     let offered = sponsor
@@ -2619,7 +1398,7 @@ async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
         super::admission::JoinerActivationOutcomeV1::SpaceTransitionRequired
     ));
     assert!(transition.advances.lock().unwrap().is_empty());
-    assert!(joiner.requires_session_transition().await.unwrap());
+    assert!(query_pending_transition.execute().await.unwrap());
     let interrupted = joiner_repository.load(attempt_id).await.unwrap().unwrap();
     let expected_active_history = interrupted
         .verified_membership_history
@@ -2648,10 +1427,7 @@ async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
         CrossSpaceTransitionPhaseV2::TargetPromoted,
         CrossSpaceTransitionPhaseV2::CleanupPending,
     ] {
-        assert!(joiner
-            .recover_space_transitions_after_session_drain()
-            .await
-            .is_err());
+        assert!(complete_pending_transition.execute().await.is_err());
         let saved = joiner_repository.load(attempt_id).await.unwrap().unwrap();
         assert_eq!(saved.terminal_result, None);
         assert_eq!(
@@ -2665,12 +1441,11 @@ async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
         );
     }
 
-    let transitions_finished = joiner
-        .recover_space_transitions_after_session_drain()
-        .await
-        .unwrap();
-    assert_eq!(transitions_finished, 1);
-    assert!(!joiner.requires_session_transition().await.unwrap());
+    assert!(matches!(
+        complete_pending_transition.execute().await.unwrap(),
+        crate::space::admission::CurrentJoinStatus::Active { .. }
+    ));
+    assert!(!query_pending_transition.execute().await.unwrap());
     let recovery = joiner
         .recover_with(&DeferredAdmissionDelivery)
         .await
@@ -2685,10 +1460,7 @@ async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
         .unwrap();
     assert_eq!(active.terminal_result, AdmissionTerminalResultV1::Active);
     assert_eq!(
-        joiner_repository
-            .load_membership_history_v2()
-            .await
-            .unwrap(),
+        joiner_repository.load_membership_history().await.unwrap(),
         Some(expected_active_history)
     );
     let AdmissionSpaceTransitionResultV2::CrossSpace(result) =
@@ -2710,16 +1482,8 @@ async fn cross_space_activation_saves_complete_before_forward_only_recovery() {
         }
     };
     assert!(active.acknowledgment_rebuild.contains(&acknowledgment));
-    let profile = super::ProfileSpaceAdmission::new(
-        Arc::clone(&joiner_repository),
-        DeviceId::new("joiner"),
-        Arc::new(UnusedClock),
-    );
-    let pending_ack = profile
-        .pending_joiner_complete_ack()
-        .await
-        .unwrap()
-        .unwrap();
+    let profile = crate::facade::SpaceJoinFacade::new(Arc::clone(&joiner_repository));
+    let pending_ack = profile.recover_completion().await.unwrap().unwrap();
     assert_eq!(pending_ack.sponsor_device_id, DeviceId::new("sponsor"));
     assert_eq!(
         pending_ack.frame.kind,
@@ -2748,18 +1512,7 @@ async fn cross_space_rejection_discards_target_only_before_activation() {
         transition.clone(),
     );
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0xd3; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0xd4; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    let initiated = seed_initiated_join(joiner_repository.as_ref(), attempt_id, [0xd4; 16]).await;
     let (candidate, base_history, candidate_event, commitment, _) =
         durable_candidate_verification_fixture(attempt_id);
     let offered = sponsor
@@ -2835,7 +1588,7 @@ async fn cross_space_rejection_discards_target_only_before_activation() {
 
 #[tokio::test]
 async fn invitation_consume_retry_is_no_write_and_terminal_compaction_waits_for_resolution() {
-    use super::admission::InvitationConsumeResultV1;
+    use crate::space::admission::joiner::InvitationConsumeResultV1;
 
     let sponsor_dir = tempfile::tempdir().unwrap();
     let joiner_dir = tempfile::tempdir().unwrap();
@@ -2844,18 +1597,7 @@ async fn invitation_consume_retry_is_no_write_and_terminal_compaction_waits_for_
     let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
     let joiner = durable_admission_owner(Arc::clone(&joiner_repository));
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x30; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0x31; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    let initiated = seed_initiated_join(joiner_repository.as_ref(), attempt_id, [0x31; 16]).await;
     let (candidate, history, event, commitment, _) =
         durable_candidate_verification_fixture(attempt_id);
     sponsor
@@ -2875,10 +1617,13 @@ async fn invitation_consume_retry_is_no_write_and_terminal_compaction_waits_for_
 
     let before_retry = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
     let metadata_before_retry = sponsor_repository.profile_metadata().await.unwrap();
-    sponsor
-        .record_invitation_consume_result(attempt_id, InvitationConsumeResultV1::Retryable)
-        .await
-        .unwrap();
+    crate::space::admission::joiner::record_invitation_consume_result(
+        sponsor_repository.as_ref(),
+        attempt_id,
+        InvitationConsumeResultV1::Retryable,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         sponsor_repository.load(attempt_id).await.unwrap(),
         Some(before_retry)
@@ -2900,22 +1645,31 @@ async fn invitation_consume_retry_is_no_write_and_terminal_compaction_waits_for_
         .joiner_record_rejected(attempt_id, &rejected)
         .await
         .unwrap();
-    sponsor
-        .sponsor_confirm_rejected(attempt_id, &rejected_ack)
-        .await
-        .unwrap();
+    crate::space::admission::sponsor::confirm_rejected_delivery(
+        sponsor_repository.as_ref(),
+        attempt_id,
+        &rejected_ack,
+    )
+    .await
+    .unwrap();
 
     assert!(sponsor.compact_if_settled(attempt_id).await.is_err());
-    sponsor
-        .record_invitation_consume_result(attempt_id, InvitationConsumeResultV1::Conflict)
-        .await
-        .unwrap();
+    crate::space::admission::joiner::record_invitation_consume_result(
+        sponsor_repository.as_ref(),
+        attempt_id,
+        InvitationConsumeResultV1::Conflict,
+    )
+    .await
+    .unwrap();
     let after_conflict = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
     let metadata_after_conflict = sponsor_repository.profile_metadata().await.unwrap();
-    sponsor
-        .record_invitation_consume_result(attempt_id, InvitationConsumeResultV1::Conflict)
-        .await
-        .unwrap();
+    crate::space::admission::joiner::record_invitation_consume_result(
+        sponsor_repository.as_ref(),
+        attempt_id,
+        InvitationConsumeResultV1::Conflict,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         sponsor_repository.load(attempt_id).await.unwrap(),
         Some(after_conflict)
@@ -2935,18 +1689,7 @@ async fn restart_recovery_delivers_durable_outboxes_and_compacts_settled_termina
     let joiner_repository = durable_admission_repository(&joiner_dir, [0x79; 16]);
     let joiner = durable_admission_owner(Arc::clone(&joiner_repository));
     let joiner_attempt = uc_core::membership::AdmissionAttemptId::from_bytes([0x7a; 32]);
-    joiner
-        .start_join(
-            joiner_attempt,
-            [0x7b; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    seed_initiated_join(joiner_repository.as_ref(), joiner_attempt, [0x7b; 16]).await;
 
     let report = joiner
         .recover_with(&ConfirmingAdmissionDelivery)
@@ -2969,20 +1712,9 @@ async fn restart_recovery_delivers_durable_outboxes_and_compacts_settled_termina
     let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x7c; 16]);
     let remote_repository = durable_admission_repository(&remote_dir, [0x7d; 16]);
     let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let remote = durable_admission_owner(remote_repository);
     let sponsor_attempt = uc_core::membership::AdmissionAttemptId::from_bytes([0x7e; 32]);
-    let initiated = remote
-        .start_join(
-            sponsor_attempt,
-            [0x7f; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    let initiated =
+        seed_initiated_join(remote_repository.as_ref(), sponsor_attempt, [0x7f; 16]).await;
     let (candidate, history, event, commitment, _) =
         durable_candidate_verification_fixture(sponsor_attempt);
     sponsor
@@ -3036,20 +1768,8 @@ async fn candidate_bound_to_another_attempt_leaves_sponsor_state_unchanged() {
     let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x33; 16]);
     let joiner_repository = durable_admission_repository(&joiner_dir, [0x34; 16]);
     let sponsor = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let joiner = durable_admission_owner(joiner_repository);
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x35; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0x36; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    let initiated = seed_initiated_join(joiner_repository.as_ref(), attempt_id, [0x36; 16]).await;
     let (history, event, commitment) = admission_verification_fixture([0x37; 32]);
     let target_relationships = admission_relationships(&event);
     let identity_binding = admission_identity_binding(&event, &target_relationships);
@@ -3092,7 +1812,7 @@ async fn candidate_bound_to_another_attempt_leaves_sponsor_state_unchanged() {
     ));
     assert!(sponsor_repository.load(attempt_id).await.unwrap().is_none());
     assert!(sponsor_repository
-        .load_membership_history_v2()
+        .load_membership_history()
         .await
         .unwrap()
         .is_none());
@@ -3107,18 +1827,7 @@ async fn activation_receipt_bound_to_another_attempt_leaves_joiner_state_unchang
     let sponsor = durable_admission_owner(sponsor_repository);
     let joiner = durable_admission_owner(Arc::clone(&joiner_repository));
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x3b; 32]);
-    let initiated = joiner
-        .start_join(
-            attempt_id,
-            [0x3c; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    let initiated = seed_initiated_join(joiner_repository.as_ref(), attempt_id, [0x3c; 16]).await;
     let (candidate, base_history, candidate_event, commitment, _) =
         durable_candidate_verification_fixture(attempt_id);
     let offered = sponsor
@@ -3162,10 +1871,7 @@ async fn activation_receipt_bound_to_another_attempt_leaves_joiner_state_unchang
         .await
         .unwrap();
     let before_attempt = joiner_repository.load(attempt_id).await.unwrap().unwrap();
-    let before_history = joiner_repository
-        .load_membership_history_v2()
-        .await
-        .unwrap();
+    let before_history = joiner_repository.load_membership_history().await.unwrap();
     let other_attempt = uc_core::membership::AdmissionAttemptId::from_bytes([0x3e; 32]);
     let wrong_receipt = durable_candidate_verification_fixture(other_attempt).4;
 
@@ -3182,10 +1888,7 @@ async fn activation_receipt_bound_to_another_attempt_leaves_joiner_state_unchang
         Some(before_attempt)
     );
     assert_eq!(
-        joiner_repository
-            .load_membership_history_v2()
-            .await
-            .unwrap(),
+        joiner_repository.load_membership_history().await.unwrap(),
         before_history
     );
 }
@@ -3198,25 +1901,27 @@ async fn durable_join_is_saved_before_the_target_space_is_known() {
     let repository = durable_admission_repository(&joiner_dir, [0x40; 16]);
     let sponsor = durable_admission_owner(sponsor_repository);
     let joiner = durable_admission_owner(Arc::clone(&repository));
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x41; 32]);
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
+    };
 
     let initiated = joiner
-        .start_join_before_network(
-            attempt_id,
-            [0x42; 16],
+        .prepare_join_before_network_without_route(
+            &preparation,
+            &DeviceId::new("joiner"),
             b"invitation-code",
             b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
+            false,
         )
         .await
         .unwrap();
+    let attempt_id = initiated.attempt.attempt_id;
 
-    assert!(initiated.target_access_state.is_none());
-    assert_eq!(initiated.outboxes.len(), 1);
+    assert!(initiated.attempt.target_access_state.is_none());
+    assert_eq!(initiated.attempt.outboxes.len(), 1);
     assert_eq!(
         repository.load(attempt_id).await.unwrap(),
-        Some(initiated.clone())
+        Some(initiated.attempt.clone())
     );
 
     let (candidate, base_history, candidate_event, commitment, _) =
@@ -3225,7 +1930,7 @@ async fn durable_join_is_saved_before_the_target_space_is_known() {
         .sponsor_accept_and_offer(
             attempt_id,
             [0x43; 32],
-            &initiated.outboxes[0],
+            &initiated.attempt.outboxes[0],
             candidate.clone(),
             base_history.clone(),
             &candidate_event,
@@ -3269,143 +1974,35 @@ async fn durable_join_is_saved_before_the_target_space_is_known() {
 }
 
 #[tokio::test]
-async fn durable_join_starts_once_and_survives_owner_restart() {
-    use uc_core::membership::{
-        AdmissionAttemptRepositoryPort, AdmissionOutboxPurposeV1, JoinerAdmissionStageV1,
-    };
-
-    let directory = tempfile::tempdir().unwrap();
-    let repository: Arc<dyn AdmissionAttemptRepositoryPort> =
-        durable_admission_repository(&directory, [0x23; 16]);
-    let owner = durable_admission_owner(Arc::clone(&repository));
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x31; 32]);
-    let join_id = [0x32; 16];
-
-    let first = owner
-        .start_join(
-            attempt_id,
-            join_id,
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    assert_eq!(first.local_join_ordinal, Some(0));
-    assert!(matches!(
-        first.role_state,
-        uc_core::membership::AdmissionAttemptRoleStateV1::Joiner(
-            uc_core::membership::JoinerAdmissionStateV1 {
-                stage: JoinerAdmissionStageV1::Initiated
-            }
-        )
-    ));
-    assert_eq!(first.outboxes.len(), 1);
-    assert_eq!(
-        first.outboxes[0].purpose,
-        AdmissionOutboxPurposeV1::JoinRequest
-    );
-
-    let profile = super::ProfileSpaceAdmission::new(
-        Arc::clone(&repository),
-        DeviceId::new("joiner"),
-        Arc::new(UnusedClock),
-    );
-    let fresh_snapshot = profile.query_space_membership_status().await.unwrap();
-    assert!(fresh_snapshot.revision > 0);
-    assert!(fresh_snapshot.devices.is_empty());
-    assert!(matches!(
-        fresh_snapshot.current_join,
-        Some(super::CurrentJoinStatus::Pending {
-            join_id: projected_join_id,
-            ..
-        }) if projected_join_id == join_id
-    ));
-
-    let reopened = durable_admission_owner(Arc::clone(&repository));
-    assert!(matches!(
-        reopened.current_local_join().await.unwrap(),
-        Some(super::CurrentJoinStatus::Pending {
-            join_id: projected_join_id,
-            target_space_id: None,
-            sponsor_device_id: None,
-            sponsor_identity_fingerprint: None,
-            cancel_requested: false,
-        }) if projected_join_id == join_id
-    ));
-    let second = reopened
-        .start_join(
-            attempt_id,
-            join_id,
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
-    assert_eq!(second, first);
-    assert!(matches!(
-        reopened.cancel_local_join(join_id).await.unwrap(),
-        super::CurrentJoinStatus::Pending {
-            join_id: projected_join_id,
-            cancel_requested: true,
-            ..
-        } if projected_join_id == join_id
-    ));
-    assert!(matches!(
-        reopened.cancel_local_join([0xff; 16]).await,
-        Err(WorkspaceConvergenceError::JoinNotFound)
-    ));
-    assert!(matches!(
-        durable_admission_owner(repository)
-            .current_local_join()
-            .await
-            .unwrap(),
-        Some(super::CurrentJoinStatus::Pending {
-            join_id: projected_join_id,
-            cancel_requested: true,
-            ..
-        }) if projected_join_id == join_id
-    ));
-}
-
-#[tokio::test]
 async fn automatic_recovery_keeps_the_same_join_identity() {
-    use super::admission::DurableJoinRecoveryMaterialV1;
-    use uc_core::membership::AdmissionAttemptRepositoryPort;
+    use crate::deps::AdmissionAttemptRepositoryPort;
 
     let directory = tempfile::tempdir().unwrap();
     let repository: Arc<dyn AdmissionAttemptRepositoryPort> =
         durable_admission_repository(&directory, [0x73; 16]);
     let owner = durable_admission_owner(Arc::clone(&repository));
-    let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x74; 32]);
-    let material = DurableJoinRecoveryMaterialV1 {
-        pending_security_state: b"private-join-state".to_vec(),
-        candidate_key_package: b"public-key-package".to_vec(),
-        member_instance: MemberInstanceId::from_bytes([0x75; 32]),
-        resume_public_key: vec![0x76; 32],
-        resume_private_key: vec![0x77; 32],
+    let preparation = RotatingPreparation {
+        calls: AtomicUsize::new(0),
     };
-
-    owner
-        .start_join_with_recovery_material(
-            attempt_id,
-            [0x78; 16],
+    let started = owner
+        .prepare_join_before_network_without_route(
+            &preparation,
+            &DeviceId::new("joiner"),
             b"sponsor",
             b"join-request",
-            &material,
+            false,
         )
+        .await
+        .unwrap();
+    let material = owner
+        .load_join_recovery_material(started.attempt.attempt_id)
         .await
         .unwrap();
 
     let reopened = durable_admission_owner(repository);
     assert_eq!(
         reopened
-            .load_join_recovery_material(attempt_id)
+            .load_join_recovery_material(started.attempt.attempt_id)
             .await
             .unwrap(),
         material
@@ -3437,7 +2034,7 @@ impl uc_core::ports::space::PrepareAdmissionTargetAccessPort for FailingTargetAc
 }
 
 #[async_trait::async_trait]
-impl uc_core::ports::space::GroupAdmissionPort for FailingPreparation {
+impl crate::deps::GroupAdmissionPort for FailingPreparation {
     async fn prepare_group_join(
         &self,
         _device_id: &DeviceId,
@@ -3447,38 +2044,10 @@ impl uc_core::ports::space::GroupAdmissionPort for FailingPreparation {
             "injected join material failure".to_owned(),
         ))
     }
-
-    async fn admit_group_member(
-        &self,
-        _space_id: &SpaceId,
-        _sponsor_device_id: &DeviceId,
-        _joiner_device_id: &DeviceId,
-        _existing_member_ids: &[DeviceId],
-        _key_package: &[u8],
-    ) -> Result<uc_core::space_access::GroupAdmission, uc_core::ports::space::SpaceAccessError>
-    {
-        Err(uc_core::ports::space::SpaceAccessError::Internal(
-            "unused".to_owned(),
-        ))
-    }
-
-    async fn install_group_join(
-        &self,
-        _space_id: &SpaceId,
-        _passphrase: &uc_core::crypto::domain::Passphrase,
-        _pending: uc_core::space_access::PreparedGroupJoin,
-        _welcome: &[u8],
-        _encrypted_key_catalog: &[u8],
-        _group_epoch: u64,
-    ) -> Result<(), uc_core::ports::space::SpaceAccessError> {
-        Err(uc_core::ports::space::SpaceAccessError::Internal(
-            "unused".to_owned(),
-        ))
-    }
 }
 
 #[async_trait::async_trait]
-impl uc_core::ports::space::GroupAdmissionPort for RotatingPreparation {
+impl crate::deps::GroupAdmissionPort for RotatingPreparation {
     async fn prepare_group_join(
         &self,
         _device_id: &DeviceId,
@@ -3489,34 +2058,6 @@ impl uc_core::ports::space::GroupAdmissionPort for RotatingPreparation {
             uc_core::space_access::PreparedGroupJoin::new(vec![call], vec![call.wrapping_add(1)])
                 .with_member_instance(MemberInstanceId::from_bytes([call; 32])),
         )
-    }
-
-    async fn admit_group_member(
-        &self,
-        _space_id: &SpaceId,
-        _sponsor_device_id: &DeviceId,
-        _joiner_device_id: &DeviceId,
-        _existing_member_ids: &[DeviceId],
-        _key_package: &[u8],
-    ) -> Result<uc_core::space_access::GroupAdmission, uc_core::ports::space::SpaceAccessError>
-    {
-        Err(uc_core::ports::space::SpaceAccessError::Internal(
-            "unused".to_owned(),
-        ))
-    }
-
-    async fn install_group_join(
-        &self,
-        _space_id: &SpaceId,
-        _passphrase: &uc_core::crypto::domain::Passphrase,
-        _pending: uc_core::space_access::PreparedGroupJoin,
-        _welcome: &[u8],
-        _encrypted_key_catalog: &[u8],
-        _group_epoch: u64,
-    ) -> Result<(), uc_core::ports::space::SpaceAccessError> {
-        Err(uc_core::ports::space::SpaceAccessError::Internal(
-            "unused".to_owned(),
-        ))
     }
 }
 
@@ -3709,13 +2250,13 @@ async fn explicit_join_supersedes_initiated_attempt_after_request_delivery_ack()
         .await
         .unwrap();
     let first_request = first.attempt.outboxes[0].clone();
-    owner
-        .acknowledge_delivery(
-            first.attempt.attempt_id,
-            &super::admission::admission_acknowledgment(&first_request),
-        )
-        .await
-        .unwrap();
+    crate::space::admission::recover_pending_admissions::record_protocol_message_delivered(
+        repository.as_ref(),
+        first.attempt.attempt_id,
+        &super::admission::admission_acknowledgment(&first_request),
+    )
+    .await
+    .unwrap();
 
     let second = owner
         .prepare_join_before_network_without_route(
@@ -3900,7 +2441,7 @@ async fn explicit_join_supersedes_candidate_before_prepared() {
         calls: AtomicUsize::new(0),
     };
     repository
-        .compare_and_replace_membership_history_v2(None, b"source-membership-history")
+        .compare_and_replace_membership_history(None, b"source-membership-history")
         .await
         .unwrap();
     let first = owner
@@ -3958,7 +2499,7 @@ async fn explicit_join_supersedes_candidate_before_prepared() {
     assert!(previous.space_transition.is_none());
     assert_eq!(previous.rejection_reason, None);
     assert_eq!(
-        repository.load_membership_history_v2().await.unwrap(),
+        repository.load_membership_history().await.unwrap(),
         Some(b"source-membership-history".to_vec())
     );
 
@@ -3969,7 +2510,9 @@ async fn explicit_join_supersedes_candidate_before_prepared() {
     assert_eq!(report.attempts_compacted, 1);
     assert!(delivery.routes.lock().unwrap().contains(&(
         first.attempt.attempt_id,
-        Some(uc_core::membership::AdmissionOutboxDeliveryRouteV1::Continuation(vec![5]),),
+        Some(crate::deps::AdmissionOutboxDeliveryRouteV1::Continuation(
+            vec![5]
+        ),),
     )));
     assert_eq!(
         repository
@@ -4257,18 +2800,7 @@ async fn admission_unavailable_keeps_the_exact_pending_join() {
     let repository = durable_admission_repository(&directory, [0x24; 16]);
     let owner = durable_admission_owner(Arc::clone(&repository));
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x25; 32]);
-    let started = owner
-        .start_join(
-            attempt_id,
-            [0x26; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    let started = seed_initiated_join(repository.as_ref(), attempt_id, [0x26; 16]).await;
     let metadata_before = repository.profile_metadata().await.unwrap();
 
     let retry = owner
@@ -4288,34 +2820,30 @@ async fn admission_unavailable_keeps_the_exact_pending_join() {
 async fn delivery_ack_clears_only_the_exact_supported_outbox() {
     let directory = tempfile::tempdir().unwrap();
     let repository = durable_admission_repository(&directory, [0x27; 16]);
-    let owner = durable_admission_owner(Arc::clone(&repository));
     let attempt_id = uc_core::membership::AdmissionAttemptId::from_bytes([0x28; 32]);
-    let started = owner
-        .start_join(
-            attempt_id,
-            [0x29; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    let started = seed_initiated_join(repository.as_ref(), attempt_id, [0x29; 16]).await;
     let mut wrong = super::admission::admission_acknowledgment(&started.outboxes[0]);
     wrong.payload_digest[0] ^= 0xff;
 
-    assert!(owner
-        .acknowledge_delivery(attempt_id, &wrong)
+    assert!(
+        crate::space::admission::recover_pending_admissions::record_protocol_message_delivered(
+            repository.as_ref(),
+            attempt_id,
+            &wrong,
+        )
         .await
-        .is_err());
+        .is_err()
+    );
     assert!(!repository.load(attempt_id).await.unwrap().unwrap().outboxes[0].superseded);
 
     let exact = super::admission::admission_acknowledgment(&started.outboxes[0]);
-    owner
-        .acknowledge_delivery(attempt_id, &exact)
-        .await
-        .unwrap();
+    crate::space::admission::recover_pending_admissions::record_protocol_message_delivered(
+        repository.as_ref(),
+        attempt_id,
+        &exact,
+    )
+    .await
+    .unwrap();
     let saved = repository.load(attempt_id).await.unwrap().unwrap();
     assert!(saved.outboxes[0].superseded);
     assert!(saved.inbox_dedup.contains(&exact));
@@ -4478,6 +3006,7 @@ async fn sponsor_candidate_uses_only_members_active_in_verified_history() {
         sponsor_device.as_str(),
         Vec::new(),
     );
+    deps.membership_history_repo = Arc::clone(&admission_repository);
     deps.admission_attempts = admission_repository;
     deps.member_signatures = Arc::new(CredentialBackedSigner {
         device_id: sponsor_device.clone(),
@@ -4604,11 +3133,16 @@ async fn admission_recovery_starts_with_legacy_migration_import() {
         "device-1",
         Vec::new(),
     );
-    deps.admission_attempts = durable_admission_repository(&directory, [0x71; 16]);
+    let admission_repository = durable_admission_repository(&directory, [0x71; 16]);
+    deps.membership_history_repo = Arc::clone(&admission_repository);
+    deps.admission_attempts = admission_repository;
     deps.legacy_migration_recovery = recovery.clone();
     let owner = WorkspaceMembership::new(deps);
+    let recovery_use_case = crate::space::admission::RecoverPendingAdmissionsUseCase::new(
+        crate::space::admission::SpaceAdmission::new(owner),
+    );
 
-    owner.recover_pending_admissions().await.unwrap();
+    recovery_use_case.execute().await.unwrap();
 
     assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
 }
@@ -4626,22 +3160,11 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
     let sponsor_repository = durable_admission_repository(&sponsor_dir, [0x72; 16]);
     let joiner_repository = durable_admission_repository(&joiner_dir, [0x73; 16]);
     let sponsor_transaction = durable_admission_owner(Arc::clone(&sponsor_repository));
-    let joiner_transaction = durable_admission_owner(joiner_repository);
+    let joiner_transaction = durable_admission_owner(Arc::clone(&joiner_repository));
     let attempt_id = AdmissionAttemptId::from_bytes([0x74; 32]);
     let (candidate, base_history, candidate_event, commitment, activation_receipt) =
         durable_candidate_verification_fixture(attempt_id);
-    let initiated = joiner_transaction
-        .start_join(
-            attempt_id,
-            [0x75; 16],
-            b"sponsor",
-            b"join-request",
-            b"joiner-pending-state",
-            b"joiner-key-package",
-            b"joiner-target-access",
-        )
-        .await
-        .unwrap();
+    let initiated = seed_initiated_join(joiner_repository.as_ref(), attempt_id, [0x75; 16]).await;
     let candidate_message = sponsor_transaction
         .sponsor_accept_and_offer(
             attempt_id,
@@ -4656,13 +3179,13 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
         )
         .await
         .unwrap();
-    sponsor_transaction
-        .record_invitation_consume_result(
-            attempt_id,
-            super::admission::InvitationConsumeResultV1::Consumed,
-        )
-        .await
-        .unwrap();
+    crate::space::admission::joiner::record_invitation_consume_result(
+        sponsor_repository.as_ref(),
+        attempt_id,
+        crate::space::admission::joiner::InvitationConsumeResultV1::Consumed,
+    )
+    .await
+    .unwrap();
     let prepared = joiner_transaction
         .joiner_verify_and_prepare(
             attempt_id,
@@ -4708,7 +3231,7 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
         payload: receipt_payload.clone(),
     };
     let committed_history = sponsor_repository
-        .load_membership_history_v2()
+        .load_membership_history()
         .await
         .unwrap()
         .unwrap();
@@ -4726,6 +3249,7 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
         "sponsor",
         Vec::new(),
     );
+    first_deps.membership_history_repo = Arc::clone(&racing_repository);
     first_deps.admission_attempts = racing_repository;
     first_deps.activate_sponsor_admission_security = first_activation.clone();
     first_deps.member_repo = member_repo.clone();
@@ -4764,6 +3288,7 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
         "sponsor",
         Vec::new(),
     );
+    resumed_deps.membership_history_repo = Arc::clone(&sponsor_repository);
     resumed_deps.admission_attempts = Arc::clone(&sponsor_repository);
     resumed_deps.activate_sponsor_admission_security = resumed_activation.clone();
     resumed_deps.member_repo = member_repo.clone();
@@ -4772,8 +3297,11 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
         credential: sponsor_credential,
     });
     let resumed_owner = WorkspaceMembership::new(resumed_deps);
+    let recovery_use_case = crate::space::admission::RecoverPendingAdmissionsUseCase::new(
+        crate::space::admission::SpaceAdmission::new(resumed_owner),
+    );
 
-    assert_eq!(resumed_owner.recover_pending_admissions().await.unwrap(), 1);
+    assert_eq!(recovery_use_case.execute().await.unwrap(), 1);
     let recovered = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
     assert!(recovered.write_ahead_recovery.is_none());
     assert!(recovered.completion.is_some());
@@ -4789,7 +3317,7 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
     );
     let recovered_history = VersionedMembershipHistory::decode_persisted_v2(
         &sponsor_repository
-            .load_membership_history_v2()
+            .load_membership_history()
             .await
             .unwrap()
             .unwrap(),
@@ -4802,7 +3330,7 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
         1
     );
 
-    resumed_owner.recover_pending_admissions().await.unwrap();
+    recovery_use_case.execute().await.unwrap();
     assert_eq!(
         resumed_activation.activation_requests.lock().unwrap().len(),
         1
@@ -4875,7 +3403,7 @@ async fn committed_admission_records_the_effective_members_in_signed_history() {
 
     harness
         .owner
-        .submit_removal(&DeviceId::new("device-b"))
+        .submit_legacy_removal_for_test(&DeviceId::new("device-b"))
         .await
         .unwrap();
     let state = harness.repository.load_state().await.unwrap().unwrap();

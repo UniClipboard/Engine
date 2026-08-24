@@ -31,15 +31,16 @@ use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::{debug, info, instrument, warn};
+use uc_application::deps::AdmissionCompletionRecoveryEndpointPort;
 use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    AdmissionCompletionRecoveryEndpointPort, ContentExchangeGatePort, CurrentMemberSignaturePort,
-    CurrentMembershipIdentityPort, CurrentWorkspacePeerScopePort, GroupRevocationPort,
-    GroupUpdateDispatchPort, MemberRepositoryPort, MembershipAttestationEndpointPort,
-    MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
+    ContentExchangeGatePort, CurrentMemberSignaturePort, CurrentMembershipIdentityPort,
+    CurrentWorkspacePeerScopePort, GroupRevocationPort, GroupUpdateDispatchPort,
+    MemberRepositoryPort, MembershipAttestationEndpointPort, MembershipHistoryExchangeEndpointPort,
+    PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};

@@ -6,14 +6,14 @@ use base64::Engine as _;
 use tracing::{error, info};
 use uc_application::facade::{
     ActionUnavailableReason, AppFacade, ContentTypesPatch as AppContentTypesPatch,
-    CurrentJoinStatus, DeviceCompatibility, DeviceMembership, GroupRelationship,
+    CurrentJoinStatus, DecidePendingMembershipRemovalError, DecidePendingMembershipRemovalResult,
+    DeviceCompatibility, DeviceMembership, GroupRelationship, InitiateSpaceMemberRemovalError,
     MemberProtectionStatusView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, ProfileSpaceAdmission, QuerySpaceMembershipStatusError,
-    RecoveryAvailability, RosterError, SpaceMembershipAction, SpaceMembershipChangeChoice,
-    SpaceMembershipChangeDecisionResult, SpaceMembershipChangeImpact, SpaceMembershipStatus,
-    SpaceProtectionModeView, SpaceProtectionView, SyncRelationship,
+    MemberSyncPreferencesView, QuerySpaceMembershipStatusError, RecoveryAvailability, RosterError,
+    SpaceMembershipAction, SpaceMembershipChangeImpact, SpaceMembershipFacade,
+    SpaceMembershipStatus, SpaceProtectionModeView, SpaceProtectionView, SyncRelationship,
 };
-use uc_core::membership::WorkspaceSnapshot;
+use uc_core::membership::{RemovalDecision, WorkspaceSnapshot};
 use uc_core::ports::ReachabilityState;
 
 use crate::{
@@ -96,7 +96,7 @@ pub async fn execute_query_workspace_convergence(
 }
 
 pub async fn execute_query_space_membership_status(
-    facade: &ProfileSpaceAdmission,
+    facade: &SpaceMembershipFacade,
 ) -> Result<OperationResult, EngineError> {
     let snapshot = facade
         .query_space_membership_status()
@@ -108,7 +108,7 @@ pub async fn execute_query_space_membership_status(
 }
 
 pub async fn execute_decide_device_trust_change(
-    facade: &AppFacade,
+    facade: &SpaceMembershipFacade,
     input: DecideDeviceTrustChangeInput,
 ) -> Result<OperationResult, EngineError> {
     let change_id =
@@ -119,61 +119,59 @@ pub async fn execute_decide_device_trust_change(
                 false,
             )
         })?;
-    let choice = match input.choice {
-        DeviceTrustChoiceSummary::ApplyChange => SpaceMembershipChangeChoice::ApplyChange,
-        DeviceTrustChoiceSummary::KeepCurrentDeviceGroup => {
-            SpaceMembershipChangeChoice::KeepCurrentDeviceGroup
-        }
+    let decision = match input.choice {
+        DeviceTrustChoiceSummary::ApplyChange => RemovalDecision::Accept,
+        DeviceTrustChoiceSummary::KeepCurrentDeviceGroup => RemovalDecision::Reject,
     };
     let result = facade
-        .decide_device_trust_change(change_id, choice, input.confirm_local_removal)
+        .decide_pending_membership_removal(change_id, decision, input.confirm_local_removal)
         .await
-        .map_err(map_roster_error)?;
+        .map_err(map_decide_pending_membership_removal_error)?;
     Ok(OperationResult::DeviceTrustDecision(device_trust_decision(
         result,
     )))
 }
 
 fn device_trust_decision(
-    result: SpaceMembershipChangeDecisionResult,
+    result: DecidePendingMembershipRemovalResult,
 ) -> DeviceTrustDecisionSummary {
     match result {
-        SpaceMembershipChangeDecisionResult::Applied {
-            change_id,
-            snapshot,
+        DecidePendingMembershipRemovalResult::Accepted {
+            removal_event_id,
+            status,
         } => DeviceTrustDecisionSummary::Applied {
-            change_id: change_id.to_hex(),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
+            change_id: removal_event_id.to_hex(),
+            snapshot: Box::new(device_trust_snapshot(status)),
         },
-        SpaceMembershipChangeDecisionResult::KeptCurrentDeviceGroup {
-            change_id,
-            snapshot,
+        DecidePendingMembershipRemovalResult::Rejected {
+            removal_event_id,
+            status,
         } => DeviceTrustDecisionSummary::KeptCurrentDeviceGroup {
-            change_id: change_id.to_hex(),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
+            change_id: removal_event_id.to_hex(),
+            snapshot: Box::new(device_trust_snapshot(status)),
         },
-        SpaceMembershipChangeDecisionResult::AlreadyCompleted {
-            change_id,
-            completed_choice,
-            snapshot,
+        DecidePendingMembershipRemovalResult::AlreadyDecided {
+            removal_event_id,
+            decision,
+            status,
         } => DeviceTrustDecisionSummary::AlreadyCompleted {
-            change_id: change_id.to_hex(),
-            completed_choice: device_trust_choice(completed_choice),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
+            change_id: removal_event_id.to_hex(),
+            completed_choice: device_trust_choice(decision),
+            snapshot: Box::new(device_trust_snapshot(status)),
         },
-        SpaceMembershipChangeDecisionResult::StateChanged {
-            current_change_id,
-            snapshot,
+        DecidePendingMembershipRemovalResult::PendingRemovalChanged {
+            current_removal_event_id,
+            status,
         } => DeviceTrustDecisionSummary::StateChanged {
-            current_change_id: current_change_id.map(|change_id| change_id.to_hex()),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
+            current_change_id: current_removal_event_id.map(|change_id| change_id.to_hex()),
+            snapshot: Box::new(device_trust_snapshot(status)),
         },
-        SpaceMembershipChangeDecisionResult::LocalDeviceConfirmationRequired {
-            change_id,
-            snapshot,
+        DecidePendingMembershipRemovalResult::SelfRemovalConfirmationRequired {
+            removal_event_id,
+            status,
         } => DeviceTrustDecisionSummary::LocalDeviceConfirmationRequired {
-            change_id: change_id.to_hex(),
-            snapshot: Box::new(device_trust_snapshot(snapshot)),
+            change_id: removal_event_id.to_hex(),
+            snapshot: Box::new(device_trust_snapshot(status)),
         },
     }
 }
@@ -203,16 +201,16 @@ pub async fn execute_update_member_sync_preferences(
 }
 
 pub async fn execute_remove_member(
-    facade: &AppFacade,
+    facade: &SpaceMembershipFacade,
     input: RemoveMemberInput,
 ) -> Result<OperationResult, EngineError> {
     validate_device_id(&input.device_id)?;
-    let snapshot = facade
-        .remove_member(&input.device_id)
+    let result = facade
+        .initiate_space_member_removal(&uc_core::DeviceId::new(input.device_id))
         .await
-        .map_err(map_roster_error)?;
+        .map_err(map_initiate_space_member_removal_error)?;
     Ok(OperationResult::WorkspaceMembership(
-        workspace_convergence_summary(snapshot),
+        workspace_convergence_summary(result.snapshot),
     ))
 }
 
@@ -558,12 +556,10 @@ fn device_membership(membership: DeviceMembership) -> DeviceMembershipSummary {
     }
 }
 
-fn device_trust_choice(choice: SpaceMembershipChangeChoice) -> DeviceTrustChoiceSummary {
-    match choice {
-        SpaceMembershipChangeChoice::ApplyChange => DeviceTrustChoiceSummary::ApplyChange,
-        SpaceMembershipChangeChoice::KeepCurrentDeviceGroup => {
-            DeviceTrustChoiceSummary::KeepCurrentDeviceGroup
-        }
+fn device_trust_choice(decision: RemovalDecision) -> DeviceTrustChoiceSummary {
+    match decision {
+        RemovalDecision::Accept => DeviceTrustChoiceSummary::ApplyChange,
+        RemovalDecision::Reject => DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
     }
 }
 
@@ -794,6 +790,57 @@ fn map_query_space_membership_status_error(error: QuerySpaceMembershipStatusErro
             false,
         ),
         QuerySpaceMembershipStatusError::Failed => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+        ),
+    }
+}
+
+fn map_decide_pending_membership_removal_error(
+    error: DecidePendingMembershipRemovalError,
+) -> EngineError {
+    match error {
+        DecidePendingMembershipRemovalError::Unavailable => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            false,
+        ),
+        DecidePendingMembershipRemovalError::Corrupt => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+        ),
+        DecidePendingMembershipRemovalError::Failed => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+        ),
+    }
+}
+
+fn map_initiate_space_member_removal_error(error: InitiateSpaceMemberRemovalError) -> EngineError {
+    match error {
+        InitiateSpaceMemberRemovalError::Unavailable => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            false,
+        ),
+        InitiateSpaceMemberRemovalError::Corrupt => EngineError::new(
+            QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+        ),
+        InitiateSpaceMemberRemovalError::TargetNotFound => {
+            EngineError::new(MEMBER_NOT_FOUND_CODE, EngineErrorCategory::NotFound, false)
+        }
+        InitiateSpaceMemberRemovalError::SelfTarget => EngineError::new(
+            MEMBER_INVALID_INPUT_CODE,
+            EngineErrorCategory::InvalidInput,
+            false,
+        ),
+        InitiateSpaceMemberRemovalError::LocalMemberRemoved
+        | InitiateSpaceMemberRemovalError::Failed => EngineError::new(
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             false,

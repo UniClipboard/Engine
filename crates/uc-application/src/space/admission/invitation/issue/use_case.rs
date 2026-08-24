@@ -19,66 +19,29 @@
 //! [`InMemoryPairingInvitationHolder`]:
 //!     crate::pairing_invitation::InMemoryPairingInvitationHolder
 
-use std::net::IpAddr;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
-use uc_core::membership::{MembershipAdmissionDecision, MembershipAdmissionGatePort};
-use uc_core::pairing::invitation::PairingInvitation;
-use uc_core::ports::pairing_invitation::{
-    CodeOrigin, InvitationError, IssuedInvitation, PairingInvitationAddressCandidate,
-    PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
-};
-use uc_core::ports::{ClockPort, DeviceIdentityPort};
-use uc_observability_contract::analytics::{
-    AnalyticsFacade, Event, InvitationCodeSource, PairingMethod,
-};
+use uc_core::ports::pairing_invitation::{IssuedInvitation, PairingInvitationPort};
 
-use crate::facade::space_setup::{
-    InvitationAvailability, IssuePairingInvitationError, IssuePairingInvitationResult,
-};
-use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
+use crate::facade::space_setup::{IssuePairingInvitationError, IssuePairingInvitationResult};
+use crate::space::admission::invitation::issuer::map_invitation_error;
+use crate::space::admission::invitation::PairingInvitationIssuer;
 
 pub(crate) struct IssuePairingInvitationUseCase {
     pairing_invitation: Arc<dyn PairingInvitationPort>,
-    pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
-    /// Dev-only: the by-address variant lives on its own port so the
-    /// standard sponsor lifecycle (`PairingInvitationPort`) stays free of
-    /// the diagnostic surface.
-    pairing_invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
-    device_identity: Arc<dyn DeviceIdentityPort>,
-    clock: Arc<dyn ClockPort>,
-    holder: Arc<InMemoryPairingInvitationHolder>,
-    /// Slice 8b' · sponsor-side `pairing_started` funnel anchor.
-    /// Captured at the entry of `execute()` regardless of outcome — even
-    /// "early dial failure" (NetworkNotStarted / ServiceUnavailable) leaves
-    /// a started signal so PostHog can compute the "tried to invite" cohort.
-    analytics: Arc<dyn AnalyticsFacade>,
-    membership_admission: Arc<dyn MembershipAdmissionGatePort>,
+    issuer: Arc<PairingInvitationIssuer>,
 }
 
 impl IssuePairingInvitationUseCase {
     pub(crate) fn new(
         pairing_invitation: Arc<dyn PairingInvitationPort>,
-        pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
-        pairing_invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
-        device_identity: Arc<dyn DeviceIdentityPort>,
-        clock: Arc<dyn ClockPort>,
-        holder: Arc<InMemoryPairingInvitationHolder>,
-        analytics: Arc<dyn AnalyticsFacade>,
-        membership_admission: Arc<dyn MembershipAdmissionGatePort>,
+        issuer: Arc<PairingInvitationIssuer>,
     ) -> Self {
         Self {
             pairing_invitation,
-            pairing_invitation_addresses,
-            pairing_invitation_by_address,
-            device_identity,
-            clock,
-            holder,
-            analytics,
-            membership_admission,
+            issuer,
         }
     }
 
@@ -86,152 +49,14 @@ impl IssuePairingInvitationUseCase {
     pub(crate) async fn execute(
         &self,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.capture_pairing_started();
-        let admission_generation = self.current_admission_generation().await?;
+        let admission_generation = self.issuer.begin().await?;
 
-        // 1. Ask the rendezvous adapter for a code.
         let issued: IssuedInvitation = self
             .pairing_invitation
             .issue_invitation()
             .await
-            .map_err(map_invitation_err)?;
-        self.finish_issued_invitation(issued, admission_generation)
-            .await
-    }
-
-    #[instrument(skip_all, fields(selected_ip = %selected_ip))]
-    pub(crate) async fn execute_for_address(
-        &self,
-        selected_ip: IpAddr,
-    ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.capture_pairing_started();
-        let admission_generation = self.current_admission_generation().await?;
-
-        let issued: IssuedInvitation = self
-            .pairing_invitation_by_address
-            .issue_invitation_for_address(selected_ip)
-            .await
-            .map_err(map_invitation_err)?;
-        self.finish_issued_invitation(issued, admission_generation)
-            .await
-    }
-
-    #[instrument(skip_all, fields(count = tracing::field::Empty))]
-    pub(crate) async fn list_addresses(
-        &self,
-    ) -> Result<Vec<PairingInvitationAddressCandidate>, IssuePairingInvitationError> {
-        let candidates = self
-            .pairing_invitation_addresses
-            .list_invitation_addresses()
-            .await
-            .map_err(map_invitation_err)?;
-        tracing::Span::current().record("count", candidates.len());
-        Ok(candidates)
-    }
-
-    fn capture_pairing_started(&self) {
-        self.analytics.capture(Event::PairingStarted {
-            method: PairingMethod::Code,
-        });
-    }
-
-    async fn finish_issued_invitation(
-        &self,
-        issued: IssuedInvitation,
-        admission_generation: u64,
-    ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        debug!(code = %issued.code.as_str(), expires_at = %issued.expires_at, "invitation issued by rendezvous");
-
-        // pairing_invitation_issued: the sponsor-side outcome anchor. The
-        // 3-way `CodeOrigin` collapses into a 2-way code source plus a
-        // LAN-only flag (intentional LAN-only vs transient directory outage,
-        // both yielding a locally-minted code).
-        let (code_source, lan_only_mode, availability) = match issued.code_origin {
-            CodeOrigin::DirectoryIssued => (
-                InvitationCodeSource::DirectoryIssued,
-                false,
-                InvitationAvailability::CrossNetwork,
-            ),
-            CodeOrigin::LocallyMintedLanOnly => (
-                InvitationCodeSource::LocallyMinted,
-                true,
-                InvitationAvailability::SameLocalNetwork,
-            ),
-            CodeOrigin::LocallyMintedDirectoryUnreachable => (
-                InvitationCodeSource::LocallyMinted,
-                false,
-                InvitationAvailability::SameLocalNetwork,
-            ),
-        };
-        self.analytics.capture(Event::PairingInvitationIssued {
-            code_source,
-            lan_only_mode,
-        });
-
-        let issued_at = self.now_utc()?;
-        let device_id = self.device_identity.current_device_id();
-        let (invitation, _issued_event) = PairingInvitation::issue(
-            issued.code.clone(),
-            issued_at,
-            issued.expires_at,
-            device_id,
-            admission_generation,
-        );
-
-        self.holder.insert(invitation).await;
-        info!(code = %issued.code.as_str(), "pairing invitation parked in holder");
-
-        Ok(IssuePairingInvitationResult {
-            code: issued.code,
-            expires_at: issued.expires_at,
-            availability,
-        })
-    }
-
-    fn now_utc(&self) -> Result<DateTime<Utc>, IssuePairingInvitationError> {
-        let ms = self.clock.now_ms();
-        DateTime::<Utc>::from_timestamp_millis(ms).ok_or_else(|| {
-            warn!(ms, "clock returned a timestamp outside chrono's range");
-            IssuePairingInvitationError::Internal("clock returned invalid timestamp".into())
-        })
-    }
-
-    async fn current_admission_generation(&self) -> Result<u64, IssuePairingInvitationError> {
-        self.membership_admission
-            .invitation_generation()
-            .await
-            .map_err(map_membership_admission_decision)
-    }
-}
-
-fn map_membership_admission_decision(
-    decision: MembershipAdmissionDecision,
-) -> IssuePairingInvitationError {
-    match decision {
-        MembershipAdmissionDecision::Allowed => IssuePairingInvitationError::Internal(
-            "membership admission gate returned an incomplete allow result".into(),
-        ),
-        MembershipAdmissionDecision::AwaitingConvergence => {
-            IssuePairingInvitationError::MembershipReconciliationInProgress
-        }
-        MembershipAdmissionDecision::RecoveryRequired => {
-            IssuePairingInvitationError::MembershipReconciliationRequired
-        }
-        MembershipAdmissionDecision::SupersededInvitation
-        | MembershipAdmissionDecision::Unavailable => {
-            IssuePairingInvitationError::MembershipReconciliationUnavailable
-        }
-    }
-}
-
-fn map_invitation_err(err: InvitationError) -> IssuePairingInvitationError {
-    match err {
-        InvitationError::NetworkNotStarted => IssuePairingInvitationError::NetworkNotStarted,
-        InvitationError::ServiceUnavailable => IssuePairingInvitationError::ServiceUnavailable,
-        InvitationError::AddressNotAvailable(ip) => {
-            IssuePairingInvitationError::AddressNotAvailable(ip)
-        }
-        InvitationError::Internal(m) => IssuePairingInvitationError::Internal(m),
+            .map_err(map_invitation_error)?;
+        self.issuer.finish(issued, admission_generation).await
     }
 }
 
@@ -239,14 +64,25 @@ fn map_invitation_err(err: InvitationError) -> IssuePairingInvitationError {
 mod tests {
     use super::*;
 
+    use std::net::IpAddr;
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
-    use chrono::Duration;
+    use chrono::{DateTime, Duration, Utc};
 
     use uc_core::ids::DeviceId;
     use uc_core::membership::{MembershipAdmissionDecision, MembershipAdmissionGatePort};
     use uc_core::pairing::invitation::{InvitationCode, InvitationState};
+    use uc_core::ports::pairing_invitation::{
+        CodeOrigin, InvitationError, PairingInvitationByAddressPort,
+    };
+    use uc_core::ports::{ClockPort, DeviceIdentityPort};
+    use uc_observability_contract::analytics::{
+        AnalyticsFacade, Event, InvitationCodeSource, PairingMethod,
+    };
+
+    use crate::space::admission::invitation::holder::InMemoryPairingInvitationHolder;
+    use crate::space::admission::invitation::issue_for_address::IssuePairingInvitationForAddressUseCase;
 
     struct FixedMembershipAdmissionGate(MembershipAdmissionDecision);
 
@@ -361,15 +197,6 @@ mod tests {
     }
 
     #[async_trait]
-    impl PairingInvitationAddressQueryPort for FakeInvitationPort {
-        async fn list_invitation_addresses(
-            &self,
-        ) -> Result<Vec<PairingInvitationAddressCandidate>, InvitationError> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[async_trait]
     impl PairingInvitationByAddressPort for FakeInvitationPort {
         async fn issue_invitation_for_address(
             &self,
@@ -405,6 +232,7 @@ mod tests {
 
     struct Harness {
         uc: IssuePairingInvitationUseCase,
+        by_address: IssuePairingInvitationForAddressUseCase,
         invitation_port: Arc<FakeInvitationPort>,
         holder: Arc<InMemoryPairingInvitationHolder>,
         analytics: Arc<CapturingAnalyticsSink>,
@@ -483,10 +311,7 @@ mod tests {
         let holder = Arc::new(InMemoryPairingInvitationHolder::new());
         let analytics = Arc::new(CapturingAnalyticsSink::default());
         let analytics_facade = wrap_facade(analytics.clone());
-        let uc = IssuePairingInvitationUseCase::new(
-            port.clone() as Arc<dyn PairingInvitationPort>,
-            port.clone() as Arc<dyn PairingInvitationAddressQueryPort>,
-            port.clone() as Arc<dyn PairingInvitationByAddressPort>,
+        let issuer = Arc::new(PairingInvitationIssuer::new(
             device_identity,
             clock,
             holder.clone(),
@@ -494,9 +319,18 @@ mod tests {
             Arc::new(FixedMembershipAdmissionGate(
                 MembershipAdmissionDecision::Allowed,
             )),
+        ));
+        let uc = IssuePairingInvitationUseCase::new(
+            port.clone() as Arc<dyn PairingInvitationPort>,
+            Arc::clone(&issuer),
+        );
+        let by_address = IssuePairingInvitationForAddressUseCase::new(
+            port.clone() as Arc<dyn PairingInvitationByAddressPort>,
+            issuer,
         );
         Harness {
             uc,
+            by_address,
             invitation_port: port,
             holder,
             analytics,
@@ -545,10 +379,7 @@ mod tests {
         let clock: Arc<dyn ClockPort> = Arc::new(FixedClock(issued_at_ms()));
         let holder = Arc::new(InMemoryPairingInvitationHolder::new());
         let analytics = Arc::new(CapturingAnalyticsSink::default());
-        let uc = IssuePairingInvitationUseCase::new(
-            port.clone() as Arc<dyn PairingInvitationPort>,
-            port.clone() as Arc<dyn PairingInvitationAddressQueryPort>,
-            port.clone() as Arc<dyn PairingInvitationByAddressPort>,
+        let issuer = Arc::new(PairingInvitationIssuer::new(
             device_identity,
             clock,
             holder.clone(),
@@ -556,6 +387,10 @@ mod tests {
             Arc::new(FixedMembershipAdmissionGate(
                 MembershipAdmissionDecision::AwaitingConvergence,
             )),
+        ));
+        let uc = IssuePairingInvitationUseCase::new(
+            port.clone() as Arc<dyn PairingInvitationPort>,
+            issuer,
         );
 
         assert!(matches!(
@@ -590,7 +425,7 @@ mod tests {
         let port = Arc::new(FakeInvitationPort::with_ok("ADDR-0001", expires_at()));
         let h = build_harness(port);
 
-        let result = h.uc.execute_for_address(selected_ip).await.unwrap();
+        let result = h.by_address.execute(selected_ip).await.unwrap();
 
         assert_eq!(result.code.as_str(), "ADDR-0001");
         assert_eq!(h.invitation_port.calls(), 0);

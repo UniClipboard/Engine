@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use uc_core::membership::{
+use uc_application::deps::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
-    AdmissionSpaceTransitionV2,
 };
+use uc_core::membership::AdmissionSpaceTransitionV2;
 
 /// Rejects activation until the profile has a real generation-switch adapter.
 pub struct FailClosedAdmissionSpaceTransition;

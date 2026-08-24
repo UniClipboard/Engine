@@ -27,8 +27,7 @@ use crate::clipboard::write::MobileConsumableBackfill;
 use crate::deps::CurrentSpaceIdentityPort;
 use crate::deps::SpaceRebuildProgressPort;
 use crate::facade::space_setup::commands::{
-    CurrentInvitation, InitializeSpaceInput, IssuePairingInvitationResult,
-    PairingInvitationAddressCandidate, SetupStateView, UnlockSpaceInput, UnlockSpaceResult,
+    InitializeSpaceInput, IssuePairingInvitationResult, UnlockSpaceInput, UnlockSpaceResult,
 };
 use crate::facade::space_setup::commands::{
     RedeemPairingInvitationCommand, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
@@ -37,22 +36,42 @@ use crate::facade::space_setup::deps::{
     SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
 };
 use crate::facade::space_setup::errors::IssuePairingInvitationError;
-use crate::facade::space_setup::errors::{
-    CancelInvitationError, QuerySetupStateError, RedeemPairingInvitationError,
+use crate::facade::space_setup::errors::RedeemPairingInvitationError;
+use crate::space::admission::complete_pending_space_transition::{
+    CompletePendingSpaceTransitionError, CompletePendingSpaceTransitionUseCase,
 };
-use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
+use crate::space::admission::invitation::cancel::{
+    CancelInvitationError, CancelPairingInvitationUseCase,
+};
+use crate::space::admission::invitation::issue::IssuePairingInvitationUseCase;
+use crate::space::admission::invitation::issue_for_address::IssuePairingInvitationForAddressUseCase;
+use crate::space::admission::invitation::query_addresses::{
+    PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
+    QueryPairingInvitationAddressesUseCase,
+};
 use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
-use crate::space::admission::issue_invitation::IssuePairingInvitationUseCase;
+use crate::space::admission::invitation::PairingInvitationIssuer;
+use crate::space::admission::join_space::{
+    JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinSpaceUseCase,
+};
 use crate::space::admission::joiner::joiner_handshake::JoinerHandshakeCoordinator;
-use crate::space::admission::redeem_invitation::RedeemPairingInvitationUseCase;
+use crate::space::admission::joiner::{JoinerAdmissionOwnerPort, RedeemPairingInvitationUseCase};
+use crate::space::admission::query_pending_space_transition::{
+    QueryPendingSpaceTransitionError, QueryPendingSpaceTransitionUseCase,
+};
 use crate::space::admission::sponsor::orchestrator::PairingInboundOrchestrator;
 use crate::space::admission::sponsor::sponsor_handshake::SponsorHandshakeCoordinator;
+use crate::space::admission::sponsor::SponsorAdmissionOwnerPort;
 use crate::space::admission::PriorSpaceAdmissionStateReset;
+use crate::space::admission::SpaceAdmission;
 use crate::space::connectivity::reachability::{
     EnsureReachableAllError, EnsureReachableAllReport, EnsureReachableAllUseCase,
 };
 use crate::space::initialize_space::{
     InitializeSpaceError, InitializeSpaceRequest, InitializeSpaceResult, InitializeSpaceUseCase,
+};
+use crate::space::query_space_setup_state::{
+    QuerySetupStateError, QuerySpaceSetupStateUseCase, SetupStateView,
 };
 use crate::space::re_pairing::RePairingState;
 use crate::space::rebuild_space::{
@@ -80,7 +99,13 @@ pub struct SpaceFacade {
     initialize_space: Arc<InitializeSpaceUseCase>,
     // 解锁空间
     unlock_space: Arc<UnlockSpaceUseCase>,
+    cancel_pairing_invitation: Arc<CancelPairingInvitationUseCase>,
     issue_pairing_invitation: Arc<IssuePairingInvitationUseCase>,
+    issue_pairing_invitation_for_address: Arc<IssuePairingInvitationForAddressUseCase>,
+    query_pairing_invitation_addresses: Arc<QueryPairingInvitationAddressesUseCase>,
+    join_space: Arc<JoinSpaceUseCase>,
+    complete_pending_space_transition: Arc<CompletePendingSpaceTransitionUseCase>,
+    query_pending_space_transition: Arc<QueryPendingSpaceTransitionUseCase>,
     redeem_pairing_invitation: Arc<RedeemPairingInvitationUseCase>,
     /// `JoinHandle` for the sponsor-side inbound pairing orchestrator
     /// spawned during construction. Aborted in [`Self::on_shutdown`] so
@@ -88,18 +113,8 @@ pub struct SpaceFacade {
     pairing_inbound_handle: JoinHandle<()>,
     session_readiness: Arc<PostSessionReadiness>,
     space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort>,
-    re_pairing_state: Arc<RePairingState>,
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
-    /// Slice4 P3 T3.2 · `query_setup_state` reads `device_name` from
-    /// `Settings.general`; `cancel_invitation` / `reset` need no
-    /// settings access but the field stays `pub(crate)` so a future
-    /// query can pick up additional general fields without churn.
-    settings: Arc<dyn SettingsPort>,
-    /// Slice4 P3 T3.2 · `cancel_invitation` clears the in-memory
-    /// pending-invitation map; `query_setup_state` snapshots the
-    /// earliest-expiring entry. Held in addition to the use-case-owned
-    /// clone so the facade keeps a stable read/write handle.
-    invitation_holder: Arc<InMemoryPairingInvitationHolder>,
+    query_space_setup_state: Arc<QuerySpaceSetupStateUseCase>,
     /// Slice 2 Phase 1 · T8：F1 hook。A1/A2/B2 成功后
     /// [`Self::auto_prime_presence`] 触发一次全员预连,把 presence 缓存
     /// 填满,让 UI 查 roster 时 online/offline 立刻准。
@@ -173,6 +188,7 @@ impl SpaceFacade {
             convergence.group_update_delivery();
         let SpaceTransitionDeps {
             admission_attempts,
+            admission_space_transition,
             device_management_reset_data,
             relationship_reset,
             space_security_reset,
@@ -182,9 +198,6 @@ impl SpaceFacade {
 
         let resume_session = Arc::clone(&space_access.resume_session);
         let member_repo_for_facade = Arc::clone(&member_repo);
-        // Slice4 P3 T3.2 · facade-local handle for `query_setup_state`
-        // (reads `Settings.general.device_name`).
-        let settings_for_facade = Arc::clone(&settings);
         // Invitation holder is purely an internal flow-state component
         // (§11.4) — construct it here so bootstrap never sees the type.
         let invitation_holder = Arc::new(InMemoryPairingInvitationHolder::new());
@@ -192,8 +205,9 @@ impl SpaceFacade {
         // / `query_setup_state` snapshots; the use case + orchestrator
         // already own their own `Arc::clone`s below.
         let invitation_holder_for_facade = Arc::clone(&invitation_holder);
-        let prior_admission_state =
-            Arc::new(PriorSpaceAdmissionStateReset::new(admission_attempts));
+        let prior_admission_state = Arc::new(PriorSpaceAdmissionStateReset::new(Arc::clone(
+            &admission_attempts,
+        )));
         let membership_rebuilder = Arc::new(SpaceMembershipRebuilder::new(
             Arc::clone(&member_repo),
             Arc::clone(&relationship_reset),
@@ -201,7 +215,15 @@ impl SpaceFacade {
         ));
         let space_rebuild_progress_for_facade = Arc::clone(&space_rebuild_progress);
         let re_pairing_state = Arc::new(RePairingState::new(re_pairing_state_store));
-        let re_pairing_state_for_facade = Arc::clone(&re_pairing_state);
+        let query_space_setup_state = Arc::new(QuerySpaceSetupStateUseCase::new(
+            Arc::clone(&current_space_identity),
+            Arc::clone(&invitation_holder_for_facade),
+            Arc::clone(&settings),
+            Arc::clone(&re_pairing_state),
+        ));
+        let cancel_pairing_invitation = Arc::new(CancelPairingInvitationUseCase::new(Arc::clone(
+            &invitation_holder_for_facade,
+        )));
         let rebuild_transition = Arc::new(SpaceRebuildTransition::new(
             device_management_reset_data,
             space_security_reset,
@@ -244,16 +266,25 @@ impl SpaceFacade {
             Arc::clone(&clock),
             Arc::clone(&analytics),
         ));
-        let issue_pairing_invitation = Arc::new(IssuePairingInvitationUseCase::new(
-            Arc::clone(&pairing_invitation),
-            pairing_invitation_addresses,
-            pairing_invitation_by_address,
+        let pairing_invitation_issuer = Arc::new(PairingInvitationIssuer::new(
             Arc::clone(&device_identity),
             Arc::clone(&clock),
             Arc::clone(&invitation_holder),
             Arc::clone(&analytics),
             Arc::clone(&space_admission) as Arc<dyn MembershipAdmissionGatePort>,
         ));
+        let issue_pairing_invitation = Arc::new(IssuePairingInvitationUseCase::new(
+            Arc::clone(&pairing_invitation),
+            Arc::clone(&pairing_invitation_issuer),
+        ));
+        let issue_pairing_invitation_for_address =
+            Arc::new(IssuePairingInvitationForAddressUseCase::new(
+                pairing_invitation_by_address,
+                pairing_invitation_issuer,
+            ));
+        let query_pairing_invitation_addresses = Arc::new(
+            QueryPairingInvitationAddressesUseCase::new(pairing_invitation_addresses),
+        );
         // T8 · F1 hook: construct ensure_reachable_all early so peer_addr_repo /
         // device_identity can still be Arc::clone'd here — both are moved into
         // downstream use cases below.
@@ -301,7 +332,7 @@ impl SpaceFacade {
             invitation_holder,
             Arc::clone(&clock),
             sponsor_handshake,
-            Arc::clone(&space_admission) as Arc<dyn WorkspaceAdmissionOwnerPort>,
+            Arc::clone(&space_admission) as Arc<dyn SponsorAdmissionOwnerPort>,
             Arc::clone(&analytics),
         ));
         let pairing_inbound_handle = inbound_orchestrator.spawn();
@@ -330,8 +361,8 @@ impl SpaceFacade {
             proof_port,
             local_identity,
             device_identity,
-            settings,
-            Arc::clone(&space_admission) as Arc<dyn WorkspaceAdmissionOwnerPort>,
+            Arc::clone(&settings),
+            Arc::clone(&space_admission) as Arc<dyn JoinerAdmissionOwnerPort>,
             handshake_ttl,
         );
         let redeem_pairing_invitation = Arc::new(RedeemPairingInvitationUseCase::new(
@@ -340,19 +371,37 @@ impl SpaceFacade {
             Arc::clone(&re_pairing_state),
             Arc::clone(&analytics),
         ));
+        let join_space = Arc::new(JoinSpaceUseCase::new(
+            settings,
+            Arc::clone(&redeem_pairing_invitation),
+            Arc::clone(&presence_for_facade),
+            Arc::clone(&ensure_reachable_all),
+            Arc::clone(&space_admission),
+        ));
+        let complete_pending_space_transition =
+            Arc::new(CompletePendingSpaceTransitionUseCase::new(
+                Arc::clone(&admission_attempts),
+                admission_space_transition,
+            ));
+        let query_pending_space_transition =
+            Arc::new(QueryPendingSpaceTransitionUseCase::new(admission_attempts));
 
         Self {
             initialize_space,
             unlock_space,
+            cancel_pairing_invitation,
             issue_pairing_invitation,
+            issue_pairing_invitation_for_address,
+            query_pairing_invitation_addresses,
+            join_space,
+            complete_pending_space_transition,
+            query_pending_space_transition,
             redeem_pairing_invitation,
             pairing_inbound_handle,
             session_readiness,
             space_rebuild_progress: space_rebuild_progress_for_facade,
-            re_pairing_state: re_pairing_state_for_facade,
             current_space_identity,
-            settings: settings_for_facade,
-            invitation_holder: invitation_holder_for_facade,
+            query_space_setup_state,
             ensure_reachable_all,
             member_repo: member_repo_for_facade,
             peer_scope,
@@ -421,8 +470,8 @@ impl SpaceFacade {
         &self,
         selected_ip: IpAddr,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.issue_pairing_invitation
-            .execute_for_address(selected_ip)
+        self.issue_pairing_invitation_for_address
+            .execute(selected_ip)
             .await
     }
 
@@ -430,8 +479,8 @@ impl SpaceFacade {
     #[instrument(skip_all)]
     pub async fn list_pairing_invitation_addresses(
         &self,
-    ) -> Result<Vec<PairingInvitationAddressCandidate>, IssuePairingInvitationError> {
-        self.issue_pairing_invitation.list_addresses().await
+    ) -> Result<Vec<PairingInvitationAddressCandidate>, QueryPairingInvitationAddressesError> {
+        self.query_pairing_invitation_addresses.execute().await
     }
 
     /// B2 · Redeem a sponsor-issued invitation (joiner side).
@@ -444,13 +493,37 @@ impl SpaceFacade {
     /// `ServiceUnavailable` if presence is genuinely unusable, which is
     /// the more actionable surface for the UI.
     #[instrument(skip_all)]
+    pub async fn join_space(
+        &self,
+        input: JoinSpaceInput,
+    ) -> Result<JoinSpaceResult, JoinSpaceError> {
+        self.join_space.execute(input).await
+    }
+
+    pub async fn has_pending_space_transition(
+        &self,
+    ) -> Result<bool, QueryPendingSpaceTransitionError> {
+        self.query_pending_space_transition.execute().await
+    }
+
+    pub async fn complete_pending_space_transition(
+        &self,
+    ) -> Result<crate::space::admission::CurrentJoinStatus, CompletePendingSpaceTransitionError>
+    {
+        self.complete_pending_space_transition.execute().await
+    }
+
+    #[instrument(skip_all)]
     pub async fn redeem_pairing_invitation(
         &self,
         input: RedeemPairingInvitationInput,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
         self.auto_prime_presence().await;
         let cmd: RedeemPairingInvitationCommand = input.into();
-        self.redeem_pairing_invitation.execute(cmd).await
+        self.redeem_pairing_invitation
+            .execute(cmd)
+            .await
+            .map(|outcome| outcome.result)
     }
 
     /// Slice4 P3 T3.2 · Cancel any in-flight pairing invitation parked
@@ -468,12 +541,7 @@ impl SpaceFacade {
     /// will simply hit `take_matching → NotFound` on the sponsor side.
     #[instrument(skip_all)]
     pub async fn cancel_invitation(&self) -> Result<(), CancelInvitationError> {
-        let removed = self.invitation_holder.cancel_all().await;
-        if removed == 0 {
-            return Err(CancelInvitationError::NotIssued);
-        }
-        info!(count = removed, "cancelled in-flight pairing invitations");
-        Ok(())
+        self.cancel_pairing_invitation.execute().await
     }
 
     /// Rebuild this profile as a single-device space while retaining local
@@ -512,33 +580,7 @@ impl SpaceFacade {
     /// * `device_name` from `Settings.general.device_name`.
     #[instrument(skip_all)]
     pub async fn query_setup_state(&self) -> Result<SetupStateView, QuerySetupStateError> {
-        let current_space_id = self
-            .current_space_identity
-            .current_space_id()
-            .await
-            .map_err(|err| QuerySetupStateError::StorageFailed(err.to_string()))?;
-        let current_invitation = self
-            .invitation_holder
-            .snapshot_earliest()
-            .await
-            .map(|(code, expires_at)| CurrentInvitation { code, expires_at });
-        let settings = self
-            .settings
-            .load()
-            .await
-            .map_err(|err| QuerySetupStateError::StorageFailed(err.to_string()))?;
-        let re_pairing_required = self
-            .re_pairing_state
-            .is_required()
-            .await
-            .map_err(|err| QuerySetupStateError::StorageFailed(err.to_string()))?;
-        Ok(SetupStateView {
-            has_completed: current_space_id.is_some(),
-            space_id: current_space_id,
-            current_invitation,
-            device_name: settings.general.device_name,
-            re_pairing_required,
-        })
+        self.query_space_setup_state.execute().await
     }
 
     /// Slice 2 Phase 1 · T10 · CLI `members` 入口:主动触发一轮
@@ -708,6 +750,7 @@ mod tests {
 
     use chrono::{DateTime, Utc};
 
+    use crate::deps::GroupAdmissionPort;
     use tokio::sync::mpsc;
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SpaceId};
@@ -728,8 +771,8 @@ mod tests {
         PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
     };
     use uc_core::ports::space::{
-        DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, GroupAdmissionPort,
-        PrepareAdmissionOfferPort, ProofPort, SpaceAccessError,
+        DeriveAdmissionProofKeyPort, DeriveSpaceSubkeyPort, PrepareAdmissionOfferPort, ProofPort,
+        SpaceAccessError,
     };
     use uc_core::ports::{
         AppVersionStateError, AppVersionStatePort, ClockPort, DeviceIdentityPort,
@@ -845,47 +888,30 @@ mod tests {
                 &self,
                 device_id: &DeviceId,
             ) -> Result<PreparedGroupJoin, SpaceAccessError>;
-            async fn admit_group_member(
-                &self,
-                space_id: &SpaceId,
-                sponsor_device_id: &DeviceId,
-                joiner_device_id: &DeviceId,
-                existing_member_ids: &[DeviceId],
-                key_package: &[u8],
-            ) -> Result<GroupAdmission, SpaceAccessError>;
-            async fn install_group_join(
-                &self,
-                space_id: &SpaceId,
-                passphrase: &Passphrase,
-                pending: PreparedGroupJoin,
-                welcome: &[u8],
-                encrypted_key_catalog: &[u8],
-                group_epoch: u64,
-            ) -> Result<(), SpaceAccessError>;
         }
         #[async_trait]
-        impl uc_core::membership::PrepareSponsorAdmissionSecurityPort for SpaceAccess {
+        impl crate::deps::PrepareSponsorAdmissionSecurityPort for SpaceAccess {
             async fn prepare_sponsor_admission_security(
                 &self,
-                request: uc_core::membership::SponsorAdmissionSecurityRequest,
+                request: crate::deps::SponsorAdmissionSecurityRequest,
             ) -> Result<
-                uc_core::membership::SponsorPreparedAdmissionSecurity,
-                uc_core::membership::AdmissionSecurityTransitionError,
+                crate::deps::SponsorPreparedAdmissionSecurity,
+                crate::deps::AdmissionSecurityTransitionError,
             >;
         }
         #[async_trait]
-        impl uc_core::membership::ActivateSponsorAdmissionSecurityPort for SpaceAccess {
+        impl crate::deps::ActivateSponsorAdmissionSecurityPort for SpaceAccess {
             async fn activate_sponsor_admission_security(
                 &self,
-                request: uc_core::membership::ActivateSponsorAdmissionSecurityRequest,
-            ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError>;
+                request: crate::deps::ActivateSponsorAdmissionSecurityRequest,
+            ) -> Result<(), crate::deps::AdmissionSecurityTransitionError>;
         }
         #[async_trait]
-        impl uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort for SpaceAccess {
+        impl crate::deps::ActivateCompletionHelperAdmissionSecurityPort for SpaceAccess {
             async fn activate_completion_helper_admission_security(
                 &self,
-                request: uc_core::membership::ActivateCompletionHelperAdmissionSecurityRequest,
-            ) -> Result<(), uc_core::membership::AdmissionSecurityTransitionError>;
+                request: crate::deps::ActivateCompletionHelperAdmissionSecurityRequest,
+            ) -> Result<(), crate::deps::AdmissionSecurityTransitionError>;
         }
         #[async_trait]
         impl uc_core::membership::GroupRevocationPort for SpaceAccess {
@@ -1159,28 +1185,28 @@ mod tests {
         async fn prepare_device_management_reset(
             &self,
             _target_space_id: &SpaceId,
-        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
             Ok(())
         }
 
         async fn stage_device_management_reset_mutations(
             &self,
             _target_space_id: &SpaceId,
-        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
             Ok(())
         }
 
         async fn promote_device_management_reset(
             &self,
             _target_space_id: &SpaceId,
-        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
             Ok(())
         }
 
         async fn finalize_device_management_reset(
             &self,
             _target_space_id: &SpaceId,
-        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
             Ok(())
         }
     }
@@ -1196,7 +1222,7 @@ mod tests {
         async fn prepare_device_management_reset(
             &self,
             target_space_id: &SpaceId,
-        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
             self.prepared_targets
                 .lock()
                 .unwrap()
@@ -1207,7 +1233,7 @@ mod tests {
         async fn stage_device_management_reset_mutations(
             &self,
             _target_space_id: &SpaceId,
-        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
             self.staged.store(true, Ordering::Release);
             Ok(())
         }
@@ -1215,10 +1241,10 @@ mod tests {
         async fn promote_device_management_reset(
             &self,
             _target_space_id: &SpaceId,
-        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
             if self.fail_promotion.swap(false, Ordering::AcqRel) {
                 self.staged.store(false, Ordering::Release);
-                return Err(uc_core::membership::AdmissionSpaceTransitionError::Storage);
+                return Err(crate::deps::AdmissionSpaceTransitionError::Storage);
             }
             Ok(())
         }
@@ -1226,7 +1252,7 @@ mod tests {
         async fn finalize_device_management_reset(
             &self,
             _target_space_id: &SpaceId,
-        ) -> Result<(), uc_core::membership::AdmissionSpaceTransitionError> {
+        ) -> Result<(), crate::deps::AdmissionSpaceTransitionError> {
             Ok(())
         }
     }
@@ -1734,6 +1760,13 @@ mod tests {
         let space_rebuild_progress = Arc::new(InMemoryRebuildProgress {
             target: Arc::clone(&profile_readiness.device_management_reset_target),
         });
+        let workspace_deps = crate::space::convergence::tests::test_deps(
+            Arc::new(MemoryWorkspaceRepository::default()),
+            "device-1",
+            Vec::new(),
+        );
+        let admission_attempts = Arc::clone(&workspace_deps.admission_attempts);
+        let admission_space_transition = Arc::clone(&workspace_deps.admission_space_transition);
         let facade = SpaceFacade::new(SpaceFacadeDeps {
             session: SpaceSessionDeps {
                 space_access: SpaceAccessPorts {
@@ -1785,11 +1818,7 @@ mod tests {
                 analytics: Arc::new(uc_observability_contract::analytics::NoopAnalyticsFacade),
                 convergence: Arc::new(SpaceModules::new(
                     crate::space::assembly::SpaceModulesDeps {
-                        workspace: crate::space::convergence::tests::test_deps(
-                            Arc::new(MemoryWorkspaceRepository::default()),
-                            "device-1",
-                            Vec::new(),
-                        ),
+                        workspace: workspace_deps,
                         membership:
                             crate::space::workspace_membership::discovery::testing::test_deps(),
                         group_revocation: Arc::new(NoopGroupRevocation),
@@ -1798,6 +1827,8 @@ mod tests {
                 )),
             },
             transition: SpaceTransitionDeps {
+                admission_attempts,
+                admission_space_transition,
                 device_management_reset_data: reset_data,
                 relationship_reset: Arc::new(NoopRelationshipStateReset),
                 space_security_reset: Arc::new(NoopSpaceSecurityStateReset),
@@ -2067,9 +2098,19 @@ mod tests {
             Arc::new(InMemorySettings::default()),
         );
         facade.issue_pairing_invitation().await.expect("B1 ok");
-        assert_eq!(facade.invitation_holder.len().await, 1);
+        assert!(facade
+            .query_setup_state()
+            .await
+            .expect("query before cancel")
+            .current_invitation
+            .is_some());
         facade.cancel_invitation().await.expect("cancel ok");
-        assert_eq!(facade.invitation_holder.len().await, 0);
+        assert!(facade
+            .query_setup_state()
+            .await
+            .expect("query after cancel")
+            .current_invitation
+            .is_none());
     }
 
     #[tokio::test]
@@ -2095,11 +2136,15 @@ mod tests {
             member_repo.clone(),
         );
         facade.issue_pairing_invitation().await.expect("B1 ok");
-        assert_eq!(facade.invitation_holder.len().await, 1);
+        assert!(facade
+            .query_setup_state()
+            .await
+            .expect("query before reset")
+            .current_invitation
+            .is_some());
 
         facade.reset().await.expect("reset ok");
 
-        assert_eq!(facade.invitation_holder.len().await, 0);
         let view = facade.query_setup_state().await.expect("query ok");
         assert!(view.has_completed);
         assert_ne!(view.space_id.as_ref().map(AsRef::as_ref), Some("old-space"));

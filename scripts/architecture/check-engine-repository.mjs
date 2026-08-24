@@ -371,8 +371,8 @@ function checkCurrentPeerScopeOwnership() {
   const problems = []
   const scopedConsumers = [
     'crates/uc-application/src/facade/roster/facade.rs',
-    'crates/uc-application/src/space/convergence/connectivity/reachability.rs',
-    'crates/uc-application/src/space/convergence/connectivity/membership.rs',
+    'crates/uc-application/src/space/connectivity/reachability.rs',
+    'crates/uc-application/src/space/connectivity/membership.rs',
     'crates/uc-application/src/clipboard/sync/dispatch_entry/target_selector.rs',
     'crates/uc-application/src/clipboard/sync/active_state/fanout.rs',
     'crates/uc-application/src/clipboard/sync/resend_entry.rs',
@@ -395,26 +395,37 @@ function checkCurrentPeerScopeOwnership() {
     addProblem(problems, 'current peer scope', 'the superseded device visibility gate was restored')
   }
 
-  const convergence = read('crates/uc-application/src/space/convergence/projection/current_scope.rs')
-  const implementationStart = convergence.indexOf(
-    'impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceConvergence'
+  const currentScope = read(
+    'crates/uc-application/src/space/workspace_membership/projection/current_scope.rs'
   )
-  const implementation = convergence.slice(implementationStart)
+  const currentHistoryStart = currentScope.indexOf('pub(in crate::space) async fn v2_current_peer_snapshot')
+  const transitionStart = currentScope.indexOf(
+    'if history.lineage_id() != state.space_lineage',
+    currentHistoryStart
+  )
+  const beforeTransition = currentScope.slice(currentHistoryStart, transitionStart)
+  const implementationStart = currentScope.indexOf(
+    'impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceMembership'
+  )
+  const implementation = currentScope.slice(implementationStart)
   const appliedHistory = implementation.indexOf(
     '.filter(|history| history.applied_head().is_some())'
   )
   const legacyFallback = implementation.indexOf('let Some(history) = history else')
   if (
+    currentHistoryStart < 0 ||
+    transitionStart < 0 ||
+    !beforeTransition.includes('return Err(CurrentWorkspacePeerScopeError::Unavailable)') ||
+    beforeTransition.includes('return Ok(None)') ||
     implementationStart < 0 ||
     appliedHistory < 0 ||
     legacyFallback < 0 ||
-    appliedHistory > legacyFallback ||
-    implementation.slice(0, legacyFallback).includes('migrated_from_pre_adr_020')
+    appliedHistory > legacyFallback
   ) {
     addProblem(
       problems,
       'current peer scope',
-      'applied membership history must be selected before the legacy roster fallback'
+      'missing current membership history must fail closed before the explicit space-transition fallback'
     )
   }
 
@@ -503,12 +514,11 @@ function checkRetiredLegacyPairingRecovery() {
 
 function checkWorkspaceConvergenceInternalBoundaries() {
   const problems = []
-  const root = 'crates/uc-application/src/space/convergence'
   const requiredDomainEntries = [
-    `${root}/admission/mod.rs`,
-    `${root}/membership/mod.rs`,
-    `${root}/projection/mod.rs`,
-    `${root}/connectivity/mod.rs`,
+    'crates/uc-application/src/space/admission/mod.rs',
+    'crates/uc-application/src/space/workspace_membership/membership/mod.rs',
+    'crates/uc-application/src/space/workspace_membership/projection/mod.rs',
+    'crates/uc-application/src/space/connectivity/mod.rs',
   ]
   for (const path of requiredDomainEntries) {
     if (!existsSync(join(REPOSITORY_ROOT, path))) {
@@ -517,12 +527,12 @@ function checkWorkspaceConvergenceInternalBoundaries() {
   }
 
   const retiredFlatPaths = [
-    `${root}/admission_transaction.rs`,
-    `${root}/group_update_delivery.rs`,
-    `${root}/legacy_upgrade.rs`,
-    `${root}/membership_connectivity.rs`,
-    `${root}/reachability.rs`,
-    `${root}/tests.rs`,
+    'crates/uc-application/src/space/workspace_membership/admission_transaction.rs',
+    'crates/uc-application/src/space/workspace_membership/group_update_delivery.rs',
+    'crates/uc-application/src/space/workspace_membership/legacy_upgrade.rs',
+    'crates/uc-application/src/space/workspace_membership/membership_connectivity.rs',
+    'crates/uc-application/src/space/workspace_membership/reachability.rs',
+    'crates/uc-application/src/space/workspace_membership/tests.rs',
   ]
   for (const path of retiredFlatPaths) {
     if (existsSync(join(REPOSITORY_ROOT, path))) {
@@ -530,7 +540,7 @@ function checkWorkspaceConvergenceInternalBoundaries() {
     }
   }
 
-  const convergence = read(`${root}/mod.rs`)
+  const membershipRoot = read('crates/uc-application/src/space/workspace_membership/mod.rs')
   const domainFlowMarkers = [
     'impl ProfileWorkspaceConvergence',
     'fn prepare_sponsor_candidate(',
@@ -539,11 +549,11 @@ function checkWorkspaceConvergenceInternalBoundaries() {
     'fn v2_current_peer_snapshot(',
   ]
   for (const marker of domainFlowMarkers) {
-    if (convergence.includes(marker)) {
+    if (membershipRoot.includes(marker)) {
       addProblem(
         problems,
         'workspace convergence boundaries',
-        `domain flow remains in convergence/mod.rs: ${marker}`
+        `domain flow remains in workspace_membership/mod.rs: ${marker}`
       )
     }
   }

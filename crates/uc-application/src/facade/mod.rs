@@ -20,6 +20,8 @@ pub mod host_event;
 pub mod roster;
 pub mod search;
 pub mod settings;
+pub mod space_join;
+pub mod space_membership;
 pub mod space_setup;
 pub mod storage;
 pub mod upgrade;
@@ -32,7 +34,7 @@ pub use crate::profile::factory_reset::{
 pub use crate::profile::probe_profile_key_access::{
     ProbeProfileKeyAccessError, ProbeProfileKeyAccessUseCase,
 };
-pub use crate::space::admission::coordinator::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
+pub use crate::space::admission::join_space::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 pub use crate::space::connectivity::membership::{
     start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
 };
@@ -78,6 +80,8 @@ pub use clipboard::{
     EntryDeliveryStatusView, EntryDeliveryTargetView, EntryDeliveryView, EntrySource,
     GetEntryDeliveryViewError,
 };
+pub use space_join::{CancelSpaceJoinError, RecoverSpaceJoinCompletionError, SpaceJoinFacade};
+pub use space_membership::SpaceMembershipFacade;
 // V3 envelope codec helpers — surfaced through the facade per §11.4.3 so
 // external CLI / test consumers don't reach into `crate::usecases::*`
 // directly. Implementations live in `usecases::clipboard_sync::payload_codec`.
@@ -109,18 +113,21 @@ pub use crate::search::live_index::{
     ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardLiveIndexPort,
     ClipboardLiveIndexer,
 };
-pub use crate::space::admission::{
-    CurrentJoinStatus, JoinedSpace, PendingInboundMember, PendingJoinerCompleteAck,
-    ProfileSpaceAdmission, SpaceTransitionRecoveryPort,
-};
+pub use crate::space::admission::recover_space_join_completion::PendingJoinerCompleteAck;
+pub use crate::space::admission::{CurrentJoinStatus, JoinedSpace, PendingInboundMember};
 pub use crate::space::assembly::{SpaceModules, SpaceModulesDeps};
+pub use crate::space::decide_pending_membership_removal::{
+    DecidePendingMembershipRemovalError, DecidePendingMembershipRemovalResult,
+};
+pub use crate::space::initiate_space_member_removal::{
+    InitiateSpaceMemberRemovalError, InitiateSpaceMemberRemovalResult,
+};
 pub use crate::space::membership_state::SpaceMembershipStateRepositoryError;
 pub use crate::space::query_space_membership_status::{
     ActionUnavailableReason, DeviceCompatibility, DeviceMembership, GroupRelationship,
     PendingSpaceMembershipChange, QuerySpaceMembershipStatusError, RecoveryAvailability,
     SpaceMemberRelationship, SpaceMembershipAction, SpaceMembershipChangeChoice,
-    SpaceMembershipChangeDecisionResult, SpaceMembershipChangeImpact, SpaceMembershipStatus,
-    SyncRelationship,
+    SpaceMembershipChangeImpact, SpaceMembershipStatus, SyncRelationship,
 };
 pub use crate::space::workspace_membership::discovery::MembershipConvergenceDeps;
 pub use crate::space::workspace_membership::{
@@ -193,12 +200,13 @@ pub use settings::{
 };
 
 pub use space_setup::{
-    CancelInvitationError, CurrentInvitation, InitializeSpaceError, InitializeSpaceInput,
-    InitializeSpaceResult, IssuePairingInvitationError, IssuePairingInvitationResult,
-    PairingInvitationAddressCandidate, QuerySetupStateError, RedeemPairingInvitationError,
-    RedeemPairingInvitationInput, RedeemPairingInvitationResult, ResetSpaceError, SetupStateView,
-    SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps,
-    UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    CancelInvitationError, CompletePendingSpaceTransitionError, CurrentInvitation,
+    InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
+    IssuePairingInvitationResult, PairingInvitationAddressCandidate,
+    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
+    RedeemPairingInvitationError, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
+    ResetSpaceError, SetupStateView, SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps,
+    SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use storage::{
     ClearCacheResultView, StorageFacade, StorageFacadeDeps, StorageFacadeError, StorageStatsView,

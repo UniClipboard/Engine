@@ -36,12 +36,15 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 use crate::space::admission::durable as admission;
+use crate::space::membership_history::{
+    MembershipHistoryRepositoryError, MembershipHistoryRepositoryPort,
+};
 use crate::space::membership_state::{
-    SpaceMembershipStateRepositoryError, SpaceMembershipStateRepositoryPort,
+    SpaceMembershipStateEvents, SpaceMembershipStateRepositoryError,
+    SpaceMembershipStateRepositoryPort,
 };
 pub(crate) use crate::space::query_space_membership_status::{
     build_active_space_status, ActiveSpaceStatusFacts, ActiveSpaceStatusResult, DeviceMembership,
-    SpaceMembershipChangeChoice, SpaceMembershipChangeDecisionResult,
 };
 #[cfg(test)]
 pub(crate) use crate::space::query_space_membership_status::{
@@ -96,6 +99,8 @@ pub enum WorkspaceConvergenceError {
     Inconsistent(String),
     #[error("workspace convergence admission storage failed: {0}")]
     AdmissionStorage(String),
+    #[error("membership history storage failed: {0}")]
+    MembershipHistory(#[from] MembershipHistoryRepositoryError),
     #[error("workspace convergence admission generation advanced")]
     AdmissionGenerationAdvanced,
     #[error("unreadable source history requires explicit confirmation")]
@@ -116,7 +121,9 @@ impl WorkspaceConvergenceError {
     pub(crate) fn is_locked(&self) -> bool {
         matches!(
             self,
-            Self::Locked | Self::Repository(SpaceMembershipStateRepositoryError::Locked)
+            Self::Locked
+                | Self::Repository(SpaceMembershipStateRepositoryError::Locked)
+                | Self::MembershipHistory(MembershipHistoryRepositoryError::Locked)
         )
     }
 
@@ -124,27 +131,27 @@ impl WorkspaceConvergenceError {
         matches!(
             self,
             Self::Repository(SpaceMembershipStateRepositoryError::Corrupt)
+                | Self::MembershipHistory(MembershipHistoryRepositoryError::Corrupt)
         )
     }
 }
 
 pub struct WorkspaceMembershipDeps {
     pub repository: Arc<dyn SpaceMembershipStateRepositoryPort>,
-    pub admission_attempts: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    pub admission_attempts: Arc<dyn crate::deps::AdmissionAttemptRepositoryPort>,
+    pub membership_history_repo: Arc<dyn MembershipHistoryRepositoryPort>,
     pub historical_membership_signatures:
         Arc<dyn uc_core::membership::HistoricalMembershipSignatureVerifier>,
-    pub admission_security_transition:
-        Arc<dyn uc_core::membership::AdmissionSecurityTransitionPort>,
+    pub admission_security_transition: Arc<dyn crate::deps::AdmissionSecurityTransitionPort>,
     pub prepare_sponsor_admission_security:
-        Arc<dyn uc_core::membership::PrepareSponsorAdmissionSecurityPort>,
+        Arc<dyn crate::deps::PrepareSponsorAdmissionSecurityPort>,
     pub activate_sponsor_admission_security:
-        Arc<dyn uc_core::membership::ActivateSponsorAdmissionSecurityPort>,
+        Arc<dyn crate::deps::ActivateSponsorAdmissionSecurityPort>,
     pub activate_completion_helper_admission_security:
-        Arc<dyn uc_core::membership::ActivateCompletionHelperAdmissionSecurityPort>,
-    pub admission_space_transition: Arc<dyn uc_core::membership::AdmissionSpaceTransitionPort>,
-    pub admission_outbox_delivery: Arc<dyn uc_core::membership::AdmissionOutboxDeliveryPort>,
-    pub admission_completion_recovery:
-        Arc<dyn uc_core::membership::AdmissionCompletionRecoveryPort>,
+        Arc<dyn crate::deps::ActivateCompletionHelperAdmissionSecurityPort>,
+    pub admission_space_transition: Arc<dyn crate::deps::AdmissionSpaceTransitionPort>,
+    pub admission_outbox_delivery: Arc<dyn crate::deps::AdmissionOutboxDeliveryPort>,
+    pub admission_completion_recovery: Arc<dyn crate::deps::AdmissionCompletionRecoveryPort>,
     pub legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort>,
     pub member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
@@ -169,11 +176,11 @@ pub struct WorkspaceMembershipDeps {
 /// The unified workspace convergence owner.
 pub struct WorkspaceMembership {
     pub(in crate::space) deps: WorkspaceMembershipDeps,
-    state_lock: tokio::sync::Mutex<()>,
-    device_trust_decision_lock: tokio::sync::Mutex<()>,
+    pub(in crate::space) state_write_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(in crate::space) recovery_requests:
+        crate::space::membership_runtime::MembershipRecoveryRequests,
     peer_reconciliation_locks: tokio::sync::Mutex<BTreeMap<DeviceId, Arc<tokio::sync::Mutex<()>>>>,
-    wake: Arc<tokio::sync::Notify>,
-    events: broadcast::Sender<WorkspaceSnapshot>,
+    state_events: SpaceMembershipStateEvents,
 }
 
 #[derive(Clone, Copy)]
@@ -185,14 +192,26 @@ enum ReconciliationPeerRole {
 
 impl WorkspaceMembership {
     pub fn new(deps: WorkspaceMembershipDeps) -> Arc<Self> {
-        let (events, _) = broadcast::channel(64);
+        Self::new_with_state_coordination(
+            deps,
+            Arc::new(tokio::sync::Mutex::new(())),
+            SpaceMembershipStateEvents::new(),
+            crate::space::membership_runtime::MembershipRecoveryRequests::new(),
+        )
+    }
+
+    pub(in crate::space) fn new_with_state_coordination(
+        deps: WorkspaceMembershipDeps,
+        state_write_lock: Arc<tokio::sync::Mutex<()>>,
+        state_events: SpaceMembershipStateEvents,
+        recovery_requests: crate::space::membership_runtime::MembershipRecoveryRequests,
+    ) -> Arc<Self> {
         Arc::new(Self {
             deps,
-            state_lock: tokio::sync::Mutex::new(()),
-            device_trust_decision_lock: tokio::sync::Mutex::new(()),
+            state_write_lock,
+            recovery_requests,
             peer_reconciliation_locks: tokio::sync::Mutex::new(BTreeMap::new()),
-            wake: Arc::new(tokio::sync::Notify::new()),
-            events,
+            state_events,
         })
     }
 
@@ -238,16 +257,8 @@ impl WorkspaceMembership {
         uc_core::membership::MembershipAdmissionDecision::Allowed
     }
 
-    pub fn wake_handle(&self) -> Arc<tokio::sync::Notify> {
-        Arc::clone(&self.wake)
-    }
-
     pub fn subscribe(&self) -> broadcast::Receiver<WorkspaceSnapshot> {
-        self.events.subscribe()
-    }
-
-    fn notify(&self) {
-        self.wake.notify_waiters();
+        self.state_events.subscribe()
     }
 
     async fn load_state_with_presence(
@@ -282,6 +293,6 @@ impl WorkspaceMembership {
     }
 
     fn publish(&self, state: &SpaceMembershipState) {
-        let _ = self.events.send(state.snapshot());
+        self.state_events.publish(state);
     }
 }

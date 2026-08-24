@@ -37,9 +37,10 @@ use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
 use crate::facade::space_setup::{EnsureReachableAllError, EnsureReachableAllReport};
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
-    IssuePairingInvitationResult, PairingInvitationAddressCandidate, QuerySetupStateError,
-    RedeemPairingInvitationError, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
-    SetupStateView, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    IssuePairingInvitationResult, PairingInvitationAddressCandidate,
+    QueryPairingInvitationAddressesError, QuerySetupStateError, RedeemPairingInvitationError,
+    RedeemPairingInvitationInput, RedeemPairingInvitationResult, SetupStateView, UnlockSpaceError,
+    UnlockSpaceInput, UnlockSpaceResult,
 };
 use crate::facade::upgrade::UpgradeFacade;
 use crate::facade::{
@@ -54,7 +55,6 @@ use crate::facade::{
     SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
     SettingsFacadeError, SpaceAccessState, SpaceFacade, StorageFacade,
 };
-use crate::space::admission::coordinator::SpaceAdmissionCoordinator;
 use crate::space::connectivity::network_recovery::{
     NetworkRecoveryFacade, NetworkRecoveryRequestError, NetworkRecoveryStatus,
 };
@@ -77,7 +77,6 @@ pub struct AppFacade {
     space_session_activity: Arc<SpaceSessionActivity>,
     lock_space_session: Arc<LockSpaceSessionUseCase>,
     recover_space_session: Arc<RecoverSpaceSessionUseCase>,
-    space_admission: Arc<SpaceAdmissionCoordinator>,
     member_roster: Arc<MemberRosterFacade>,
     query_space_access_state: Arc<QuerySpaceAccessStateUseCase>,
     probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
@@ -112,16 +111,11 @@ impl AppFacade {
     /// Bootstrap builds each sub-facade from its own `*Deps` bundle and
     /// hands them here — the aggregator never sees raw ports.
     pub fn new(parts: AppFacadeParts) -> Self {
-        let space_admission = Arc::new(SpaceAdmissionCoordinator::new(
-            Arc::clone(&parts.space),
-            Arc::clone(&parts.settings),
-        ));
         Self {
             space: parts.space,
             space_session_activity: parts.space_session_activity,
             lock_space_session: parts.lock_space_session,
             recover_space_session: parts.recover_space_session,
-            space_admission,
             member_roster: parts.member_roster,
             query_space_access_state: parts.query_space_access_state,
             probe_profile_key_access: parts.probe_profile_key_access,
@@ -313,7 +307,20 @@ impl AppFacade {
         &self,
         input: crate::facade::JoinSpaceInput,
     ) -> Result<crate::facade::JoinSpaceResult, crate::facade::JoinSpaceError> {
-        self.space_admission.join_space(input).await
+        self.space.join_space(input).await
+    }
+
+    pub async fn has_pending_space_transition(
+        &self,
+    ) -> Result<bool, crate::facade::QueryPendingSpaceTransitionError> {
+        self.space.has_pending_space_transition().await
+    }
+
+    pub async fn complete_pending_space_transition(
+        &self,
+    ) -> Result<crate::facade::CurrentJoinStatus, crate::facade::CompletePendingSpaceTransitionError>
+    {
+        self.space.complete_pending_space_transition().await
     }
 
     pub async fn deliver_join_completion_ack(
@@ -384,7 +391,7 @@ impl AppFacade {
     pub async fn issue_pairing_invitation(
         &self,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.space_admission.issue_invitation().await
+        self.space.issue_pairing_invitation().await
     }
 
     /// 按指定本机地址签发配对邀请。
@@ -392,16 +399,16 @@ impl AppFacade {
         &self,
         selected_ip: IpAddr,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        self.space_admission
-            .issue_invitation_for_address(selected_ip)
+        self.space
+            .issue_pairing_invitation_for_address(selected_ip)
             .await
     }
 
     /// 列出当前可用于配对邀请的本机地址。
     pub async fn list_pairing_invitation_addresses(
         &self,
-    ) -> Result<Vec<PairingInvitationAddressCandidate>, IssuePairingInvitationError> {
-        self.space_admission.list_invitation_addresses().await
+    ) -> Result<Vec<PairingInvitationAddressCandidate>, QueryPairingInvitationAddressesError> {
+        self.space.list_pairing_invitation_addresses().await
     }
 
     /// B2:兑换配对邀请。
@@ -409,7 +416,7 @@ impl AppFacade {
         &self,
         input: RedeemPairingInvitationInput,
     ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
-        let result = self.space_admission.redeem_invitation(input).await?;
+        let result = self.space.redeem_pairing_invitation(input).await?;
         self.recover_space_session
             .execute()
             .await
@@ -420,7 +427,7 @@ impl AppFacade {
     }
 
     pub async fn cancel_invitation(&self) -> Result<(), crate::facade::CancelInvitationError> {
-        self.space_admission.cancel_invitation().await
+        self.space.cancel_invitation().await
     }
 
     /// 列出对外成员摘要。外部调用只经过 `AppFacade`,不直接依赖 roster 子 facade。
@@ -695,13 +702,6 @@ impl AppFacade {
             .await
     }
 
-    pub async fn remove_member(
-        &self,
-        device_id: &str,
-    ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
-        self.member_roster.submit_member_removal(device_id).await
-    }
-
     pub async fn decide_membership_removal(
         &self,
         removal_event_id: uc_core::membership::MembershipEventId,
@@ -716,17 +716,6 @@ impl AppFacade {
         &self,
     ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
         self.member_roster.query_workspace_convergence().await
-    }
-
-    pub async fn decide_device_trust_change(
-        &self,
-        change_id: uc_core::membership::MembershipEventId,
-        choice: crate::facade::SpaceMembershipChangeChoice,
-        confirm_local_removal: bool,
-    ) -> Result<crate::facade::SpaceMembershipChangeDecisionResult, RosterError> {
-        self.member_roster
-            .decide_device_trust_change(change_id, choice, confirm_local_removal)
-            .await
     }
 
     pub fn subscribe_workspace_convergence(

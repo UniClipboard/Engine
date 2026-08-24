@@ -43,12 +43,12 @@ pub(crate) struct RedeemPairingInvitationUseCase {
     handshake: Arc<JoinerHandshakeCoordinator>,
     resume_session: Arc<dyn ResumeSpaceSessionPort>,
     re_pairing_state: Arc<RePairingState>,
-    /// Joiner-side analytics: fires `pairing_started` on entry,
-    /// `pairing_failed` on failure. The success funnel no longer exists:
-    /// join results are expressed through the workspace state.
-    /// All calls are fire-and-forget; the gate inside the facade
-    /// implementation keeps them off the hot path.
     analytics: Arc<dyn AnalyticsFacade>,
+}
+
+pub(crate) struct RedeemPairingInvitationOutcome {
+    pub(crate) result: RedeemPairingInvitationResult,
+    pub(crate) requires_session_transition: bool,
 }
 
 impl RedeemPairingInvitationUseCase {
@@ -70,7 +70,7 @@ impl RedeemPairingInvitationUseCase {
     pub(crate) async fn execute(
         &self,
         cmd: RedeemPairingInvitationCommand,
-    ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
+    ) -> Result<RedeemPairingInvitationOutcome, RedeemPairingInvitationError> {
         // Slice 8b · pairing_started 在 execute 入口立即 fire,即使 handshake
         // 第一行就拒绝(InvitationNotFound)也保证 funnel 第一步留下信号。
         self.analytics.capture(Event::PairingStarted {
@@ -116,7 +116,7 @@ impl RedeemPairingInvitationUseCase {
                     "activate paired space: persisted session was unavailable".into(),
                 ));
             }
-            Ok((persisted, channel))
+            Ok((persisted, channel, requires_session_transition))
         }
         .await;
         match &result {
@@ -126,7 +126,12 @@ impl RedeemPairingInvitationUseCase {
                 failure_reason: map_redeem_error_to_pairing_failure_reason(err),
             }),
         }
-        result.map(|(res, _)| res)
+        result.map(
+            |(result, _, requires_session_transition)| RedeemPairingInvitationOutcome {
+                result,
+                requires_session_transition,
+            },
+        )
     }
 
     /// Mark setup complete. Ordering rationale: see module doc — this runs
@@ -237,11 +242,10 @@ mod tests {
     use async_trait::async_trait;
     use tokio::time::Duration;
 
+    use crate::deps::GroupAdmissionPort;
     use uc_core::crypto::domain::{ActiveSpace, Passphrase};
     use uc_core::ids::{DeviceId, SessionId, SpaceId};
-    use uc_core::membership::{
-        AdmissionChangeFacts, MemberInstanceId, MembershipAdmissionDecision,
-    };
+    use uc_core::membership::{AdmissionChangeFacts, MemberInstanceId};
     use uc_core::pairing::invitation::InvitationCode;
     use uc_core::pairing::session_message::{
         PairingReject, PairingRejectReason, PairingSessionMessage, SponsorAdmissionOffer,
@@ -250,9 +254,7 @@ mod tests {
         DialError, DialOutcome, DiscoveryChannel, PairingSessionId, PairingSessionPort,
         SessionError,
     };
-    use uc_core::ports::space::{
-        DeriveAdmissionProofKeyPort, GroupAdmissionPort, ProofPort, SpaceAccessError,
-    };
+    use uc_core::ports::space::{DeriveAdmissionProofKeyPort, ProofPort, SpaceAccessError};
     use uc_core::ports::{DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort};
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -261,7 +263,7 @@ mod tests {
         SpaceAccessProofArtifact,
     };
 
-    use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
+    use crate::space::admission::joiner::JoinerAdmissionOwnerPort;
     use crate::space::session::ResumeSpaceSessionPort;
     use crate::space::workspace_membership::WorkspaceConvergenceError;
 
@@ -381,23 +383,6 @@ mod tests {
                 pending: &PreparedGroupJoin,
                 payload: &[u8],
             ) -> Result<Vec<u8>, SpaceAccessError>;
-            async fn admit_group_member(
-                &self,
-                space_id: &SpaceId,
-                sponsor_device_id: &DeviceId,
-                joiner_device_id: &DeviceId,
-                existing_member_ids: &[DeviceId],
-                key_package: &[u8],
-            ) -> Result<GroupAdmission, SpaceAccessError>;
-            async fn install_group_join(
-                &self,
-                space_id: &SpaceId,
-                passphrase: &Passphrase,
-                pending: PreparedGroupJoin,
-                welcome: &[u8],
-                encrypted_key_catalog: &[u8],
-                group_epoch: u64,
-            ) -> Result<(), SpaceAccessError>;
         }
     }
 
@@ -506,7 +491,7 @@ mod tests {
         requires_session_transition: bool,
     }
     #[async_trait]
-    impl WorkspaceAdmissionOwnerPort for RecordingOwner {
+    impl JoinerAdmissionOwnerPort for RecordingOwner {
         async fn prepare_local_join_before_network(
             &self,
             preparation: &(dyn GroupAdmissionPort + Send + Sync),
@@ -532,17 +517,6 @@ mod tests {
                     prepared_group_join,
                 },
             )
-        }
-
-        async fn admission_decision_for_joiner(
-            &self,
-            _: u64,
-            _: &DeviceId,
-        ) -> MembershipAdmissionDecision {
-            MembershipAdmissionDecision::Allowed
-        }
-        async fn synchronize_chain(&self) -> Result<(), WorkspaceConvergenceError> {
-            Ok(())
         }
 
         async fn prepare_joiner_candidate(
@@ -751,7 +725,7 @@ mod tests {
                 Arc::new(FixedLocal(joiner_fp())),
                 Arc::new(FixedDevice(DeviceId::new("joiner-device"))),
                 Arc::new(NamedSettings("joiner-laptop".into())),
-                owner.clone() as Arc<dyn WorkspaceAdmissionOwnerPort>,
+                owner.clone() as Arc<dyn JoinerAdmissionOwnerPort>,
                 Duration::from_secs(30),
             );
             let analytics = Arc::new(CapturingAnalyticsSink::default());
@@ -797,11 +771,12 @@ mod tests {
     async fn active_join_persists_setup_after_durable_completion() {
         let (uc, h) = Harness::happy();
         let out = uc.execute(cmd("CODE-1")).await.unwrap();
-        assert_eq!(out.sponsor_device_id.as_str(), "sponsor-device");
-        assert_eq!(out.sponsor_identity_fingerprint, sponsor_fp());
-        assert_eq!(out.space_id.inner(), "space-xyz");
-        assert_eq!(out.self_device_id.as_str(), "joiner-device");
-        assert_eq!(out.self_identity_fingerprint, joiner_fp());
+        assert_eq!(out.result.sponsor_device_id.as_str(), "sponsor-device");
+        assert_eq!(out.result.sponsor_identity_fingerprint, sponsor_fp());
+        assert_eq!(out.result.space_id.inner(), "space-xyz");
+        assert_eq!(out.result.self_device_id.as_str(), "joiner-device");
+        assert_eq!(out.result.self_identity_fingerprint, joiner_fp());
+        assert!(!out.requires_session_transition);
 
         let calls = h.owner.calls.lock().unwrap().clone();
         assert_eq!(
@@ -833,7 +808,8 @@ mod tests {
         });
         let (uc, h) = Harness::build(Arc::new(HappySession::primed()), owner);
         let result = uc.execute(cmd("X")).await.unwrap();
-        assert_eq!(result.space_id.inner(), "space-xyz");
+        assert_eq!(result.result.space_id.inner(), "space-xyz");
+        assert!(result.requires_session_transition);
         assert!(*h.re_pairing_store.required.lock().unwrap());
         let sent = h.session.sent.lock().unwrap().clone();
         assert!(sent.iter().all(|message| !matches!(

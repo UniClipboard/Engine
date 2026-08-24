@@ -5,20 +5,23 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use diesel::{connection::SimpleConnection, Connection, OptionalExtension, RunQueryDsl};
 use sha2::{Digest, Sha256};
+use uc_application::deps::{
+    AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
+    AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
+    DeviceManagementResetDataPort,
+};
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
 use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
-use uc_core::membership::DeviceManagementResetDataPort;
 use uc_core::membership::{
-    ActiveSpaceGenerationManifestV2, AdmissionContentKeyCatalogV1, AdmissionSpaceTransitionError,
-    AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
-    AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionV2,
-    ContentKeyId, CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2,
-    CrossSpaceTransitionV2, FreshSpaceTransitionPhaseV1, FreshSpaceTransitionV1, GroupEpoch,
-    ProtectionGroupId, RevocationRepositoryPort, SameSpaceTransitionPhaseV1, SameSpaceTransitionV1,
-    SpaceKeyMaterial, SpaceKeyState, CROSS_SPACE_TRANSITION_FORMAT_V2,
-    FRESH_SPACE_TRANSITION_FORMAT_V1, SAME_SPACE_TRANSITION_FORMAT_V1,
+    ActiveSpaceGenerationManifestV2, AdmissionContentKeyCatalogV1,
+    AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, ContentKeyId,
+    CrossSpaceTransitionPhaseV2, CrossSpaceTransitionResultV2, CrossSpaceTransitionV2,
+    FreshSpaceTransitionPhaseV1, FreshSpaceTransitionV1, GroupEpoch, ProtectionGroupId,
+    RevocationRepositoryPort, SameSpaceTransitionPhaseV1, SameSpaceTransitionV1, SpaceKeyMaterial,
+    SpaceKeyState, CROSS_SPACE_TRANSITION_FORMAT_V2, FRESH_SPACE_TRANSITION_FORMAT_V1,
+    SAME_SPACE_TRANSITION_FORMAT_V1,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::security::BlobCipherPort;
@@ -2703,6 +2706,11 @@ mod tests {
 
     use diesel::{Connection, RunQueryDsl, SqliteConnection};
     use tempfile::tempdir;
+    use uc_application::deps::AdmissionSpaceTransitionPort;
+    use uc_application::deps::{
+        AdmissionSpaceTransitionError, AdmissionSpaceTransitionPreparationV2,
+        AdmissionSpaceTransitionStepV2, DeviceManagementResetDataPort,
+    };
     use uc_core::blob::ports::BlobReaderPort;
     use uc_core::clipboard::MobileConsumableRef;
     use uc_core::crypto::aad;
@@ -2711,13 +2719,11 @@ mod tests {
     use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
     use uc_core::membership::{
         AdmissionAttemptId, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
-        AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, AdmissionSpaceTransitionError,
-        AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
-        AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionStepV2,
-        AdmissionSpaceTransitionV2, BaseMembershipHistoryPositionV1, ContentKeyPurpose,
-        CrossSpaceTransitionPhaseV2, DeviceManagementResetDataPort, MembershipCredential,
-        PendingGroupUpdate, RevocationRepositoryPort, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-        ED25519_SIGNATURE_ALGORITHM_V1,
+        AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1,
+        AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+        BaseMembershipHistoryPositionV1, ContentKeyPurpose, CrossSpaceTransitionPhaseV2,
+        MembershipCredential, PendingGroupUpdate, RevocationRepositoryPort,
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::ports::security::current_profile::CurrentProfilePort;
     use uc_core::ports::security::BlobCipherPort;
@@ -3593,7 +3599,7 @@ mod tests {
             )
             .await,
             Err(
-                uc_core::membership::AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation
+                uc_application::deps::AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation
             )
         ));
         super::preflight_source_inline_history(&pool, &source_space, source_session, true)

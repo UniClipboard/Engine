@@ -18,10 +18,10 @@ impl WorkspaceMembership {
         };
         let encoded_history = self
             .deps
-            .admission_attempts
-            .load_membership_history_v2()
+            .membership_history_repo
+            .load_membership_history()
             .await
-            .map_err(admission::map_repository_error)?
+            .map_err(WorkspaceConvergenceError::from)?
             .ok_or_else(|| {
                 WorkspaceConvergenceError::Inconsistent(
                     "current V2 member history disappeared during query".to_owned(),

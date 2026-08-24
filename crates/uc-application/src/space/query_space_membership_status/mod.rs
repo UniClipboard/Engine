@@ -8,8 +8,8 @@ pub use error::QuerySpaceMembershipStatusError;
 pub use model::{
     ActionUnavailableReason, DeviceCompatibility, DeviceMembership, GroupRelationship,
     PendingSpaceMembershipChange, RecoveryAvailability, SpaceMemberRelationship,
-    SpaceMembershipAction, SpaceMembershipChangeChoice, SpaceMembershipChangeDecisionResult,
-    SpaceMembershipChangeImpact, SpaceMembershipStatus, SyncRelationship,
+    SpaceMembershipAction, SpaceMembershipChangeChoice, SpaceMembershipChangeImpact,
+    SpaceMembershipStatus, SyncRelationship,
 };
 pub(crate) use use_case::QuerySpaceMembershipStatusUseCase;
 

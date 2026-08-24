@@ -10,6 +10,14 @@
 //! boundary. External callers interact with invitations exclusively
 //! through [`crate::facade::space_setup::SpaceFacade`].
 
+pub(crate) mod cancel;
 pub(crate) mod holder;
+pub(crate) mod issue;
+pub(crate) mod issue_for_address;
+pub(crate) mod query_addresses;
+
+mod issuer;
+
+pub(crate) use issuer::PairingInvitationIssuer;
 
 pub(crate) use holder::InMemoryPairingInvitationHolder;

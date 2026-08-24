@@ -4,13 +4,19 @@ use super::{
     ActionUnavailableReason, DeviceMembership, QuerySpaceMembershipStatusError,
     RecoveryAvailability, SpaceMembershipStatus,
 };
-use crate::space::admission::durable::{self as admission, DurableAdmissionProjection};
+use crate::space::admission::durable as admission;
+use crate::space::admission::query_space_join_status::{
+    QuerySpaceJoinStatusError, QuerySpaceJoinStatusUseCase,
+};
+use crate::space::admission::PendingInboundMember;
+use crate::space::membership_history::LoadedMembershipHistory;
 use crate::space::membership_state::SpaceMembershipStateRepositoryError;
 use crate::space::workspace_membership::WorkspaceConvergenceError;
 use std::sync::Arc;
 
 use uc_core::membership::{
-    CurrentMemberSignatureError, MemberInstanceId, SpaceMembershipState, VersionedMembershipHistory,
+    AdmissionAttemptRoleStateV1, CurrentMemberSignatureError, MemberInstanceId, MembershipEventV2,
+    MembershipOperationV2, SpaceMembershipState, VersionedMembershipHistory,
 };
 
 /// 生成当前 Space 面向产品展示的成员状态。
@@ -19,16 +25,17 @@ use uc_core::membership::{
 /// 正在进行的准入状态组合成一份临时视图。持久化状态不会直接返回给调用方；
 /// 在线状态只描述连接情况，不能授予或移除成员资格。
 pub(crate) struct QuerySpaceMembershipStatusUseCase {
-    admission: DurableAdmissionProjection,
+    query_join_status: QuerySpaceJoinStatusUseCase,
     deps: QuerySpaceMembershipStatusDeps,
     active_space: tokio::sync::RwLock<Option<ActiveSpaceMembershipStatusDeps>>,
 }
 
 impl QuerySpaceMembershipStatusUseCase {
     pub(crate) fn new(deps: QuerySpaceMembershipStatusDeps) -> Self {
-        let admission = DurableAdmissionProjection::new(Arc::clone(&deps.admission_attempts));
+        let query_join_status =
+            QuerySpaceJoinStatusUseCase::new(Arc::clone(&deps.admission_attempts));
         Self {
-            admission,
+            query_join_status,
             deps,
             active_space: tokio::sync::RwLock::new(None),
         }
@@ -58,15 +65,13 @@ impl QuerySpaceMembershipStatusUseCase {
         let revision = self.load_profile_membership_revision().await?;
         active_status.status.revision = active_status.status.revision.max(revision);
         active_status.status.current_join = self
-            .admission
-            .current_local_join()
+            .query_join_status
+            .execute()
             .await
-            .map_err(map_workspace_membership_error)?;
+            .map_err(map_join_status_error)?;
         active_status.status.pending_inbound_member = self
-            .admission
-            .pending_inbound_member(&active_status.space_lineage)
-            .await
-            .map_err(map_workspace_membership_error)?;
+            .load_pending_member_awaiting_admission(&active_status.space_lineage)
+            .await?;
         Ok(active_status.status)
     }
 
@@ -81,10 +86,10 @@ impl QuerySpaceMembershipStatusUseCase {
             Err(error) => return Err(error),
         };
         let current_join = self
-            .admission
-            .current_local_join()
+            .query_join_status
+            .execute()
             .await
-            .map_err(map_workspace_membership_error)?;
+            .map_err(map_join_status_error)?;
         Ok(SpaceMembershipStatus {
             revision,
             local_device_id: self.deps.own_device.clone(),
@@ -110,6 +115,46 @@ impl QuerySpaceMembershipStatusUseCase {
             .map(|metadata| metadata.device_trust_revision)
             .map_err(admission::map_repository_error)
             .map_err(map_workspace_membership_error)
+    }
+
+    async fn load_pending_member_awaiting_admission(
+        &self,
+        active_lineage_id: &str,
+    ) -> Result<Option<PendingInboundMember>, QuerySpaceMembershipStatusError> {
+        let mut matching = self
+            .deps
+            .admission_attempts
+            .scan_recoverable()
+            .await
+            .map_err(admission::map_repository_error)
+            .map_err(map_workspace_membership_error)?
+            .into_iter()
+            .filter(|attempt| {
+                !attempt.is_terminal()
+                    && matches!(attempt.role_state, AdmissionAttemptRoleStateV1::Sponsor(_))
+                    && attempt.lineage_id.as_deref() == Some(active_lineage_id)
+            });
+        let Some(attempt) = matching.next() else {
+            return Ok(None);
+        };
+        if matching.next().is_some() {
+            return Err(QuerySpaceMembershipStatusError::Failed);
+        }
+
+        let candidate_event = attempt
+            .candidate_event
+            .as_deref()
+            .ok_or(QuerySpaceMembershipStatusError::Corrupt)?;
+        let event: MembershipEventV2 = postcard::from_bytes(candidate_event)
+            .map_err(|_| QuerySpaceMembershipStatusError::Corrupt)?;
+        let MembershipOperationV2::AddDevice { admission } = event.operation else {
+            return Err(QuerySpaceMembershipStatusError::Corrupt);
+        };
+
+        Ok(Some(PendingInboundMember {
+            device_id: admission.facts.device_id,
+            display_name: admission.facts.device_name,
+        }))
     }
 
     pub(super) async fn query_active_space_status(
@@ -165,20 +210,13 @@ impl QuerySpaceMembershipStatusUseCase {
         &self,
         active_space: &ActiveSpaceMembershipStatusDeps,
     ) -> Result<VersionedMembershipHistory, QuerySpaceMembershipStatusError> {
-        let encoded = self
-            .deps
-            .admission_attempts
-            .load_membership_history_v2()
+        active_space
+            .membership_history
+            .load_verified_history()
             .await
-            .map_err(admission::map_repository_error)
-            .map_err(map_workspace_membership_error)?
-            .ok_or(QuerySpaceMembershipStatusError::Unavailable)?;
-
-        VersionedMembershipHistory::decode_persisted_v2(
-            &encoded,
-            active_space.historical_signatures.as_ref(),
-        )
-        .map_err(|_| QuerySpaceMembershipStatusError::Corrupt)
+            .map_err(map_membership_history_repository_error)?
+            .ok_or(QuerySpaceMembershipStatusError::Unavailable)
+            .map(LoadedMembershipHistory::into_history)
     }
 
     async fn determine_local_membership_from_history(
@@ -227,9 +265,36 @@ impl QuerySpaceMembershipStatusUseCase {
     }
 }
 
+fn map_membership_history_repository_error(
+    error: crate::space::membership_history::MembershipHistoryRepositoryError,
+) -> QuerySpaceMembershipStatusError {
+    match error {
+        crate::space::membership_history::MembershipHistoryRepositoryError::Locked => {
+            QuerySpaceMembershipStatusError::Unavailable
+        }
+        crate::space::membership_history::MembershipHistoryRepositoryError::Corrupt => {
+            QuerySpaceMembershipStatusError::Corrupt
+        }
+        crate::space::membership_history::MembershipHistoryRepositoryError::Conflict
+        | crate::space::membership_history::MembershipHistoryRepositoryError::Unavailable => {
+            QuerySpaceMembershipStatusError::Failed
+        }
+    }
+}
+
 fn map_workspace_membership_error(
     error: WorkspaceConvergenceError,
 ) -> QuerySpaceMembershipStatusError {
+    if error.is_corrupt() {
+        QuerySpaceMembershipStatusError::Corrupt
+    } else if error.is_locked() {
+        QuerySpaceMembershipStatusError::Unavailable
+    } else {
+        QuerySpaceMembershipStatusError::Failed
+    }
+}
+
+fn map_join_status_error(error: QuerySpaceJoinStatusError) -> QuerySpaceMembershipStatusError {
     if error.is_corrupt() {
         QuerySpaceMembershipStatusError::Corrupt
     } else if error.is_locked() {

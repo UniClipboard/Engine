@@ -220,6 +220,91 @@ fn history_with_a_and_b(
 }
 
 #[test]
+fn local_removal_event_is_bound_to_the_current_history_and_author() {
+    let (history, a, b, _, add_b) = history_with_a_and_b(true);
+
+    let removal = history
+        .create_unsigned_local_removal_event(
+            a.facts.member_instance,
+            &a.membership_credential,
+            b.facts.member_instance,
+            [3; 16],
+            [4; 32],
+        )
+        .expect("active member can remove another effective member");
+
+    assert_eq!(removal.parent_event_id, Some(add_b.event_id()));
+    assert_eq!(removal.parent_depth, add_b.parent_depth + 1);
+    assert_eq!(removal.author_member_instance_id, a.facts.member_instance);
+    assert_eq!(removal.security_state_digest, [4; 32]);
+    assert!(matches!(
+        removal.operation,
+        MembershipOperationV2::RemoveDevice { member }
+            if member == b.facts.member_instance
+    ));
+    assert!(removal.signature.is_empty());
+}
+
+#[test]
+fn local_removal_event_rejects_self_or_non_member_targets() {
+    let (history, a, _, _, _) = history_with_a_and_b(true);
+
+    for target in [
+        a.facts.member_instance,
+        credential(9).member_instance_id(&DeviceId::new("x")),
+    ] {
+        assert_eq!(
+            history.create_unsigned_local_removal_event(
+                a.facts.member_instance,
+                &a.membership_credential,
+                target,
+                [3; 16],
+                [4; 32],
+            ),
+            Err(uc_core::membership::MembershipHistoryV2Error::InvalidOperation)
+        );
+    }
+}
+
+#[test]
+fn effective_member_is_resolved_only_from_current_signed_history() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut history, a, b, _, add_b) = history_with_a_and_b(true);
+
+    assert_eq!(
+        history.effective_member_for_device(&a.facts.device_id),
+        Some(a.facts.member_instance)
+    );
+    assert_eq!(
+        history.effective_member_for_device(&b.facts.device_id),
+        Some(b.facts.member_instance)
+    );
+    assert_eq!(
+        history.effective_member_for_device(&DeviceId::new("missing")),
+        None
+    );
+
+    let removal = event(
+        &history,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        3,
+        &verifier,
+    );
+    history
+        .verify_and_receive_event(removal, &verifier)
+        .expect("signed removal applies");
+
+    assert_eq!(
+        history.effective_member_for_device(&b.facts.device_id),
+        None
+    );
+}
+
+#[test]
 fn remote_v2_removal_waits_for_the_local_decision_and_preserves_each_branch() {
     let verifier = DeterministicSignatureVerifier;
     let (mut author_history, a, b, _, add_b) = history_with_a_and_b(true);
@@ -262,22 +347,18 @@ fn remote_v2_removal_waits_for_the_local_decision_and_preserves_each_branch() {
         Some(removal.event_id())
     );
 
-    let mut acceptance = MembershipDecisionV2::new(
-        MEMBERSHIP_DECISION_FORMAT_V2,
-        LINEAGE.to_owned(),
-        removal.event_id(),
-        b.facts.member_instance,
-        b.membership_credential.credential_id,
-        b.membership_credential.signature_algorithm_version,
-        RemovalDecision::Accept,
-        Some(add_b.event_id()),
-        removal.resulting_members_digest,
-        [4; 16],
-        Vec::new(),
-    );
+    let mut acceptance = accepting_history
+        .create_unsigned_local_removal_decision(
+            removal.event_id(),
+            b.facts.member_instance,
+            &b.membership_credential,
+            RemovalDecision::Accept,
+            [4; 16],
+        )
+        .expect("acceptance is valid at the pending removal");
     acceptance.signature = verifier.sign(&b.membership_credential, &acceptance.signing_payload());
     accepting_history
-        .verify_and_record_local_decision(acceptance, b.facts.member_instance, &verifier)
+        .apply_signed_local_removal_decision(acceptance, b.facts.member_instance, &verifier)
         .expect("acceptance advances the local branch");
     assert!(!accepting_history
         .effective_members()
@@ -295,22 +376,18 @@ fn remote_v2_removal_waits_for_the_local_decision_and_preserves_each_branch() {
     rejecting_history
         .merge_remote_history(&author_history, b.facts.member_instance, &verifier)
         .expect("the same removal verifies on the rejecting branch");
-    let mut rejection = MembershipDecisionV2::new(
-        MEMBERSHIP_DECISION_FORMAT_V2,
-        LINEAGE.to_owned(),
-        removal.event_id(),
-        b.facts.member_instance,
-        b.membership_credential.credential_id,
-        b.membership_credential.signature_algorithm_version,
-        RemovalDecision::Reject,
-        Some(add_b.event_id()),
-        add_b.resulting_members_digest,
-        [5; 16],
-        Vec::new(),
-    );
+    let mut rejection = rejecting_history
+        .create_unsigned_local_removal_decision(
+            removal.event_id(),
+            b.facts.member_instance,
+            &b.membership_credential,
+            RemovalDecision::Reject,
+            [5; 16],
+        )
+        .expect("rejection is valid at the pending removal");
     rejection.signature = verifier.sign(&b.membership_credential, &rejection.signing_payload());
     rejecting_history
-        .verify_and_record_local_decision(rejection, b.facts.member_instance, &verifier)
+        .apply_signed_local_removal_decision(rejection, b.facts.member_instance, &verifier)
         .expect("rejection preserves the local branch");
     assert!(rejecting_history
         .effective_members()
@@ -957,7 +1034,7 @@ fn active_rejecting_member_can_deliver_its_decision_to_the_accepted_branch() {
     );
     rejection.signature = verifier.sign(&c.membership_credential, &rejection.signing_payload());
     rejected
-        .verify_and_record_local_decision(rejection.clone(), c.facts.member_instance, &verifier)
+        .apply_signed_local_removal_decision(rejection.clone(), c.facts.member_instance, &verifier)
         .expect("C keeps the parent branch");
 
     assert!(rejected.is_authorized_decision_delivery_of(&accepted, c.facts.member_instance));

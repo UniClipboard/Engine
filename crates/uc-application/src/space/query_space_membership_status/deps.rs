@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use crate::space::membership_history::MembershipHistoryStore;
 use uc_core::ids::DeviceId;
-use uc_core::membership::{
-    AdmissionAttemptRepositoryPort, CurrentMemberSignaturePort,
-    HistoricalMembershipSignatureVerifier, MemberRepositoryPort,
-};
+use uc_core::membership::{CurrentMemberSignaturePort, MemberRepositoryPort};
+
+use crate::deps::AdmissionAttemptRepositoryPort;
 use uc_core::ports::{ClockPort, PresencePort};
 
 use crate::space::membership_state::SpaceMembershipStateRepositoryPort;
@@ -18,7 +18,7 @@ pub(crate) struct QuerySpaceMembershipStatusDeps {
 #[derive(Clone)]
 pub(crate) struct ActiveSpaceMembershipStatusDeps {
     pub(crate) state_repository: Arc<dyn SpaceMembershipStateRepositoryPort>,
-    pub(crate) historical_signatures: Arc<dyn HistoricalMembershipSignatureVerifier>,
+    pub(crate) membership_history: Arc<MembershipHistoryStore>,
     pub(crate) member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub(crate) member_repo: Arc<dyn MemberRepositoryPort>,
     pub(crate) presence: Arc<dyn PresencePort>,

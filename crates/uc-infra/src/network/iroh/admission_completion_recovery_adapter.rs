@@ -9,12 +9,14 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uc_application::deps::{
+    AdmissionCompletionRecoveryEndpointPort, AdmissionCompletionRecoveryPort,
+    AdmissionCompletionRecoveryTransportError,
+};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionCompletionRecoveryChallengeV1, AdmissionCompletionRecoveryEndpointPort,
-    AdmissionCompletionRecoveryHelloV1, AdmissionCompletionRecoveryPort,
+    AdmissionCompletionRecoveryChallengeV1, AdmissionCompletionRecoveryHelloV1,
     AdmissionCompletionRecoveryResponseV1, AdmissionCompletionRecoveryTransportBindingV1,
-    AdmissionCompletionRecoveryTransportError,
 };
 use uc_core::pairing::DurableAdmissionFrame;
 use uc_core::ports::PeerAddressRepositoryPort;
