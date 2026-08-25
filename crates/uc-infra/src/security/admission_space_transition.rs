@@ -43,7 +43,8 @@ use crate::search::render_payload::RenderPayloadCodec;
 
 use super::{
     active_space_manifest_store::DeviceManagementResetJournalV1, ActiveSpaceManifestStore,
-    BlobCipherAdapter, DefaultSpaceAccessAdapter, EncryptedBlobStore, InMemorySession,
+    ActiveSpaceManifestStoreError, BlobCipherAdapter, DefaultSpaceAccessAdapter,
+    EncryptedBlobStore, InMemorySession,
 };
 
 struct TargetSessionSubkeyDeriver(InMemorySession);
@@ -120,6 +121,45 @@ struct TargetPersistedContentKeyEntryV2 {
     content_key_id: String,
     epoch: u64,
     key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SameSpaceActivationManifestState {
+    TargetCommitted,
+    SourceActive,
+    LegacySourceActive,
+}
+
+fn classify_same_space_activation_manifest(
+    transition: &SameSpaceTransitionV1,
+    target_manifest: &ActiveSpaceManifestV2,
+    active_manifest: Option<&ActiveSpaceManifestV2>,
+    legacy_source_generation: [u8; 16],
+) -> Result<SameSpaceActivationManifestState, AdmissionSpaceTransitionError> {
+    match active_manifest {
+        Some(manifest) if manifest == target_manifest => {
+            Ok(SameSpaceActivationManifestState::TargetCommitted)
+        }
+        Some(manifest)
+            if manifest.space_id == transition.target_space_id
+                && manifest.database_generation == transition.source_generation =>
+        {
+            Ok(SameSpaceActivationManifestState::SourceActive)
+        }
+        None if transition.source_generation == legacy_source_generation => {
+            Ok(SameSpaceActivationManifestState::LegacySourceActive)
+        }
+        _ => Err(AdmissionSpaceTransitionError::RecoveryRequired),
+    }
+}
+
+fn map_active_space_manifest_store_error(
+    error: ActiveSpaceManifestStoreError,
+) -> AdmissionSpaceTransitionError {
+    match error {
+        ActiveSpaceManifestStoreError::Storage => AdmissionSpaceTransitionError::Storage,
+        ActiveSpaceManifestStoreError::Corrupt => AdmissionSpaceTransitionError::RecoveryRequired,
+    }
 }
 
 fn valid_relayed_group_updates(
@@ -469,7 +509,7 @@ impl DurableAdmissionSpaceTransition {
                         transition.target_generation,
                     )?)
                     .await
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(map_active_space_manifest_store_error)?;
                 self.source_pool
                     .replace_database(
                         target_database
@@ -538,6 +578,38 @@ impl DurableAdmissionSpaceTransition {
                 advanced(SameSpaceTransitionPhaseV1::ActivationStarted)
             }
             SameSpaceTransitionPhaseV1::ActivationStarted => {
+                let active_manifest = self.active_manifest_for(
+                    transition.attempt_id,
+                    &transition.target_space_id,
+                    transition.target_generation,
+                )?;
+                let directory = self.target_generation_directory(
+                    &transition.target_space_id,
+                    &transition.target_generation,
+                );
+                let target_database = directory.join("target.sqlite");
+                let stored_manifest = self
+                    .manifest_store
+                    .load()
+                    .await
+                    .map_err(map_active_space_manifest_store_error)?;
+                let manifest_state = classify_same_space_activation_manifest(
+                    transition,
+                    &active_manifest,
+                    stored_manifest.as_ref(),
+                    self.generation(transition.attempt_id.as_bytes(), b"legacy-source"),
+                )?;
+                if manifest_state == SameSpaceActivationManifestState::TargetCommitted {
+                    self.source_pool
+                        .replace_database(
+                            target_database
+                                .to_str()
+                                .ok_or(AdmissionSpaceTransitionError::Storage)?,
+                        )
+                        .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
+                    self.blob_store.replace_root(directory.join("blobs"));
+                    return advanced(SameSpaceTransitionPhaseV1::TargetPromoted);
+                }
                 let target_workspace = self.open_target_workspace(
                     &transition.target_space_id,
                     &transition.target_generation,
@@ -545,16 +617,11 @@ impl DurableAdmissionSpaceTransition {
                     self.session.as_ref(),
                 )?;
                 let target_material = self.same_space_key_material(&target_workspace).await?;
-                let directory = self.target_generation_directory(
-                    &transition.target_space_id,
-                    &transition.target_generation,
-                );
                 std::fs::create_dir_all(&directory)
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
                 let scratch = directory.join("same-space.snapshot.tmp");
                 let source_bytes = db_snapshot::snapshot_to_bytes(&self.source_pool, &scratch)
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
-                let target_database = directory.join("target.sqlite");
                 write_new_file(&target_database, &source_bytes)
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
                 self.install_and_reopen_security_material(
@@ -574,13 +641,9 @@ impl DurableAdmissionSpaceTransition {
                     &directory.join("blobs"),
                 )?;
                 self.manifest_store
-                    .promote(&self.active_manifest_for(
-                        transition.attempt_id,
-                        &transition.target_space_id,
-                        transition.target_generation,
-                    )?)
+                    .promote(&active_manifest)
                     .await
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(map_active_space_manifest_store_error)?;
                 self.source_pool
                     .replace_database(
                         target_database
@@ -915,7 +978,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(map_active_space_manifest_store_error)?;
         if active_manifest
             .as_ref()
             .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
@@ -948,7 +1011,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load_device_reset_journal()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(map_active_space_manifest_store_error)?
         {
             Some(journal)
                 if journal.target_space_id == target_space_id.as_ref()
@@ -972,7 +1035,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         self.manifest_store
             .save_device_reset_journal(&journal)
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(map_active_space_manifest_store_error)?;
         let reset_source_directory = self
             .generations
             .generation_directory(&reset_id, &source_generation);
@@ -1001,7 +1064,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(map_active_space_manifest_store_error)?
             .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
         {
             return Ok(());
@@ -1019,12 +1082,14 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         );
         std::fs::create_dir_all(&target_directory)
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
-        let working_database = target_directory.join("reset-working.sqlite");
-        remove_sqlite_database_if_present(&working_database)?;
+        let working_database =
+            reset_working_database_path(&target_directory, &source.prepared.backup_digest);
         let source_bytes = std::fs::read(&source.prepared.backup_path)
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
-        write_new_file(&working_database, &source_bytes)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        if !working_database.exists() {
+            write_new_file(&working_database, &source_bytes)
+                .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        }
         self.source_pool
             .replace_database(
                 working_database
@@ -1042,7 +1107,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(map_active_space_manifest_store_error)?
             .is_some_and(|manifest| manifest.space_id == target_space_id.as_ref())
         {
             return Ok(());
@@ -1095,7 +1160,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         self.manifest_store
             .promote(&manifest)
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(map_active_space_manifest_store_error)?;
         self.source_pool
             .replace_database(
                 finalized
@@ -1117,7 +1182,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(map_active_space_manifest_store_error)?
             .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
         if active_manifest.space_id != target_space_id.as_ref() {
             return Err(AdmissionSpaceTransitionError::Inconsistent);
@@ -1126,7 +1191,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load_device_reset_journal()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(map_active_space_manifest_store_error)?
         else {
             return Ok(());
         };
@@ -1160,11 +1225,11 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             &journal.target_generation,
         );
         remove_file_if_present(&target_directory.join("source-final.sqlite"))?;
-        remove_sqlite_database_if_present(&target_directory.join("reset-working.sqlite"))?;
+        remove_reset_working_databases_if_present(&target_directory)?;
         self.manifest_store
             .clear_device_reset_journal()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)
+            .map_err(map_active_space_manifest_store_error)
     }
 }
 
@@ -1194,7 +1259,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+            .map_err(map_active_space_manifest_store_error)?;
         let target_generation = self.generation(input.attempt_id.as_bytes(), b"target-database");
         let source_space = self.session.current_space_id().ok();
         if source_space
@@ -1415,7 +1480,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 self.manifest_store
                     .promote(&manifest)
                     .await
-                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+                    .map_err(map_active_space_manifest_store_error)?;
                 self.source_pool
                     .replace_database(
                         target_database
@@ -1475,7 +1540,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 .manifest_store
                 .load()
                 .await
-                .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+                .map_err(map_active_space_manifest_store_error)?
                 .is_some_and(|manifest| manifest.space_id == fresh.target_space_id)
             {
                 return Err(AdmissionSpaceTransitionError::RecoveryRequired);
@@ -1498,7 +1563,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                 .manifest_store
                 .load()
                 .await
-                .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+                .map_err(map_active_space_manifest_store_error)?
                 .is_some_and(|manifest| {
                     manifest.space_id == same.target_space_id
                         && manifest.database_generation == same.target_generation
@@ -1526,7 +1591,7 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
             .manifest_store
             .load()
             .await
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+            .map_err(map_active_space_manifest_store_error)?
             .is_some_and(|manifest| manifest.space_id == transition.target_space_id)
         {
             return Err(AdmissionSpaceTransitionError::RecoveryRequired);
@@ -1613,7 +1678,6 @@ fn remove_file_if_present(path: &Path) -> Result<(), AdmissionSpaceTransitionErr
 }
 
 fn remove_sqlite_database_if_present(path: &Path) -> Result<(), AdmissionSpaceTransitionError> {
-    remove_file_if_present(path)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1621,7 +1685,54 @@ fn remove_sqlite_database_if_present(path: &Path) -> Result<(), AdmissionSpaceTr
     for suffix in ["-wal", "-shm"] {
         remove_file_if_present(&path.with_file_name(format!("{file_name}{suffix}")))?;
     }
+    remove_file_if_present(path)
+}
+
+fn reset_working_database_path(target_directory: &Path, source_digest: &[u8; 32]) -> PathBuf {
+    target_directory.join(format!("reset-working-{}.sqlite", short_hex(source_digest)))
+}
+
+fn remove_reset_working_databases_if_present(
+    target_directory: &Path,
+) -> Result<(), AdmissionSpaceTransitionError> {
+    let entries = match std::fs::read_dir(target_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(AdmissionSpaceTransitionError::Storage),
+    };
+    let mut databases = std::collections::BTreeSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            return Err(AdmissionSpaceTransitionError::Storage);
+        };
+        if let Some(database_name) = reset_working_database_name(file_name) {
+            databases.insert(target_directory.join(database_name));
+        }
+    }
+    for database in databases {
+        remove_sqlite_database_if_present(&database)?;
+    }
     Ok(())
+}
+
+fn reset_working_database_name(file_name: &str) -> Option<&str> {
+    let database_name = file_name
+        .strip_suffix("-wal")
+        .or_else(|| file_name.strip_suffix("-shm"))
+        .unwrap_or(file_name);
+    if database_name == "reset-working.sqlite" {
+        return Some(database_name);
+    }
+    let digest = database_name
+        .strip_prefix("reset-working-")?
+        .strip_suffix(".sqlite")?;
+    (digest.len() == 32
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(database_name)
 }
 
 fn remove_directory_if_present(path: &Path) -> Result<(), AdmissionSpaceTransitionError> {
@@ -2641,12 +2752,26 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     file.sync_all()
         .map_err(|_| "sync temporary generation".to_owned())?;
     drop(file);
-    replace_file_atomically(&temporary, path)
-        .map_err(|_| "replace existing generation".to_owned())?;
-    let directory = std::fs::File::open(parent).map_err(|_| "open generation parent".to_owned())?;
-    directory
-        .sync_all()
-        .map_err(|_| "sync generation parent".to_owned())
+    commit_replacement(&temporary, path).map_err(|_| "replace existing generation".to_owned())
+}
+
+fn commit_replacement(temp: &Path, destination: &Path) -> std::io::Result<()> {
+    replace_file_atomically(temp, destination)?;
+    sync_parent_directory_if_supported(destination)
+}
+
+#[cfg(not(windows))]
+fn sync_parent_directory_if_supported(destination: &Path) -> std::io::Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent"))?;
+    let directory = std::fs::File::open(parent)?;
+    directory.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_parent_directory_if_supported(_: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -2709,14 +2834,16 @@ mod tests {
     use uc_core::file_transfer::FileTransferEvent;
     use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
     use uc_core::membership::{
-        AdmissionAttemptId, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
-        AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, AdmissionSpaceTransitionError,
-        AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
-        AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionStepV2,
-        AdmissionSpaceTransitionV2, BaseMembershipHistoryPositionV1, ContentKeyPurpose,
-        CrossSpaceTransitionPhaseV2, DeviceManagementResetDataPort, MembershipCredential,
-        PendingGroupUpdate, RevocationRepositoryPort, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-        ED25519_SIGNATURE_ALGORITHM_V1,
+        ActiveSpaceManifestV2, AdmissionAttemptId, AdmissionChangeFacts,
+        AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1,
+        AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
+        AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionResultV2,
+        AdmissionSpaceTransitionStepV2, AdmissionSpaceTransitionV2,
+        BaseMembershipHistoryPositionV1, ContentKeyPurpose, CrossSpaceTransitionPhaseV2,
+        DeviceManagementResetDataPort, MembershipCredential, PendingGroupUpdate,
+        RevocationRepositoryPort, SameSpaceTransitionPhaseV1, SameSpaceTransitionV1,
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+        SAME_SPACE_TRANSITION_FORMAT_V1,
     };
     use uc_core::ports::security::current_profile::CurrentProfilePort;
     use uc_core::ports::security::BlobCipherPort;
@@ -2758,6 +2885,139 @@ mod tests {
             Err(AdmissionSpaceTransitionError::InsufficientStorage)
         );
         assert_eq!(ensure_reset_capacity(100, 100), Ok(()));
+    }
+
+    #[test]
+    fn same_space_activation_replay_rejects_manifest_outside_target_source_or_legacy() {
+        let attempt_id = AdmissionAttemptId::from_bytes([0x21; 32]);
+        let transition = SameSpaceTransitionV1 {
+            transition_format_version: SAME_SPACE_TRANSITION_FORMAT_V1,
+            attempt_id,
+            target_space_id: "same-space".to_owned(),
+            source_generation: [0x22; 16],
+            target_generation: [0x23; 16],
+            target_keyslot_ref: b"retained-active-keyslot-v1".to_vec(),
+            target_workspace_ref: b"target-workspace".to_vec(),
+            phase: SameSpaceTransitionPhaseV1::ActivationStarted,
+        };
+        let target_manifest = ActiveSpaceManifestV2::new(
+            "same-space".to_owned(),
+            [0x24; 16],
+            transition.target_generation,
+            [0x25; 16],
+        )
+        .unwrap();
+        let source_manifest = ActiveSpaceManifestV2::new(
+            "same-space".to_owned(),
+            [0x26; 16],
+            transition.source_generation,
+            [0x27; 16],
+        )
+        .unwrap();
+        let newer_manifest =
+            ActiveSpaceManifestV2::new("same-space".to_owned(), [0x28; 16], [0x29; 16], [0x2a; 16])
+                .unwrap();
+
+        assert_eq!(
+            super::classify_same_space_activation_manifest(
+                &transition,
+                &target_manifest,
+                Some(&target_manifest),
+                [0x2b; 16],
+            ),
+            Ok(super::SameSpaceActivationManifestState::TargetCommitted)
+        );
+        assert_eq!(
+            super::classify_same_space_activation_manifest(
+                &transition,
+                &target_manifest,
+                Some(&source_manifest),
+                [0x2b; 16],
+            ),
+            Ok(super::SameSpaceActivationManifestState::SourceActive)
+        );
+        assert_eq!(
+            super::classify_same_space_activation_manifest(
+                &transition,
+                &target_manifest,
+                Some(&newer_manifest),
+                [0x2b; 16],
+            ),
+            Err(AdmissionSpaceTransitionError::RecoveryRequired)
+        );
+        assert_eq!(
+            super::classify_same_space_activation_manifest(
+                &transition,
+                &target_manifest,
+                None,
+                [0x2b; 16],
+            ),
+            Err(AdmissionSpaceTransitionError::RecoveryRequired)
+        );
+
+        let legacy_transition = SameSpaceTransitionV1 {
+            source_generation: [0x2b; 16],
+            ..transition
+        };
+        assert_eq!(
+            super::classify_same_space_activation_manifest(
+                &legacy_transition,
+                &target_manifest,
+                None,
+                [0x2b; 16],
+            ),
+            Ok(super::SameSpaceActivationManifestState::LegacySourceActive)
+        );
+    }
+
+    #[test]
+    fn reset_working_cleanup_discovers_orphaned_sidecars_and_is_reentrant() {
+        let directory = tempdir().unwrap();
+        let scoped_database = super::reset_working_database_path(directory.path(), &[0xab; 32]);
+        let scoped_name = scoped_database.file_name().unwrap().to_string_lossy();
+        let scoped_wal = directory.path().join(format!("{scoped_name}-wal"));
+        let scoped_shm = directory.path().join(format!("{scoped_name}-shm"));
+        let unrelated = directory
+            .path()
+            .join("reset-working-not-a-digest.sqlite-wal");
+        std::fs::write(&scoped_wal, b"orphan wal").unwrap();
+        std::fs::write(&scoped_shm, b"orphan shm").unwrap();
+        std::fs::write(&unrelated, b"unrelated").unwrap();
+
+        super::remove_reset_working_databases_if_present(directory.path()).unwrap();
+
+        assert!(!scoped_wal.exists());
+        assert!(!scoped_shm.exists());
+        assert!(unrelated.exists());
+        super::remove_reset_working_databases_if_present(directory.path()).unwrap();
+    }
+
+    #[test]
+    fn corrupt_active_manifest_maps_to_recovery_required() {
+        use crate::security::active_space_manifest_store::ActiveSpaceManifestStoreError;
+
+        assert_eq!(
+            super::map_active_space_manifest_store_error(ActiveSpaceManifestStoreError::Corrupt),
+            AdmissionSpaceTransitionError::RecoveryRequired
+        );
+        assert_eq!(
+            super::map_active_space_manifest_store_error(ActiveSpaceManifestStoreError::Storage),
+            AdmissionSpaceTransitionError::Storage
+        );
+    }
+
+    #[test]
+    fn write_new_file_replaces_existing_file_on_windows_without_directory_open_error() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("transition.json");
+        let temporary = path.with_extension("write.tmp");
+        std::fs::write(&path, b"old").unwrap();
+
+        let result = super::write_new_file(&path, b"new");
+
+        assert!(result.is_ok(), "write_new_file failed: {result:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(!temporary.exists());
     }
 
     #[derive(Default)]
@@ -3515,6 +3775,7 @@ mod tests {
             transition,
             AdmissionSpaceTransitionV2::SameSpace(_)
         ));
+        let mut activation_started = None;
         let result = loop {
             session.clear();
             SpaceAccessStore::try_resume_session(access.as_ref(), &target_space)
@@ -3530,7 +3791,16 @@ mod tests {
             let replay = transitioner.advance(&transition).await.unwrap();
             assert_eq!(first, replay);
             match first {
-                AdmissionSpaceTransitionStepV2::Advanced(next) => transition = next,
+                AdmissionSpaceTransitionStepV2::Advanced(next) => {
+                    if matches!(
+                        &next,
+                        AdmissionSpaceTransitionV2::SameSpace(same)
+                            if same.phase == SameSpaceTransitionPhaseV1::ActivationStarted
+                    ) {
+                        activation_started = Some(next.clone());
+                    }
+                    transition = next;
+                }
                 AdmissionSpaceTransitionStepV2::Finished(result) => break result,
             }
         };
@@ -3556,10 +3826,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(plaintext.as_bytes(), b"same-space content remains readable");
-        assert_eq!(
-            manifest_store.load().await.unwrap().unwrap().space_id,
-            "same-space"
-        );
+        let committed_manifest = manifest_store.load().await.unwrap().unwrap();
+        assert_eq!(committed_manifest.space_id, "same-space");
+
+        let newer_manifest =
+            ActiveSpaceManifestV2::new("same-space".to_owned(), [0xb1; 16], [0xb2; 16], [0xb3; 16])
+                .unwrap();
+        assert_ne!(newer_manifest, committed_manifest);
+        manifest_store.promote(&newer_manifest).await.unwrap();
+        let error = transitioner
+            .advance(
+                activation_started
+                    .as_ref()
+                    .expect("same-space transition must enter ActivationStarted"),
+            )
+            .await
+            .expect_err("replay must not overwrite a manifest from a newer transition");
+        assert_eq!(error, AdmissionSpaceTransitionError::RecoveryRequired);
+        assert_eq!(manifest_store.load().await.unwrap(), Some(newer_manifest));
     }
 
     #[tokio::test]

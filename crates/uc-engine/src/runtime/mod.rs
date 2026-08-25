@@ -74,6 +74,7 @@ struct SessionFactory {
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     recovery_generation: Arc<AtomicU64>,
     profile_convergence: Arc<uc_application::facade::ProfileWorkspaceConvergence>,
+    pairing_invitation_runtime: uc_application::facade::PairingInvitationRuntime,
 }
 
 struct ProductionSession {
@@ -343,6 +344,7 @@ impl ProductionRuntime {
             network_recovery: Arc::clone(&network_recovery),
             recovery_generation: Arc::new(AtomicU64::new(0)),
             profile_convergence: Arc::clone(&profile_convergence),
+            pairing_invitation_runtime: uc_application::facade::PairingInvitationRuntime::default(),
         });
         session_supervisor.configure_factory(Arc::clone(&session_factory));
         session_supervisor.resume().await?;
@@ -416,6 +418,7 @@ impl ProductionRuntime {
             factory.rendezvous_base_url.clone(),
             factory.relay_fallback_override,
             factory.iroh_bind_port_override,
+            factory.pairing_invitation_runtime.clone(),
         )
         .await
         .map_err(|error| startup_error("p2p session", error))?;

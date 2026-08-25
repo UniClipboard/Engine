@@ -200,13 +200,20 @@ impl DeviceHarness {
             Box::new(EmptyClipboard),
             Box::new(EmptyFiles),
         );
-        let config = EngineConfig::new("space-membership-e2e")
+        let config = EngineConfig::new(env!("CARGO_PKG_VERSION"))
             .with_rendezvous_base_url(self.rendezvous_base_url.clone())
             .with_test_relay_fallback(allow_relay_fallback);
         let (engine, _events) = Engine::start(config, host)
             .await
             .expect("start complete engine");
         engine
+    }
+
+    fn profile_lifecycle_marker(&self) -> Vec<u8> {
+        self.secure_storage
+            .get("profile_lifecycle_marker:v1")
+            .expect("read profile lifecycle marker")
+            .expect("profile lifecycle marker is initialized")
     }
 }
 
@@ -468,6 +475,67 @@ async fn v11_marks_a_running_v019_peer_as_upgrade_required() {
         .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shut down upgraded engine A");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn sponsor_pairs_two_devices_sequentially_without_reset() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let device_a = DeviceHarness::new(rendezvous.uri());
+    let device_b = DeviceHarness::new(rendezvous.uri());
+    let device_c = DeviceHarness::new(rendezvous.uri());
+
+    let engine_a = device_a.start_local_only().await;
+    let engine_b = device_b.start_local_only().await;
+    let engine_c = device_c.start_local_only().await;
+    let (space_id, a_id) = create_space(&engine_a, "Device A").await;
+    let a_profile_before_pairing = device_a.profile_lifecycle_marker();
+
+    let b_id = join_through(&engine_a, &engine_b, "Device B", &space_id).await;
+    wait_for_same_workspace_state_with_diagnostics(
+        "A and B after the first sequential admission",
+        &[&engine_a, &engine_b],
+        2,
+        2,
+    )
+    .await;
+
+    let c_id = join_through(&engine_a, &engine_c, "Device C", &space_id).await;
+    wait_for_same_workspace_state_with_diagnostics(
+        "A, B, and C after the second sequential admission",
+        &[&engine_a, &engine_b, &engine_c],
+        3,
+        3,
+    )
+    .await;
+
+    let trust = device_trust_summary(&engine_a).await;
+    assert_eq!(trust.local_device_id, a_id);
+    assert_eq!(
+        trust.local_membership,
+        uc_engine::DeviceMembershipSummary::Active
+    );
+    let mut active_member_ids = trust
+        .devices
+        .iter()
+        .filter(|device| device.membership == uc_engine::DeviceMembershipSummary::Active)
+        .map(|device| device.device_id.as_str())
+        .collect::<Vec<_>>();
+    active_member_ids.sort_unstable();
+    let mut expected_member_ids = vec![a_id.as_str(), b_id.as_str(), c_id.as_str()];
+    expected_member_ids.sort_unstable();
+    assert_eq!(active_member_ids, expected_member_ids);
+    assert_eq!(
+        device_a.profile_lifecycle_marker(),
+        a_profile_before_pairing
+    );
+
+    for engine in [engine_a, engine_b, engine_c] {
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .expect("shut down sequential admission engine");
+    }
 }
 
 // 场景流程：

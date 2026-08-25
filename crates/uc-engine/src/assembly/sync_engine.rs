@@ -594,6 +594,7 @@ pub async fn build_sync_engine_assembly(
     current_app_version: &str,
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
     iroh_config: IrohNodeConfig,
+    pairing_invitation_runtime: uc_application::facade::PairingInvitationRuntime,
 ) -> Result<SyncEngineAssembly, SyncEngineAssemblyError> {
     let upgrade = UpgradeFacade::new(UpgradeFacadeDeps {
         app_version_state: Arc::clone(&deps.app_version_state),
@@ -920,39 +921,42 @@ pub async fn build_sync_engine_assembly(
     let local_identity: Arc<dyn LocalIdentityPort> = identity_store;
     let convergence_assembly = Arc::new(convergence_assembly);
 
-    let facade = Arc::new(SpaceFacade::new(SpaceFacadeDeps {
-        session: SpaceSessionDeps {
-            space_access: deps.security.space_access_ports.clone(),
-            setup_status: Arc::clone(&deps.setup_status),
-            mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
-            legacy_profile_isolation_required,
-            app_version_state: Arc::clone(&deps.app_version_state),
-            current_app_version: current_app_version.to_owned(),
+    let facade = Arc::new(SpaceFacade::new_with_pairing_runtime(
+        SpaceFacadeDeps {
+            session: SpaceSessionDeps {
+                space_access: deps.security.space_access_ports.clone(),
+                setup_status: Arc::clone(&deps.setup_status),
+                mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
+                legacy_profile_isolation_required,
+                app_version_state: Arc::clone(&deps.app_version_state),
+                current_app_version: current_app_version.to_owned(),
+            },
+            admission: SpaceAdmissionDeps {
+                local_identity: Arc::clone(&local_identity),
+                device_identity: Arc::clone(&deps.device.device_identity),
+                member_repo: Arc::clone(&deps.device.member_repo),
+                settings: Arc::clone(&deps.settings),
+                clock: Arc::clone(&deps.system.clock),
+                pairing_invitation: handlers.invitation,
+                pairing_invitation_addresses: handlers.invitation_addresses,
+                pairing_invitation_by_address: handlers.invitation_by_address,
+                pairing_session: handlers.session,
+                pairing_events: handlers.events,
+                proof_port,
+                trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
+                peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
+                presence: Arc::clone(&presence),
+                analytics: Arc::clone(&space_setup.analytics_facade),
+                convergence: Arc::clone(&convergence_assembly),
+            },
+            transition: SpaceTransitionDeps {
+                device_management_reset_data: Arc::clone(&space_setup.device_management_reset_data),
+                relationship_reset: Arc::clone(&space_setup.relationship_reset),
+                space_security_reset: Arc::clone(&space_setup.space_security_reset),
+            },
         },
-        admission: SpaceAdmissionDeps {
-            local_identity: Arc::clone(&local_identity),
-            device_identity: Arc::clone(&deps.device.device_identity),
-            member_repo: Arc::clone(&deps.device.member_repo),
-            settings: Arc::clone(&deps.settings),
-            clock: Arc::clone(&deps.system.clock),
-            pairing_invitation: handlers.invitation,
-            pairing_invitation_addresses: handlers.invitation_addresses,
-            pairing_invitation_by_address: handlers.invitation_by_address,
-            pairing_session: handlers.session,
-            pairing_events: handlers.events,
-            proof_port,
-            trusted_peer_repo: Arc::clone(&shared.trusted_peer_repo),
-            peer_addr_repo: Arc::clone(&space_setup.peer_addr_repo),
-            presence: Arc::clone(&presence),
-            analytics: Arc::clone(&space_setup.analytics_facade),
-            convergence: Arc::clone(&convergence_assembly),
-        },
-        transition: SpaceTransitionDeps {
-            device_management_reset_data: Arc::clone(&space_setup.device_management_reset_data),
-            relationship_reset: Arc::clone(&space_setup.relationship_reset),
-            space_security_reset: Arc::clone(&space_setup.space_security_reset),
-        },
-    }));
+        pairing_invitation_runtime,
+    ));
 
     // Slice 2 Phase 1 · T9:roster 门面和 space_setup facade 共享同一组
     // 实例(`member_repo` / `local_identity` / `presence`),这样 F1 hook

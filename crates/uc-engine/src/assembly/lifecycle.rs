@@ -50,6 +50,7 @@ pub async fn build_daemon_lifecycle(
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
     iroh_bind_port_override: Option<u16>,
+    pairing_invitation_runtime: uc_application::facade::PairingInvitationRuntime,
 ) -> anyhow::Result<DaemonLifecycle> {
     // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
     // member_repo 已不再持有的孤儿条目清掉,恢复设计意图的不变量
@@ -147,6 +148,7 @@ pub async fn build_daemon_lifecycle(
         #[cfg(feature = "lan-compat")]
         mobile_sync_ports,
         iroh_config,
+        pairing_invitation_runtime,
     )
     .await
     .map_err(|e| anyhow::anyhow!("Slice 1+ assembly build failed: {e}"))?;

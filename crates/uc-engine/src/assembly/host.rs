@@ -823,6 +823,7 @@ mod tests {
             None,
             None,
             None,
+            uc_application::facade::PairingInvitationRuntime::default(),
         )
         .await
         .unwrap();

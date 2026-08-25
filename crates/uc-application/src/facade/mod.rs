@@ -181,10 +181,11 @@ pub use settings::{
 pub use space_setup::{
     CancelInvitationError, CurrentInvitation, FactoryResetError, InitializeSpaceError,
     InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
-    IssuePairingInvitationResult, PairingInvitationAddressCandidate, QuerySetupStateError,
-    RedeemPairingInvitationError, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
-    ResetSpaceError, SetupStateView, SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps,
-    SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    IssuePairingInvitationResult, PairingInvitationAddressCandidate, PairingInvitationRuntime,
+    QuerySetupStateError, RedeemPairingInvitationError, RedeemPairingInvitationInput,
+    RedeemPairingInvitationResult, ResetSpaceError, SetupStateView, SpaceAdmissionDeps,
+    SpaceFacade, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError,
+    UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use storage::{
     ClearCacheResultView, StorageFacade, StorageFacadeDeps, StorageFacadeError, StorageStatsView,

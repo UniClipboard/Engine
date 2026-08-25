@@ -357,6 +357,17 @@ pub struct SpaceFacade {
     local_device_id: DeviceId,
 }
 
+/// Process-local invitation state shared by replacement network sessions.
+///
+/// A network session can be rebuilt while a previous endpoint registration is
+/// still draining. Sharing this runtime lets either session validate an
+/// invitation issued by the current facade without persisting invitation
+/// credentials across process restarts.
+#[derive(Clone, Default)]
+pub struct PairingInvitationRuntime {
+    holder: Arc<InMemoryPairingInvitationHolder>,
+}
+
 impl SpaceFacade {
     /// Wire all use cases from a single [`SpaceFacadeDeps`] bundle and
     /// spawn the sponsor-side inbound pairing orchestrator.
@@ -366,10 +377,13 @@ impl SpaceFacade {
     /// [`SpaceConvergenceAssembly::new`] so the application layer stays the
     /// single construction point (ADR-018).
     pub fn new(deps: SpaceFacadeDeps) -> Self {
-        Self::new_internal(deps)
+        Self::new_with_pairing_runtime(deps, PairingInvitationRuntime::default())
     }
 
-    fn new_internal(deps: SpaceFacadeDeps) -> Self {
+    pub fn new_with_pairing_runtime(
+        deps: SpaceFacadeDeps,
+        pairing_invitation_runtime: PairingInvitationRuntime,
+    ) -> Self {
         let SpaceFacadeDeps {
             session,
             admission,
@@ -441,9 +455,7 @@ impl SpaceFacade {
             current_app_version,
         };
 
-        // Invitation holder is purely an internal flow-state component
-        // (§11.4) — construct it here so bootstrap never sees the type.
-        let invitation_holder = Arc::new(InMemoryPairingInvitationHolder::new());
+        let invitation_holder = Arc::clone(&pairing_invitation_runtime.holder);
         // Slice4 P3 T3.2 · facade-local handle for `cancel_invitation`
         // / `query_setup_state` snapshots; the use case + orchestrator
         // already own their own `Arc::clone`s below.
@@ -1052,7 +1064,7 @@ mod tests {
         RelationshipStateResetError, RelationshipStateResetPort, RevocationId, SpaceMember,
         SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
     };
-    use uc_core::pairing::invitation::InvitationCode;
+    use uc_core::pairing::invitation::{InvitationCode, PairingInvitation};
     use uc_core::pairing::PairingSessionMessage;
     use uc_core::ports::pairing::{
         DialError, DialOutcome, PairingEventPort, PairingSessionEvent, PairingSessionId,
@@ -2306,6 +2318,32 @@ mod tests {
         let out = facade.issue_pairing_invitation().await.expect("B1 ok");
         assert_eq!(out.code.as_str(), "SMOKE-0001");
         assert_eq!(*inv.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn pairing_invitation_runtime_shares_pending_state_across_sessions() {
+        let first_session = PairingInvitationRuntime::default();
+        let replacement_session = first_session.clone();
+        let issued_at = Utc::now();
+        let code = InvitationCode::new("SHARED-01");
+        let (invitation, _) = PairingInvitation::issue(
+            code.clone(),
+            issued_at,
+            issued_at + chrono::Duration::minutes(5),
+            DeviceId::new("device-1"),
+            0,
+        );
+
+        first_session.holder.insert(invitation).await;
+
+        assert_eq!(
+            replacement_session
+                .holder
+                .snapshot_earliest()
+                .await
+                .map(|(pending, _)| pending),
+            Some(code)
+        );
     }
 
     #[tokio::test]
