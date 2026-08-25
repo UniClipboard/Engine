@@ -2641,12 +2641,26 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     file.sync_all()
         .map_err(|_| "sync temporary generation".to_owned())?;
     drop(file);
-    replace_file_atomically(&temporary, path)
-        .map_err(|_| "replace existing generation".to_owned())?;
-    let directory = std::fs::File::open(parent).map_err(|_| "open generation parent".to_owned())?;
-    directory
-        .sync_all()
-        .map_err(|_| "sync generation parent".to_owned())
+    commit_replacement(&temporary, path).map_err(|_| "replace existing generation".to_owned())
+}
+
+fn commit_replacement(temp: &Path, destination: &Path) -> std::io::Result<()> {
+    replace_file_atomically(temp, destination)?;
+    sync_parent_directory_if_supported(destination)
+}
+
+#[cfg(not(windows))]
+fn sync_parent_directory_if_supported(destination: &Path) -> std::io::Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent"))?;
+    let directory = std::fs::File::open(parent)?;
+    directory.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_parent_directory_if_supported(_: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -2758,6 +2772,20 @@ mod tests {
             Err(AdmissionSpaceTransitionError::InsufficientStorage)
         );
         assert_eq!(ensure_reset_capacity(100, 100), Ok(()));
+    }
+
+    #[test]
+    fn write_new_file_replaces_existing_file_on_windows_without_directory_open_error() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("transition.json");
+        let temporary = path.with_extension("write.tmp");
+        std::fs::write(&path, b"old").unwrap();
+
+        let result = super::write_new_file(&path, b"new");
+
+        assert!(result.is_ok(), "write_new_file failed: {result:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(!temporary.exists());
     }
 
     #[derive(Default)]
