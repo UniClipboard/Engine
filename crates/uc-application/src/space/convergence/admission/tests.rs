@@ -4613,11 +4613,18 @@ async fn admission_recovery_starts_with_legacy_migration_import() {
     assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fails() {
+struct RecoveredSponsorAdmissionFixture {
+    _sponsor_dir: tempfile::TempDir,
+    repository: Arc<dyn uc_core::membership::AdmissionAttemptRepositoryPort>,
+    owner: Arc<WorkspaceConvergence>,
+    attempt_id: uc_core::membership::AdmissionAttemptId,
+    prior_member_instance: uc_core::membership::MemberInstanceId,
+    activation: Arc<RecordingSponsorAdmissionSecurity>,
+}
+
+async fn recover_interrupted_sponsor_admission() -> RecoveredSponsorAdmissionFixture {
     use uc_core::membership::{
-        AdmissionAttemptId, AdmissionOutboxPurposeV1, MembershipCredential,
-        SponsorAdmissionStageV1, SponsorAdmissionStateV1, VersionedMembershipHistory,
+        AdmissionAttemptId, MembershipCredential, SponsorAdmissionStageV1, SponsorAdmissionStateV1,
         ED25519_SIGNATURE_ALGORITHM_V1,
     };
 
@@ -4630,6 +4637,13 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
     let attempt_id = AdmissionAttemptId::from_bytes([0x74; 32]);
     let (candidate, base_history, candidate_event, commitment, activation_receipt) =
         durable_candidate_verification_fixture(attempt_id);
+    let lineage_id = candidate.lineage_id.clone();
+    let uc_core::membership::MembershipOperationV2::AddDevice { admission } =
+        &candidate_event.operation
+    else {
+        unreachable!("fixture always creates AddDevice")
+    };
+    let prior_member_instance = admission.facts.member_instance;
     let initiated = joiner_transaction
         .start_join(
             attempt_id,
@@ -4759,22 +4773,56 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
     ));
 
     let resumed_activation = Arc::new(RecordingSponsorAdmissionSecurity::default());
-    let mut resumed_deps = test_deps(
-        Arc::new(MemoryWorkspaceRepository::default()),
-        "sponsor",
-        Vec::new(),
-    );
+    let sponsor_device = DeviceId::new("sponsor");
+    let sponsor_member_instance = sponsor_credential.member_instance_id(&sponsor_device);
+    let workspace_repository = MemoryWorkspaceRepository::default();
+    let mut workspace_state = WorkspaceConvergenceState::fresh(lineage_id.clone(), 1);
+    workspace_state.own_instance = Some(sponsor_member_instance);
+    workspace_repository
+        .save_state(&workspace_state)
+        .await
+        .unwrap();
+    let mut resumed_deps = test_deps(Arc::new(workspace_repository), "sponsor", Vec::new());
     resumed_deps.admission_attempts = Arc::clone(&sponsor_repository);
+    resumed_deps.prepare_sponsor_admission_security = resumed_activation.clone();
     resumed_deps.activate_sponsor_admission_security = resumed_activation.clone();
     resumed_deps.member_repo = member_repo.clone();
     resumed_deps.member_signatures = Arc::new(CredentialBackedSigner {
-        device_id: DeviceId::new("sponsor"),
+        device_id: sponsor_device.clone(),
         credential: sponsor_credential,
+    });
+    resumed_deps.membership_identity = Arc::new(FixedMembershipIdentity {
+        space: SpaceId::from_string(lineage_id),
+        device_id: sponsor_device.clone(),
+    });
+    resumed_deps.announcement_material = Arc::new(ConfiguredAnnouncementMaterial {
+        device_id: sponsor_device,
     });
     let resumed_owner = WorkspaceConvergence::new(resumed_deps);
 
     assert_eq!(resumed_owner.recover_pending_admissions().await.unwrap(), 1);
-    let recovered = sponsor_repository.load(attempt_id).await.unwrap().unwrap();
+
+    RecoveredSponsorAdmissionFixture {
+        _sponsor_dir: sponsor_dir,
+        repository: sponsor_repository,
+        owner: resumed_owner,
+        attempt_id,
+        prior_member_instance,
+        activation: resumed_activation,
+    }
+}
+
+#[tokio::test]
+async fn sponsor_recovery_finishes_durable_candidate_after_restart() {
+    use uc_core::membership::{AdmissionOutboxPurposeV1, VersionedMembershipHistory};
+
+    let fixture = recover_interrupted_sponsor_admission().await;
+    let recovered = fixture
+        .repository
+        .load(fixture.attempt_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(recovered.write_ahead_recovery.is_none());
     assert!(recovered.completion.is_some());
     assert_eq!(
@@ -4788,7 +4836,8 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
         1
     );
     let recovered_history = VersionedMembershipHistory::decode_persisted_v2(
-        &sponsor_repository
+        &fixture
+            .repository
             .load_membership_history_v2()
             .await
             .unwrap()
@@ -4797,19 +4846,23 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
     )
     .unwrap();
     assert_eq!(recovered_history.active_members().len(), 2);
+    assert!(recovered_history
+        .active_members()
+        .contains(&fixture.prior_member_instance));
     assert_eq!(
-        resumed_activation.activation_requests.lock().unwrap().len(),
+        fixture.activation.activation_requests.lock().unwrap().len(),
         1
     );
 
-    resumed_owner.recover_pending_admissions().await.unwrap();
+    fixture.owner.recover_pending_admissions().await.unwrap();
     assert_eq!(
-        resumed_activation.activation_requests.lock().unwrap().len(),
+        fixture.activation.activation_requests.lock().unwrap().len(),
         1
     );
     assert_eq!(
-        sponsor_repository
-            .load(attempt_id)
+        fixture
+            .repository
+            .load(fixture.attempt_id)
             .await
             .unwrap()
             .unwrap()
@@ -4821,6 +4874,87 @@ async fn sponsor_recovery_finishes_the_same_activation_after_completion_save_fai
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn sponsor_accepts_next_candidate_after_recovery_converges() {
+    use uc_core::membership::{
+        AdmissionAttemptId, AdmissionOutboxPurposeV1, MembershipCredential,
+        VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
+    };
+    use uc_core::pairing::{InvitationCode, JoinerRequest, PairingSecurityCapability};
+
+    let fixture = recover_interrupted_sponsor_admission().await;
+    let recovered_base = fixture
+        .owner
+        .verified_admission_base_history()
+        .await
+        .expect("recovered durable history remains a valid sponsor admission base");
+    assert_eq!(
+        recovered_base.active_members(),
+        recovered_base.effective_members()
+    );
+    let next_attempt_id = AdmissionAttemptId::from_bytes([0x82; 32]);
+    let invitation = InvitationCode::new("candidate-after-sponsor-recovery");
+    let next_device = DeviceId::new("next-joiner");
+    let next_credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x83; 32]);
+    let next_member_instance = next_credential.member_instance_id(&next_device);
+    let mut next_facts = admission_facts_for(next_member_instance, &next_device);
+    next_facts.identity_signature =
+        DeterministicHistoricalVerifier.sign(&next_credential, &next_facts.signing_payload());
+    let binding = crate::space::admission::adapter::stable_join_request_binding(
+        &next_device,
+        &next_facts.identity_fingerprint,
+    );
+    let request_message = super::admission::durable_admission_message(
+        next_attempt_id,
+        AdmissionOutboxPurposeV1::JoinRequest,
+        invitation.as_str().as_bytes(),
+        None,
+        &binding,
+    );
+    let request = JoinerRequest {
+        attempt_id: *next_attempt_id.as_bytes(),
+        join_id: [0x84; 16],
+        request_message_id: request_message.message_id,
+        invitation_code: invitation,
+        device_id: next_device,
+        device_name: next_facts.device_name.clone(),
+        identity_fingerprint: next_facts.identity_fingerprint.clone(),
+        nonce: Vec::new(),
+        transport_address_blob: next_facts.transport_address_blob.clone(),
+        security_capability: PairingSecurityCapability::ReliableGroupEpochV1,
+        key_package: b"next-candidate-key-package".to_vec(),
+        member_instance: next_member_instance,
+        membership_credential: next_credential,
+        resume_public_key: vec![0x85; 32],
+        admission: next_facts,
+    };
+
+    let result = fixture.owner.prepare_sponsor_candidate(&request).await;
+    let frame = match result {
+        Err(WorkspaceConvergenceError::AdmissionInProgress) => {
+            panic!("recovered sponsor admission still blocks the next candidate")
+        }
+        result => result.expect("recovered sponsor accepts a distinct next candidate"),
+    };
+    let payload =
+        super::admission::DurableAdmissionCandidatePayloadV1::decode(&frame.payload).unwrap();
+    let base_history = VersionedMembershipHistory::decode_persisted_v2(
+        &payload.base_membership_history,
+        &DeterministicHistoricalVerifier,
+    )
+    .unwrap();
+
+    assert_eq!(
+        frame.kind,
+        uc_core::pairing::DurableAdmissionMessageKind::Candidate
+    );
+    assert_eq!(frame.attempt_id, *next_attempt_id.as_bytes());
+    assert!(base_history
+        .active_members()
+        .contains(&fixture.prior_member_instance));
+    assert_eq!(base_history.active_members().len(), 2);
 }
 
 #[tokio::test]
