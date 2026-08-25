@@ -538,6 +538,34 @@ impl DurableAdmissionSpaceTransition {
                 advanced(SameSpaceTransitionPhaseV1::ActivationStarted)
             }
             SameSpaceTransitionPhaseV1::ActivationStarted => {
+                let active_manifest = self.active_manifest_for(
+                    transition.attempt_id,
+                    &transition.target_space_id,
+                    transition.target_generation,
+                )?;
+                let directory = self.target_generation_directory(
+                    &transition.target_space_id,
+                    &transition.target_generation,
+                );
+                let target_database = directory.join("target.sqlite");
+                if self
+                    .manifest_store
+                    .load()
+                    .await
+                    .map_err(|_| AdmissionSpaceTransitionError::Storage)?
+                    .as_ref()
+                    == Some(&active_manifest)
+                {
+                    self.source_pool
+                        .replace_database(
+                            target_database
+                                .to_str()
+                                .ok_or(AdmissionSpaceTransitionError::Storage)?,
+                        )
+                        .map_err(|_| AdmissionSpaceTransitionError::RecoveryRequired)?;
+                    self.blob_store.replace_root(directory.join("blobs"));
+                    return advanced(SameSpaceTransitionPhaseV1::TargetPromoted);
+                }
                 let target_workspace = self.open_target_workspace(
                     &transition.target_space_id,
                     &transition.target_generation,
@@ -545,16 +573,11 @@ impl DurableAdmissionSpaceTransition {
                     self.session.as_ref(),
                 )?;
                 let target_material = self.same_space_key_material(&target_workspace).await?;
-                let directory = self.target_generation_directory(
-                    &transition.target_space_id,
-                    &transition.target_generation,
-                );
                 std::fs::create_dir_all(&directory)
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
                 let scratch = directory.join("same-space.snapshot.tmp");
                 let source_bytes = db_snapshot::snapshot_to_bytes(&self.source_pool, &scratch)
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
-                let target_database = directory.join("target.sqlite");
                 write_new_file(&target_database, &source_bytes)
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
                 self.install_and_reopen_security_material(
@@ -574,11 +597,7 @@ impl DurableAdmissionSpaceTransition {
                     &directory.join("blobs"),
                 )?;
                 self.manifest_store
-                    .promote(&self.active_manifest_for(
-                        transition.attempt_id,
-                        &transition.target_space_id,
-                        transition.target_generation,
-                    )?)
+                    .promote(&active_manifest)
                     .await
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
                 self.source_pool
@@ -1019,12 +1038,14 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
         );
         std::fs::create_dir_all(&target_directory)
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
-        let working_database = target_directory.join("reset-working.sqlite");
-        remove_sqlite_database_if_present(&working_database)?;
+        let working_database =
+            reset_working_database_path(&target_directory, &source.prepared.backup_digest);
         let source_bytes = std::fs::read(&source.prepared.backup_path)
             .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
-        write_new_file(&working_database, &source_bytes)
-            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        if !working_database.exists() {
+            write_new_file(&working_database, &source_bytes)
+                .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        }
         self.source_pool
             .replace_database(
                 working_database
@@ -1160,7 +1181,7 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             &journal.target_generation,
         );
         remove_file_if_present(&target_directory.join("source-final.sqlite"))?;
-        remove_sqlite_database_if_present(&target_directory.join("reset-working.sqlite"))?;
+        remove_reset_working_databases_if_present(&target_directory)?;
         self.manifest_store
             .clear_device_reset_journal()
             .await
@@ -1620,6 +1641,32 @@ fn remove_sqlite_database_if_present(path: &Path) -> Result<(), AdmissionSpaceTr
         .ok_or(AdmissionSpaceTransitionError::Storage)?;
     for suffix in ["-wal", "-shm"] {
         remove_file_if_present(&path.with_file_name(format!("{file_name}{suffix}")))?;
+    }
+    Ok(())
+}
+
+fn reset_working_database_path(target_directory: &Path, source_digest: &[u8; 32]) -> PathBuf {
+    target_directory.join(format!("reset-working-{}.sqlite", short_hex(source_digest)))
+}
+
+fn remove_reset_working_databases_if_present(
+    target_directory: &Path,
+) -> Result<(), AdmissionSpaceTransitionError> {
+    remove_sqlite_database_if_present(&target_directory.join("reset-working.sqlite"))?;
+    let entries = match std::fs::read_dir(target_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(AdmissionSpaceTransitionError::Storage),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            return Err(AdmissionSpaceTransitionError::Storage);
+        };
+        if file_name.starts_with("reset-working-") && file_name.ends_with(".sqlite") {
+            remove_sqlite_database_if_present(&entry.path())?;
+        }
     }
     Ok(())
 }

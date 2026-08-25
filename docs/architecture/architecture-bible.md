@@ -959,6 +959,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 - 2026-08-25：修正 `uc-infra` admission transition 的 Windows 文件持久化语义：`MoveFileExW` 完成原子替换后不再把父目录当普通文件打开并同步，Unix 继续在 `rename` 后同步父目录；不改变分层、公共接口或 admission 业务规则。
 
+- 2026-08-25：补全 Windows 上 admission transition 的幂等重放。设备管理重置按源快照摘要隔离 working database，旧运行单元仍持有 SQLite 句柄时，新重试不再覆盖被锁文件；同空间切换以完整 active manifest 为提交点，提交后的重复推进只重新打开已激活 generation，不再覆盖当前数据库。临时 working database 仍由 reset 收尾统一清理；不改变公共接口、加密边界或 admission 业务规则。
+
 - 2026-08-20：为升级后当前成员范围不可用的问题增加不含用户资料的分类诊断日志，区分成员历史读取或解析、当前加入记录读取、沿革不一致、设备资料读取，以及有效成员缺少设备对应记录；日志只记录固定分类、数量和布尔值，不改变成员判断、失败策略、持久化格式或对外接口。
 
 - 2026-08-20：单条历史记录的发送视图改用当前成员范围与历史可信关系的交集；历史关系和旧发送事实继续保留，当前范围不可用时查询失败。该修改补齐既有当前成员范围规则，不改变分层或所有权。
