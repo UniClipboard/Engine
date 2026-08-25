@@ -20,8 +20,8 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ClipboardDispatchPort, ClipboardHeader, ClockPort, DispatchReport, FirstSyncStateError,
     FirstSyncStatePort, LocalIdentityError, LocalIdentityPort, PeerAddressError, PeerAddressRecord,
-    PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort, ReachabilityState,
-    SettingsPort, SyncPayload,
+    PeerAddressRepositoryPort, PeerReachabilityPort, PresenceError, PresenceEvent,
+    ReachabilityState, SettingsPort, SyncPayload,
 };
 use uc_core::security::IdentityFingerprint;
 use uc_core::settings::model::Settings;
@@ -111,7 +111,7 @@ impl ClockPort for FixedClock {
 /// are present to satisfy the trait.
 pub(crate) struct StaticPresence(pub(crate) ReachabilityState);
 #[async_trait]
-impl PresencePort for StaticPresence {
+impl PeerReachabilityPort for StaticPresence {
     async fn ensure_reachable(
         &self,
         _device: &DeviceId,

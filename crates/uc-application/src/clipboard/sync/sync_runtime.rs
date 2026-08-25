@@ -12,7 +12,7 @@ use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::clipboard::{ClipboardEventRepositoryPort, ListClipboardEntriesPort};
 use uc_core::ports::{
     ClockPort, DeviceIdentityPort, EntryDeliveryRepositoryPort, PeerAddressRepositoryPort,
-    PresencePort, ReachabilityState, SettingsPort,
+    PeerReachabilityPort, ReachabilityState, SettingsPort,
 };
 
 use crate::clipboard::inbound::ClipboardInboundRuntime;
@@ -36,7 +36,7 @@ pub struct ClipboardSyncRuntimeDeps {
     pub outbound: Arc<ClipboardOutboundFacade>,
     pub settings: Arc<dyn SettingsPort>,
     pub inbound: ClipboardInboundRuntime,
-    pub presence: Arc<dyn PresencePort>,
+    pub presence: Arc<dyn PeerReachabilityPort>,
     pub known_peers: Arc<dyn PeerAddressRepositoryPort>,
     pub entries: Arc<dyn ListClipboardEntriesPort>,
     pub events: Arc<dyn ClipboardEventRepositoryPort>,
@@ -189,7 +189,7 @@ impl RecoveryDeliveryPort for ClipboardOutboundFacade {
 }
 
 struct OfflineDeliveryRecoveryDeps {
-    presence: Arc<dyn PresencePort>,
+    presence: Arc<dyn PeerReachabilityPort>,
     known_peers: Arc<dyn PeerAddressRepositoryPort>,
     settings: Arc<dyn SettingsPort>,
     entries: Arc<dyn ListClipboardEntriesPort>,
@@ -247,7 +247,6 @@ impl OfflineDeliveryRecovery {
             if !supersede_older_unreachable_entries(&self.deps, entry_id, target).await {
                 warn!(
                     entry_id = %entry_id,
-                    target = %target,
                     "clipboard delivery recovery: unable to replace older offline content"
                 );
             }
@@ -344,7 +343,6 @@ async fn recover_for_target(deps: &OfflineDeliveryRecoveryDeps, target: DeviceId
             if !supersede_older_unreachable_entries(deps, &entry.entry_id, &target).await {
                 warn!(
                     entry_id = %entry.entry_id,
-                    target = %target,
                     "clipboard delivery recovery: unable to replace older offline content"
                 );
                 return;
@@ -362,7 +360,6 @@ async fn recover_for_target(deps: &OfflineDeliveryRecoveryDeps, target: DeviceId
             {
                 Ok(report) => info!(
                     entry_id = %entry.entry_id,
-                    target = %target,
                     accepted = report.accepted,
                     duplicate = report.duplicate,
                     offline = report.offline,
@@ -379,7 +376,7 @@ async fn recover_for_target(deps: &OfflineDeliveryRecoveryDeps, target: DeviceId
                     }
                 }
                 Err(_) => {
-                    debug!(error_kind = "delivery", entry_id = %entry.entry_id, target = %target, "clipboard delivery recovery skipped entry");
+                    debug!(error_kind = "delivery", entry_id = %entry.entry_id, "clipboard delivery recovery skipped entry");
                 }
             }
             return;
@@ -627,7 +624,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl PresencePort for IdlePresence {
+    impl PeerReachabilityPort for IdlePresence {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,

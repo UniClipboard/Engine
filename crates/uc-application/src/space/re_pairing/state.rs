@@ -6,6 +6,18 @@ pub(crate) struct RePairingState {
     store: Arc<dyn RePairingStateStorePort>,
 }
 
+#[async_trait::async_trait]
+pub(crate) trait ResolveRePairingPort: Send + Sync {
+    async fn resolve_after_successful_pairing(&self) -> Result<(), RePairingStateError>;
+}
+
+#[async_trait::async_trait]
+impl ResolveRePairingPort for RePairingState {
+    async fn resolve_after_successful_pairing(&self) -> Result<(), RePairingStateError> {
+        RePairingState::resolve_after_successful_pairing(self).await
+    }
+}
+
 impl RePairingState {
     pub(crate) fn new(store: Arc<dyn RePairingStateStorePort>) -> Self {
         Self { store }

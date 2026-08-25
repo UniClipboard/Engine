@@ -20,44 +20,44 @@ use tokio::sync::broadcast;
 use tracing::instrument;
 
 use uc_core::membership::{
-    CurrentWorkspacePeerScopePort, MemberProtectionStatus as CoreMemberProtectionStatus,
-    MemberRepositoryPort, MembershipEventId, RemovalDecision,
+    MemberProtectionStatus as CoreMemberProtectionStatus, MemberRepositoryPort,
     SpaceProtectionMode as CoreSpaceProtectionMode, SpaceProtectionSnapshot,
     SpaceProtectionStatusPort,
 };
-use uc_core::ports::{ConnectionChannelPort, LocalIdentityPort, PresenceEvent, PresencePort};
+use uc_core::ports::{
+    ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort, PresenceEvent,
+};
 use uc_core::DeviceId;
 
+use crate::deps::CurrentSpaceMemberScopePort;
 use crate::facade::roster::commands::{
     apply_member_sync_preferences_patch, MemberProtectionStatusView, MemberProtectionView,
     MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
     RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
 };
 use crate::facade::roster::errors::RosterError;
-use crate::space::workspace_membership::WorkspaceConvergenceError;
-use uc_core::membership::WorkspaceSnapshot;
 
 /// 构造 `MemberRosterFacade` 时需要的 port 束。对齐 `SpaceFacadeDeps`
 /// 的风格,便于 bootstrap 分步 construct 各 facade。
-pub struct MemberRosterDeps {
+pub(crate) struct MemberRosterDeps {
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub local_identity: Arc<dyn LocalIdentityPort>,
-    pub presence: Arc<dyn PresencePort>,
+    pub presence: Arc<dyn PeerReachabilityPort>,
     /// Phase 96 INDIC-01:连接通道单一真相源。`Option` 是为了 CLI / 测试
     /// 路径不强制构造 iroh adapter —— 缺省时 `list_peer_snapshots` 把
     /// channel 填成 `Unknown` 透传给 UI,UI 显式可见而非误判。
     pub connection_channel: Option<Arc<dyn ConnectionChannelPort>>,
+    pub peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
 }
 
 /// Roster 查询门面 —— 见模块文档。
-pub struct MemberRosterFacade {
+pub(crate) struct MemberRosterFacade {
     member_repo: Arc<dyn MemberRepositoryPort>,
     local_identity: Arc<dyn LocalIdentityPort>,
-    presence: Arc<dyn PresencePort>,
+    presence: Arc<dyn PeerReachabilityPort>,
     connection_channel: Option<Arc<dyn ConnectionChannelPort>>,
     space_protection: Option<Arc<dyn SpaceProtectionStatusPort>>,
-    workspace_convergence: Option<Arc<crate::space::workspace_membership::WorkspaceMembership>>,
-    peer_scope: Option<Arc<dyn CurrentWorkspacePeerScopePort>>,
+    peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
 }
 
 impl MemberRosterFacade {
@@ -68,8 +68,7 @@ impl MemberRosterFacade {
             presence: deps.presence,
             connection_channel: deps.connection_channel,
             space_protection: None,
-            workspace_convergence: None,
-            peer_scope: None,
+            peer_scope: deps.peer_scope,
         }
     }
 
@@ -81,29 +80,10 @@ impl MemberRosterFacade {
         self
     }
 
-    pub fn with_convergence(
-        mut self,
-        convergence: Arc<crate::space::assembly::SpaceModules>,
-    ) -> Self {
-        self.peer_scope = Some(convergence.current_peer_scope());
-        self.workspace_convergence = Some(convergence.workspace_membership());
-        self
-    }
-
     #[cfg(test)]
-    fn with_peer_scope(mut self, peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>) -> Self {
-        self.peer_scope = Some(peer_scope);
+    fn with_peer_scope(mut self, peer_scope: Arc<dyn CurrentSpaceMemberScopePort>) -> Self {
+        self.peer_scope = peer_scope;
         self
-    }
-
-    pub fn subscribe_workspace_convergence(&self) -> broadcast::Receiver<WorkspaceSnapshot> {
-        self.workspace_convergence
-            .as_ref()
-            .map(|convergence| convergence.subscribe())
-            .unwrap_or_else(|| {
-                let (sender, _) = broadcast::channel(1);
-                sender.subscribe()
-            })
     }
 
     /// 聚合当前所有成员 + 各自 presence 状态 + 本机标记。
@@ -125,8 +105,6 @@ impl MemberRosterFacade {
             .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
         let scope = self
             .peer_scope
-            .as_ref()
-            .ok_or(RosterError::MembershipReconciliationUnavailable)?
             .snapshot()
             .await
             .map_err(|_| RosterError::MembershipReconciliationUnavailable)?;
@@ -141,7 +119,7 @@ impl MemberRosterFacade {
             let is_local = local_fp
                 .as_ref()
                 .is_some_and(|fp| fp == &member.identity_fingerprint);
-            if !is_local && !scope.peer_device_ids.contains(&member.device_id) {
+            if !is_local && !scope.usable_peer_device_ids.contains(&member.device_id) {
                 continue;
             }
             let state = self.presence.current_state(&member.device_id).await;
@@ -252,34 +230,6 @@ impl MemberRosterFacade {
         Ok(updated.sync_preferences.into())
     }
 
-    /// 记录本机对已收到成员移除的唯一决定。
-    pub async fn decide_membership_removal(
-        &self,
-        removal_event_id: MembershipEventId,
-        decision: RemovalDecision,
-    ) -> Result<WorkspaceSnapshot, RosterError> {
-        let convergence = self
-            .workspace_convergence
-            .as_ref()
-            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
-        convergence
-            .decide_membership_removal(removal_event_id, decision)
-            .await
-            .map_err(map_workspace_convergence_error)
-    }
-
-    /// 查询当前完整工作空间收敛状态(一次查询恢复完整快照,不要求拼接事件)。
-    pub async fn query_workspace_convergence(&self) -> Result<WorkspaceSnapshot, RosterError> {
-        let convergence = self
-            .workspace_convergence
-            .as_ref()
-            .ok_or(RosterError::MembershipReconciliationUnavailable)?;
-        convergence
-            .query()
-            .await
-            .map_err(map_workspace_convergence_error)
-    }
-
     pub async fn query_space_protection(&self) -> Result<SpaceProtectionView, RosterError> {
         let space_protection = self
             .space_protection
@@ -343,21 +293,6 @@ impl MemberRosterFacade {
     }
 }
 
-fn map_workspace_convergence_error(error: WorkspaceConvergenceError) -> RosterError {
-    match error {
-        WorkspaceConvergenceError::Locked
-        | WorkspaceConvergenceError::Repository(
-            crate::space::membership_state::SpaceMembershipStateRepositoryError::Locked,
-        ) => RosterError::MembershipReconciliationLocked,
-        WorkspaceConvergenceError::Repository(
-            crate::space::membership_state::SpaceMembershipStateRepositoryError::Corrupt,
-        ) => RosterError::MembershipReconciliationCorrupt,
-        WorkspaceConvergenceError::SelfTarget => RosterError::MemberRemovalInvalidInput,
-        WorkspaceConvergenceError::UnknownTarget => RosterError::MemberRemovalTargetNotFound,
-        error => RosterError::MemberRemoval(error.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,33 +302,6 @@ mod tests {
     use uc_core::membership::{MemberSyncPreferences, MembershipError, SpaceMember};
     use uc_core::ports::{LocalIdentityError, ReachabilityState};
     use uc_core::security::IdentityFingerprint;
-
-    #[test]
-    fn locked_device_trust_state_keeps_a_distinct_unavailable_error() {
-        for error in [
-            WorkspaceConvergenceError::Locked,
-            WorkspaceConvergenceError::Repository(
-                crate::space::membership_state::SpaceMembershipStateRepositoryError::Locked,
-            ),
-        ] {
-            assert!(matches!(
-                map_workspace_convergence_error(error),
-                RosterError::MembershipReconciliationLocked
-            ));
-        }
-    }
-
-    #[test]
-    fn corrupt_device_trust_state_keeps_a_distinct_invalid_state_error() {
-        let error = map_workspace_convergence_error(WorkspaceConvergenceError::Repository(
-            crate::space::membership_state::SpaceMembershipStateRepositoryError::Corrupt,
-        ));
-
-        assert!(matches!(
-            error,
-            RosterError::MembershipReconciliationCorrupt
-        ));
-    }
 
     struct Members(Vec<SpaceMember>);
 
@@ -442,7 +350,7 @@ mod tests {
     struct StaticPresence;
 
     #[async_trait]
-    impl PresencePort for StaticPresence {
+    impl PeerReachabilityPort for StaticPresence {
         async fn ensure_reachable(
             &self,
             _device_id: &DeviceId,
@@ -462,18 +370,16 @@ mod tests {
     struct FixedPeerScope(Vec<DeviceId>);
 
     #[async_trait]
-    impl CurrentWorkspacePeerScopePort for FixedPeerScope {
+    impl CurrentSpaceMemberScopePort for FixedPeerScope {
         async fn snapshot(
             &self,
-        ) -> Result<
-            uc_core::membership::CurrentWorkspacePeerSnapshot,
-            uc_core::membership::CurrentWorkspacePeerScopeError,
-        > {
-            Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+        ) -> Result<crate::deps::CurrentSpaceMemberScope, crate::deps::CurrentSpaceMemberScopeError>
+        {
+            Ok(crate::deps::CurrentSpaceMemberScope {
                 revision: 1,
-                source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
-                local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
-                peer_device_ids: self.0.clone(),
+                local_member_active: true,
+                usable_peer_device_ids: self.0.clone(),
+                paused_peer_devices: Vec::new(),
             })
         }
     }
@@ -504,6 +410,7 @@ mod tests {
             local_identity: Arc::new(LocalIdentity(local)),
             presence: Arc::new(StaticPresence),
             connection_channel: None,
+            peer_scope: Arc::new(FixedPeerScope(Vec::new())),
         })
         .with_peer_scope(Arc::new(FixedPeerScope(vec![DeviceId::new("charlie")])));
 

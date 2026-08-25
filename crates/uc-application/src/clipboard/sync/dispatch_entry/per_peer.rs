@@ -25,7 +25,7 @@ use tracing::warn;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, DispatchReport, DispatchTiming,
-    FirstSyncStatePort, PresencePort, ReachabilityState, SyncPayload,
+    FirstSyncStatePort, PeerReachabilityPort, ReachabilityState, SyncPayload,
 };
 use uc_observability_contract::analytics::{
     AnalyticsPort, Direction, Event, PayloadSizeBucket, PayloadType, SyncDeferReason,
@@ -43,7 +43,7 @@ use super::{
 
 pub(crate) struct PerPeerDispatcher {
     clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
-    presence: Arc<dyn PresencePort>,
+    presence: Arc<dyn PeerReachabilityPort>,
     analytics: Arc<dyn AnalyticsPort>,
     first_sync_state: Arc<dyn FirstSyncStatePort>,
 }
@@ -51,7 +51,7 @@ pub(crate) struct PerPeerDispatcher {
 impl PerPeerDispatcher {
     pub(crate) fn new(
         clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
         analytics: Arc<dyn AnalyticsPort>,
         first_sync_state: Arc<dyn FirstSyncStatePort>,
     ) -> Self {

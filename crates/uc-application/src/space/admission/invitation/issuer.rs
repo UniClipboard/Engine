@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use tracing::{debug, info, warn};
-use uc_core::membership::{MembershipAdmissionDecision, MembershipAdmissionGatePort};
+use tracing::warn;
+use uc_core::membership::MembershipAdmissionDecision;
 use uc_core::pairing::invitation::PairingInvitation;
 use uc_core::ports::pairing_invitation::{CodeOrigin, InvitationError, IssuedInvitation};
 use uc_core::ports::{ClockPort, DeviceIdentityPort};
@@ -14,13 +14,14 @@ use crate::facade::space_setup::{
     InvitationAvailability, IssuePairingInvitationError, IssuePairingInvitationResult,
 };
 use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
+use crate::space::query_membership_admission::QueryMembershipAdmissionPort;
 
 pub(crate) struct PairingInvitationIssuer {
     device_identity: Arc<dyn DeviceIdentityPort>,
     clock: Arc<dyn ClockPort>,
     holder: Arc<InMemoryPairingInvitationHolder>,
     analytics: Arc<dyn AnalyticsFacade>,
-    membership_admission: Arc<dyn MembershipAdmissionGatePort>,
+    membership_admission: Arc<dyn QueryMembershipAdmissionPort>,
 }
 
 impl PairingInvitationIssuer {
@@ -29,7 +30,7 @@ impl PairingInvitationIssuer {
         clock: Arc<dyn ClockPort>,
         holder: Arc<InMemoryPairingInvitationHolder>,
         analytics: Arc<dyn AnalyticsFacade>,
-        membership_admission: Arc<dyn MembershipAdmissionGatePort>,
+        membership_admission: Arc<dyn QueryMembershipAdmissionPort>,
     ) -> Self {
         Self {
             device_identity,
@@ -44,10 +45,15 @@ impl PairingInvitationIssuer {
         self.analytics.capture(Event::PairingStarted {
             method: PairingMethod::Code,
         });
-        self.membership_admission
-            .invitation_generation()
+        let snapshot = self
+            .membership_admission
+            .query_membership_admission(None)
             .await
-            .map_err(map_membership_admission_decision)
+            .map_err(|error| IssuePairingInvitationError::Internal(error.to_string()))?;
+        if snapshot.decision != MembershipAdmissionDecision::Allowed {
+            return Err(map_membership_admission_decision(snapshot.decision));
+        }
+        Ok(snapshot.current_generation)
     }
 
     pub(crate) async fn finish(
@@ -55,7 +61,6 @@ impl PairingInvitationIssuer {
         issued: IssuedInvitation,
         admission_generation: u64,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
-        debug!(code = %issued.code.as_str(), expires_at = %issued.expires_at, "invitation issued by rendezvous");
         let (code_source, lan_only_mode, availability) = match issued.code_origin {
             CodeOrigin::DirectoryIssued => (
                 InvitationCodeSource::DirectoryIssued,
@@ -88,7 +93,6 @@ impl PairingInvitationIssuer {
             admission_generation,
         );
         self.holder.insert(invitation).await;
-        info!(code = %issued.code.as_str(), "pairing invitation parked in holder");
 
         Ok(IssuePairingInvitationResult {
             code: issued.code,

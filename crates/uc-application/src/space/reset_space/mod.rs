@@ -3,4 +3,4 @@ pub(crate) mod ports;
 mod use_case;
 
 pub use error::ResetSpaceError;
-pub(crate) use use_case::ResetSpaceUseCase;
+pub(crate) use use_case::{QueryCommittedDeviceManagementResetUseCase, ResetSpaceUseCase};

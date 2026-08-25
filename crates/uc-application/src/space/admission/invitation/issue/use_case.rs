@@ -71,7 +71,7 @@ mod tests {
     use chrono::{DateTime, Duration, Utc};
 
     use uc_core::ids::DeviceId;
-    use uc_core::membership::{MembershipAdmissionDecision, MembershipAdmissionGatePort};
+    use uc_core::membership::MembershipAdmissionDecision;
     use uc_core::pairing::invitation::{InvitationCode, InvitationState};
     use uc_core::ports::pairing_invitation::{
         CodeOrigin, InvitationError, PairingInvitationByAddressPort,
@@ -83,23 +83,22 @@ mod tests {
 
     use crate::space::admission::invitation::holder::InMemoryPairingInvitationHolder;
     use crate::space::admission::invitation::issue_for_address::IssuePairingInvitationForAddressUseCase;
+    use crate::space::query_membership_admission::{
+        MembershipAdmissionSnapshot, QueryMembershipAdmissionError, QueryMembershipAdmissionPort,
+    };
 
     struct FixedMembershipAdmissionGate(MembershipAdmissionDecision);
 
     #[async_trait]
-    impl MembershipAdmissionGatePort for FixedMembershipAdmissionGate {
-        async fn admission_decision(
+    impl QueryMembershipAdmissionPort for FixedMembershipAdmissionGate {
+        async fn query_membership_admission(
             &self,
-            _invitation_generation: u64,
-        ) -> MembershipAdmissionDecision {
-            self.0
-        }
-
-        async fn invitation_generation(&self) -> Result<u64, MembershipAdmissionDecision> {
-            match self.0 {
-                MembershipAdmissionDecision::Allowed => Ok(0),
-                decision => Err(decision),
-            }
+            _invitation_generation: Option<u64>,
+        ) -> Result<MembershipAdmissionSnapshot, QueryMembershipAdmissionError> {
+            Ok(MembershipAdmissionSnapshot {
+                current_generation: 0,
+                decision: self.0,
+            })
         }
     }
 

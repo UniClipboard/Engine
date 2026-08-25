@@ -5,5 +5,5 @@ mod use_case;
 
 pub use error::UnlockSpaceError;
 pub use ports::UnlockSpacePort;
-pub use readiness::PostSessionReadiness;
+pub(crate) use readiness::PostSessionReadiness;
 pub(crate) use use_case::UnlockSpaceUseCase;

@@ -4,4 +4,4 @@ mod use_case;
 
 pub use error::LockSpaceSessionError;
 pub use ports::LockSpacePort;
-pub use use_case::LockSpaceSessionUseCase;
+pub(crate) use use_case::LockSpaceSessionUseCase;

@@ -1,24 +1,22 @@
 use std::sync::Arc;
 
 use super::QueryPendingSpaceTransitionError;
-use crate::deps::AdmissionAttemptRepositoryPort;
-use crate::space::admission::durable;
+use crate::space::membership_ledger::MembershipLedger;
 
 pub(crate) struct QueryPendingSpaceTransitionUseCase {
-    admission_attempts: Arc<dyn AdmissionAttemptRepositoryPort>,
+    ledger: Arc<MembershipLedger>,
 }
 
 impl QueryPendingSpaceTransitionUseCase {
-    pub(crate) fn new(admission_attempts: Arc<dyn AdmissionAttemptRepositoryPort>) -> Self {
-        Self { admission_attempts }
+    pub(crate) fn new(ledger: Arc<MembershipLedger>) -> Self {
+        Self { ledger }
     }
 
     pub(crate) async fn execute(&self) -> Result<bool, QueryPendingSpaceTransitionError> {
         let attempts = self
-            .admission_attempts
-            .scan_recoverable()
+            .ledger
+            .recoverable_admission_records()
             .await
-            .map_err(durable::map_repository_error)
             .map_err(|error| QueryPendingSpaceTransitionError(error.to_string()))?;
         Ok(attempts.into_iter().any(|attempt| {
             attempt.is_joiner()

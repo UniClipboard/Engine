@@ -911,8 +911,6 @@ impl ApplyInboundClipboardUseCase {
         name = "apply_inbound.execute",
         skip_all,
         fields(
-            from_device = %input.from_device,
-            peer.device_id = %input.from_device,
             snapshot_hash = %input.snapshot_hash,
             plaintext_len = input.plaintext.len(),
             flow.id = tracing::field::Empty,
@@ -1533,7 +1531,6 @@ impl ApplyInboundClipboardUseCase {
             if let Some(write_port) = self.write_port().cloned() {
                 debug!(entry_id = %entry_id, "inbound: entry persisted, scheduling background OS clipboard write");
                 let entry_id_for_write = entry_id.clone();
-                let from_device_for_write = input.from_device;
                 let snapshot_hash_for_write = input.snapshot_hash.clone();
                 let origin_guard_key_for_write = snapshot_for_write.origin_guard_key();
                 // `.in_current_span()` keeps the spawned task under `apply_inbound.execute`
@@ -1552,7 +1549,6 @@ impl ApplyInboundClipboardUseCase {
                                 error_kind = "inbound_os_write_failed",
                                 error = %e,
                                 entry_id = %entry_id_for_write,
-                                from_device = %from_device_for_write,
                                 snapshot_hash = %snapshot_hash_for_write,
                                 origin_guard_key = %origin_guard_key_for_write,
                                 "inbound: OS clipboard background write failed after capture"

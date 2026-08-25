@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use uc_core::ids::{DeviceId, SpaceId};
 pub use uc_core::membership::SponsorAdmissionSecurityDelivery;
 use uc_core::membership::{
-    AdmissionContentKeyCatalogV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1,
+    AdmissionContentKeyCatalogV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition,
     MembershipCredentialId,
 };
 
@@ -17,7 +17,7 @@ pub enum AdmissionSecurityTransitionError {
 #[derive(Clone, PartialEq, Eq)]
 pub struct AdmissionSecurityTransitionInput {
     pub attempt_id: [u8; 32],
-    pub base_history_position: BaseMembershipHistoryPositionV1,
+    pub base_history_position: BaseMembershipHistoryPosition,
     pub candidate_core_digest: [u8; 32],
     pub key_catalog_digest: [u8; 32],
     pub admission_bundle_digest: [u8; 32],
@@ -75,7 +75,7 @@ pub struct SponsorAdmissionSecurityRecipient {
 pub struct SponsorAdmissionSecurityRequest {
     pub space_id: SpaceId,
     pub attempt_id: [u8; 32],
-    pub base_history_position: BaseMembershipHistoryPositionV1,
+    pub base_history_position: BaseMembershipHistoryPosition,
     pub candidate_core_digest: [u8; 32],
     pub candidate_identity: Vec<u8>,
     pub candidate_key_package: Vec<u8>,

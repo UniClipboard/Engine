@@ -31,9 +31,10 @@ use chrono::{DateTime, Utc};
 use tracing::{debug, info, instrument, warn};
 
 use uc_core::ids::SpaceId;
+#[cfg(test)]
+use uc_core::membership::MembershipInitializationError;
 use uc_core::membership::{
-    MemberRepositoryPort, MemberSyncPreferences, MembershipInitializationError, SpaceMember,
-    SpaceMembershipInitializerPort,
+    MemberRepositoryPort, MemberSyncPreferences, SpaceMember, SpaceMembershipInitializerPort,
 };
 use uc_core::ports::space::SpaceAccessError;
 use uc_core::ports::{
@@ -136,7 +137,7 @@ impl InitializeSpaceUseCase {
             .initialize(&space_id, &cmd.passphrase)
             .await
             .map_err(map_initialize_space_access_err)?;
-        debug!(%space_id, "space initialised");
+        debug!("space initialized");
 
         // 4. Resolve the local network identity. In Slice 1 the iroh
         //    endpoint binds its Ed25519 secret at bootstrap time, so
@@ -154,7 +155,7 @@ impl InitializeSpaceUseCase {
                  violates LocalIdentityPort idempotency contract"
             )),
         })?;
-        debug!(fingerprint = %fingerprint, "local identity resolved");
+        debug!("local identity resolved");
 
         // 5-6. Build and persist the owner SpaceMember record.
         let device_id = self.device_identity.current_device_id();
@@ -170,7 +171,7 @@ impl InitializeSpaceUseCase {
             .save(&member)
             .await
             .map_err(InitializeSpaceError::storage)?;
-        debug!(%device_id, "owner SpaceMember persisted");
+        debug!("local Space member persisted");
 
         // 7. A successful A1 must already be ready to sponsor the first durable
         //    admission. Keep the security-group creation and trusted-history
@@ -186,7 +187,7 @@ impl InitializeSpaceUseCase {
             .activate_initial_space(&space_id)
             .await
             .map_err(InitializeSpaceError::storage)?;
-        info!(%space_id, %device_id, "space initialisation completed");
+        info!("space initialization completed");
 
         // Identity switches before `setup_completed` fires so that event
         // already reports under the new person — keeps the activation
@@ -936,7 +937,6 @@ mod tests {
         // that has already onboarded.
         *h.profile_readiness.status.lock().unwrap() = TestProfileReadiness {
             has_completed: true,
-            space_id: None,
         };
 
         let err = h.uc.execute(ok_cmd(Some("My Mac"))).await.unwrap_err();

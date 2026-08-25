@@ -371,8 +371,6 @@ function checkCurrentPeerScopeOwnership() {
   const problems = []
   const scopedConsumers = [
     'crates/uc-application/src/facade/roster/facade.rs',
-    'crates/uc-application/src/space/connectivity/reachability.rs',
-    'crates/uc-application/src/space/connectivity/membership.rs',
     'crates/uc-application/src/clipboard/sync/dispatch_entry/target_selector.rs',
     'crates/uc-application/src/clipboard/sync/active_state/fanout.rs',
     'crates/uc-application/src/clipboard/sync/resend_entry.rs',
@@ -380,13 +378,13 @@ function checkCurrentPeerScopeOwnership() {
   for (const path of scopedConsumers) {
     const source = read(path)
     if (
-      !source.includes('CurrentWorkspacePeerScopePort') ||
+      !source.includes('CurrentSpaceMemberScopePort') ||
       !/\.snapshot\(\)\s*\.await/.test(source)
     ) {
       addProblem(
         problems,
         'current peer scope',
-        `${path} must consume one complete CurrentWorkspacePeerScopePort snapshot`
+        `${path} must consume one complete CurrentSpaceMemberScopePort snapshot`
       )
     }
   }
@@ -395,37 +393,17 @@ function checkCurrentPeerScopeOwnership() {
     addProblem(problems, 'current peer scope', 'the superseded device visibility gate was restored')
   }
 
-  const currentScope = read(
-    'crates/uc-application/src/space/workspace_membership/projection/current_scope.rs'
-  )
-  const currentHistoryStart = currentScope.indexOf('pub(in crate::space) async fn v2_current_peer_snapshot')
-  const transitionStart = currentScope.indexOf(
-    'if history.lineage_id() != state.space_lineage',
-    currentHistoryStart
-  )
-  const beforeTransition = currentScope.slice(currentHistoryStart, transitionStart)
-  const implementationStart = currentScope.indexOf(
-    'impl uc_core::membership::CurrentWorkspacePeerScopePort for WorkspaceMembership'
-  )
-  const implementation = currentScope.slice(implementationStart)
-  const appliedHistory = implementation.indexOf(
-    '.filter(|history| history.applied_head().is_some())'
-  )
-  const legacyFallback = implementation.indexOf('let Some(history) = history else')
+  const currentScope = read('crates/uc-application/src/space/membership_ledger/repository.rs')
   if (
-    currentHistoryStart < 0 ||
-    transitionStart < 0 ||
-    !beforeTransition.includes('return Err(CurrentWorkspacePeerScopeError::Unavailable)') ||
-    beforeTransition.includes('return Ok(None)') ||
-    implementationStart < 0 ||
-    appliedHistory < 0 ||
-    legacyFallback < 0 ||
-    appliedHistory > legacyFallback
+    !currentScope.includes('VersionedMembershipHistory::decode_persisted_v2') ||
+    !currentScope.includes('impl CurrentSpaceMemberScopePort for MembershipLedger') ||
+    currentScope.includes('CurrentWorkspacePeerScopePort') ||
+    currentScope.includes('MemberRepositoryPort')
   ) {
     addProblem(
       problems,
       'current peer scope',
-      'missing current membership history must fail closed before the explicit space-transition fallback'
+      'missing V2 membership history must fail closed without a legacy membership fallback'
     )
   }
 
@@ -512,50 +490,94 @@ function checkRetiredLegacyPairingRecovery() {
   return problems
 }
 
-function checkWorkspaceConvergenceInternalBoundaries() {
+function checkApplicationMembershipCutover() {
   const problems = []
-  const requiredDomainEntries = [
+  const requiredEntries = [
+    'crates/uc-application/src/space/application.rs',
     'crates/uc-application/src/space/admission/mod.rs',
-    'crates/uc-application/src/space/workspace_membership/membership/mod.rs',
-    'crates/uc-application/src/space/workspace_membership/projection/mod.rs',
-    'crates/uc-application/src/space/connectivity/mod.rs',
+    'crates/uc-application/src/space/admission/handle_space_admission_message/mod.rs',
+    'crates/uc-application/src/space/membership_ledger/mod.rs',
+    'crates/uc-application/src/space/query_device_trust/mod.rs',
+    'crates/uc-application/src/space/remove_space_member/mod.rs',
+    'crates/uc-application/src/space/decide_device_trust_change/mod.rs',
+    'crates/uc-application/src/space/synchronize_membership_history/mod.rs',
+    'crates/uc-application/src/space/handle_membership_history_message/mod.rs',
+    'crates/uc-application/src/space/maintain_space_membership/runtime.rs',
   ]
-  for (const path of requiredDomainEntries) {
+  for (const path of requiredEntries) {
     if (!existsSync(join(REPOSITORY_ROOT, path))) {
-      addProblem(problems, 'workspace convergence boundaries', `missing domain entry: ${path}`)
+      addProblem(problems, 'application membership cutover', `missing target entry: ${path}`)
     }
   }
 
-  const retiredFlatPaths = [
-    'crates/uc-application/src/space/workspace_membership/admission_transaction.rs',
-    'crates/uc-application/src/space/workspace_membership/group_update_delivery.rs',
-    'crates/uc-application/src/space/workspace_membership/legacy_upgrade.rs',
-    'crates/uc-application/src/space/workspace_membership/membership_connectivity.rs',
-    'crates/uc-application/src/space/workspace_membership/reachability.rs',
-    'crates/uc-application/src/space/workspace_membership/tests.rs',
+  const retiredPaths = [
+    'crates/uc-application/src/space/assembly.rs',
+    'crates/uc-application/src/space/current_membership_scope.rs',
+    'crates/uc-application/src/space/membership_state_coordinator.rs',
+    'crates/uc-application/src/space/membership_state_coordinator_tests.rs',
+    'crates/uc-application/src/space/membership_state',
+    'crates/uc-application/src/space/membership_convergence',
+    'crates/uc-application/src/space/membership_runtime',
+    'crates/uc-application/src/space/recover_pending_membership_effects',
+    'crates/uc-application/src/space/decide_membership_removal_legacy',
+    'crates/uc-application/src/space/query_workspace_membership_diagnostics',
+    'crates/uc-application/src/space/runtime.rs',
+    'crates/uc-application/src/facade/space_join',
+    'crates/uc-application/src/facade/space_membership',
   ]
-  for (const path of retiredFlatPaths) {
+  for (const path of retiredPaths) {
     if (existsSync(join(REPOSITORY_ROOT, path))) {
-      addProblem(problems, 'workspace convergence boundaries', `retired flat path remains: ${path}`)
+      addProblem(problems, 'application membership cutover', `retired path remains: ${path}`)
     }
   }
 
-  const membershipRoot = read('crates/uc-application/src/space/workspace_membership/mod.rs')
-  const domainFlowMarkers = [
-    'impl ProfileWorkspaceConvergence',
-    'fn prepare_sponsor_candidate(',
-    'fn reconcile_membership_history(',
-    'fn decide_membership_removal_locked(',
-    'fn v2_current_peer_snapshot(',
+  const applicationSources = readSourceTree('crates/uc-application/src')
+  const forbiddenMarkers = [
+    'MembershipStateCoordinator',
+    'MembershipConvergence',
+    'SpaceModules',
+    'SpaceMembershipState',
+    'WorkspaceSnapshot',
+    'ContentExchangeGatePort',
+    'CurrentWorkspacePeerScopePort',
+    'SpaceJoinRecordStorePort',
+    'LegacySynchronizeMembershipHistoryUseCase',
   ]
-  for (const marker of domainFlowMarkers) {
-    if (membershipRoot.includes(marker)) {
+  for (const marker of forbiddenMarkers) {
+    if (applicationSources.includes(marker)) {
       addProblem(
         problems,
-        'workspace convergence boundaries',
-        `domain flow remains in workspace_membership/mod.rs: ${marker}`
+        'application membership cutover',
+        `retired application marker remains: ${marker}`
       )
     }
+  }
+
+  const facadeSurface = read('crates/uc-application/src/facade/mod.rs')
+  for (const marker of [
+    'MemberRosterFacade',
+    'SpaceMembershipRuntime',
+    'QueryDeviceTrustUseCase',
+    'RemoveSpaceMemberUseCase',
+    'DecideDeviceTrustChangeUseCase',
+    'MaintainSpaceMembershipUseCase',
+  ]) {
+    if (facadeSurface.includes(marker)) {
+      addProblem(
+        problems,
+        'application membership cutover',
+        `internal Space implementation is publicly re-exported: ${marker}`
+      )
+    }
+  }
+
+  const sensitiveTracingField = /(device(?:_id)?|peer|from_device|target|address|path|file(?:name)?)\s*=\s*%/
+  if (sensitiveTracingField.test(applicationSources)) {
+    addProblem(
+      problems,
+      'application membership cutover',
+      'application tracing contains a raw device, address, filename, or path field'
+    )
   }
   return problems
 }
@@ -585,7 +607,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkBindingProvenance(metadata, sources),
     ...checkLanIsolation(metadata, sources),
     ...checkCurrentPeerScopeOwnership(),
-    ...checkWorkspaceConvergenceInternalBoundaries(),
+    ...checkApplicationMembershipCutover(),
     ...checkRetiredLegacyPairingRecovery(),
     ...(includePlaintext ? checkPlaintextScanner() : []),
   ]

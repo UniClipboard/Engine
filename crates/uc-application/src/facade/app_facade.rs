@@ -34,12 +34,10 @@ use crate::clipboard::sync::V3BlobRef;
 use crate::facade::config_migration::ConfigMigrationFacade;
 use crate::facade::roster::{MemberSummary, PeerSnapshotView, RosterError};
 use crate::facade::settings::{GeneralSettingsPatch, SettingsPatch};
-use crate::facade::space_setup::{EnsureReachableAllError, EnsureReachableAllReport};
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
     IssuePairingInvitationResult, PairingInvitationAddressCandidate,
-    QueryPairingInvitationAddressesError, QuerySetupStateError, RedeemPairingInvitationError,
-    RedeemPairingInvitationInput, RedeemPairingInvitationResult, SetupStateView, UnlockSpaceError,
+    QueryPairingInvitationAddressesError, QuerySetupStateError, SetupStateView, UnlockSpaceError,
     UnlockSpaceInput, UnlockSpaceResult,
 };
 use crate::facade::upgrade::UpgradeFacade;
@@ -48,23 +46,20 @@ use crate::facade::{
     ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade, ClipboardSyncError,
     ClipboardSyncFacade, DiagnosticsFacade, DispatchEntryOutcome, FetchBlobCommand,
     FetchBlobResult, FetchBlobToPathCommand, FetchBlobToPathResult, HistoryMaintenanceRuntime,
-    LocalDeviceInfo, MemberRosterFacade, ProbeProfileKeyAccessError, ProbeProfileKeyAccessUseCase,
-    PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult, QueryLocalDeviceUseCase,
-    QuerySpaceAccessStateError, QuerySpaceAccessStateUseCase, ResendEntryCommand, ResendEntryError,
-    ResendReport, ResourceFacade, SearchFacade, SearchFacadeError, SearchPageView,
-    SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
-    SettingsFacadeError, SpaceAccessState, SpaceFacade, StorageFacade,
+    LocalDeviceInfo, ProbeProfileKeyAccessError, ProbeProfileKeyAccessUseCase, PublishBlobCommand,
+    PublishBlobPathCommand, PublishBlobResult, QueryLocalDeviceUseCase, QuerySpaceAccessStateError,
+    ResendEntryCommand, ResendEntryError, ResendReport, ResourceFacade, SearchFacade,
+    SearchFacadeError, SearchPageView, SearchQueryInput, SearchRebuildAcceptedView,
+    SearchStatusView, SettingsFacade, SettingsFacadeError, SpaceAccessState, SpaceFacade,
+    StorageFacade,
 };
 use crate::space::connectivity::network_recovery::{
     NetworkRecoveryFacade, NetworkRecoveryRequestError, NetworkRecoveryStatus,
 };
-use crate::space::lock_space_session::{LockSpaceSessionError, LockSpaceSessionUseCase};
-use crate::space::recover_space_session::{
-    RecoverSpaceSessionError, RecoverSpaceSessionResult, RecoverSpaceSessionUseCase,
-};
-use crate::space::session::SpaceSessionActivity;
+use crate::space::lock_space_session::LockSpaceSessionError;
+use crate::space::recover_space_session::{RecoverSpaceSessionError, RecoverSpaceSessionResult};
 use uc_core::ids::DeviceId;
-use uc_core::ports::{PresenceError, PresenceEvent, ReachabilityState};
+use uc_core::ports::{PresenceEvent, ReachabilityState};
 use uc_core::ClipboardChangeOrigin;
 use uc_core::SystemClipboardSnapshot;
 
@@ -74,11 +69,6 @@ use uc_core::SystemClipboardSnapshot;
 /// 因此运行期拿到的对象始终可以立即处理所有稳定 Engine 动作。
 pub struct AppFacade {
     space: Arc<SpaceFacade>,
-    space_session_activity: Arc<SpaceSessionActivity>,
-    lock_space_session: Arc<LockSpaceSessionUseCase>,
-    recover_space_session: Arc<RecoverSpaceSessionUseCase>,
-    member_roster: Arc<MemberRosterFacade>,
-    query_space_access_state: Arc<QuerySpaceAccessStateUseCase>,
     probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     resource: Arc<ResourceFacade>,
     clipboard_history: Arc<ClipboardHistoryFacade>,
@@ -113,11 +103,6 @@ impl AppFacade {
     pub fn new(parts: AppFacadeParts) -> Self {
         Self {
             space: parts.space,
-            space_session_activity: parts.space_session_activity,
-            lock_space_session: parts.lock_space_session,
-            recover_space_session: parts.recover_space_session,
-            member_roster: parts.member_roster,
-            query_space_access_state: parts.query_space_access_state,
             probe_profile_key_access: parts.probe_profile_key_access,
             resource: parts.resource,
             clipboard_history: parts.clipboard_history,
@@ -272,12 +257,7 @@ impl AppFacade {
         &self,
         input: InitializeSpaceInput,
     ) -> Result<InitializeSpaceResult, InitializeSpaceError> {
-        let result = self.space.initialize_space(input).await?;
-        self.space_session_activity
-            .resume_after_session_ready()
-            .await
-            .map_err(|error| InitializeSpaceError::internal(anyhow::anyhow!(error)))?;
-        Ok(result)
+        self.space.initialize_space(input).await
     }
 
     /// A2: unlock a space through the top-level application facade.
@@ -285,22 +265,17 @@ impl AppFacade {
         &self,
         input: UnlockSpaceInput,
     ) -> Result<UnlockSpaceResult, UnlockSpaceError> {
-        let result = self.space.unlock_space(input).await?;
-        self.space_session_activity
-            .resume_after_session_ready()
-            .await
-            .map_err(|error| UnlockSpaceError::Internal(error.to_string()))?;
-        Ok(result)
+        self.space.unlock_space(input).await
     }
 
     pub async fn recover_space_session(
         &self,
     ) -> Result<RecoverSpaceSessionResult, RecoverSpaceSessionError> {
-        self.recover_space_session.execute().await
+        self.space.recover_space_session().await
     }
 
     pub async fn lock_space_session(&self) -> Result<(), LockSpaceSessionError> {
-        self.lock_space_session.execute().await
+        self.space.lock_space_session().await
     }
 
     pub async fn join_space(
@@ -323,13 +298,6 @@ impl AppFacade {
         self.space.complete_pending_space_transition().await
     }
 
-    pub async fn deliver_join_completion_ack(
-        &self,
-        pending: crate::facade::PendingJoinerCompleteAck,
-    ) -> Result<(), RedeemPairingInvitationError> {
-        self.space.deliver_join_completion_ack(pending).await
-    }
-
     /// Read setup state through the top-level application facade.
     pub async fn query_setup_state(&self) -> Result<SetupStateView, QuerySetupStateError> {
         self.space.query_setup_state().await
@@ -347,17 +315,10 @@ impl AppFacade {
 
     /// 尝试静默恢复空间会话。
     pub async fn try_resume_session(&self) -> Result<bool, RecoverSpaceSessionError> {
-        self.recover_space_session
-            .execute()
+        self.space
+            .recover_space_session()
             .await
             .map(|result| result.resumed)
-    }
-
-    /// 刷新成员在线状态。
-    pub async fn refresh_presence(
-        &self,
-    ) -> Result<EnsureReachableAllReport, EnsureReachableAllError> {
-        self.space.refresh_presence().await
     }
 
     pub async fn recover_network(&self) -> Result<(), NetworkRecoveryRequestError> {
@@ -366,25 +327,6 @@ impl AppFacade {
 
     pub async fn network_recovery_status(&self) -> NetworkRecoveryStatus {
         self.network_recovery.status().await
-    }
-
-    /// 列出已配对 peer 的 `DeviceId`(本机已过滤)。供 desktop keepalive
-    /// 调度器用来发现新 peer / 收回已删除 peer。Thin wrapper over
-    /// [`SpaceFacade::list_paired_peer_device_ids`].
-    pub async fn list_paired_peer_device_ids(
-        &self,
-    ) -> Result<Vec<DeviceId>, EnsureReachableAllError> {
-        self.space.list_paired_peer_device_ids().await
-    }
-
-    /// 对单个 peer 触发一次 `ensure_reachable`。供 desktop keepalive 调度
-    /// 器在退避到期时按需拨号。Thin wrapper over
-    /// [`SpaceFacade::ensure_reachable_one`].
-    pub async fn ensure_reachable_one(
-        &self,
-        device: &DeviceId,
-    ) -> Result<ReachabilityState, PresenceError> {
-        self.space.ensure_reachable_one(device).await
     }
 
     /// B1:签发配对邀请。
@@ -411,35 +353,20 @@ impl AppFacade {
         self.space.list_pairing_invitation_addresses().await
     }
 
-    /// B2:兑换配对邀请。
-    pub async fn redeem_pairing_invitation(
-        &self,
-        input: RedeemPairingInvitationInput,
-    ) -> Result<RedeemPairingInvitationResult, RedeemPairingInvitationError> {
-        let result = self.space.redeem_pairing_invitation(input).await?;
-        self.recover_space_session
-            .execute()
-            .await
-            .map_err(|error| {
-                RedeemPairingInvitationError::Internal(format!("activate paired space: {error}"))
-            })?;
-        Ok(result)
-    }
-
     pub async fn cancel_invitation(&self) -> Result<(), crate::facade::CancelInvitationError> {
         self.space.cancel_invitation().await
     }
 
     /// 列出对外成员摘要。外部调用只经过 `AppFacade`,不直接依赖 roster 子 facade。
     pub async fn list_members(&self) -> Result<Vec<MemberSummary>, RosterError> {
-        self.member_roster.list_members().await
+        self.space.list_members().await
     }
 
     /// 列出带 presence 的 roster entry。
     pub async fn list_roster_entries(
         &self,
     ) -> Result<Vec<crate::facade::roster::RosterEntry>, RosterError> {
-        self.member_roster.list_with_presence().await
+        self.space.list_roster_entries().await
     }
 
     /// 发送一个剪贴板快照到在线 peer。
@@ -611,7 +538,7 @@ impl AppFacade {
 
     /// 查询加密/初始化状态。
     pub async fn encryption_state(&self) -> Result<SpaceAccessState, QuerySpaceAccessStateError> {
-        self.query_space_access_state.execute().await
+        self.space.query_space_access_state().await
     }
 
     pub async fn verify_secure_storage_access(&self) -> Result<bool, ProbeProfileKeyAccessError> {
@@ -689,7 +616,7 @@ impl AppFacade {
         &self,
         device_id: &str,
     ) -> Result<crate::facade::MemberSyncPreferencesView, RosterError> {
-        self.member_roster.get_sync_preferences(device_id).await
+        self.space.member_sync_preferences(device_id).await
     }
 
     pub async fn update_member_sync_preferences(
@@ -697,37 +624,15 @@ impl AppFacade {
         device_id: &str,
         patch: crate::facade::MemberSyncPreferencesPatch,
     ) -> Result<crate::facade::MemberSyncPreferencesView, RosterError> {
-        self.member_roster
-            .update_sync_preferences(device_id, patch)
+        self.space
+            .update_member_sync_preferences(device_id, patch)
             .await
-    }
-
-    pub async fn decide_membership_removal(
-        &self,
-        removal_event_id: uc_core::membership::MembershipEventId,
-        decision: uc_core::membership::RemovalDecision,
-    ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
-        self.member_roster
-            .decide_membership_removal(removal_event_id, decision)
-            .await
-    }
-
-    pub async fn workspace_convergence(
-        &self,
-    ) -> Result<crate::facade::WorkspaceSnapshot, RosterError> {
-        self.member_roster.query_workspace_convergence().await
-    }
-
-    pub fn subscribe_workspace_convergence(
-        &self,
-    ) -> broadcast::Receiver<crate::facade::WorkspaceSnapshot> {
-        self.member_roster.subscribe_workspace_convergence()
     }
 
     pub async fn space_protection(
         &self,
     ) -> Result<crate::facade::SpaceProtectionView, RosterError> {
-        self.member_roster.query_space_protection().await
+        self.space.space_protection().await
     }
 
     pub async fn diagnostics_status(
@@ -822,12 +727,12 @@ impl AppFacade {
 
     /// 列出对外 peer 快照。外部调用只经过 `AppFacade`,不直接依赖 roster 子 facade。
     pub async fn list_peer_snapshots(&self) -> Result<Vec<PeerSnapshotView>, RosterError> {
-        self.member_roster.list_peer_snapshots().await
+        self.space.list_peer_snapshots().await
     }
 
     /// 订阅成员在线状态变化。外部拿到的是 application 事件,不暴露 core 事件类型。
     pub fn subscribe_peer_presence_events(&self) -> Result<AppPresenceSubscription, RosterError> {
-        let inner = self.member_roster.subscribe_presence_events();
+        let inner = self.space.subscribe_presence_events();
         Ok(AppPresenceSubscription { inner })
     }
 }
@@ -888,11 +793,6 @@ fn reachability_state_to_string(state: ReachabilityState) -> String {
 
 pub struct AppFacadeParts {
     pub space: Arc<SpaceFacade>,
-    pub space_session_activity: Arc<SpaceSessionActivity>,
-    pub lock_space_session: Arc<LockSpaceSessionUseCase>,
-    pub recover_space_session: Arc<RecoverSpaceSessionUseCase>,
-    pub member_roster: Arc<MemberRosterFacade>,
-    pub query_space_access_state: Arc<QuerySpaceAccessStateUseCase>,
     pub probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     pub resource: Arc<ResourceFacade>,
     pub clipboard_history: Arc<ClipboardHistoryFacade>,

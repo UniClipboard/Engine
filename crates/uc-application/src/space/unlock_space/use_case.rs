@@ -66,7 +66,7 @@ impl UnlockSpaceUseCase {
 
         match self.space_access.unlock(&space_id, &passphrase).await {
             Ok(_) => {
-                info!(%space_id, "space unlocked");
+                info!("space unlocked");
                 self.analytics.capture(Event::SpaceUnlocked);
                 Ok(space_id)
             }

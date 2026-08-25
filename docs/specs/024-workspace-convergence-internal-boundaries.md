@@ -1,10 +1,11 @@
 # 规格 024：成员收敛内部职责边界实施
 
 > 旧配对自动恢复部分已由 ADR-023 和规格 026 取代；`legacy_upgrade.rs` 及其运行期、端点和网络通道已经删除。
+> 本文的渐进整理顺序已由 ADR-025 和规格 027 取代，仅保留为历史实施记录。
 
 ## 状态
 
-- **状态**：已实施
+- **状态**：历史记录，已由规格 027 取代
 - **日期**：2026-08-17
 - **决策依据**：`docs/adr/021-workspace-convergence-internal-boundaries.md`
 - **相关文档**：`docs/adr/016-workspace-wide-convergence.md`、

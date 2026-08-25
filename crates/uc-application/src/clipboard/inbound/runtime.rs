@@ -10,7 +10,6 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::{ClipboardContentCategory, ClipboardContentCategorySet};
 use uc_core::ids::DeviceId;
-use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClipboardReceiverPort, ClockPort, ConnectionChannel, InboundClipboard,
@@ -28,6 +27,7 @@ use uc_observability_contract::FlowId;
 use crate::clipboard::sync::decode_v3_bytes_to_snapshot;
 use crate::clipboard::sync::receive_gate::MemberReceiveGate;
 use crate::clipboard::write::ClipboardWriteIntent;
+use crate::deps::CurrentSpaceMemberScopePort;
 
 use super::{InboundClipboardApplyInput, InboundClipboardApplyOutcome, InboundClipboardApplyPort};
 
@@ -61,8 +61,7 @@ pub trait ClipboardInboundEventPort: Send + Sync {
 pub struct ClipboardInboundRuntimeDeps {
     pub receiver: Arc<dyn ClipboardReceiverPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
-    /// Blocks content from peers that cannot participate in normal exchange.
-    pub content_gate: Arc<dyn ContentExchangeGatePort>,
+    pub member_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
     pub settings: Arc<dyn SettingsPort>,
     pub clock: Arc<dyn ClockPort>,
@@ -121,7 +120,7 @@ impl ClipboardInboundRuntime {
     pub fn start(deps: ClipboardInboundRuntimeDeps) -> Self {
         let mut receiver = deps.receiver.subscribe();
         let processor = InboundProcessor {
-            receive_gate: MemberReceiveGate::new(deps.member_repo, deps.content_gate),
+            receive_gate: MemberReceiveGate::new(deps.member_repo, deps.member_scope),
             settings: deps.settings,
             transfer_cipher: deps.transfer_cipher,
             clock: deps.clock,
@@ -174,7 +173,6 @@ impl InboundProcessor {
     #[instrument(
         skip_all,
         fields(
-            peer.device_id = %inbound.peer_device_id.as_str(),
             snapshot_hash = %inbound.header.snapshot_hash,
             flow.id = tracing::field::Empty,
             flow.kind = "clipboard_sync",
@@ -288,21 +286,17 @@ impl InboundProcessor {
             receipt.finish(InboundClipboardDisposition::Rejected);
             return None;
         }
-        if !self
-            .receive_gate
-            .is_receive_allowed(&inbound.peer_device_id)
-            .await
-        {
+        let Some(receive_permit) = self.receive_gate.authorize(&inbound.peer_device_id).await
+        else {
             receipt.finish(InboundClipboardDisposition::Rejected);
             return None;
-        }
+        };
         timing.receiver_policy_ms = duration_ms(receiver_policy_started_at.elapsed());
         let receiver_decrypt_started_at = Instant::now();
         let plaintext = match self.transfer_cipher.decrypt(&inbound.ciphertext).await {
             Ok(bytes) => Bytes::from(bytes),
             Err(_) => {
                 warn!(
-                    peer = %inbound.peer_device_id.as_str(),
                     snapshot_hash = %inbound.header.snapshot_hash,
                     error_kind = "inbound_clipboard_decrypt_failed",
                     "inbound clipboard decrypt failed"
@@ -317,7 +311,6 @@ impl InboundProcessor {
             Ok(snapshot) => ClipboardContentCategorySet::from_snapshot(&snapshot),
             Err(_) => {
                 warn!(
-                    peer = %inbound.peer_device_id.as_str(),
                     snapshot_hash = %inbound.header.snapshot_hash,
                     error_kind = "inbound_clipboard_classification_failed",
                     "inbound clipboard classification failed open"
@@ -330,8 +323,7 @@ impl InboundProcessor {
         let receiver_category_policy_started_at = Instant::now();
         if !self
             .receive_gate
-            .is_receive_category_allowed(&inbound.peer_device_id, &categories)
-            .await
+            .is_receive_category_allowed(&receive_permit, &categories)
         {
             receipt.finish(InboundClipboardDisposition::Rejected);
             return None;
@@ -521,7 +513,6 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     use uc_core::ids::{DeviceId, FormatId, RepresentationId};
-    use uc_core::membership::ContentExchangeGatePort;
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
     use uc_core::ports::{
         ClipboardHeader, ClipboardReceiverPort, ClockPort, ConnectionChannel, InboundClipboard,
@@ -535,6 +526,9 @@ mod tests {
 
     use super::*;
     use crate::clipboard::sync::encode_snapshot_to_v3_bytes;
+    use crate::deps::{
+        CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
+    };
     use crate::facade::{
         InboundClipboardApplyError, InboundClipboardApplyInput, InboundClipboardApplyOutcome,
         InboundClipboardApplyPort,
@@ -582,21 +576,40 @@ mod tests {
 
     struct AllowAllMembers;
 
-    struct AllowAllContent;
+    struct AllowAllScope;
 
     #[async_trait]
-    impl ContentExchangeGatePort for AllowAllContent {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            false
+    impl CurrentSpaceMemberScopePort for AllowAllScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Ok(CurrentSpaceMemberScope {
+                revision: 1,
+                local_member_active: true,
+                usable_peer_device_ids: [
+                    "peer-1",
+                    "peer-relay",
+                    "peer-disabled",
+                    "peer-unavailable",
+                    "peer-text-disabled",
+                ]
+                .into_iter()
+                .map(DeviceId::new)
+                .collect(),
+                paused_peer_devices: Vec::new(),
+            })
         }
     }
 
-    struct BlockedUpgradePeer;
+    struct BlockedScope;
 
     #[async_trait]
-    impl ContentExchangeGatePort for BlockedUpgradePeer {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            true
+    impl CurrentSpaceMemberScopePort for BlockedScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Ok(CurrentSpaceMemberScope {
+                revision: 1,
+                local_member_active: true,
+                usable_peer_device_ids: Vec::new(),
+                paused_peer_devices: Vec::new(),
+            })
         }
     }
 
@@ -896,7 +909,7 @@ mod tests {
         ClipboardInboundRuntimeDeps {
             receiver,
             member_repo: Arc::new(AllowAllMembers),
-            content_gate: Arc::new(AllowAllContent),
+            member_scope: Arc::new(AllowAllScope),
             transfer_cipher: Arc::new(EchoCipher),
             settings: Arc::new(FixedSettings { sync_enabled: true }),
             clock: Arc::new(FixedClock),
@@ -915,7 +928,7 @@ mod tests {
         ClipboardInboundRuntimeDeps {
             receiver,
             member_repo,
-            content_gate: Arc::new(AllowAllContent),
+            member_scope: Arc::new(AllowAllScope),
             transfer_cipher,
             settings: Arc::new(FixedSettings { sync_enabled: true }),
             clock: Arc::new(FixedClock),
@@ -924,16 +937,16 @@ mod tests {
         }
     }
 
-    fn deps_with_content_gate(
+    fn deps_with_member_scope(
         receiver: Arc<FakeReceiver>,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
+        member_scope: Arc<dyn CurrentSpaceMemberScopePort>,
         apply: Arc<dyn InboundClipboardApplyPort>,
         events: Arc<dyn ClipboardInboundEventPort>,
     ) -> ClipboardInboundRuntimeDeps {
         ClipboardInboundRuntimeDeps {
             receiver,
             member_repo: Arc::new(AllowAllMembers),
-            content_gate,
+            member_scope,
             transfer_cipher: Arc::new(NeverCipher),
             settings: Arc::new(FixedSettings { sync_enabled: true }),
             clock: Arc::new(FixedClock),
@@ -1235,9 +1248,9 @@ mod tests {
     #[tokio::test]
     async fn upgrade_required_peer_is_rejected_before_decrypt_or_apply() {
         let receiver = Arc::new(FakeReceiver::new());
-        let runtime = ClipboardInboundRuntime::start(deps_with_content_gate(
+        let runtime = ClipboardInboundRuntime::start(deps_with_member_scope(
             Arc::clone(&receiver),
-            Arc::new(BlockedUpgradePeer),
+            Arc::new(BlockedScope),
             Arc::new(NeverApply),
             Arc::new(RecordingEvents::default()),
         ));

@@ -45,15 +45,16 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
-use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::clipboard::{ActiveClipboardDispatchPort, LoadActiveClipboardPort};
 use uc_core::ports::presence::{PresenceEvent, ReachabilityState};
-use uc_core::ports::PresencePort;
+use uc_core::ports::PeerReachabilityPort;
 use uc_core::MemberRepositoryPort;
+
+use crate::deps::CurrentSpaceMemberScopePort;
 
 use super::super::send_gate::MemberSendGate;
 use super::super::snapshot_from_entry::SnapshotReconstructor;
-use super::fanout::send_active_state_to;
+use super::fanout::send_active_state_to_with_scope;
 
 /// Debounce window for coalescing a burst of peer-online transitions into one
 /// resync per device (D7). Distinct from the restore broadcast's 300ms window:
@@ -63,31 +64,30 @@ const PEER_ONLINE_RESYNC_DEBOUNCE: Duration = Duration::from_millis(1_500);
 
 /// Dependencies for the peer-online resync worker.
 pub(crate) struct PeerOnlineResyncWorker {
-    presence: Arc<dyn PresencePort>,
+    presence: Arc<dyn PeerReachabilityPort>,
     load_register: Arc<dyn LoadActiveClipboardPort>,
     reconstructor: SnapshotReconstructor,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
-    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+    peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     send_gate: MemberSendGate,
 }
 
 impl PeerOnlineResyncWorker {
     pub(crate) fn new(
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
         load_register: Arc<dyn LoadActiveClipboardPort>,
         reconstructor: SnapshotReconstructor,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
-        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+        peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Self {
         Self {
             presence,
             load_register,
             reconstructor,
             dispatch,
-            peer_scope,
-            send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
+            peer_scope: Arc::clone(&peer_scope),
+            send_gate: MemberSendGate::new(member_repo),
         }
     }
 
@@ -201,27 +201,23 @@ impl PeerOnlineResyncWorker {
             }
         };
 
+        let scope = match self.peer_scope.snapshot().await {
+            Ok(scope) => scope,
+            Err(_) => return,
+        };
         for target in targets {
-            let is_current = self
-                .peer_scope
-                .snapshot()
-                .await
-                .map(|scope| scope.peer_device_ids.contains(&target))
-                .unwrap_or(false);
-            if !is_current {
-                continue;
-            }
             // Never resend the state to the device that activated it: it is
             // already the source of truth for this activation.
             if target == state.activated_by {
                 continue;
             }
-            send_active_state_to(
+            send_active_state_to_with_scope(
                 &self.dispatch,
                 &self.send_gate,
                 &target,
                 &state,
                 &categories,
+                &scope,
             )
             .await;
         }
@@ -237,6 +233,9 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
 
+    use crate::deps::{
+        CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
+    };
     use uc_core::blob::ports::BlobReaderPort;
     use uc_core::clipboard::{
         ActiveClipboardState, ClipboardEntry, ClipboardRepositoryError, ClipboardSelection,
@@ -244,7 +243,6 @@ mod tests {
         PersistedClipboardRepresentation, SelectionPolicyVersion,
     };
     use uc_core::ids::{DeviceId, EntryId, EventId, FormatId, RepresentationId};
-    use uc_core::membership::ContentExchangeGatePort;
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::clipboard::{
         ActiveClipboardDispatchError, ActiveClipboardRegisterError, ClipboardPayloadResolverPort,
@@ -268,7 +266,7 @@ mod tests {
         }
     }
     #[async_trait]
-    impl PresencePort for FakePresence {
+    impl PeerReachabilityPort for FakePresence {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
@@ -352,21 +350,17 @@ mod tests {
         }
     }
 
-    struct BlockedUpgradePeer;
+    struct BlockedPeerScope;
 
     #[async_trait]
-    impl ContentExchangeGatePort for BlockedUpgradePeer {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            true
-        }
-    }
-
-    struct AllowAllContent;
-
-    #[async_trait]
-    impl ContentExchangeGatePort for AllowAllContent {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            false
+    impl CurrentSpaceMemberScopePort for BlockedPeerScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Ok(CurrentSpaceMemberScope {
+                revision: 1,
+                local_member_active: true,
+                usable_peer_device_ids: Vec::new(),
+                paused_peer_devices: Vec::new(),
+            })
         }
     }
 
@@ -510,7 +504,6 @@ mod tests {
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
             Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             Arc::new(AllowAllMembers),
-            Arc::new(AllowAllContent),
         );
         (worker, presence_tx, dispatch)
     }
@@ -562,9 +555,8 @@ mod tests {
             Arc::new(FixedRegister(Some(state("blake3v1:aa", "self")))),
             reconstructor(),
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
-            Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
+            Arc::new(BlockedPeerScope),
             Arc::new(AllowAllMembers),
-            Arc::new(BlockedUpgradePeer),
         );
         let handle = worker.spawn();
         tokio::task::yield_now().await;

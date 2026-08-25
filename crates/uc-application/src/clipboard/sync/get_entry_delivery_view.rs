@@ -14,7 +14,6 @@ use uc_core::clipboard::{
     DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus as DomainDeliveryStatus,
 };
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::CurrentWorkspacePeerScopePort;
 use uc_core::mobile_sync::MobileDeviceId;
 use uc_core::ports::clipboard::GetClipboardEntryPort;
 use uc_core::ports::{
@@ -23,6 +22,8 @@ use uc_core::ports::{
 };
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uc_core::MemberRepositoryPort;
+
+use crate::deps::CurrentSpaceMemberScopePort;
 
 /// 视图模型:某条 entry 的"来源 + 对每个当前可信对端的同步状态"完整快照。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +95,7 @@ pub(crate) struct GetEntryDeliveryViewUseCase {
     entry_repo: Arc<dyn GetClipboardEntryPort>,
     event_repo: Arc<dyn ClipboardEventRepositoryPort>,
     trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
-    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+    peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     member_repo: Arc<dyn MemberRepositoryPort>,
@@ -106,7 +107,7 @@ impl GetEntryDeliveryViewUseCase {
         entry_repo: Arc<dyn GetClipboardEntryPort>,
         event_repo: Arc<dyn ClipboardEventRepositoryPort>,
         trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
-        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+        peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
@@ -141,7 +142,7 @@ impl GetEntryDeliveryViewUseCase {
             .snapshot()
             .await
             .map_err(|e| GetEntryDeliveryViewError::Storage(format!("current peer scope: {e:?}")))?
-            .peer_device_ids
+            .usable_peer_device_ids
             .into_iter()
             .collect();
 
@@ -289,7 +290,6 @@ impl GetEntryDeliveryViewUseCase {
             Err(err) => {
                 tracing::warn!(
                     error = %err,
-                    mobile_device_id = %mobile_id,
                     "delivery view: mobile_device_repo lookup failed; falling back to id-only name",
                 );
                 None
@@ -314,15 +314,12 @@ fn map_status(status: &DomainDeliveryStatus) -> EntryDeliveryStatusView {
 mod tests {
     use super::*;
 
+    use crate::deps::{CurrentSpaceMemberScope, CurrentSpaceMemberScopeError};
     use async_trait::async_trait;
     use chrono::Utc;
     use std::sync::Mutex;
     use uc_core::clipboard::ClipboardEntry;
     use uc_core::ids::EventId;
-    use uc_core::membership::{
-        CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
-        CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot,
-    };
     use uc_core::mobile_sync::{MobileClientType, MobileDevice, MobileDeviceError};
     use uc_core::security::IdentityFingerprint;
     use uc_core::trusted_peer::{TrustedPeer, TrustedPeerError};
@@ -492,15 +489,13 @@ mod tests {
     struct FixedPeerScope(Vec<DeviceId>);
 
     #[async_trait]
-    impl CurrentWorkspacePeerScopePort for FixedPeerScope {
-        async fn snapshot(
-            &self,
-        ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
-            Ok(CurrentWorkspacePeerSnapshot {
+    impl CurrentSpaceMemberScopePort for FixedPeerScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Ok(CurrentSpaceMemberScope {
                 revision: 1,
-                source: CurrentWorkspacePeerScopeSource::CurrentHistory,
-                local_membership: CurrentWorkspaceLocalMembership::Active,
-                peer_device_ids: self.0.clone(),
+                local_member_active: true,
+                usable_peer_device_ids: self.0.clone(),
+                paused_peer_devices: Vec::new(),
             })
         }
     }
@@ -508,11 +503,9 @@ mod tests {
     struct FailingPeerScope;
 
     #[async_trait]
-    impl CurrentWorkspacePeerScopePort for FailingPeerScope {
-        async fn snapshot(
-            &self,
-        ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
-            Err(CurrentWorkspacePeerScopeError::Unavailable)
+    impl CurrentSpaceMemberScopePort for FailingPeerScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Err(CurrentSpaceMemberScopeError::Unavailable)
         }
     }
 
@@ -687,7 +680,7 @@ mod tests {
         delivery_repo: Arc<FakeDeliveryRepo>,
         member_repo: Arc<FakeMemberRepo>,
         mobile_device_repo: Arc<dyn FindMobileDeviceByIdPort>,
-        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+        peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     ) -> GetEntryDeliveryViewUseCase {
         GetEntryDeliveryViewUseCase::new(
             entry_repo,

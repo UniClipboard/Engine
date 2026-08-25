@@ -3,24 +3,24 @@ use std::sync::Arc;
 use uc_core::ports::space::SpaceAccessError;
 
 use crate::space::current_space::CurrentSpaceIdentityPort;
-use crate::space::session::{ResumeSpaceSessionPort, SpaceSessionActivity};
+use crate::space::session::{ResumeSpaceSessionPort, SpaceSessionActivityPort};
 use crate::space::unlock_space::PostSessionReadiness;
 
 use super::{RecoverSpaceSessionError, RecoverSpaceSessionResult};
 
-pub struct RecoverSpaceSessionUseCase {
+pub(crate) struct RecoverSpaceSessionUseCase {
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     resume_session: Arc<dyn ResumeSpaceSessionPort>,
     readiness: Arc<PostSessionReadiness>,
-    activity: Arc<SpaceSessionActivity>,
+    activity: Arc<dyn SpaceSessionActivityPort>,
 }
 
 impl RecoverSpaceSessionUseCase {
-    pub fn new(
+    pub(crate) fn new(
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
         resume_session: Arc<dyn ResumeSpaceSessionPort>,
         readiness: Arc<PostSessionReadiness>,
-        activity: Arc<SpaceSessionActivity>,
+        activity: Arc<dyn SpaceSessionActivityPort>,
     ) -> Self {
         Self {
             current_space_identity,
@@ -30,7 +30,9 @@ impl RecoverSpaceSessionUseCase {
         }
     }
 
-    pub async fn execute(&self) -> Result<RecoverSpaceSessionResult, RecoverSpaceSessionError> {
+    pub(crate) async fn execute(
+        &self,
+    ) -> Result<RecoverSpaceSessionResult, RecoverSpaceSessionError> {
         let Some(space_id) = self
             .current_space_identity
             .current_space_id()

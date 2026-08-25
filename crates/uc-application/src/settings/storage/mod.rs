@@ -102,14 +102,12 @@ impl StorageFacade {
                 if entry.is_dir {
                     if let Err(err) = deps.cache_fs.remove_dir_all(&entry.path).await {
                         tracing::warn!(
-                            path = %entry.path.display(),
                             error = %err,
                             "storage facade: failed to remove cache subdirectory"
                         );
                     }
                 } else if let Err(err) = deps.cache_fs.remove_file(&entry.path).await {
                     tracing::warn!(
-                        path = %entry.path.display(),
                         error = %err,
                         "storage facade: failed to remove cache file"
                     );

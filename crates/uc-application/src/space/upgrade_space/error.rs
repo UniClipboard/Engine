@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::space::rebuild_space::RebuildSpaceError;
 
-use super::ports::EngineVersionStateError;
+use uc_core::ports::EngineVersionStateError;
 
 #[derive(Debug, Error)]
 pub(crate) enum UpgradeSpaceError {

@@ -1,29 +1,24 @@
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 use uc_core::membership::{
     MemberRepositoryPort, RelationshipStateResetPort, SpaceSecurityStateResetPort,
 };
-use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
 use uc_core::ports::pairing_invitation::{
     PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
 };
-use uc_core::ports::space::ProofPort;
 use uc_core::ports::{
-    ClockPort, DeviceIdentityPort, LocalIdentityPort, PeerAddressRepositoryPort, PresencePort,
-    SettingsPort,
+    ClockPort, DeviceIdentityPort, LocalIdentityPort, PeerReachabilityPort, SettingsPort,
 };
-use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard::write::MobileConsumableBackfill;
-use crate::deps::{
-    AdmissionAttemptRepositoryPort, AdmissionSpaceTransitionPort, DeviceManagementResetDataPort,
-};
+use crate::deps::DeviceManagementResetDataPort;
 use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
 };
-use crate::space::assembly::SpaceModules;
+use crate::space::application::SpaceApplicationDeps;
 
 pub struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
@@ -32,6 +27,7 @@ pub struct SpaceSessionDeps {
     pub current_engine_version: String,
     pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     pub initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
+    pub activity: Arc<dyn crate::space::session::SpaceSessionActivityPort>,
 }
 
 pub struct SpaceAdmissionDeps {
@@ -43,21 +39,12 @@ pub struct SpaceAdmissionDeps {
     pub pairing_invitation: Arc<dyn PairingInvitationPort>,
     pub pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
     pub pairing_invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
-    pub pairing_session: Arc<dyn PairingSessionPort>,
-    pub pairing_events: Arc<dyn PairingEventPort>,
-    pub proof_port: Arc<dyn ProofPort>,
-    pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
-    pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-    pub presence: Arc<dyn PresencePort>,
+    pub presence: Arc<dyn PeerReachabilityPort>,
     pub analytics: Arc<dyn AnalyticsFacade>,
-    /// The assembled space convergence owners behind the admission seam.
-    /// Always present: the assembly layer guarantees the owner exists.
-    pub convergence: Arc<SpaceModules>,
+    pub connection_channel: Option<Arc<dyn uc_core::ports::ConnectionChannelPort>>,
 }
 
 pub struct SpaceTransitionDeps {
-    pub admission_attempts: Arc<dyn AdmissionAttemptRepositoryPort>,
-    pub admission_space_transition: Arc<dyn AdmissionSpaceTransitionPort>,
     pub device_management_reset_data: Arc<dyn DeviceManagementResetDataPort>,
     pub relationship_reset: Arc<dyn RelationshipStateResetPort>,
     pub space_security_reset: Arc<dyn SpaceSecurityStateResetPort>,
@@ -69,4 +56,6 @@ pub struct SpaceFacadeDeps {
     pub session: SpaceSessionDeps,
     pub admission: SpaceAdmissionDeps,
     pub transition: SpaceTransitionDeps,
+    pub application: SpaceApplicationDeps,
+    pub membership_presence_events: broadcast::Receiver<uc_core::ports::PresenceEvent>,
 }

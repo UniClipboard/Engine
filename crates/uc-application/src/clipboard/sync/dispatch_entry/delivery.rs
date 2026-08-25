@@ -60,7 +60,7 @@ pub(crate) fn classify_dispatch_result(
 ) -> ProcessedDispatchResult {
     match joined {
         Ok((device_id, Ok(DispatchAck::Accepted))) => {
-            debug!(device_id = %device_id.as_str(), "dispatch → Accepted");
+            debug!("dispatch accepted");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
                 target_device_id: device_id,
@@ -78,7 +78,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Ok(DispatchAck::DuplicateIgnored))) => {
-            debug!(device_id = %device_id.as_str(), "dispatch → DuplicateIgnored");
+            debug!("dispatch duplicate ignored");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
                 target_device_id: device_id,
@@ -96,7 +96,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Err(ClipboardDispatchError::Offline))) => {
-            debug!(device_id = %device_id.as_str(), "dispatch → Offline (unreachable)");
+            debug!("dispatch deferred because peer is offline");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
                 target_device_id: device_id,
@@ -114,7 +114,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Err(err))) => {
-            warn!(device_id = %device_id.as_str(), error = %err, "dispatch failed");
+            warn!(error = %err, "dispatch failed");
             let (failure_reason, reason_detail) = match &err {
                 // Offline is handled in the previous arm (Unreachable); this
                 // arm only fires for the non-Offline error variants.
@@ -193,7 +193,6 @@ impl DeliveryRecorder {
                 warn!(
                     error = %err,
                     entry_id = %record.entry_id,
-                    target_device_id = %record.target_device_id,
                     "failed to record entry delivery"
                 );
                 continue;

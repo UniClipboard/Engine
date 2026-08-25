@@ -5,13 +5,13 @@ use crate::space::session::IsSpaceUnlockedPort;
 
 use super::{QuerySpaceAccessStateError, SpaceAccessState};
 
-pub struct QuerySpaceAccessStateUseCase {
+pub(crate) struct QuerySpaceAccessStateUseCase {
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     is_unlocked: Arc<dyn IsSpaceUnlockedPort>,
 }
 
 impl QuerySpaceAccessStateUseCase {
-    pub fn new(
+    pub(crate) fn new(
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
         is_unlocked: Arc<dyn IsSpaceUnlockedPort>,
     ) -> Self {
@@ -21,7 +21,7 @@ impl QuerySpaceAccessStateUseCase {
         }
     }
 
-    pub async fn execute(&self) -> Result<SpaceAccessState, QuerySpaceAccessStateError> {
+    pub(crate) async fn execute(&self) -> Result<SpaceAccessState, QuerySpaceAccessStateError> {
         let Some(space_id) = self.current_space_identity.current_space_id().await? else {
             return Ok(SpaceAccessState {
                 initialized: false,

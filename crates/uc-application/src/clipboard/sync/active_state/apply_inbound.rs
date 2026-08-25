@@ -38,13 +38,14 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId, SpaceId};
-use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::clipboard::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientError, ActiveClipboardPullClientPort,
     ActiveClipboardReceiverPort, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
     FindEntryIdBySnapshotHashPort, InboundActiveClipboardState, LoadActiveClipboardPort,
 };
-use uc_core::ports::{ClockPort, PeerAddressRepositoryPort, PresencePort};
+use uc_core::ports::{ClockPort, PeerAddressRepositoryPort, PeerReachabilityPort};
+
+use crate::deps::CurrentSpaceMemberScopePort;
 use uc_core::MemberRepositoryPort;
 
 use crate::clipboard::write::{
@@ -52,7 +53,7 @@ use crate::clipboard::write::{
 };
 use crate::space::session::IsSpaceUnlockedPort;
 
-use super::super::receive_gate::MemberReceiveGate;
+use super::super::receive_gate::{MemberReceiveGate, MemberReceivePermit};
 use super::super::send_gate::MemberSendGate;
 use super::super::snapshot_from_entry::SnapshotReconstructor;
 use super::fanout::fan_out_active_state;
@@ -113,6 +114,7 @@ pub(crate) trait InboundPulledContentStore: Send + Sync {
         from_device: &DeviceId,
         snapshot_hash: &str,
         transfer_envelope: Vec<u8>,
+        receive_permit: &MemberReceivePermit,
     ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError>;
 }
 
@@ -128,10 +130,10 @@ pub(crate) struct ApplyInboundActiveClipboardStateUseCase {
     coordinator: Arc<ClipboardWriteCoordinator>,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-    peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+    peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     /// Reachability tracker: the re-broadcast fan-out skips peers already known
     /// offline rather than burning a dial timeout per stale/ghost roster entry.
-    presence: Arc<dyn PresencePort>,
+    presence: Arc<dyn PeerReachabilityPort>,
     send_gate: MemberSendGate,
     clock: Arc<dyn ClockPort>,
     mobile_consumability: MobileConsumabilityProbe,
@@ -161,14 +163,13 @@ impl ApplyInboundActiveClipboardStateUseCase {
         load_register: Arc<dyn LoadActiveClipboardPort>,
         advance_register: Arc<dyn AdvanceActiveClipboardPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
         entry_lookup: Arc<dyn FindEntryIdBySnapshotHashPort>,
         reconstructor: SnapshotReconstructor,
         coordinator: Arc<ClipboardWriteCoordinator>,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-        presence: Arc<dyn PresencePort>,
+        peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
         clock: Arc<dyn ClockPort>,
         mobile_consumability: MobileConsumabilityProbe,
         converged_tx: broadcast::Sender<ActiveClipboardConvergedEvent>,
@@ -178,18 +179,15 @@ impl ApplyInboundActiveClipboardStateUseCase {
             is_unlocked,
             load_register,
             advance_register,
-            receive_gate: MemberReceiveGate::new(
-                Arc::clone(&member_repo),
-                Arc::clone(&content_gate),
-            ),
+            receive_gate: MemberReceiveGate::new(Arc::clone(&member_repo), Arc::clone(&peer_scope)),
             entry_lookup,
             reconstructor,
             coordinator,
             dispatch,
             peer_addr_repo,
-            peer_scope,
+            peer_scope: Arc::clone(&peer_scope),
             presence,
-            send_gate: MemberSendGate::new_with_content_gate(member_repo, content_gate),
+            send_gate: MemberSendGate::new(member_repo),
             clock,
             mobile_consumability,
             pull_client: None,
@@ -264,7 +262,6 @@ impl ApplyInboundActiveClipboardStateUseCase {
         name = "active_state.apply_inbound",
         skip_all,
         fields(
-            peer.device_id = %inbound.peer_device_id.as_str(),
             snapshot_hash = %inbound.snapshot_hash,
             activated_at_ms = inbound.activated_at_ms,
         ),
@@ -292,7 +289,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
             .peer_scope
             .snapshot()
             .await
-            .map(|scope| scope.peer_device_ids.contains(&peer))
+            .map(|scope| scope.usable_peer_device_ids.contains(&peer))
             .unwrap_or(false);
         if !peer_is_current {
             debug!("active state inbound dropped: source is outside current peer scope");
@@ -336,9 +333,9 @@ impl ApplyInboundActiveClipboardStateUseCase {
         //    peer writes nothing here: no OS write, no register advance (so a
         //    rejected item can't suppress later legit ones via its ts), no
         //    re-broadcast (loop-safe).
-        if !self.receive_gate.is_receive_allowed(&peer).await {
+        let Some(receive_permit) = self.receive_gate.authorize(&peer).await else {
             return;
-        }
+        };
 
         // 5. Resolve the content locally by `snapshot_hash` (never by the
         //    sender's per-device entry_id). A hash match counts as "held" only
@@ -358,7 +355,10 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 //    the entry and falls through to the same convergence tail.
                 //    Any pull/store failure leaves the register untouched (no
                 //    advance, no re-broadcast, no retry).
-                match self.pull_and_store(&peer, &incoming.snapshot_hash).await {
+                match self
+                    .pull_and_store(&peer, &incoming.snapshot_hash, &receive_permit)
+                    .await
+                {
                     Some(id) => id,
                     None => return,
                 }
@@ -369,7 +369,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
             }
         };
 
-        self.converge_with_entry(&peer, &incoming, local_entry_id)
+        self.converge_with_entry(&peer, &incoming, local_entry_id, &receive_permit)
             .await;
     }
 
@@ -402,7 +402,12 @@ impl ApplyInboundActiveClipboardStateUseCase {
     /// without the content, decrypt / store failure) — the caller must then
     /// leave the register untouched (no advance, no re-broadcast, no retry,
     /// per D6).
-    async fn pull_and_store(&self, peer: &DeviceId, snapshot_hash: &str) -> Option<EntryId> {
+    async fn pull_and_store(
+        &self,
+        peer: &DeviceId,
+        snapshot_hash: &str,
+        receive_permit: &MemberReceivePermit,
+    ) -> Option<EntryId> {
         let (Some(pull_client), Some(store)) = (
             self.pull_client.as_ref(),
             self.pulled_content_store.as_ref(),
@@ -433,13 +438,16 @@ impl ApplyInboundActiveClipboardStateUseCase {
 
         // Decrypt + validate receive policy + persist. A store failure or a
         // policy rejection leaves the register untouched.
-        match store.store(peer, snapshot_hash, envelope).await {
+        match store
+            .store(peer, snapshot_hash, envelope, receive_permit)
+            .await
+        {
             Ok(InboundPulledContentStoreOutcome::Stored(entry_id)) => {
                 info!(entry_id = %entry_id, "active state inbound: pulled content stored");
                 Some(entry_id)
             }
             Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy) => {
-                info!(peer = %peer, "active state inbound: pulled content rejected by receive policy");
+                info!("active state inbound: pulled content rejected by receive policy");
                 None
             }
             Err(err) => {
@@ -456,9 +464,10 @@ impl ApplyInboundActiveClipboardStateUseCase {
     /// converge identically.
     async fn converge_with_entry(
         &self,
-        peer: &DeviceId,
+        _peer: &DeviceId,
         incoming: &ActiveClipboardState,
         local_entry_id: EntryId,
+        receive_permit: &MemberReceivePermit,
     ) {
         // Reconstruct the snapshot for the resolved entry. A reconstruction
         // failure (payload lost / locked / blob unavailable) means we cannot
@@ -476,8 +485,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
         if !self
             .receive_gate
-            .is_receive_category_allowed(peer, &categories)
-            .await
+            .is_receive_category_allowed(receive_permit, &categories)
         {
             return;
         }
@@ -618,8 +626,8 @@ mod tests {
         ResolvedClipboardPayload, UpdateRepresentationProcessingResultPort,
     };
     use uc_core::ports::{
-        ClipboardSelectionRepositoryPort, PeerAddressError, PeerAddressRecord, PresenceError,
-        PresenceEvent, PresencePort, ReachabilityState, SystemClipboardPort,
+        ClipboardSelectionRepositoryPort, PeerAddressError, PeerAddressRecord,
+        PeerReachabilityPort, PresenceError, PresenceEvent, ReachabilityState, SystemClipboardPort,
     };
     use uc_core::{BlobId, MemberSyncPreferences};
 
@@ -629,7 +637,7 @@ mod tests {
     /// natural default; a test can pass `Offline` to exercise the skip.
     struct StaticPresence(ReachabilityState);
     #[async_trait]
-    impl PresencePort for StaticPresence {
+    impl PeerReachabilityPort for StaticPresence {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
@@ -751,21 +759,20 @@ mod tests {
         }
     }
 
-    struct AllowAllContent;
+    struct BlockedScope;
 
     #[async_trait]
-    impl ContentExchangeGatePort for AllowAllContent {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            false
-        }
-    }
-
-    struct BlockedContent;
-
-    #[async_trait]
-    impl ContentExchangeGatePort for BlockedContent {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            true
+    impl CurrentSpaceMemberScopePort for BlockedScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<crate::deps::CurrentSpaceMemberScope, crate::deps::CurrentSpaceMemberScopeError>
+        {
+            Ok(crate::deps::CurrentSpaceMemberScope {
+                revision: 1,
+                local_member_active: true,
+                usable_peer_device_ids: Vec::new(),
+                paused_peer_devices: Vec::new(),
+            })
         }
     }
 
@@ -910,21 +917,21 @@ mod tests {
         receive_enabled: bool,
         now_ms: i64,
     ) -> Harness {
-        harness_with_content_gate(
+        harness_with_scope(
             unlocked,
             register,
             receive_enabled,
             now_ms,
-            Arc::new(AllowAllContent),
+            Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
         )
     }
 
-    fn harness_with_content_gate(
+    fn harness_with_scope(
         unlocked: bool,
         register: Option<ActiveClipboardState>,
         receive_enabled: bool,
         now_ms: i64,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
+        member_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     ) -> Harness {
         let advance = Arc::new(AdvanceSpy::default());
         let dispatch = Arc::new(DispatchSpy::default());
@@ -947,13 +954,12 @@ mod tests {
             Arc::new(FixedRegister(register)),
             Arc::clone(&advance) as Arc<dyn AdvanceActiveClipboardPort>,
             Arc::new(MemberRepoStub { receive_enabled }),
-            content_gate,
             Arc::new(EntryLookupNeverCalled),
             reconstructor,
             coordinator,
             Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
             Arc::new(EmptyPeerAddrRepo),
-            Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
+            member_scope,
             Arc::new(StaticPresence(ReachabilityState::Online)),
             Arc::new(FixedClock(now_ms)),
             MobileConsumabilityProbe::new(Arc::new(crate::test_support::FixedFileSets::empty())),
@@ -1043,7 +1049,7 @@ mod tests {
 
     #[tokio::test]
     async fn upgrade_required_peer_is_dropped_before_current_clipboard_is_read() {
-        let h = harness_with_content_gate(true, None, true, 1_000, Arc::new(BlockedContent));
+        let h = harness_with_scope(true, None, true, 1_000, Arc::new(BlockedScope));
         h.uc.handle_one(inbound("blake3v1:aa", 1_000, "dev-x"))
             .await;
         assert_inert(&h);
@@ -1110,6 +1116,7 @@ mod tests {
             _from_device: &DeviceId,
             _snapshot_hash: &str,
             transfer_envelope: Vec<u8>,
+            _receive_permit: &MemberReceivePermit,
         ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
             *self.seen_envelope.lock().unwrap() = Some(transfer_envelope);
             Ok(InboundPulledContentStoreOutcome::Stored(
@@ -1127,6 +1134,7 @@ mod tests {
             _from_device: &DeviceId,
             _snapshot_hash: &str,
             _transfer_envelope: Vec<u8>,
+            _receive_permit: &MemberReceivePermit,
         ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
             panic!("store reached after a pull failure");
         }
@@ -1140,6 +1148,7 @@ mod tests {
             _from_device: &DeviceId,
             _snapshot_hash: &str,
             _transfer_envelope: Vec<u8>,
+            _receive_permit: &MemberReceivePermit,
         ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
             Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy)
         }
@@ -1326,7 +1335,6 @@ mod tests {
             Arc::new(MemberRepoStub {
                 receive_enabled: true,
             }),
-            Arc::new(AllowAllContent),
             Arc::new(EntryLookupAlwaysMissing),
             reconstructor,
             coordinator,

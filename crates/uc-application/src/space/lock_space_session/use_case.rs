@@ -1,21 +1,21 @@
 use std::sync::Arc;
 
 use crate::space::current_space::CurrentSpaceIdentityPort;
-use crate::space::session::SpaceSessionActivity;
+use crate::space::session::SpaceSessionActivityPort;
 
 use super::{LockSpacePort, LockSpaceSessionError};
 
-pub struct LockSpaceSessionUseCase {
+pub(crate) struct LockSpaceSessionUseCase {
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     lock: Arc<dyn LockSpacePort>,
-    activity: Arc<SpaceSessionActivity>,
+    activity: Arc<dyn SpaceSessionActivityPort>,
 }
 
 impl LockSpaceSessionUseCase {
-    pub fn new(
+    pub(crate) fn new(
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
         lock: Arc<dyn LockSpacePort>,
-        activity: Arc<SpaceSessionActivity>,
+        activity: Arc<dyn SpaceSessionActivityPort>,
     ) -> Self {
         Self {
             current_space_identity,
@@ -24,7 +24,7 @@ impl LockSpaceSessionUseCase {
         }
     }
 
-    pub async fn execute(&self) -> Result<(), LockSpaceSessionError> {
+    pub(crate) async fn execute(&self) -> Result<(), LockSpaceSessionError> {
         let space_id = self
             .current_space_identity
             .current_space_id()

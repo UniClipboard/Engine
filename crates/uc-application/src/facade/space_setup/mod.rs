@@ -27,23 +27,10 @@ pub use crate::space::query_space_setup_state::{
 pub use crate::space::reset_space::ResetSpaceError;
 pub use crate::space::unlock_space::UnlockSpaceError;
 pub use commands::{
-    InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationResult,
-    RedeemPairingInvitationInput, RedeemPairingInvitationResult, UnlockSpaceInput,
+    InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationResult, UnlockSpaceInput,
     UnlockSpaceResult,
 };
 pub use deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps};
 pub use errors::{IssuePairingInvitationError, RedeemPairingInvitationError};
 pub use facade::SpaceFacade;
 pub use uc_observability_contract::analytics::PairingFailureReason;
-
-pub(crate) const LEGACY_SPACE_ID: &str = "space";
-
-pub(crate) fn legacy_space_id() -> uc_core::ids::SpaceId {
-    uc_core::ids::SpaceId::from(LEGACY_SPACE_ID)
-}
-
-// T10:CLI `members` 入口需要 report / error 类型才能展示 probe 摘要;
-// usecase 本身保持 `pub(crate)`(§11.4),此处只透出两个值对象。
-pub use crate::space::connectivity::reachability::{
-    EnsureReachableAllError, EnsureReachableAllReport,
-};

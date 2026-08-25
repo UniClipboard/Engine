@@ -29,7 +29,7 @@ pub use commands::{
     RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use errors::RosterError;
-pub use facade::{MemberRosterDeps, MemberRosterFacade};
+pub(crate) use facade::{MemberRosterDeps, MemberRosterFacade};
 pub use uc_core::ports::{ConnectionChannel, PresenceEvent};
 
 /// Phase 96 INDIC-01:`ConnectionChannel` 4 态映射到稳定 wire 字符串。

@@ -9,15 +9,14 @@ use bytes::Bytes;
 use tracing::instrument;
 
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::{ContentExchangeGatePort, CurrentWorkspacePeerScopePort};
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     CancelDirectoryAttemptTransfersPort, CleanupDirectoryStagingPort, ClipboardDispatchPort,
     ClipboardHeader, ClockPort, CommitInboundReceivePort, DeviceIdentityPort, DispatchAck,
     EntryDeliveryRepositoryPort, FindMobileDeviceByIdPort, FirstSyncStatePort,
     GetDirectoryPublishRecordPort, GetEntryAttemptPort, GetEntryReceiveProgressPort,
-    ListNonTerminalAttemptsPort, LocalIdentityPort, PeerAddressRepositoryPort, PresencePort,
-    RequestReceiveCancellationPort, SettingsPort,
+    ListNonTerminalAttemptsPort, LocalIdentityPort, PeerAddressRepositoryPort,
+    PeerReachabilityPort, RequestReceiveCancellationPort, SettingsPort,
 };
 use uc_core::MemberRepositoryPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
@@ -34,6 +33,7 @@ use crate::clipboard::sync::{
     encode_snapshot_to_v3_bytes, DispatchClipboardEntryInput, DispatchClipboardEntryUseCase,
     DispatchOutcome, DispatchPerTarget, DispatchSyncError,
 };
+use crate::deps::CurrentSpaceMemberScopePort;
 use crate::facade::blob_transfer::{BlobTransferFacade, SharedHostEventEmitter};
 use crate::facade::clipboard::cancel_entry_receive::{
     CancelEntryReceiveError, CancelEntryReceiveOutcome, CancelEntryReceiveUseCase,
@@ -48,10 +48,8 @@ use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 pub struct ClipboardSyncDeps {
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
-    /// 已保存成员移除意图对发送路径的硬限制。
-    pub removal_gate: Arc<dyn ContentExchangeGatePort>,
-    pub peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-    pub presence: Arc<dyn PresencePort>,
+    pub peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
+    pub presence: Arc<dyn PeerReachabilityPort>,
     pub transfer_cipher: Arc<dyn TransferCipherPort>,
     pub clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
@@ -194,7 +192,7 @@ impl ClipboardSyncFacade {
     }
 
     pub fn new(deps: ClipboardSyncDeps) -> Self {
-        let dispatch_uc = Arc::new(DispatchClipboardEntryUseCase::new_with_removal_gate(
+        let dispatch_uc = Arc::new(DispatchClipboardEntryUseCase::new_with_scope(
             Arc::clone(&deps.peer_addr_repo),
             Arc::clone(&deps.member_repo),
             Arc::clone(&deps.presence),
@@ -208,7 +206,6 @@ impl ClipboardSyncFacade {
             Arc::clone(&deps.first_sync_state),
             Arc::clone(&deps.entry_delivery_repo),
             Arc::clone(&deps.host_event_bus),
-            Arc::clone(&deps.removal_gate),
             Arc::clone(&deps.peer_scope),
         ));
         let view_uc = Arc::new(GetEntryDeliveryViewUseCase::new(
@@ -658,7 +655,7 @@ mod tests {
     mockall::mock! {
         pub Presence {}
         #[async_trait]
-        impl PresencePort for Presence {
+        impl PeerReachabilityPort for Presence {
             async fn ensure_reachable(
                 &self,
                 device: &DeviceId,
@@ -950,7 +947,6 @@ mod tests {
         ClipboardSyncFacade::new(ClipboardSyncDeps {
             peer_addr_repo: Arc::new(peer_addr_repo),
             member_repo: Arc::new(make_member_repo_all_enabled()),
-            removal_gate: Arc::new(crate::clipboard::sync::dispatch_entry::AllowAllRemovalTargets),
             peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             presence: Arc::new(presence),
             transfer_cipher: Arc::new(cipher),

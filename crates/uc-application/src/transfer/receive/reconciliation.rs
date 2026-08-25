@@ -499,6 +499,62 @@ mod tests {
 
     struct Clock;
 
+    struct TestArtifactCleaner;
+
+    #[async_trait]
+    impl CleanupReceiveArtifactsPort for TestArtifactCleaner {
+        async fn cleanup_receive_artifacts(
+            &self,
+            artifacts: &[ReceiveArtifact],
+        ) -> Result<(), uc_core::ports::ReceiveArtifactLogError> {
+            for artifact in artifacts {
+                let paths = match artifact.ownership {
+                    ReceiveArtifactOwnership::ManagedStaging
+                        if artifact.staged_path != artifact.final_path =>
+                    {
+                        vec![&artifact.staged_path, &artifact.final_path]
+                    }
+                    ReceiveArtifactOwnership::ManagedStaging => vec![&artifact.staged_path],
+                    ReceiveArtifactOwnership::UserDestination
+                        if artifact.staged_path != artifact.final_path =>
+                    {
+                        vec![&artifact.staged_path]
+                    }
+                    ReceiveArtifactOwnership::UserDestination => Vec::new(),
+                };
+                for path in paths {
+                    match tokio::fs::symlink_metadata(path).await {
+                        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                            if let Err(error) = tokio::fs::remove_dir_all(path).await {
+                                if error.kind() != std::io::ErrorKind::NotFound {
+                                    return Err(uc_core::ports::ReceiveArtifactLogError::Backend(
+                                        error.to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            if let Err(error) = tokio::fs::remove_file(path).await {
+                                if error.kind() != std::io::ErrorKind::NotFound {
+                                    return Err(uc_core::ports::ReceiveArtifactLogError::Backend(
+                                        error.to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(uc_core::ports::ReceiveArtifactLogError::Backend(
+                                error.to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
     impl ClockPort for Clock {
         fn now_ms(&self) -> i64 {
             10
@@ -540,7 +596,7 @@ mod tests {
             store.clone(),
             store.clone(),
             store.clone(),
-            Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
+            Arc::new(TestArtifactCleaner),
             store.clone(),
             store.clone(),
             store,

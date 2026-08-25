@@ -2,8 +2,9 @@
 //! Space，并在成功后返回该 SpaceId。
 use std::sync::Arc;
 
-use crate::space::admission::SpaceAdmissionResetPort;
-use crate::space::rebuild_space::ports::{RebindSpaceSessionPort, SpaceMembershipRebuildPort};
+use crate::space::rebuild_space::ports::{
+    RebindSpaceSessionPort, SpaceMembershipRebuildPort, SpaceMembershipResetPort,
+};
 use chrono::{DateTime, Utc};
 
 use super::error::RebuildSpaceError;
@@ -21,7 +22,7 @@ pub(crate) struct RebuildSpaceUseCase {
     device_identity: Arc<dyn DeviceIdentityPort>,
     rebuild_transition: Arc<dyn SpaceRebuildTransitionPort>,
     rebind_space_session: Arc<dyn RebindSpaceSessionPort>,
-    admission_reset: Arc<dyn SpaceAdmissionResetPort>,
+    membership_reset: Arc<dyn SpaceMembershipResetPort>,
     membership_rebuilder: Arc<dyn SpaceMembershipRebuildPort>,
     clock: Arc<dyn ClockPort>,
     execution_lock: tokio::sync::Mutex<()>,
@@ -42,7 +43,7 @@ impl RebuildSpaceUseCase {
         device_identity: Arc<dyn DeviceIdentityPort>,
         rebuild_transition: Arc<dyn SpaceRebuildTransitionPort>,
         rebind_space_session: Arc<dyn RebindSpaceSessionPort>,
-        admission_reset: Arc<dyn SpaceAdmissionResetPort>,
+        membership_reset: Arc<dyn SpaceMembershipResetPort>,
         membership_rebuilder: Arc<dyn SpaceMembershipRebuildPort>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
@@ -52,7 +53,7 @@ impl RebuildSpaceUseCase {
             device_identity,
             rebuild_transition,
             rebind_space_session,
-            admission_reset,
+            membership_reset,
             membership_rebuilder,
             clock,
             execution_lock: tokio::sync::Mutex::new(()),
@@ -128,8 +129,8 @@ impl RebuildSpaceUseCase {
             .await
             .map_err(RebuildSpaceError::rebuild)?;
 
-        self.admission_reset
-            .clear_prior_space_state()
+        self.membership_reset
+            .reset()
             .await
             .map_err(RebuildSpaceError::rebuild)?;
 

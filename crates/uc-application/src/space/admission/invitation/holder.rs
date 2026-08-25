@@ -93,6 +93,27 @@ impl InMemoryPairingInvitationHolder {
         }
     }
 
+    pub(crate) async fn inspect_matching(
+        &self,
+        code: &InvitationCode,
+        now: DateTime<Utc>,
+    ) -> Result<PairingInvitation, TakeMatchingError> {
+        let mut map = self.by_code.lock().await;
+        let Some(invitation) = map.get(code).cloned() else {
+            return Err(TakeMatchingError::NotFound);
+        };
+        match invitation.state() {
+            InvitationState::Pending { expires_at } if now < *expires_at => Ok(invitation),
+            InvitationState::Pending { .. } => {
+                map.remove(code);
+                Err(TakeMatchingError::Expired)
+            }
+            _ => Err(TakeMatchingError::Internal(
+                "holder stored a non-pending aggregate".to_owned(),
+            )),
+        }
+    }
+
     /// Snapshot the **earliest-expiring** outstanding invitation, if any.
     ///
     /// Returned without consuming, intended for read-only query paths

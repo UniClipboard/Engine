@@ -24,6 +24,7 @@
 - [成员收敛内部职责边界](specs/024-workspace-convergence-internal-boundaries.md)
 - [用户明确加入安全取代旧加入](specs/025-user-initiated-join-supersession.md)
 - [旧资料独立化与重新配对](specs/026-legacy-profile-isolation-and-re-pairing.md)
+- [Application Space 成员关系一次性重写](specs/027-application-space-membership-one-shot-rewrite.md)
 - [Engine 仓库检查](specs/engine-repository-checks.md)
 - [Port 定义](specs/ports.md)
 - [uc-engine 跨平台核心接口](specs/uc-engine-interface.md)
@@ -50,3 +51,4 @@
 - [ADR-022：用户明确加入创建新尝试并安全取代旧尝试](adr/022-user-initiated-join-supersession.md)
 - [ADR-023：旧资料独立化与重新配对](adr/023-legacy-profile-isolation-and-re-pairing.md)
 - [ADR-024：将 ResetSpace 定义为设备管理重置](adr/024-reset-space-as-device-management-reset.md)
+- [ADR-025：Application Space 成员关系一次性重写](adr/025-application-space-membership-one-shot-rewrite.md)

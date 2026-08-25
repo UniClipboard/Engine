@@ -23,7 +23,76 @@ use uc_core::ports::{
     SeedProvisionalReceivePort,
 };
 use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
-use uc_infra::file_transfer::{InMemoryEventPublisher, InMemoryEventStore};
+#[derive(Default)]
+struct InMemoryEventStore {
+    events: std::sync::RwLock<std::collections::HashMap<String, Vec<FileTransferEvent>>>,
+}
+
+impl InMemoryEventStore {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl FileTransferEventStorePort for InMemoryEventStore {
+    async fn load(&self, transfer_id: &str) -> anyhow::Result<Vec<FileTransferEvent>> {
+        Ok(self
+            .events
+            .read()
+            .map_err(|_| anyhow::anyhow!("event store lock poisoned"))?
+            .get(transfer_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn append(&self, event: FileTransferEvent) -> anyhow::Result<()> {
+        let transfer_id = match &event {
+            FileTransferEvent::Started { transfer_id, .. }
+            | FileTransferEvent::Progress { transfer_id, .. }
+            | FileTransferEvent::Completed { transfer_id, .. }
+            | FileTransferEvent::Failed { transfer_id, .. }
+            | FileTransferEvent::Cancelled { transfer_id, .. } => transfer_id.clone(),
+        };
+        self.events
+            .write()
+            .map_err(|_| anyhow::anyhow!("event store lock poisoned"))?
+            .entry(transfer_id)
+            .or_default()
+            .push(event);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct InMemoryEventPublisher {
+    published: std::sync::RwLock<Vec<FileTransferEvent>>,
+}
+
+impl InMemoryEventPublisher {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn published_events(&self) -> anyhow::Result<Vec<FileTransferEvent>> {
+        Ok(self
+            .published
+            .read()
+            .map_err(|_| anyhow::anyhow!("event publisher lock poisoned"))?
+            .clone())
+    }
+}
+
+#[async_trait]
+impl FileTransferEventPublisherPort for InMemoryEventPublisher {
+    async fn publish(&self, event: FileTransferEvent) -> anyhow::Result<()> {
+        self.published
+            .write()
+            .map_err(|_| anyhow::anyhow!("event publisher lock poisoned"))?
+            .push(event);
+        Ok(())
+    }
+}
 
 /// No-op lifecycle ports for session tests that never drive readiness.
 #[derive(Default)]

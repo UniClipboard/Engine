@@ -984,7 +984,7 @@ mod tests {
     use uc_core::search::tag::TagId;
     use uc_core::ClipboardEntryContentCategory;
     use uc_core::MimeType;
-    use uc_infra::search::constants::CURRENT_INDEX_VERSION;
+    const CURRENT_INDEX_VERSION: &str = "current-test-index";
 
     /// Returns the supplied entries verbatim (already windowed by the test).
     struct FakeEntryRepo {

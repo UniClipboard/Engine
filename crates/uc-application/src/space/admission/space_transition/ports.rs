@@ -26,7 +26,7 @@ pub enum AdmissionSpaceTransitionError {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct AdmissionSpaceTransitionPreparationV2 {
-    pub attempt_id: uc_core::membership::AdmissionAttemptId,
+    pub attempt_id: uc_core::membership::SpaceJoinRecordId,
     pub target_space_id: String,
     pub target_security_commitment: AdmissionSecurityCommitmentV1,
     pub target_membership_history: Vec<u8>,

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use super::ports::EngineVersionStatePort;
 use crate::space::{
-    current_space::CurrentSpaceIdentityPort, re_pairing::RePairingState,
-    rebuild_space::RebuildSpaceUseCase, upgrade_space::error::UpgradeSpaceError,
+    current_space::CurrentSpaceIdentityPort, rebuild_space::RebuildSpaceUseCase,
+    upgrade_space::error::UpgradeSpaceError,
 };
+use uc_core::ports::EngineVersionStatePort;
 
 pub(crate) struct EngineVersionTransition {
     pub(crate) previous: Option<semver::Version>,
@@ -16,7 +16,6 @@ pub(crate) struct UpgradeSpaceUseCase {
     rebuild_space: Arc<RebuildSpaceUseCase>,
     version_state: Arc<dyn EngineVersionStatePort>,
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
-    re_pairing_state: Arc<RePairingState>,
 }
 
 impl EngineVersionTransition {
@@ -38,14 +37,12 @@ impl UpgradeSpaceUseCase {
         rebuild_space: Arc<RebuildSpaceUseCase>,
         version_state: Arc<dyn EngineVersionStatePort>,
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
-        re_pairing_state: Arc<RePairingState>,
     ) -> Self {
         Self {
             current_engine_version,
             rebuild_space,
             version_state,
             current_space_identity,
-            re_pairing_state,
         }
     }
 
@@ -86,16 +83,7 @@ impl UpgradeSpaceUseCase {
             .await
             .map_err(|error| UpgradeSpaceError::ReadSetupState(error.to_string()))?;
 
-        let re_pairing_required = self
-            .re_pairing_state
-            .is_required()
-            .await
-            .map_err(|error| UpgradeSpaceError::ReadSetupState(error.to_string()))?;
-
-        if current_space_id.is_some()
-            && !re_pairing_required
-            && transition.crosses(&legacy_profile_isolation_version)
-        {
+        if current_space_id.is_some() && transition.crosses(&legacy_profile_isolation_version) {
             self.rebuild_space
                 .execute()
                 .await

@@ -20,8 +20,6 @@ pub mod host_event;
 pub mod roster;
 pub mod search;
 pub mod settings;
-pub mod space_join;
-pub mod space_membership;
 pub mod space_setup;
 pub mod storage;
 pub mod upgrade;
@@ -35,34 +33,33 @@ pub use crate::profile::probe_profile_key_access::{
     ProbeProfileKeyAccessError, ProbeProfileKeyAccessUseCase,
 };
 pub use crate::space::admission::join_space::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
-pub use crate::space::connectivity::membership::{
-    start_membership_connectivity, MembershipConnectivityDeps, MembershipConnectivityRuntime,
-};
 pub use crate::space::connectivity::network_recovery::{
     NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
     NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,
 };
-pub use crate::space::lock_space_session::{
-    LockSpacePort, LockSpaceSessionError, LockSpaceSessionUseCase,
-};
-pub use crate::space::query_space_access_state::{
-    QuerySpaceAccessStateError, QuerySpaceAccessStateUseCase, SpaceAccessState,
-};
+pub use crate::space::lock_space_session::LockSpaceSessionError;
+pub use crate::space::query_space_access_state::{QuerySpaceAccessStateError, SpaceAccessState};
 pub use crate::space::recover_space_session::{
-    RecoverSpaceSessionError, RecoverSpaceSessionResult, RecoverSpaceSessionUseCase,
+    RecoverSpaceSessionError, RecoverSpaceSessionResult,
 };
-pub use crate::space::runtime::{SpaceApplicationHandle, SpaceApplicationRuntime};
-pub use crate::space::session::{
-    build_space_session_activity, ResumeSpaceSessionPort, SpaceActivityError, SpaceSessionActivity,
-    SpaceSessionActivityDeps,
-};
-pub use crate::space::unlock_space::PostSessionReadiness;
 
 pub use crate::clipboard::active::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
     ActiveClipboardLifecycle, ActiveClipboardLifecycleError, ActiveClipboardPullServeFacadeDeps,
     ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
     ClipboardSnapshotDeps,
+};
+pub use crate::space::admission::cancel_space_join::CancelSpaceJoinError;
+pub use crate::space::decide_device_trust_change::{
+    DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
+    DeviceTrustChangeChoice,
+};
+pub use crate::space::query_device_trust::{
+    DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
+    DeviceTrustStatus, DeviceTrustSyncState, PendingDeviceTrustChange, QueryDeviceTrustError,
+};
+pub use crate::space::remove_space_member::{
+    MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
 };
 pub use app_facade::{
     AppFacade, AppFacadeParts, AppPresenceEvent, AppPresenceSubscription,
@@ -80,8 +77,6 @@ pub use clipboard::{
     EntryDeliveryStatusView, EntryDeliveryTargetView, EntryDeliveryView, EntrySource,
     GetEntryDeliveryViewError,
 };
-pub use space_join::{CancelSpaceJoinError, RecoverSpaceJoinCompletionError, SpaceJoinFacade};
-pub use space_membership::SpaceMembershipFacade;
 // V3 envelope codec helpers — surfaced through the facade per §11.4.3 so
 // external CLI / test consumers don't reach into `crate::usecases::*`
 // directly. Implementations live in `usecases::clipboard_sync::payload_codec`.
@@ -113,26 +108,7 @@ pub use crate::search::live_index::{
     ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardLiveIndexPort,
     ClipboardLiveIndexer,
 };
-pub use crate::space::admission::recover_space_join_completion::PendingJoinerCompleteAck;
 pub use crate::space::admission::{CurrentJoinStatus, JoinedSpace, PendingInboundMember};
-pub use crate::space::assembly::{SpaceModules, SpaceModulesDeps};
-pub use crate::space::decide_pending_membership_removal::{
-    DecidePendingMembershipRemovalError, DecidePendingMembershipRemovalResult,
-};
-pub use crate::space::initiate_space_member_removal::{
-    InitiateSpaceMemberRemovalError, InitiateSpaceMemberRemovalResult,
-};
-pub use crate::space::membership_state::SpaceMembershipStateRepositoryError;
-pub use crate::space::query_space_membership_status::{
-    ActionUnavailableReason, DeviceCompatibility, DeviceMembership, GroupRelationship,
-    PendingSpaceMembershipChange, QuerySpaceMembershipStatusError, RecoveryAvailability,
-    SpaceMemberRelationship, SpaceMembershipAction, SpaceMembershipChangeChoice,
-    SpaceMembershipChangeImpact, SpaceMembershipStatus, SyncRelationship,
-};
-pub use crate::space::workspace_membership::discovery::MembershipConvergenceDeps;
-pub use crate::space::workspace_membership::{
-    WorkspaceConvergenceError, WorkspaceMembership, WorkspaceMembershipDeps,
-};
 pub use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
     ReceiveReadinessStatus,
@@ -172,18 +148,15 @@ pub use crate::clipboard::resource::{
 };
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
-    MemberProtectionStatusView, MemberProtectionView, MemberRosterDeps, MemberRosterFacade,
-    MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
-    PresenceEvent, RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
+    MemberProtectionStatusView, MemberProtectionView, MemberSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesView, PeerSnapshotView, PresenceEvent, RosterEntry, RosterError,
+    SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{
     map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,
     SearchQueryInput, SearchRebuildAcceptedView, SearchRebuildProgressView, SearchResultView,
     SearchRuntime, SearchRuntimeDeps, SearchRuntimeError, SearchStatusSnapshot, SearchStatusView,
     SearchTagView,
-};
-pub use uc_core::membership::{
-    WorkspaceDigest, WorkspaceFailureCategory, WorkspacePhase, WorkspaceSnapshot,
 };
 // Note: `RelayDiagnosticPort` is intentionally NOT re-exported here. The port
 // trait stays under `crate::facade::settings::relay_diagnostic` and is reached
@@ -204,9 +177,9 @@ pub use space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
     IssuePairingInvitationResult, PairingInvitationAddressCandidate,
     QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
-    RedeemPairingInvitationError, RedeemPairingInvitationInput, RedeemPairingInvitationResult,
-    ResetSpaceError, SetupStateView, SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps,
-    SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    RedeemPairingInvitationError, ResetSpaceError, SetupStateView, SpaceAdmissionDeps, SpaceFacade,
+    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput,
+    UnlockSpaceResult,
 };
 pub use storage::{
     ClearCacheResultView, StorageFacade, StorageFacadeDeps, StorageFacadeError, StorageStatsView,

@@ -71,9 +71,9 @@ version = "1.10.0"
 features = ["v4"]
 
 [dev-dependencies]
-uc-infra = { path = "../uc-infra" }
 mockall = "0.13"
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 image = "0.25"
 

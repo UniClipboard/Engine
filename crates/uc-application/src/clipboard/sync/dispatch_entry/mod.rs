@@ -103,12 +103,11 @@ use uc_core::clipboard::{
     ClipboardContentCategory, ClipboardContentCategorySet, EntryDeliveryRecord,
 };
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClockPort, ConnectionChannel,
     DeviceIdentityPort, DispatchAck, EntryDeliveryRepositoryPort, FirstSyncStatePort,
-    LocalIdentityPort, PeerAddressRepositoryPort, PresencePort, SettingsPort, SyncPayload,
+    LocalIdentityPort, PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort, SyncPayload,
 };
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::{
@@ -324,64 +323,56 @@ pub(crate) struct DispatchClipboardEntryUseCase {
 }
 
 #[cfg(test)]
-pub(crate) struct AllowAllRemovalTargets;
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl ContentExchangeGatePort for AllowAllRemovalTargets {
-    async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-        false
-    }
-}
-
-#[cfg(test)]
 pub(crate) struct AllTestPeerScope;
 
 #[cfg(test)]
+fn all_test_peer_ids() -> Vec<DeviceId> {
+    [
+        "peer-a",
+        "peer-accept-only",
+        "peer-b",
+        "peer-c",
+        "peer-dup",
+        "peer-glitch",
+        "peer-io",
+        "peer-mute",
+        "peer-no-text",
+        "peer-off",
+        "peer-ok",
+        "peer-on",
+        "peer-orphan",
+        "peer-policy",
+        "peer-rej",
+        "peer-rejecty",
+        "peer-slow",
+        "peer-strict",
+        "peer-v2",
+        "peer-1",
+        "peer-2",
+        "peer-p",
+        "peer-rebroadcast",
+        "peer-fast",
+        "peer-slow",
+        "peer-removed",
+        "peer-retained",
+    ]
+    .into_iter()
+    .map(DeviceId::new)
+    .collect()
+}
+
+#[cfg(test)]
 #[async_trait::async_trait]
-impl uc_core::membership::CurrentWorkspacePeerScopePort for AllTestPeerScope {
+impl crate::deps::CurrentSpaceMemberScopePort for AllTestPeerScope {
     async fn snapshot(
         &self,
-    ) -> Result<
-        uc_core::membership::CurrentWorkspacePeerSnapshot,
-        uc_core::membership::CurrentWorkspacePeerScopeError,
-    > {
-        Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+    ) -> Result<crate::deps::CurrentSpaceMemberScope, crate::deps::CurrentSpaceMemberScopeError>
+    {
+        Ok(crate::deps::CurrentSpaceMemberScope {
             revision: 1,
-            source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
-            local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
-            peer_device_ids: [
-                "peer-a",
-                "peer-accept-only",
-                "peer-b",
-                "peer-c",
-                "peer-dup",
-                "peer-glitch",
-                "peer-io",
-                "peer-mute",
-                "peer-no-text",
-                "peer-off",
-                "peer-ok",
-                "peer-on",
-                "peer-orphan",
-                "peer-policy",
-                "peer-rej",
-                "peer-rejecty",
-                "peer-slow",
-                "peer-strict",
-                "peer-v2",
-                "peer-1",
-                "peer-2",
-                "peer-p",
-                "peer-rebroadcast",
-                "peer-fast",
-                "peer-slow",
-                "peer-removed",
-                "peer-retained",
-            ]
-            .into_iter()
-            .map(DeviceId::new)
-            .collect(),
+            local_member_active: true,
+            usable_peer_device_ids: all_test_peer_ids(),
+            paused_peer_devices: Vec::new(),
         })
     }
 }
@@ -395,7 +386,7 @@ impl DispatchClipboardEntryUseCase {
     pub(crate) fn new(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
         transfer_cipher: Arc<dyn TransferCipherPort>,
         clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
@@ -407,7 +398,7 @@ impl DispatchClipboardEntryUseCase {
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
     ) -> Self {
-        Self::new_with_removal_gate(
+        Self::new_with_scope(
             peer_addr_repo,
             member_repo,
             presence,
@@ -421,16 +412,15 @@ impl DispatchClipboardEntryUseCase {
             first_sync_state,
             entry_delivery_repo,
             host_event_bus,
-            Arc::new(AllowAllRemovalTargets),
             Arc::new(AllTestPeerScope),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_removal_gate(
+    pub(crate) fn new_with_scope(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
         transfer_cipher: Arc<dyn TransferCipherPort>,
         clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
@@ -441,20 +431,14 @@ impl DispatchClipboardEntryUseCase {
         first_sync_state: Arc<dyn FirstSyncStatePort>,
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
-        removal_gate: Arc<dyn ContentExchangeGatePort>,
-        peer_scope: Arc<dyn uc_core::membership::CurrentWorkspacePeerScopePort>,
+        peer_scope: Arc<dyn crate::deps::CurrentSpaceMemberScopePort>,
     ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {
             cipher: transfer_cipher,
             device_identity,
             clock,
-            selector: TargetSelector::new_with_removal_gate(
-                peer_addr_repo,
-                member_repo,
-                removal_gate,
-                peer_scope,
-            ),
+            selector: TargetSelector::new_with_scope(peer_addr_repo, member_repo, peer_scope),
             header_factory: OutboundHeaderFactory::new(settings, local_identity, header_clock),
             dispatcher: Arc::new(PerPeerDispatcher::new(
                 clipboard_dispatch,
@@ -552,7 +536,6 @@ impl DispatchClipboardEntryUseCase {
             let device_id = *device_id;
             let child_span = info_span!(
                 "peer.dispatch",
-                peer.device_id = %device_id.as_str(),
                 flow.id = %flow_id,
                 flow.kind = "clipboard_sync",
             );
@@ -684,8 +667,8 @@ mod tests {
     use uc_core::ports::{
         ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, DispatchTiming,
         FirstSyncStateError, LocalIdentityError, LocalIdentityPort, PeerAddressError,
-        PeerAddressRecord, PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort,
-        ReachabilityState, SettingsPort,
+        PeerAddressRecord, PeerAddressRepositoryPort, PeerReachabilityPort, PresenceError,
+        PresenceEvent, ReachabilityState, SettingsPort,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -871,7 +854,7 @@ mod tests {
 
     struct StaticPresence(ReachabilityState);
     #[async_trait]
-    impl PresencePort for StaticPresence {
+    impl PeerReachabilityPort for StaticPresence {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
@@ -1003,7 +986,7 @@ mod tests {
     fn build_uc_with_presence_and_first_sync_state(
         peer_addr_repo: MockPeerAddrRepo,
         member_repo: MockMemberRepo,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
         cipher: MockCipher,
         dispatch: MockDispatch,
         device_identity: MockDeviceId_,

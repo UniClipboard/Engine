@@ -7104,7 +7104,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uc-core",
- "uc-infra",
  "uc-observability-contract",
  "unicode-normalization",
  "url",

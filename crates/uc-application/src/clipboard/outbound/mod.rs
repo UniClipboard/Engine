@@ -14,7 +14,6 @@ use uc_core::clipboard::{
     FILE_DISPLAY_METADATA_MIME,
 };
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::CurrentWorkspacePeerScopePort;
 use uc_core::ports::clipboard::{
     ClipboardPayloadResolverPort, EntryFileSetRepositoryPort, GetClipboardEntryPort,
     GetRepresentationPort, UpdateRepresentationProcessingResultPort,
@@ -34,6 +33,7 @@ use crate::clipboard::sync::resend_entry::{
 };
 use crate::clipboard::sync::V3BlobRef;
 use crate::clipboard::sync::{FileCandidate, FileSyncIntent, OutboundSyncPlanner};
+use crate::deps::CurrentSpaceMemberScopePort;
 use crate::facade::{
     BlobTransferError, BlobTransferFacade, ClipboardSyncFacade, DispatchEntryPerTarget,
     PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult,
@@ -165,7 +165,7 @@ pub struct ClipboardOutboundDeps {
     pub blob_store: Arc<dyn BlobReaderPort>,
     pub entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     pub trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
-    pub peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
+    pub peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     pub device_identity: Arc<dyn DeviceIdentityPort>,
 }
 
@@ -308,7 +308,6 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                     // a set whose identity covers all members.
                     warn!(
                         error = %err,
-                        file = %path.display(),
                         entry_id = %entry_id_str,
                         "outbound: file-set member unreadable at dispatch; skipping dispatch (all-or-nothing)"
                     );
@@ -318,7 +317,6 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 }
                 Err(err) => warn!(
                     error = %err,
-                    file = %path.display(),
                     "排除无法读取元数据的剪贴板文件"
                 ),
             }

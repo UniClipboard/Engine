@@ -1,6 +1,6 @@
 # ADR-021：成员收敛的内部职责边界
 
-- **状态**：已采纳，已实施
+- **状态**：已由 ADR-025 取代
 - **日期**：2026-08-17
 - **修订**：ADR-016 的唯一流程负责人边界、ADR-017 的空间准入责任、ADR-020 的成员核对和用户决定边界
 - **相关文档**：`docs/adr/016-workspace-wide-convergence.md`、
@@ -9,6 +9,9 @@
   `docs/specs/022-current-member-runtime-scope.md`、
   `docs/specs/023-durable-membership-proof-and-admission-activation.md`、
   `docs/architecture/architecture-bible.md`
+
+> 本文记录旧的渐进整理决定。其成员业务规则继续由 ADR-020 等文档保存；保留
+> `WorkspaceConvergence` 总对象并逐项迁移的实施方式，已由 ADR-025 和规格 027 取代。
 
 ## 背景
 

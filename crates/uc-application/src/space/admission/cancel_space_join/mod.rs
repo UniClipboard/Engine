@@ -1,6 +1,8 @@
 mod error;
-mod use_case;
+mod target_use_case;
 
 pub use error::CancelSpaceJoinError;
-pub(in crate::space) use use_case::confirm_superseded_join_cleanup_delivery;
-pub(crate) use use_case::CancelSpaceJoinUseCase;
+pub(crate) use target_use_case::CancelSpaceJoinUseCase;
+
+#[cfg(test)]
+mod target_tests;

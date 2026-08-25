@@ -224,10 +224,7 @@ impl CleanupExpiredFilesUseCase {
         let cache_fs = self.cache_fs.as_ref();
 
         if !cache_fs.exists(&self.file_cache_dir).await {
-            info!(
-                path = %self.file_cache_dir.display(),
-                "File cache directory does not exist, skipping TTL sweep"
-            );
+            info!("File cache directory does not exist, skipping TTL sweep");
             return Ok(());
         }
 
@@ -269,7 +266,6 @@ impl CleanupExpiredFilesUseCase {
                         Err(e) => {
                             warn!(
                                 entry_id = %entry_id,
-                                path = %path.display(),
                                 error = %e,
                                 "delete_entry failed for expired cache file"
                             );
@@ -288,17 +284,13 @@ impl CleanupExpiredFilesUseCase {
                     } else {
                         match cache_fs.remove_file(path).await {
                             Ok(()) => {
-                                info!(
-                                    path = %path.display(),
-                                    "Removed orphan cache file (no owning entry in DB)"
-                                );
+                                info!("Removed orphan cache file (no owning entry in DB)");
                                 result.orphans_removed += 1;
                                 result.files_removed += 1;
                                 result.bytes_reclaimed += size;
                             }
                             Err(e) => {
                                 warn!(
-                                    path = %path.display(),
                                     error = %e,
                                     "Failed to remove orphan cache file"
                                 );
@@ -376,12 +368,10 @@ impl CleanupExpiredFilesUseCase {
                 match write_quota_baseline(cache_fs, &baseline_path, now_ms).await {
                     Ok(()) => info!(
                         baseline_ms = now_ms,
-                        path = %baseline_path.display(),
                         "Established cache-quota baseline; existing payloads grandfathered (exempt from quota)"
                     ),
                     Err(e) => warn!(
                         error = %e,
-                        path = %baseline_path.display(),
                         "Failed to persist cache-quota baseline; skipping quota enforcement (fail-safe)"
                     ),
                 }
@@ -390,7 +380,6 @@ impl CleanupExpiredFilesUseCase {
             Err(e) => {
                 warn!(
                     error = %e,
-                    path = %baseline_path.display(),
                     "Cache-quota baseline unreadable; skipping quota enforcement (fail-safe, baseline left intact)"
                 );
                 return;
@@ -737,7 +726,6 @@ async fn collect_expired_recursive(
         Ok(entries) => entries,
         Err(e) => {
             warn!(
-                path = %dir.display(),
                 error = %e,
                 "Failed to read cache directory"
             );
@@ -767,7 +755,6 @@ async fn collect_expired_recursive(
             Ok(None) => continue,
             Err(e) => {
                 warn!(
-                    path = %entry.path.display(),
                     error = %e,
                     "Failed to read file metadata"
                 );
@@ -803,7 +790,6 @@ async fn cleanup_empty_dirs(cache_fs: &dyn CacheFsPort, cache_dir: &Path) {
             Ok(contents) if contents.is_empty() => {
                 if let Err(e) = cache_fs.remove_dir(&entry.path).await {
                     warn!(
-                        path = %entry.path.display(),
                         error = %e,
                         "Failed to remove empty cache directory"
                     );
@@ -1018,9 +1004,101 @@ mod tests {
 
     // --- TTL sweep over the cache-fs port (real adapter + tempdir) --------
 
+    use async_trait::async_trait;
+
+    struct TestTokioCacheFs;
+
+    #[async_trait]
+    impl CacheFsPort for TestTokioCacheFs {
+        async fn exists(&self, path: &Path) -> bool {
+            tokio::fs::try_exists(path).await.unwrap_or(false)
+        }
+
+        async fn read_dir(&self, path: &Path) -> Result<Vec<uc_core::ports::cache_fs::DirEntry>> {
+            let mut entries = Vec::new();
+            let mut directory = tokio::fs::read_dir(path).await?;
+            while let Some(entry) = directory.next_entry().await? {
+                let file_type = entry.file_type().await?;
+                entries.push(uc_core::ports::cache_fs::DirEntry {
+                    path: entry.path(),
+                    is_dir: file_type.is_dir(),
+                });
+            }
+            Ok(entries)
+        }
+
+        async fn remove_dir_all(&self, path: &Path) -> Result<()> {
+            tokio::fs::remove_dir_all(path).await?;
+            Ok(())
+        }
+
+        async fn remove_file(&self, path: &Path) -> Result<()> {
+            tokio::fs::remove_file(path).await?;
+            Ok(())
+        }
+
+        async fn dir_size(&self, path: &Path) -> Result<u64> {
+            let mut total = 0;
+            let mut pending = vec![path.to_path_buf()];
+            while let Some(next) = pending.pop() {
+                let metadata = match tokio::fs::metadata(&next).await {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if metadata.is_dir() {
+                    let mut entries = tokio::fs::read_dir(next).await?;
+                    while let Some(entry) = entries.next_entry().await? {
+                        pending.push(entry.path());
+                    }
+                } else {
+                    total += metadata.len();
+                }
+            }
+            Ok(total)
+        }
+
+        async fn read_file(&self, path: &Path) -> Result<Option<Vec<u8>>> {
+            match tokio::fs::read(path).await {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        }
+
+        async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<()> {
+            tokio::fs::write(path, contents).await?;
+            Ok(())
+        }
+
+        async fn metadata(
+            &self,
+            path: &Path,
+        ) -> Result<Option<uc_core::ports::cache_fs::FileMetadata>> {
+            match tokio::fs::metadata(path).await {
+                Ok(metadata) => Ok(Some(uc_core::ports::cache_fs::FileMetadata {
+                    size_bytes: metadata.len(),
+                    is_dir: metadata.is_dir(),
+                    modified_unix_ms: metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .and_then(|duration| i64::try_from(duration.as_millis()).ok()),
+                })),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        }
+
+        async fn remove_dir(&self, path: &Path) -> Result<()> {
+            tokio::fs::remove_dir(path).await?;
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn collect_expired_files_walks_recursively_and_respects_retention() {
-        let fs = uc_infra::fs::TokioCacheFsAdapter::new();
+        let fs = TestTokioCacheFs;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         tokio::fs::write(root.join("a.bin"), vec![0u8; 10])
@@ -1051,7 +1129,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_empty_dirs_removes_only_empty_subdirs() {
-        let fs = uc_infra::fs::TokioCacheFsAdapter::new();
+        let fs = TestTokioCacheFs;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         tokio::fs::create_dir(root.join("empty")).await.unwrap();

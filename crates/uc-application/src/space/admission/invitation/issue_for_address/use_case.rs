@@ -22,7 +22,7 @@ impl IssuePairingInvitationForAddressUseCase {
         Self { invitation, issuer }
     }
 
-    #[instrument(skip_all, fields(selected_ip = %selected_ip))]
+    #[instrument(skip_all)]
     pub(crate) async fn execute(
         &self,
         selected_ip: IpAddr,

@@ -23,6 +23,11 @@ pub trait SpaceMembershipRebuildPort: Send + Sync {
 }
 
 #[async_trait]
+pub(crate) trait SpaceMembershipResetPort: Send + Sync {
+    async fn reset(&self) -> Result<(), SpaceMembershipRebuildError>;
+}
+
+#[async_trait]
 pub trait RebindSpaceSessionPort: Send + Sync {
     async fn rebind_to_space(&self, space_id: &SpaceId) -> Result<(), SpaceSessionRebindError>;
 }
