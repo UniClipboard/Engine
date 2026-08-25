@@ -1,22 +1,15 @@
 use std::sync::Arc;
 
-use tracing::{info, warn};
-use uc_core::crypto::domain::Passphrase;
-use uc_core::pairing::InvitationCode;
-use uc_core::ports::{PresencePort, SettingsPort};
+use uc_core::ports::SettingsPort;
 
 use super::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
-use crate::facade::space_setup::commands::RedeemPairingInvitationCommand;
 use crate::space::admission::joiner::RedeemPairingInvitationUseCase;
 use crate::space::admission::query_space_join_status::QuerySpaceJoinStatusUseCase;
 use crate::space::admission::{CurrentJoinStatus, SpaceAdmission};
-use crate::space::connectivity::reachability::EnsureReachableAllUseCase;
 
 pub(crate) struct JoinSpaceUseCase {
     settings: Arc<dyn SettingsPort>,
     redeem_invitation: Arc<RedeemPairingInvitationUseCase>,
-    presence: Arc<dyn PresencePort>,
-    ensure_reachable_all: Arc<EnsureReachableAllUseCase>,
     query_join_status: QuerySpaceJoinStatusUseCase,
 }
 
@@ -24,18 +17,13 @@ impl JoinSpaceUseCase {
     pub(crate) fn new(
         settings: Arc<dyn SettingsPort>,
         redeem_invitation: Arc<RedeemPairingInvitationUseCase>,
-        presence: Arc<dyn PresencePort>,
-        ensure_reachable_all: Arc<EnsureReachableAllUseCase>,
         admission: Arc<SpaceAdmission>,
     ) -> Self {
-        let query_join_status = QuerySpaceJoinStatusUseCase::new(Arc::clone(
-            &admission.membership.deps.admission_attempts,
-        ));
+        let query_join_status =
+            QuerySpaceJoinStatusUseCase::new(Arc::clone(&admission.membership.deps.join_records));
         Self {
             settings,
             redeem_invitation,
-            presence,
-            ensure_reachable_all,
             query_join_status,
         }
     }
@@ -45,14 +33,13 @@ impl JoinSpaceUseCase {
         input: JoinSpaceInput,
     ) -> Result<JoinSpaceResult, JoinSpaceError> {
         persist_device_name(self.settings.as_ref(), input.device_name).await?;
-        self.prime_presence().await;
         let outcome = self
             .redeem_invitation
-            .execute(RedeemPairingInvitationCommand {
-                code: InvitationCode::new(input.invitation_code),
-                passphrase: Passphrase::new(input.passphrase),
-                preserve_unreadable_history: input.preserve_unreadable_history,
-            })
+            .execute(
+                input.invitation_code,
+                input.passphrase,
+                input.preserve_unreadable_history,
+            )
             .await
             .map_err(JoinSpaceError::Admission)?;
         let status = self
@@ -68,23 +55,6 @@ impl JoinSpaceUseCase {
             status,
             requires_session_transition: outcome.requires_session_transition,
         })
-    }
-
-    async fn prime_presence(&self) {
-        self.presence.activate().await;
-        match self.ensure_reachable_all.execute().await {
-            Ok(report) => info!(
-                total = report.total,
-                online = report.online,
-                offline = report.offline,
-                errors = report.errors.len(),
-                "presence primed before joining Space"
-            ),
-            Err(error) => warn!(
-                error = %error,
-                "presence prime failed before joining Space; admission dial will report the actionable failure"
-            ),
-        }
     }
 }
 
