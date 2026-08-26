@@ -15,7 +15,9 @@ use thiserror::Error;
 
 use uc_core::ports::AppVersionStatePort;
 
-use crate::space::current_space::CurrentSpaceIdentityPort;
+#[cfg(test)]
+use crate::space::CurrentSpaceIdentityError;
+use crate::space::CurrentSpaceIdentityPort;
 
 use crate::settings::upgrade::acknowledge::{
     AcknowledgeError as InnerAcknowledgeError, AcknowledgeUseCase,
@@ -151,10 +153,7 @@ mod tests {
     impl CurrentSpaceIdentityPort for FakeCurrentSpace {
         async fn current_space_id(
             &self,
-        ) -> Result<
-            Option<uc_core::ids::SpaceId>,
-            crate::space::current_space::CurrentSpaceIdentityError,
-        > {
+        ) -> Result<Option<uc_core::ids::SpaceId>, CurrentSpaceIdentityError> {
             Ok(self.0.then(|| uc_core::ids::SpaceId::from("space")))
         }
     }

@@ -85,6 +85,26 @@ function readSourceTree(relativeRoot) {
   return sources.join('\n')
 }
 
+function rustSourcesUnder(relativeRoot) {
+  const root = join(REPOSITORY_ROOT, relativeRoot)
+  const sources = []
+  const pending = [root]
+  while (pending.length > 0) {
+    const directory = pending.pop()
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) pending.push(path)
+      else if (entry.name.endsWith('.rs')) {
+        sources.push({
+          path: relative(REPOSITORY_ROOT, path),
+          source: readFileSync(path, 'utf8'),
+        })
+      }
+    }
+  }
+  return sources
+}
+
 function parseJson(input, source) {
   try {
     return JSON.parse(input)
@@ -393,7 +413,7 @@ function checkCurrentPeerScopeOwnership() {
     addProblem(problems, 'current peer scope', 'the superseded device visibility gate was restored')
   }
 
-  const currentScope = read('crates/uc-application/src/space/membership_ledger/repository.rs')
+  const currentScope = read('crates/uc-application/src/space/membership/ledger/repository.rs')
   if (
     !currentScope.includes('VersionedMembershipHistory::decode_persisted_v2') ||
     !currentScope.includes('impl CurrentSpaceMemberScopePort for MembershipLedger') ||
@@ -494,15 +514,21 @@ function checkApplicationMembershipCutover() {
   const problems = []
   const requiredEntries = [
     'crates/uc-application/src/space/application.rs',
+    'crates/uc-application/src/space/facade/mod.rs',
+    'crates/uc-application/src/facade/space_setup/mod.rs',
     'crates/uc-application/src/space/admission/mod.rs',
     'crates/uc-application/src/space/admission/handle_space_admission_message/mod.rs',
-    'crates/uc-application/src/space/membership_ledger/mod.rs',
-    'crates/uc-application/src/space/query_device_trust/mod.rs',
-    'crates/uc-application/src/space/remove_space_member/mod.rs',
-    'crates/uc-application/src/space/decide_device_trust_change/mod.rs',
-    'crates/uc-application/src/space/synchronize_membership_history/mod.rs',
-    'crates/uc-application/src/space/handle_membership_history_message/mod.rs',
-    'crates/uc-application/src/space/maintain_space_membership/runtime.rs',
+    'crates/uc-application/src/space/lifecycle/mod.rs',
+    'crates/uc-application/src/space/lifecycle/session/mod.rs',
+    'crates/uc-application/src/space/membership/mod.rs',
+    'crates/uc-application/src/space/membership/ledger/mod.rs',
+    'crates/uc-application/src/space/membership/query_device_trust/mod.rs',
+    'crates/uc-application/src/space/membership/remove_space_member/mod.rs',
+    'crates/uc-application/src/space/membership/decide_device_trust_change/mod.rs',
+    'crates/uc-application/src/space/membership/synchronize_history/mod.rs',
+    'crates/uc-application/src/space/membership/handle_history_message/mod.rs',
+    'crates/uc-application/src/space/membership/maintenance/runtime.rs',
+    'crates/uc-application/src/space/connectivity/recovery/mod.rs',
   ]
   for (const path of requiredEntries) {
     if (!existsSync(join(REPOSITORY_ROOT, path))) {
@@ -524,6 +550,31 @@ function checkApplicationMembershipCutover() {
     'crates/uc-application/src/space/runtime.rs',
     'crates/uc-application/src/facade/space_join',
     'crates/uc-application/src/facade/space_membership',
+    'crates/uc-application/src/facade/space_setup/commands.rs',
+    'crates/uc-application/src/facade/space_setup/deps.rs',
+    'crates/uc-application/src/facade/space_setup/errors.rs',
+    'crates/uc-application/src/facade/space_setup/facade.rs',
+    'crates/uc-application/src/space/current_member_signing',
+    'crates/uc-application/src/space/current_space',
+    'crates/uc-application/src/space/decide_device_trust_change',
+    'crates/uc-application/src/space/handle_membership_history_message',
+    'crates/uc-application/src/space/initialize_space',
+    'crates/uc-application/src/space/lock_space_session',
+    'crates/uc-application/src/space/maintain_space_membership',
+    'crates/uc-application/src/space/membership_ledger',
+    'crates/uc-application/src/space/query_device_trust',
+    'crates/uc-application/src/space/query_membership_admission',
+    'crates/uc-application/src/space/query_space_access_state',
+    'crates/uc-application/src/space/query_space_setup_state',
+    'crates/uc-application/src/space/re_pairing',
+    'crates/uc-application/src/space/rebuild_space',
+    'crates/uc-application/src/space/recover_space_session',
+    'crates/uc-application/src/space/remove_space_member',
+    'crates/uc-application/src/space/reset_space',
+    'crates/uc-application/src/space/session',
+    'crates/uc-application/src/space/synchronize_membership_history',
+    'crates/uc-application/src/space/unlock_space',
+    'crates/uc-application/src/space/upgrade_space',
   ]
   for (const path of retiredPaths) {
     if (existsSync(join(REPOSITORY_ROOT, path))) {
@@ -582,6 +633,83 @@ function checkApplicationMembershipCutover() {
   return problems
 }
 
+function checkSpaceModuleInterface() {
+  const problems = []
+  const spaceRoot = 'crates/uc-application/src/space'
+  const moduleSource = read(`${spaceRoot}/mod.rs`)
+  const allowedRootEntries = new Set([
+    'AGENTS.md',
+    'admission',
+    'application.rs',
+    'application_tests.rs',
+    'connectivity',
+    'facade',
+    'lifecycle',
+    'membership',
+    'mod.rs',
+  ])
+  for (const entry of readdirSync(join(REPOSITORY_ROOT, spaceRoot))) {
+    if (!allowedRootEntries.has(entry)) {
+      addProblem(
+        problems,
+        'space module interface',
+        `${spaceRoot}/${entry} is outside the approved responsibility areas`
+      )
+    }
+  }
+  const publicChildModule = /^\s*pub(?:\(crate\))?\s+mod\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;/gm
+  for (const match of moduleSource.matchAll(publicChildModule)) {
+    addProblem(
+      problems,
+      'space module interface',
+      `${spaceRoot}/mod.rs exposes child module ${match[1]}; export approved items instead`
+    )
+  }
+
+  const responsibilityRoots = ['admission', 'connectivity', 'facade', 'lifecycle', 'membership']
+  for (const responsibility of responsibilityRoots) {
+    const responsibilityModule = read(`${spaceRoot}/${responsibility}/mod.rs`)
+    for (const match of responsibilityModule.matchAll(publicChildModule)) {
+      addProblem(
+        problems,
+        'space module interface',
+        `${spaceRoot}/${responsibility}/mod.rs exposes child module ${match[1]}`
+      )
+    }
+  }
+
+  for (const { path, source } of rustSourcesUnder('crates/uc-application/src')) {
+    if (!path.startsWith(`${spaceRoot}/`) && /\bcrate::space::[a-z_][a-zA-Z0-9_]*::/.test(source)) {
+      addProblem(
+        problems,
+        'space module interface',
+        `${path} reaches through the space module interface`
+      )
+    }
+    if (path.startsWith(`${spaceRoot}/`) && source.includes('crate::facade::space_setup::')) {
+      addProblem(
+        problems,
+        'space module interface',
+        `${path} depends on the public space facade re-export`
+      )
+    }
+    for (const responsibility of responsibilityRoots) {
+      const responsibilityRoot = `${spaceRoot}/${responsibility}/`
+      const deepReference = new RegExp(
+        `\\bcrate::space::${responsibility}::[a-z_][a-zA-Z0-9_]*::`
+      )
+      if (!path.startsWith(responsibilityRoot) && deepReference.test(source)) {
+        addProblem(
+          problems,
+          'space module interface',
+          `${path} reaches through the ${responsibility} responsibility interface`
+        )
+      }
+    }
+  }
+  return problems
+}
+
 function repositorySources() {
   return {
     engine: read('crates/uc-engine/src/lib.rs'),
@@ -608,6 +736,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkLanIsolation(metadata, sources),
     ...checkCurrentPeerScopeOwnership(),
     ...checkApplicationMembershipCutover(),
+    ...checkSpaceModuleInterface(),
     ...checkRetiredLegacyPairingRecovery(),
     ...(includePlaintext ? checkPlaintextScanner() : []),
   ]

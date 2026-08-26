@@ -32,15 +32,17 @@ pub use crate::profile::factory_reset::{
 pub use crate::profile::probe_profile_key_access::{
     ProbeProfileKeyAccessError, ProbeProfileKeyAccessUseCase,
 };
-pub use crate::space::admission::join_space::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
-pub use crate::space::connectivity::network_recovery::{
-    NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
-    NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,
-};
-pub use crate::space::lock_space_session::LockSpaceSessionError;
-pub use crate::space::query_space_access_state::{QuerySpaceAccessStateError, SpaceAccessState};
-pub use crate::space::recover_space_session::{
-    RecoverSpaceSessionError, RecoverSpaceSessionResult,
+pub use crate::space::{
+    CancelSpaceJoinError, CurrentJoinStatus, DecideDeviceTrustChange, DecideDeviceTrustChangeError,
+    DecideDeviceTrustChangeResult, DeviceTrustChangeChoice, DeviceTrustDevice,
+    DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus,
+    DeviceTrustSyncState, JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinedSpace,
+    LockSpaceSessionError, MembershipCommitReceipt, NetworkRecoveryEvent, NetworkRecoveryFacade,
+    NetworkRecoveryPhase, NetworkRecoveryRequestError, NetworkRecoveryStatus,
+    PendingDeviceTrustChange, PendingInboundMember, QueryDeviceTrustError,
+    QuerySpaceAccessStateError, RebuildNetworkSessionError, RebuildNetworkSessionPort,
+    RecoverSpaceSessionError, RecoverSpaceSessionResult, RemoveSpaceMemberError,
+    RemoveSpaceMemberResult, SpaceAccessState,
 };
 
 pub use crate::clipboard::active::{
@@ -48,18 +50,6 @@ pub use crate::clipboard::active::{
     ActiveClipboardLifecycle, ActiveClipboardLifecycleError, ActiveClipboardPullServeFacadeDeps,
     ActiveClipboardReconcileDeps, ActiveClipboardReconcileFacade, ActiveClipboardReconcileOutcome,
     ClipboardSnapshotDeps,
-};
-pub use crate::space::admission::cancel_space_join::CancelSpaceJoinError;
-pub use crate::space::decide_device_trust_change::{
-    DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
-    DeviceTrustChangeChoice,
-};
-pub use crate::space::query_device_trust::{
-    DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
-    DeviceTrustStatus, DeviceTrustSyncState, PendingDeviceTrustChange, QueryDeviceTrustError,
-};
-pub use crate::space::remove_space_member::{
-    MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
 };
 pub use app_facade::{
     AppFacade, AppFacadeParts, AppPresenceEvent, AppPresenceSubscription,
@@ -108,7 +98,6 @@ pub use crate::search::live_index::{
     ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardLiveIndexPort,
     ClipboardLiveIndexer,
 };
-pub use crate::space::admission::{CurrentJoinStatus, JoinedSpace, PendingInboundMember};
 pub use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
     ReceiveReadinessStatus,

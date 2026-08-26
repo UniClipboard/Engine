@@ -122,9 +122,9 @@ Rust API       UniFFI 绑定          N-API 绑定
 | 搜索 | 搜索文档、不可逆词项标签、标签和索引状态 | 实时索引、查询、重建和隐私维护流程 |
 | 设置 | 同步、网络、保留、安全和文件偏好 | 设置读取、事务更新和中继诊断流程 |
 
-空间会话是否已解锁是多个应用流程共享的运行期能力，由 `uc-application/src/space/session/` 定义；状态查询、
+空间会话是否已解锁是多个应用流程共享的运行期能力，由 `uc-application/src/space/lifecycle/session/` 定义；状态查询、
 活动剪贴板、入站处理和配置迁移复用同一接口，基础设施提供实现，core 不保存该应用接口。
-当前 Space 是否存在以及会话是否已解锁，由 `uc-application/src/space/query_space_access_state/` 的单一查询
+当前 Space 是否存在以及会话是否已解锁，由 `uc-application/src/space/lifecycle/query_space_access_state/` 的单一查询
 用例组合；`AppFacade` 只转发查询。当前 profile 密钥能否从系统安全存储静默读取，由
 `uc-application/src/profile/probe_profile_key_access/` 解释底层探测结果；权限拒绝和暂时不可用返回未授权，
 密钥缺失返回未初始化。原加密 Facade 已删除。
@@ -212,8 +212,10 @@ Space
 `uc-application` 已完成一次性切换，当前结构如下：
 
 - `SpaceFacade` 是唯一公开的 Space 业务入口；成员名单、加入、查询、移除、决定、重建和生命周期均由该入口转发到一个完整用例。
+- `SpaceFacade` 的唯一实现位于私有 Space 模块内。`space/mod.rs` 不公开任何子模块，只逐项导出允许离开 Space 的调用契约和组装能力；其他 application 模块只能从该根出口读取，crate 外继续只通过 `facade` 和 `deps` 两份白名单访问。
+- Space 内部固定分为 `lifecycle/`、`admission/`、`membership/` 和 `connectivity/` 四个责任区。每个责任区隐藏自己的 case、runtime、session、状态和测试，只从本区 `mod.rs` 提供跨区协作所需内容；责任区外不得穿透子目录。
 - `SpaceApplication` 一次构造完整用户用例、成员历史网络入口、准入网络入口和唯一成员后台；外部不能取得内部用例或后台对象。
-- 私有 `membership_ledger` 加载并验证完整成员资料，通过一个带条件的原子提交能力共同保存 V2 历史、加入记录、对端关系、分页传输、待处理效果和唯一修订号。
+- 私有 `membership/ledger` 加载并验证完整成员资料，通过一个带条件的原子提交能力共同保存 V2 历史、加入记录、对端关系、分页传输、待处理效果和唯一修订号。
 - V2 签名成员历史是唯一正向成员资格；最终授权范围只在 ledger 内派生。成员资料、可信关系、地址、在线状态和偏好只能缩小普通操作目标，不能授予资格。
 - 查询、移除、决定、历史发送、历史接收、准入入站和后台维护分别拥有一个完整入口。提交后的网络失败不会回滚正式历史，后台只从已保存事实继续。
 - 成员后台只保留一套。启动、恢复、状态变化、定时和设备上线都进入同一维护顺序；暂停先通知网络工作停止，再等待当前保存边界完成，关闭等待最多五秒。
@@ -965,6 +967,9 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 
 ## 文档维护记录
 
+- 2026-08-26：完成 application Space 内部结构整理。根部只保留 Facade、组装、准入、生命周期、成员关系和连接恢复；原平铺的生命周期、session、成员 ledger、信任、历史、维护 runtime、签名和 re-pairing 模块分别迁入 `lifecycle/` 与 `membership/`，网络恢复迁入 `connectivity/recovery/`。四个责任区的子模块均为私有，跨区协作只经过各自根出口；旧路径物理删除且由仓库检查禁止恢复。运行行为和既有公开出口不变。
+- 2026-08-26：收紧 application Space 模块出口。将 `SpaceFacade` 的唯一实现及其输入、错误和依赖定义迁入私有 Space 模块；`space/mod.rs` 改为私有子模块加逐项出口，`facade/space_setup` 只保留既有公开调用清单，`deps` 和其他 application 模块不再穿透 Space 子目录。新增仓库检查阻止公开子模块、外部深层引用、Space 对公开 Facade 的反向依赖和旧实现路径回归；运行行为、产品操作和公开结果不变。
+- 2026-08-26：新增 `crates/uc-application/src/space/AGENTS.md`，按当前实现记录 Space 的公开入口、内部组装、每个 case、成员事实、网络入口、后台恢复、代码地图、设计图和修改检查；同步修正 Space 模块入口中过时的旧结构说明。本次只补充维护文档，不改变运行行为。
 - 2026-08-25：完成规格 027 的 application 一次性切换。`SpaceFacade` 成为唯一公开 Space 业务入口，`SpaceApplication` 统一构造用户用例、两类网络入口和唯一成员后台；新增加密 ledger 原子边界与最终授权范围，删除旧成员总对象、旧准入 owner、旧 gossip、旧综合状态、旧仓储接口、旧连接后台、side facade 和兼容路径。Core、Infra、Engine、绑定、数据库和真实网络接入仍按规格边界留待后续适配。
 - 2026-08-25：采纳 ADR-025 并新增规格 027。停止围绕旧成员关系总对象的渐进迁移，当前中间改动只作为业务证据；目标改为先固定 application 的产品动作、持久能力接口、网络入口、恢复和生命周期，再一次性替换 application 旧总对象、散落流程、旧 runtime 和旧 gossip 编排。Core、Infra、Engine、绑定、数据库和网络实现不纳入本规格，即使暂时不兼容也不反向改变 application 设计；生产代码尚未按新规格实施。
 - 2026-08-25：创建和解锁 Space 的应用输入统一使用受保护的密码类型；Engine 在稳定外部输入进入应用层时完成一次转换，应用流程不再把密码还原成普通字符串后重复包装。全局检查确认加入、配置迁移和 Relay 凭据已采用对应敏感类型，兼容协议中的序列化字段保持不变。

@@ -53,11 +53,10 @@ use crate::facade::{
     SearchStatusView, SettingsFacade, SettingsFacadeError, SpaceAccessState, SpaceFacade,
     StorageFacade,
 };
-use crate::space::connectivity::network_recovery::{
-    NetworkRecoveryFacade, NetworkRecoveryRequestError, NetworkRecoveryStatus,
+use crate::space::{
+    LockSpaceSessionError, NetworkRecoveryFacade, NetworkRecoveryRequestError,
+    NetworkRecoveryStatus, RecoverSpaceSessionError, RecoverSpaceSessionResult,
 };
-use crate::space::lock_space_session::LockSpaceSessionError;
-use crate::space::recover_space_session::{RecoverSpaceSessionError, RecoverSpaceSessionResult};
 use uc_core::ids::DeviceId;
 use uc_core::ports::{PresenceEvent, ReachabilityState};
 use uc_core::ClipboardChangeOrigin;

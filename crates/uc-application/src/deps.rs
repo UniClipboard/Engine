@@ -48,65 +48,42 @@ pub use crate::profile::probe_profile_key_access::{
     ProbeProfileKeyAccessPort, ProbeProfileKeyAccessUseCase, ProfileKeyAccessProbe,
     ProfileKeyAccessProbePortError,
 };
-pub use crate::space::admission::handle_space_admission_message::{
-    AuthenticatedSpaceAdmissionMessage, HandleSpaceAdmissionMessageError,
-    HandleSpaceAdmissionMessagePort, PrepareSpaceAdmissionMessagePort,
-    PreparedSpaceAdmissionCommit, PreparedSpaceAdmissionMessage, SpaceAdmissionPreparationContext,
+pub use crate::space::{
+    build_space_session_activity, CleanupLegacyMembershipDataPort, CommitMembershipLedgerPort,
+    CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentSpaceIdentityError,
+    CurrentSpaceIdentityPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
+    CurrentSpaceMemberScopePort, DeliverRestrictedMembershipPort, DeviceManagementResetDataPort,
+    InboundMembershipTransfer, InitialSpaceActivationPort, InitializeSpacePort,
+    InvitationConsumeDeliveryResult, IsSpaceUnlockedPort, JoinerStagedSecurityTransition,
+    LoadDeviceTrustObservationsPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+    LockSpacePort, MembershipEffectExecutionError, MembershipEffectKind, MembershipEffectPhase,
+    MembershipLedgerError, MembershipLedgerMutation, MembershipNetworkActivityPort,
+    MembershipSessionActivityPort, PausedSpaceMember, PeerReconciliationRecord,
+    PendingMembershipEffect, PortableCurrentSpaceIdentityPort, SpaceRebuildProgressError,
+    SpaceRebuildProgressPort, SpaceSessionRebindError, UnlockSpacePort,
 };
-pub use crate::space::admission::join_space::{PrepareJoinSpacePort, PreparedJoinSpace};
-pub use crate::space::admission::outbox::{
-    AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult,
-    AdmissionOutboxDeliveryRoute, InvitationConsumeDeliveryResult,
-};
-pub use crate::space::admission::security_transition::{
+pub use crate::space::{
     ActivateCompletionHelperAdmissionSecurityPort,
-    ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
-    ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
+    ActivateCompletionHelperAdmissionSecurityRequest, ActivateMembershipEffectPort,
+    ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
+    AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult,
+    AdmissionOutboxDeliveryRoute, AdmissionSecurityTransitionError,
     AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
-    JoinerStagedSecurityTransition, PrepareSponsorAdmissionSecurityPort,
-    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRecipient,
-    SponsorAdmissionSecurityRequest, SponsorPreparedAdmissionSecurity,
-    SponsorPreparedSecurityTransition,
-};
-pub use crate::space::admission::space_transition::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
-    DeviceManagementResetDataPort,
+    ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
+    AuthenticatedSpaceAdmissionMessage, HandleSpaceAdmissionMessageError,
+    HandleSpaceAdmissionMessagePort, PrepareJoinSpacePort, PrepareSpaceAdmissionMessagePort,
+    PrepareSponsorAdmissionSecurityPort, PreparedJoinSpace, PreparedSpaceAdmissionCommit,
+    PreparedSpaceAdmissionMessage, RePairingStateError, RePairingStateStorePort,
+    RebindSpaceSessionPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    RestrictedMembershipDeliveryPort, ResumeSpaceSessionPort, SpaceActivityError,
+    SpaceAdmissionPreparationContext, SpaceApplicationDeps, SpaceMemberPauseReason,
+    SpaceSessionActivityDeps, SpaceSessionActivityPort, SponsorAdmissionSecurityDelivery,
+    SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
+    SponsorPreparedAdmissionSecurity, SponsorPreparedSecurityTransition,
 };
-pub use crate::space::application::SpaceApplicationDeps;
-pub use crate::space::current_member_signing::{
-    CurrentMemberSignatureError, CurrentMemberSignaturePort,
-};
-pub use crate::space::current_space::{
-    CurrentSpaceIdentityError, CurrentSpaceIdentityPort, InitialSpaceActivationPort,
-    PortableCurrentSpaceIdentityPort,
-};
-pub use crate::space::initialize_space::InitializeSpacePort;
-pub use crate::space::lock_space_session::LockSpacePort;
-pub use crate::space::maintain_space_membership::{
-    CleanupLegacyMembershipDataPort, DeliverRestrictedMembershipPort,
-    MembershipNetworkActivityPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
-};
-pub use crate::space::membership_ledger::{
-    ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
-    CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
-    CurrentSpaceMemberScopePort, InboundMembershipTransfer, LoadMembershipLedgerPort,
-    LoadedMembershipLedger, MembershipEffectExecutionError, MembershipEffectKind,
-    MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
-    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
-};
-pub use crate::space::query_device_trust::LoadDeviceTrustObservationsPort;
-pub use crate::space::re_pairing::{RePairingStateError, RePairingStateStorePort};
-pub use crate::space::rebuild_space::{
-    RebindSpaceSessionPort, SpaceRebuildProgressError, SpaceRebuildProgressPort,
-    SpaceSessionRebindError,
-};
-pub use crate::space::session::{
-    build_space_session_activity, IsSpaceUnlockedPort, MembershipSessionActivityPort,
-    ResumeSpaceSessionPort, SpaceSessionActivityDeps, SpaceSessionActivityPort,
-};
-pub use crate::space::unlock_space::UnlockSpacePort;
 // §11.4.3 — the `entry_identity` module is `pub(crate)`, but its coordinator is
 // held by the `pub` `ClipboardPorts` field below and threaded into `pub` use-case
 // builders. Re-export it from this composition module so it stays reachable for

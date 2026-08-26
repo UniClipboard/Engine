@@ -8,8 +8,8 @@ use super::{
     PreparedSpaceAdmissionMessage, SpaceAdmissionPreparationContext,
 };
 use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
-use crate::space::membership_ledger::{MembershipLedger, MembershipLedgerError};
-use crate::space::remove_space_member::WakeSpaceMembershipMaintenancePort;
+use crate::space::membership::WakeSpaceMembershipMaintenancePort;
+use crate::space::membership::{MembershipLedger, MembershipLedgerError};
 use uc_core::ports::ClockPort;
 
 pub(crate) struct HandleSpaceAdmissionMessageUseCase {

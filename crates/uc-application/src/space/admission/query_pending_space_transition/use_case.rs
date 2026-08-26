@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::QueryPendingSpaceTransitionError;
-use crate::space::membership_ledger::MembershipLedger;
+use crate::space::membership::MembershipLedger;
 
 pub(crate) struct QueryPendingSpaceTransitionUseCase {
     ledger: Arc<MembershipLedger>,

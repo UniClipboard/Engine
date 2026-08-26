@@ -22,7 +22,9 @@ use tracing::{debug, warn};
 
 use uc_core::ports::{AppVersionStateError, AppVersionStatePort};
 
-use crate::space::current_space::CurrentSpaceIdentityPort;
+#[cfg(test)]
+use crate::space::CurrentSpaceIdentityError;
+use crate::space::CurrentSpaceIdentityPort;
 
 use super::status::UpgradeStatus;
 
@@ -180,10 +182,7 @@ mod tests {
     impl CurrentSpaceIdentityPort for FakeCurrentSpace {
         async fn current_space_id(
             &self,
-        ) -> Result<
-            Option<uc_core::ids::SpaceId>,
-            crate::space::current_space::CurrentSpaceIdentityError,
-        > {
+        ) -> Result<Option<uc_core::ids::SpaceId>, CurrentSpaceIdentityError> {
             Ok(self
                 .has_completed
                 .then(|| uc_core::ids::SpaceId::from("space")))

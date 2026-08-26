@@ -25,9 +25,9 @@ use tracing::instrument;
 
 use uc_core::ports::pairing_invitation::{IssuedInvitation, PairingInvitationPort};
 
-use crate::facade::space_setup::{IssuePairingInvitationError, IssuePairingInvitationResult};
 use crate::space::admission::invitation::issuer::map_invitation_error;
 use crate::space::admission::invitation::PairingInvitationIssuer;
+use crate::space::facade::{IssuePairingInvitationError, IssuePairingInvitationResult};
 
 pub(crate) struct IssuePairingInvitationUseCase {
     pairing_invitation: Arc<dyn PairingInvitationPort>,
@@ -83,7 +83,7 @@ mod tests {
 
     use crate::space::admission::invitation::holder::InMemoryPairingInvitationHolder;
     use crate::space::admission::invitation::issue_for_address::IssuePairingInvitationForAddressUseCase;
-    use crate::space::query_membership_admission::{
+    use crate::space::membership::{
         MembershipAdmissionSnapshot, QueryMembershipAdmissionError, QueryMembershipAdmissionPort,
     };
 
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(result.expires_at, expires_at());
         assert_eq!(
             result.availability,
-            crate::facade::space_setup::InvitationAvailability::CrossNetwork
+            crate::space::facade::InvitationAvailability::CrossNetwork
         );
         assert_eq!(h.invitation_port.calls(), 1);
 
@@ -414,7 +414,7 @@ mod tests {
 
         assert_eq!(
             result.availability,
-            crate::facade::space_setup::InvitationAvailability::SameLocalNetwork
+            crate::space::facade::InvitationAvailability::SameLocalNetwork
         );
     }
 

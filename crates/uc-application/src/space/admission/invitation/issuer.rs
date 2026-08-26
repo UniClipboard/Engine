@@ -10,11 +10,11 @@ use uc_observability_contract::analytics::{
     AnalyticsFacade, Event, InvitationCodeSource, PairingMethod,
 };
 
-use crate::facade::space_setup::{
+use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
+use crate::space::facade::{
     InvitationAvailability, IssuePairingInvitationError, IssuePairingInvitationResult,
 };
-use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
-use crate::space::query_membership_admission::QueryMembershipAdmissionPort;
+use crate::space::membership::QueryMembershipAdmissionPort;
 
 pub(crate) struct PairingInvitationIssuer {
     device_identity: Arc<dyn DeviceIdentityPort>,

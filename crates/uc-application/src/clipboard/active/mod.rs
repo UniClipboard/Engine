@@ -49,7 +49,7 @@ use uc_core::{blob::ports::BlobReaderPort, MemberRepositoryPort};
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
-use crate::space::session::IsSpaceUnlockedPort;
+use crate::space::IsSpaceUnlockedPort;
 
 use crate::clipboard::inbound::{
     InboundClipboardApplyInput, InboundClipboardApplyOutcome, InboundClipboardApplyPort,

@@ -4,9 +4,9 @@ use std::sync::Arc;
 use tracing::instrument;
 use uc_core::ports::pairing_invitation::{IssuedInvitation, PairingInvitationByAddressPort};
 
-use crate::facade::space_setup::{IssuePairingInvitationError, IssuePairingInvitationResult};
 use crate::space::admission::invitation::issuer::map_invitation_error;
 use crate::space::admission::invitation::PairingInvitationIssuer;
+use crate::space::facade::{IssuePairingInvitationError, IssuePairingInvitationResult};
 
 /// 开发工具专用：使用调用方明确选择的本机地址签发邀请。
 pub(crate) struct IssuePairingInvitationForAddressUseCase {

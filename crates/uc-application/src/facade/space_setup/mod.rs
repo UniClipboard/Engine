@@ -1,36 +1,15 @@
-//! `SpaceFacade` — lifecycle of the local encrypted space.
+//! Public Space facade whitelist.
 //!
-//! Covers first-run initialization (A1 `InitializeSpaceUseCase`) and
-//! post-setup unlock (A2 `UnlockSpaceUseCase`). Constructed from
-//! [`SpaceFacadeDeps`] so external callers (bootstrap) bundle ports into
-//! one struct instead of passing a dozen positional arguments.
-//!
-//! Distinct from the older `crate::setup::SetupFacade`, which orchestrates
-//! the device-onboarding (pairing / join) flow that predates Slice 1. The
-//! two facades will co-exist until later slices consolidate them.
+//! The implementation belongs to the private `space` module. External
+//! consumers keep using this stable facade namespace.
 
-pub(crate) mod commands;
-mod deps;
-mod errors;
-mod facade;
-
-pub use crate::space::admission::complete_pending_space_transition::CompletePendingSpaceTransitionError;
-pub use crate::space::admission::invitation::cancel::CancelInvitationError;
-pub use crate::space::admission::invitation::query_addresses::{
-    PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
-};
-pub use crate::space::admission::query_pending_space_transition::QueryPendingSpaceTransitionError;
-pub use crate::space::initialize_space::{InitializeSpaceError, InitializeSpaceResult};
-pub use crate::space::query_space_setup_state::{
-    CurrentInvitation, QuerySetupStateError, SetupStateView,
-};
-pub use crate::space::reset_space::ResetSpaceError;
-pub use crate::space::unlock_space::UnlockSpaceError;
-pub use commands::{
-    InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationResult, UnlockSpaceInput,
+pub use crate::space::{
+    CancelInvitationError, CompletePendingSpaceTransitionError, CurrentInvitation,
+    InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, InvitationAvailability,
+    IssuePairingInvitationError, IssuePairingInvitationResult, PairingInvitationAddressCandidate,
+    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
+    RedeemPairingInvitationError, ResetSpaceError, SetupStateView, SpaceAdmissionDeps, SpaceFacade,
+    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput,
     UnlockSpaceResult,
 };
-pub use deps::{SpaceAdmissionDeps, SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps};
-pub use errors::{IssuePairingInvitationError, RedeemPairingInvitationError};
-pub use facade::SpaceFacade;
 pub use uc_observability_contract::analytics::PairingFailureReason;

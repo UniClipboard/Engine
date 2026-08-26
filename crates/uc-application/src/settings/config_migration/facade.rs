@@ -16,8 +16,11 @@ use uc_core::ports::config_migration::{
     StageConfigImportPort, StagedConfigImport,
 };
 
-use crate::space::current_space::{CurrentSpaceIdentityPort, PortableCurrentSpaceIdentityPort};
-use crate::space::session::IsSpaceUnlockedPort;
+#[cfg(test)]
+use crate::space::CurrentSpaceIdentityError;
+use crate::space::{
+    CurrentSpaceIdentityPort, IsSpaceUnlockedPort, PortableCurrentSpaceIdentityPort,
+};
 
 /// Ports consumed by [`ConfigMigrationFacade`].
 ///
@@ -165,19 +168,14 @@ mod tests {
 
     #[async_trait]
     impl CurrentSpaceIdentityPort for FakeCurrentSpace {
-        async fn current_space_id(
-            &self,
-        ) -> Result<Option<SpaceId>, crate::space::current_space::CurrentSpaceIdentityError>
-        {
+        async fn current_space_id(&self) -> Result<Option<SpaceId>, CurrentSpaceIdentityError> {
             Ok(self.space_id.clone())
         }
     }
 
     #[async_trait]
     impl PortableCurrentSpaceIdentityPort for FakeCurrentSpace {
-        async fn prepare_portable_identity(
-            &self,
-        ) -> Result<(), crate::space::current_space::CurrentSpaceIdentityError> {
+        async fn prepare_portable_identity(&self) -> Result<(), CurrentSpaceIdentityError> {
             *self.portable_calls.lock().expect("portable calls") += 1;
             Ok(())
         }
@@ -187,19 +185,14 @@ mod tests {
 
     #[async_trait]
     impl CurrentSpaceIdentityPort for FailingCurrentSpace {
-        async fn current_space_id(
-            &self,
-        ) -> Result<Option<SpaceId>, crate::space::current_space::CurrentSpaceIdentityError>
-        {
-            Err(crate::space::current_space::CurrentSpaceIdentityError::Unavailable)
+        async fn current_space_id(&self) -> Result<Option<SpaceId>, CurrentSpaceIdentityError> {
+            Err(CurrentSpaceIdentityError::Unavailable)
         }
     }
 
     #[async_trait]
     impl PortableCurrentSpaceIdentityPort for FailingCurrentSpace {
-        async fn prepare_portable_identity(
-            &self,
-        ) -> Result<(), crate::space::current_space::CurrentSpaceIdentityError> {
+        async fn prepare_portable_identity(&self) -> Result<(), CurrentSpaceIdentityError> {
             Ok(())
         }
     }

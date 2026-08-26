@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use crate::deps::{AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult};
-use crate::space::maintain_space_membership::{
+use crate::space::membership::MembershipLedger;
+use crate::space::membership::{
     MembershipMaintenanceReport, MembershipMaintenanceStepOutcome, RecoverSpaceAdmissionsPort,
 };
-use crate::space::membership_ledger::MembershipLedger;
 
 pub(crate) struct RecoverSpaceAdmissionsUseCase {
     ledger: Arc<MembershipLedger>,

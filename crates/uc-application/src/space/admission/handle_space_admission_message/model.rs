@@ -1,7 +1,7 @@
 use uc_core::ids::DeviceId;
 use uc_core::membership::SpaceJoinRecord;
 
-use crate::space::membership_ledger::{PeerReconciliationRecord, PendingMembershipEffect};
+use crate::space::membership::{PeerReconciliationRecord, PendingMembershipEffect};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct AuthenticatedSpaceAdmissionMessage {

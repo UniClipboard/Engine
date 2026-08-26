@@ -4,22 +4,9 @@ use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::*;
 
-use super::admission::handle_space_admission_message::*;
-use super::admission::invitation::InMemoryPairingInvitationHolder;
-use super::admission::join_space::{
-    JoinSpaceError, JoinSpaceInput, PrepareJoinSpacePort, PreparedJoinSpace,
-};
+use super::admission::*;
 use super::application::{SpaceApplication, SpaceApplicationDeps};
-use super::current_member_signing::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
-use super::maintain_space_membership::{
-    CleanupLegacyMembershipDataPort, MembershipMaintenanceStepOutcome,
-    MembershipNetworkActivityPort,
-};
-use super::membership_ledger::*;
-use super::query_device_trust::{
-    DeviceTrustObservation, LoadDeviceTrustObservationsPort, QueryDeviceTrustError,
-};
-use crate::deps::*;
+use super::membership::*;
 
 struct MemoryLedger(Mutex<LoadedMembershipLedger>);
 
@@ -307,10 +294,8 @@ impl MembershipNetworkActivityPort for PassivePorts {
 }
 
 #[async_trait]
-impl super::re_pairing::ResolveRePairingPort for PassivePorts {
-    async fn resolve_after_successful_pairing(
-        &self,
-    ) -> Result<(), super::re_pairing::RePairingStateError> {
+impl ResolveRePairingPort for PassivePorts {
+    async fn resolve_after_successful_pairing(&self) -> Result<(), RePairingStateError> {
         Ok(())
     }
 }

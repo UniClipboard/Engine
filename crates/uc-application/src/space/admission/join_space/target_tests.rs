@@ -9,11 +9,11 @@ use uc_core::membership::{
 use uc_core::ports::SettingsPort;
 
 use super::*;
-use crate::space::membership_ledger::{
+use crate::space::membership::WakeSpaceMembershipMaintenancePort;
+use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedger,
     MembershipLedgerError, MembershipLedgerMutation,
 };
-use crate::space::remove_space_member::WakeSpaceMembershipMaintenancePort;
 
 struct MemoryRepository {
     loaded: Mutex<LoadedMembershipLedger>,

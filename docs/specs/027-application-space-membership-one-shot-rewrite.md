@@ -94,7 +94,7 @@ Relationship: 规则正确但依赖过多，且与 ContentExchangeGatePort 重�
 
 ```text
 Component: Membership synchronization
-Path: crates/uc-application/src/space/synchronize_membership_history/
+Path: crates/uc-application/src/space/membership/synchronize_history/
 Responsibility: 全量或单设备发送有界历史页，接收入站页并保存关系。
 Relationship: 用例入口保留，内部不再依赖旧总对象或旧综合状态。
 ```
@@ -131,7 +131,7 @@ Relationship: 合并为一个 runtime，业务恢复顺序交给一个维护用�
 
 ### `MembershipLedger`
 
-- 路径：`crates/uc-application/src/space/membership_ledger/`
+- 路径：`crates/uc-application/src/space/membership/ledger/`
 - 职责：加载并验证当前成员历史与运行资料；执行带版本条件的原子提交；派生当前授权范围。
 - 输入：期望 revision、规范成员变化、关系变化、传输变化或效果变化。
 - 输出：已提交的新 revision 和经验证快照，或 Locked、Conflict、Corrupt、Unavailable。
@@ -139,7 +139,7 @@ Relationship: 合并为一个 runtime，业务恢复顺序交给一个维护用�
 
 ### `QueryDeviceTrustUseCase`
 
-- 路径：`crates/uc-application/src/space/query_device_trust/`
+- 路径：`crates/uc-application/src/space/membership/query_device_trust/`
 - 职责：一次读取当前历史、关系、加入投影、成员显示资料和 reachability，生成完整设备信任结果。
 - 输入：无。
 - 输出：`DeviceTrustStatus`。
@@ -147,7 +147,7 @@ Relationship: 合并为一个 runtime，业务恢复顺序交给一个维护用�
 
 ### `RemoveSpaceMemberUseCase`
 
-- 路径：`crates/uc-application/src/space/remove_space_member/`
+- 路径：`crates/uc-application/src/space/membership/remove_space_member/`
 - 职责：验证目标、签名移除、原子保存历史变化与待处理效果、请求后台维护并返回最新结果。
 - 输入：目标 `DeviceId`。
 - 输出：`RemoveSpaceMemberResult`，包含变化编号、规范提交回执和最新设备信任状态。
@@ -155,7 +155,7 @@ Relationship: 合并为一个 runtime，业务恢复顺序交给一个维护用�
 
 ### `DecideDeviceTrustChangeUseCase`
 
-- 路径：`crates/uc-application/src/space/decide_device_trust_change/`
+- 路径：`crates/uc-application/src/space/membership/decide_device_trust_change/`
 - 职责：处理当前待决定移除的接受、拒绝、重复、过期和本机移除确认。
 - 输入：变化编号、选择、是否确认移除本机。
 - 输出：Applied、KeptCurrentGroup、AlreadyCompleted、StateChanged 或 LocalConfirmationRequired，均携带最新状态。
@@ -163,7 +163,7 @@ Relationship: 合并为一个 runtime，业务恢复顺序交给一个维护用�
 
 ### `SynchronizeMembershipHistoryUseCase`
 
-- 路径：`crates/uc-application/src/space/synchronize_membership_history/`
+- 路径：`crates/uc-application/src/space/membership/synchronize_history/`
 - 职责：在一个固定总预算内同步全部当前成员，或同步一个明确上线的成员。
 - 输入：`AllCurrentPeers` 或 `AuthenticatedPeer(DeviceId)`。
 - 输出：整体完成或当前范围不可用；单设备暂时失败记录为 deferred。
@@ -171,7 +171,7 @@ Relationship: 合并为一个 runtime，业务恢复顺序交给一个维护用�
 
 ### `HandleMembershipHistoryMessageUseCase`
 
-- 路径：`crates/uc-application/src/space/handle_membership_history_message/`
+- 路径：`crates/uc-application/src/space/membership/handle_history_message/`
 - 职责：处理一条来自已认证成员通道的有界历史消息，先保存接收结果再返回 ACK。
 - 输入：已认证来源设备和一条 `MembershipHistoryMessage`。
 - 输出：一条 ACK 或稳定拒绝。
@@ -179,7 +179,7 @@ Relationship: 合并为一个 runtime，业务恢复顺序交给一个维护用�
 
 ### `MaintainSpaceMembershipUseCase`
 
-- 路径：`crates/uc-application/src/space/maintain_space_membership/`
+- 路径：`crates/uc-application/src/space/membership/maintenance/`
 - 职责：完整恢复当前 Space 的未完成成员工作。
 - 输入：Startup、Resume、Periodic、StateChanged 或 PeerOnline。
 - 输出：按类别统计完成、延后和稳定失败数量。
@@ -187,7 +187,7 @@ Relationship: 合并为一个 runtime，业务恢复顺序交给一个维护用�
 
 ### `SpaceMembershipRuntime`
 
-- 路径：`crates/uc-application/src/space/maintain_space_membership/runtime.rs`
+- 路径：`crates/uc-application/src/space/membership/maintenance/runtime.rs`
 - 职责：拥有 presence 订阅、定时器、退避、唤醒、暂停、恢复和关闭。
 - 输入：运行期命令和事件。
 - 输出：无业务状态；只调用 `MaintainSpaceMembershipUseCase`。
@@ -521,22 +521,22 @@ Application facade 固定查询设备信任、处理当前变化、移除成员�
 
 ## Step 2: 建立 application ledger 模型与 ports
 
-**File:** `crates/uc-application/src/space/membership_ledger/`
+**File:** `crates/uc-application/src/space/membership/ledger/`
 **Change:** 定义新运行资料、窄加载/原子提交 ports 和 application 内存 adapter。成员历史规则继续调用现有 Core；本步骤不修改 Core 或提供 Infra adapter。
 **Risk:** Port 不能照搬现有宽仓储的全部方法。它只表达目标用例真正需要的一次加载、一次条件提交和一次联合提交。
 
 ## Step 3: 重写正式成员用例
 
-**File:** `crates/uc-application/src/space/query_device_trust/`
-**File:** `crates/uc-application/src/space/remove_space_member/`
-**File:** `crates/uc-application/src/space/decide_device_trust_change/`
+**File:** `crates/uc-application/src/space/membership/query_device_trust/`
+**File:** `crates/uc-application/src/space/membership/remove_space_member/`
+**File:** `crates/uc-application/src/space/membership/decide_device_trust_change/`
 **Change:** 以 `rebuild_space` 的单入口、执行锁、阶段方法、持久提交和收尾模式重写三个正式用例。
 **Risk:** 决定提交后效果失败不能返回成“未发生”；结果和查询必须表达已提交但暂时受限。
 
 ## Step 4: 重写历史收发
 
-**File:** `crates/uc-application/src/space/synchronize_membership_history/`
-**File:** `crates/uc-application/src/space/handle_membership_history_message/`
+**File:** `crates/uc-application/src/space/membership/synchronize_history/`
+**File:** `crates/uc-application/src/space/membership/handle_history_message/`
 **Change:** 把 outbound 和 inbound 从旧总对象移入两个完整用例；复用既有 V2 编解码和上限。
 **Risk:** 必须保留每页先保存后 ACK、重复页幂等、乱序继续和整体验证后提交。
 
@@ -548,8 +548,8 @@ Application facade 固定查询设备信任、处理当前变化、移除成员�
 
 ## Step 6: 合并维护与 runtime
 
-**File:** `crates/uc-application/src/space/maintain_space_membership/`
-**File:** `crates/uc-application/src/space/session/activity.rs`
+**File:** `crates/uc-application/src/space/membership/maintenance/`
+**File:** `crates/uc-application/src/space/lifecycle/session/activity.rs`
 **Change:** 合并旧 gossip、成员维护和成员连接 runtime；固定维护顺序、退避、暂停、恢复和关闭。
 **Risk:** 暂停必须阻止新网络工作，但不能取消正在提交的本地事务；关闭不能无限等待离线对端。
 

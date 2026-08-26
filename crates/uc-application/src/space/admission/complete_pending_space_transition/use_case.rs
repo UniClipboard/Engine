@@ -8,8 +8,8 @@ use uc_core::membership::{
 use super::CompletePendingSpaceTransitionError;
 use crate::deps::{AdmissionSpaceTransitionPort, AdmissionSpaceTransitionStepV2};
 use crate::space::admission::CurrentJoinStatus;
-use crate::space::membership_ledger::MembershipLedger;
-use crate::space::query_device_trust::project_current_join;
+use crate::space::membership::project_current_join;
+use crate::space::membership::MembershipLedger;
 
 pub(crate) struct CompletePendingSpaceTransitionUseCase {
     ledger: Arc<MembershipLedger>,

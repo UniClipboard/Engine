@@ -9,34 +9,30 @@ use uc_core::membership::{
 };
 use uc_core::ports::PresenceEvent;
 
-use crate::space::admission::cancel_space_join::CancelSpaceJoinUseCase;
-use crate::space::admission::complete_pending_space_transition::CompletePendingSpaceTransitionUseCase;
-use crate::space::admission::handle_space_admission_message::{
-    HandleSpaceAdmissionMessagePort, HandleSpaceAdmissionMessageUseCase,
-    PrepareSpaceAdmissionMessagePort,
+use crate::space::admission::{
+    CancelSpaceJoinUseCase, CompletePendingSpaceTransitionUseCase, HandleSpaceAdmissionMessagePort,
+    HandleSpaceAdmissionMessageUseCase, InMemoryPairingInvitationHolder, JoinSpaceUseCase,
+    PrepareJoinSpacePort, PrepareSpaceAdmissionMessagePort, QueryPendingSpaceTransitionUseCase,
+    RecoverSpaceAdmissionsUseCase,
 };
-use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
-use crate::space::admission::join_space::{JoinSpaceUseCase, PrepareJoinSpacePort};
-use crate::space::admission::query_pending_space_transition::QueryPendingSpaceTransitionUseCase;
-use crate::space::admission::recover_space_admissions::RecoverSpaceAdmissionsUseCase;
-use crate::space::current_member_signing::CurrentMemberSignaturePort;
-use crate::space::decide_device_trust_change::DecideDeviceTrustChangeUseCase;
-use crate::space::handle_membership_history_message::HandleMembershipHistoryMessageUseCase;
-use crate::space::maintain_space_membership::{
-    CleanupLegacyMembershipDataPort, MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase,
-    MembershipNetworkActivityPort, SpaceMembershipRuntime,
-};
-use crate::space::membership_ledger::{
+use crate::space::membership::CurrentMemberSignaturePort;
+use crate::space::membership::DecideDeviceTrustChangeUseCase;
+use crate::space::membership::HandleMembershipHistoryMessageUseCase;
+use crate::space::membership::QueryMembershipAdmissionUseCase;
+use crate::space::membership::RemoveSpaceMemberUseCase;
+use crate::space::membership::SynchronizeMembershipHistoryUseCase;
+use crate::space::membership::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScopePort, DeliverRestrictedMembershipUseCase,
     InitializeSpaceMembershipUseCase, LoadMembershipLedgerPort, MembershipLedger,
     RePairingAwareMembershipActivation, RecoverMembershipEffectsUseCase,
     RestrictedMembershipDeliveryPort,
 };
-use crate::space::query_device_trust::{LoadDeviceTrustObservationsPort, QueryDeviceTrustUseCase};
-use crate::space::query_membership_admission::QueryMembershipAdmissionUseCase;
-use crate::space::remove_space_member::RemoveSpaceMemberUseCase;
-use crate::space::synchronize_membership_history::SynchronizeMembershipHistoryUseCase;
+use crate::space::membership::{
+    CleanupLegacyMembershipDataPort, MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase,
+    MembershipNetworkActivityPort, SpaceMembershipRuntime,
+};
+use crate::space::membership::{LoadDeviceTrustObservationsPort, QueryDeviceTrustUseCase};
 
 pub struct SpaceApplicationDeps {
     pub load_membership_ledger: Arc<dyn LoadMembershipLedgerPort>,
@@ -77,7 +73,7 @@ pub(crate) struct SpaceApplication {
     membership_history_endpoint: Arc<HandleMembershipHistoryMessageUseCase>,
     space_admission_endpoint: Arc<HandleSpaceAdmissionMessageUseCase>,
     initialize_membership: Arc<InitializeSpaceMembershipUseCase>,
-    membership_activity: crate::space::maintain_space_membership::SpaceMembershipActivity,
+    membership_activity: crate::space::membership::SpaceMembershipActivity,
     runtime: Option<SpaceMembershipRuntime>,
 }
 
@@ -86,7 +82,7 @@ impl SpaceApplication {
         deps: SpaceApplicationDeps,
         presence_events: broadcast::Receiver<PresenceEvent>,
         invitations: Arc<InMemoryPairingInvitationHolder>,
-        re_pairing: Arc<dyn crate::space::re_pairing::ResolveRePairingPort>,
+        re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
         let ledger = Arc::new(MembershipLedger::new(
             deps.load_membership_ledger,
@@ -136,9 +132,7 @@ impl SpaceApplication {
             MaintainSpaceMembershipDeps {
                 admissions: recover_admissions,
                 effects: Arc::clone(&recover_membership_effects)
-                    as Arc<
-                        dyn crate::space::maintain_space_membership::RecoverMembershipEffectsPort,
-                    >,
+                    as Arc<dyn crate::space::membership::RecoverMembershipEffectsPort>,
                 restricted_delivery: deliver_restricted_membership,
                 synchronization: synchronize_membership,
                 cleanup: deps.cleanup_legacy_membership_data,
@@ -222,13 +216,13 @@ impl SpaceApplication {
 
     pub(crate) fn membership_session_activity(
         &self,
-    ) -> Arc<dyn crate::space::session::MembershipSessionActivityPort> {
+    ) -> Arc<dyn crate::space::lifecycle::MembershipSessionActivityPort> {
         Arc::new(self.membership_activity.clone())
     }
 
     pub(crate) fn membership_maintenance_wake(
         &self,
-    ) -> Arc<dyn crate::space::remove_space_member::WakeSpaceMembershipMaintenancePort> {
+    ) -> Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort> {
         Arc::new(self.membership_activity.clone())
     }
 
@@ -280,7 +274,7 @@ impl SpaceApplication {
 
     pub(crate) fn membership_reset(
         &self,
-    ) -> Arc<dyn crate::space::rebuild_space::SpaceMembershipResetPort> {
+    ) -> Arc<dyn crate::space::lifecycle::SpaceMembershipResetPort> {
         self.ledger.clone()
     }
 

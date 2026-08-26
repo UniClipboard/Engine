@@ -13,16 +13,61 @@
 //! live in this subdomain as well. The join use case owns device-name
 //! persistence and the best-effort network preparation before redemption.
 
-pub(crate) mod cancel_space_join;
-pub(crate) mod complete_pending_space_transition;
-pub(crate) mod handle_space_admission_message;
-pub(crate) mod invitation;
-pub(crate) mod join_space;
+mod cancel_space_join;
+mod complete_pending_space_transition;
+mod handle_space_admission_message;
+mod invitation;
+mod join_space;
 mod model;
-pub(crate) mod outbox;
-pub(crate) mod query_pending_space_transition;
-pub(crate) mod recover_space_admissions;
-pub(crate) mod security_transition;
-pub(crate) mod space_transition;
+mod outbox;
+mod query_pending_space_transition;
+mod recover_space_admissions;
+mod security_transition;
+mod space_transition;
 
+pub use cancel_space_join::CancelSpaceJoinError;
+pub use complete_pending_space_transition::CompletePendingSpaceTransitionError;
+pub use handle_space_admission_message::{
+    AuthenticatedSpaceAdmissionMessage, HandleSpaceAdmissionMessageError,
+    HandleSpaceAdmissionMessagePort, PrepareSpaceAdmissionMessagePort,
+    PreparedSpaceAdmissionCommit, PreparedSpaceAdmissionMessage, SpaceAdmissionPreparationContext,
+};
+pub use invitation::{
+    CancelInvitationError, PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
+};
+pub use join_space::{
+    JoinSpaceError, JoinSpaceInput, JoinSpaceResult, PrepareJoinSpacePort, PreparedJoinSpace,
+};
 pub use model::{CurrentJoinStatus, JoinedSpace, PendingInboundMember};
+pub use outbox::{
+    AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult,
+    AdmissionOutboxDeliveryRoute, InvitationConsumeDeliveryResult,
+};
+pub use query_pending_space_transition::QueryPendingSpaceTransitionError;
+pub use security_transition::{
+    ActivateCompletionHelperAdmissionSecurityPort,
+    ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
+    ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
+    AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
+    JoinerStagedSecurityTransition, PrepareSponsorAdmissionSecurityPort,
+    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRecipient,
+    SponsorAdmissionSecurityRequest, SponsorPreparedAdmissionSecurity,
+    SponsorPreparedSecurityTransition,
+};
+pub use space_transition::{
+    AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
+    AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
+    DeviceManagementResetDataPort,
+};
+
+pub(super) use cancel_space_join::CancelSpaceJoinUseCase;
+pub(super) use complete_pending_space_transition::CompletePendingSpaceTransitionUseCase;
+pub(super) use handle_space_admission_message::HandleSpaceAdmissionMessageUseCase;
+pub(super) use invitation::{
+    CancelPairingInvitationUseCase, InMemoryPairingInvitationHolder,
+    IssuePairingInvitationForAddressUseCase, IssuePairingInvitationUseCase,
+    PairingInvitationIssuer, QueryPairingInvitationAddressesUseCase,
+};
+pub(super) use join_space::JoinSpaceUseCase;
+pub(super) use query_pending_space_transition::QueryPendingSpaceTransitionUseCase;
+pub(super) use recover_space_admissions::RecoverSpaceAdmissionsUseCase;

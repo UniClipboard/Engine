@@ -3,9 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uc_core::ports::SettingsPort;
 
-use crate::space::membership_ledger::{MembershipLedger, MembershipLedgerError};
-use crate::space::query_device_trust::project_current_join;
-use crate::space::remove_space_member::WakeSpaceMembershipMaintenancePort;
+use crate::space::membership::project_current_join;
+use crate::space::membership::WakeSpaceMembershipMaintenancePort;
+use crate::space::membership::{MembershipLedger, MembershipLedgerError};
 
 use super::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 

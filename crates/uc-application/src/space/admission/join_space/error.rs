@@ -1,4 +1,4 @@
-use crate::facade::space_setup::RedeemPairingInvitationError;
+use crate::space::facade::RedeemPairingInvitationError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JoinSpaceError {

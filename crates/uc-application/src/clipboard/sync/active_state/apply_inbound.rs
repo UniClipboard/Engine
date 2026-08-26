@@ -51,7 +51,7 @@ use uc_core::MemberRepositoryPort;
 use crate::clipboard::write::{
     ClipboardWriteCoordinator, ClipboardWriteIntent, MobileConsumabilityProbe,
 };
-use crate::space::session::IsSpaceUnlockedPort;
+use crate::space::IsSpaceUnlockedPort;
 
 use super::super::receive_gate::{MemberReceiveGate, MemberReceivePermit};
 use super::super::send_gate::MemberSendGate;

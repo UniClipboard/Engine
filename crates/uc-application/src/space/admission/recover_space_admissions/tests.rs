@@ -16,7 +16,7 @@ use crate::deps::{
     AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult,
     AdmissionOutboxDeliveryRoute,
 };
-use crate::space::membership_ledger::{
+use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedger,
     MembershipLedgerError, MembershipLedgerMutation,
 };

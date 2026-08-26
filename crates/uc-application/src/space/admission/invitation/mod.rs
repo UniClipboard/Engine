@@ -8,16 +8,24 @@
 //! All types here are `pub(crate)` per `uc-application/AGENTS.md` §11.4:
 //! the holder is a cross-use-case flow-state component, not an external
 //! boundary. External callers interact with invitations exclusively
-//! through [`crate::facade::space_setup::SpaceFacade`].
+//! through [`crate::space::SpaceFacade`].
 
-pub(crate) mod cancel;
-pub(crate) mod holder;
-pub(crate) mod issue;
-pub(crate) mod issue_for_address;
-pub(crate) mod query_addresses;
+mod cancel;
+mod holder;
+mod issue;
+mod issue_for_address;
+mod query_addresses;
 
 mod issuer;
 
-pub(crate) use issuer::PairingInvitationIssuer;
+pub use cancel::CancelInvitationError;
+pub use query_addresses::{
+    PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
+};
 
-pub(crate) use holder::InMemoryPairingInvitationHolder;
+pub(in crate::space) use cancel::CancelPairingInvitationUseCase;
+pub(in crate::space) use holder::InMemoryPairingInvitationHolder;
+pub(in crate::space) use issue::IssuePairingInvitationUseCase;
+pub(in crate::space) use issue_for_address::IssuePairingInvitationForAddressUseCase;
+pub(in crate::space) use issuer::PairingInvitationIssuer;
+pub(in crate::space) use query_addresses::QueryPairingInvitationAddressesUseCase;

@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::space::reset_space::ports::PendingSpaceInvitationResetPort;
+use crate::space::lifecycle::PendingSpaceInvitationResetPort;
 
 use uc_core::pairing::invitation::{
     ConsumeError, InvitationCode, InvitationState, PairingInvitation,
