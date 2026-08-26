@@ -284,6 +284,36 @@ impl AppFacade {
         self.space.join_space(input).await
     }
 
+    pub async fn query_device_trust(
+        &self,
+    ) -> Result<crate::facade::DeviceTrustStatus, crate::facade::QueryDeviceTrustError> {
+        self.space.query_device_trust().await
+    }
+
+    pub async fn remove_space_member(
+        &self,
+        target: &DeviceId,
+    ) -> Result<crate::facade::RemoveSpaceMemberResult, crate::facade::RemoveSpaceMemberError> {
+        self.space.remove_space_member(target).await
+    }
+
+    pub async fn decide_device_trust_change(
+        &self,
+        input: crate::facade::DecideDeviceTrustChange,
+    ) -> Result<
+        crate::facade::DecideDeviceTrustChangeResult,
+        crate::facade::DecideDeviceTrustChangeError,
+    > {
+        self.space.decide_device_trust_change(input).await
+    }
+
+    pub async fn cancel_space_join(
+        &self,
+        join_id: [u8; 16],
+    ) -> Result<crate::facade::CurrentJoinStatus, crate::facade::CancelSpaceJoinError> {
+        self.space.cancel_space_join(join_id).await
+    }
+
     pub async fn has_pending_space_transition(
         &self,
     ) -> Result<bool, crate::facade::QueryPendingSpaceTransitionError> {

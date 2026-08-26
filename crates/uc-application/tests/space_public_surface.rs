@@ -3,7 +3,7 @@ use uc_application::deps::{
     SpaceSessionActivityPort,
 };
 use uc_application::facade::space_setup::{SpaceFacade, SpaceFacadeDeps};
-use uc_application::facade::{DeviceTrustStatus, JoinSpaceInput, NetworkRecoveryFacade};
+use uc_application::facade::{AppFacade, DeviceTrustStatus, JoinSpaceInput, NetworkRecoveryFacade};
 
 #[test]
 fn space_contracts_remain_reachable_only_through_facade_and_deps() {
@@ -20,4 +20,12 @@ fn space_contracts_remain_reachable_only_through_facade_and_deps() {
     ];
 
     assert!(public_types.iter().all(|name| !name.is_empty()));
+}
+
+#[test]
+fn app_facade_exposes_all_stable_space_membership_actions() {
+    let _ = AppFacade::query_device_trust;
+    let _ = AppFacade::remove_space_member;
+    let _ = AppFacade::decide_device_trust_change;
+    let _ = AppFacade::cancel_space_join;
 }
