@@ -5,8 +5,9 @@ use crate::error_codes::*;
 use tracing::error;
 use uc_application::facade::{
     AppFacade, JoinSpaceError as AppJoinSpaceError, JoinSpaceInput as AppJoinSpaceInput,
-    RedeemPairingInvitationError,
 };
+use uc_core::crypto::domain::Passphrase;
+use uc_core::pairing::InvitationCode;
 
 use crate::operations::device::member::join_space_status;
 
@@ -23,9 +24,9 @@ pub async fn execute_join_space(
 ) -> Result<JoinSpaceExecution, EngineError> {
     let joined = facade
         .join_space(AppJoinSpaceInput {
-            invitation_code: input.invitation_code,
+            invitation_code: InvitationCode::new(input.invitation_code),
             device_name: input.device_name,
-            passphrase: input.passphrase.expose().to_owned(),
+            passphrase: Passphrase::new(input.passphrase.expose()),
             preserve_unreadable_history: input.preserve_unreadable_history,
         })
         .await
@@ -45,86 +46,33 @@ pub(crate) fn join_status_result(
 fn map_join_space_error(error: AppJoinSpaceError) -> EngineError {
     match error {
         AppJoinSpaceError::DeviceNameRequired => device_name_required_error(),
-        AppJoinSpaceError::Admission(error) => map_fresh_join_error(error),
-        AppJoinSpaceError::Settings(_) | AppJoinSpaceError::SavedState(_) => {
-            join_internal_error("join space", error)
-        }
-    }
-}
-
-fn map_fresh_join_error(error: RedeemPairingInvitationError) -> EngineError {
-    match error {
-        RedeemPairingInvitationError::InvitationNotFound => error_with(
+        AppJoinSpaceError::InvalidInvitation => error_with(
             JOIN_SPACE_INVITATION_NOT_FOUND_CODE,
             EngineErrorCategory::NotFound,
             false,
         ),
-        RedeemPairingInvitationError::InvitationExpired => error_with(
-            JOIN_SPACE_INVITATION_EXPIRED_CODE,
-            EngineErrorCategory::NotFound,
-            false,
-        ),
-        RedeemPairingInvitationError::SponsorUnreachable => {
-            unavailable_error(JOIN_SPACE_SPONSOR_UNREACHABLE_CODE)
-        }
-        RedeemPairingInvitationError::ServiceUnavailable => {
-            unavailable_error(JOIN_SPACE_SERVICE_UNAVAILABLE_CODE)
-        }
-        RedeemPairingInvitationError::SponsorUpgradeRequired => error_with(
-            JOIN_SPACE_SPONSOR_UPGRADE_REQUIRED_CODE,
-            EngineErrorCategory::Conflict,
-            false,
-        ),
-        RedeemPairingInvitationError::PassphraseMismatch => error_with(
-            JOIN_SPACE_PASSPHRASE_MISMATCH_CODE,
-            EngineErrorCategory::Unauthorized,
-            false,
-        ),
-        RedeemPairingInvitationError::CorruptedKeyMaterial => error_with(
-            JOIN_SPACE_CORRUPTED_KEY_CODE,
-            EngineErrorCategory::Internal,
-            false,
-        ),
-        RedeemPairingInvitationError::DeviceNameRequired => device_name_required_error(),
-        RedeemPairingInvitationError::UnreadableHistoryRequiresConfirmation => error_with(
-            JOIN_SPACE_UNREADABLE_HISTORY_REQUIRES_CONFIRMATION_CODE,
-            EngineErrorCategory::Conflict,
-            false,
-        ),
-        RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded => error_with(
+        AppJoinSpaceError::PreviousJoinCannotBeSuperseded => error_with(
             JOIN_SPACE_PREVIOUS_JOIN_CANNOT_BE_SUPERSEDED_CODE,
             EngineErrorCategory::Conflict,
             false,
         ),
-        RedeemPairingInvitationError::SponsorRejectedInvitation => error_with(
-            JOIN_SPACE_SPONSOR_REJECTED_CODE,
-            EngineErrorCategory::Conflict,
+        AppJoinSpaceError::Locked => error_with(
+            JOIN_SPACE_NOT_UNLOCKED_CODE,
+            EngineErrorCategory::Unauthorized,
             false,
         ),
-        RedeemPairingInvitationError::SponsorAdmissionUnavailable => error_with(
-            JOIN_SPACE_SPONSOR_ADMISSION_UNAVAILABLE_CODE,
-            EngineErrorCategory::Conflict,
-            true,
-        ),
-        RedeemPairingInvitationError::SponsorAdmissionConflict => error_with(
-            JOIN_SPACE_SPONSOR_REJECTED_CODE,
-            EngineErrorCategory::Conflict,
-            false,
-        ),
-        RedeemPairingInvitationError::SponsorDeclined => error_with(
-            JOIN_SPACE_SPONSOR_DECLINED_CODE,
-            EngineErrorCategory::Conflict,
-            false,
-        ),
-        RedeemPairingInvitationError::SponsorTimedOut => {
-            deadline_error(JOIN_SPACE_SPONSOR_TIMEOUT_CODE)
+        AppJoinSpaceError::StateChanged => {
+            error_with(JOIN_SPACE_STORAGE_CODE, EngineErrorCategory::Conflict, true)
         }
-        RedeemPairingInvitationError::Timeout => deadline_error(JOIN_SPACE_TIMEOUT_CODE),
-        RedeemPairingInvitationError::ConnectionLost => {
-            unavailable_error(JOIN_SPACE_CONNECTION_LOST_CODE)
+        AppJoinSpaceError::RecoveryRequired => error_with(
+            JOIN_SPACE_PENDING_MIGRATION_CODE,
+            EngineErrorCategory::InvalidState,
+            false,
+        ),
+        AppJoinSpaceError::Unavailable => unavailable_error(JOIN_SPACE_STORAGE_CODE),
+        AppJoinSpaceError::Settings(_) | AppJoinSpaceError::InvalidStartMaterial => {
+            join_internal_error("join space", error)
         }
-        RedeemPairingInvitationError::SponsorInternal(_)
-        | RedeemPairingInvitationError::Internal(_) => join_internal_error("join space", error),
     }
 }
 
@@ -138,10 +86,6 @@ fn device_name_required_error() -> EngineError {
 
 fn unavailable_error(code: u32) -> EngineError {
     error_with(code, EngineErrorCategory::Unavailable, true)
-}
-
-fn deadline_error(code: u32) -> EngineError {
-    error_with(code, EngineErrorCategory::DeadlineExceeded, true)
 }
 
 fn error_with(code: u32, category: EngineErrorCategory, retryable: bool) -> EngineError {
@@ -158,30 +102,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fresh_join_failures_keep_user_visible_reasons_distinct() {
-        let not_found = map_fresh_join_error(RedeemPairingInvitationError::InvitationNotFound);
-        let expired = map_fresh_join_error(RedeemPairingInvitationError::InvitationExpired);
-        let rejected =
-            map_fresh_join_error(RedeemPairingInvitationError::SponsorRejectedInvitation);
-        let declined = map_fresh_join_error(RedeemPairingInvitationError::SponsorDeclined);
-        let unreadable = map_fresh_join_error(
-            RedeemPairingInvitationError::UnreadableHistoryRequiresConfirmation,
-        );
+    fn local_start_failures_keep_stable_product_categories() {
+        let locked = map_join_space_error(AppJoinSpaceError::Locked);
+        let changed = map_join_space_error(AppJoinSpaceError::StateChanged);
+        let recovery = map_join_space_error(AppJoinSpaceError::RecoveryRequired);
+        let unavailable = map_join_space_error(AppJoinSpaceError::Unavailable);
 
-        assert_ne!(not_found.code(), expired.code());
-        assert_ne!(rejected.code(), declined.code());
-        assert_eq!(
-            unreadable.code(),
-            JOIN_SPACE_UNREADABLE_HISTORY_REQUIRES_CONFIRMATION_CODE
-        );
-        assert_eq!(unreadable.category(), EngineErrorCategory::Conflict);
-        assert!(!unreadable.is_retryable());
+        assert_eq!(locked.code(), JOIN_SPACE_NOT_UNLOCKED_CODE);
+        assert_eq!(locked.category(), EngineErrorCategory::Unauthorized);
+        assert_eq!(changed.category(), EngineErrorCategory::Conflict);
+        assert!(changed.is_retryable());
+        assert_eq!(recovery.category(), EngineErrorCategory::InvalidState);
+        assert_eq!(unavailable.category(), EngineErrorCategory::Unavailable);
+        assert!(unavailable.is_retryable());
     }
 
     #[test]
     fn previous_join_cannot_be_superseded_is_a_stable_conflict() {
-        let error =
-            map_fresh_join_error(RedeemPairingInvitationError::PreviousJoinCannotBeSuperseded);
+        let error = map_join_space_error(AppJoinSpaceError::PreviousJoinCannotBeSuperseded);
 
         assert_eq!(
             error.code(),

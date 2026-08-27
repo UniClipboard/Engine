@@ -20,6 +20,7 @@ mod invitation;
 mod join_space;
 mod model;
 mod outbox;
+mod protocol;
 mod query_pending_space_transition;
 mod recover_space_admissions;
 mod security_transition;
@@ -35,13 +36,15 @@ pub use handle_space_admission_message::{
 pub use invitation::{
     CancelInvitationError, PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
 };
-pub use join_space::{
-    JoinSpaceError, JoinSpaceInput, JoinSpaceResult, PrepareJoinSpacePort, PreparedJoinSpace,
-};
+pub use join_space::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 pub use model::{CurrentJoinStatus, JoinedSpace, PendingInboundMember};
 pub use outbox::{
     AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult,
     AdmissionOutboxDeliveryRoute, InvitationConsumeDeliveryResult,
+};
+pub use protocol::{
+    JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
+    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, SpaceAdmissionCommitToken,
 };
 pub use query_pending_space_transition::QueryPendingSpaceTransitionError;
 pub use security_transition::{
@@ -68,6 +71,6 @@ pub(super) use invitation::{
     IssuePairingInvitationForAddressUseCase, IssuePairingInvitationUseCase,
     PairingInvitationIssuer, QueryPairingInvitationAddressesUseCase,
 };
-pub(super) use join_space::JoinSpaceUseCase;
+pub(super) use protocol::SpaceAdmissionProtocol;
 pub(super) use query_pending_space_transition::QueryPendingSpaceTransitionUseCase;
 pub(super) use recover_space_admissions::RecoverSpaceAdmissionsUseCase;

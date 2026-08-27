@@ -1,6 +1,6 @@
 use uc_application::deps::{
-    CurrentSpaceMemberScopePort, HandleSpaceAdmissionMessagePort, SpaceApplicationDeps,
-    SpaceSessionActivityPort,
+    CurrentSpaceMemberScopePort, HandleSpaceAdmissionMessagePort, JoinerStartMaterialPort,
+    JoinerStartStatePort, SpaceApplicationDeps, SpaceSessionActivityPort,
 };
 use uc_application::facade::space_setup::{SpaceFacade, SpaceFacadeDeps};
 use uc_application::facade::{AppFacade, DeviceTrustStatus, JoinSpaceInput, NetworkRecoveryFacade};
@@ -16,6 +16,8 @@ fn space_contracts_remain_reachable_only_through_facade_and_deps() {
         std::any::type_name::<SpaceApplicationDeps>(),
         std::any::type_name::<dyn CurrentSpaceMemberScopePort>(),
         std::any::type_name::<dyn HandleSpaceAdmissionMessagePort>(),
+        std::any::type_name::<dyn JoinerStartMaterialPort>(),
+        std::any::type_name::<dyn JoinerStartStatePort>(),
         std::any::type_name::<dyn SpaceSessionActivityPort>(),
     ];
 
@@ -24,6 +26,7 @@ fn space_contracts_remain_reachable_only_through_facade_and_deps() {
 
 #[test]
 fn app_facade_exposes_all_stable_space_membership_actions() {
+    let _ = AppFacade::join_space;
     let _ = AppFacade::query_device_trust;
     let _ = AppFacade::remove_space_member;
     let _ = AppFacade::decide_device_trust_change;

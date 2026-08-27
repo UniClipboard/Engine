@@ -11,9 +11,9 @@ use uc_core::ports::PresenceEvent;
 
 use crate::space::admission::{
     CancelSpaceJoinUseCase, CompletePendingSpaceTransitionUseCase, HandleSpaceAdmissionMessagePort,
-    HandleSpaceAdmissionMessageUseCase, InMemoryPairingInvitationHolder, JoinSpaceUseCase,
-    PrepareJoinSpacePort, PrepareSpaceAdmissionMessagePort, QueryPendingSpaceTransitionUseCase,
-    RecoverSpaceAdmissionsUseCase,
+    HandleSpaceAdmissionMessageUseCase, InMemoryPairingInvitationHolder, JoinerStartMaterialPort,
+    JoinerStartStatePort, PrepareSpaceAdmissionMessagePort, QueryPendingSpaceTransitionUseCase,
+    RecoverSpaceAdmissionsUseCase, SpaceAdmissionProtocol,
 };
 use crate::space::membership::CurrentMemberSignaturePort;
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
@@ -45,7 +45,8 @@ pub struct SpaceApplicationDeps {
     pub group_bootstrap: Arc<dyn GroupBootstrapPort>,
     pub clock: Arc<dyn uc_core::ports::ClockPort>,
     pub settings: Arc<dyn uc_core::ports::SettingsPort>,
-    pub prepare_join_space: Arc<dyn PrepareJoinSpacePort>,
+    pub joiner_start_material: Arc<dyn JoinerStartMaterialPort>,
+    pub joiner_start_state: Arc<dyn JoinerStartStatePort>,
     pub prepare_space_admission_message: Arc<dyn PrepareSpaceAdmissionMessagePort>,
     pub device_trust_observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     pub membership_history_transport: Arc<dyn MembershipHistoryExchangePort>,
@@ -67,7 +68,7 @@ pub(crate) struct SpaceApplication {
     remove_space_member: Arc<RemoveSpaceMemberUseCase>,
     decide_device_trust_change: Arc<DecideDeviceTrustChangeUseCase>,
     cancel_space_join: Arc<CancelSpaceJoinUseCase>,
-    join_space: Arc<JoinSpaceUseCase>,
+    join_space: Arc<SpaceAdmissionProtocol>,
     complete_pending_space_transition: Arc<CompletePendingSpaceTransitionUseCase>,
     query_pending_space_transition: Arc<QueryPendingSpaceTransitionUseCase>,
     membership_history_endpoint: Arc<HandleMembershipHistoryMessageUseCase>,
@@ -164,11 +165,10 @@ impl SpaceApplication {
             Arc::clone(&ledger),
             Arc::new(membership_activity.clone()),
         ));
-        let join_space = Arc::new(JoinSpaceUseCase::new(
+        let join_space = Arc::new(SpaceAdmissionProtocol::new(
             deps.settings,
-            deps.prepare_join_space,
-            Arc::clone(&ledger),
-            Arc::new(membership_activity.clone()),
+            deps.joiner_start_material,
+            deps.joiner_start_state,
         ));
         let complete_pending_space_transition =
             Arc::new(CompletePendingSpaceTransitionUseCase::new(
@@ -242,7 +242,7 @@ impl SpaceApplication {
         Arc::clone(&self.cancel_space_join)
     }
 
-    pub(crate) fn join_space(&self) -> Arc<JoinSpaceUseCase> {
+    pub(crate) fn join_space(&self) -> Arc<SpaceAdmissionProtocol> {
         Arc::clone(&self.join_space)
     }
 

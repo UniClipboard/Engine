@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -32,7 +33,10 @@ impl CommitMembershipLedgerPort for MemoryLedger {
     }
 }
 
-struct PassivePorts;
+#[derive(Default)]
+struct PassivePorts {
+    join_commits: AtomicUsize,
+}
 
 impl HistoricalMembershipSignatureVerifier for PassivePorts {
     fn verify(
@@ -166,9 +170,67 @@ impl GroupBootstrapPort for PassivePorts {
 }
 
 #[async_trait]
-impl PrepareJoinSpacePort for PassivePorts {
-    async fn prepare(&self, _input: &JoinSpaceInput) -> Result<PreparedJoinSpace, JoinSpaceError> {
-        unreachable!()
+impl JoinerStartMaterialPort for PassivePorts {
+    async fn create(
+        &self,
+        input: &JoinSpaceInput,
+    ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
+        let admission_id = SpaceAdmissionId::from_bytes([0x81; 32]).expect("valid admission id");
+        let join_id = JoinId::from_bytes([0x82; 16]).expect("valid join id");
+        let request = AdmissionJoinRequestV1::new(
+            InvitationId::from_bytes([0x83; 32]).expect("valid invitation id"),
+            DeviceId::new("joining-device"),
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x84; 32]),
+            AdmissionKeyPackage::from_bytes(vec![0x85; 48]).expect("valid key package"),
+            AdmissionRecoveryPublicKey::from_bytes([0x86; 32]).expect("valid recovery public key"),
+            AdmissionIdentitySignature::from_bytes(vec![0x87; 64])
+                .expect("valid identity signature"),
+            if input.preserve_unreadable_history {
+                UnreadableHistoryPolicy::Preserve
+            } else {
+                UnreadableHistoryPolicy::Discard
+            },
+        )
+        .expect("valid join request");
+        let request = SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Joiner,
+            0,
+            AdmissionMessageId::from_bytes([0x88; 32]).expect("valid message id"),
+            None,
+            SpaceAdmissionBodyV1::JoinRequest(request),
+        )
+        .expect("valid join request envelope");
+        Ok(JoinerStartMaterial::new(
+            admission_id,
+            join_id,
+            SpaceAdmissionRoute::from_bytes(vec![0x89; 32]).expect("valid route"),
+            request,
+            AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0x8a; 64])
+                .expect("valid password material"),
+        ))
+    }
+}
+
+#[async_trait]
+impl JoinerStartStatePort for PassivePorts {
+    async fn load(&self) -> Result<LoadedJoinerStartState, JoinerStartStateError> {
+        Ok(LoadedJoinerStartState::new(
+            11,
+            AdmissionSourceSnapshot::from_bytes(vec![0x8b; 32]).expect("valid source snapshot"),
+            None,
+            false,
+            SpaceAdmissionCommitToken::from_bytes([0x8c; 32]).expect("valid commit token"),
+        ))
+    }
+
+    async fn commit(
+        &self,
+        _token: SpaceAdmissionCommitToken,
+        _mutation: JoinerStartMutation,
+    ) -> Result<(), JoinerStartStateError> {
+        self.join_commits.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -305,7 +367,7 @@ async fn complete_application_starts_from_only_target_ports() {
     let mut initial = LoadedMembershipLedger::no_current_space();
     initial.admission_profile = Some(AdmissionProfileMetadata::fresh([0x71; 16]));
     let repository = Arc::new(MemoryLedger(Mutex::new(initial)));
-    let passive = Arc::new(PassivePorts);
+    let passive = Arc::new(PassivePorts::default());
     let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
     let application = SpaceApplication::start(
         SpaceApplicationDeps {
@@ -319,7 +381,8 @@ async fn complete_application_starts_from_only_target_ports() {
             group_bootstrap: passive.clone(),
             clock: passive.clone(),
             settings: passive.clone(),
-            prepare_join_space: passive.clone(),
+            joiner_start_material: passive.clone(),
+            joiner_start_state: passive.clone(),
             prepare_space_admission_message: passive.clone(),
             device_trust_observations: passive.clone(),
             membership_history_transport: passive.clone(),
@@ -334,8 +397,21 @@ async fn complete_application_starts_from_only_target_ports() {
         },
         presence_rx,
         Arc::new(InMemoryPairingInvitationHolder::new()),
-        passive,
+        passive.clone(),
     );
+
+    let joined = application
+        .join_space()
+        .start_join(JoinSpaceInput {
+            invitation_code: uc_core::pairing::InvitationCode::new("join-code"),
+            device_name: Some("New Device".to_owned()),
+            passphrase: uc_core::crypto::domain::Passphrase::new("passphrase"),
+            preserve_unreadable_history: false,
+        })
+        .await
+        .expect("new protocol JoinSpace should return after saving Pending");
+    assert!(matches!(joined.status, CurrentJoinStatus::Pending { .. }));
+    assert_eq!(passive.join_commits.load(Ordering::SeqCst), 1);
 
     let _ = application.membership_history_endpoint();
     let _ = application.space_admission_endpoint();

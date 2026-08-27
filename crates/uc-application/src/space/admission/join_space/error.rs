@@ -1,5 +1,3 @@
-use crate::space::facade::RedeemPairingInvitationError;
-
 #[derive(Debug, thiserror::Error)]
 pub enum JoinSpaceError {
     #[error("device name is required")]
@@ -8,9 +6,24 @@ pub enum JoinSpaceError {
     #[error("failed to save device name: {0}")]
     Settings(String),
 
-    #[error(transparent)]
-    Admission(#[from] RedeemPairingInvitationError),
+    #[error("space admission is locked")]
+    Locked,
 
-    #[error("saved join state is unavailable: {0}")]
-    SavedState(String),
+    #[error("space admission state changed")]
+    StateChanged,
+
+    #[error("space admission requires recovery")]
+    RecoveryRequired,
+
+    #[error("space admission is unavailable")]
+    Unavailable,
+
+    #[error("the invitation cannot start a new admission")]
+    InvalidInvitation,
+
+    #[error("the previous local join cannot be superseded")]
+    PreviousJoinCannotBeSuperseded,
+
+    #[error("the generated join material is invalid")]
+    InvalidStartMaterial,
 }

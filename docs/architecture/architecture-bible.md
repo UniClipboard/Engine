@@ -1455,9 +1455,30 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-26 | 入站准入状态接口收口 | 入站准入通过单一状态入口一次读取处理上下文和不可拆解的保存凭证，准入流程不再依赖成员 ledger、内部版本或存储错误；成员 ledger 继续统一验证和原子保存，持久化格式、网络内容和用户结果均未变化。 |
 | 2026-08-26 | 单一 Space 准入协议规格 | 新增覆盖 Core、Application、Infra、Engine、数据库、绑定和双设备验收的一次性切换规格；明确未来只保留一套新协议且不提供兼容、回退或双实现。当前运行架构未变化。 |
 | 2026-08-26 | 单一 Space 准入协议核心基础 | Core 开始使用类型化消息、严格顺序与重放证据、原样回复和按阶段封闭的新加入记录；首次认证会用双方绑定和后续凭据替换加密口令材料。当前仅完成新协议核心基础，旧流程仍待后续切换并删除。 |
+| 2026-08-27 | 单一 Space 准入 Application 目标测试 | 新增 Fresh Joiner 首个纵向目标测试，固定 JoinRequest 必须先保存再返回 Pending；后续 Sponsor Candidate、Joiner Prepared 和精确重放按测试先行逐步加入，统一负责人尚待完成。 |
+| 2026-08-27 | 单一 Space 准入状态凭证目标测试 | 新增不透明状态提交凭证的目标测试，要求全零无效且调试输出隐藏内容；负责人只交回凭证，不读取账本版本、历史摘要或存储字段。当前仅建立失败测试。 |
+| 2026-08-27 | 单一 Space 准入开始状态目标测试 | 新增开始加入状态视图的目标测试，要求一次提供本地序号、来源快照、当前加入、切换要求和不透明提交凭证；负责人不读取账本内部结构。当前仅建立失败测试。 |
+| 2026-08-27 | 单一 Space 准入开始状态代码说明 | 为开始加入业务视图补充中文代码文档，说明整体读取、旧加入取代、来源 Space 保留、会话切换和不透明提交凭证的用途；行为不变。 |
+| 2026-08-27 | 单一 Space 准入状态入口目标测试 | Fresh Joiner 测试改由记录型状态入口提供完整开始视图，并只在收到不透明凭证和 Core 完整变化后记录保存；正式状态接口和负责人接入尚待实现。 |
+| 2026-08-27 | 单一 Space 准入开始状态读取 | `SpaceAdmissionProtocol::start_join` 开始通过 `JoinerStartStatePort` 一次读取并消费完整开始视图；材料生成、Core 推进、提交和错误映射尚待后续测试驱动实现。 |
+| 2026-08-27 | 单一 Space 准入开始状态错误目标测试 | 新增状态读取错误映射测试，要求 Locked、StateChanged、RecoveryRequired 和 Unavailable 保持独立 Application 类别，不退化为底层文本。当前仅建立失败测试。 |
+| 2026-08-27 | 单一 Space 准入开始状态错误映射 | `JoinerStartStateError` 的四类失败分别映射到稳定 `JoinSpaceError` 类别，`start_join` 不再依赖底层错误文本；旧入口错误在最终切换阶段整体删除。 |
+| 2026-08-27 | 单一 Space 准入开始材料错误目标测试 | 新增开始材料错误映射测试，要求无效邀请与本机材料不可用保持不同 Application 结果；当前仅建立失败测试。 |
+| 2026-08-27 | 单一 Space 准入 Fresh Join 本机提交 | `SpaceAdmissionProtocol::start_join` 已完成完整视图读取、初始材料生成、Core 新记录创建、一次提交和 Pending 返回；当前遇到旧未结束加入时失败关闭，安全取代留待完整业务阶段。 |
+| 2026-08-27 | 单一 Space 准入设备名顺序目标测试 | Fresh Join 纵向测试要求设备名校验与保存发生在加入记录提交之前，由统一负责人完成；Facade 和材料能力不编排该步骤。当前仅建立失败测试。 |
+| 2026-08-27 | 单一 Space 准入设备名顺序实现 | `SpaceAdmissionProtocol::start_join` 接管设备名校验与保存，并在读取开始状态和提交加入记录之前完成；公开结果和设置格式不变。 |
+| 2026-08-27 | 单一 Space 准入 JoinSpace 生产接线 | `SpaceApplication` 的 JoinSpace 字段、依赖和 Facade 调用开始改用 `SpaceAdmissionProtocol` 及 JoinerStart 两项能力；旧 JoinSpace 生产入口退出组装，源码待验证后删除。 |
+| 2026-08-27 | 旧 Application JoinSpace case 删除 | 删除旧 `PrepareJoinSpacePort`、`PreparedJoinSpace`、`JoinSpaceUseCase` 及其旧记录测试；稳定 JoinSpace 输入、结果和错误继续由新协议入口使用，不保留转发壳。 |
+| 2026-08-27 | 单一 Space 准入 JoinSpace 组装测试 | Application 组装测试从 `SpaceApplication::join_space()` 实际执行新协议 Fresh Join，确认一次提交后返回 Pending；旧 case 不再参与测试装配。 |
+| 2026-08-27 | 单一 Space 准入 JoinSpace 公开入口保护 | 公开路径测试继续固定稳定 `AppFacade::join_space`，并只通过 deps 暴露 JoinerStart 的材料与状态能力；协议内部阶段不进入产品接口。 |
+| 2026-08-27 | 单一 Space 准入 JoinSpace 稳定错误切换 | JoinSpace 移除旧同步握手错误包装，Engine 改为映射本机保存前的明确错误类别；远端邀请、口令和对端结果后续只通过 Pending/Rejected 投影公开。 |
+| 2026-08-27 | 单一 Space 准入安全取代目标测试 | 新增连续两次 JoinSpace 测试，要求 Initiated 旧加入取代与新加入创建进入同一次状态提交；不能先终结旧记录再另存新记录。当前仅建立失败测试。 |
+| 2026-08-27 | 单一 Space 准入安全取代提交 | 新增 `JoinerStartMutation`，将可选旧加入取代变化与新加入创建变化交给状态能力一次保存；Prepared 及以后仍稳定拒绝新 JoinSpace。 |
 | 2026-08-26 | 单一 Space 准入核心目录拆分 | 将新准入核心按编号、敏感材料、消息、交换、状态、状态推进和测试拆开；根入口只负责统一导出。对外入口、协议规则和运行行为不变。 |
 | 2026-08-27 | 单一 Space 准入 Core 完成 | 完成 Joiner、Sponsor、CompletionHelper、取消、取代、拒绝、重放、恢复要求、结清和终态压缩；所有推进统一返回 replacement、原样回复和本次影响。Application、Infra、存储、Engine 和设备验收尚未切换，不报告产品流程完成。 |
 | 2026-08-27 | 旧 Core 准入删除门禁 | 旧 `SpaceJoinRecord`、outbox、inbox、身份绑定和完成接力类型统一标记为弃用；只允许现有未迁移调用者继续使用。Application、Infra 和 Engine 切到新 Aggregate 后按规格 028 清单整体删除，不保留兼容出口。 |
+| 2026-08-27 | 单一 Space 准入材料代码说明 | 为 Core 所有不透明准入材料补充中文代码文档，只说明业务含义、合法阶段和生命周期，不引入网络、存储、密码库或外层组装知识；协议、状态和运行行为不变。 |
+| 2026-08-27 | 单一 Space 准入交换代码说明 | 为 Core 准入交换事实补充中文代码文档，说明消息证据、顺序期望、精确重放、固定回复和重试进度；不引入外层实现知识，交换规则和运行行为不变。 |
 
 ## 相关文档
 

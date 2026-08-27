@@ -66,8 +66,9 @@ pub use admission::{
 };
 pub use admission::{
     AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult,
-    AdmissionOutboxDeliveryRoute, InvitationConsumeDeliveryResult, PrepareJoinSpacePort,
-    PreparedJoinSpace,
+    AdmissionOutboxDeliveryRoute, InvitationConsumeDeliveryResult, JoinerStartMaterial,
+    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
+    JoinerStartStatePort, LoadedJoinerStartState, SpaceAdmissionCommitToken,
 };
 pub use admission::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,

@@ -395,8 +395,8 @@ impl SpaceFacade {
             .await
             .as_ref()
             .map(SpaceApplication::join_space)
-            .ok_or_else(|| JoinSpaceError::SavedState("space application is closed".to_owned()))?;
-        join.execute(input).await
+            .ok_or(JoinSpaceError::Unavailable)?;
+        join.start_join(input).await
     }
 
     pub async fn query_device_trust(
