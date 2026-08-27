@@ -127,7 +127,7 @@ pub use pairing_invitation::{
     PairingInvitationByAddressPort, PairingInvitationPort,
 };
 pub use peer_address::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
-pub use presence::{PresenceError, PresenceEvent, PresencePort, ReachabilityState};
+pub use presence::{PeerReachabilityPort, PresenceError, PresenceEvent, ReachabilityState};
 pub use receive_artifact_log::{
     CleanupReceiveArtifactsPort, GetReceiveArtifactRecordPort, ListUnsettledReceiveArtifactsPort,
     ReceiveArtifact, ReceiveArtifactLogError, ReceiveArtifactOwnership, ReceiveArtifactPhase,

@@ -8,18 +8,42 @@ use crate::ids::DeviceId;
 use crate::security::IdentityFingerprint;
 
 use super::{
-    AdmissionChangeFacts, BaseMembershipHistoryPositionV1, MemberInstanceId,
-    MembershipCredentialId, MembershipEventId,
+    AdmissionChangeFacts, AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+    BaseMembershipHistoryPosition, MemberInstanceId, MembershipCredentialId, MembershipEventId,
 };
 
-pub const ADMISSION_ATTEMPT_FORMAT_V1: u16 = 1;
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub const SPACE_JOIN_RECORD_FORMAT_V1: u16 = 1;
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub const ADMISSION_PROFILE_METADATA_FORMAT_V1: u16 = 1;
-pub const TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1: u16 = 1;
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub const COMPLETED_SPACE_JOIN_RECORD_FORMAT_V1: u16 = 1;
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub const ADMISSION_IDENTITY_BINDING_FORMAT_V1: u16 = 1;
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub const ADMISSION_COMPLETION_RECOVERY_FORMAT_V1: u16 = 1;
 
-/// Security payload persisted with an admission attempt for later delivery.
+/// Security payload persisted with an Space join record for later delivery.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub struct SponsorAdmissionSecurityDelivery {
     pub recipient: DeviceId,
     pub credential_id: MembershipCredentialId,
@@ -37,6 +61,10 @@ impl fmt::Debug for SponsorAdmissionSecurityDelivery {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub enum AdmissionCompletionRecoveryValidationError {
     Invalid,
     UpgradeRequired,
@@ -54,9 +82,13 @@ impl fmt::Display for AdmissionCompletionRecoveryValidationError {
 impl std::error::Error for AdmissionCompletionRecoveryValidationError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdmissionCompletionRecoveryHelloV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct AdmissionCompletionRecoveryHello {
     pub format_version: u16,
-    pub attempt_id: AdmissionAttemptId,
+    pub attempt_id: SpaceJoinRecordId,
     pub lineage_id: String,
     pub event_id: MembershipEventId,
     pub sponsor_member_instance: MemberInstanceId,
@@ -65,10 +97,10 @@ pub struct AdmissionCompletionRecoveryHelloV1 {
     pub resume_public_key: Vec<u8>,
 }
 
-impl AdmissionCompletionRecoveryHelloV1 {
+impl AdmissionCompletionRecoveryHello {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        attempt_id: AdmissionAttemptId,
+        attempt_id: SpaceJoinRecordId,
         lineage_id: String,
         event_id: MembershipEventId,
         sponsor_member_instance: MemberInstanceId,
@@ -121,35 +153,43 @@ impl AdmissionCompletionRecoveryHelloV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdmissionCompletionRecoveryTransportBindingV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct AdmissionCompletionRecoveryTransportBinding {
     pub joiner_transport_identity_digest: [u8; 32],
     pub helper_transport_identity_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdmissionCompletionRecoveryChallengeV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct AdmissionCompletionRecoveryChallenge {
     pub format_version: u16,
     pub hello_digest: [u8; 32],
-    pub transport_binding: AdmissionCompletionRecoveryTransportBindingV1,
+    pub transport_binding: AdmissionCompletionRecoveryTransportBinding,
     pub challenge_counter: u64,
     pub nonce: [u8; 32],
     pub joiner_last_message_id: [u8; 32],
     pub helper_last_message_id: [u8; 32],
     pub helper_credential_id: MembershipCredentialId,
-    pub helper_history_position: BaseMembershipHistoryPositionV1,
+    pub helper_history_position: BaseMembershipHistoryPosition,
     pub signature: Vec<u8>,
 }
 
-impl AdmissionCompletionRecoveryChallengeV1 {
+impl AdmissionCompletionRecoveryChallenge {
     pub fn new(
-        hello: &AdmissionCompletionRecoveryHelloV1,
-        transport_binding: AdmissionCompletionRecoveryTransportBindingV1,
+        hello: &AdmissionCompletionRecoveryHello,
+        transport_binding: AdmissionCompletionRecoveryTransportBinding,
         challenge_counter: u64,
         nonce: [u8; 32],
         joiner_last_message_id: [u8; 32],
         helper_last_message_id: [u8; 32],
         helper_credential_id: MembershipCredentialId,
-        helper_history_position: BaseMembershipHistoryPositionV1,
+        helper_history_position: BaseMembershipHistoryPosition,
     ) -> Result<Self, AdmissionCompletionRecoveryValidationError> {
         hello.validate()?;
         if challenge_counter == 0
@@ -218,6 +258,10 @@ impl AdmissionCompletionRecoveryChallengeV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub struct AdmissionCompletionRecoveryBundleV1 {
     pub format_version: u16,
     pub candidate_event: Vec<u8>,
@@ -265,6 +309,10 @@ impl AdmissionCompletionRecoveryBundleV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub struct AdmissionCompletionRecoveryResponseV1 {
     pub format_version: u16,
     pub hello_digest: [u8; 32],
@@ -317,10 +365,14 @@ impl AdmissionCompletionRecoveryResponseV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub struct AdmissionCompletionRecoveryPeerV1 {
     pub format_version: u16,
-    pub hello: AdmissionCompletionRecoveryHelloV1,
-    pub challenge: AdmissionCompletionRecoveryChallengeV1,
+    pub hello: AdmissionCompletionRecoveryHello,
+    pub challenge: AdmissionCompletionRecoveryChallenge,
     pub response_digest: Option<[u8; 32]>,
 }
 
@@ -330,6 +382,10 @@ fn append_recovery_field(hasher: &mut Sha256, value: &[u8]) {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub struct AdmissionIdentityBindingV1 {
     pub format_version: u16,
     pub lineage_id: String,
@@ -343,6 +399,10 @@ pub struct AdmissionIdentityBindingV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
 pub enum AdmissionIdentityBindingError {
     Invalid,
     UpgradeRequired,
@@ -455,9 +515,13 @@ impl AdmissionIdentityBindingV1 {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct AdmissionAttemptId([u8; 32]);
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct SpaceJoinRecordId([u8; 32]);
 
-impl AdmissionAttemptId {
+impl SpaceJoinRecordId {
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
@@ -467,15 +531,19 @@ impl AdmissionAttemptId {
     }
 }
 
-impl std::fmt::Debug for AdmissionAttemptId {
+impl std::fmt::Debug for SpaceJoinRecordId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("AdmissionAttemptId([REDACTED])")
+        formatter.write_str("SpaceJoinRecordId([REDACTED])")
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SponsorAdmissionStageV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum SponsorAdmissionStage {
     Accepted,
     Candidate,
     Prepared,
@@ -487,7 +555,11 @@ pub enum SponsorAdmissionStageV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum JoinerAdmissionStageV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum JoinerAdmissionStage {
     Initiated,
     Candidate,
     Prepared,
@@ -500,37 +572,61 @@ pub enum JoinerAdmissionStageV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CompletionHelperAdmissionStageV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum CompletionHelperAdmissionStage {
     Applied,
     Completed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SponsorAdmissionStateV1 {
-    pub stage: SponsorAdmissionStageV1,
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct SponsorAdmissionState {
+    pub stage: SponsorAdmissionStage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JoinerAdmissionStateV1 {
-    pub stage: JoinerAdmissionStageV1,
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct JoinerAdmissionState {
+    pub stage: JoinerAdmissionStage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompletionHelperAdmissionStateV1 {
-    pub stage: CompletionHelperAdmissionStageV1,
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct CompletionHelperAdmissionState {
+    pub stage: CompletionHelperAdmissionStage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AdmissionAttemptRoleStateV1 {
-    Sponsor(SponsorAdmissionStateV1),
-    Joiner(JoinerAdmissionStateV1),
-    CompletionHelper(CompletionHelperAdmissionStateV1),
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum SpaceJoinRoleState {
+    Sponsor(SponsorAdmissionState),
+    Joiner(JoinerAdmissionState),
+    CompletionHelper(CompletionHelperAdmissionState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AdmissionOutboxPurposeV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum AdmissionOutboxPurpose {
     JoinRequest,
     Candidate,
     Prepared,
@@ -545,8 +641,12 @@ pub enum AdmissionOutboxPurposeV1 {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdmissionOutboxMessageV1 {
-    pub purpose: AdmissionOutboxPurposeV1,
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct AdmissionOutboxMessage {
+    pub purpose: AdmissionOutboxPurpose,
     pub recipient: Vec<u8>,
     pub message_id: [u8; 32],
     pub predecessor_message_id: Option<[u8; 32]>,
@@ -554,10 +654,10 @@ pub struct AdmissionOutboxMessageV1 {
     pub superseded: bool,
 }
 
-impl std::fmt::Debug for AdmissionOutboxMessageV1 {
+impl std::fmt::Debug for AdmissionOutboxMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("AdmissionOutboxMessageV1")
+            .debug_struct("AdmissionOutboxMessage")
             .field("purpose", &self.purpose)
             .field("message_id", &"[REDACTED]")
             .field("superseded", &self.superseded)
@@ -566,21 +666,29 @@ impl std::fmt::Debug for AdmissionOutboxMessageV1 {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdmissionInboxRecordV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct AdmissionInboxRecord {
     pub message_id: [u8; 32],
     pub payload_digest: [u8; 32],
     pub acknowledgment_payload: Vec<u8>,
 }
 
-impl std::fmt::Debug for AdmissionInboxRecordV1 {
+impl std::fmt::Debug for AdmissionInboxRecord {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("AdmissionInboxRecordV1([REDACTED])")
+        formatter.write_str("AdmissionInboxRecord([REDACTED])")
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AdmissionTerminalResultV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum AdmissionTerminalResult {
     Active,
     Completed,
     Rejected,
@@ -588,7 +696,11 @@ pub enum AdmissionTerminalResultV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SupersedeAdmissionAttemptError {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum SupersedeSpaceJoinError {
     NotJoiner,
     AlreadyTerminal,
     UnsafeStage,
@@ -596,11 +708,69 @@ pub enum SupersedeAdmissionAttemptError {
     InvalidCleanupMessage,
 }
 
-impl fmt::Display for SupersedeAdmissionAttemptError {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum CancelSpaceJoinRecordError {
+    NotJoiner,
+    AlreadyTerminal,
+    UnsafeStage,
+    InvalidCancellationMessage,
+}
+
+impl fmt::Display for CancelSpaceJoinRecordError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NotJoiner => "only a local join can be cancelled",
+            Self::AlreadyTerminal => "a terminal Space join record cannot be cancelled",
+            Self::UnsafeStage => "the local join has crossed the cancellation boundary",
+            Self::InvalidCancellationMessage => "the Space join cancellation message is invalid",
+        })
+    }
+}
+
+impl std::error::Error for CancelSpaceJoinRecordError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum SpaceJoinTransitionError {
+    NotJoiner,
+    AlreadyTerminal,
+    AdmissionIncomplete,
+    StoredTransitionInvalid,
+    TransitionMismatch,
+    InvalidAdvance,
+    InvalidResult,
+    MissingVerifiedHistory,
+}
+
+impl fmt::Display for SpaceJoinTransitionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NotJoiner => "only a local join can advance a Space transition",
+            Self::AlreadyTerminal => "a terminal Space join cannot advance its transition",
+            Self::AdmissionIncomplete => "Space admission is incomplete",
+            Self::StoredTransitionInvalid => "the saved Space transition is invalid",
+            Self::TransitionMismatch => "the Space transition does not match the saved join",
+            Self::InvalidAdvance => "the Space transition did not advance by one phase",
+            Self::InvalidResult => "the Space transition result is invalid",
+            Self::MissingVerifiedHistory => "verified membership history is missing",
+        })
+    }
+}
+
+impl std::error::Error for SpaceJoinTransitionError {}
+
+impl fmt::Display for SupersedeSpaceJoinError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::NotJoiner => "only a local join can be superseded",
-            Self::AlreadyTerminal => "a terminal admission attempt cannot be superseded",
+            Self::AlreadyTerminal => "a terminal Space join record cannot be superseded",
             Self::UnsafeStage => "the local join has crossed the supersession boundary",
             Self::RecoveryRequired => "the local join requires recovery before replacement",
             Self::InvalidCleanupMessage => "the supersession cleanup message is invalid",
@@ -608,11 +778,15 @@ impl fmt::Display for SupersedeAdmissionAttemptError {
     }
 }
 
-impl std::error::Error for SupersedeAdmissionAttemptError {}
+impl std::error::Error for SupersedeSpaceJoinError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AdmissionRejectionReasonV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub enum AdmissionRejectionReason {
     InvitationUnavailable,
     AuthenticationRejected,
     IdentityConflict,
@@ -625,13 +799,17 @@ pub enum AdmissionRejectionReasonV1 {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdmissionAttemptV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct SpaceJoinRecord {
     pub format_version: u16,
     pub record_version: u64,
-    pub attempt_id: AdmissionAttemptId,
+    pub record_id: SpaceJoinRecordId,
     pub join_id: Option<[u8; 16]>,
     pub local_join_ordinal: Option<u64>,
-    pub role_state: AdmissionAttemptRoleStateV1,
+    pub role_state: SpaceJoinRoleState,
     pub lineage_id: Option<String>,
     pub base_history_position: Option<Vec<u8>>,
     pub candidate_event: Option<Vec<u8>>,
@@ -662,10 +840,10 @@ pub struct AdmissionAttemptV1 {
     pub resume_private_key: Option<Vec<u8>>,
     pub identity_binding: Option<Vec<u8>>,
     pub resume_peers: Vec<Vec<u8>>,
-    pub inbox_dedup: Vec<AdmissionInboxRecordV1>,
-    pub outboxes: Vec<AdmissionOutboxMessageV1>,
-    pub terminal_result: Option<AdmissionTerminalResultV1>,
-    pub rejection_reason: Option<AdmissionRejectionReasonV1>,
+    pub inbox_dedup: Vec<AdmissionInboxRecord>,
+    pub outboxes: Vec<AdmissionOutboxMessage>,
+    pub terminal_result: Option<AdmissionTerminalResult>,
+    pub rejection_reason: Option<AdmissionRejectionReason>,
     pub write_ahead_recovery: Option<Vec<u8>>,
     pub cleanup_pending: bool,
     #[serde(default)]
@@ -680,13 +858,13 @@ pub struct AdmissionAttemptV1 {
     pub sponsor_continuation_address: Option<Vec<u8>>,
 }
 
-impl std::fmt::Debug for AdmissionAttemptV1 {
+impl std::fmt::Debug for SpaceJoinRecord {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("AdmissionAttemptV1")
+            .debug_struct("SpaceJoinRecord")
             .field("format_version", &self.format_version)
             .field("record_version", &self.record_version)
-            .field("attempt_id", &self.attempt_id)
+            .field("attempt_id", &self.record_id)
             .field("stage", &self.stage_rank())
             .field("outbox_count", &self.outboxes.len())
             .field("terminal_result", &self.terminal_result)
@@ -695,7 +873,7 @@ impl std::fmt::Debug for AdmissionAttemptV1 {
     }
 }
 
-impl AdmissionAttemptV1 {
+impl SpaceJoinRecord {
     pub fn decode_persisted(bytes: &[u8]) -> Result<Self, postcard::Error> {
         match postcard::from_bytes(bytes) {
             Ok(attempt) => Ok(attempt),
@@ -709,29 +887,28 @@ impl AdmissionAttemptV1 {
         }
     }
 
-    pub fn new_completion_helper(attempt_id: AdmissionAttemptId) -> Self {
-        let mut attempt = Self::new_joiner(attempt_id, [0; 16], JoinerAdmissionStageV1::Initiated);
+    pub fn new_completion_helper(attempt_id: SpaceJoinRecordId) -> Self {
+        let mut attempt = Self::new_joiner(attempt_id, [0; 16], JoinerAdmissionStage::Initiated);
         attempt.join_id = None;
         attempt.local_join_ordinal = None;
-        attempt.role_state =
-            AdmissionAttemptRoleStateV1::CompletionHelper(CompletionHelperAdmissionStateV1 {
-                stage: CompletionHelperAdmissionStageV1::Applied,
-            });
+        attempt.role_state = SpaceJoinRoleState::CompletionHelper(CompletionHelperAdmissionState {
+            stage: CompletionHelperAdmissionStage::Applied,
+        });
         attempt
     }
 
     pub fn new_joiner(
-        attempt_id: AdmissionAttemptId,
+        record_id: SpaceJoinRecordId,
         join_id: [u8; 16],
-        stage: JoinerAdmissionStageV1,
+        stage: JoinerAdmissionStage,
     ) -> Self {
         Self {
-            format_version: ADMISSION_ATTEMPT_FORMAT_V1,
+            format_version: SPACE_JOIN_RECORD_FORMAT_V1,
             record_version: 0,
-            attempt_id,
+            record_id,
             join_id: Some(join_id),
             local_join_ordinal: None,
-            role_state: AdmissionAttemptRoleStateV1::Joiner(JoinerAdmissionStateV1 { stage }),
+            role_state: SpaceJoinRoleState::Joiner(JoinerAdmissionState { stage }),
             lineage_id: None,
             base_history_position: None,
             candidate_event: None,
@@ -778,37 +955,35 @@ impl AdmissionAttemptV1 {
 
     pub fn stage_rank(&self) -> Option<u8> {
         Some(match self.role_state {
-            AdmissionAttemptRoleStateV1::Sponsor(SponsorAdmissionStateV1 { stage }) => {
+            SpaceJoinRoleState::Sponsor(SponsorAdmissionState { stage }) => match stage {
+                SponsorAdmissionStage::Accepted => 1,
+                SponsorAdmissionStage::Candidate => 2,
+                SponsorAdmissionStage::Prepared => 3,
+                SponsorAdmissionStage::Committed => 4,
+                SponsorAdmissionStage::Applied => 5,
+                SponsorAdmissionStage::Completed | SponsorAdmissionStage::Rejected => 6,
+            },
+            SpaceJoinRoleState::Joiner(JoinerAdmissionState { stage }) => match stage {
+                JoinerAdmissionStage::Initiated => 0,
+                JoinerAdmissionStage::Candidate => 2,
+                JoinerAdmissionStage::Prepared => 3,
+                JoinerAdmissionStage::Committed => 4,
+                JoinerAdmissionStage::Applied => 5,
+                JoinerAdmissionStage::Completed
+                | JoinerAdmissionStage::Rejected
+                | JoinerAdmissionStage::Superseded => 6,
+            },
+            SpaceJoinRoleState::CompletionHelper(CompletionHelperAdmissionState { stage }) => {
                 match stage {
-                    SponsorAdmissionStageV1::Accepted => 1,
-                    SponsorAdmissionStageV1::Candidate => 2,
-                    SponsorAdmissionStageV1::Prepared => 3,
-                    SponsorAdmissionStageV1::Committed => 4,
-                    SponsorAdmissionStageV1::Applied => 5,
-                    SponsorAdmissionStageV1::Completed | SponsorAdmissionStageV1::Rejected => 6,
+                    CompletionHelperAdmissionStage::Applied => 5,
+                    CompletionHelperAdmissionStage::Completed => 6,
                 }
             }
-            AdmissionAttemptRoleStateV1::Joiner(JoinerAdmissionStateV1 { stage }) => match stage {
-                JoinerAdmissionStageV1::Initiated => 0,
-                JoinerAdmissionStageV1::Candidate => 2,
-                JoinerAdmissionStageV1::Prepared => 3,
-                JoinerAdmissionStageV1::Committed => 4,
-                JoinerAdmissionStageV1::Applied => 5,
-                JoinerAdmissionStageV1::Completed
-                | JoinerAdmissionStageV1::Rejected
-                | JoinerAdmissionStageV1::Superseded => 6,
-            },
-            AdmissionAttemptRoleStateV1::CompletionHelper(CompletionHelperAdmissionStateV1 {
-                stage,
-            }) => match stage {
-                CompletionHelperAdmissionStageV1::Applied => 5,
-                CompletionHelperAdmissionStageV1::Completed => 6,
-            },
         })
     }
 
-    pub fn set_joiner_stage(&mut self, stage: JoinerAdmissionStageV1) -> bool {
-        let AdmissionAttemptRoleStateV1::Joiner(state) = &mut self.role_state else {
+    pub fn set_joiner_stage(&mut self, stage: JoinerAdmissionStage) -> bool {
+        let SpaceJoinRoleState::Joiner(state) = &mut self.role_state else {
             return false;
         };
         state.stage = stage;
@@ -816,22 +991,20 @@ impl AdmissionAttemptV1 {
     }
 
     pub const fn is_joiner(&self) -> bool {
-        matches!(self.role_state, AdmissionAttemptRoleStateV1::Joiner(_))
+        matches!(self.role_state, SpaceJoinRoleState::Joiner(_))
     }
 
     pub fn same_role_as(&self, other: &Self) -> bool {
         matches!(
             (self.role_state, other.role_state),
             (
-                AdmissionAttemptRoleStateV1::Sponsor(_),
-                AdmissionAttemptRoleStateV1::Sponsor(_)
-            ) | (
-                AdmissionAttemptRoleStateV1::Joiner(_),
-                AdmissionAttemptRoleStateV1::Joiner(_)
-            ) | (
-                AdmissionAttemptRoleStateV1::CompletionHelper(_),
-                AdmissionAttemptRoleStateV1::CompletionHelper(_)
-            )
+                SpaceJoinRoleState::Sponsor(_),
+                SpaceJoinRoleState::Sponsor(_)
+            ) | (SpaceJoinRoleState::Joiner(_), SpaceJoinRoleState::Joiner(_))
+                | (
+                    SpaceJoinRoleState::CompletionHelper(_),
+                    SpaceJoinRoleState::CompletionHelper(_)
+                )
         )
     }
 
@@ -849,28 +1022,28 @@ impl AdmissionAttemptV1 {
 
     pub fn superseded_by_new_join(
         &self,
-        cleanup: AdmissionOutboxMessageV1,
-    ) -> Result<Self, SupersedeAdmissionAttemptError> {
-        let AdmissionAttemptRoleStateV1::Joiner(joiner) = self.role_state else {
-            return Err(SupersedeAdmissionAttemptError::NotJoiner);
+        cleanup: AdmissionOutboxMessage,
+    ) -> Result<Self, SupersedeSpaceJoinError> {
+        let SpaceJoinRoleState::Joiner(joiner) = self.role_state else {
+            return Err(SupersedeSpaceJoinError::NotJoiner);
         };
         if self.is_terminal() {
-            return Err(SupersedeAdmissionAttemptError::AlreadyTerminal);
+            return Err(SupersedeSpaceJoinError::AlreadyTerminal);
         }
         if !matches!(
             joiner.stage,
-            JoinerAdmissionStageV1::Initiated | JoinerAdmissionStageV1::Candidate
+            JoinerAdmissionStage::Initiated | JoinerAdmissionStage::Candidate
         ) {
-            return Err(SupersedeAdmissionAttemptError::UnsafeStage);
+            return Err(SupersedeSpaceJoinError::UnsafeStage);
         }
         let initial_join_request = self.outboxes.iter().rev().find(|message| {
-            message.purpose == AdmissionOutboxPurposeV1::JoinRequest
+            message.purpose == AdmissionOutboxPurpose::JoinRequest
                 && message.predecessor_message_id.is_none()
                 && !message.recipient.is_empty()
                 && !message.payload.is_empty()
                 && message.message_id != [0; 32]
         });
-        let candidate_material_is_complete = joiner.stage != JoinerAdmissionStageV1::Candidate
+        let candidate_material_is_complete = joiner.stage != JoinerAdmissionStage::Candidate
             || (self.lineage_id.is_some()
                 && self.base_history_position.is_some()
                 && self.candidate_event.is_some()
@@ -907,7 +1080,7 @@ impl AdmissionAttemptV1 {
                 .as_ref()
                 .is_none_or(|key| key.len() != 32)
         {
-            return Err(SupersedeAdmissionAttemptError::RecoveryRequired);
+            return Err(SupersedeSpaceJoinError::RecoveryRequired);
         }
         let active_predecessor = self
             .outboxes
@@ -916,14 +1089,14 @@ impl AdmissionAttemptV1 {
             .find(|message| !message.superseded)
             .or(initial_join_request)
             .map(|message| message.message_id);
-        if cleanup.purpose != AdmissionOutboxPurposeV1::CancelRequested
+        if cleanup.purpose != AdmissionOutboxPurpose::CancelRequested
             || cleanup.recipient.is_empty()
             || cleanup.payload.is_empty()
             || cleanup.message_id == [0; 32]
             || cleanup.predecessor_message_id != active_predecessor
             || cleanup.superseded
         {
-            return Err(SupersedeAdmissionAttemptError::InvalidCleanupMessage);
+            return Err(SupersedeSpaceJoinError::InvalidCleanupMessage);
         }
 
         let mut superseded = self.clone();
@@ -932,31 +1105,157 @@ impl AdmissionAttemptV1 {
         }
         superseded.cancel_request = Some(cleanup.payload.clone());
         superseded.outboxes.push(cleanup);
-        superseded.role_state = AdmissionAttemptRoleStateV1::Joiner(JoinerAdmissionStateV1 {
-            stage: JoinerAdmissionStageV1::Superseded,
+        superseded.role_state = SpaceJoinRoleState::Joiner(JoinerAdmissionState {
+            stage: JoinerAdmissionStage::Superseded,
         });
-        superseded.terminal_result = Some(AdmissionTerminalResultV1::SupersededByNewJoin);
+        superseded.terminal_result = Some(AdmissionTerminalResult::SupersededByNewJoin);
         superseded.rejection_reason = None;
         Ok(superseded)
+    }
+
+    pub fn cancelled(
+        &self,
+        cancellation: AdmissionOutboxMessage,
+    ) -> Result<Self, CancelSpaceJoinRecordError> {
+        let SpaceJoinRoleState::Joiner(joiner) = self.role_state else {
+            return Err(CancelSpaceJoinRecordError::NotJoiner);
+        };
+        if self.is_terminal() {
+            return Err(CancelSpaceJoinRecordError::AlreadyTerminal);
+        }
+        if matches!(
+            joiner.stage,
+            JoinerAdmissionStage::Committed
+                | JoinerAdmissionStage::Applied
+                | JoinerAdmissionStage::Completed
+                | JoinerAdmissionStage::Rejected
+                | JoinerAdmissionStage::Superseded
+        ) {
+            return Err(CancelSpaceJoinRecordError::UnsafeStage);
+        }
+        let join_request = self
+            .outboxes
+            .iter()
+            .find(|message| message.purpose == AdmissionOutboxPurpose::JoinRequest)
+            .ok_or(CancelSpaceJoinRecordError::InvalidCancellationMessage)?;
+        let active_predecessor = self
+            .outboxes
+            .iter()
+            .rev()
+            .find(|message| !message.superseded)
+            .map(|message| message.message_id);
+        if cancellation.purpose != AdmissionOutboxPurpose::CancelRequested
+            || cancellation.recipient != join_request.recipient
+            || cancellation.recipient.is_empty()
+            || cancellation.payload.is_empty()
+            || cancellation.message_id == [0; 32]
+            || cancellation.predecessor_message_id != active_predecessor
+            || cancellation.superseded
+        {
+            return Err(CancelSpaceJoinRecordError::InvalidCancellationMessage);
+        }
+
+        let mut cancelled = self.clone();
+        for message in &mut cancelled.outboxes {
+            message.superseded = true;
+        }
+        cancelled.cancel_request = Some(cancellation.payload.clone());
+        cancelled.outboxes.push(cancellation);
+        cancelled.role_state = SpaceJoinRoleState::Joiner(JoinerAdmissionState {
+            stage: JoinerAdmissionStage::Rejected,
+        });
+        cancelled.terminal_result = Some(AdmissionTerminalResult::Rejected);
+        cancelled.rejection_reason = Some(AdmissionRejectionReason::Cancelled);
+        Ok(cancelled)
+    }
+
+    pub fn advanced_space_transition(
+        &self,
+        current: &AdmissionSpaceTransitionV2,
+        next: &AdmissionSpaceTransitionV2,
+    ) -> Result<Self, SpaceJoinTransitionError> {
+        self.validate_current_space_transition(current)?;
+        if !current.can_advance_to(next) {
+            return Err(SpaceJoinTransitionError::InvalidAdvance);
+        }
+        let encoded = next
+            .encode()
+            .ok_or(SpaceJoinTransitionError::InvalidAdvance)?;
+        let mut advanced = self.clone();
+        advanced.space_transition = Some(encoded);
+        Ok(advanced)
+    }
+
+    pub fn completed_space_transition(
+        &self,
+        current: &AdmissionSpaceTransitionV2,
+        result: &AdmissionSpaceTransitionResultV2,
+    ) -> Result<(Self, Vec<u8>), SpaceJoinTransitionError> {
+        self.validate_current_space_transition(current)?;
+        if !result.matches_cleanup_pending(current) {
+            return Err(SpaceJoinTransitionError::InvalidResult);
+        }
+        let history = self
+            .verified_membership_history
+            .clone()
+            .ok_or(SpaceJoinTransitionError::MissingVerifiedHistory)?;
+        let encoded = result
+            .encode()
+            .ok_or(SpaceJoinTransitionError::InvalidResult)?;
+        let mut completed = self.clone();
+        completed.space_transition_result = Some(encoded);
+        completed.role_state = SpaceJoinRoleState::Joiner(JoinerAdmissionState {
+            stage: JoinerAdmissionStage::Completed,
+        });
+        completed.terminal_result = Some(AdmissionTerminalResult::Active);
+        Ok((completed, history))
+    }
+
+    fn validate_current_space_transition(
+        &self,
+        current: &AdmissionSpaceTransitionV2,
+    ) -> Result<(), SpaceJoinTransitionError> {
+        if !self.is_joiner() {
+            return Err(SpaceJoinTransitionError::NotJoiner);
+        }
+        if self.is_terminal() {
+            return Err(SpaceJoinTransitionError::AlreadyTerminal);
+        }
+        if self.completion.is_none() {
+            return Err(SpaceJoinTransitionError::AdmissionIncomplete);
+        }
+        let stored = self
+            .space_transition
+            .as_deref()
+            .and_then(AdmissionSpaceTransitionV2::decode)
+            .ok_or(SpaceJoinTransitionError::StoredTransitionInvalid)?;
+        if stored != *current || current.attempt_id() != self.record_id {
+            return Err(SpaceJoinTransitionError::TransitionMismatch);
+        }
+        Ok(())
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdmissionProfileMetadataV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct AdmissionProfileMetadata {
     pub format_version: u16,
     pub profile_generation: [u8; 16],
     pub next_local_join_ordinal: u64,
     pub join_projection_floor_ordinal: u64,
     pub device_trust_revision: u64,
-    pub consumed_invitation_attempts: BTreeMap<[u8; 32], AdmissionAttemptId>,
+    pub consumed_invitation_attempts: BTreeMap<[u8; 32], SpaceJoinRecordId>,
     #[serde(default)]
-    pub completion_recovery_challenges: BTreeMap<AdmissionAttemptId, Vec<u8>>,
+    pub completion_recovery_challenges: BTreeMap<SpaceJoinRecordId, Vec<u8>>,
 }
 
-impl std::fmt::Debug for AdmissionProfileMetadataV1 {
+impl std::fmt::Debug for AdmissionProfileMetadata {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("AdmissionProfileMetadataV1")
+            .debug_struct("AdmissionProfileMetadata")
             .field("format_version", &self.format_version)
             .field("profile_generation", &"[REDACTED]")
             .field("next_local_join_ordinal", &self.next_local_join_ordinal)
@@ -973,7 +1272,7 @@ impl std::fmt::Debug for AdmissionProfileMetadataV1 {
     }
 }
 
-impl AdmissionProfileMetadataV1 {
+impl AdmissionProfileMetadata {
     pub fn fresh(profile_generation: [u8; 16]) -> Self {
         Self {
             format_version: ADMISSION_PROFILE_METADATA_FORMAT_V1,
@@ -988,26 +1287,30 @@ impl AdmissionProfileMetadataV1 {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalAdmissionAttemptV1 {
+#[deprecated(
+    since = "1.1.0-rc.5",
+    note = "legacy Space admission model; migrate to SpaceAdmissionAggregate before Spec 028 cleanup"
+)]
+pub struct CompletedSpaceJoinRecord {
     pub format_version: u16,
-    pub attempt_id: AdmissionAttemptId,
+    pub attempt_id: SpaceJoinRecordId,
     pub join_id: Option<[u8; 16]>,
     pub local_join_ordinal: Option<u64>,
     pub invitation_digest: Option<[u8; 32]>,
     pub identity_binding: Option<Vec<u8>>,
-    pub terminal_result: AdmissionTerminalResultV1,
-    pub rejection_reason: Option<AdmissionRejectionReasonV1>,
+    pub terminal_result: AdmissionTerminalResult,
+    pub rejection_reason: Option<AdmissionRejectionReason>,
     pub candidate_event_id: Option<[u8; 32]>,
     pub cancel_outcome: Option<Vec<u8>>,
     pub replay_result: Vec<u8>,
     pub space_transition_result: Option<Vec<u8>>,
-    pub acknowledgment_rebuild: Vec<AdmissionInboxRecordV1>,
+    pub acknowledgment_rebuild: Vec<AdmissionInboxRecord>,
 }
 
-impl std::fmt::Debug for TerminalAdmissionAttemptV1 {
+impl std::fmt::Debug for CompletedSpaceJoinRecord {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("TerminalAdmissionAttemptV1")
+            .debug_struct("CompletedSpaceJoinRecord")
             .field("attempt_id", &self.attempt_id)
             .field("terminal_result", &self.terminal_result)
             .finish()
@@ -1017,18 +1320,22 @@ impl std::fmt::Debug for TerminalAdmissionAttemptV1 {
 #[cfg(test)]
 mod tests {
     use crate::ids::DeviceId;
-    use crate::membership::{AdmissionChangeFacts, MemberInstanceId, MembershipEventId};
+    use crate::membership::{
+        AdmissionChangeFacts, AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
+        FreshSpaceTransitionPhaseV1, FreshSpaceTransitionV1, MemberInstanceId, MembershipEventId,
+        FRESH_SPACE_TRANSITION_FORMAT_V1,
+    };
     use crate::security::IdentityFingerprint;
 
     use super::{
-        AdmissionAttemptId, AdmissionAttemptV1, AdmissionIdentityBindingV1,
-        AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1, AdmissionTerminalResultV1,
-        JoinerAdmissionStageV1, SupersedeAdmissionAttemptError,
+        AdmissionIdentityBindingV1, AdmissionOutboxMessage, AdmissionOutboxPurpose,
+        AdmissionRejectionReason, AdmissionTerminalResult, JoinerAdmissionStage, SpaceJoinRecord,
+        SpaceJoinRecordId, SupersedeSpaceJoinError,
     };
 
-    fn join_request(attempt_id: AdmissionAttemptId) -> AdmissionOutboxMessageV1 {
-        AdmissionOutboxMessageV1 {
-            purpose: AdmissionOutboxPurposeV1::JoinRequest,
+    fn join_request(attempt_id: SpaceJoinRecordId) -> AdmissionOutboxMessage {
+        AdmissionOutboxMessage {
+            purpose: AdmissionOutboxPurpose::JoinRequest,
             recipient: vec![9],
             message_id: *attempt_id.as_bytes(),
             predecessor_message_id: None,
@@ -1037,9 +1344,9 @@ mod tests {
         }
     }
 
-    fn cancel_request(attempt_id: AdmissionAttemptId) -> AdmissionOutboxMessageV1 {
-        AdmissionOutboxMessageV1 {
-            purpose: AdmissionOutboxPurposeV1::CancelRequested,
+    fn cancel_request(attempt_id: SpaceJoinRecordId) -> AdmissionOutboxMessage {
+        AdmissionOutboxMessage {
+            purpose: AdmissionOutboxPurpose::CancelRequested,
             recipient: vec![9],
             message_id: [7; 32],
             predecessor_message_id: Some(*attempt_id.as_bytes()),
@@ -1050,9 +1357,9 @@ mod tests {
 
     #[test]
     fn initiated_join_can_be_superseded_without_losing_replay_facts() {
-        let attempt_id = AdmissionAttemptId::from_bytes([1; 32]);
+        let attempt_id = SpaceJoinRecordId::from_bytes([1; 32]);
         let mut attempt =
-            AdmissionAttemptV1::new_joiner(attempt_id, [2; 16], JoinerAdmissionStageV1::Initiated);
+            SpaceJoinRecord::new_joiner(attempt_id, [2; 16], JoinerAdmissionStage::Initiated);
         attempt.local_join_ordinal = Some(3);
         attempt.joiner_pending_security_state = Some(vec![3]);
         attempt.candidate_key_package = Some(vec![4]);
@@ -1060,7 +1367,7 @@ mod tests {
             Some(crate::membership::MemberInstanceId::from_bytes([5; 32]));
         attempt.resume_public_key = Some(vec![6; 32]);
         attempt.resume_private_key = Some(vec![7; 32]);
-        attempt.inbox_dedup.push(super::AdmissionInboxRecordV1 {
+        attempt.inbox_dedup.push(super::AdmissionInboxRecord {
             message_id: [8; 32],
             payload_digest: [9; 32],
             acknowledgment_payload: vec![10],
@@ -1078,48 +1385,133 @@ mod tests {
         );
         assert_eq!(
             superseded.terminal_result,
-            Some(AdmissionTerminalResultV1::SupersededByNewJoin)
+            Some(AdmissionTerminalResult::SupersededByNewJoin)
         );
         assert_eq!(superseded.rejection_reason, None);
         assert_eq!(superseded.inbox_dedup, attempt.inbox_dedup);
         assert!(superseded.outboxes[0].superseded);
         assert_eq!(
             superseded.outboxes[1].purpose,
-            AdmissionOutboxPurposeV1::CancelRequested
+            AdmissionOutboxPurpose::CancelRequested
         );
         assert!(!superseded.outboxes[1].superseded);
         assert_eq!(superseded.cancel_request, Some(vec![6]));
     }
 
     #[test]
+    fn initiated_join_can_be_cancelled_as_one_state_change() {
+        let record_id = SpaceJoinRecordId::from_bytes([10; 32]);
+        let mut record =
+            SpaceJoinRecord::new_joiner(record_id, [11; 16], JoinerAdmissionStage::Initiated);
+        record.outboxes.push(join_request(record_id));
+
+        let cancelled = record.cancelled(cancel_request(record_id)).unwrap();
+
+        assert_eq!(cancelled.stage_rank(), Some(6));
+        assert_eq!(
+            cancelled.terminal_result,
+            Some(AdmissionTerminalResult::Rejected)
+        );
+        assert_eq!(
+            cancelled.rejection_reason,
+            Some(AdmissionRejectionReason::Cancelled)
+        );
+        assert!(cancelled.outboxes[0].superseded);
+        assert_eq!(
+            cancelled.outboxes[1].purpose,
+            AdmissionOutboxPurpose::CancelRequested
+        );
+        assert_eq!(cancelled.cancel_request, Some(vec![6]));
+        assert_eq!(cancelled.record_version, record.record_version);
+    }
+
+    fn fresh_transition(
+        record_id: SpaceJoinRecordId,
+        phase: FreshSpaceTransitionPhaseV1,
+    ) -> AdmissionSpaceTransitionV2 {
+        AdmissionSpaceTransitionV2::Fresh(FreshSpaceTransitionV1 {
+            transition_format_version: FRESH_SPACE_TRANSITION_FORMAT_V1,
+            attempt_id: record_id,
+            target_space_id: "target-space".to_owned(),
+            target_generation: [12; 16],
+            target_keyslot_ref: vec![13],
+            target_workspace_ref: vec![14],
+            phase,
+        })
+    }
+
+    #[test]
+    fn join_record_advances_one_valid_space_transition_phase() {
+        let record_id = SpaceJoinRecordId::from_bytes([15; 32]);
+        let mut record =
+            SpaceJoinRecord::new_joiner(record_id, [16; 16], JoinerAdmissionStage::Applied);
+        record.completion = Some(vec![17]);
+        let current = fresh_transition(record_id, FreshSpaceTransitionPhaseV1::TargetStaged);
+        record.space_transition = current.encode();
+        let next = fresh_transition(record_id, FreshSpaceTransitionPhaseV1::ActivationStarted);
+
+        let advanced = record.advanced_space_transition(&current, &next).unwrap();
+
+        assert_eq!(advanced.space_transition, next.encode());
+        assert_eq!(advanced.record_version, record.record_version);
+    }
+
+    #[test]
+    fn cleanup_result_completes_join_and_returns_verified_history() {
+        let record_id = SpaceJoinRecordId::from_bytes([18; 32]);
+        let mut record =
+            SpaceJoinRecord::new_joiner(record_id, [19; 16], JoinerAdmissionStage::Applied);
+        record.completion = Some(vec![20]);
+        record.verified_membership_history = Some(vec![21]);
+        let transition = fresh_transition(record_id, FreshSpaceTransitionPhaseV1::CleanupPending);
+        record.space_transition = transition.encode();
+        let result = AdmissionSpaceTransitionResultV2::Fresh {
+            target_space_id: "target-space".to_owned(),
+        };
+
+        let (completed, history) = record
+            .completed_space_transition(&transition, &result)
+            .unwrap();
+
+        assert_eq!(history, vec![21]);
+        assert_eq!(completed.space_transition_result, result.encode());
+        assert_eq!(completed.stage_rank(), Some(6));
+        assert_eq!(
+            completed.terminal_result,
+            Some(AdmissionTerminalResult::Active)
+        );
+        assert_eq!(completed.record_version, record.record_version);
+    }
+
+    #[test]
     fn prepared_or_recovery_bound_join_cannot_be_superseded() {
-        let attempt_id = AdmissionAttemptId::from_bytes([11; 32]);
+        let attempt_id = SpaceJoinRecordId::from_bytes([11; 32]);
         let mut prepared =
-            AdmissionAttemptV1::new_joiner(attempt_id, [12; 16], JoinerAdmissionStageV1::Prepared);
+            SpaceJoinRecord::new_joiner(attempt_id, [12; 16], JoinerAdmissionStage::Prepared);
         prepared.local_join_ordinal = Some(1);
         prepared.prepared_proof = Some(vec![1]);
         assert_eq!(
             prepared.superseded_by_new_join(cancel_request(attempt_id)),
-            Err(SupersedeAdmissionAttemptError::UnsafeStage)
+            Err(SupersedeSpaceJoinError::UnsafeStage)
         );
 
         let mut contradictory =
-            AdmissionAttemptV1::new_joiner(attempt_id, [12; 16], JoinerAdmissionStageV1::Candidate);
+            SpaceJoinRecord::new_joiner(attempt_id, [12; 16], JoinerAdmissionStage::Candidate);
         contradictory.local_join_ordinal = Some(1);
         contradictory.prepared_proof = Some(vec![1]);
         let original = contradictory.clone();
         assert_eq!(
             contradictory.superseded_by_new_join(cancel_request(attempt_id)),
-            Err(SupersedeAdmissionAttemptError::RecoveryRequired)
+            Err(SupersedeSpaceJoinError::RecoveryRequired)
         );
         assert_eq!(contradictory, original);
     }
 
     #[test]
     fn join_without_a_valid_initial_request_cannot_be_superseded() {
-        let attempt_id = AdmissionAttemptId::from_bytes([13; 32]);
+        let attempt_id = SpaceJoinRecordId::from_bytes([13; 32]);
         let mut attempt =
-            AdmissionAttemptV1::new_joiner(attempt_id, [14; 16], JoinerAdmissionStageV1::Initiated);
+            SpaceJoinRecord::new_joiner(attempt_id, [14; 16], JoinerAdmissionStage::Initiated);
         attempt.local_join_ordinal = Some(1);
         attempt.joiner_pending_security_state = Some(vec![1]);
         attempt.candidate_key_package = Some(vec![2]);
@@ -1129,15 +1521,15 @@ mod tests {
 
         assert_eq!(
             attempt.superseded_by_new_join(cancel_request(attempt_id)),
-            Err(SupersedeAdmissionAttemptError::RecoveryRequired)
+            Err(SupersedeSpaceJoinError::RecoveryRequired)
         );
     }
 
     #[test]
     fn candidate_without_identity_binding_cannot_be_superseded() {
-        let attempt_id = AdmissionAttemptId::from_bytes([15; 32]);
+        let attempt_id = SpaceJoinRecordId::from_bytes([15; 32]);
         let mut attempt =
-            AdmissionAttemptV1::new_joiner(attempt_id, [16; 16], JoinerAdmissionStageV1::Candidate);
+            SpaceJoinRecord::new_joiner(attempt_id, [16; 16], JoinerAdmissionStage::Candidate);
         attempt.local_join_ordinal = Some(1);
         attempt.joiner_pending_security_state = Some(vec![1]);
         attempt.candidate_key_package = Some(vec![2]);
@@ -1162,15 +1554,15 @@ mod tests {
 
         assert_eq!(
             attempt.superseded_by_new_join(cancel_request(attempt_id)),
-            Err(SupersedeAdmissionAttemptError::RecoveryRequired)
+            Err(SupersedeSpaceJoinError::RecoveryRequired)
         );
     }
 
     #[test]
     fn unsafe_roles_stages_and_recovery_states_cannot_be_superseded() {
-        let attempt_id = AdmissionAttemptId::from_bytes([17; 32]);
+        let attempt_id = SpaceJoinRecordId::from_bytes([17; 32]);
         let mut base =
-            AdmissionAttemptV1::new_joiner(attempt_id, [18; 16], JoinerAdmissionStageV1::Initiated);
+            SpaceJoinRecord::new_joiner(attempt_id, [18; 16], JoinerAdmissionStage::Initiated);
         base.local_join_ordinal = Some(1);
         base.joiner_pending_security_state = Some(vec![1]);
         base.candidate_key_package = Some(vec![2]);
@@ -1182,36 +1574,35 @@ mod tests {
         let mut sponsor = base.clone();
         sponsor.join_id = None;
         sponsor.local_join_ordinal = None;
-        sponsor.role_state =
-            super::AdmissionAttemptRoleStateV1::Sponsor(super::SponsorAdmissionStateV1 {
-                stage: super::SponsorAdmissionStageV1::Accepted,
-            });
+        sponsor.role_state = super::SpaceJoinRoleState::Sponsor(super::SponsorAdmissionState {
+            stage: super::SponsorAdmissionStage::Accepted,
+        });
         assert_eq!(
             sponsor.superseded_by_new_join(cancel_request(attempt_id)),
-            Err(SupersedeAdmissionAttemptError::NotJoiner)
+            Err(SupersedeSpaceJoinError::NotJoiner)
         );
 
         let mut terminal = base.clone();
-        terminal.terminal_result = Some(AdmissionTerminalResultV1::Rejected);
+        terminal.terminal_result = Some(AdmissionTerminalResult::Rejected);
         assert_eq!(
             terminal.superseded_by_new_join(cancel_request(attempt_id)),
-            Err(SupersedeAdmissionAttemptError::AlreadyTerminal)
+            Err(SupersedeSpaceJoinError::AlreadyTerminal)
         );
 
         for stage in [
-            JoinerAdmissionStageV1::Prepared,
-            JoinerAdmissionStageV1::Committed,
-            JoinerAdmissionStageV1::Applied,
-            JoinerAdmissionStageV1::Completed,
-            JoinerAdmissionStageV1::Rejected,
-            JoinerAdmissionStageV1::Superseded,
+            JoinerAdmissionStage::Prepared,
+            JoinerAdmissionStage::Committed,
+            JoinerAdmissionStage::Applied,
+            JoinerAdmissionStage::Completed,
+            JoinerAdmissionStage::Rejected,
+            JoinerAdmissionStage::Superseded,
         ] {
             let mut unsafe_stage = base.clone();
             unsafe_stage.role_state =
-                super::AdmissionAttemptRoleStateV1::Joiner(super::JoinerAdmissionStateV1 { stage });
+                super::SpaceJoinRoleState::Joiner(super::JoinerAdmissionState { stage });
             assert_eq!(
                 unsafe_stage.superseded_by_new_join(cancel_request(attempt_id)),
-                Err(SupersedeAdmissionAttemptError::UnsafeStage)
+                Err(SupersedeSpaceJoinError::UnsafeStage)
             );
         }
 
@@ -1238,16 +1629,16 @@ mod tests {
         for attempt in recovery_bound {
             assert_eq!(
                 attempt.superseded_by_new_join(cancel_request(attempt_id)),
-                Err(SupersedeAdmissionAttemptError::RecoveryRequired)
+                Err(SupersedeSpaceJoinError::RecoveryRequired)
             );
         }
     }
 
     #[test]
-    fn admission_attempt_without_continuation_address_still_decodes() {
-        let attempt_id = AdmissionAttemptId::from_bytes([19; 32]);
+    fn space_join_record_without_continuation_address_still_decodes() {
+        let attempt_id = SpaceJoinRecordId::from_bytes([19; 32]);
         let mut expected =
-            AdmissionAttemptV1::new_joiner(attempt_id, [20; 16], JoinerAdmissionStageV1::Initiated);
+            SpaceJoinRecord::new_joiner(attempt_id, [20; 16], JoinerAdmissionStage::Initiated);
         expected.cancel_request = Some(vec![21]);
         expected.cancel_outcome = Some(vec![22]);
         expected.resume_public_key = Some(vec![23; 32]);
@@ -1256,7 +1647,7 @@ mod tests {
 
         let mut previous_version = postcard::to_stdvec(&expected).unwrap();
         assert_eq!(previous_version.pop(), Some(0));
-        let decoded = AdmissionAttemptV1::decode_persisted(&previous_version).unwrap();
+        let decoded = SpaceJoinRecord::decode_persisted(&previous_version).unwrap();
 
         assert_eq!(decoded, expected);
         assert_eq!(decoded.sponsor_continuation_address, None);
@@ -1272,24 +1663,24 @@ mod tests {
         }
 
         let joiner_stages = [
-            JoinerAdmissionStageV1::Initiated,
-            JoinerAdmissionStageV1::Candidate,
-            JoinerAdmissionStageV1::Prepared,
-            JoinerAdmissionStageV1::Committed,
-            JoinerAdmissionStageV1::Applied,
-            JoinerAdmissionStageV1::Completed,
-            JoinerAdmissionStageV1::Rejected,
-            JoinerAdmissionStageV1::Superseded,
+            JoinerAdmissionStage::Initiated,
+            JoinerAdmissionStage::Candidate,
+            JoinerAdmissionStage::Prepared,
+            JoinerAdmissionStage::Committed,
+            JoinerAdmissionStage::Applied,
+            JoinerAdmissionStage::Completed,
+            JoinerAdmissionStage::Rejected,
+            JoinerAdmissionStage::Superseded,
         ];
         for (index, stage) in joiner_stages.into_iter().enumerate() {
             assert_eq!(postcard::to_stdvec(&stage).unwrap(), vec![index as u8]);
         }
 
         let terminal_results = [
-            AdmissionTerminalResultV1::Active,
-            AdmissionTerminalResultV1::Completed,
-            AdmissionTerminalResultV1::Rejected,
-            AdmissionTerminalResultV1::SupersededByNewJoin,
+            AdmissionTerminalResult::Active,
+            AdmissionTerminalResult::Completed,
+            AdmissionTerminalResult::Rejected,
+            AdmissionTerminalResult::SupersededByNewJoin,
         ];
         for (index, terminal) in terminal_results.into_iter().enumerate() {
             assert_eq!(postcard::to_stdvec(&terminal).unwrap(), vec![index as u8]);

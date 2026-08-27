@@ -145,16 +145,6 @@ pub enum RelationshipStateResetError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum CurrentMemberSignatureError {
-    #[error("current member signing state is unavailable")]
-    Unavailable,
-    #[error("current member signing state is invalid")]
-    InvalidState,
-    #[error("current member signing state could not be loaded: {0}")]
-    Repository(String),
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum GroupUpdateDispatchError {
     #[error("group update recipient is offline")]
     Offline,

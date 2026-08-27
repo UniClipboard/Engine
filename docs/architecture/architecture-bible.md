@@ -215,14 +215,16 @@ Space
 - `SpaceFacade` 的唯一实现位于私有 Space 模块内。`space/mod.rs` 不公开任何子模块，只逐项导出允许离开 Space 的调用契约和组装能力；其他 application 模块只能从该根出口读取，crate 外继续只通过 `facade` 和 `deps` 两份白名单访问。
 - Space 内部固定分为 `lifecycle/`、`admission/`、`membership/` 和 `connectivity/` 四个责任区。每个责任区隐藏自己的 case、runtime、session、状态和测试，只从本区 `mod.rs` 提供跨区协作所需内容；责任区外不得穿透子目录。
 - `SpaceApplication` 一次构造完整用户用例、成员历史网络入口、准入网络入口和唯一成员后台；外部不能取得内部用例或后台对象。
+- 入站成员准入通过单一状态入口读取同一时点的加入记录、签名成员历史和邀请代数，并取得不可拆解的一次性保存凭证；准入流程不读取成员 ledger 字段，也不拼装版本或并发条件。
 - 私有 `membership/ledger` 加载并验证完整成员资料，通过一个带条件的原子提交能力共同保存 V2 历史、加入记录、对端关系、分页传输、待处理效果和唯一修订号。
+- Core `SpaceAdmissionAggregate` 是新准入协议唯一状态负责人：类型化消息、双方独立序号、前序关系、精确重放、Joiner/Sponsor/CompletionHelper 合法推进、取消、取代、稳定拒绝、恢复要求和终态压缩都由它决定。每次推进返回 `AdmissionTransition`，统一携带 replacement、原样回复和本次原子影响；Application 不匹配内部阶段。
 - V2 签名成员历史是唯一正向成员资格；最终授权范围只在 ledger 内派生。成员资料、可信关系、地址、在线状态和偏好只能缩小普通操作目标，不能授予资格。
 - 查询、移除、决定、历史发送、历史接收、准入入站和后台维护分别拥有一个完整入口。提交后的网络失败不会回滚正式历史，后台只从已保存事实继续。
 - 成员后台只保留一套。启动、恢复、状态变化、定时和设备上线都进入同一维护顺序；暂停先通知网络工作停止，再等待当前保存边界完成，关闭等待最多五秒。
 - 旧成员总对象、旧准入 owner、旧 gossip、旧综合状态、旧仓储接口、旧诊断入口、旧连接后台和 side facade 已物理删除，不保留别名、双写、回退或 feature 控制的第二实现。
 - 旧资料仍不转换成员授权；重建会一次清空旧历史、关系、传输、效果和加入记录，再建立单设备 V2 根并要求其他设备重新配对。
 
-本次只完成 application 及其内部消费者。Core、Infra、Engine、三套绑定、数据库和真实网络适配需按这些固定接口另行接入；外层暂时不兼容不能要求 application 恢复旧结构。
+Application 的规格 027 切换和新准入 Core 已分别完成；两者之间的新 `SpaceAdmissionProtocol`、加密 ledger、Infra 认证/传输、Engine 构造顺序、三套绑定和真实网络验收仍待接入。当前不能把 Core 单元测试解释为产品加入流程已经可用，也不得为临时编译恢复旧结构。
 
 下文 ADR-020 至 ADR-024 的章节继续说明协议和产品语义；其中出现的旧负责人名称只代表历史设计，当前代码归属统一以本节和规格 027 为准。
 
@@ -262,7 +264,15 @@ Space
 为止。若进程在共同保护状态写入后、成员历史起点写入前中断，持有未完成升级记录的创建方在重启后继续完成
 成员历史，不再重新按设备编号选择负责人。
 
-### 配对作为工作空间准入通道（ADR-017、ADR-022，规格 023）
+### 单一 Space 准入协议（ADR-017、ADR-022，规格 023、028）
+
+规格 028 取代旧配对会话编排作为下一版唯一准入方向。Core 已只保留一套类型化业务消息和封闭状态记录，完整表达 JoinRequest、Candidate、Prepared、Commit、Applied、Complete、CompleteAck、Settled、CancelRequested 与 Rejected；相同消息只重放已保存结果，冲突、乱序和错误前序不推进状态。正式 Commit 是唯一新增成员事实，Active 只能在本机 Space 切换完成后保存，Prepared 以后禁止新加入取代，Commit 以后取消稳定返回 TooLateCommitted。
+
+Core 对外只提供 Aggregate、Transition、消息、待发送交换、稳定错误分类和本次影响。Joiner、Sponsor、CompletionHelper 与 Terminal 的具体状态类型只在 Core 内部可见；Application 后台通过统一待发送读取恢复，消息入口先调用统一重放裁决，不能逐阶段读取或修改字段。CompletionHelper 只能根据已验证 Commit 和回执生成等价 Complete，不能创建或修改成员事实。
+
+当前实现边界止于 Core。Application 仍需建立唯一 `SpaceAdmissionProtocol`，Infra 仍需接入 OPAQUE、OpenMLS、加密存储和新 Iroh 通道，Engine 仍需完成 endpoint-before-router-before-runtime 构造顺序。完成这些切换并删除旧协议前，本节的新流程不属于已发布运行路径。
+
+以下 ADR-017/规格 023 内容保留为业务约束来源；其中旧 `WorkspaceConvergence`、旧尝试仓储、outbox 和完成接力通道名称不再代表目标代码归属。
 
 ADR-017 的目标是成员加入由 `WorkspaceConvergence` 完整负责，配对只保留内部通信职责。正常加入时产品和
 绑定只创建工作空间邀请或调用一次 JoinSpace，查询、取消和移除等管理动作也不能看到或驱动候选、历史
@@ -1440,7 +1450,14 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-25 | Space 成员关系按行为迁移 | 成员传播、当前成员范围、成员历史同步、待处理成员效果、成员历史基线和成员运行期分别迁入含义明确的模块；不保留含义模糊的成员关系总目录作为最终归宿。当前切片只调整应用层归属，运行行为和保存顺序不变。 |
 | 2026-08-25 | 成员历史同步标准用例 | 应用层以一个固定总预算的完整动作同步当前全部有效成员；运行期和准入前同步复用同一入口，单设备分页交换、验证、合并和确认留在内部。单设备暂时失败不阻塞整体，当前成员范围不可用才返回整体失败。 |
 | 2026-08-25 | 成员历史同步用例注释补全 | 为完整同步入口补充中文职责说明，明确内部执行锁、跨用例共享状态写锁、整轮固定预算和单设备失败处理；仅完善维护说明，运行行为不变。 |
+| 2026-08-26 | Space 加入记录职责和可读性收口 | Core 加入记录统一生成用户取消、Space 切换推进和完成终态；成员 ledger 统一推进记录版本，并用旧状态凭证一次保存成员历史、关系、待处理效果和邀请占用。准入 case 不再逐字段拼装终态或计算下一版本；持久化格式、网络内容、公开操作和用户结果不变。 |
 | 2026-08-26 | Application Space 统一入口补齐 | `AppFacade` 补齐设备信任查询、成员移除、成员变化决定和取消加入的稳定转发，四项操作继续由 `SpaceFacade` 内同一完整流程负责；无架构变化。 |
+| 2026-08-26 | 入站准入状态接口收口 | 入站准入通过单一状态入口一次读取处理上下文和不可拆解的保存凭证，准入流程不再依赖成员 ledger、内部版本或存储错误；成员 ledger 继续统一验证和原子保存，持久化格式、网络内容和用户结果均未变化。 |
+| 2026-08-26 | 单一 Space 准入协议规格 | 新增覆盖 Core、Application、Infra、Engine、数据库、绑定和双设备验收的一次性切换规格；明确未来只保留一套新协议且不提供兼容、回退或双实现。当前运行架构未变化。 |
+| 2026-08-26 | 单一 Space 准入协议核心基础 | Core 开始使用类型化消息、严格顺序与重放证据、原样回复和按阶段封闭的新加入记录；首次认证会用双方绑定和后续凭据替换加密口令材料。当前仅完成新协议核心基础，旧流程仍待后续切换并删除。 |
+| 2026-08-26 | 单一 Space 准入核心目录拆分 | 将新准入核心按编号、敏感材料、消息、交换、状态、状态推进和测试拆开；根入口只负责统一导出。对外入口、协议规则和运行行为不变。 |
+| 2026-08-27 | 单一 Space 准入 Core 完成 | 完成 Joiner、Sponsor、CompletionHelper、取消、取代、拒绝、重放、恢复要求、结清和终态压缩；所有推进统一返回 replacement、原样回复和本次影响。Application、Infra、存储、Engine 和设备验收尚未切换，不报告产品流程完成。 |
+| 2026-08-27 | 旧 Core 准入删除门禁 | 旧 `SpaceJoinRecord`、outbox、inbox、身份绑定和完成接力类型统一标记为弃用；只允许现有未迁移调用者继续使用。Application、Infra 和 Engine 切到新 Aggregate 后按规格 028 清单整体删除，不保留兼容出口。 |
 
 ## 相关文档
 
@@ -1473,3 +1490,4 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/specs/025-user-initiated-join-supersession.md`：用户再次明确加入时安全取代旧本机加入的分阶段实施规格。
 - `docs/specs/026-legacy-profile-isolation-and-re-pairing.md`：旧资料独立化、关系清理和产品提醒的实施规格。
 - `docs/specs/027-application-space-membership-one-shot-rewrite.md`：Application Space 成员关系目标对象、接口、流程、删除清单和验收标准。
+- `docs/specs/028-single-space-admission-protocol.md`：全新单一 Space 准入协议、跨层接入、删除清单和完整验收标准。

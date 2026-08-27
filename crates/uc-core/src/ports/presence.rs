@@ -47,7 +47,7 @@ pub enum PresenceError {
 }
 
 #[async_trait]
-pub trait PresencePort: Send + Sync {
+pub trait PeerReachabilityPort: Send + Sync {
     /// Actively probe / dial the target device.
     ///
     /// Returns the resulting state — typically `Online` on success, `Offline`

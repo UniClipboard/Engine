@@ -75,13 +75,13 @@ Relationship: 仍是完整流程的唯一负责人；锁负责进程内串行，
 ```
 Component: DurableAdmissionTransaction
 Path: crates/uc-application/src/space/convergence/admission/transaction.rs
-Responsibility: 创建、推进、恢复、投影和压缩加密准入尝试。
+Responsibility: 创建、推进、恢复、投影和压缩加密Space 加入记录。
 Relationship: prepare_join_before_network 当前遇到 Pending 时调用 reopen_join_start；这里是行为替换的主要入口。
 ```
 
 ```
 Component: Admission domain model and repository port
-Path: crates/uc-core/src/membership/admission_attempt.rs
+Path: crates/uc-core/src/membership/space_join_record.rs
 Path: crates/uc-core/src/membership/ports.rs
 Responsibility: 定义 Joiner 阶段、终态、outbox、尝试、profile 元数据、当前加入投影和持久化语义接口。
 Relationship: 当前终态只有 Active、Completed、Rejected，仓储也没有原子结束旧加入并创建新加入的语义操作。
@@ -89,7 +89,7 @@ Relationship: 当前终态只有 Active、Completed、Rejected，仓储也没有
 
 ```
 Component: Encrypted admission store
-Path: crates/uc-infra/src/db/repositories/admission_attempt_store.rs
+Path: crates/uc-infra/src/db/repositories/space_join_record_store.rs
 Responsibility: 用 profile 主密钥和每尝试数据密钥加密保存尝试，在 SQLite immediate transaction 中分配序号、推进 revision、版本检查和压缩终态。
 Relationship: 新原子操作必须在这里一次提交；不得先保存旧终态再单独 create 新尝试。
 ```
@@ -121,12 +121,12 @@ Relationship: 平台层透传同一 code/category/retryable，不判断内部阶
 
 ## Components
 
-### AdmissionAttempt 的取代规则
+### SpaceJoinRecord 的取代规则
 
-在 `crates/uc-core/src/membership/admission_attempt.rs` 追加：
+在 `crates/uc-core/src/membership/space_join_record.rs` 追加：
 
-- `JoinerAdmissionStageV1::Superseded`，阶段排名为终态排名 6；只允许 Joiner 使用。
-- `AdmissionTerminalResultV1::SupersededByNewJoin`，只允许与 Joiner `Superseded` 配对。
+- `JoinerAdmissionStage::Superseded`，阶段排名为终态排名 6；只允许 Joiner 使用。
+- `AdmissionTerminalResult::SupersededByNewJoin`，只允许与 Joiner `Superseded` 配对。
 - 一个 crate 内领域方法，用于从已验证的 `Initiated` 或 `Candidate` 构造被取代终态。该方法一次完成：停止旧的
   JoinRequest/Candidate 等提交前 outbox、保留 inbox 防重放记录、生成隔离的 `CancelRequested` 清理通知、设置
   `terminal_result`，并保证 `rejection_reason` 为空。
@@ -139,7 +139,7 @@ Relationship: 平台层透传同一 code/category/retryable，不判断内部阶
 在 `crates/uc-core/src/membership/ports.rs` 增加一个语义输入和一个仓储方法。建议命名：
 
 ```text
-LocalJoinStartMutationV1
+LocalJoinStartMutation
   Create { replacement }
   Supersede {
     expected_previous_attempt_id,
@@ -148,13 +148,13 @@ LocalJoinStartMutationV1
     replacement
   }
 
-AdmissionAttemptRepositoryPort::commit_local_join_start(mutation)
+SpaceJoinRecordStorePort::commit_local_join_start(mutation)
 ```
 
 该接口只表达一次完整结果，不暴露“先结束、再建新记录、再推进投影”的步骤。`create` 继续服务 Sponsor、
 CompletionHelper 和明确 attempt 身份的内部幂等恢复；公开用户加入只能通过 `commit_local_join_start` 创建本机 Joiner。
 
-`DieselAdmissionAttemptStore` 在同一个 SQLite immediate transaction 中：
+`DieselSpaceJoinRecordStore` 在同一个 SQLite immediate transaction 中：
 
 1. 打开并验证全部相关密文；
 2. 核对期望旧 attempt、record version、当前最高序号的非终态 Joiner 和安全阶段；
@@ -218,12 +218,12 @@ CompletionHelper 和明确 attempt 身份的内部幂等恢复；公开用户加
 
 | 数据 | 修改 | 生命周期与约束 |
 | --- | --- | --- |
-| `JoinerAdmissionStageV1` | 末尾追加 `Superseded` | 只与本机 Joiner 的取代终态配对；旧序列化判别值不改变 |
-| `AdmissionTerminalResultV1` | 末尾追加 `SupersededByNewJoin` | 内部终态；不是 Rejected，不写成员历史 |
-| `AdmissionAttemptV1` | 不新增公开业务字段 | 复用阶段、终态、outbox、inbox、版本和加密材料；被取代时 rejection_reason 必须为空 |
-| `TerminalAdmissionAttemptV1` | 允许新终态值 | 压缩后继续保留最小防重放和旧消息重建事实 |
-| `AdmissionProfileMetadataV1` | 字段不变 | 一次原子取代只推进一个 ordinal 和一次 revision；邀请消费映射不改绑 |
-| `CurrentLocalJoinProjectionV1` | 字段不变 | 只投影新 attempt；不公开旧取代终态 |
+| `JoinerAdmissionStage` | 末尾追加 `Superseded` | 只与本机 Joiner 的取代终态配对；旧序列化判别值不改变 |
+| `AdmissionTerminalResult` | 末尾追加 `SupersededByNewJoin` | 内部终态；不是 Rejected，不写成员历史 |
+| `SpaceJoinRecord` | 不新增公开业务字段 | 复用阶段、终态、outbox、inbox、版本和加密材料；被取代时 rejection_reason 必须为空 |
+| `CompletedSpaceJoinRecord` | 允许新终态值 | 压缩后继续保留最小防重放和旧消息重建事实 |
+| `AdmissionProfileMetadata` | 字段不变 | 一次原子取代只推进一个 ordinal 和一次 revision；邀请消费映射不改绑 |
+| `CurrentLocalJoinProjection` | 字段不变 | 只投影新 attempt；不公开旧取代终态 |
 
 枚举新值必须追加，不能改变现有值的序列化顺序。新版本可读取旧密文；包含新终态的资料由旧二进制打开时必须在写入前
 失败，不允许把未知值当成 Rejected、Completed 或空状态。全部尝试正文、终态和清理资料继续按现有 MasterKey AEAD
@@ -317,9 +317,9 @@ WorkspaceAdmissionOwnerPort::prepare_local_join_before_network(...)
 
 ## Phase 2: 跑通 Initiated 取代的最小端到端闭环
 
-**File:** `crates/uc-core/src/membership/admission_attempt.rs`、
+**File:** `crates/uc-core/src/membership/space_join_record.rs`、
 `crates/uc-core/src/membership/ports.rs`、
-`crates/uc-infra/src/db/repositories/admission_attempt_store.rs`、
+`crates/uc-infra/src/db/repositories/space_join_record_store.rs`、
 `crates/uc-application/src/space/convergence/admission/transaction.rs`、
 `crates/uc-application/src/space/convergence/admission/flow.rs`
 
@@ -355,7 +355,7 @@ WorkspaceAdmissionOwnerPort::prepare_local_join_before_network(...)
 
 **File:** `crates/uc-application/src/space/convergence/admission/transaction.rs`、
 `crates/uc-application/src/space/convergence/admission/flow.rs`、
-`crates/uc-infra/src/db/repositories/admission_attempt_store.rs`、准入恢复测试
+`crates/uc-infra/src/db/repositories/space_join_record_store.rs`、准入恢复测试
 
 **Change:**
 
@@ -410,7 +410,7 @@ WorkspaceAdmissionOwnerPort::prepare_local_join_before_network(...)
 
 **Expected behavior:** 与当前正常加入一致，但使用新的原子用户动作入口保存全新 attempt。
 
-**Implementation:** `LocalJoinStartMutationV1::Create` 核对没有当前非终态 Joiner，并允许已取代旧记录的隔离清理继续。
+**Implementation:** `LocalJoinStartMutation::Create` 核对没有当前非终态 Joiner，并允许已取代旧记录的隔离清理继续。
 
 ## Scenario: 相同邀请码再次明确提交
 
@@ -547,7 +547,7 @@ WorkspaceAdmissionOwnerPort::prepare_local_join_before_network(...)
 代表性精确命令在对应测试落地后执行：
 
 ```bash
-cargo test -p uc-core admission_attempt
+cargo test -p uc-core space_join_record
 cargo test -p uc-infra commit_local_join_start
 cargo test -p uc-application explicit_join_
 cargo test -p uc-application superseded_late_
@@ -564,7 +564,7 @@ cargo test -p uc-ohos-napi previous_join_conflict_keeps_its_stable_summary
 
 | 命令筛选 | 匹配数 | 通过数 |
 | --- | ---: | ---: |
-| `uc-core admission_attempt` | 7 | 7 |
+| `uc-core space_join_record` | 7 | 7 |
 | `uc-infra commit_local_join_start` | 1 | 1 |
 | `uc-infra supersession_` | 3 | 3 |
 | `uc-infra consumed_invitation_stays_bound_to_its_original_attempt` | 1 | 1 |

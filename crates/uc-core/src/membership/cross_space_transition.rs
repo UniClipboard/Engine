@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::AdmissionAttemptId;
+use super::SpaceJoinRecordId;
 
 pub const CROSS_SPACE_TRANSITION_FORMAT_V2: u16 = 2;
 pub const FRESH_SPACE_TRANSITION_FORMAT_V1: u16 = 1;
@@ -38,7 +38,7 @@ impl FreshSpaceTransitionPhaseV1 {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreshSpaceTransitionV1 {
     pub transition_format_version: u16,
-    pub attempt_id: AdmissionAttemptId,
+    pub attempt_id: SpaceJoinRecordId,
     pub target_space_id: String,
     pub target_generation: [u8; 16],
     pub target_keyslot_ref: Vec<u8>,
@@ -108,7 +108,7 @@ impl SameSpaceTransitionPhaseV1 {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SameSpaceTransitionV1 {
     pub transition_format_version: u16,
-    pub attempt_id: AdmissionAttemptId,
+    pub attempt_id: SpaceJoinRecordId,
     pub target_space_id: String,
     pub source_generation: [u8; 16],
     pub target_generation: [u8; 16],
@@ -190,7 +190,7 @@ impl CrossSpaceTransitionPhaseV2 {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossSpaceTransitionV2 {
     pub transition_format_version: u16,
-    pub attempt_id: AdmissionAttemptId,
+    pub attempt_id: SpaceJoinRecordId,
     pub source_space_id: String,
     pub source_generation: [u8; 16],
     pub source_backup_ref: Vec<u8>,
@@ -349,7 +349,7 @@ impl AdmissionSpaceTransitionV2 {
         }
     }
 
-    pub const fn attempt_id(&self) -> AdmissionAttemptId {
+    pub const fn attempt_id(&self) -> SpaceJoinRecordId {
         match self {
             Self::Fresh(transition) => transition.attempt_id,
             Self::SameSpace(transition) => transition.attempt_id,
@@ -449,7 +449,7 @@ mod tests {
         let finalized = phase.rank() >= CrossSpaceTransitionPhaseV2::SourceFinalized.rank();
         CrossSpaceTransitionV2 {
             transition_format_version: CROSS_SPACE_TRANSITION_FORMAT_V2,
-            attempt_id: AdmissionAttemptId::from_bytes([0x11; 32]),
+            attempt_id: SpaceJoinRecordId::from_bytes([0x11; 32]),
             source_space_id: "source".to_owned(),
             source_generation: [0x12; 16],
             source_backup_ref: b"backup".to_vec(),

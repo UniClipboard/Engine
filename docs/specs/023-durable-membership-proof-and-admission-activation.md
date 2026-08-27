@@ -31,7 +31,7 @@
 
 当前签名成员历史把事件作者记录为 `MemberInstanceId`，但 `AddDevice` 没有保存用于验证该成员后续签名的
 长期凭据。应用层验证历史事件时，先从当前 `applied_head` 而不是事件的精确父位置解析作者设备，再通过
-`CurrentMemberSignaturePort` 从当前 OpenMLS 成员状态中查找验证身份。成员一旦被后续 `RemoveDevice`
+应用层定义的 `CurrentMemberSignaturePort` 从当前 OpenMLS 成员状态中查找验证身份。成员一旦被后续 `RemoveDevice`
 移出当前已应用分支或当前 OpenMLS 树，新加入设备即使收到完整、连续且当时合法的历史，也不再保证能
 确认该作者当时有资格或取得其旧公钥。
 
@@ -103,7 +103,7 @@
 # 4. Current Architecture Context
 
 ```text
-Component: MembershipEvent / MembershipReconciliation
+Component: VersionedMembershipHistory
 Path: crates/uc-core/src/membership/membership_history.rs
 Responsibility: 保存单父事件历史、known_head、applied_head、成员操作、决定和有效成员计算。
 Relationship: V1 事件保存作者成员实例和签名，但 AddDevice 未保存成员历史验签公钥；receive_verified
@@ -234,7 +234,7 @@ Relationship: 当前成功只有 SpaceJoined，等待和稳定拒绝主要表现
 11. S2 正式提交后，到 Applied 永久入账并与 Complete outbox 一同保存前，本分支不接受另一项本地加入、
     移除或成员安全提交。唯一例外是明确移除永久失联的本次待激活候选；远端竞争后继按 ADR-020 保存为
     分叉，不能自动应用。
-12. 同一 `AdmissionAttempt` 也是本机加入方空间迁移的唯一恢复记录。旧 `MigrationPhase`、setup 状态、
+12. 同一 `SpaceJoinRecord` 也是本机加入方空间迁移的唯一恢复记录。旧 `MigrationPhase`、setup 状态、
     keyslot、session、关系清理和内容重封装不得各自推进；J3 之前来源 Space 保持完整活动，J3 开始后
     运行入口保持关闭，直到一个目标活动世代完整可用。
 13. 邀请的本机加密 claim 是一次性受理的唯一裁决。本机 claim、尝试身份绑定和 consume outbox 一次提交；
@@ -284,7 +284,7 @@ Relationship: 当前成功只有 SpaceJoined，等待和稳定拒绝主要表现
 - **输入**：已经验证的 V2 `AddDevice` 和对应 `AdmissionActivationReceipt`。
 - **输出**：已保存、缺少对应事件、幂等重复或冲突回执。
 - **关系**：回执是 `VersionedMembershipHistory` 聚合内的永久配套事实，不属于可压缩的
-  `AdmissionAttempt`，也不建立独立证明账本、完成证明游标或产品接口。它只能解除已有 `AddDevice` 的
+  `SpaceJoinRecord`，也不建立独立证明账本、完成证明游标或产品接口。它只能解除已有 `AddDevice` 的
   负门禁，不能创建成员、改变分支或恢复已移除成员。
 
 成员核对摘要除事件头和决定摘要外，增加对按 `event_id` 排序的 `(event_id, receipt_id)` 求得的
@@ -305,7 +305,7 @@ Relationship: 当前成功只有 SpaceJoined，等待和稳定拒绝主要表现
 
 ### Attempt-bound Space transition
 
-- **职责**：在同一准入尝试内保存来源快照、暂存目标世代，并在 J3 排空来源写入、补齐最终快照、重封装
+- **职责**：在同一Space 加入记录内保存来源快照、暂存目标世代，并在 J3 排空来源写入、补齐最终快照、重封装
   数据和一次性提升目标活动世代。
 - **输入**：`attempt_id`、来源活动世代、目标暂存世代、Complete 和当前持久恢复步骤。
 - **输出**：未切换、可恢复切换中或已激活的唯一结果，以及迁移/保留记录计数。
@@ -331,7 +331,7 @@ profile 安全存储命名空间内的 `profile_admission_master_key:v1`。它�
 不得提前清除设置或重新开放旧 profile。profile 级 revision、下一个 local ordinal、已消费邀请索引和压缩终态都直接使用
 该 MasterKey 的域分离 AEAD 子密钥加密，因此 Fresh、Pending 和 Fresh Rejected 都不依赖目标 Space 密钥。
 
-每个 `attempt_id` 另生成随机 `AdmissionAttemptDataKey`，由 `ProfileAdmissionMasterKey` 使用带 profile、
+每个 `attempt_id` 另生成随机 `SpaceJoinRecordDataKey`，由 `ProfileAdmissionMasterKey` 使用带 profile、
 attempt、版本和用途的 AEAD envelope 包裹后保存在 SQLite；它只加密未压缩尝试、KeyPackage、续接私钥、
 来源备份和其他大体积临时资料。目标 Space 和目标 MasterKey 可用后，历史、证明和安全状态写入按
 `(attempt_id, target_space_id, target_generation)` 显式寻址、由目标 Space MasterKey 加密的暂存槽，不得从
@@ -348,7 +348,7 @@ attempt data key。删除失败只形成可重试清理，不能回退活动世�
 ### Device-trust admission projection
 
 - **职责**：在现有 `DeviceTrustSnapshot` 中投影本机最近一次加入结果和当前 Space 唯一的入站候选。
-- **输入**：持久准入尝试、当前活动 Space、现有设备关系事实和 profile 级单调 revision。
+- **输入**：持久Space 加入记录、当前活动 Space、现有设备关系事实和 profile 级单调 revision。
 - **输出**：`current_join`、`pending_inbound_member` 和更新后的完整设备信任快照。
 - **关系**：它只是现有正式快照的一部分，不建立独立状态查询、事件或成员事实来源；
   `QueryWorkspaceConvergence` 及其事件继续只用于 `dev-tools` 诊断。
@@ -372,7 +372,7 @@ local ordinal、`join_projection_floor_ordinal` 作为准入仓储元数据加�
 
 - **职责**：在 profile 级准入负责人内统一判断 ResetSpace 是否静止，并把 FactoryResetSpace 作为可恢复的
   本机强制销毁流程执行。
-- **输入**：全部准入尝试、outbox、写前记录、Space transition、终态清理状态、当前 profile generation 和
+- **输入**：全部Space 加入记录、outbox、写前记录、Space transition、终态清理状态、当前 profile generation 和
   现有 Space 生命周期能力。
 - **输出**：普通重置完成、无副作用冲突，或只能向前恢复的彻底重置结果。
 - **关系**：Engine 把现有 ResetSpace 和 FactoryResetSpace 先路由给 profile 级 `WorkspaceConvergence`；它
@@ -390,8 +390,7 @@ local ordinal、`join_projection_floor_ordinal` 作为准入仓储元数据加�
 
 1. 先从 `applied_head` 得到当前有效成员集合；不在集合中的实例始终排除。
 2. V2 创世 `AddDevice` 的创建者固有激活。
-3. `FullyVerified` 迁移结果在其精确迁移头上把该头的当前成员记为激活基线；后继仍按 V2 规则处理。
-4. `LegacyAccepted` 只把规范检查点中的 `continuing_member_credentials` 记为激活基线。
+4. 根历史只接受当前本机已验证身份与永久成员凭据；旧资料必须重置。
 5. 其他 V2 `AddDevice` 对发起方和第三方观察者都必须有成员历史中按 event_id 保存的唯一有效
    `AdmissionActivationReceipt`。这证明加入方已经持久保存事件和目标安全状态；它即使尚未运行，也可像
    离线成员一样进入这些观察者的当前范围。
@@ -422,7 +421,7 @@ local ordinal、`join_projection_floor_ordinal` 作为准入仓储元数据加�
 后写入。清理完成时原子生成新 generation 并把 phase 置为 None；phase 非 None 时禁止创建 profile key 或
 打开普通运行。生命周期标记损坏或安全存储不可用时失败关闭，不能删除磁盘状态后猜测阶段。
 
-`AdmissionProfileMetadataV1` 使用 `ProfileAdmissionMasterKey` 加密，AEAD associated data 绑定
+`AdmissionProfileMetadata` 使用 `ProfileAdmissionMasterKey` 加密，AEAD associated data 绑定
 `profile_generation`，至少保存 `next_local_join_ordinal`、`join_projection_floor_ordinal`、
 `device_trust_revision` 和已消费邀请索引引用。floor 必须小于或等于 next ordinal；普通 ResetSpace 只把它
 推进到当时的 next ordinal，任何字段倒退、重复代次、溢出或密文与 generation 不符都进入
@@ -445,44 +444,9 @@ Ed25519。AddDevice 中的该公钥和算法必须逐字节等于本次 KeyPacka
 公钥和算法，并进入 candidate_event_id、admission bundle digest 和目标安全摘要；任一不一致都在 S1/J1
 拒绝，不能等到后续事件验签才发现。
 
-### `VersionedMembershipEvent`
+### `MembershipEventV2` 与 `MembershipDecisionV2`
 
-```text
-VersionedMembershipEvent
-  V1Evidence { semantic_event, canonical_signing_payload, signature, original_event_id }
-  V2(MembershipEventV2)
-```
-
-`MembershipEventV2` 保留现有沿革、父事件、深度、操作标识、作者实例、操作、结果成员摘要、安全状态
-摘要、安全更新、准入包摘要和签名，并新增：
-
-| 字段 | 含义 |
-| --- | --- |
-| `event_format_version` | 事件规范编码版本 |
-| `author_credential_id` | 从父历史中选择的精确作者凭据 |
-| `admission.membership_credential` | `AddDevice` 为新实例永久引入的验证凭据 |
-| `admission.resume_public_key_digest` | 绑定本次受限续接公钥，供原发起方失联后的合格当前成员认证同一尝试 |
-| `author_signature_algorithm_version` | 本事件作者签名算法；必须等于父历史所选作者凭据的算法版本 |
-
-事件标识必须对显式版本和全部规范载荷做域分离摘要。`semantic_event` 保存 V1 的沿革、父引用、深度、
-作者、操作、结果摘要、安全摘要和准入摘要等完整可应用语义，不得只保存签名附件。迁移必须从该语义值按
-现有 V1 规则重新生成 `canonical_signing_payload` 和 `original_event_id`，并与保存证据逐字节相等后才允许
-应用。当前 V1 存储没有独立保存嵌套事件原始字节；不得把 serde / postcard 重编码字节冒充原始 wire，
-也不能把 V1 解码后重编码成 V2 并声称是原签名事件。外层 V2 存储密文仍须逐字节保留。
-
-### `VersionedMembershipDecision`
-
-```text
-VersionedMembershipDecision
-  V1Evidence { semantic_decision, canonical_signing_payload, signature, original_decision_id }
-  V2(MembershipDecisionV2)
-```
-
-V2 决定保留现有沿革、移除事件、决定者实例、接受/拒绝、观察到的已应用位置、结果摘要、随机数和签名，
-并新增决定格式版本、`decider_credential_id` 和签名算法版本。决定者资格从被引用 `RemoveDevice` 的父历史
-计算，再使用该位置保存的精确凭据验签；这允许刚被移除的目标返回自己对该移除的决定，但不授予它签署
-当前分支后继的权限。`semantic_decision` 保存全部可应用 V1 决定字段，并必须重算出相同规范签名载荷和
-原决定标识；V1 决定与 V1 事件使用相同的原始保留和迁移证据规则。
+成员历史只保存 V2 事件与 V2 决定。事件绑定沿革、父位置、作者永久凭据、操作、结果成员摘要、安全状态、准入摘要和签名；决定绑定被引用的移除事件、决定者永久凭据、接受或拒绝、观察位置、结果摘要和签名。不存在旧事件包装、旧决定包装或旧证据回退。
 
 ### `AdmissionSecurityCommitmentV1`
 
@@ -515,7 +479,7 @@ Sponsor 的 `prepare` 和 joiner 的 `stage` 都必须返回完整承诺及其 i
 V2 AddDevice 保存 `security_commitment_id` 和 `admission_bundle_digest`，event_id 最后对完整事件求摘要，
 从而不存在 event_id 与安全承诺互相包含的循环。
 
-### `AdmissionAttempt`
+### `SpaceJoinRecord`
 
 | 字段 | 含义 |
 | --- | --- |
@@ -576,13 +540,13 @@ ADR-022 裁决：旧本机 Joiner 尚未持久保存 Prepared 时，原子保存
 加入方身份和本次凭据后保存。相同邀请和相同 `attempt_id` 重放同一尝试；相同邀请绑定另一
 `attempt_id` 或身份时稳定拒绝。
 
-这里的“原子消费”只指发起方本机：加密 `invitation_claim`、Sponsor AdmissionAttempt 和远端 consume
+这里的“原子消费”只指发起方本机：加密 `invitation_claim`、Sponsor SpaceJoinRecord 和远端 consume
 outbox 在同一提交中保存。本机提交后该 claim 是唯一裁决，即使 rendezvous 尚可解析旧 code，后续连接
 也只能恢复同一 attempt 或稳定拒绝。`PairingInvitationPort::consume_invitation` 由 outbox 重试；204、404
 或 409 都只表示渠道已经关闭，5xx/网络失败继续重试，任何结果都不能撤销本机 claim。
 
 J0 同时生成只用于续接的独立 Ed25519 密钥，并把其公钥摘要绑定进候选核心和正式 `AddDevice`。发起方
-保存公钥，加入方私钥只存在于 `AdmissionAttemptDataKey` 加密负载中。每次恢复由对端先持久保存新挑战；
+保存公钥，加入方私钥只存在于 `SpaceJoinRecordDataKey` 加密负载中。每次恢复由对端先持久保存新挑战；
 签名载荷域分离绑定协议版本、attempt、lineage、event、原 Sponsor、joiner、当前对端成员实例、双方认证
 传输身份摘要、单调挑战计数、随机 nonce 和双方最后持久消息编号。加入方用 resume key 响应；对端用其
 精确历史成员凭据签署挑战和结果。双方在发送回复前先保存计数和消息位置，旧计数、身份变化、跨尝试或
@@ -598,12 +562,12 @@ J0 同时生成只用于续接的独立 Ed25519 密钥，并把其公钥摘要�
 ### `CrossSpaceTransitionV2`
 
 已经存在活动 Space 的加入方只有在 Candidate 明确证明目标沿革不同后才创建该记录；同 Space 和全新
-设备不创建来源备份。记录属于 `AdmissionAttempt`，不能通过独立 migration id 启动第二条恢复流程。
+设备不创建来源备份。记录属于 `SpaceJoinRecord`，不能通过独立 migration id 启动第二条恢复流程。
 
 | 字段 | 含义 |
 | --- | --- |
 | `transition_format_version` | 首版 V2；与旧 `MigrationPhase` 格式隔离 |
-| `attempt_id` | 必须等于所属准入尝试 |
+| `attempt_id` | 必须等于所属Space 加入记录 |
 | `source_space_id` / `source_generation` | J1 时仍活动的来源 Space 和活动世代 |
 | `source_backup_ref` / `source_backup_digest` | 尝试子密钥保护的完整来源备份及规范清单摘要 |
 | `source_revision_at_backup` | 初次备份完成时的数据版本 |
@@ -678,7 +642,7 @@ joiner_member_instance_id
 
 该记录属于 `VersionedMembershipHistory.activation_receipts`，按 `event_id` 唯一保存。相同 `event_id`
 出现不同 `attempt_id`、回执或摘要时进入 `RecoveryRequired`，不能按时间选择。成员历史核对通过事件标识
-补齐该记录，不另建 proof cursor；准入尝试结束后，验证与传播不得再读取尝试记录。
+补齐该记录，不另建 proof cursor；Space 加入记录结束后，验证与传播不得再读取尝试记录。
 
 ### `AdmissionCompletion`
 
@@ -713,40 +677,9 @@ JoinRequest、Applied、Complete 或 Ack 从终态记录和版本化成员历史
 SupersededByNewJoin 不得永久封死该设备以后加入。以后如需保留期限，必须
 先另行定义跨设备最大重试期和已消费邀请的永久防重放依据。
 
-### `LegacyPrefixCheckpointV2`
+### V2 单成员根历史
 
-| 字段 | 含义 |
-| --- | --- |
-| `checkpoint_format_version` | 检查点结构版本 |
-| `lineage_id` | 旧历史所属沿革 |
-| `v1_prefix_head` / `v1_prefix_depth` | 被接受旧前缀的精确末端 |
-| `v1_evidence_digest` | 按历史顺序对 V1 规范签名载荷、原签名和原事件/决定标识计算的摘要 |
-| `resulting_members_digest` | 前缀末端成员摘要 |
-| `security_state_digest` | 前缀末端安全状态摘要 |
-| `continuing_member_credentials` | 当前分支仍有效实例的 V2 验证凭据 |
-| `checkpoint_id` | 对以上规范内容的域分离摘要，不包含创建者或签名 |
-
-检查点不是对旧事件补签，也不把旧前缀标成逐条已验证。它只在旧档案缺少已移除作者公钥、但本机已
-接受状态仍满足严格迁移前提时，成为未来 V2 事件的精确分支信任锚。不同检查点不得按时间或成员数量
-自动选择；摘要不同即保持分叉或进入恢复。
-
-### `LegacyCheckpointAttestationV2`
-
-| 字段 | 含义 |
-| --- | --- |
-| `attestation_format_version` | 证明结构版本 |
-| `checkpoint_id` | 被证明的规范检查点 |
-| `attester_member_instance_id` | 作证的当前有效实例 |
-| `attester_credential_id` | 从检查点继续成员凭据中选择的精确凭据 |
-| `signature` | 对版本、检查点和作证者的签名 |
-
-同一规范检查点可以拥有多份成员证明。A 和 C 对相同 V1 前缀、结果状态及继续成员凭据迁移时必须得到
-相同 `checkpoint_id`；继续成员凭据按成员实例和 credential_id 规范排序。各自签名只增加可并存的
-attestation，不能改变检查点身份或制造分叉。
-
-新加入方只在本次已认证发起方提供自己的有效 attestation、作证凭据能派生其成员实例、V1 证据摘要与
-收到的规范证据一致且结果成员/安全摘要与暂存目标连续时接受检查点。这是通过本次邀请接受发起方对精确旧
-分支的声明，不是从检查点自签名推导全局信任。
+新建或重置 Space 直接以本机已验证身份和永久成员凭据建立唯一 V2 单成员根历史。升级资料不得从旧成员状态生成检查点或继续成员集合；产品必须先重置 Space，再重新配对其他设备。
 
 ## API / Interface
 
@@ -977,7 +910,7 @@ AdmissionSpaceTransitionPort
   discard_pre_commit(attempt_id)
   recover(attempt_id)
 
-AdmissionAttemptRepositoryPort
+SpaceJoinRecordStorePort
   load(attempt_id)
   load_by_join_id(join_id)
   compare_and_advance(expected_stage, next_state_with_outbox)
@@ -1111,7 +1044,7 @@ V10 和新准入续接 `/1` 承载本规格的版本化消息及 Ack。V10 pairi
 回执。事件已经存在但回执暂缺时，成员事实可以保存，候选仍被激活投影排除，依赖该候选作为作者的后继页
 进入加密延迟区并停止历史游标。回执先到则要求发送方先补事件再重发，不建立第二游标或证明延迟区。
 Completion 只在准入续接中由加入方验证完成者的当前历史位置，不进入普通历史核对。不能通过发送完整成员
-资料表或准入尝试替代成员历史及其激活回执。
+资料表或Space 加入记录替代成员历史及其激活回执。
 
 ## Admission workflow
 
@@ -1326,7 +1259,7 @@ FactoryResetSpace 不运行上述静止检查。它按以下唯一顺序执行�
 ### Legacy switch-space recovery gate
 
 升级时可能已经存在旧 `MigrationPhase`，它不含 attempt、候选、公共安全承诺、回执或 outbox，禁止伪造
-`AdmissionAttempt` 或补造激活证明。新运行时在 V2 -> V3 成员状态迁移和任何网络监听之前只运行一次
+`SpaceJoinRecord` 或补造激活证明。新运行时在 V2 -> V3 成员状态迁移和任何网络监听之前只运行一次
 `LegacySwitchSpaceRecovery`：
 
 | 旧状态 | 唯一处理 |
@@ -1344,82 +1277,11 @@ FactoryResetSpace 不运行上述静止检查。它按以下唯一顺序执行�
 `None` 但 backup 非空是旧 phase 1 在写 Prepared 前崩溃的孤儿窗口。只有来源状态和全部主记录一致可读、
 且不存在目标 keyslot/安全状态副作用时才可清 backup；旧 backup 不含 run_id 且系统安全存储不可枚举，无法
 定位的孤儿密钥记为旧版不可逆安全存储残留，不猜测或删除其他 key。旧状态成功收束后删除独立恢复接线；
-之后所有新切换只由 `AdmissionAttempt.space_transition` 恢复。
+之后所有新切换只由 `SpaceJoinRecord.space_transition` 恢复。
 
-### Workspace convergence storage V2 to V3 migration
+### Workspace state reset policy
 
-当前 `workspace_convergence_state` 只有按 `space_lookup_token` 覆盖的一条活动记录，不存在临时槽或活动指针。
-实现必须新增以下持久模型，不能把“旁路写”和“切换”留给仓储实现自行解释：
-
-| 存储 | 明文字段 | 加密负载与职责 |
-| --- | --- | --- |
-| `workspace_convergence_v3_slots` | 现有 HMAC `space_lookup_token`、随机 `slot_id`、`updated_at_ms` | `WORKSPACE_STATE_V3_PREFIX` 完整状态；`slot_id` 不编码 Space、设备或版本 |
-| `workspace_convergence_v3_active` | `space_lookup_token`、当前随机 `slot_id`、单调 generation | 唯一活动指针；指向不存在或无法验证的槽即 RecoveryRequired |
-| `workspace_convergence_v3_migrations` | `space_lookup_token`、随机 `migration_id` | MasterKey AEAD 加密的来源布局、原密文备份及摘要、目标 slot、phase 和验证摘要 |
-
-`WorkspaceConvergenceMigrationV3.phase` 只有 `Staging`、`TargetVerified`、`Activated` 和 `CleanupPending`。
-原 V2 密文本身已经是密文，但仍作为敏感负载放入 migration AEAD，不新增明文摘要、SpaceId、成员或路径。
-新版读取顺序固定为：先查活动指针并验证对应 V3 slot；没有指针时才读取现有单行记录。指针存在但 slot
-无效时不得自动回退 V2 备份。
-
-可读取旧布局与迁移结果固定如下；每一行都必须有从对应历史版本提取的不可变密文夹具：
-
-| 旧布局 | 可用证据 | 唯一允许结果 |
-| --- | --- | --- |
-| 带 `WORKSPACE_STATE_V2_PREFIX` 的 `WorkspaceConvergenceState` | V1 语义事件/决定、签名和原 id、当前安全状态、待处理状态 | 作者公钥全部可恢复时 FullyVerified；只缺已移除作者公钥且满足检查点前提时 LegacyAccepted；否则 RecoveryRequired |
-| 无前缀 `UnversionedCurrentWorkspaceState` | 与当前状态相同的历史，另含成员效果/决定投递；外层仍由原 MasterKey 认证 | 先按精确旧 DTO 解码并验证默认值，再使用与上一行相同的三分类 |
-| 无前缀 `DeviceTrustInitialWorkspaceState` | V1 历史和关系，不含后来新增的成员效果字段 | 缺失字段只能取该布局定义的空默认值；随后使用相同三分类，不能把解码失败尝试成别的成功布局 |
-| 上述任一布局中 `membership_reconciliation` 为空或没有已应用头 | 没有可逐条验签的成员事件；仅有经认证的当前安全成员和旧迁移标记 | 仅在当前保护状态、成员实例、本机身份和无待处理工作可形成唯一规范前缀时 LegacyAccepted；否则 RecoveryRequired；不能 FullyVerified |
-| `LegacyWorkspaceConvergenceState` | 旧 changes/confirmations、成员映射及 removal causal proof 中可能存在的 signing public key，但没有完整签名成员事件链 | 验证旧 epoch/digest 链、确认、因果证明和当前保护状态后只能生成 LegacyAccepted 检查点；任一缺失或矛盾为 RecoveryRequired；禁止合成 V2 事件 |
-
-布局识别按“已知前缀优先，其后按固定旧版本次序且完整消费全部字节”执行；一个密文若能被多个 DTO 部分
-解码、含尾随字节或与 `updated_at_ms`/lineage 不符，直接 RecoveryRequired，不能选择看起来更有利的结果。
-
-读取现有 `WORKSPACE_STATE_V2_PREFIX` 加密工作空间状态时，先识别存储和事件版本，再按以下唯一顺序处理：
-
-1. 保存原始 V2 存储密文和 AEAD 关联资料；对 V1 事件/决定保存完整语义值、按当前规则重建且验证通过的
-   规范签名载荷、原签名和原标识，并证明语义重算结果逐字节一致。迁移全程不得原地修改活动行，也不得
-   假设现有布局含嵌套原始事件字节。
-2. 先用原 MasterKey 成功认证并解密，再验证 V1 结构、父链、深度、操作摘要、已应用位置、当前成员结果
-   和安全状态一致性。网络取得、认证失败或升级前未完整落盘的状态不能产生 `LegacyAccepted`。
-3. 从现有事件、旧因果资料、当前有效安全状态和受支持迁移记录中恢复每个事件及决定作者的精确公钥。
-   不能按设备名、地址、当前列表位置或新凭据猜测。
-4. 根据实际证据生成以下一个结果和对应激活基线：
-
-| 结果 | 条件 | 后续行为 |
-| --- | --- | --- |
-| `FullyVerified` | 所有 V1 作者公钥均可精确恢复，且每条签名、结构和结果均验证通过 | 保存可按成员实例自校验的 V2 凭据索引；迁移头的当前成员形成激活基线；未来只写 V2，不再走 V1 验签路径 |
-| `LegacyAccepted` | 升级前本机状态已经完成并经原 MasterKey 认证；只缺少已移除作者公钥；V1 结构、当前结果、安全状态和本机身份一致，且没有未完成准入、成员效果、待决定或分叉 | 保留原 V1 历史，创建精确 `LegacyPrefixCheckpointV2` 和本机 attestation；检查点继续成员形成激活基线；未来 V2 从检查点继续，公开状态不得称为逐条验证 |
-| `RecoveryRequired` | 存在结构矛盾、签名无效、当前作者缺钥、分叉、待决定移除、安全状态冲突或检查点冲突 | 保留全部原数据，关闭新准入和普通交换，等待明确恢复 |
-
-5. 在 `workspace_convergence_v3_migrations` 保存 `Staging`、原密文备份和来源摘要，再把完整结果旁路写入新的
-   V3 slot，包括迁移来源摘要、激活回执映射和激活基线；原活动行及其密文保持逐字节不变。
-6. 关闭写句柄，使用生产 V3 解码入口重新打开临时槽，重新认证 AEAD，并核对历史头、成员摘要、安全摘要、
-   迁移分类、检查点、凭据、激活回执和激活投影。成功后把 migration phase 保存为 `TargetVerified`。任一
-   失败都废弃临时槽并保持原 V2 行和密文字节不变；
-   这只为下次迁移重试保留输入，不代表新版继续运行 V1/V2 成功流程。可重试存储故障返回稳定迁移错误，
-   证据矛盾进入 RecoveryRequired；两者都关闭普通写入、准入和旧协议监听。
-7. 只有第 6 步全部通过，才在一个 SQLite immediate transaction 中同时写入 V3 活动指针、把 migration
-   phase 设为 `Activated`，并把旧单行记录替换为使用原 MasterKey/AAD 加密的
-   `WORKSPACE_STATE_V3_GUARD_PREFIX`。Guard 不含业务状态，只让旧读取器在任何 save/upsert 前因未知布局
-   失败；原 V2 字节已经在 migration 密文中只读保留。事务前崩溃只能看到原 V2，事务后崩溃只能看到活动
-   V3 加 guard，不能出现指针与 guard 分离。
-8. 新版从活动 V3 完整重开后把 phase 推进为 `CleanupPending`，只清理废弃临时 slot，不删除原 V2 只读
-   备份。正常运行永不从备份回退。旧二进制读取 guard 必须失败关闭，且在成功解码前不得执行 save/upsert；
-   兼容测试必须证明问题基线旧二进制不能覆盖活动 V3 slot、激活回执、指针或迁移备份。
-
-本机遇到未知存储、事件、算法或检查点版本返回稳定 `UpgradeRequired` Engine error，不进入上述“无效”
-判断。远端只有按认证探测确认旧设备不能读写 V2 成员历史时，才进入
-`Rejected(PeerUpgradeRequired)`；新设备不为它长期双写 V1。旧版本兼容结束后删除 V1 运行时写入和主动
-验签入口，只保留受版本控制的读取迁移器。
-
-`LegacyAccepted` 明确接受较低保证：新加入方信任经认证发起者对精确旧前缀的分支声明，而不是声称逐条
-验证缺失公钥的旧事件。这与 ADR-020 允许有效当前成员在自己的分支邀请设备一致。检查点摘要不同仍按
-分叉或恢复处理，不能自动合并。
-
-相同 V1 前缀的规范检查点只由 V1 证据摘要、结果摘要、安全摘要和规范排序的继续成员凭据决定。成员
-attestation 单独追加，不参与 `checkpoint_id`。因此两台离线设备独立迁移同一完整状态必须得到同一
-检查点；若任一规范输入不同，保持分叉或进入恢复，不能拼接证明伪装为同一前缀。
+下版不读取或迁移旧成员状态。旧资料在进入普通运行前被判定为必须重置；重置流程无需解码旧成员历史即可清除旧状态，并建立不含旧成员字段的新状态与 V2 单成员根历史。缺少 V2 历史时，准入、普通交换和成员操作全部失败关闭。
 
 # 6. Implementation Plan
 
@@ -1449,7 +1311,7 @@ Candidate -> Complete、精确历史验签和当前成员接收者；再补每�
 
 **Change:** 增加 `MembershipCredential`、`VersionedMembershipEvent`、`VersionedMembershipDecision`、
 `AdmissionSecurityCommitmentV1`、历史内永久 `MembershipActivationReceiptRecord`、迁移检查点、激活基线、
-`AdmissionAttempt` 和 `CrossSpaceTransitionV2` 领域状态；实现父历史授权、精确凭据选择、事件/决定结果
+`SpaceJoinRecord` 和 `CrossSpaceTransitionV2` 领域状态；实现父历史授权、精确凭据选择、事件/决定结果
 验证和固定激活投影。把事件、决定和激活回执验证收成一个完整历史入口，保留 ADR-020 的移除决定边界。
 
 **Risk:** 创世、自移除、重新加入和旧父分支必须明确验证；不能让公钥存在本身等于当前授权。
@@ -1468,7 +1330,7 @@ Candidate -> Complete、精确历史验签和当前成员接收者；再补每�
 实现 V2 原密文旁路保留、
 三类迁移结果、激活基线、加密尝试、outbox、终态压缩和写前恢复。迁移器必须先旁路写 V3，再用生产
 入口重新打开验证，最后原子发布 pointer 与 guard。复用 `SecureStoragePort` 的一次性迁移密钥模式实现
-`ProfileAdmissionMasterKey` 加 wrapped `AdmissionAttemptDataKey`，增加世代化目标 keyslot/workspace 暂存
+`ProfileAdmissionMasterKey` 加 wrapped `SpaceJoinRecordDataKey`，增加世代化目标 keyslot/workspace 暂存
 和 `ActiveSpaceGenerationManifestV2`，并让目标
 Space 仓储显式按 attempt/Space/generation/key 访问，不依赖活动 session。准入仓储同时加密保存
 `local_join_ordinal`、`join_projection_floor_ordinal` 和跨 Space 单调的 DeviceTrust revision；它们只选择或
@@ -1527,7 +1389,7 @@ RecoveryRequired；新流程在 final manifest 验证前不能开放任何网络
 **File:** `crates/uc-application/src/space/convergence/mod.rs`、
 `crates/uc-core/src/membership/ports.rs`、规格 022 列出的普通成员消费者及架构检查
 
-**Change:** 按固定基线算法从已应用历史派生范围：创世、FullyVerified 迁移成员和 LegacyAccepted 继续
+**Change:** 从 V2 单成员根和后续已验证事件派生范围：根成员和
 成员获得明确基线；其他 V2 Add 必须有历史内永久 Applied 回执，本机候选还必须有本机 Complete。Presence、邀请、公告、
 普通历史、内容、文件、活动状态和补送使用同一快照；准入安全更新的既有接收者也只能从该快照派生，
 删除 sponsor handshake 对完整成员资料仓储的接收者枚举。
@@ -1612,7 +1474,7 @@ FactoryReset key-first 和实际受管文件清理每步、
 
 ### Scenario: 取消与 S2 同时发生
 **Expected behavior:** 恰好得到“无 AddDevice 的 Rejected”或“已正式提交并继续 Pending”之一。
-**Implementation:** 加入方只保存 CancelRequested 并等待；发起方在自己的 AdmissionAttempt 上原子裁决，
+**Implementation:** 加入方只保存 CancelRequested 并等待；发起方在自己的 SpaceJoinRecord 上原子裁决，
 收到正式 Rejected 前不得删除 Prepared 或暂存状态。若 Commit 先到，它证明 S2 已先保存，加入方把取消
 归类为 TooLateCommitted、清理 CancelRequested outbox，并继续恢复同一尝试直到 Active。
 
@@ -1721,18 +1583,9 @@ consume、安全更新、历史页和激活回执批次分别使用本规格清�
 **Expected behavior:** 历史验证继续可用，但该设备不在准入目标安全状态、拨号、公告或普通内容范围内。
 **Implementation:** 安全接收者先从候选父历史和激活门禁派生，再与所需资料相交；不得反向枚举仓储。
 
-### Scenario: V1 可恢复全部作者公钥
-**Expected behavior:** 逐条验证并记录 FullyVerified；未来只写 V2。
-**Implementation:** 公钥必须由精确旧记录或安全身份映射恢复，不能猜测。
-
-### Scenario: V1 只缺少已移除作者公钥
-**Expected behavior:** 原历史保留，状态明确为 LegacyAccepted，并从精确检查点继续。
-**Implementation:** 仅从升级前已经完成且通过原 MasterKey 认证的本机状态创建检查点；不重写或补签
-旧事件，检查点继续成员形成明确激活基线。
-
-### Scenario: V1 结构、安全状态或检查点矛盾
-**Expected behavior:** RecoveryRequired，不清数据、不任选一个结果。
-**Implementation:** 原密文保持不变，新准入和普通交换失败关闭。
+### Scenario: 升级资料尚未重置 Space
+**Expected behavior:** 只报告必须重置，不恢复旧成员关系，也不开放普通运行。
+**Implementation:** 重置清除旧状态后建立 V2 单成员根历史，其他设备必须重新配对。
 
 ### Scenario: 收到未知事件、算法、协议或存储版本
 **Expected behavior:** UpgradeRequired，不标记 Invalid 或 Diverged。
@@ -1771,7 +1624,7 @@ Accepted/Candidate/Prepared 入站尝试；上述冲突都不是 Rejected。
 attempt 隔离的消息重发或压缩时释放槽，但恢复扫描继续处理旧记录。
 
 ### Scenario: Cross-Space J3 任一步崩溃
-**Expected behavior:** 重启时普通网络和写入保持关闭，只从所属 AdmissionAttempt 的持久 phase 继续；最终
+**Expected behavior:** 重启时普通网络和写入保持关闭，只从所属 SpaceJoinRecord 的持久 phase 继续；最终
 只存在一个活动 Space，不能由旧 migration 恢复器同时推进。
 **Implementation:** `ActivationStarted` 后前向恢复 SourceFinalized、DataRewrapped、TargetPromoted 和
 CleanupPending；活动 manifest 是唯一选择点。
@@ -1815,19 +1668,17 @@ Completion。缺 key、缺 backup 或出现非备份旧-key行时 RecoveryRequir
 5. 让 AddDevice 凭据的算法或公钥与 KeyPackage signer、admission bundle 或安全摘要任一不一致，预期在
    Candidate/Prepared 验证时拒绝，transport key 相同也不能通过。
 6. 未知事件格式和未知签名算法分别返回 UpgradeRequired；不能落入 InvalidSignature。
-7. 对 AdmissionAttempt 的每个阶段执行相同消息、前一阶段消息、后一阶段消息和另一 attempt 消息，预期
+7. 对 SpaceJoinRecord 的每个阶段执行相同消息、前一阶段消息、后一阶段消息和另一 attempt 消息，预期
    幂等重放或稳定拒绝，阶段不跳跃。
 8. Candidate 后推进基础历史，再提交 Prepared，预期 Rejected 且没有 AddDevice。
 9. 分别把 joiner `CancelRequested` 与 S2、Sponsor 对 `pending_inbound_member.device_id` 的 `RemoveMember`
    与 S2/S3 做并发调度。取消只能得到“无 Add 的 Rejected”或“TooLateCommitted 后 Active”；主动移除仍只
    得到三阶段真值表之一。两类操作不得互相复用结果或自动生成额外 RemoveDevice。
-10. 分别计算创世、FullyVerified、LegacyAccepted、缺 Applied 的 V2、具有 Applied 的 V2 和本机缺 Complete
    的 V2 投影，预期只得到固定规则允许的集合，任何回执都不能添加历史外成员。
 11. 对同一 event_id 追加相同和冲突 Applied 回执，并让多个有效 Completion 到达同一 Joiner；预期回执
     幂等或 RecoveryRequired，Joiner 只保留首份有效 Completion，后续同事实消息不进入共享历史。
 12. 压缩 Sponsor Completed、Joiner Active、Rejected 和 SupersededByNewJoin 尝试，预期 profile key 下的终态、邀请防重放和必要永久回执仍存在，wrapped
     attempt data key 与大负载已删除；outbox 非空或终态重封装未提交时拒绝压缩。Fresh Rejected 也能重启查询。
-13. 对 FullyVerified、LegacyAccepted、RecoveryRequired 和未知版本夹具逐个迁移并重启，预期结果稳定，
     原 V2 外层密文逐字节不变，V1 规范证据摘要一致。
 14. 对原 Sponsor 和第三方续接签名逐项修改 attempt、lineage、event、Sponsor/joiner/helper 任一成员身份、
     任一 transport identity、nonce、挑战计数或双方最后消息编号，预期拒绝；旧挑战重放不推进状态。
@@ -1885,10 +1736,9 @@ Completion。缺 key、缺 backup 或出现非备份旧-key行时 RecoveryRequir
 13. 原发起方在 Commit 送达前永久离线，加入方持续 Pending；在 J2 后永久离线，第三个合格当前成员提供
     有界资格历史、保存同一事件和 Applied、应用属于自己的封存安全更新并从本地状态重算相同公共承诺后
     返回 Complete，加入方 Active。只保存事件/Applied 而未应用安全更新时必须继续 Pending。
-14. 压缩所有准入尝试后让新设备分页取得历史并按 event_id 补齐永久激活回执，预期仍正确激活 V2 成员，
+14. 压缩所有Space 加入记录后让新设备分页取得历史并按 event_id 补齐永久激活回执，预期仍正确激活 V2 成员，
     不读取尝试仓储，也不请求其他设备的 Completion。
 15. A、C 从相同 V1 前缀独立迁移；checkpoint_id 相同、attestation 可并存，不出现伪分叉，激活基线一致。
-16. 对四种真实旧布局和“无历史头”分支分别运行 FullyVerified/LegacyAccepted/RecoveryRequired 夹具；再在
     migration record、V3 slot、生产重开、`TargetVerified`、active pointer 加 guard 事务和 cleanup 前后逐点
     注入失败，预期只能打开完整旧行或完整 V3，原密文备份不丢且不自动回退。
 17. 用问题基线旧二进制打开 guard 并尝试正常保存；预期在 upsert 前失败关闭且 V3 slot、active pointer、
@@ -2060,7 +1910,7 @@ Completion。缺 key、缺 backup 或出现非备份旧-key行时 RecoveryRequir
       Joiner 保持同一 Pending 并跨重启重试。新的本机 JoinSpace 按 ADR-022 创建新 ordinal，或在不可取代时
       使用专用稳定冲突并保持 ordinal 不变；不得再因新旧输入不一致返回 1238。
 * [ ] profile 级 ProfileAdmissionMasterKey 在无活动 Space 时也能解密 revision、ordinal、projection floor、邀请防重放索引和
-      终态；J0 的 wrapped AdmissionAttemptDataKey 只保护未压缩尝试。Active/Rejected/SupersededByNewJoin
+      终态；J0 的 wrapped SpaceJoinRecordDataKey 只保护未压缩尝试。Active/Rejected/SupersededByNewJoin
       先原子重封装终态，
       再删临时 key；普通 ResetSpace 仍保留这些事实，Fresh Rejected、重启、跨 Space 和下一次 Join 仍可
       幂等读取且不出现明文。
@@ -2076,11 +1926,8 @@ Completion。缺 key、缺 backup 或出现非备份旧-key行时 RecoveryRequir
 * [ ] 回执早于 AddDevice 时接收方不落库并返回 MissingMembershipEvent，发送方先补事件再重发；候选后继
       早于 Applied 时只加密暂存一页历史并停止历史游标。依赖补齐后自动验证，不能因乱序误报无效、未授权
       或分叉，也不存在独立 proof cursor 或 Completion 传播页。
-* [ ] 激活投影明确覆盖创世、FullyVerified、LegacyAccepted、普通 V2 观察者和本机加入方五类基线，且
       激活回执只能减少已应用历史授予的权限。
-* [ ] 五类旧布局分支逐项映射到唯一 FullyVerified、LegacyAccepted 或 RecoveryRequired 结果，并各有从真实
       历史版本提取的不可变密文夹具、迁移测试和重启测试；LegacyWorkspaceConvergenceState 不合成 V2 事件。
-* [ ] LegacyAccepted 只能来自升级前已完成且经原 MasterKey 认证的本机状态，不被公开或记录为逐条验证，
       不修改、补签或删除原 V1 历史。
 * [ ] 相同规范旧前缀由不同成员迁移得到同一 checkpoint_id，成员证明差异不会制造历史分叉。
 * [ ] 未知事件、决定、算法、协议和存储版本返回 UpgradeRequired，不误报 Invalid 或 Diverged。
@@ -2162,11 +2009,9 @@ S2 到永久 Applied/Complete outbox 的短窗口会暂时阻止本分支的其�
 操作换来唯一且可解释的正式边界，也避免原 Sponsor 与多个完成帮助者各自产生竞争移除。自动继承取消
 意图需要跨设备唯一移除裁决，首版不采用。
 
-## 迁移保证降低
+## 升级重置保证
 
-`LegacyAccepted` 让缺少已移除作者公钥的既有 Space 保留数据并继续使用，但不能提供逐条密码验证的同等
-保证。明确保存精确检查点和状态标签，比清空数据、伪造补签或静默接受更诚实。发现任何结构或安全矛盾
-时仍进入 RecoveryRequired。
+旧成员状态不再转换为当前授权事实。升级资料必须重置 Space；重置保留产品明确允许保留的本机数据，并删除旧设备关系与旧成员状态，然后建立 V2 单成员根历史。
 
 ## 存储和恢复成本
 

@@ -1,6 +1,5 @@
 mod active_space_generation_manifest;
 mod admission;
-mod admission_attempt;
 mod admission_content_key_catalog;
 mod bootstrap;
 mod cross_space_transition;
@@ -13,6 +12,8 @@ mod ports;
 mod preferences;
 mod protection;
 mod revocation;
+mod space_admission;
+mod space_join_record;
 mod versioned_membership_history;
 mod workspace_convergence;
 
@@ -20,21 +21,6 @@ pub use active_space_generation_manifest::{
     ActiveSpaceGenerationManifestV2, ACTIVE_SPACE_GENERATION_MANIFEST_FORMAT_V2,
 };
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
-pub use admission_attempt::{
-    AdmissionAttemptId, AdmissionAttemptRoleStateV1, AdmissionAttemptV1,
-    AdmissionCompletionRecoveryBundleV1, AdmissionCompletionRecoveryChallengeV1,
-    AdmissionCompletionRecoveryHelloV1, AdmissionCompletionRecoveryPeerV1,
-    AdmissionCompletionRecoveryResponseV1, AdmissionCompletionRecoveryTransportBindingV1,
-    AdmissionCompletionRecoveryValidationError, AdmissionIdentityBindingError,
-    AdmissionIdentityBindingV1, AdmissionInboxRecordV1, AdmissionOutboxMessageV1,
-    AdmissionOutboxPurposeV1, AdmissionProfileMetadataV1, AdmissionRejectionReasonV1,
-    AdmissionTerminalResultV1, CompletionHelperAdmissionStageV1, CompletionHelperAdmissionStateV1,
-    JoinerAdmissionStageV1, JoinerAdmissionStateV1, SponsorAdmissionSecurityDelivery,
-    SponsorAdmissionStageV1, SponsorAdmissionStateV1, SupersedeAdmissionAttemptError,
-    TerminalAdmissionAttemptV1, ADMISSION_ATTEMPT_FORMAT_V1,
-    ADMISSION_COMPLETION_RECOVERY_FORMAT_V1, ADMISSION_IDENTITY_BINDING_FORMAT_V1,
-    ADMISSION_PROFILE_METADATA_FORMAT_V1, TERMINAL_ADMISSION_ATTEMPT_FORMAT_V1,
-};
 pub use admission_content_key_catalog::{
     AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1,
     ADMISSION_CONTENT_KEY_CATALOG_FORMAT_V1,
@@ -51,7 +37,7 @@ pub use cross_space_transition::{
     SAME_SPACE_TRANSITION_FORMAT_V1,
 };
 pub use error::{
-    CurrentMemberSignatureError, CurrentMembershipIdentityError, GroupUpdateDispatchError,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError,
     MembershipAnnouncementRepositoryError, MembershipAppliedSecurityUpdateRepositoryError,
     MembershipAttestationEndpointError, MembershipAttestationError,
     MembershipCandidateRepositoryError, MembershipError, MembershipGossipEndpointError,
@@ -71,25 +57,22 @@ pub use gossip::{
 pub use member::SpaceMember;
 pub use member_instance::MemberInstanceId;
 pub use membership_history::{
-    MembershipDecision, MembershipDecisionId, MembershipEvent, MembershipEventId,
-    MembershipHistoryError, MembershipHistoryMessage, MembershipHistoryRelationship,
-    MembershipOperation, MembershipReconciliation, MembershipReconciliationOutcome,
-    PendingRemovalFacts, RemovalDecision,
+    MembershipDecisionId, MembershipEventId, MembershipHistoryMessage,
+    MembershipHistoryRelationship, PendingRemovalFacts, RemovalDecision,
 };
 pub use ports::{
-    BeginRevocationOutcome, ContentExchangeGatePort, CurrentMemberSignaturePort,
-    CurrentMembershipAnnouncementMaterial, CurrentMembershipAnnouncementPort,
-    CurrentMembershipIdentity, CurrentMembershipIdentityPort, CurrentWorkspaceLocalMembership,
-    CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
-    CurrentWorkspacePeerSnapshot, GroupRevocationPort, GroupUpdateDispatchPort,
-    MemberRepositoryPort, MembershipAdmissionDecision, MembershipAdmissionGatePort,
-    MembershipAnnouncementRepositoryPort, MembershipAppliedSecurityUpdateRepositoryPort,
-    MembershipAttestationEndpointPort, MembershipAttestationPort,
-    MembershipCandidateRepositoryPort, MembershipGossipEndpointPort, MembershipGossipTransportPort,
-    MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangePort,
-    MembershipOutboxRepositoryPort, MembershipSecurityState, MembershipSecurityUpdatePort,
-    RelationshipStateResetPort, RevocationRepositoryPort, SpaceMembershipInitializerPort,
-    SpaceSecurityStateResetPort, VerifiedPeerPromotionPort,
+    BeginRevocationOutcome, ContentExchangeGatePort, CurrentMembershipAnnouncementMaterial,
+    CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityPort,
+    CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort,
+    CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot, GroupRevocationPort,
+    GroupUpdateDispatchPort, MemberRepositoryPort, MembershipAdmissionDecision,
+    MembershipAdmissionGatePort, MembershipAnnouncementRepositoryPort,
+    MembershipAppliedSecurityUpdateRepositoryPort, MembershipAttestationEndpointPort,
+    MembershipAttestationPort, MembershipCandidateRepositoryPort, MembershipGossipEndpointPort,
+    MembershipGossipTransportPort, MembershipHistoryExchangeEndpointPort,
+    MembershipHistoryExchangePort, MembershipOutboxRepositoryPort, MembershipSecurityState,
+    MembershipSecurityUpdatePort, RelationshipStateResetPort, RevocationRepositoryPort,
+    SpaceMembershipInitializerPort, SpaceSecurityStateResetPort, VerifiedPeerPromotionPort,
 };
 pub use preferences::MemberSyncPreferences;
 pub use protection::{
@@ -102,28 +85,62 @@ pub use revocation::{
     ProtectionGroupId, RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationStage,
     RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityMode,
 };
+pub use space_admission::{
+    AdmissionActivatedSecurityState, AdmissionAppliedV1, AdmissionArtifactError,
+    AdmissionBaseSnapshot, AdmissionCandidateError, AdmissionCandidateV1, AdmissionChannelPeerId,
+    AdmissionCommitV1, AdmissionCompleteAckV1, AdmissionCompleteV1,
+    AdmissionContinuationCredential, AdmissionContinuationRoute, AdmissionEffect,
+    AdmissionEncryptedPasswordEquivalent, AdmissionErrorCategory, AdmissionEvidenceRelation,
+    AdmissionHelperNonce, AdmissionHelperSecurityState, AdmissionIdentitySignature,
+    AdmissionInboundDecision, AdmissionInboundExpectation, AdmissionInvitationClaim,
+    AdmissionJoinRequestError, AdmissionJoinRequestV1, AdmissionKeyPackage,
+    AdmissionMessageEvidence, AdmissionMessageHeaderError, AdmissionMessageId, AdmissionMlsCommit,
+    AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPendingExchangeError, AdmissionPreparedV1,
+    AdmissionProtocolMessageError, AdmissionRecoveryCategory, AdmissionRecoveryPublicKey,
+    AdmissionReplayDecision, AdmissionReplayError, AdmissionRetryState, AdmissionRole,
+    AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState, AdmissionSettledV1,
+    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionSpaceTransition,
+    AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
+    AdmissionStagedTargetInput, AdmissionTransition, InvitationId, JoinId,
+    PendingAdmissionExchange, SpaceAdmissionAggregate, SpaceAdmissionAggregateError,
+    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeHeaderV1, SpaceAdmissionEnvelopeV1,
+    SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion,
+    SpaceAdmissionRejectionReason, SpaceAdmissionRoute, UnreadableHistoryPolicy,
+    SPACE_ADMISSION_RECORD_FORMAT_V1,
+};
+#[allow(deprecated)]
+pub use space_join_record::{
+    AdmissionCompletionRecoveryBundleV1, AdmissionCompletionRecoveryChallenge,
+    AdmissionCompletionRecoveryHello, AdmissionCompletionRecoveryPeerV1,
+    AdmissionCompletionRecoveryResponseV1, AdmissionCompletionRecoveryTransportBinding,
+    AdmissionCompletionRecoveryValidationError, AdmissionIdentityBindingError,
+    AdmissionIdentityBindingV1, AdmissionInboxRecord, AdmissionOutboxMessage,
+    AdmissionOutboxPurpose, AdmissionProfileMetadata, AdmissionRejectionReason,
+    AdmissionTerminalResult, CancelSpaceJoinRecordError, CompletedSpaceJoinRecord,
+    CompletionHelperAdmissionStage, CompletionHelperAdmissionState, JoinerAdmissionStage,
+    JoinerAdmissionState, SpaceJoinRecord, SpaceJoinRecordId, SpaceJoinRoleState,
+    SpaceJoinTransitionError, SponsorAdmissionSecurityDelivery, SponsorAdmissionStage,
+    SponsorAdmissionState, SupersedeSpaceJoinError, ADMISSION_COMPLETION_RECOVERY_FORMAT_V1,
+    ADMISSION_IDENTITY_BINDING_FORMAT_V1, ADMISSION_PROFILE_METADATA_FORMAT_V1,
+    COMPLETED_SPACE_JOIN_RECORD_FORMAT_V1, SPACE_JOIN_RECORD_FORMAT_V1,
+};
 pub use versioned_membership_history::{
     AdmissionActivationReceipt, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,
-    BaseMembershipHistoryPositionV1, HistoricalMembershipSignatureError,
-    HistoricalMembershipSignatureVerifier, LegacyCheckpointAttestationV2, LegacyPrefixCheckpointV2,
-    MembershipActivationBaselineV2, MembershipActivationReceiptRecord,
-    MembershipActivationReceiptStoreOutcome, MembershipAdmissionV2, MembershipCredential,
-    MembershipCredentialId, MembershipDecisionStoreOutcome, MembershipDecisionV1Evidence,
-    MembershipDecisionV2, MembershipEventV1Evidence, MembershipEventV2,
+    BaseMembershipHistoryPosition, HistoricalMembershipSignatureError,
+    HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2,
+    MembershipActivationReceiptRecord, MembershipActivationReceiptStoreOutcome,
+    MembershipAdmissionV2, MembershipCredential, MembershipCredentialId,
+    MembershipDecisionStoreOutcome, MembershipDecisionV2, MembershipEventV2,
     MembershipHistoryPageRecordCountsV2, MembershipHistoryPageV2, MembershipHistoryV2Ack,
     MembershipHistoryV2Error, MembershipHistoryV2ReceiveOutcome, MembershipOperationV2,
-    PreparedAdmissionProofV1, VersionedMembershipDecision, VersionedMembershipEvent,
-    VersionedMembershipHistory, ADMISSION_COMPLETION_FORMAT_V1,
+    PreparedAdmissionProofV1, VersionedMembershipHistory, ADMISSION_COMPLETION_FORMAT_V1,
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
-    LEGACY_CHECKPOINT_ATTESTATION_FORMAT_V2, LEGACY_PREFIX_CHECKPOINT_FORMAT_V2,
     MAX_MEMBERSHIP_HISTORY_FRAME_SIZE, MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE,
     MEMBERSHIP_CREDENTIAL_FORMAT_V1, MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
     MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2, PREPARED_ADMISSION_PROOF_FORMAT_V1,
 };
 pub use workspace_convergence::{
-    AdmissionChangeFacts, AdmissionSavedFacts, PendingAdmissionRecord,
-    PendingAppliedMembershipEffect, PendingMembershipDecisionDelivery,
-    PendingMembershipHistoryTransferV2, SpaceMembershipState, WorkspaceConvergenceError,
-    WorkspaceConvergenceEvent, WorkspaceDigest, WorkspaceEffect, WorkspaceFailureCategory,
-    WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
+    AdmissionChangeFacts, PendingMembershipHistoryTransferV2, SpaceMembershipState,
+    WorkspaceConvergenceError, WorkspaceConvergenceEvent, WorkspaceDigest, WorkspaceEffect,
+    WorkspaceFailureCategory, WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
 };

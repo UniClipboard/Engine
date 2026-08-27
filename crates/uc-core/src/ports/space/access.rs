@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 
 use crate::crypto::domain::{ActiveSpace, Passphrase};
-use crate::ids::{DeviceId, SessionId, SpaceId};
+use crate::ids::{SessionId, SpaceId};
 use crate::pairing::InvitationCode;
 use crate::space_access::{
     AdmissionOffer, JoinOffer, PreparedAdmissionOffer, PreparedAdmissionTargetAccess,
