@@ -39,7 +39,7 @@ impl CommitMembershipLedgerPort for MemoryLedgerRepository {
     ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
         let mut loaded = self.loaded.lock().unwrap();
         let digest = loaded
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
         if loaded.revision != mutation.expected_revision
@@ -120,7 +120,7 @@ fn consistent_transfer() -> (
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 5;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(local.device_id);
     loaded.local_member_instance = Some(local.member_instance);
     loaded.local_join_active = true;
@@ -244,7 +244,7 @@ fn two_page_extension() -> (
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 10;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(base.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(base.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(local.device_id);
     loaded.local_member_instance = Some(local.member_instance);
     loaded.local_join_active = true;
@@ -347,7 +347,7 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
             .len(),
         1
     );
-    let base_history = after_first.membership_history_v2.clone();
+    let base_history = after_first.membership_history.clone();
 
     let final_ack = handler.execute(&source, pages[1].clone()).await.unwrap();
 
@@ -358,7 +358,7 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
     assert_eq!(repository.commits.load(Ordering::SeqCst), 2);
     let persisted = repository.load().await.unwrap();
     assert!(persisted.inbound_transfers.is_empty());
-    assert_ne!(persisted.membership_history_v2, base_history);
+    assert_ne!(persisted.membership_history, base_history);
     let prepared_add_devices = persisted
         .pending_effects
         .values()
@@ -453,7 +453,7 @@ async fn replacing_an_active_transfer_is_persistently_invalid() {
 async fn authenticated_removed_device_is_rejected_before_a_page_is_saved() {
     let (mut loaded, peer_device_id, message, _) = consistent_transfer();
     let (local, local_credential) = member_facts("device-a", 0x41);
-    loaded.membership_history_v2 = Some(
+    loaded.membership_history = Some(
         VersionedMembershipHistory::new_single_member_root(
             "space-a".to_owned(),
             local.clone(),

@@ -1,6 +1,8 @@
 use super::ports::{JoinerStartMaterialError, JoinerStartStateError};
-use super::test_support::{ProtocolEvent, SpaceAdmissionProtocolTestPair};
 use super::{LoadedJoinerStartState, SpaceAdmissionCommitToken};
+use crate::space::admission::protocol::test_support::{
+    ProtocolEvent, SpaceAdmissionProtocolTestPair,
+};
 use crate::space::admission::{CurrentJoinStatus, JoinSpaceError, JoinSpaceInput};
 use uc_core::membership::AdmissionSourceSnapshot;
 
@@ -94,6 +96,7 @@ async fn fresh_join_is_saved_before_pending_is_returned() {
         &[
             ProtocolEvent::DeviceNameSaved,
             ProtocolEvent::JoinerSavedJoinRequest,
+            ProtocolEvent::AdmissionRecoveryWoken,
         ]
     );
 }

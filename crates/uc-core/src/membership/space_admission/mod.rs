@@ -32,8 +32,9 @@ pub use message::{
     SpaceAdmissionRejectionReason, UnreadableHistoryPolicy,
 };
 pub use state::{
-    AdmissionEffect, AdmissionRecoveryCategory, AdmissionTransition, SpaceAdmissionAggregate,
-    SpaceAdmissionAggregateError, SPACE_ADMISSION_RECORD_FORMAT_V1,
+    AdmissionEffect, AdmissionPendingRecovery, AdmissionRecoveryCategory, AdmissionTransition,
+    SpaceAdmissionAggregate, SpaceAdmissionAggregateError, SponsorCandidatePreparation,
+    SPACE_ADMISSION_RECORD_FORMAT_V1,
 };
 #[cfg(test)]
 pub(crate) use state::{

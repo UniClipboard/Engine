@@ -36,7 +36,7 @@ impl CommitMembershipLedgerPort for MemoryLedgerRepository {
     ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
         let mut loaded = self.0.lock().unwrap();
         let digest = loaded
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
         if loaded.revision != mutation.expected_revision
@@ -175,7 +175,7 @@ fn active_ledger() -> LoadedMembershipLedger {
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 5;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(local.device_id);
     loaded.local_member_instance = Some(local.member_instance);
     loaded.local_join_active = true;

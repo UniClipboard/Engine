@@ -69,7 +69,7 @@ pub struct SpaceFacade {
     query_committed_device_management_reset: Arc<QueryCommittedDeviceManagementResetUseCase>,
     membership_history_endpoint:
         Arc<dyn uc_core::membership::MembershipHistoryExchangeEndpointPort>,
-    space_admission_endpoint: Arc<dyn crate::deps::HandleSpaceAdmissionMessagePort>,
+    space_admission_endpoint: Arc<dyn crate::deps::HandleAuthenticatedSpaceAdmissionMessagePort>,
     application: Mutex<Option<SpaceApplication>>,
 }
 
@@ -99,7 +99,6 @@ impl SpaceFacade {
         let application = SpaceApplication::start(
             application,
             membership_presence_events,
-            Arc::clone(&invitation_holder),
             Arc::clone(&re_pairing_state)
                 as Arc<dyn crate::space::membership::ResolveRePairingPort>,
         );
@@ -290,7 +289,7 @@ impl SpaceFacade {
 
     pub fn space_admission_endpoint(
         &self,
-    ) -> Arc<dyn crate::deps::HandleSpaceAdmissionMessagePort> {
+    ) -> Arc<dyn crate::deps::HandleAuthenticatedSpaceAdmissionMessagePort> {
         Arc::clone(&self.space_admission_endpoint)
     }
 
@@ -389,14 +388,14 @@ impl SpaceFacade {
         &self,
         input: JoinSpaceInput,
     ) -> Result<JoinSpaceResult, JoinSpaceError> {
-        let join = self
+        let space_admission = self
             .application
             .lock()
             .await
             .as_ref()
-            .map(SpaceApplication::join_space)
+            .map(SpaceApplication::space_admission)
             .ok_or(JoinSpaceError::Unavailable)?;
-        join.start_join(input).await
+        space_admission.start_join(input).await
     }
 
     pub async fn query_device_trust(

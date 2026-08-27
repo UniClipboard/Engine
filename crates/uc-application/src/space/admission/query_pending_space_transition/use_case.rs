@@ -15,7 +15,7 @@ impl QueryPendingSpaceTransitionUseCase {
     pub(crate) async fn execute(&self) -> Result<bool, QueryPendingSpaceTransitionError> {
         let attempts = self
             .ledger
-            .recoverable_admission_records()
+            .recoverable_join_records()
             .await
             .map_err(|error| QueryPendingSpaceTransitionError(error.to_string()))?;
         Ok(attempts.into_iter().any(|attempt| {

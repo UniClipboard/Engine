@@ -1,49 +1,93 @@
-use super::{PeerReconciliationRecord, PendingMembershipEffect};
+//! Persists Space join progress inside the membership ledger.
+//!
+//! Admission use cases decide protocol steps, invitation handling, replies,
+//! delivery, and recovery scheduling. This module saves the resulting
+//! `SpaceJoinRecord` and any coupled membership history, peer relationship,
+//! pending effect, or invitation claim in one conditional ledger commit.
+
 use uc_core::membership::{
     AdmissionInboxRecord, AdmissionProfileMetadata, MembershipHistoryRelationship, SpaceJoinRecord,
     SpaceJoinRecordId, VersionedMembershipHistory,
 };
 
-use super::{MembershipLedger, MembershipLedgerError};
+use super::{MembershipLedger, MembershipLedgerError, PeerReconciliationRecord};
+use crate::space::admission::{
+    AcceptAdmissionError, ConsumedInvitation, InboundAdmissionStatePort, LoadMemberAdmissionError,
+    LoadedMemberAdmissionActivation, MemberAdmissionCommitToken, PreparedMemberAdmissionActivation,
+};
 
-impl MembershipLedger {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn commit_inbound_admission(
+#[async_trait::async_trait]
+impl InboundAdmissionStatePort for MembershipLedger {
+    async fn load(
         &self,
-        expected_revision: u64,
-        expected_membership_history_v2: Vec<u8>,
-        expected_record_version: Option<u64>,
-        record: SpaceJoinRecord,
-        membership_history_v2: Vec<u8>,
-        relationship: PeerReconciliationRecord,
-        effect: PendingMembershipEffect,
-        consumed_invitation_digest: Option<[u8; 32]>,
-    ) -> Result<AdmissionProfileMetadata, MembershipLedgerError> {
+        record_id: SpaceJoinRecordId,
+    ) -> Result<LoadedMemberAdmissionActivation, LoadMemberAdmissionError> {
+        let snapshot = self
+            .load_verified()
+            .await
+            .map_err(map_load_member_admission_error)?;
+        let record = snapshot.record();
+        let signed_membership_history = record
+            .membership_history
+            .clone()
+            .ok_or(LoadMemberAdmissionError::RecoveryRequired)?;
+        let current_record = record.admission_records.get(record_id.as_bytes()).cloned();
+        let expected_record_version = current_record.as_ref().map(|record| record.record_version);
+        let token = MemberAdmissionCommitToken::new(
+            record.revision,
+            signed_membership_history.clone(),
+            record_id,
+            expected_record_version,
+        );
+        Ok(LoadedMemberAdmissionActivation::new(
+            current_record,
+            signed_membership_history,
+            record.revision,
+            token,
+        ))
+    }
+
+    async fn accept(
+        &self,
+        token: MemberAdmissionCommitToken,
+        prepared: PreparedMemberAdmissionActivation,
+        invitation: Option<ConsumedInvitation>,
+    ) -> Result<(), AcceptAdmissionError> {
+        let consumed_invitation_digest = invitation.map(ConsumedInvitation::digest);
+        let (
+            expected_revision,
+            expected_membership_history,
+            expected_record_id,
+            expected_record_version,
+        ) = token.into_parts();
+        let (mut record, membership_history, relationship, effect) = prepared.into_parts();
+        record.record_version = match expected_record_version {
+            Some(version) => version
+                .checked_add(1)
+                .ok_or(AcceptAdmissionError::RecoveryRequired)?,
+            None => 0,
+        };
         let record_id = record.record_id;
         let committed = self
             .compare_and_commit(move |ledger| {
                 if ledger.revision != expected_revision
-                    || ledger.membership_history_v2.as_deref()
-                        != Some(expected_membership_history_v2.as_slice())
+                    || ledger.membership_history.as_deref()
+                        != Some(expected_membership_history.as_slice())
+                    || record_id != expected_record_id
                 {
                     return Err(MembershipLedgerError::Conflict);
                 }
                 let key = *record_id.as_bytes();
                 match (ledger.admission_records.get(&key), expected_record_version) {
-                    (None, None) if record.record_version == 0 => {}
-                    (Some(current), Some(version))
-                        if current.record_version == version
-                            && record.record_version
-                                == version
-                                    .checked_add(1)
-                                    .ok_or(MembershipLedgerError::Corrupt)? => {}
+                    (None, None) => {}
+                    (Some(current), Some(version)) if current.record_version == version => {}
                     _ => return Err(MembershipLedgerError::Conflict),
                 }
                 let next_revision = ledger
                     .revision
                     .checked_add(1)
                     .ok_or(MembershipLedgerError::Corrupt)?;
-                ledger.membership_history_v2 = Some(membership_history_v2);
+                ledger.membership_history = Some(membership_history);
                 ledger
                     .peer_reconciliation
                     .insert(relationship.peer_device_id.clone(), relationship);
@@ -71,13 +115,40 @@ impl MembershipLedger {
                 metadata.device_trust_revision = next_revision;
                 Ok(())
             })
-            .await?;
+            .await
+            .map_err(map_accept_admission_error)?;
         committed
             .admission_profile
-            .ok_or(MembershipLedgerError::Corrupt)
+            .ok_or(AcceptAdmissionError::RecoveryRequired)?;
+        Ok(())
     }
+}
 
-    pub(crate) async fn create_admission_record(
+fn map_load_member_admission_error(error: MembershipLedgerError) -> LoadMemberAdmissionError {
+    match error {
+        MembershipLedgerError::Locked => LoadMemberAdmissionError::Locked,
+        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+            LoadMemberAdmissionError::RecoveryRequired
+        }
+        MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
+            LoadMemberAdmissionError::Unavailable
+        }
+    }
+}
+
+fn map_accept_admission_error(error: MembershipLedgerError) -> AcceptAdmissionError {
+    match error {
+        MembershipLedgerError::Locked => AcceptAdmissionError::Locked,
+        MembershipLedgerError::Conflict => AcceptAdmissionError::StateChanged,
+        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+            AcceptAdmissionError::RecoveryRequired
+        }
+        MembershipLedgerError::Unavailable => AcceptAdmissionError::Unavailable,
+    }
+}
+
+impl MembershipLedger {
+    pub(crate) async fn start_join_record(
         &self,
         record: SpaceJoinRecord,
         consumed_invitation_digest: Option<[u8; 32]>,
@@ -91,7 +162,7 @@ impl MembershipLedger {
                     return Err(MembershipLedgerError::Conflict);
                 }
                 if let Some(expected_history) = expected_membership_history_v2.as_deref() {
-                    if ledger.membership_history_v2.as_deref() != Some(expected_history) {
+                    if ledger.membership_history.as_deref() != Some(expected_history) {
                         return Err(MembershipLedgerError::Conflict);
                     }
                 }
@@ -122,7 +193,7 @@ impl MembershipLedger {
             .ok_or(MembershipLedgerError::Corrupt)
     }
 
-    pub(crate) async fn load_admission_record(
+    pub(crate) async fn load_join_record(
         &self,
         record_id: SpaceJoinRecordId,
     ) -> Result<Option<SpaceJoinRecord>, MembershipLedgerError> {
@@ -135,14 +206,17 @@ impl MembershipLedger {
             .cloned())
     }
 
-    pub(crate) async fn advance_admission_record_with_history(
+    pub(crate) async fn activate_joined_space(
         &self,
-        record_id: SpaceJoinRecordId,
-        expected_record_version: u64,
-        next: SpaceJoinRecord,
+        mut next: SpaceJoinRecord,
         expected_membership_history_v2: Vec<u8>,
         membership_history_v2: Vec<u8>,
     ) -> Result<AdmissionProfileMetadata, MembershipLedgerError> {
+        let record_id = next.record_id;
+        let expected_record_version = next.record_version;
+        next.record_version = expected_record_version
+            .checked_add(1)
+            .ok_or(MembershipLedgerError::Corrupt)?;
         let target_history = VersionedMembershipHistory::decode_persisted_v2(
             &membership_history_v2,
             self.verifier.as_ref(),
@@ -169,13 +243,8 @@ impl MembershipLedger {
             .collect::<Result<Vec<_>, _>>()?;
         let committed = self
             .compare_and_commit(move |ledger| {
-                if ledger.membership_history_v2.as_deref()
+                if ledger.membership_history.as_deref()
                     != Some(expected_membership_history_v2.as_slice())
-                    || next.record_id != record_id
-                    || next.record_version
-                        != expected_record_version
-                            .checked_add(1)
-                            .ok_or(MembershipLedgerError::Corrupt)?
                 {
                     return Err(MembershipLedgerError::Conflict);
                 }
@@ -192,7 +261,7 @@ impl MembershipLedger {
                     .checked_add(1)
                     .ok_or(MembershipLedgerError::Corrupt)?;
                 ledger.lineage_id = Some(target_lineage_id);
-                ledger.membership_history_v2 = Some(membership_history_v2);
+                ledger.membership_history = Some(membership_history_v2);
                 ledger.local_device_id = Some(local_device_id);
                 ledger.local_member_instance = Some(local_member_instance);
                 ledger.local_join_active = true;
@@ -226,7 +295,7 @@ impl MembershipLedger {
             .ok_or(MembershipLedgerError::Corrupt)
     }
 
-    pub(crate) async fn recoverable_admission_records(
+    pub(crate) async fn recoverable_join_records(
         &self,
     ) -> Result<Vec<SpaceJoinRecord>, MembershipLedgerError> {
         let mut records = self
@@ -242,7 +311,7 @@ impl MembershipLedger {
         Ok(records)
     }
 
-    pub(crate) async fn settle_admission_outbox(
+    pub(crate) async fn settle_join_message(
         &self,
         record_id: SpaceJoinRecordId,
         expected_record_version: u64,
@@ -288,7 +357,7 @@ impl MembershipLedger {
             .ok_or(MembershipLedgerError::Corrupt)
     }
 
-    pub(crate) async fn current_local_admission_record(
+    pub(crate) async fn current_local_join_record(
         &self,
     ) -> Result<Option<SpaceJoinRecord>, MembershipLedgerError> {
         let snapshot = self.load_verified().await?;
@@ -313,22 +382,17 @@ impl MembershipLedger {
             .map(|(_, record)| record.clone()))
     }
 
-    pub(crate) async fn advance_admission_record(
+    pub(crate) async fn save_join_record_progress(
         &self,
-        record_id: SpaceJoinRecordId,
-        expected_record_version: u64,
-        next: SpaceJoinRecord,
+        mut next: SpaceJoinRecord,
     ) -> Result<AdmissionProfileMetadata, MembershipLedgerError> {
+        let record_id = next.record_id;
+        let expected_record_version = next.record_version;
+        next.record_version = expected_record_version
+            .checked_add(1)
+            .ok_or(MembershipLedgerError::Corrupt)?;
         let committed = self
             .compare_and_commit(move |ledger| {
-                if next.record_id != record_id
-                    || next.record_version
-                        != expected_record_version
-                            .checked_add(1)
-                            .ok_or(MembershipLedgerError::Corrupt)?
-                {
-                    return Err(MembershipLedgerError::Conflict);
-                }
                 let key = *record_id.as_bytes();
                 let current = ledger
                     .admission_records

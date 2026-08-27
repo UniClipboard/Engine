@@ -1,6 +1,8 @@
 use uc_application::deps::{
-    CurrentSpaceMemberScopePort, HandleSpaceAdmissionMessagePort, JoinerStartMaterialPort,
-    JoinerStartStatePort, SpaceApplicationDeps, SpaceSessionActivityPort,
+    CurrentSpaceMemberScopePort, HandleAuthenticatedSpaceAdmissionMessagePort,
+    JoinerStartMaterialPort, JoinerStartStatePort, PendingAdmissionRecoveryStatePort,
+    SpaceAdmissionTransportPort, SpaceApplicationDeps, SpaceSessionActivityPort,
+    SponsorJoinRequestStatePort,
 };
 use uc_application::facade::space_setup::{SpaceFacade, SpaceFacadeDeps};
 use uc_application::facade::{AppFacade, DeviceTrustStatus, JoinSpaceInput, NetworkRecoveryFacade};
@@ -15,9 +17,12 @@ fn space_contracts_remain_reachable_only_through_facade_and_deps() {
         std::any::type_name::<NetworkRecoveryFacade>(),
         std::any::type_name::<SpaceApplicationDeps>(),
         std::any::type_name::<dyn CurrentSpaceMemberScopePort>(),
-        std::any::type_name::<dyn HandleSpaceAdmissionMessagePort>(),
+        std::any::type_name::<dyn HandleAuthenticatedSpaceAdmissionMessagePort>(),
         std::any::type_name::<dyn JoinerStartMaterialPort>(),
         std::any::type_name::<dyn JoinerStartStatePort>(),
+        std::any::type_name::<dyn PendingAdmissionRecoveryStatePort>(),
+        std::any::type_name::<dyn SpaceAdmissionTransportPort>(),
+        std::any::type_name::<dyn SponsorJoinRequestStatePort>(),
         std::any::type_name::<dyn SpaceSessionActivityPort>(),
     ];
 

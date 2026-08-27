@@ -57,7 +57,7 @@ pub struct PendingMembershipEffect {
 pub struct LoadedMembershipLedger {
     pub revision: u64,
     pub lineage_id: Option<String>,
-    pub membership_history_v2: Option<Vec<u8>>,
+    pub membership_history: Option<Vec<u8>>,
     pub local_device_id: Option<DeviceId>,
     pub local_member_instance: Option<MemberInstanceId>,
     pub local_join_active: bool,
@@ -75,7 +75,7 @@ impl LoadedMembershipLedger {
         Self {
             revision: 0,
             lineage_id: None,
-            membership_history_v2: None,
+            membership_history: None,
             local_device_id: None,
             local_member_instance: None,
             local_join_active: false,
@@ -151,7 +151,7 @@ impl std::fmt::Debug for LoadedMembershipLedger {
             .field("has_current_space", &self.lineage_id.is_some())
             .field(
                 "has_membership_history_v2",
-                &self.membership_history_v2.is_some(),
+                &self.membership_history.is_some(),
             )
             .field("local_join_active", &self.local_join_active)
             .field("peer_count", &self.peer_reconciliation.len())

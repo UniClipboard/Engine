@@ -60,7 +60,7 @@ impl CommitMembershipLedgerPort for MemoryLedgerRepository {
             .lock()
             .map_err(|_| MembershipLedgerError::Unavailable)?;
         let digest = loaded
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
         if loaded.revision != mutation.expected_revision
@@ -225,7 +225,7 @@ fn active_ledger() -> (LoadedMembershipLedger, TestSigner) {
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 8;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(local_facts.device_id.clone());
     loaded.local_member_instance = Some(local_member);
     loaded.local_join_active = true;
@@ -298,7 +298,7 @@ async fn removal_commits_all_local_facts_once_before_returning_success() {
     );
     let persisted = repository.load().await.unwrap();
     let history = VersionedMembershipHistory::decode_persisted_v2(
-        persisted.membership_history_v2.as_deref().unwrap(),
+        persisted.membership_history.as_deref().unwrap(),
         &AcceptingVerifier,
     )
     .unwrap();

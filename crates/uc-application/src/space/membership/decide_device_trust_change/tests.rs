@@ -61,7 +61,7 @@ impl CommitMembershipLedgerPort for MemoryLedgerRepository {
             .lock()
             .map_err(|_| MembershipLedgerError::Unavailable)?;
         let digest = loaded
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
         if loaded.revision != mutation.expected_revision
@@ -261,7 +261,7 @@ fn pending_local_removal_ledger() -> (LoadedMembershipLedger, TestSigner, Member
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 8;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(local_facts.device_id.clone());
     loaded.local_member_instance = Some(local_member);
     loaded.local_join_active = true;
@@ -376,7 +376,7 @@ async fn confirmed_acceptance_commits_the_decision_and_stops_local_access() {
     assert_eq!(wake.0.load(Ordering::SeqCst), 1);
     let persisted = repository.load().await.unwrap();
     let history = VersionedMembershipHistory::decode_persisted_v2(
-        persisted.membership_history_v2.as_deref().unwrap(),
+        persisted.membership_history.as_deref().unwrap(),
         &AcceptingVerifier,
     )
     .unwrap();
@@ -451,7 +451,7 @@ async fn rejection_keeps_local_membership_and_diverges_only_the_proposer() {
     assert_eq!(wake.0.load(Ordering::SeqCst), 1);
     let persisted = repository.load().await.unwrap();
     let history = VersionedMembershipHistory::decode_persisted_v2(
-        persisted.membership_history_v2.as_deref().unwrap(),
+        persisted.membership_history.as_deref().unwrap(),
         &AcceptingVerifier,
     )
     .unwrap();

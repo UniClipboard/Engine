@@ -66,7 +66,7 @@ impl VerifiedMembershipLedger {
 
     pub(crate) fn history_digest(&self) -> Option<[u8; 32]> {
         self.record
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)))
     }
@@ -181,7 +181,7 @@ impl MembershipLedger {
         .encode_persisted_v2()
         .map_err(|_| MembershipLedgerError::Corrupt)?;
         self.compare_and_commit(move |record| {
-            if record.lineage_id.is_some() || record.membership_history_v2.is_some() {
+            if record.lineage_id.is_some() || record.membership_history.is_some() {
                 return Err(MembershipLedgerError::Conflict);
             }
             let next_revision = record
@@ -189,7 +189,7 @@ impl MembershipLedger {
                 .checked_add(1)
                 .ok_or(MembershipLedgerError::Corrupt)?;
             record.lineage_id = Some(lineage_id);
-            record.membership_history_v2 = Some(history);
+            record.membership_history = Some(history);
             record.local_device_id = Some(local_device_id);
             record.local_member_instance = Some(local_member_instance);
             record.local_join_active = true;
@@ -213,7 +213,7 @@ impl MembershipLedger {
                 .checked_add(1)
                 .ok_or(MembershipLedgerError::Corrupt)?;
             record.lineage_id = None;
-            record.membership_history_v2 = None;
+            record.membership_history = None;
             record.local_device_id = None;
             record.local_member_instance = None;
             record.local_join_active = false;
@@ -239,7 +239,7 @@ impl MembershipLedger {
         loaded: &LoadedMembershipLedger,
     ) -> Result<Option<VersionedMembershipHistory>, MembershipLedgerError> {
         let Some(lineage_id) = loaded.lineage_id.as_deref() else {
-            if loaded.membership_history_v2.is_some()
+            if loaded.membership_history.is_some()
                 || loaded.local_device_id.is_some()
                 || loaded.local_member_instance.is_some()
                 || loaded.local_join_active
@@ -249,7 +249,7 @@ impl MembershipLedger {
             return Ok(None);
         };
         let history_bytes = loaded
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .ok_or(MembershipLedgerError::RecoveryRequired)?;
         let history =
@@ -276,7 +276,7 @@ impl MembershipLedger {
         let loaded = self.loader.load().await?;
         self.validate_loaded(&loaded)?;
         let expected_history_digest = loaded
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
         let next_revision = loaded
@@ -325,7 +325,7 @@ impl MembershipLedger {
             .history
             .ok_or(MembershipLedgerError::RecoveryRequired)?;
         let output = update(&mut replacement, &mut history, self.verifier.as_ref())?;
-        replacement.membership_history_v2 = Some(
+        replacement.membership_history = Some(
             history
                 .encode_persisted_v2()
                 .map_err(|_| MembershipLedgerError::Corrupt)?,

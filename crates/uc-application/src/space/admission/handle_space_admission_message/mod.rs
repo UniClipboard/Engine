@@ -1,14 +1,18 @@
 mod error;
 mod model;
-mod port;
+mod ports;
 mod use_case;
 
-pub use error::HandleSpaceAdmissionMessageError;
+pub use error::{AcceptAdmissionError, HandleSpaceAdmissionMessageError, LoadMemberAdmissionError};
 pub use model::{
-    AuthenticatedSpaceAdmissionMessage, PreparedSpaceAdmissionCommit,
+    AuthenticatedSpaceAdmissionMessage, LoadedMemberAdmissionActivation,
+    MemberAdmissionCommitToken, PreparedMemberAdmissionActivation, PreparedSpaceAdmissionCommit,
     PreparedSpaceAdmissionMessage, SpaceAdmissionPreparationContext,
 };
-pub use port::{HandleSpaceAdmissionMessagePort, PrepareSpaceAdmissionMessagePort};
+pub use ports::{
+    ConsumedInvitation, HandleSpaceAdmissionMessagePort, InboundAdmissionStatePort,
+    PrepareSpaceAdmissionMessagePort,
+};
 pub(crate) use use_case::HandleSpaceAdmissionMessageUseCase;
 
 #[cfg(test)]

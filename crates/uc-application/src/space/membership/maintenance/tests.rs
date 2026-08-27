@@ -21,7 +21,10 @@ impl RecordingStep {
 
 #[async_trait]
 impl RecoverSpaceAdmissionsPort for RecordingStep {
-    async fn recover_space_admissions(&self) -> MembershipMaintenanceStepOutcome {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
         self.record()
     }
 }
@@ -81,7 +84,10 @@ struct NonCooperativeAdmission {
 
 #[async_trait]
 impl RecoverSpaceAdmissionsPort for NonCooperativeAdmission {
-    async fn recover_space_admissions(&self) -> MembershipMaintenanceStepOutcome {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
         self.started.notify_one();
         std::future::pending().await
     }
@@ -89,7 +95,10 @@ impl RecoverSpaceAdmissionsPort for NonCooperativeAdmission {
 
 #[async_trait]
 impl RecoverSpaceAdmissionsPort for BlockingAdmission {
-    async fn recover_space_admissions(&self) -> MembershipMaintenanceStepOutcome {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
         self.started.notify_one();
         self.release.notified().await;
         MembershipMaintenanceStepOutcome::Completed

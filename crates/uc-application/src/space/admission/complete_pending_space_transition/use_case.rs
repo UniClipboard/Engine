@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use uc_core::membership::{
-    AdmissionSpaceTransitionV2, AdmissionTerminalResult, JoinerAdmissionStage,
-    JoinerAdmissionState, SpaceJoinRecord, SpaceJoinRecordId, SpaceJoinRoleState,
-};
+use uc_core::membership::{AdmissionSpaceTransitionV2, SpaceJoinRecord, SpaceJoinRecordId};
 
 use super::CompletePendingSpaceTransitionError;
 use crate::deps::{AdmissionSpaceTransitionPort, AdmissionSpaceTransitionStepV2};
@@ -32,7 +29,7 @@ impl CompletePendingSpaceTransitionUseCase {
     ) -> Result<CurrentJoinStatus, CompletePendingSpaceTransitionError> {
         let records = self
             .ledger
-            .recoverable_admission_records()
+            .recoverable_join_records()
             .await
             .map_err(state)?;
         for record in records.into_iter().filter(is_pending_space_transition) {
@@ -70,35 +67,16 @@ impl CompletePendingSpaceTransitionUseCase {
                 .map_err(state)?
             {
                 AdmissionSpaceTransitionStepV2::Advanced(next) => {
-                    if !transition.can_advance_to(&next) {
-                        return Err(state("Space transition skipped or replaced a phase"));
-                    }
-                    record.space_transition = Some(
-                        next.encode()
-                            .ok_or_else(|| state("advanced Space transition is invalid"))?,
-                    );
+                    record = record
+                        .advanced_space_transition(&transition, &next)
+                        .map_err(state)?;
                     self.persist(record).await?;
                     record = self.load_required(transition.attempt_id()).await?;
                 }
                 AdmissionSpaceTransitionStepV2::Finished(result) => {
-                    if !result.matches_cleanup_pending(&transition) {
-                        return Err(state(
-                            "Space transition result does not match cleanup state",
-                        ));
-                    }
-                    let history = record
-                        .verified_membership_history
-                        .clone()
-                        .ok_or_else(|| state("Space transition verified history is missing"))?;
-                    record.space_transition_result = Some(
-                        result
-                            .encode()
-                            .ok_or_else(|| state("Space transition result cannot be encoded"))?,
-                    );
-                    record.terminal_result = Some(AdmissionTerminalResult::Active);
-                    record.role_state = SpaceJoinRoleState::Joiner(JoinerAdmissionState {
-                        stage: JoinerAdmissionStage::Completed,
-                    });
+                    let (record, history) = record
+                        .completed_space_transition(&transition, &result)
+                        .map_err(state)?;
                     self.persist_with_history(record, history).await?;
                     return Ok(());
                 }
@@ -108,14 +86,10 @@ impl CompletePendingSpaceTransitionUseCase {
 
     async fn persist(
         &self,
-        mut record: SpaceJoinRecord,
+        record: SpaceJoinRecord,
     ) -> Result<(), CompletePendingSpaceTransitionError> {
-        let expected_version = record.record_version;
-        record.record_version = expected_version
-            .checked_add(1)
-            .ok_or_else(|| state("admission record version overflow"))?;
         self.ledger
-            .advance_admission_record(record.record_id, expected_version, record)
+            .save_join_record_progress(record)
             .await
             .map_err(state)?;
         Ok(())
@@ -123,21 +97,11 @@ impl CompletePendingSpaceTransitionUseCase {
 
     async fn persist_with_history(
         &self,
-        mut record: SpaceJoinRecord,
+        record: SpaceJoinRecord,
         history: Vec<u8>,
     ) -> Result<(), CompletePendingSpaceTransitionError> {
-        let expected_version = record.record_version;
-        record.record_version = expected_version
-            .checked_add(1)
-            .ok_or_else(|| state("admission record version overflow"))?;
         self.ledger
-            .advance_admission_record_with_history(
-                record.record_id,
-                expected_version,
-                record,
-                history.clone(),
-                history,
-            )
+            .activate_joined_space(record, history.clone(), history)
             .await
             .map_err(state)?;
         Ok(())
@@ -148,7 +112,7 @@ impl CompletePendingSpaceTransitionUseCase {
         record_id: SpaceJoinRecordId,
     ) -> Result<SpaceJoinRecord, CompletePendingSpaceTransitionError> {
         self.ledger
-            .load_admission_record(record_id)
+            .load_join_record(record_id)
             .await
             .map_err(state)?
             .ok_or_else(|| state("admission attempt was not found"))

@@ -4,7 +4,10 @@ use super::{MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger};
 
 #[async_trait]
 pub trait RecoverSpaceAdmissionsPort: Send + Sync {
-    async fn recover_space_admissions(&self) -> MembershipMaintenanceStepOutcome;
+    async fn recover_space_admissions(
+        &self,
+        trigger: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome;
 }
 
 #[async_trait]

@@ -66,19 +66,24 @@ pub use admission::{
 };
 pub use admission::{
     AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult,
-    AdmissionOutboxDeliveryRoute, InvitationConsumeDeliveryResult, JoinerStartMaterial,
-    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
-    JoinerStartStatePort, LoadedJoinerStartState, SpaceAdmissionCommitToken,
+    AdmissionOutboxDeliveryRoute, AdmissionRecoveryCommitToken, AdmissionRecoveryReport,
+    AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
+    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
+    HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
+    InvitationConsumeDeliveryResult, JoinerStartMaterial, JoinerStartMaterialError,
+    JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
+    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorJoinRequest,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareSponsorCandidateError,
+    PrepareSponsorCandidatePort, PreparedJoinerCandidateMaterial, PreparedSponsorCandidate,
+    SpaceAdmissionCommitToken, SpaceAdmissionMessageReply, SpaceAdmissionTransportError,
+    SpaceAdmissionTransportPort, SponsorAdmissionMutation, SponsorJoinRequestCommitToken,
+    SponsorJoinRequestState, SponsorJoinRequestStateError, SponsorJoinRequestStatePort,
 };
 pub use admission::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
     DeviceManagementResetDataPort,
-};
-pub use admission::{
-    AuthenticatedSpaceAdmissionMessage, HandleSpaceAdmissionMessageError,
-    HandleSpaceAdmissionMessagePort, PrepareSpaceAdmissionMessagePort,
-    PreparedSpaceAdmissionCommit, PreparedSpaceAdmissionMessage, SpaceAdmissionPreparationContext,
 };
 pub use application::SpaceApplicationDeps;
 pub use lifecycle::UnlockSpacePort;

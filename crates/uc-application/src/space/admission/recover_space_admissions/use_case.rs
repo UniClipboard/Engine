@@ -21,7 +21,7 @@ impl RecoverSpaceAdmissionsUseCase {
 
     pub(crate) async fn execute(&self) -> MembershipMaintenanceReport {
         let mut report = MembershipMaintenanceReport::default();
-        let records = match self.ledger.recoverable_admission_records().await {
+        let records = match self.ledger.recoverable_join_records().await {
             Ok(records) => records,
             Err(_) => {
                 report.corrupt_count = 1;
@@ -36,7 +36,7 @@ impl RecoverSpaceAdmissionsUseCase {
                 .map(|message| message.message_id)
                 .collect::<Vec<_>>();
             for message_id in message_ids {
-                let current = match self.ledger.load_admission_record(record.record_id).await {
+                let current = match self.ledger.load_join_record(record.record_id).await {
                     Ok(Some(current)) => current,
                     Ok(None) | Err(_) => {
                         report.deferred_count += 1;
@@ -61,7 +61,7 @@ impl RecoverSpaceAdmissionsUseCase {
                     {
                         match self
                             .ledger
-                            .settle_admission_outbox(
+                            .settle_join_message(
                                 current.record_id,
                                 current.record_version,
                                 message.message_id,
@@ -85,7 +85,7 @@ impl RecoverSpaceAdmissionsUseCase {
                             crate::space::admission::outbox::acknowledgment(&rejected);
                         if self
                             .ledger
-                            .settle_admission_outbox(
+                            .settle_join_message(
                                 current.record_id,
                                 current.record_version,
                                 message.message_id,
@@ -104,7 +104,7 @@ impl RecoverSpaceAdmissionsUseCase {
                             crate::space::admission::outbox::acknowledgment(message);
                         if self
                             .ledger
-                            .settle_admission_outbox(
+                            .settle_join_message(
                                 current.record_id,
                                 current.record_version,
                                 message.message_id,
@@ -136,7 +136,10 @@ impl RecoverSpaceAdmissionsUseCase {
 
 #[async_trait::async_trait]
 impl RecoverSpaceAdmissionsPort for RecoverSpaceAdmissionsUseCase {
-    async fn recover_space_admissions(&self) -> MembershipMaintenanceStepOutcome {
+    async fn recover_space_admissions(
+        &self,
+        _trigger: &crate::space::membership::MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceStepOutcome {
         let report = self.execute().await;
         if report.corrupt_count > 0 {
             MembershipMaintenanceStepOutcome::Corrupt

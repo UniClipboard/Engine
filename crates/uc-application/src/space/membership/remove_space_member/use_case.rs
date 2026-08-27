@@ -174,7 +174,7 @@ impl RemoveSpaceMemberUseCase {
             .await
             .map_err(|_| RemoveSpaceMemberError::CommittedButPending { change_id })?;
         let committed_history = committed
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .ok_or(RemoveSpaceMemberError::CommittedButPending { change_id })?;
         let history_digest = <[u8; 32]>::from(sha2::Sha256::digest(committed_history));

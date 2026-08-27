@@ -2,19 +2,20 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+use super::error::{AcceptAdmissionError, LoadMemberAdmissionError};
+use super::ports::{ConsumedInvitation, InboundAdmissionStatePort};
 use super::{
     AuthenticatedSpaceAdmissionMessage, HandleSpaceAdmissionMessageError,
     HandleSpaceAdmissionMessagePort, PrepareSpaceAdmissionMessagePort,
-    PreparedSpaceAdmissionMessage, SpaceAdmissionPreparationContext,
+    PreparedMemberAdmissionActivation, PreparedSpaceAdmissionMessage,
 };
 use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
 use crate::space::membership::WakeSpaceMembershipMaintenancePort;
-use crate::space::membership::{MembershipLedger, MembershipLedgerError};
 use uc_core::ports::ClockPort;
 
 pub(crate) struct HandleSpaceAdmissionMessageUseCase {
-    ledger: Arc<MembershipLedger>,
     preparation: Arc<dyn PrepareSpaceAdmissionMessagePort>,
+    admission_state: Arc<dyn InboundAdmissionStatePort>,
     maintenance: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     invitations: Arc<InMemoryPairingInvitationHolder>,
     clock: Arc<dyn ClockPort>,
@@ -33,15 +34,15 @@ impl HandleSpaceAdmissionMessagePort for HandleSpaceAdmissionMessageUseCase {
 
 impl HandleSpaceAdmissionMessageUseCase {
     pub(crate) fn new(
-        ledger: Arc<MembershipLedger>,
         preparation: Arc<dyn PrepareSpaceAdmissionMessagePort>,
+        admission_state: Arc<dyn InboundAdmissionStatePort>,
         maintenance: Arc<dyn WakeSpaceMembershipMaintenancePort>,
         invitations: Arc<InMemoryPairingInvitationHolder>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
-            ledger,
             preparation,
+            admission_state,
             maintenance,
             invitations,
             clock,
@@ -54,22 +55,13 @@ impl HandleSpaceAdmissionMessageUseCase {
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<Vec<u8>, HandleSpaceAdmissionMessageError> {
         let _guard = self.execution_lock.lock().await;
-        let snapshot = self
-            .ledger
-            .load_verified()
+        let state = self
+            .admission_state
+            .load(message.record_id)
             .await
-            .map_err(map_ledger_error)?;
-        let history = snapshot
-            .record()
-            .membership_history_v2
-            .clone()
-            .ok_or(HandleSpaceAdmissionMessageError::RecoveryRequired)?;
-        let current_record = snapshot
-            .record()
-            .admission_records
-            .get(message.attempt_id.as_bytes())
-            .cloned();
-        let invitation = if current_record.is_none() {
+            .map_err(map_load_member_admission_error)?;
+        let invitation_required = !state.has_current_record();
+        let invitation = if invitation_required {
             let code = message
                 .invitation_code
                 .as_ref()
@@ -81,7 +73,7 @@ impl HandleSpaceAdmissionMessageUseCase {
                 .inspect_matching(code, now)
                 .await
                 .map_err(|_| HandleSpaceAdmissionMessageError::Invalid)?;
-            if invitation.admission_generation() != snapshot.record().revision {
+            if invitation.admission_generation() != state.required_invitation_generation() {
                 return Err(HandleSpaceAdmissionMessageError::StateChanged);
             }
             Some((
@@ -93,16 +85,13 @@ impl HandleSpaceAdmissionMessageUseCase {
         } else {
             None
         };
-        let context = SpaceAdmissionPreparationContext {
-            revision: snapshot.record().revision,
-            invitation_generation: invitation.as_ref().map(|(_, _, _, generation)| *generation),
-            membership_history_v2: history.clone(),
-            current_record,
-        };
+
+        let context =
+            state.preparation_context(invitation.as_ref().map(|(_, _, _, generation)| *generation));
         match self.preparation.prepare(&message, &context).await? {
             PreparedSpaceAdmissionMessage::NoChange { reply } => Ok(reply),
             PreparedSpaceAdmissionMessage::Commit(commit) => {
-                if commit.record.record_id != message.attempt_id
+                if commit.record.record_id != message.record_id
                     || commit.relationship.peer_device_id != message.source_device_id
                     || !commit
                         .effect
@@ -112,8 +101,7 @@ impl HandleSpaceAdmissionMessageUseCase {
                     return Err(HandleSpaceAdmissionMessageError::Invalid);
                 }
                 let reply = commit.reply.clone();
-                let expected_record_version = commit.expected_record_version;
-                let invitation = if expected_record_version.is_none() {
+                let invitation = if invitation_required {
                     let invitation = invitation.ok_or(HandleSpaceAdmissionMessageError::Invalid)?;
                     if commit.invitation_generation != Some(invitation.3) {
                         return Err(HandleSpaceAdmissionMessageError::StateChanged);
@@ -125,19 +113,21 @@ impl HandleSpaceAdmissionMessageUseCase {
                     }
                     None
                 };
-                self.ledger
-                    .commit_inbound_admission(
-                        context.revision,
-                        history,
-                        expected_record_version,
-                        commit.record,
-                        commit.membership_history_v2,
-                        commit.relationship,
-                        commit.effect,
-                        invitation.as_ref().map(|(_, _, digest, _)| *digest),
+                self.admission_state
+                    .accept(
+                        state.into_commit_token(),
+                        PreparedMemberAdmissionActivation::new(
+                            commit.record,
+                            commit.membership_history_v2,
+                            commit.relationship,
+                            commit.effect,
+                        ),
+                        invitation
+                            .as_ref()
+                            .map(|(_, _, digest, _)| ConsumedInvitation::new(*digest)),
                     )
                     .await
-                    .map_err(map_ledger_error)?;
+                    .map_err(map_accept_admission_error)?;
                 if let Some((code, now, _, _)) = invitation {
                     self.invitations
                         .take_matching(&code, now)
@@ -159,13 +149,25 @@ fn invitation_digest(code: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn map_ledger_error(error: MembershipLedgerError) -> HandleSpaceAdmissionMessageError {
+fn map_load_member_admission_error(
+    error: LoadMemberAdmissionError,
+) -> HandleSpaceAdmissionMessageError {
     match error {
-        MembershipLedgerError::Locked => HandleSpaceAdmissionMessageError::Locked,
-        MembershipLedgerError::Conflict => HandleSpaceAdmissionMessageError::StateChanged,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        LoadMemberAdmissionError::Locked => HandleSpaceAdmissionMessageError::Locked,
+        LoadMemberAdmissionError::RecoveryRequired => {
             HandleSpaceAdmissionMessageError::RecoveryRequired
         }
-        MembershipLedgerError::Unavailable => HandleSpaceAdmissionMessageError::Unavailable,
+        LoadMemberAdmissionError::Unavailable => HandleSpaceAdmissionMessageError::Unavailable,
+    }
+}
+
+fn map_accept_admission_error(error: AcceptAdmissionError) -> HandleSpaceAdmissionMessageError {
+    match error {
+        AcceptAdmissionError::Locked => HandleSpaceAdmissionMessageError::Locked,
+        AcceptAdmissionError::StateChanged => HandleSpaceAdmissionMessageError::StateChanged,
+        AcceptAdmissionError::RecoveryRequired => {
+            HandleSpaceAdmissionMessageError::RecoveryRequired
+        }
+        AcceptAdmissionError::Unavailable => HandleSpaceAdmissionMessageError::Unavailable,
     }
 }

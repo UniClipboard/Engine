@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tokio::sync::broadcast;
@@ -10,10 +12,11 @@ use uc_core::membership::{
 use uc_core::ports::PresenceEvent;
 
 use crate::space::admission::{
-    CancelSpaceJoinUseCase, CompletePendingSpaceTransitionUseCase, HandleSpaceAdmissionMessagePort,
-    HandleSpaceAdmissionMessageUseCase, InMemoryPairingInvitationHolder, JoinerStartMaterialPort,
-    JoinerStartStatePort, PrepareSpaceAdmissionMessagePort, QueryPendingSpaceTransitionUseCase,
-    RecoverSpaceAdmissionsUseCase, SpaceAdmissionProtocol,
+    CancelSpaceJoinUseCase, CompletePendingSpaceTransitionUseCase,
+    HandleAuthenticatedSpaceAdmissionMessagePort, JoinerStartMaterialPort, JoinerStartStatePort,
+    PendingAdmissionRecoveryStatePort, PrepareJoinerCandidatePort, PrepareSponsorCandidatePort,
+    QueryPendingSpaceTransitionUseCase, SpaceAdmissionProtocol, SpaceAdmissionTransportPort,
+    SponsorJoinRequestStatePort,
 };
 use crate::space::membership::CurrentMemberSignaturePort;
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
@@ -34,6 +37,38 @@ use crate::space::membership::{
 };
 use crate::space::membership::{LoadDeviceTrustObservationsPort, QueryDeviceTrustUseCase};
 
+struct DeferredMaintenanceWake {
+    target: OnceLock<Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>>,
+    pending: AtomicBool,
+}
+
+impl DeferredMaintenanceWake {
+    fn new() -> Self {
+        Self {
+            target: OnceLock::new(),
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    fn bind(&self, target: Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>) {
+        if self.target.set(target).is_ok() && self.pending.swap(false, Ordering::AcqRel) {
+            if let Some(target) = self.target.get() {
+                target.wake();
+            }
+        }
+    }
+}
+
+impl crate::space::membership::WakeSpaceMembershipMaintenancePort for DeferredMaintenanceWake {
+    fn wake(&self) {
+        if let Some(target) = self.target.get() {
+            target.wake();
+        } else {
+            self.pending.store(true, Ordering::Release);
+        }
+    }
+}
+
 pub struct SpaceApplicationDeps {
     pub load_membership_ledger: Arc<dyn LoadMembershipLedgerPort>,
     pub commit_membership_ledger: Arc<dyn CommitMembershipLedgerPort>,
@@ -47,7 +82,11 @@ pub struct SpaceApplicationDeps {
     pub settings: Arc<dyn uc_core::ports::SettingsPort>,
     pub joiner_start_material: Arc<dyn JoinerStartMaterialPort>,
     pub joiner_start_state: Arc<dyn JoinerStartStatePort>,
-    pub prepare_space_admission_message: Arc<dyn PrepareSpaceAdmissionMessagePort>,
+    pub pending_admission_recovery_state: Arc<dyn PendingAdmissionRecoveryStatePort>,
+    pub space_admission_transport: Arc<dyn SpaceAdmissionTransportPort>,
+    pub sponsor_join_request_state: Arc<dyn SponsorJoinRequestStatePort>,
+    pub prepare_sponsor_candidate: Arc<dyn PrepareSponsorCandidatePort>,
+    pub prepare_joiner_candidate: Arc<dyn PrepareJoinerCandidatePort>,
     pub device_trust_observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     pub membership_history_transport: Arc<dyn MembershipHistoryExchangePort>,
     pub admission_outbox_delivery: Arc<dyn crate::deps::AdmissionOutboxDeliveryPort>,
@@ -68,11 +107,10 @@ pub(crate) struct SpaceApplication {
     remove_space_member: Arc<RemoveSpaceMemberUseCase>,
     decide_device_trust_change: Arc<DecideDeviceTrustChangeUseCase>,
     cancel_space_join: Arc<CancelSpaceJoinUseCase>,
-    join_space: Arc<SpaceAdmissionProtocol>,
+    space_admission: Arc<SpaceAdmissionProtocol>,
     complete_pending_space_transition: Arc<CompletePendingSpaceTransitionUseCase>,
     query_pending_space_transition: Arc<QueryPendingSpaceTransitionUseCase>,
     membership_history_endpoint: Arc<HandleMembershipHistoryMessageUseCase>,
-    space_admission_endpoint: Arc<HandleSpaceAdmissionMessageUseCase>,
     initialize_membership: Arc<InitializeSpaceMembershipUseCase>,
     membership_activity: crate::space::membership::SpaceMembershipActivity,
     runtime: Option<SpaceMembershipRuntime>,
@@ -82,7 +120,6 @@ impl SpaceApplication {
     pub(crate) fn start(
         deps: SpaceApplicationDeps,
         presence_events: broadcast::Receiver<PresenceEvent>,
-        invitations: Arc<InMemoryPairingInvitationHolder>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
         let ledger = Arc::new(MembershipLedger::new(
@@ -111,9 +148,17 @@ impl SpaceApplication {
             Arc::clone(&current_scope),
             deps.membership_history_transport,
         ));
-        let recover_admissions = Arc::new(RecoverSpaceAdmissionsUseCase::new(
-            Arc::clone(&ledger),
-            deps.admission_outbox_delivery,
+        let deferred_maintenance_wake = Arc::new(DeferredMaintenanceWake::new());
+        let space_admission = Arc::new(SpaceAdmissionProtocol::new(
+            deps.settings,
+            deps.joiner_start_material,
+            deps.joiner_start_state,
+            deps.pending_admission_recovery_state,
+            deps.space_admission_transport,
+            deferred_maintenance_wake.clone(),
+            deps.sponsor_join_request_state,
+            deps.prepare_sponsor_candidate,
+            deps.prepare_joiner_candidate,
         ));
         let membership_activation = Arc::new(RePairingAwareMembershipActivation::new(
             deps.activate_membership_effect,
@@ -131,7 +176,7 @@ impl SpaceApplication {
         ));
         let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
             MaintainSpaceMembershipDeps {
-                admissions: recover_admissions,
+                admissions: space_admission.clone(),
                 effects: Arc::clone(&recover_membership_effects)
                     as Arc<dyn crate::space::membership::RecoverMembershipEffectsPort>,
                 restricted_delivery: deliver_restricted_membership,
@@ -146,6 +191,7 @@ impl SpaceApplication {
             deps.membership_network_activity,
         );
         let membership_activity = runtime.activity();
+        deferred_maintenance_wake.bind(Arc::new(membership_activity.clone()));
         let activity = Arc::new(membership_activity.clone());
         let remove_space_member = Arc::new(RemoveSpaceMemberUseCase::new(
             Arc::clone(&ledger),
@@ -165,11 +211,6 @@ impl SpaceApplication {
             Arc::clone(&ledger),
             Arc::new(membership_activity.clone()),
         ));
-        let join_space = Arc::new(SpaceAdmissionProtocol::new(
-            deps.settings,
-            deps.joiner_start_material,
-            deps.joiner_start_state,
-        ));
         let complete_pending_space_transition =
             Arc::new(CompletePendingSpaceTransitionUseCase::new(
                 Arc::clone(&ledger),
@@ -180,13 +221,6 @@ impl SpaceApplication {
         let membership_history_endpoint = Arc::new(HandleMembershipHistoryMessageUseCase::new(
             Arc::clone(&ledger),
         ));
-        let space_admission_endpoint = Arc::new(HandleSpaceAdmissionMessageUseCase::new(
-            Arc::clone(&ledger),
-            deps.prepare_space_admission_message,
-            Arc::new(membership_activity.clone()),
-            invitations,
-            deps.clock,
-        ));
         Self {
             ledger,
             current_scope,
@@ -195,11 +229,10 @@ impl SpaceApplication {
             remove_space_member,
             decide_device_trust_change,
             cancel_space_join,
-            join_space,
+            space_admission,
             complete_pending_space_transition,
             query_pending_space_transition,
             membership_history_endpoint,
-            space_admission_endpoint,
             initialize_membership,
             membership_activity,
             runtime: Some(runtime),
@@ -242,8 +275,8 @@ impl SpaceApplication {
         Arc::clone(&self.cancel_space_join)
     }
 
-    pub(crate) fn join_space(&self) -> Arc<SpaceAdmissionProtocol> {
-        Arc::clone(&self.join_space)
+    pub(crate) fn space_admission(&self) -> Arc<SpaceAdmissionProtocol> {
+        Arc::clone(&self.space_admission)
     }
 
     pub(crate) fn complete_pending_space_transition(
@@ -262,8 +295,10 @@ impl SpaceApplication {
         self.membership_history_endpoint.clone()
     }
 
-    pub(crate) fn space_admission_endpoint(&self) -> Arc<dyn HandleSpaceAdmissionMessagePort> {
-        self.space_admission_endpoint.clone()
+    pub(crate) fn space_admission_endpoint(
+        &self,
+    ) -> Arc<dyn HandleAuthenticatedSpaceAdmissionMessagePort> {
+        self.space_admission.clone()
     }
 
     pub(crate) fn initialize_membership(

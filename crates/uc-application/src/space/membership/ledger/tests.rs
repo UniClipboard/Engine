@@ -12,6 +12,10 @@ use uc_core::membership::{
 };
 
 use super::*;
+use crate::space::admission::{
+    AcceptAdmissionError, ConsumedInvitation, InboundAdmissionStatePort, LoadMemberAdmissionError,
+    PreparedMemberAdmissionActivation,
+};
 
 #[derive(Clone)]
 struct MemoryLedgerRepository {
@@ -53,7 +57,7 @@ impl CommitMembershipLedgerPort for MemoryLedgerRepository {
             return Err(MembershipLedgerError::Conflict);
         }
         let current_history_digest = loaded
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
         if current_history_digest != mutation.expected_history_digest {
@@ -100,7 +104,7 @@ fn active_single_member_ledger() -> LoadedMembershipLedger {
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 7;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(device_id);
     loaded.local_member_instance = Some(member_instance);
     loaded.local_join_active = true;
@@ -149,7 +153,7 @@ fn active_two_member_ledger() -> LoadedMembershipLedger {
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 8;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(local_facts.device_id);
     loaded.local_member_instance = Some(local_member);
     loaded.local_join_active = true;
@@ -378,10 +382,10 @@ async fn admission_record_and_initial_history_commit_atomically() {
     let record_id = SpaceJoinRecordId::from_bytes([0x62; 32]);
     let record =
         SpaceJoinRecord::new_joiner(record_id, [0x63; 16], JoinerAdmissionStage::Initiated);
-    let history = active_single_member_ledger().membership_history_v2.unwrap();
+    let history = active_single_member_ledger().membership_history.unwrap();
 
     let metadata = ledger
-        .create_admission_record(record.clone(), None, Some(history.clone()))
+        .start_join_record(record.clone(), None, Some(history.clone()))
         .await
         .unwrap();
 
@@ -392,8 +396,181 @@ async fn admission_record_and_initial_history_commit_atomically() {
         persisted.admission_records.get(record_id.as_bytes()),
         Some(&record)
     );
-    assert_eq!(persisted.membership_history_v2, Some(history));
+    assert_eq!(persisted.membership_history, Some(history));
     assert_eq!(persisted.revision, 8);
+}
+
+#[tokio::test]
+async fn inbound_admission_load_returns_one_consistent_context() {
+    let loaded = active_single_member_ledger();
+    let expected_history = loaded.membership_history.clone().unwrap();
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = MembershipLedger::new(repository.clone(), repository, Arc::new(AcceptingVerifier));
+    let record_id = SpaceJoinRecordId::from_bytes([0x64; 32]);
+
+    let state = ledger.load(record_id).await.unwrap();
+    assert_eq!(state.required_invitation_generation(), 7);
+
+    let context = state.preparation_context(Some(7));
+    assert_eq!(context.invitation_generation, Some(7));
+    assert_eq!(context.membership_history_v2, expected_history);
+    assert!(context.current_record.is_none());
+}
+
+#[tokio::test]
+async fn inbound_admission_load_requires_signed_membership_history() {
+    let mut loaded = active_single_member_ledger();
+    loaded.membership_history = None;
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = MembershipLedger::new(repository.clone(), repository, Arc::new(AcceptingVerifier));
+
+    let error = ledger
+        .load(SpaceJoinRecordId::from_bytes([0x65; 32]))
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(error, LoadMemberAdmissionError::RecoveryRequired);
+}
+
+#[tokio::test]
+async fn stale_inbound_admission_token_commits_nothing() {
+    let mut loaded = active_single_member_ledger();
+    loaded.admission_profile = Some(AdmissionProfileMetadata::fresh([0x64; 16]));
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+    let record_id = SpaceJoinRecordId::from_bytes([0x65; 32]);
+    let state = ledger.load(record_id).await.unwrap();
+    let context = state.preparation_context(Some(7));
+    let prepared = PreparedMemberAdmissionActivation::new(
+        SpaceJoinRecord::new_joiner(record_id, [0x66; 16], JoinerAdmissionStage::Prepared),
+        context.membership_history_v2,
+        PeerReconciliationRecord {
+            peer_device_id: DeviceId::new("device-b"),
+            relationship: MembershipHistoryRelationship::Unknown,
+            confirmed_position: None,
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 1,
+        },
+        PendingMembershipEffect {
+            event_id: [0x67; 32],
+            kind: MembershipEffectKind::AddDevice,
+            phase: MembershipEffectPhase::Prepared,
+            affected_device_ids: vec![DeviceId::new("device-b")],
+            payload: vec![0x68],
+        },
+    );
+    {
+        let mut changed = repository.loaded.lock().unwrap();
+        changed.revision += 1;
+        changed
+            .admission_profile
+            .as_mut()
+            .unwrap()
+            .device_trust_revision = changed.revision;
+    }
+    let before = repository.load().await.unwrap();
+
+    let error = ledger
+        .accept(
+            state.into_commit_token(),
+            prepared,
+            Some(ConsumedInvitation::new([0x69; 32])),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, AcceptAdmissionError::StateChanged);
+    assert_eq!(repository.load().await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn inbound_admission_record_version_is_advanced_by_the_ledger() {
+    let mut loaded = active_single_member_ledger();
+    loaded.admission_profile = Some(AdmissionProfileMetadata::fresh([0x6d; 16]));
+    let record_id = SpaceJoinRecordId::from_bytes([0x6e; 32]);
+    let record =
+        SpaceJoinRecord::new_joiner(record_id, [0x6f; 16], JoinerAdmissionStage::Candidate);
+    loaded
+        .admission_records
+        .insert(*record_id.as_bytes(), record.clone());
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+    let state = ledger.load(record_id).await.unwrap();
+    let context = state.preparation_context(None);
+    let mut next = record;
+    next.set_joiner_stage(JoinerAdmissionStage::Prepared);
+    let prepared = PreparedMemberAdmissionActivation::new(
+        next,
+        context.membership_history_v2,
+        PeerReconciliationRecord {
+            peer_device_id: DeviceId::new("device-b"),
+            relationship: MembershipHistoryRelationship::Unknown,
+            confirmed_position: None,
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 1,
+        },
+        PendingMembershipEffect {
+            event_id: [0x70; 32],
+            kind: MembershipEffectKind::AddDevice,
+            phase: MembershipEffectPhase::Prepared,
+            affected_device_ids: vec![DeviceId::new("device-b")],
+            payload: vec![0x71],
+        },
+    );
+
+    ledger
+        .accept(state.into_commit_token(), prepared, None)
+        .await
+        .unwrap();
+
+    let persisted = repository.load().await.unwrap();
+    assert_eq!(
+        persisted
+            .admission_records
+            .get(record_id.as_bytes())
+            .unwrap()
+            .record_version,
+        1
+    );
+}
+
+#[tokio::test]
+async fn admission_record_version_is_advanced_by_the_ledger() {
+    let mut loaded = active_single_member_ledger();
+    loaded.admission_profile = Some(AdmissionProfileMetadata::fresh([0x6a; 16]));
+    let record_id = SpaceJoinRecordId::from_bytes([0x6b; 32]);
+    let record =
+        SpaceJoinRecord::new_joiner(record_id, [0x6c; 16], JoinerAdmissionStage::Initiated);
+    loaded
+        .admission_records
+        .insert(*record_id.as_bytes(), record.clone());
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+    let mut next = record;
+    next.set_joiner_stage(JoinerAdmissionStage::Candidate);
+
+    ledger.save_join_record_progress(next).await.unwrap();
+
+    let persisted = repository.load().await.unwrap();
+    let record = persisted
+        .admission_records
+        .get(record_id.as_bytes())
+        .unwrap();
+    assert_eq!(record.record_version, 1);
+    assert_eq!(record.stage_rank(), Some(2));
 }
 
 #[tokio::test]
@@ -414,27 +591,22 @@ async fn admission_progress_and_history_advance_in_one_cas() {
         Arc::new(AcceptingVerifier),
     );
     let mut next = record;
-    next.record_version = 1;
     next.set_joiner_stage(JoinerAdmissionStage::Candidate);
-    let expected_history = loaded.membership_history_v2.clone().unwrap();
+    let expected_history = loaded.membership_history.clone().unwrap();
 
     let metadata = ledger
-        .advance_admission_record_with_history(
-            record_id,
-            0,
-            next.clone(),
-            expected_history.clone(),
-            expected_history,
-        )
+        .activate_joined_space(next.clone(), expected_history.clone(), expected_history)
         .await
         .unwrap();
 
     assert_eq!(repository.commit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(metadata.device_trust_revision, 8);
     let persisted = repository.load().await.unwrap();
+    let mut expected = next;
+    expected.record_version = 1;
     assert_eq!(
         persisted.admission_records.get(record_id.as_bytes()),
-        Some(&next)
+        Some(&expected)
     );
     assert_eq!(persisted.revision, 8);
 }
@@ -459,18 +631,17 @@ async fn completed_cross_space_join_switches_lineage_and_local_member_atomically
     loaded
         .admission_records
         .insert(*record_id.as_bytes(), record.clone());
-    let source_history = loaded.membership_history_v2.clone().unwrap();
+    let source_history = loaded.membership_history.clone().unwrap();
     let repository = Arc::new(MemoryLedgerRepository::new(loaded));
     let ledger = MembershipLedger::new(
         repository.clone(),
         repository.clone(),
         Arc::new(AcceptingVerifier),
     );
-    let mut next = record;
-    next.record_version = 1;
+    let next = record;
 
     ledger
-        .advance_admission_record_with_history(record_id, 0, next, source_history, target_history)
+        .activate_joined_space(next, source_history, target_history)
         .await
         .unwrap();
 
@@ -584,7 +755,7 @@ async fn confirmed_restricted_delivery_is_removed_from_the_ledger() {
     let mut loaded = active_two_member_ledger();
     let peer = DeviceId::new("device-b");
     let history = VersionedMembershipHistory::decode_persisted_v2(
-        loaded.membership_history_v2.as_deref().unwrap(),
+        loaded.membership_history.as_deref().unwrap(),
         &AcceptingVerifier,
     )
     .unwrap();
@@ -650,7 +821,7 @@ async fn new_space_root_and_local_activation_commit_once() {
     assert_eq!(persisted.local_device_id, Some(facts.device_id));
     assert_eq!(persisted.local_member_instance, Some(facts.member_instance));
     assert!(persisted.local_join_active);
-    assert!(persisted.membership_history_v2.is_some());
+    assert!(persisted.membership_history.is_some());
 }
 
 #[tokio::test]
@@ -685,7 +856,7 @@ async fn space_rebuild_reset_clears_every_previous_membership_fact_atomically() 
     let persisted = repository.load().await.unwrap();
     assert_eq!(persisted.revision, 9);
     assert!(persisted.lineage_id.is_none());
-    assert!(persisted.membership_history_v2.is_none());
+    assert!(persisted.membership_history.is_none());
     assert!(persisted.local_device_id.is_none());
     assert!(persisted.local_member_instance.is_none());
     assert!(!persisted.local_join_active);

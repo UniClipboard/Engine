@@ -77,7 +77,7 @@ fn active_ledger() -> LoadedMembershipLedger {
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 7;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(device_id);
     loaded.local_member_instance = Some(member_instance);
     loaded.local_join_active = true;

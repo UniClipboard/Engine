@@ -28,10 +28,9 @@ mod space_transition;
 
 pub use cancel_space_join::CancelSpaceJoinError;
 pub use complete_pending_space_transition::CompletePendingSpaceTransitionError;
-pub use handle_space_admission_message::{
-    AuthenticatedSpaceAdmissionMessage, HandleSpaceAdmissionMessageError,
-    HandleSpaceAdmissionMessagePort, PrepareSpaceAdmissionMessagePort,
-    PreparedSpaceAdmissionCommit, PreparedSpaceAdmissionMessage, SpaceAdmissionPreparationContext,
+pub(crate) use handle_space_admission_message::{
+    AcceptAdmissionError, ConsumedInvitation, InboundAdmissionStatePort, LoadMemberAdmissionError,
+    LoadedMemberAdmissionActivation, MemberAdmissionCommitToken, PreparedMemberAdmissionActivation,
 };
 pub use invitation::{
     CancelInvitationError, PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
@@ -43,8 +42,19 @@ pub use outbox::{
     AdmissionOutboxDeliveryRoute, InvitationConsumeDeliveryResult,
 };
 pub use protocol::{
+    AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
+    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
+    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
+    HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
     JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
-    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, SpaceAdmissionCommitToken,
+    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, LoadedPendingAdmission,
+    LoadedSponsorJoinRequest, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
+    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PreparedJoinerCandidateMaterial,
+    PreparedSponsorCandidate, SpaceAdmissionCommitToken, SpaceAdmissionMessageReply,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionMutation,
+    SponsorJoinRequestCommitToken, SponsorJoinRequestState, SponsorJoinRequestStateError,
+    SponsorJoinRequestStatePort,
 };
 pub use query_pending_space_transition::QueryPendingSpaceTransitionError;
 pub use security_transition::{
@@ -65,7 +75,6 @@ pub use space_transition::{
 
 pub(super) use cancel_space_join::CancelSpaceJoinUseCase;
 pub(super) use complete_pending_space_transition::CompletePendingSpaceTransitionUseCase;
-pub(super) use handle_space_admission_message::HandleSpaceAdmissionMessageUseCase;
 pub(super) use invitation::{
     CancelPairingInvitationUseCase, InMemoryPairingInvitationHolder,
     IssuePairingInvitationForAddressUseCase, IssuePairingInvitationUseCase,
@@ -73,4 +82,3 @@ pub(super) use invitation::{
 };
 pub(super) use protocol::SpaceAdmissionProtocol;
 pub(super) use query_pending_space_transition::QueryPendingSpaceTransitionUseCase;
-pub(super) use recover_space_admissions::RecoverSpaceAdmissionsUseCase;

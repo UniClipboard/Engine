@@ -1,7 +1,8 @@
 use super::id::AdmissionChannelPeerId;
 
 macro_rules! define_redacted_artifact {
-    ($name:ident, $max_size:expr) => {
+    ($(#[$metadata:meta])* $name:ident, $max_size:expr) => {
+        $(#[$metadata])*
         #[derive(PartialEq, Eq)]
         pub struct $name(Vec<u8>);
 
@@ -33,6 +34,9 @@ macro_rules! define_redacted_artifact {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+/// 构造不透明准入材料时的错误。
+///
+/// 准入规则只确认材料存在且处于允许范围，不解释材料内部内容。
 pub enum AdmissionArtifactError {
     #[error("the admission artifact is empty")]
     Empty,
@@ -40,28 +44,115 @@ pub enum AdmissionArtifactError {
     Oversized,
 }
 
-define_redacted_artifact!(AdmissionKeyPackage, 1024 * 1024);
-define_redacted_artifact!(AdmissionIdentitySignature, 64 * 1024);
-define_redacted_artifact!(SpaceAdmissionRoute, 64 * 1024);
-define_redacted_artifact!(AdmissionContinuationRoute, 64 * 1024);
-define_redacted_artifact!(AdmissionSignedMembershipHistory, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionMlsCommit, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionMlsWelcome, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionSealedRecoveryMaterial, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionSourceSnapshot, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionEncryptedPasswordEquivalent, 1024 * 1024);
-define_redacted_artifact!(AdmissionContinuationCredential, 1024 * 1024);
-define_redacted_artifact!(AdmissionInvitationClaim, 1024 * 1024);
-define_redacted_artifact!(AdmissionBaseSnapshot, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionStagedSecurityState, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionStagedTargetInput, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionStagedTarget, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionSealedSecurityState, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionActivatedSecurityState, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionSpaceTransition, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionSpaceTransitionResult, 4 * 1024 * 1024);
-define_redacted_artifact!(AdmissionHelperSecurityState, 4 * 1024 * 1024);
+define_redacted_artifact!(
+    /// Joiner 放入 `JoinRequest` 的候选成员密钥材料，用于把本次加入绑定到后续候选结果。
+    AdmissionKeyPackage,
+    1024 * 1024
+);
+define_redacted_artifact!(
+    /// Joiner 对本次加入身份材料的签名，用于证明请求中的身份与候选成员一致。
+    AdmissionIdentitySignature,
+    64 * 1024
+);
+define_redacted_artifact!(
+    /// 首次加入和待重试交换使用的不透明到达信息；准入规则只保存它，不解释其内部内容。
+    SpaceAdmissionRoute,
+    64 * 1024
+);
+define_redacted_artifact!(
+    /// 首次认证后继续同一 admission 所需的不透明到达信息，不能用于创建另一条加入流程。
+    AdmissionContinuationRoute,
+    64 * 1024
+);
+define_redacted_artifact!(
+    /// 准入流程使用的完整已签名成员历史，作为候选基础和正式目标成员事实。
+    AdmissionSignedMembershipHistory,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Sponsor 为固定候选生成的成员安全变更材料，随 `Candidate` 交给 Joiner。
+    AdmissionMlsCommit,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Sponsor 为 Joiner 生成的初始成员安全材料，与同一 `Candidate` 的变更和承诺绑定。
+    AdmissionMlsWelcome,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Sponsor 正式提交候选后封存的恢复材料，只能恢复同一次已提交的 admission。
+    AdmissionSealedRecoveryMaterial,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Joiner 开始加入前的来源 Space 快照，用于判断并恢复后续 Space 切换。
+    AdmissionSourceSnapshot,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Joiner 首次认证前持有的口令等价材料；认证完成后必须由 continuation credential 替代。
+    AdmissionEncryptedPasswordEquivalent,
+    1024 * 1024
+);
+define_redacted_artifact!(
+    /// 首次认证后继续同一 admission 的凭据，绑定本次 admission 和双方 channel peer。
+    AdmissionContinuationCredential,
+    1024 * 1024
+);
+define_redacted_artifact!(
+    /// 邀请已绑定到本次 admission 和 Joiner 身份的消费证据，用于阻止邀请被改绑。
+    AdmissionInvitationClaim,
+    1024 * 1024
+);
+define_redacted_artifact!(
+    /// Sponsor 接受 `JoinRequest` 时的精确成员与安全基础；后续候选必须继续基于这份事实。
+    AdmissionBaseSnapshot,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Sponsor 已准备但尚未正式提交的候选安全状态，不能作为正式成员状态使用。
+    AdmissionStagedSecurityState,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Joiner 从 `Candidate` 取得、等待完整验证的目标输入；它尚不代表目标 Space 可用。
+    AdmissionStagedTargetInput,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Joiner 已验证但尚未激活的目标 Space 状态；完成切换前不能成为活动状态。
+    AdmissionStagedTarget,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Sponsor 正式提交成员变化后封存的安全状态；确认 Joiner 已应用前不能激活。
+    AdmissionSealedSecurityState,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Sponsor 确认 Joiner 已应用正式成员变化后激活的安全状态。
+    AdmissionActivatedSecurityState,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Joiner 接受 `Complete` 后生成的 Space 切换计划；计划完成前目标 Space 不能活动。
+    AdmissionSpaceTransition,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// Space 切换计划的完成结果，用于把 Joiner 从 Activating 推进到 Active。
+    AdmissionSpaceTransitionResult,
+    4 * 1024 * 1024
+);
+define_redacted_artifact!(
+    /// CompletionHelper 完成已正式提交 admission 所需的安全状态；它不能创建或改变成员事实。
+    AdmissionHelperSecurityState,
+    4 * 1024 * 1024
+);
 
+/// CompletionHelper 恢复挑战使用的一次性 256-bit nonce。
+///
+/// 全零值被拒绝；nonce 与双方最后消息位置和单调 challenge counter 一同绑定，防止旧挑战跨连接重放。
 #[derive(PartialEq, Eq)]
 pub struct AdmissionHelperNonce([u8; 32]);
 
@@ -85,6 +176,7 @@ impl std::fmt::Debug for AdmissionHelperNonce {
     }
 }
 
+/// 一次已认证准入连接两端的身份绑定；本地与远端身份必须不同。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct AdmissionPeerBinding {
     local_peer_id: AdmissionChannelPeerId,
@@ -121,6 +213,7 @@ impl std::fmt::Debug for AdmissionPeerBinding {
     }
 }
 
+/// Joiner 为本次 admission 生成的受限恢复公钥，只能证明同一次加入的恢复身份。
 #[derive(PartialEq, Eq)]
 pub struct AdmissionRecoveryPublicKey([u8; 32]);
 

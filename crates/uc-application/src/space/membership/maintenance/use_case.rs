@@ -45,7 +45,10 @@ impl MaintainSpaceMembershipUseCase {
         if !peer_online
             && !record(
                 &mut report,
-                self.deps.admissions.recover_space_admissions().await,
+                self.deps
+                    .admissions
+                    .recover_space_admissions(&trigger)
+                    .await,
             )
         {
             return report;

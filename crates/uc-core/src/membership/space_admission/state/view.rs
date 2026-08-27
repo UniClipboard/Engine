@@ -1,9 +1,84 @@
 use super::super::message::SpaceAdmissionEnvelopeV1;
 use super::*;
 
+pub enum AdmissionPendingRecovery<'a> {
+    Initial {
+        encrypted_password_equivalent: &'a AdmissionEncryptedPasswordEquivalent,
+        pending_exchange: &'a PendingAdmissionExchange,
+    },
+    Continuation {
+        peer_binding: AdmissionPeerBinding,
+        continuation_credential: &'a AdmissionContinuationCredential,
+        pending_exchange: &'a PendingAdmissionExchange,
+    },
+}
+
+pub struct SponsorCandidatePreparation<'a> {
+    admission_id: SpaceAdmissionId,
+    join_request: &'a SpaceAdmissionEnvelopeV1,
+    base_snapshot: &'a AdmissionBaseSnapshot,
+    peer_binding: AdmissionPeerBinding,
+}
+
+impl SponsorCandidatePreparation<'_> {
+    pub const fn admission_id(&self) -> SpaceAdmissionId {
+        self.admission_id
+    }
+
+    pub const fn join_request(&self) -> &SpaceAdmissionEnvelopeV1 {
+        self.join_request
+    }
+
+    pub const fn base_snapshot(&self) -> &AdmissionBaseSnapshot {
+        self.base_snapshot
+    }
+
+    pub const fn peer_binding(&self) -> AdmissionPeerBinding {
+        self.peer_binding
+    }
+}
+
 impl SpaceAdmissionAggregate {
     pub const fn is_terminal(&self) -> bool {
         matches!(self.state, SpaceAdmissionRecordState::Terminal(_))
+    }
+
+    pub fn pending_recovery(&self) -> Option<AdmissionPendingRecovery<'_>> {
+        match &self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) => {
+                match &state.channel_state {
+                    SpaceAdmissionJoinerChannelState::AwaitingAuthentication {
+                        encrypted_password_equivalent,
+                    } => Some(AdmissionPendingRecovery::Initial {
+                        encrypted_password_equivalent,
+                        pending_exchange: &state.pending_exchange,
+                    }),
+                    SpaceAdmissionJoinerChannelState::Authenticated {
+                        peer_binding,
+                        continuation_credential,
+                    } => Some(AdmissionPendingRecovery::Continuation {
+                        peer_binding: *peer_binding,
+                        continuation_credential,
+                        pending_exchange: &state.pending_exchange,
+                    }),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn sponsor_candidate_preparation(&self) -> Option<SponsorCandidatePreparation<'_>> {
+        let SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Accepted(state)) =
+            &self.state
+        else {
+            return None;
+        };
+        Some(SponsorCandidatePreparation {
+            admission_id: self.admission_id,
+            join_request: &state.join_request,
+            base_snapshot: &state.base_snapshot,
+            peer_binding: state.peer_binding,
+        })
     }
 
     pub fn current_exact_reply(&self) -> Option<&SpaceAdmissionEnvelopeV1> {

@@ -1,6 +1,43 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
+    pub fn reject_before_authentication(
+        mut self,
+        reason: SpaceAdmissionRejectionReason,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        if !matches!(
+            reason,
+            SpaceAdmissionRejectionReason::InvitationUnavailable
+                | SpaceAdmissionRejectionReason::AuthenticationRejected
+                | SpaceAdmissionRejectionReason::PeerUpgradeRequired
+        ) {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) =
+            self.state
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        if !matches!(
+            state.channel_state,
+            SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. }
+        ) {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        self.record_version = record_version;
+        self.state = SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+            SpaceAdmissionRejectedState::LocalJoiner(SpaceAdmissionLocalJoinerRejected {
+                join_id: state.join_id,
+                reason,
+            }),
+        ));
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub fn cancel_before_authentication(
         mut self,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {

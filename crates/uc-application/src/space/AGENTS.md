@@ -86,7 +86,7 @@ flowchart LR
 | 对端历史关系 | `PeerReconciliationRecord` | 查询、scope、历史同步、受限投递 | `Consistent` 也不能在无 AddDevice 时授予资格 |
 | 入站历史分页 | `InboundMembershipTransfer` | 历史接收 case | 未完整验证前不能替换正式历史 |
 | 成员效果进度 | `PendingMembershipEffect` | 效果恢复和 scope | 不能失败后回滚正式历史 |
-| 加入尝试和 outbox | `SpaceJoinRecord` 位于 ledger | 准入 cases、查询和恢复 | 网络恢复不能创建第二次用户尝试 |
+| 加入记录和 outbox | Core `SpaceJoinRecord` 定义合法状态变化，ledger 负责版本和原子保存 | 准入 cases、查询和恢复 | 网络恢复不能创建第二次用户加入；case 不能逐字段拼装终态 |
 | 设备信任 revision | ledger 顶层 `revision` 与 profile metadata 同事务推进 | 查询和产品失效通知 | 不能取多份 revision 的最大值 |
 | 在线状态 | reachability/presence adapter | 查询展示、拨号筛选 | 不能授予成员资格或历史接收权 |
 | 重新配对提示 | `RePairingState` | setup query、rebuild、AddDevice 最终激活 | 不能在安全效果完成前清除 |
@@ -147,7 +147,7 @@ flowchart LR
 
 | 目录 | 主要文件 | 职责 |
 | --- | --- | --- |
-| `membership/ledger/` | `repository.rs`, `model.rs`, `admission.rs`, `current_scope.rs`, `effect_executor.rs`, `restricted_delivery.rs`, `initializer.rs` | 验证和原子提交全部 application 成员事实 |
+| `membership/ledger/` | `repository.rs`, `model.rs`, `join_record.rs`, `current_scope.rs`, `effect_executor.rs`, `restricted_delivery.rs`, `initializer.rs` | 验证和原子提交全部 application 成员事实；加入记录版本只在 ledger 内推进 |
 | `membership/query_device_trust/` | `use_case.rs`, `model.rs`, `ports.rs`, `error.rs` | 单次读取完整设备信任状态 |
 | `membership/remove_space_member/` | `use_case.rs`, `model.rs`, `ports.rs`, `error.rs` | 本机发起正式成员移除 |
 | `membership/decide_device_trust_change/` | `use_case.rs`, `model.rs`, `error.rs` | 接受或拒绝远端移除变化 |
@@ -529,6 +529,8 @@ flowchart TD
 - 用户 Join 才能新建记录；recovery 只扫描并推进已有记录。
 - Commit 后不回滚；Cancel 只在提交边界前生效。
 - outbox 的成功、稳定拒绝和稳定邀请消费结果都要结清，避免永久重发。
+- 用户取消、Space transition 推进和完成终态由 `SpaceJoinRecord` 生成；case 不得逐字段修改 role、terminal result 或 transition result。
+- `record_version` 由 `MembershipLedger` 在提交时推进；case 和 preparation 不得计算下一版本。
 
 ### 修改 runtime
 
@@ -576,7 +578,7 @@ flowchart TD
 | 历史入站 | `membership/handle_history_message/tests.rs` |
 | 历史出站 | `membership/synchronize_history/tests.rs` |
 | maintenance/runtime | `membership/maintenance/tests.rs` |
-| Join/Cancel | `admission/*/target_tests.rs` |
+| Join/Cancel | `admission/join_space/target_tests.rs`, `admission/cancel_space_join/tests.rs` |
 | 准入入站 | `admission/handle_space_admission_message/tests.rs` |
 | 准入恢复 | `admission/recover_space_admissions/tests.rs` |
 | 完整目标 ports 组装 | `application_tests.rs` |

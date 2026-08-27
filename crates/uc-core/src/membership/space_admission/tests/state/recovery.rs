@@ -1,4 +1,72 @@
 #[test]
+fn initiated_joiner_exposes_one_complete_initial_recovery_view() {
+    let aggregate = initiated_joiner_aggregate_fixture();
+
+    let recovery = aggregate
+        .pending_recovery()
+        .expect("Initiated Joiner requires an initial authenticated exchange");
+
+    let AdmissionPendingRecovery::Initial {
+        encrypted_password_equivalent,
+        pending_exchange,
+    } = recovery;
+    assert_eq!(encrypted_password_equivalent.as_bytes(), &[0xf8; 32]);
+    assert_eq!(pending_exchange.route().as_bytes(), &[0xf9; 32]);
+    assert_eq!(
+        pending_exchange.request_envelope().kind(),
+        SpaceAdmissionMessageKind::JoinRequest
+    );
+}
+
+#[test]
+fn stable_initial_authentication_failure_is_saved_as_local_rejection() {
+    let rejected = initiated_joiner_aggregate_fixture()
+        .reject_before_authentication(SpaceAdmissionRejectionReason::AuthenticationRejected)
+        .expect("an unauthenticated Joiner can save a stable authentication rejection");
+
+    assert_eq!(rejected.record_version(), 1);
+    assert!(rejected.is_terminal());
+}
+
+#[test]
+fn authenticated_joiner_exposes_continuation_recovery_for_the_same_request() {
+    let aggregate = initiated_joiner_aggregate_fixture()
+        .with_authenticated_channel(
+            AdmissionPeerBinding::new(
+                AdmissionChannelPeerId::from_bytes([0x35; 32]).expect("valid local peer"),
+                AdmissionChannelPeerId::from_bytes([0x36; 32]).expect("valid remote peer"),
+            )
+            .expect("distinct peers"),
+            AdmissionContinuationCredential::from_bytes(vec![0x37; 64])
+                .expect("valid continuation credential"),
+        )
+        .expect("initial authentication transition")
+        .into_replacement();
+
+    let AdmissionPendingRecovery::Continuation {
+        peer_binding,
+        continuation_credential,
+        pending_exchange,
+    } = aggregate
+        .pending_recovery()
+        .expect("authenticated Joiner must resume the same exchange")
+    else {
+        panic!("authenticated Joiner must not repeat initial authentication");
+    };
+    assert_eq!(peer_binding.local_peer_id().as_bytes(), &[0x35; 32]);
+    assert_eq!(continuation_credential.as_bytes(), &[0x37; 64]);
+    assert_eq!(pending_exchange.route().as_bytes(), &[0xf9; 32]);
+    assert_eq!(
+        pending_exchange
+            .request_envelope()
+            .header()
+            .message_id()
+            .as_bytes(),
+        &[0xf5; 32]
+    );
+}
+
+#[test]
 fn recovery_required_terminal_blocks_further_protocol_progress() {
     let recovery = joiner_candidate_aggregate_fixture()
         .require_recovery(AdmissionRecoveryCategory::ProtocolConflict)

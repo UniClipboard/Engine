@@ -47,3 +47,4 @@ pub use terminal::{
     SpaceAdmissionRejectedState, SpaceAdmissionSponsorRejected, SpaceAdmissionSupersededState,
     SpaceAdmissionSupersededTerminal,
 };
+pub use view::{AdmissionPendingRecovery, SponsorCandidatePreparation};

@@ -235,12 +235,80 @@ impl JoinerStartStatePort for PassivePorts {
 }
 
 #[async_trait]
-impl PrepareSpaceAdmissionMessagePort for PassivePorts {
-    async fn prepare(
+impl PendingAdmissionRecoveryStatePort for PassivePorts {
+    async fn load(
+        &self,
+        _trigger: AdmissionRecoveryTrigger,
+    ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError> {
+        Ok(Vec::new())
+    }
+
+    async fn commit(
+        &self,
+        _token: AdmissionRecoveryCommitToken,
+        _transition: AdmissionTransition,
+    ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl SpaceAdmissionTransportPort for PassivePorts {
+    async fn establish_initial(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _route: &SpaceAdmissionRoute,
+        _encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
+    ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
+        Err(SpaceAdmissionTransportError::Deferred)
+    }
+
+    async fn resume(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _route: &SpaceAdmissionRoute,
+        _peer_binding: AdmissionPeerBinding,
+        _continuation_credential: &AdmissionContinuationCredential,
+    ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
+        Err(SpaceAdmissionTransportError::Deferred)
+    }
+}
+
+#[async_trait]
+impl SponsorJoinRequestStatePort for PassivePorts {
+    async fn load(
         &self,
         _message: &AuthenticatedSpaceAdmissionMessage,
-        _context: &SpaceAdmissionPreparationContext,
-    ) -> Result<PreparedSpaceAdmissionMessage, HandleSpaceAdmissionMessageError> {
+    ) -> Result<LoadedSponsorJoinRequest, SponsorJoinRequestStateError> {
+        unreachable!()
+    }
+
+    async fn commit(
+        &self,
+        _token: SponsorJoinRequestCommitToken,
+        _mutation: SponsorAdmissionMutation,
+    ) -> Result<CommittedSponsorAdmission, SponsorJoinRequestStateError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl PrepareSponsorCandidatePort for PassivePorts {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: SponsorCandidatePreparation<'_>,
+    ) -> Result<PreparedSponsorCandidate, PrepareSponsorCandidateError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl PrepareJoinerCandidatePort for PassivePorts {
+    async fn prepare(
+        &self,
+        _candidate: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedJoinerCandidateMaterial, PrepareJoinerCandidateError> {
         unreachable!()
     }
 }
@@ -383,7 +451,11 @@ async fn complete_application_starts_from_only_target_ports() {
             settings: passive.clone(),
             joiner_start_material: passive.clone(),
             joiner_start_state: passive.clone(),
-            prepare_space_admission_message: passive.clone(),
+            pending_admission_recovery_state: passive.clone(),
+            space_admission_transport: passive.clone(),
+            sponsor_join_request_state: passive.clone(),
+            prepare_sponsor_candidate: passive.clone(),
+            prepare_joiner_candidate: passive.clone(),
             device_trust_observations: passive.clone(),
             membership_history_transport: passive.clone(),
             admission_outbox_delivery: passive.clone(),
@@ -396,12 +468,11 @@ async fn complete_application_starts_from_only_target_ports() {
             membership_network_activity: passive.clone(),
         },
         presence_rx,
-        Arc::new(InMemoryPairingInvitationHolder::new()),
         passive.clone(),
     );
 
     let joined = application
-        .join_space()
+        .space_admission()
         .start_join(JoinSpaceInput {
             invitation_code: uc_core::pairing::InvitationCode::new("join-code"),
             device_name: Some("New Device".to_owned()),

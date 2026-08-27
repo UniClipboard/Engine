@@ -79,7 +79,7 @@ fn active_ledger() -> LoadedMembershipLedger {
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 8;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(local_facts.device_id);
     loaded.local_member_instance = Some(local_member);
     loaded.local_join_active = true;
@@ -99,7 +99,7 @@ fn active_ledger() -> LoadedMembershipLedger {
 fn ledger_with_pending_local_removal() -> LoadedMembershipLedger {
     let mut loaded = active_ledger();
     let mut history = VersionedMembershipHistory::decode_persisted_v2(
-        loaded.membership_history_v2.as_deref().unwrap(),
+        loaded.membership_history.as_deref().unwrap(),
         &AcceptingVerifier,
     )
     .unwrap();
@@ -126,7 +126,7 @@ fn ledger_with_pending_local_removal() -> LoadedMembershipLedger {
     history
         .merge_remote_history(&incoming, local_member, &AcceptingVerifier)
         .unwrap();
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded
         .peer_reconciliation
         .get_mut(&peer_device_id)
@@ -279,7 +279,7 @@ async fn status_exposes_the_current_pending_removal_facts() {
     assert!(change.includes_local_device);
     let history = VersionedMembershipHistory::decode_persisted_v2(
         &ledger_with_pending_local_removal()
-            .membership_history_v2
+            .membership_history
             .unwrap(),
         &AcceptingVerifier,
     )

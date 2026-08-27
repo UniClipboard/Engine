@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use uc_core::membership::{
-    AdmissionOutboxPurpose, AdmissionRejectionReason, AdmissionTerminalResult, JoinerAdmissionStage,
-};
+use uc_core::membership::AdmissionOutboxPurpose;
 
 use crate::space::admission::CurrentJoinStatus;
 use crate::space::membership::project_current_join;
@@ -36,7 +34,7 @@ impl CancelSpaceJoinUseCase {
         let _guard = self.execution_lock.lock().await;
         let mut record = self
             .ledger
-            .current_local_admission_record()
+            .current_local_join_record()
             .await
             .map_err(map_ledger_error)?
             .filter(|record| record.join_id == Some(join_id))
@@ -58,9 +56,6 @@ impl CancelSpaceJoinUseCase {
             .rev()
             .find(|message| !message.superseded)
             .map(|message| message.message_id);
-        for message in &mut record.outboxes {
-            message.superseded = true;
-        }
         let cancel = crate::space::admission::outbox::message(
             record.record_id,
             AdmissionOutboxPurpose::CancelRequested,
@@ -68,21 +63,11 @@ impl CancelSpaceJoinUseCase {
             predecessor,
             b"cancel_requested",
         );
-        record.cancel_request = Some(b"cancel_requested".to_vec());
-        record.outboxes.push(cancel);
-        record.terminal_result = Some(AdmissionTerminalResult::Rejected);
-        record.rejection_reason = Some(AdmissionRejectionReason::Cancelled);
-        if !record.set_joiner_stage(JoinerAdmissionStage::Rejected) {
-            return Err(CancelSpaceJoinError::State(
-                "current join role is invalid".to_owned(),
-            ));
-        }
-        let expected_version = record.record_version;
-        record.record_version = expected_version
-            .checked_add(1)
-            .ok_or_else(|| CancelSpaceJoinError::State("join version overflow".to_owned()))?;
+        record = record
+            .cancelled(cancel)
+            .map_err(|error| CancelSpaceJoinError::State(error.to_string()))?;
         self.ledger
-            .advance_admission_record(record.record_id, expected_version, record)
+            .save_join_record_progress(record)
             .await
             .map_err(map_ledger_error)?;
         self.maintenance.wake();

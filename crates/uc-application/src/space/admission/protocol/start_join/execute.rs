@@ -1,6 +1,5 @@
-use std::sync::Arc;
-
-use super::{JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStatePort};
+use super::super::SpaceAdmissionProtocol;
+use super::JoinerStartMutation;
 use crate::space::admission::{CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 use uc_core::membership::{
     AdmissionRetryState, PendingAdmissionExchange, SpaceAdmissionAggregate,
@@ -8,29 +7,7 @@ use uc_core::membership::{
 };
 use uc_core::ports::SettingsPort;
 
-pub(crate) struct SpaceAdmissionProtocol {
-    settings: Arc<dyn SettingsPort>,
-    /// 生成初始加入材料
-    joiner_start_material: Arc<dyn JoinerStartMaterialPort>,
-    /// 读取完整开始视图并一次性提交变化
-    joiner_start_state: Arc<dyn JoinerStartStatePort>,
-    execution_lock: tokio::sync::Mutex<()>,
-}
-
 impl SpaceAdmissionProtocol {
-    pub(crate) fn new(
-        settings: Arc<dyn SettingsPort>,
-        joiner_start_material: Arc<dyn JoinerStartMaterialPort>,
-        joiner_start_state: Arc<dyn JoinerStartStatePort>,
-    ) -> Self {
-        Self {
-            settings,
-            joiner_start_material,
-            joiner_start_state,
-            execution_lock: tokio::sync::Mutex::new(()),
-        }
-    }
-
     pub(crate) async fn start_join(
         &self,
         input: JoinSpaceInput,
@@ -77,6 +54,7 @@ impl SpaceAdmissionProtocol {
                 JoinerStartMutation::new(transition, superseded),
             )
             .await?;
+        self.maintenance_wake.wake();
 
         Ok(JoinSpaceResult {
             status: CurrentJoinStatus::Pending {

@@ -41,7 +41,7 @@ impl CommitMembershipLedgerPort for MemoryRepository {
     ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
         let mut loaded = self.loaded.lock().unwrap();
         let digest = loaded
-            .membership_history_v2
+            .membership_history
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
         if loaded.revision != mutation.expected_revision
@@ -80,10 +80,9 @@ impl PrepareSpaceAdmissionMessagePort for PreparedAdmission {
     ) -> Result<PreparedSpaceAdmissionMessage, HandleSpaceAdmissionMessageError> {
         Ok(PreparedSpaceAdmissionMessage::Commit(
             PreparedSpaceAdmissionCommit {
-                expected_record_version: None,
-                invitation_generation: Some(context.revision),
+                invitation_generation: context.invitation_generation,
                 record: SpaceJoinRecord::new_joiner(
-                    message.attempt_id,
+                    message.record_id,
                     [0x31; 16],
                     JoinerAdmissionStage::Prepared,
                 ),
@@ -161,7 +160,7 @@ fn active_ledger() -> LoadedMembershipLedger {
     let mut loaded = LoadedMembershipLedger::no_current_space();
     loaded.revision = 4;
     loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history_v2 = Some(history.encode_persisted_v2().unwrap());
+    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
     loaded.local_device_id = Some(device_id);
     loaded.local_member_instance = Some(member_instance);
     loaded.local_join_active = true;
@@ -196,19 +195,19 @@ async fn inbound_admission_commits_all_facts_before_returning_the_reply() {
     );
     invitations.insert(invitation).await;
     let use_case = HandleSpaceAdmissionMessageUseCase::new(
-        ledger,
         Arc::new(PreparedAdmission),
+        ledger,
         wake.clone(),
         Arc::clone(&invitations),
         Arc::new(FixedClock),
     );
-    let attempt_id = SpaceJoinRecordId::from_bytes([0x51; 32]);
+    let record_id = SpaceJoinRecordId::from_bytes([0x51; 32]);
     let peer = DeviceId::new("peer");
 
     let reply = use_case
         .execute(AuthenticatedSpaceAdmissionMessage {
             source_device_id: peer.clone(),
-            attempt_id,
+            record_id,
             message_id: [0x52; 32],
             payload: vec![0x53],
             invitation_code: Some(code.clone()),
@@ -222,7 +221,7 @@ async fn inbound_admission_commits_all_facts_before_returning_the_reply() {
     let persisted = repository.load().await.unwrap();
     assert!(persisted
         .admission_records
-        .contains_key(attempt_id.as_bytes()));
+        .contains_key(record_id.as_bytes()));
     assert!(persisted.peer_reconciliation.contains_key(&peer));
     assert!(persisted.pending_effects.contains_key(&[0x32; 32]));
     assert_eq!(persisted.revision, 5);
@@ -233,7 +232,7 @@ async fn inbound_admission_commits_all_facts_before_returning_the_reply() {
 fn admission_message_debug_output_redacts_sensitive_fields() {
     let message = AuthenticatedSpaceAdmissionMessage {
         source_device_id: DeviceId::new("sensitive-device"),
-        attempt_id: SpaceJoinRecordId::from_bytes([0xa1; 32]),
+        record_id: SpaceJoinRecordId::from_bytes([0xa1; 32]),
         message_id: [0xa2; 32],
         payload: b"sensitive-payload".to_vec(),
         invitation_code: Some(InvitationCode::new("654321")),
@@ -259,8 +258,8 @@ async fn invalid_invitation_is_rejected_before_protocol_preparation() {
         Arc::new(AcceptingVerifier),
     ));
     let use_case = HandleSpaceAdmissionMessageUseCase::new(
-        ledger,
         Arc::new(PanickingPreparation),
+        ledger,
         Arc::new(RecordingWake(AtomicUsize::new(0))),
         Arc::new(crate::space::admission::invitation::InMemoryPairingInvitationHolder::new()),
         Arc::new(FixedClock),
@@ -269,7 +268,7 @@ async fn invalid_invitation_is_rejected_before_protocol_preparation() {
     let error = use_case
         .execute(AuthenticatedSpaceAdmissionMessage {
             source_device_id: DeviceId::new("peer"),
-            attempt_id: SpaceJoinRecordId::from_bytes([0xb1; 32]),
+            record_id: SpaceJoinRecordId::from_bytes([0xb1; 32]),
             message_id: [0xb2; 32],
             payload: vec![0xb3],
             invitation_code: Some(InvitationCode::new("000000")),

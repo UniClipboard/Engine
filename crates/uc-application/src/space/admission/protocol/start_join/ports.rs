@@ -1,5 +1,6 @@
-use super::model::{JoinerStartMutation, LoadedJoinerStartState, SpaceAdmissionCommitToken};
-use super::JoinerStartMaterial;
+use super::model::{
+    JoinerStartMaterial, JoinerStartMutation, LoadedJoinerStartState, SpaceAdmissionCommitToken,
+};
 use crate::space::admission::{JoinSpaceError, JoinSpaceInput};
 use async_trait::async_trait;
 
