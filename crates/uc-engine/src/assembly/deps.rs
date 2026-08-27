@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
 use uc_application::deps::{
-    AppDeps, ClearProfileStatePort, MembershipHistoryRepositoryPort,
+    AppDeps, ClearProfileStatePort, CurrentMemberSignaturePort, MembershipHistoryRepositoryPort,
     ProfileLifecycleRepositoryPort, SpaceMembershipStateRepositoryPort, WipeProfileKeysPort,
 };
 use uc_core::clipboard::ActiveClipboardState;
@@ -86,13 +86,13 @@ pub struct SyncEngineDeps {
     pub membership_applied_security_update_repo:
         Arc<dyn uc_core::membership::MembershipAppliedSecurityUpdateRepositoryPort>,
     /// Independent member signatures from the current OpenMLS member tree.
-    pub current_member_signatures: Arc<dyn uc_core::membership::CurrentMemberSignaturePort>,
+    pub current_member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     /// The same unlocked session used by space access and encrypted storage.
     pub membership_session: Arc<uc_infra::security::InMemorySession>,
     /// Encrypted persistence for the unified workspace convergence state.
     pub workspace_convergence_repository: Arc<dyn SpaceMembershipStateRepositoryPort>,
     /// Profile-scoped encrypted persistence for durable admission attempts.
-    pub admission_attempt_repository: Arc<dyn uc_application::deps::AdmissionAttemptRepositoryPort>,
+    pub admission_attempt_repository: Arc<dyn uc_application::deps::SpaceJoinRecordStorePort>,
     pub membership_history_repository: Arc<dyn MembershipHistoryRepositoryPort>,
     pub admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort>,
     pub device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort>,

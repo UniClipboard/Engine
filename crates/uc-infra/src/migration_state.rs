@@ -11,8 +11,8 @@ use tokio::fs;
 use uc_core::crypto::domain::{Aad, ActiveSpace, Ciphertext};
 use uc_core::ids::SpaceId;
 use uc_core::ports::clipboard::BlobMigrationRepoPort;
-use uc_core::ports::marker::{LegacyMigrationRecoveryError, LegacyMigrationRecoveryPort};
 use uc_core::ports::security::{BlobCipherError, BlobCipherPort, KeyMigrationPort, MigrationRunId};
+use uc_core::ports::setup::{LegacyMigrationRecoveryError, LegacyMigrationRecoveryPort};
 use uc_observability_contract::analytics::AnalyticsFacade;
 use uuid::Uuid;
 

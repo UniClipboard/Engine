@@ -41,7 +41,7 @@ pub(super) fn build_space_access_ports(
 ) -> (
     SpaceAccessPorts,
     Arc<uc_infra::security::DefaultSpaceAccessAdapter>,
-    Arc<dyn uc_core::membership::CurrentMemberSignaturePort>,
+    Arc<dyn uc_application::deps::CurrentMemberSignaturePort>,
     Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
 ) {
     let security_repository = Arc::new(DieselSpaceSecurityStore::new(
@@ -63,7 +63,7 @@ pub(super) fn build_space_access_ports(
             legacy_bootstrap_repository,
         ),
     );
-    let current_member_signatures: Arc<dyn uc_core::membership::CurrentMemberSignaturePort> =
+    let current_member_signatures: Arc<dyn uc_application::deps::CurrentMemberSignaturePort> =
         space_access_adapter.clone();
     let unlock = Arc::new(ApplicationSpaceUnlockAdapter {
         inner: Arc::clone(&space_access_adapter),
@@ -393,6 +393,9 @@ pub(super) fn create_infra_layer(
     let app_version_state: Arc<dyn AppVersionStatePort> = Arc::new(
         FileAppVersionStateRepository::with_defaults(app_data_root.clone()),
     );
+    let engine_version_state: Arc<dyn uc_core::ports::EngineVersionStatePort> = Arc::new(
+        uc_infra::FileEngineVersionStateRepository::with_defaults(app_data_root.clone()),
+    );
 
     // 首次同步事件去重 flag——独立小文件 first-sync-state.json，与升级游标同级。
     // 三 flag（attempted / succeeded / file_succeeded）合一，schema_version=1，
@@ -455,6 +458,7 @@ pub(super) fn create_infra_layer(
         settings_repo,
         space_rebuild_progress,
         app_version_state,
+        engine_version_state,
         first_sync_state,
         clock,
         hash,

@@ -52,7 +52,7 @@ use uc_application::facade::{
     InboundClipboardApplyPort, MemberRosterDeps, MemberRosterFacade, MembershipConnectivityDeps,
     MembershipConvergenceDeps, SpaceAdmissionDeps, SpaceApplicationRuntime, SpaceFacade,
     SpaceFacadeDeps, SpaceModules, SpaceModulesDeps, SpaceSessionDeps, SpaceTransitionDeps,
-    TransferHostEvent, UpgradeFacade, UpgradeFacadeDeps, WorkspaceMembershipDeps,
+    TransferHostEvent, UpgradeFacade, UpgradeFacadeDeps, MembershipStateCoordinatorDeps,
 };
 use uc_application::facade::{
     ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
@@ -68,7 +68,7 @@ use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::space::ProofPort;
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
-    ClipboardReceiverPort, ConnectionChannelPort, LocalIdentityPort, PresencePort,
+    ClipboardReceiverPort, ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
 };
 use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
 use uc_infra::network::iroh::{
@@ -144,7 +144,7 @@ pub struct SyncEngineAssembly {
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
     /// Shared peer reachability source for clipboard recovery and roster
     /// consumers. All subscribers observe the same online transitions.
-    pub(crate) presence: Arc<dyn PresencePort>,
+    pub(crate) presence: Arc<dyn PeerReachabilityPort>,
     /// Slice 3 Phase 2:大 payload 发布 / 拉取门面。CLI 与后续 daemon/UI
     /// 都从这里走完整的 hash 去重、加解密和 blob 传输编排。
     pub blob: Arc<BlobTransferFacade>,
@@ -272,8 +272,8 @@ impl SyncEngineAssembly {
         self.convergence_assembly.removal_gate()
     }
 
-    pub(crate) fn workspace_convergence(&self) -> Arc<uc_application::facade::WorkspaceMembership> {
-        self.convergence_assembly.workspace_membership()
+    pub(crate) fn workspace_convergence(&self) -> Arc<uc_application::facade::MembershipStateCoordinator> {
+        self.convergence_assembly.membership_state_coordinator()
     }
 
     /// Coordinated teardown. Order matters:
@@ -601,7 +601,6 @@ pub async fn build_sync_engine_assembly(
     ) {
         upgrade.acknowledge(current_app_version).await?;
     }
-    let legacy_profile_isolation_required = upgrade_status.requires_legacy_profile_isolation();
     // IdentityFingerprintFactory is stateless — the one in SecurityPorts is
     // the same `Sha256IdentityFingerprintFactory` ZST, but we construct a
     // fresh one here rather than down-casting through `dyn` because
@@ -666,7 +665,7 @@ pub async fn build_sync_engine_assembly(
     )?;
     // Presence is installed before the convergence owner is assembled so the
     // owner can expose reachability as an independent product fact.
-    let presence: Arc<dyn PresencePort> = builder.install_presence(
+    let presence: Arc<dyn PeerReachabilityPort> = builder.install_presence(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&deps.device.member_repo),
         Arc::clone(&space_setup.peer_admission),
@@ -674,9 +673,9 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.system.clock),
     );
     let convergence_assembly = SpaceModules::new(SpaceModulesDeps {
-        workspace: WorkspaceMembershipDeps {
+        workspace: MembershipStateCoordinatorDeps {
             repository: Arc::clone(&space_setup.workspace_convergence_repository),
-            admission_attempts: Arc::clone(&space_setup.admission_attempt_repository),
+            join_records: Arc::clone(&space_setup.admission_attempt_repository),
             membership_history_repo: Arc::clone(&space_setup.membership_history_repository),
             historical_membership_signatures: Arc::new(
                 uc_infra::security::OpenMlsHistoricalSignatureVerifier,
@@ -910,9 +909,8 @@ pub async fn build_sync_engine_assembly(
         session: SpaceSessionDeps {
             space_access: deps.security.space_access_ports.clone(),
             mobile_consumable_backfill: Arc::clone(&deps.clipboard.mobile_consumable_backfill),
-            legacy_profile_isolation_required,
-            app_version_state: Arc::clone(&deps.app_version_state),
-            current_app_version: current_app_version.to_owned(),
+            engine_version_state: Arc::clone(&deps.engine_version_state),
+            current_engine_version: env!("CARGO_PKG_VERSION").to_owned(),
             current_space_identity: Arc::clone(&deps.current_space_identity),
             initial_space_activation: Arc::clone(&deps.initial_space_activation),
         },

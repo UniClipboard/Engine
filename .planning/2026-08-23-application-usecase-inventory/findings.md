@@ -1,5 +1,48 @@
 # 发现：Space Application 用例全量梳理
 
+## 2026-08-25：成员历史同步标准用例
+
+- 原 `synchronize_membership_history/use_case.rs` 同时实现网络入站、单设备同步和整 Space 同步，不是标准用例。
+- 主业务动作确定为 `SynchronizeMembershipHistoryUseCase::execute()`：在一个固定总预算内，按稳定顺序与当前全部有效成员同步本机历史。
+- 当前成员范围不可用是唯一整次失败；单设备离线、拒绝、协议失败或超时只延后该设备，保持原有尽力同步语义。
+- 单设备完整交换由 `MembershipHistoryPeerSynchronizerPort` 隐藏，调用方不理解分页、历史导出、确认或关系更新。
+- 网络入站处理保留在独立 `exchange.rs`，不属于主动同步用例。
+- Space 运行期的上线事件、恢复与显式请求，以及邀请方提交准入前的同步，均复用同一个 UseCase；旧总对象不再公开 `synchronize_chain()`。
+## 2026-08-25：Workspace Membership 标准用例梳理
+
+- 当前面向产品的三个动作已经存在标准用例：`QuerySpaceMembershipStatusUseCase`、`InitiateSpaceMemberRemovalUseCase`、`DecidePendingMembershipRemovalUseCase`。Engine 经 `SpaceMembershipFacade` 调用它们，方向正确。
+- `WorkspaceMembership` 仍公开 `query()`、`decide_membership_removal()`、`synchronize_chain()`、`handle_membership_history()` 等入口，其中查询和决定与标准用例形成第二套行为表面；dev-tools 仍通过旧 Facade 路径直接使用旧查询与旧决定。
+- `WorkspaceMembership` 同时持有状态仓储、加入记录、成员历史、签名、安全更新、成员资料、在线状态、发现通信、重试请求和通知，接口要求调用方理解的知识远大于单一成员用例。
+- `membership/bootstrap.rs` 是新建或重建 Space 时的内部生命周期步骤，不是独立用户用例；应由 initialize/reset/rebuild 的完整流程调用，保留内部接口。
+- `membership/history.rs` 的入站处理和对端同步是后台通信流程；`synchronize_chain()` 是运行期恢复动作，不是用户用例。应由一个成员历史同步负责人隐藏收发、验证、合并、确认和重试。
+- `membership/effects.rs` 的待处理决定投递是重启可恢复的后台效果，不是用户用例；应由成员运行期调用一个完整恢复动作，不暴露逐项步骤。
+- `projection/current_scope.rs` 提供内容交换门禁和当前成员范围，是共享查询模块；它服务剪贴板、传输和准入，不能改造成产品用例。
+- `projection/snapshot.rs::query()` 是旧开发工具快照，与产品的成员状态查询重复；应让 dev-tools 使用标准查询或明确的诊断查询用例，随后删除旧公开查询。
+- `discovery/` 中的候选发现、交换和重试属于另一套事件驱动后台运行期 `MembershipConvergence`，不应拆成用户用例，也不应并入三个成员命令用例。
+
+### 推荐的标准用例表面
+
+1. `QuerySpaceMembershipStatusUseCase::execute()`：唯一产品成员状态查询，组合当前成员资格、成员资料、在线状态、待处理移除、当前加入和待加入成员；只读，不推进流程。
+2. `InitiateSpaceMemberRemovalUseCase::execute(target_device)`：唯一发起成员移除动作，负责校验、签名、保存、通知恢复运行期并返回已保存结果。
+3. `DecidePendingMembershipRemovalUseCase::execute(change_id, choice, confirm_self_removal)`：唯一决定待处理移除动作，负责幂等、并发变化、自移除确认、签名、原子保存、后续效果和最终状态。
+4. 建议新增内部 `RecoverPendingMembershipEffectsUseCase::execute()`：后台唯一恢复动作，完成待投递决定、待发安全更新与必要重试；运行期只触发一次，不理解内部项目。
+5. 建议新增内部 `SynchronizeMembershipHistoryUseCase::execute(trigger)`：后台唯一历史同步动作，统一入站处理、主动同步、验证、合并、确认和失败分类；通信端点与运行期均委托它。
+
+### 保留为内部共享模块
+
+- `MembershipHistoryStore`：可靠读取、验证和原子提交成员历史。
+- 当前成员范围投影：向内容交换和准入提供稳定成员事实。
+- 新 Space 成员基线建立：只服务 initialize/reset/rebuild。
+- `MembershipConvergence`：候选发现与成员传播的独立后台运行期。
+
+### 删除检查
+
+- 删除三个标准用例会把产品结果解释、并发、幂等和通知重新散回 Facade，说明它们有真实深度，应保留。
+- 删除 `WorkspaceMembership::query` 与 `decide_membership_removal` 后，复杂度不会消失，只会由现有标准用例继续完整承担，说明这两个旧入口是重复表面，应删除。
+- 删除当前 `WorkspaceMembership` 总对象会把历史同步、后台效果、投影和生命周期步骤散回多个调用方，说明其内部能力需要保留，但应拆成少量深模块，不应继续作为一个多用途公开对象。
+- 最终边界已验证可编译：加入方三个可靠推进阶段由 `JoinerAdmissionProgression` 完整负责；双方共享的持久消息格式、顺序校验、确认构造和错误映射位于 `durable/protocol.rs`。邀请方只依赖共享协议规则，不依赖加入方推进对象。
+- `DurableAdmissionTransaction` 的最后一项邀请方行为是成员提交前拒绝；它只依赖加入记录仓储和邀请方候选阶段，已归入邀请方取消与拒绝模块。该总对象现在只剩加入方验证准备、应用提交和完成激活三段角色流程。
+
 ## 初始发现
 
 - Space 当前有 11 个标准 `use_case.rs`：initialize、unlock、lock session、recover session、reset、rebuild、upgrade、query access、query membership、initiate removal、decide removal。
@@ -8,6 +51,148 @@
 - “有 `UseCase` 后缀”不是唯一判断标准；需要从 Engine Space 操作、Space Facade、Profile Space Facade 和后台入口反向建立行为清单。
 - 当前只稳定 Space application 行为和接口，其他 application 领域与 infra 实现暂缓。
 - 刚才的架构检查会隐式执行 `openmls-validation` 构建；已停止相关进程，后续在用户解除限制前不再运行。
+
+## 2026-08-24：Space 加入记录命名
+
+- `AdmissionAttemptV1` 实际是加入方与邀请方共同保存、可跨重启恢复的一次 Space 加入记录，不是临时的准入尝试。
+- 记录自身已有 `format_version`，读取路径也负责校验和兼容旧格式；类型名中的 `V1` 不承担兼容作用。
+- 本次统一 `SpaceJoinRecord`、`SpaceJoinRecordId`、`CompletedSpaceJoinRecord`、`SpaceJoinRecordStorePort` 和 `SpaceJoinRecordStoreError`。
+- 配套格式常量和存储内部类型同步改名，但数值、字段布局和编码顺序不变。
+- 普通局部变量和字段 `attempt` / `attempt_id` 保留，避免业务流程表达变得冗长；它们在 Space Join 上下文中已经明确。
+- 第二轮分类：`AdmissionCompletionRecovery*V1` 与 `AdmissionIdentityBindingV1` 有独立编码、版本校验和升级拒绝，继续保留版本后缀。
+- 加入阶段、角色状态、待发/已收消息、最终结果、拒绝原因和 profile 元数据只是稳定业务状态，由外层记录格式负责兼容，删除 `V1`。
+- application 中的本机加入变更、当前加入视图和投递结果只在进程内使用，也删除 `V1`。
+
+## 2026-08-24：准入消息送达结果收口设计
+
+- `RecoverPendingAdmissionsUseCase` 当前同时负责扫描、路由选择、传输、按消息类型解释结果、调用加入方/邀请方/取消规则、统计和终态整理。
+- 第 185-283 行实际上是一张完整的“传输结果 + 消息类型 -> 状态推进规则”路由表；恢复流程知道十种消息及每种合法返回组合。
+- 多个状态推进规则同时被实时握手调用，不能复制或搬回恢复流程；需要保留单一规则，同时从恢复调用方隐藏逐项路由。
+- `durable/settlement.rs` 当前只负责终态压缩检查，是扩展为完整送达结果结算负责人的候选，但仍需核对实时调用、路由准备和传输返回语义。
+- 正式 `PairingAdmissionOutboxDelivery` 当前只发送 `CancelRequested`，并只返回远端 `Rejected`；其他消息直接返回暂缓。
+- `Persisted`、邀请消费和多种普通消息确认分支目前主要由测试替身驱动，不能据此声称生产恢复已经支持所有消息。
+- 实时握手会直接调用邀请方/加入方的同一状态推进规则，因此新的结算模块应复用这些规则，而不是取代或复制实时协议流程。
+- `AdmissionOutboxDeliveryPort` 有一个正式实现和多个测试替身；正式实现当前只恢复旧加入取消，测试替身模拟完整消息确认矩阵。
+- `AdmissionRecoveryReportV1` 不进入正式结果，只被内部协议回归读取；正式 `execute()` 只返回成功或失败。
+- 新负责人不需要新增 port：它是 application 内部具体模块，持有记录存储、安全切换和空间切换能力，生产与测试通过同一具体入口。
+- 恢复用例应只负责扫描、选择路由、调用传输和统计；“传输结果是否合法、怎样推进状态、能否整理记录”全部归新负责人。
+
+### 推荐设计
+
+#### `recover_pending_admissions/outbox_recovery.rs`
+
+- 具体模块 `AdmissionOutboxRecovery`，不定义 port。
+- 构造时持有记录存储、消息传输和 `AdmissionDeliverySettlement`。
+- 唯一动作 `execute() -> Result<AdmissionOutboxRecoveryReport, WorkspaceConvergenceError>`。
+- 内部负责扫描可恢复记录、选择取消消息的 continuation/invitation 路由、逐条调用传输、把成功返回交给 settlement、忽略暂时传输失败并汇总 attempted/confirmed/compacted。
+- 不解释任何消息结果，不直接调用 joiner/sponsor/cancel 规则，不判断终态整理条件。
+
+#### `durable/delivery_settlement.rs`
+
+- 具体模块 `AdmissionDeliverySettlement`，不定义 port。
+- 构造时持有记录存储、安全切换和 Space 切换能力。
+- 唯一动作：`settle(attempt_id, sent_message, delivery_result) -> Result<AdmissionDeliverySettlementResult, WorkspaceConvergenceError>`。
+- 输入必须包含原发送消息，确保返回类型与消息用途的组合可验证；不能只凭返回结果推进状态。
+- 返回只有 `Deferred` 与 `Confirmed { compacted: bool }`，调用方不看到加入方、邀请方或取消内部状态。
+- 内部唯一持有“传输结果 + 消息用途 -> 状态规则”的路由表：邀请消费交给加入方消费规则，普通确认记录精确消息，拒绝/完成/后续消息交给邀请方规则，旧加入取消确认交给旧加入清理规则，远端拒绝交给加入方拒绝规则。
+- 确认成功后由同一动作重新读取最新记录；满足终态整理条件时调用现有严格整理能力并返回 `compacted: true`，未满足时正常返回 false。
+- outbox recovery 收到 `compacted: true` 后立即停止处理该记录的旧消息快照，避免记录已整理后继续发送过期消息，并保证整理计数只增加一次。
+- `Deferred` 不读取或修改记录；非法结果组合继续失败关闭，不降级为暂缓。
+
+#### 顶层调用
+
+- `RecoverPendingAdmissionsUseCase` 继续负责旧资料恢复、完成帮助恢复和邀请方激活恢复，然后只调用一次 `outbox_recovery.execute()`。
+- `SpaceAdmission` 不新增送达结果方法，避免继续扩张总负责人。
+- `SpaceModules` 组装时从现有依赖一次构造 settlement 和 outbox recovery；不让 Facade 或 Engine 看见内部步骤。
+
+#### 删除与迁移
+
+- 从 `recover_pending_admissions/use_case.rs` 删除 `recover_outbox_deliveries`、完整结果 match、`record_protocol_message_delivered`、路由函数和终态整理判断。
+- `AdmissionRecoveryReportV1` 改为 `AdmissionOutboxRecoveryReport` 并只属于 outbox recovery。
+- `recover_pending_admissions/mod.rs` 不再为测试导出内部自由函数。
+- 现有 joiner/sponsor/cancel 状态函数保留为 settlement 的内部依赖，同时继续服务实时握手；待调用面稳定后再收紧可见范围，不在本次复制或合并它们。
+
+#### 验收标准
+
+- 顶层恢复文件不出现 `AdmissionOutboxDeliveryResult` 或跨 joiner/sponsor/cancel 的逐项送达结果调用；邀请方激活恢复仍可使用 Commit/Applied 用途完成其独立恢复步骤。
+- outbox recovery 不出现 joiner/sponsor/cancel 状态规则调用，只调用一次 settlement。
+- settlement 是唯一结果路由表；新增消息用途只修改该表及其接口级测试。
+- 用 settlement 表格回归覆盖全部合法组合与非法组合；用 outbox recovery 回归覆盖暂缓、传输失败、路由回退、确认计数和整理计数。
+- 保留实时握手的现有状态回归；删除只验证旧自由函数内部步骤的重复测试。
+- 当前正式适配仍仅对 `CancelRequested` 执行真实发送，其他消息保持 `Deferred`。
+
+## 2026-08-24：成员历史 V1 完全删除评估
+
+- 本次评估范围限定为成员历史 V1，不包括仓库中其他独立协议的 `V1` 格式。
+- V1 不是只有 `MembershipEventV1Evidence` / `MembershipDecisionV1Evidence`：旧模型以无后缀的 `MembershipEvent`、`MembershipOperation`、`MembershipDecision` 和旧成员历史存在。
+- 旧模型仍被生产代码使用：workspace convergence、旧资料 bootstrap、成员效果计算、current scope 投影和 admission base history 都直接读取或创建旧事件。
+- `VersionedMembershipEvent::V1Evidence` 与 `VersionedMembershipDecision::V1Evidence` 保存旧签名原文和原始编号，用于在 V2 历史中保留旧授权证据。
+- 因此完全删除不是死代码清理，而是移除一条仍在运行的旧资料/旧空间兼容线；必须先确认持久数据迁移和产品支持策略。
+- 进一步区分后确认：`MembershipEventV1Evidence`、`MembershipDecisionV1Evidence` 及 `VersionedMembershipEvent/Decision` 的 V1 分支目前没有生产调用，只有定义、导出、测试和规格引用，可作为独立死代码删除候选。
+- `VersionedMembershipHistory` 当前实际保存的是 V2 事件，旧资料通过 `MembershipActivationBaselineV2::LegacyAccepted` 的检查点进入，而不是把 V1Evidence 继续放在事件集合中。
+- 但无后缀的旧 `MembershipHistory` 仍被生产代码读取和创建，并负责生成该 LegacyAccepted 基线；不能与无调用的 V1Evidence 包装一起直接删除。
+- 当前加密 `WorkspaceConvergenceStateV3Payload` 仍序列化 `membership_reconciliation: Option<MembershipReconciliation>`；即使值为空，字段也属于 V3 布局。
+- 直接删除旧类型和 V3 读取结构会让现有 V3 工作空间状态无法解码，影响面不是只有尚未升级的旧资料。
+- 安全完全删除需要两阶段发布：先引入只保存 V2 成员历史的 V4 工作空间状态并保留 V3 -> V4 读取迁移；确认迁移覆盖后，后续版本才能删除 V3 读取器和旧成员类型。
+- 若要求一次提交内完全删除所有旧代码，只能同时宣布现有工作空间状态不兼容，并为所有既有资料提供重置/重新配对结果；这不是内部重构。
+- 旧多成员历史无法仅凭当前本地事实自动提升为完整 V2 授权历史；现有安全路径只允许严格的单成员、身份和签名一致场景形成 `FullyVerifiedMigration`，其余保持恢复失败。
+
+### 评估结论
+
+- 可以立即删除：无生产调用的 V1Evidence / VersionedMembershipEvent/Decision 包装及专用测试、导出和规格段落。
+- 不应立即删除：`MembershipHistory`、`MembershipEvent`、`MembershipOperation`、`MembershipDecision`、`MembershipReconciliation` 及 V3 状态读取；它们仍是生产兼容和持久格式的一部分。
+- 推荐目标是 V2-only，但实施顺序必须是“停止创建旧状态 -> 写入 V4 并迁移 -> 验证真实升级 -> 后续版本删除旧读取器”，不能在当前整理中直接全删。
+
+### 加入“升级必须重置 Space”后的修正
+
+- 不再需要 V3 -> V4 的旧历史迁移，也不需要保留旧资料加入/恢复；可以把旧状态直接判定为必须重置。
+- 但新建 Space 当前仍调用 `initialize_legacy_space_membership(true)` 并创建旧 `MembershipEvent`，因此删除前必须先让新建/重置直接建立并保存 V2 单设备根历史。
+- 完成 V2 根历史替代后，application 的旧升级入口、旧事件创建、旧效果队列处理、旧移除决定和旧当前范围回退可以整体删除。
+- 持久层仍需新状态格式或明确拒绝旧 V3；既然产品要求重置，可以不实现旧历史迁移，但必须让重置入口在旧状态无法进入普通运行前仍可执行。
+- core 的 `membership_history.rs` 混放旧状态机与 V2 仍复用的通用类型，不能整文件盲删；应先迁出事件/决定编号、移除选择、关系状态和当前网络消息外壳，再删除旧状态机主体。
+
+### 可清理的 application 代码
+
+- `membership/bootstrap.rs`：用“直接建立并持久化 V2 单设备根历史”替换 `initialize_legacy_space_membership`；随后删除 `initialize_upgraded_legacy_space`、`complete_upgraded_legacy_join`、`record_local_admission_history`、`record_local_removal_history` 和旧事件签名创建代码。
+- `membership/admission_base_history.rs`：删除 `verified_legacy_admission_base_history` 以及 `verified_admission_base_history` 的旧历史回退；没有 V2 历史时直接要求重置/恢复。
+- `membership/effects.rs`：删除基于旧 `MembershipEvent` 的 `enqueue_applied_membership_effects`、`execute_pending_membership_effects` 和 `recover_pending_membership_effects`；V2 历史接收继续直接保存成员事实和应用安全更新。
+- `membership/removal.rs`：删除 `decide_membership_removal_locked` 中 V2 未命中后进入旧 `MembershipDecision` 的整段回退，以及 `submit_legacy_removal_for_test`；产品移除决定只走现有 V2 用例。
+- `projection/current_scope.rs`：删除 `membership_reconciliation` 回退，`snapshot()` 只接受 V2 当前历史；缺失历史直接要求重置。
+- `membership/history.rs`：`synchronize_chain` 的候选设备改从 V2 active members/成员资料取得，删除从旧 reconciliation 枚举设备的分支。
+- `workspace_membership/mod.rs` 及测试辅助：删除旧事件/操作/决定/reconciliation 导入、旧查询和只服务旧历史的测试夹具。
+- 删除所有只验证旧升级、旧多成员历史、旧移除决定和 V1 当前范围回退的 application 回归；保留“旧资料只能重置”和“重置后生成 V2 根历史”的产品回归。
+
+### application 清理后可删除的 core 死代码
+
+- `MembershipEventV1Evidence`、`MembershipDecisionV1Evidence`、`VersionedMembershipEvent`、`VersionedMembershipDecision` 及 `InvalidLegacyEvidence` 分支。
+- `MembershipOperation`、`MembershipEvent`、`MembershipDecision`。
+- `MembershipReconciliation`、`MembershipReconciliationOutcome`、`MembershipHistoryError`。
+- 旧状态使用的 `PendingAppliedMembershipEffect`、`PendingMembershipDecisionDelivery` 以及 `SpaceMembershipState` 中对应队列。
+- `SpaceMembershipState.membership_reconciliation` 字段，以及 `effective_members`、旧设备查找/移除判断等只从该字段推导的方法。
+- `workspace_convergence.rs` 中创建和推进旧成员历史的事件分支与回归。
+
+### 需要保留但应迁出旧文件的 core 类型
+
+- `MembershipEventId`、`MembershipDecisionId`：V2 仍使用。
+- `RemovalDecision`：V2 移除决定仍使用。
+- `MembershipHistoryRelationship`：当前 V2 peer 关系仍使用。
+- `MembershipHistoryMessage`：当前只含 `HistoryPageV2` / `AckV2`，仍是正式网络外壳。
+- `PendingRemovalFacts`：当前成员状态结果仍使用；可保留或改为更贴近产品结果的名称。
+
+### 必须同步处理的持久层条件
+
+- 新状态格式不再包含 `membership_reconciliation` 和两个旧队列；旧 V3 状态不得进入普通恢复。
+- 强制重置判断必须位于旧状态完整解码之前，且重置操作必须能在不解析旧成员历史的情况下清除旧状态并建立全新 V2 Space。
+- `MembershipCredential`、签名算法、准入消息等其他仍在使用的 `V1` 格式不属于本次成员历史清理，不能因名称带 V1 一并删除。
+
+### 推荐实施顺序
+
+1. 删除无生产调用的 V1Evidence 包装。
+2. 让新建/重置 Space 原子建立 V2 根历史，并以它作为唯一成员事实。
+3. 删除 application 的旧初始化、旧回退、旧效果和旧移除路径。
+4. 删除 `SpaceMembershipState` 旧字段并调整持久层为重置后新格式。
+5. 迁出 V2 共用类型，删除 core 旧状态机主体和旧测试。
+6. 验证旧资料只进入重置、新资料可正常建立、加入、移除、重启和多设备同步。
 
 ## 分类口径
 

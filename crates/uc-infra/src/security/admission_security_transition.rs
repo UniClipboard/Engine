@@ -161,7 +161,7 @@ impl AdmissionSecurityTransitionPort for AdmissionSecurityTransitionAdapter {
 
 #[cfg(test)]
 mod tests {
-    use uc_core::membership::{BaseMembershipHistoryPositionV1, MembershipEventId};
+    use uc_core::membership::{BaseMembershipHistoryPosition, MembershipEventId};
 
     use super::*;
 
@@ -171,7 +171,7 @@ mod tests {
         let pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
         let input = AdmissionSecurityTransitionInput {
             attempt_id: [0x31; 32],
-            base_history_position: BaseMembershipHistoryPositionV1 {
+            base_history_position: BaseMembershipHistoryPosition {
                 event_id: Some(MembershipEventId::from_hex(&"32".repeat(32)).unwrap()),
                 depth: 4,
                 history_digest: [0x33; 32],

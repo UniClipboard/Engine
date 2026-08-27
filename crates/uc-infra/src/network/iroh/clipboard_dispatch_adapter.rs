@@ -40,7 +40,7 @@ use tracing::{debug, instrument, warn};
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, ConnectionChannel, DispatchAck,
-    DispatchReport, DispatchTiming, PeerAddressRepositoryPort, PresencePort, SyncPayload,
+    DispatchReport, DispatchTiming, PeerAddressRepositoryPort, PeerReachabilityPort, SyncPayload,
 };
 
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
@@ -69,7 +69,7 @@ pub struct IrohClipboardDispatchAdapter {
     /// [`PresencePort::mark_offline`] lets every other consumer of presence
     /// (roster view, fan-out skip logic) observe the truth without waiting
     /// for the keepalive worker's next probe cycle.
-    presence: Arc<dyn PresencePort>,
+    presence: Arc<dyn PeerReachabilityPort>,
     /// Single-flight slot per destination device. Concurrent dispatches to
     /// the same peer collapse to one `connect_with_staggered_retry`
     /// invocation: the first caller becomes the leader (records its
@@ -88,7 +88,7 @@ impl IrohClipboardDispatchAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
     ) -> Self {
         Self {
             endpoint,
@@ -431,7 +431,7 @@ mod tests {
         Presence {}
 
         #[async_trait]
-        impl PresencePort for Presence {
+        impl PeerReachabilityPort for Presence {
             async fn ensure_reachable(
                 &self,
                 device: &DeviceId,
@@ -441,7 +441,7 @@ mod tests {
         }
     }
 
-    fn presence_mock() -> Arc<dyn PresencePort> {
+    fn presence_mock() -> Arc<dyn PeerReachabilityPort> {
         Arc::new(MockPresence::new())
     }
 
@@ -738,7 +738,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl PresencePort for CountingPresence {
+    impl PeerReachabilityPort for CountingPresence {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,

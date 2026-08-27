@@ -1904,7 +1904,7 @@ fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
 fn map_workspace_convergence(
     result: OperationResult,
 ) -> Result<WorkspaceConvergence, BindingError> {
-    unpack_operation!(result, OperationResult::WorkspaceConvergence(summary) => {
+    unpack_operation!(result, OperationResult::WorkspaceMembership(summary) => {
         map_workspace_convergence_summary(summary)
     })
 }

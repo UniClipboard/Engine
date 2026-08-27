@@ -31,16 +31,15 @@ use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::{debug, info, instrument, warn};
-use uc_application::deps::AdmissionCompletionRecoveryEndpointPort;
+use uc_application::deps::{AdmissionCompletionRecoveryEndpointPort, CurrentMemberSignaturePort};
 use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    ContentExchangeGatePort, CurrentMemberSignaturePort, CurrentMembershipIdentityPort,
-    CurrentWorkspacePeerScopePort, GroupRevocationPort, GroupUpdateDispatchPort,
-    MemberRepositoryPort, MembershipAttestationEndpointPort, MembershipHistoryExchangeEndpointPort,
-    PeerAdmissionPort,
+    ContentExchangeGatePort, CurrentMembershipIdentityPort, CurrentWorkspacePeerScopePort,
+    GroupRevocationPort, GroupUpdateDispatchPort, MemberRepositoryPort,
+    MembershipAttestationEndpointPort, MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
@@ -52,7 +51,7 @@ use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
     ActiveClipboardReceiverPort, ClipboardDispatchPort, ClipboardReceiverPort, ClockPort,
     ConnectionChannelPort, DeviceIdentityPort, LocalIdentityError, PeerAddressRepositoryPort,
-    PresencePort, SettingsPort,
+    PeerReachabilityPort, SettingsPort,
 };
 
 use crate::pairing::{IrohPairingSessionAdapter, PAIRING_ALPN};
@@ -861,7 +860,7 @@ impl IrohNodeBuilder {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
-    ) -> Arc<dyn PresencePort> {
+    ) -> Arc<dyn PeerReachabilityPort> {
         // Build the adapter first so the handler shares its `last_state`
         // and broadcast `Sender` — that's what makes inbound dials flip a
         // recovered peer to Online without needing our own keepalive to
@@ -932,7 +931,7 @@ impl IrohNodeBuilder {
         member_repo: Arc<dyn MemberRepositoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
     ) -> ClipboardHandlers {
         let receiver = IrohClipboardReceiverAdapter::new(
             Arc::clone(&self.endpoint),
@@ -1437,9 +1436,9 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
+    use uc_application::deps::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
-        CurrentMemberSignatureError, CurrentMemberSignaturePort,
         MembershipAttestationEndpointError, MembershipAttestationEndpointPort,
         MembershipAttestationPort, MembershipGossipEndpointError, MembershipGossipEndpointPort,
         MembershipGossipMessage, MembershipGossipTransportPort, VerifiedMembershipPeer,
@@ -1791,7 +1790,7 @@ mod tests {
             Arc::new(InMemorySettings(StdMutex::new(Settings::default()))),
         );
 
-        let presence: Arc<dyn PresencePort> = builder.install_presence(
+        let presence: Arc<dyn PeerReachabilityPort> = builder.install_presence(
             Arc::new(EmptyPeerAddressRepo),
             Arc::new(EmptyMemberRepo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(true)),

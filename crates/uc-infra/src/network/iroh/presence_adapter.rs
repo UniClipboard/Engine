@@ -67,7 +67,7 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{
-    ClockPort, PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort,
+    ClockPort, PeerAddressRepositoryPort, PeerReachabilityPort, PresenceError, PresenceEvent,
     ReachabilityState,
 };
 use uc_core::security::IdentityFingerprint;
@@ -818,7 +818,7 @@ impl IrohPresenceAdapter {
 }
 
 #[async_trait]
-impl PresencePort for IrohPresenceAdapter {
+impl PeerReachabilityPort for IrohPresenceAdapter {
     #[instrument(skip_all, fields(device = %device.as_str()))]
     async fn ensure_reachable(
         &self,

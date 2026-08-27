@@ -12,7 +12,7 @@ use openmls_traits::{
 };
 use sha2::{Digest, Sha256};
 use uc_core::membership::{
-    AdmissionSecurityCommitmentV1, BaseMembershipHistoryPositionV1, MembershipCredential,
+    AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition, MembershipCredential,
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 
@@ -462,7 +462,7 @@ impl MlsGroupEngine {
     pub(crate) fn derive_public_admission_commitment(
         client_state: &MlsClientState,
         attempt_id: [u8; 32],
-        base_history_position: BaseMembershipHistoryPositionV1,
+        base_history_position: BaseMembershipHistoryPosition,
         candidate_core_digest: [u8; 32],
         commit: &[u8],
         key_catalog_digest: [u8; 32],
@@ -780,7 +780,7 @@ mod tests {
     use super::*;
     use crate::security::OpenMlsHistoricalSignatureVerifier;
     use uc_core::membership::{
-        BaseMembershipHistoryPositionV1, HistoricalMembershipSignatureVerifier, MembershipEventId,
+        BaseMembershipHistoryPosition, HistoricalMembershipSignatureVerifier, MembershipEventId,
         ED25519_SIGNATURE_ALGORITHM_V1,
     };
 
@@ -1006,7 +1006,7 @@ mod tests {
             admission.sponsor_state.as_bytes(),
             joined.client_state.as_bytes()
         );
-        let base = BaseMembershipHistoryPositionV1 {
+        let base = BaseMembershipHistoryPosition {
             event_id: Some(
                 MembershipEventId::from_hex(&"11".repeat(32)).expect("test event id is valid"),
             ),

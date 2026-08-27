@@ -982,10 +982,7 @@ async fn member_removal_converges_across_three_independent_engine_directories() 
         }))
         .await
         .expect("submit member removal");
-    assert!(matches!(
-        submitted,
-        OperationResult::WorkspaceConvergence(_)
-    ));
+    assert!(matches!(submitted, OperationResult::WorkspaceMembership(_)));
 
     wait_until(WAIT_TIMEOUT, || async {
         let c = workspace_convergence_summary(&engine_c).await;
@@ -1371,15 +1368,15 @@ async fn concurrent_accept_and_reject_of_one_removal_keep_their_branches_indepen
     );
     assert!(matches!(
         b_decision.expect("B rejects the removal"),
-        OperationResult::WorkspaceConvergence(_)
+        OperationResult::WorkspaceMembership(_)
     ));
     assert!(matches!(
         c_decision.expect("C accepts the removal"),
-        OperationResult::WorkspaceConvergence(_)
+        OperationResult::WorkspaceMembership(_)
     ));
     assert!(matches!(
         d_decision.expect("D rejects the removal"),
-        OperationResult::WorkspaceConvergence(_)
+        OperationResult::WorkspaceMembership(_)
     ));
 
     wait_for_concurrent_decision_state(
@@ -1868,7 +1865,7 @@ async fn completed_removal_can_continue_from_the_recovered_member_state() {
             ))
             .await
             .expect("C accepts the first removal"),
-        OperationResult::WorkspaceConvergence(_)
+        OperationResult::WorkspaceMembership(_)
     ));
     wait_until(WAIT_TIMEOUT, || async {
         let a = workspace_convergence_summary(&engine_a).await;
@@ -2202,7 +2199,7 @@ async fn workspace_convergence_summary(engine: &Engine) -> WorkspaceConvergenceS
         .execute(Operation::QueryWorkspaceConvergence)
         .await
         .expect("query workspace convergence state");
-    let OperationResult::WorkspaceConvergence(summary) = result else {
+    let OperationResult::WorkspaceMembership(summary) = result else {
         panic!("unexpected workspace convergence query result: {result:?}");
     };
     summary
@@ -2323,7 +2320,7 @@ async fn wait_for_full_workspace_sync(devices: &[(&Engine, &str)]) {
                 complete = false;
                 continue;
             };
-            let Ok(OperationResult::WorkspaceConvergence(summary)) =
+            let Ok(OperationResult::WorkspaceMembership(summary)) =
                 engine.execute(Operation::QueryWorkspaceConvergence).await
             else {
                 complete = false;

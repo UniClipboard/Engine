@@ -20,22 +20,22 @@ pub enum AdmissionKeyError {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct AdmissionAttemptDataKey([u8; 32]);
+pub(crate) struct SpaceJoinRecordDataKey([u8; 32]);
 
-impl fmt::Debug for AdmissionAttemptDataKey {
+impl fmt::Debug for SpaceJoinRecordDataKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("AdmissionAttemptDataKey([REDACTED])")
+        formatter.write_str("SpaceJoinRecordDataKey([REDACTED])")
     }
 }
 
-impl AdmissionAttemptDataKey {
+impl SpaceJoinRecordDataKey {
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct WrappedAdmissionAttemptDataKey {
+pub struct WrappedSpaceJoinRecordDataKey {
     pub format_version: u16,
     encrypted_key: EncryptedBlob,
 }
@@ -147,7 +147,7 @@ impl AdmissionKeyManager {
     pub fn create_wrapped_attempt_key(
         &self,
         attempt_id: [u8; 32],
-    ) -> Result<WrappedAdmissionAttemptDataKey, AdmissionKeyError> {
+    ) -> Result<WrappedSpaceJoinRecordDataKey, AdmissionKeyError> {
         let profile_key = self.profile_key()?;
         let mut attempt_key = [0u8; 32];
         rand::rng().fill_bytes(&mut attempt_key);
@@ -157,7 +157,7 @@ impl AdmissionKeyManager {
             &self.attempt_key_aad(attempt_id),
         )
         .map_err(|_| AdmissionKeyError::OpenFailed)?;
-        Ok(WrappedAdmissionAttemptDataKey {
+        Ok(WrappedSpaceJoinRecordDataKey {
             format_version: 1,
             encrypted_key,
         })
@@ -166,8 +166,8 @@ impl AdmissionKeyManager {
     pub(crate) fn unwrap_attempt_key(
         &self,
         attempt_id: [u8; 32],
-        wrapped: &WrappedAdmissionAttemptDataKey,
-    ) -> Result<AdmissionAttemptDataKey, AdmissionKeyError> {
+        wrapped: &WrappedSpaceJoinRecordDataKey,
+    ) -> Result<SpaceJoinRecordDataKey, AdmissionKeyError> {
         if wrapped.format_version != 1 {
             return Err(AdmissionKeyError::Corrupt);
         }
@@ -182,7 +182,7 @@ impl AdmissionKeyManager {
         let bytes: [u8; 32] = plaintext
             .try_into()
             .map_err(|_| AdmissionKeyError::Corrupt)?;
-        Ok(AdmissionAttemptDataKey(bytes))
+        Ok(SpaceJoinRecordDataKey(bytes))
     }
 
     fn attempt_payload_aad(&self, attempt_id: [u8; 32]) -> Vec<u8> {
@@ -196,7 +196,7 @@ impl AdmissionKeyManager {
     pub(crate) fn seal_attempt_payload(
         &self,
         attempt_id: [u8; 32],
-        wrapped: &WrappedAdmissionAttemptDataKey,
+        wrapped: &WrappedSpaceJoinRecordDataKey,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, AdmissionKeyError> {
         let attempt_key = self.unwrap_attempt_key(attempt_id, wrapped)?;
@@ -211,7 +211,7 @@ impl AdmissionKeyManager {
     pub(crate) fn open_attempt_payload(
         &self,
         attempt_id: [u8; 32],
-        wrapped: &WrappedAdmissionAttemptDataKey,
+        wrapped: &WrappedSpaceJoinRecordDataKey,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, AdmissionKeyError> {
         let attempt_key = self.unwrap_attempt_key(attempt_id, wrapped)?;

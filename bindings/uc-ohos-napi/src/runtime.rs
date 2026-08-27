@@ -195,7 +195,7 @@ impl OhEngine {
             .await
             .map_err(engine_error)?;
         match result {
-            OperationResult::WorkspaceConvergence(summary) => workspace_convergence(summary),
+            OperationResult::WorkspaceMembership(summary) => workspace_convergence(summary),
             _ => Err(unexpected_result()),
         }
     }

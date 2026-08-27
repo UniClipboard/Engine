@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use uc_application::deps::CurrentMemberSignaturePort;
 use uc_core::membership::{
-    CurrentMemberSignaturePort, GroupRevocationPort, MembershipSecurityState,
-    MembershipSecurityUpdateError, MembershipSecurityUpdatePort,
+    GroupRevocationPort, MembershipSecurityState, MembershipSecurityUpdateError,
+    MembershipSecurityUpdatePort,
 };
 
 use super::InMemorySession;

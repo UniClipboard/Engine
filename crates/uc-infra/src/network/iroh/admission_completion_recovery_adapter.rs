@@ -15,8 +15,8 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionCompletionRecoveryChallengeV1, AdmissionCompletionRecoveryHelloV1,
-    AdmissionCompletionRecoveryResponseV1, AdmissionCompletionRecoveryTransportBindingV1,
+    AdmissionCompletionRecoveryChallenge, AdmissionCompletionRecoveryHello,
+    AdmissionCompletionRecoveryResponseV1, AdmissionCompletionRecoveryTransportBinding,
 };
 use uc_core::pairing::DurableAdmissionFrame;
 use uc_core::ports::PeerAddressRepositoryPort;
@@ -32,18 +32,18 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Serialize, Deserialize)]
 enum RecoveryRequest {
     Hello {
-        hello: AdmissionCompletionRecoveryHelloV1,
+        hello: AdmissionCompletionRecoveryHello,
         joiner_last_message_id: [u8; 32],
     },
     Response {
-        hello: AdmissionCompletionRecoveryHelloV1,
+        hello: AdmissionCompletionRecoveryHello,
         response: AdmissionCompletionRecoveryResponseV1,
     },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 enum RecoveryReply {
-    Challenge(AdmissionCompletionRecoveryChallengeV1),
+    Challenge(AdmissionCompletionRecoveryChallenge),
     Complete(WireDurableAdmissionFrame),
     Rejected,
 }
@@ -135,7 +135,7 @@ impl IrohAdmissionCompletionRecoveryAdapter {
         )
         .await
         .map_err(|_| AdmissionCompletionRecoveryTransportError::Offline)?;
-        let expected_binding = AdmissionCompletionRecoveryTransportBindingV1 {
+        let expected_binding = AdmissionCompletionRecoveryTransportBinding {
             joiner_transport_identity_digest: Sha256::digest(self.endpoint.id().as_bytes()).into(),
             helper_transport_identity_digest: Sha256::digest(connection.remote_id().as_bytes())
                 .into(),
@@ -159,9 +159,9 @@ impl AdmissionCompletionRecoveryPort for IrohAdmissionCompletionRecoveryAdapter 
         &self,
         helper: &DeviceId,
         route: &[u8],
-        hello: AdmissionCompletionRecoveryHelloV1,
+        hello: AdmissionCompletionRecoveryHello,
         joiner_last_message_id: [u8; 32],
-    ) -> Result<AdmissionCompletionRecoveryChallengeV1, AdmissionCompletionRecoveryTransportError>
+    ) -> Result<AdmissionCompletionRecoveryChallenge, AdmissionCompletionRecoveryTransportError>
     {
         match self
             .exchange(
@@ -185,7 +185,7 @@ impl AdmissionCompletionRecoveryPort for IrohAdmissionCompletionRecoveryAdapter 
         &self,
         helper: &DeviceId,
         route: &[u8],
-        hello: AdmissionCompletionRecoveryHelloV1,
+        hello: AdmissionCompletionRecoveryHello,
         response: AdmissionCompletionRecoveryResponseV1,
     ) -> Result<DurableAdmissionFrame, AdmissionCompletionRecoveryTransportError> {
         match self
@@ -263,15 +263,15 @@ impl ProtocolHandler for IrohAdmissionCompletionRecoveryHandler {
 fn transport_binding(
     local_endpoint: &Endpoint,
     connection: &Connection,
-) -> AdmissionCompletionRecoveryTransportBindingV1 {
-    AdmissionCompletionRecoveryTransportBindingV1 {
+) -> AdmissionCompletionRecoveryTransportBinding {
+    AdmissionCompletionRecoveryTransportBinding {
         joiner_transport_identity_digest: Sha256::digest(connection.remote_id().as_bytes()).into(),
         helper_transport_identity_digest: Sha256::digest(local_endpoint.id().as_bytes()).into(),
     }
 }
 
 fn recovery_message_id(
-    hello: &AdmissionCompletionRecoveryHelloV1,
+    hello: &AdmissionCompletionRecoveryHello,
     joiner_last_message_id: [u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -330,8 +330,8 @@ fn decode_frame_payload<T: for<'de> Deserialize<'de>>(
 }
 
 fn verify_challenge_transport_binding(
-    challenge_binding: AdmissionCompletionRecoveryTransportBindingV1,
-    expected_binding: AdmissionCompletionRecoveryTransportBindingV1,
+    challenge_binding: AdmissionCompletionRecoveryTransportBinding,
+    expected_binding: AdmissionCompletionRecoveryTransportBinding,
 ) -> Result<(), AdmissionCompletionRecoveryTransportError> {
     if challenge_binding == expected_binding {
         Ok(())
@@ -364,7 +364,7 @@ async fn read_frame<T: for<'de> Deserialize<'de>>(
 mod tests {
     use super::{
         decode_frame_payload, encode_frame_payload, verify_challenge_transport_binding,
-        AdmissionCompletionRecoveryTransportBindingV1, AdmissionCompletionRecoveryTransportError,
+        AdmissionCompletionRecoveryTransportBinding, AdmissionCompletionRecoveryTransportError,
         MAX_FRAME_SIZE,
     };
 
@@ -398,11 +398,11 @@ mod tests {
 
     #[test]
     fn client_rejects_challenge_bound_to_other_transport_identities() {
-        let actual_connection = AdmissionCompletionRecoveryTransportBindingV1 {
+        let actual_connection = AdmissionCompletionRecoveryTransportBinding {
             joiner_transport_identity_digest: [0x11; 32],
             helper_transport_identity_digest: [0x22; 32],
         };
-        let challenge_binding = AdmissionCompletionRecoveryTransportBindingV1 {
+        let challenge_binding = AdmissionCompletionRecoveryTransportBinding {
             joiner_transport_identity_digest: [0x11; 32],
             helper_transport_identity_digest: [0x33; 32],
         };

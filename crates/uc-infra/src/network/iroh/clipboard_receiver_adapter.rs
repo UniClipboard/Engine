@@ -334,7 +334,7 @@ mod tests {
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::{
         ClipboardDispatchPort, ClipboardHeader, InboundClipboardDisposition, PresenceError,
-        PresenceEvent, PresencePort, ReachabilityState, SyncPayload,
+        PresenceEvent, PeerReachabilityPort, ReachabilityState, SyncPayload,
     };
     use uc_core::MemberSyncPreferences;
 
@@ -358,7 +358,7 @@ mod tests {
         Presence {}
 
         #[async_trait]
-        impl PresencePort for Presence {
+        impl PeerReachabilityPort for Presence {
             async fn ensure_reachable(
                 &self,
                 device: &DeviceId,
@@ -368,7 +368,7 @@ mod tests {
         }
     }
 
-    fn presence_mock() -> Arc<dyn PresencePort> {
+    fn presence_mock() -> Arc<dyn PeerReachabilityPort> {
         Arc::new(MockPresence::new())
     }
 

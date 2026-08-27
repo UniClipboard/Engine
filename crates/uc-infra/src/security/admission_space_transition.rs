@@ -393,7 +393,7 @@ impl DurableAdmissionSpaceTransition {
 
     fn active_generation_manifest_for(
         &self,
-        attempt_id: uc_core::membership::AdmissionAttemptId,
+        attempt_id: uc_core::membership::SpaceJoinRecordId,
         target_space_id: &str,
         target_generation: [u8; 16],
     ) -> Result<ActiveSpaceGenerationManifestV2, AdmissionSpaceTransitionError> {
@@ -2718,12 +2718,12 @@ mod tests {
     use uc_core::file_transfer::FileTransferEvent;
     use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, RepresentationId, SpaceId};
     use uc_core::membership::{
-        AdmissionAttemptId, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
-        AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1,
-        AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2,
-        BaseMembershipHistoryPositionV1, ContentKeyPurpose, CrossSpaceTransitionPhaseV2,
-        MembershipCredential, PendingGroupUpdate, RevocationRepositoryPort,
-        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+        AdmissionChangeFacts, AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1,
+        AdmissionSecurityCommitmentV1, AdmissionSpaceTransitionResultV2,
+        AdmissionSpaceTransitionV2, BaseMembershipHistoryPosition, ContentKeyPurpose,
+        CrossSpaceTransitionPhaseV2, MembershipCredential, PendingGroupUpdate,
+        RevocationRepositoryPort, SpaceJoinRecordId, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+        ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::ports::security::current_profile::CurrentProfilePort;
     use uc_core::ports::security::BlobCipherPort;
@@ -2813,7 +2813,7 @@ mod tests {
             target_space.as_ref().to_owned(),
             b"target-mls-group".to_vec(),
             attempt_id,
-            BaseMembershipHistoryPositionV1 {
+            BaseMembershipHistoryPosition {
                 event_id: None,
                 depth: 0,
                 history_digest: [0x74; 32],
@@ -3125,7 +3125,7 @@ mod tests {
             b"sealed-existing-member-update".to_vec(),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
-            attempt_id: AdmissionAttemptId::from_bytes([0x72; 32]),
+            attempt_id: SpaceJoinRecordId::from_bytes([0x72; 32]),
             target_space_id: target_space.as_ref().to_owned(),
             target_security_commitment: test_security_commitment(&target_space, [0x72; 32]),
             target_membership_history: b"verified history".to_vec(),
@@ -3337,7 +3337,7 @@ mod tests {
             Arc::clone(&current_profile),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
-            attempt_id: AdmissionAttemptId::from_bytes([0x92; 32]),
+            attempt_id: SpaceJoinRecordId::from_bytes([0x92; 32]),
             target_space_id: target_space.as_ref().to_owned(),
             target_security_commitment: test_security_commitment(&target_space, [0x92; 32]),
             target_membership_history: b"verified fresh history".to_vec(),
@@ -3499,7 +3499,7 @@ mod tests {
             Arc::new(DefaultCurrentProfile::new()),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
-            attempt_id: AdmissionAttemptId::from_bytes([0xa2; 32]),
+            attempt_id: SpaceJoinRecordId::from_bytes([0xa2; 32]),
             target_space_id: target_space.as_ref().to_owned(),
             target_security_commitment: test_security_commitment_with_catalog(
                 &target_space,

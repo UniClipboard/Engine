@@ -556,9 +556,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use uc_application::deps::CurrentMemberSignatureError;
     use uc_core::file_transfer::FileTransferDirection;
     use uc_core::ids::SpaceId;
-    use uc_core::membership::{CurrentMemberSignatureError, MembershipCandidateRepositoryError};
+    use uc_core::membership::MembershipCandidateRepositoryError;
     use uc_core::ports::{
         ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, HostEvent,
         HostEventEmitterPort, TransferHostEvent,

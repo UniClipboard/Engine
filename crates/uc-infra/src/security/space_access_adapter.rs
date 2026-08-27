@@ -27,9 +27,9 @@ use uc_application::deps::{
     ActivateCompletionHelperAdmissionSecurityPort,
     ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
     ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
-    AdmissionSecurityTransitionInput, PrepareSponsorAdmissionSecurityPort, ProfileKeyAccessProbe,
-    ProfileKeyAccessProbePortError, SponsorAdmissionSecurityRequest,
-    SponsorPreparedAdmissionSecurity,
+    AdmissionSecurityTransitionInput, CurrentMemberSignatureError, CurrentMemberSignaturePort,
+    PrepareSponsorAdmissionSecurityPort, ProfileKeyAccessProbe, ProfileKeyAccessProbePortError,
+    SponsorAdmissionSecurityRequest, SponsorPreparedAdmissionSecurity,
 };
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
@@ -38,8 +38,7 @@ use super::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
 use super::secrets::{Kek, MasterKey};
 use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
 use uc_core::membership::{
-    AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId,
-    CurrentMemberSignatureError, CurrentMemberSignaturePort, GroupBootstrapPort,
+    AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort,
     GroupBootstrapResult, GroupEpoch, GroupRevocationPort, GroupRevocationResult, KeyEpochError,
     LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
     LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus, MembershipCredential,
@@ -4196,7 +4195,7 @@ mod admission_tests {
             SponsorAdmissionSecurityRequest,
         };
         use uc_core::membership::{
-            BaseMembershipHistoryPositionV1, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
+            BaseMembershipHistoryPosition, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
         };
 
         let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
@@ -4219,7 +4218,7 @@ mod admission_tests {
             .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
                 space_id: space_id.clone(),
                 attempt_id: [0x62; 32],
-                base_history_position: BaseMembershipHistoryPositionV1 {
+                base_history_position: BaseMembershipHistoryPosition {
                     event_id: None,
                     depth: 0,
                     history_digest: [0x63; 32],
@@ -4300,7 +4299,7 @@ mod admission_tests {
             SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
         };
         use uc_core::membership::{
-            BaseMembershipHistoryPositionV1, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
+            BaseMembershipHistoryPosition, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
         };
 
         let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
@@ -4317,7 +4316,7 @@ mod admission_tests {
             .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
                 space_id: space_id.clone(),
                 attempt_id,
-                base_history_position: BaseMembershipHistoryPositionV1 {
+                base_history_position: BaseMembershipHistoryPosition {
                     event_id: None,
                     depth: 0,
                     history_digest: [0x74; 32],

@@ -8,15 +8,15 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, Watcher};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument, warn};
+use uc_application::deps::CurrentMemberSignaturePort;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    CurrentMemberSignaturePort, CurrentMembershipAnnouncementMaterial,
-    CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityError,
-    CurrentMembershipIdentityPort, MemberRepositoryPort, MembershipAttestationEndpointPort,
-    MembershipAttestationError, MembershipAttestationPort, MembershipGossipEndpointError,
-    MembershipGossipEndpointPort, MembershipGossipMessage, MembershipGossipTransportError,
-    MembershipGossipTransportPort, PeerAdmissionPort, RelayedSecurityUpdate,
-    SpaceMembershipCandidate, VerifiedMembershipPeer,
+    CurrentMembershipAnnouncementMaterial, CurrentMembershipAnnouncementPort,
+    CurrentMembershipIdentity, CurrentMembershipIdentityError, CurrentMembershipIdentityPort,
+    MemberRepositoryPort, MembershipAttestationEndpointPort, MembershipAttestationError,
+    MembershipAttestationPort, MembershipGossipEndpointError, MembershipGossipEndpointPort,
+    MembershipGossipMessage, MembershipGossipTransportError, MembershipGossipTransportPort,
+    PeerAdmissionPort, RelayedSecurityUpdate, SpaceMembershipCandidate, VerifiedMembershipPeer,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{DeviceIdentityPort, PeerAddressRepositoryPort, SettingsPort};
@@ -1024,17 +1024,18 @@ mod tests {
 
     use async_trait::async_trait;
     use iroh::{Endpoint, RelayMode, SecretKey};
+    use uc_application::deps::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
     use uc_core::ids::{DeviceId, SpaceId};
     use uc_core::membership::{
-        CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentMembershipIdentity,
-        CurrentMembershipIdentityError, CurrentMembershipIdentityPort, MemberRepositoryPort,
-        MembershipAttestationEndpointError, MembershipAttestationEndpointPort,
-        MembershipAttestationError, MembershipAttestationPort, MembershipError,
-        MembershipEventBatch, MembershipGossipEndpointError, MembershipGossipEndpointPort,
-        MembershipGossipMessage, MembershipGossipTransportError, MembershipGossipTransportPort,
-        MembershipSharedDevicePage, MembershipSharedDevicePageRequest, PeerAdmissionError,
-        PeerAdmissionPort, RelayedSecurityUpdate, SpaceMember, SpaceMembershipCandidate,
-        SponsorCandidateSeed, VerifiedMembershipPeer,
+        CurrentMembershipIdentity, CurrentMembershipIdentityError, CurrentMembershipIdentityPort,
+        MemberRepositoryPort, MembershipAttestationEndpointError,
+        MembershipAttestationEndpointPort, MembershipAttestationError, MembershipAttestationPort,
+        MembershipError, MembershipEventBatch, MembershipGossipEndpointError,
+        MembershipGossipEndpointPort, MembershipGossipMessage, MembershipGossipTransportError,
+        MembershipGossipTransportPort, MembershipSharedDevicePage,
+        MembershipSharedDevicePageRequest, PeerAdmissionError, PeerAdmissionPort,
+        RelayedSecurityUpdate, SpaceMember, SpaceMembershipCandidate, SponsorCandidateSeed,
+        VerifiedMembershipPeer,
     };
     use uc_core::ports::security::IdentityFingerprintFactoryPort;
     use uc_core::ports::{

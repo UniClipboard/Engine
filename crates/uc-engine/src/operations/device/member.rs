@@ -10,8 +10,9 @@ use uc_application::facade::{
     DeviceCompatibility, DeviceMembership, GroupRelationship, InitiateSpaceMemberRemovalError,
     MemberProtectionStatusView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
     MemberSyncPreferencesView, QuerySpaceMembershipStatusError, RecoveryAvailability, RosterError,
-    SpaceMembershipAction, SpaceMembershipChangeImpact, SpaceMembershipFacade,
-    SpaceMembershipStatus, SpaceProtectionModeView, SpaceProtectionView, SyncRelationship,
+    SpaceMembershipAction, SpaceMembershipChangeChoice, SpaceMembershipChangeImpact,
+    SpaceMembershipFacade, SpaceMembershipStatus, SpaceProtectionModeView, SpaceProtectionView,
+    SyncRelationship,
 };
 use uc_core::membership::{RemovalDecision, WorkspaceSnapshot};
 use uc_core::ports::ReachabilityState;
@@ -156,7 +157,7 @@ fn device_trust_decision(
             status,
         } => DeviceTrustDecisionSummary::AlreadyCompleted {
             change_id: removal_event_id.to_hex(),
-            completed_choice: device_trust_choice(decision),
+            completed_choice: device_trust_removal_decision(decision),
             snapshot: Box::new(device_trust_snapshot(status)),
         },
         DecidePendingMembershipRemovalResult::PendingRemovalChanged {
@@ -495,31 +496,31 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
         CurrentJoinStatus::Rejected { join_id, reason } => JoinSpaceStatusSummary::Rejected {
             join_id: encode_join_id(join_id),
             reason: match reason {
-                uc_core::membership::AdmissionRejectionReasonV1::InvitationUnavailable => {
+                uc_core::membership::AdmissionRejectionReason::InvitationUnavailable => {
                     JoinSpaceRejectionReasonSummary::InvitationUnavailable
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::AuthenticationRejected => {
+                uc_core::membership::AdmissionRejectionReason::AuthenticationRejected => {
                     JoinSpaceRejectionReasonSummary::AuthenticationRejected
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::IdentityConflict => {
+                uc_core::membership::AdmissionRejectionReason::IdentityConflict => {
                     JoinSpaceRejectionReasonSummary::IdentityConflict
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::BaseHistoryChanged => {
+                uc_core::membership::AdmissionRejectionReason::BaseHistoryChanged => {
                     JoinSpaceRejectionReasonSummary::BaseHistoryChanged
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::JoinerHistoryAhead => {
+                uc_core::membership::AdmissionRejectionReason::JoinerHistoryAhead => {
                     JoinSpaceRejectionReasonSummary::JoinerHistoryAhead
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::HistoryConflict => {
+                uc_core::membership::AdmissionRejectionReason::HistoryConflict => {
                     JoinSpaceRejectionReasonSummary::HistoryConflict
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::PeerUpgradeRequired => {
+                uc_core::membership::AdmissionRejectionReason::PeerUpgradeRequired => {
                     JoinSpaceRejectionReasonSummary::PeerUpgradeRequired
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::Cancelled => {
+                uc_core::membership::AdmissionRejectionReason::Cancelled => {
                     JoinSpaceRejectionReasonSummary::Cancelled
                 }
-                uc_core::membership::AdmissionRejectionReasonV1::RemovedBeforeActivation => {
+                uc_core::membership::AdmissionRejectionReason::RemovedBeforeActivation => {
                     JoinSpaceRejectionReasonSummary::RemovedBeforeActivation
                 }
             },
@@ -556,7 +557,16 @@ fn device_membership(membership: DeviceMembership) -> DeviceMembershipSummary {
     }
 }
 
-fn device_trust_choice(decision: RemovalDecision) -> DeviceTrustChoiceSummary {
+fn device_trust_choice(choice: SpaceMembershipChangeChoice) -> DeviceTrustChoiceSummary {
+    match choice {
+        SpaceMembershipChangeChoice::ApplyChange => DeviceTrustChoiceSummary::ApplyChange,
+        SpaceMembershipChangeChoice::KeepCurrentDeviceGroup => {
+            DeviceTrustChoiceSummary::KeepCurrentDeviceGroup
+        }
+    }
+}
+
+fn device_trust_removal_decision(decision: RemovalDecision) -> DeviceTrustChoiceSummary {
     match decision {
         RemovalDecision::Accept => DeviceTrustChoiceSummary::ApplyChange,
         RemovalDecision::Reject => DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,

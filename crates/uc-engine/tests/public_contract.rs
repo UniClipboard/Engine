@@ -1286,7 +1286,7 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
     assert!(format!("{preferences:?}").contains("member_sync_preferences"));
     assert!(format!(
         "{:?}",
-        OperationResult::WorkspaceConvergence(uc_engine::WorkspaceConvergenceSummary {
+        OperationResult::WorkspaceMembership(uc_engine::WorkspaceConvergenceSummary {
             phase: uc_engine::WorkspaceConvergencePhaseSummary::LocallyApplied,
             revision: 1,
             history_event_count: 1,
@@ -1330,7 +1330,7 @@ fn encryption_operations_expose_only_stable_state_and_outcomes() {
 
 #[test]
 fn workspace_convergence_exposes_only_stable_facts() {
-    let result = OperationResult::WorkspaceConvergence(WorkspaceConvergenceSummary {
+    let result = OperationResult::WorkspaceMembership(WorkspaceConvergenceSummary {
         phase: WorkspaceConvergencePhaseSummary::Converging,
         revision: 3,
         history_event_count: 2,
@@ -1347,7 +1347,7 @@ fn workspace_convergence_exposes_only_stable_facts() {
 
     assert_eq!(
         result,
-        OperationResult::WorkspaceConvergence(WorkspaceConvergenceSummary {
+        OperationResult::WorkspaceMembership(WorkspaceConvergenceSummary {
             phase: WorkspaceConvergencePhaseSummary::Converging,
             revision: 3,
             history_event_count: 2,

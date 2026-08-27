@@ -14,7 +14,7 @@ pub struct FileEngineVersionStateRepository {
 
 impl FileEngineVersionStateRepository {
     pub fn with_defaults(app_data_root: PathBuf) -> Self {
-        let path = VaultLayoutt::new(app_data_root).engine_upgrade_cursor_path();
+        let path = VaultLayout::new(app_data_root).engine_upgrade_cursor_path();
         Self {
             inner: FileAppVersionStateRepository::new(path),
         }

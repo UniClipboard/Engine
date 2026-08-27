@@ -1045,7 +1045,7 @@ fn operation_response(result: OperationResult) -> Value {
             "online_count": devices.iter().filter(|device| device.online).count(),
             "device_ids": devices.into_iter().map(|device| device.device_id).collect::<Vec<_>>(),
         }),
-        OperationResult::WorkspaceConvergence(summary) => json!({
+        OperationResult::WorkspaceMembership(summary) => json!({
             "ok": true,
             "kind": "workspace_convergence",
             "phase": match summary.phase {

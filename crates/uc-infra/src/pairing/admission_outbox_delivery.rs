@@ -4,10 +4,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::time::timeout;
 use uc_application::deps::{
-    AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResultV1,
-    AdmissionOutboxDeliveryRouteV1,
+    AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult,
+    AdmissionOutboxDeliveryRoute,
 };
-use uc_core::membership::{AdmissionAttemptId, AdmissionOutboxMessageV1, AdmissionOutboxPurposeV1};
+use uc_core::membership::{AdmissionOutboxMessage, AdmissionOutboxPurpose, SpaceJoinRecordId};
 use uc_core::pairing::{
     DurableAdmissionFrame, DurableAdmissionMessageKind, InvitationCode, PairingSessionMessage,
 };
@@ -31,20 +31,20 @@ impl PairingAdmissionOutboxDelivery {
 impl AdmissionOutboxDeliveryPort for PairingAdmissionOutboxDelivery {
     async fn deliver(
         &self,
-        attempt_id: AdmissionAttemptId,
-        message: &AdmissionOutboxMessageV1,
-        route: Option<&AdmissionOutboxDeliveryRouteV1>,
-    ) -> Result<AdmissionOutboxDeliveryResultV1, AdmissionOutboxDeliveryError> {
-        if message.purpose != AdmissionOutboxPurposeV1::CancelRequested {
-            return Ok(AdmissionOutboxDeliveryResultV1::Deferred);
+        attempt_id: SpaceJoinRecordId,
+        message: &AdmissionOutboxMessage,
+        route: Option<&AdmissionOutboxDeliveryRoute>,
+    ) -> Result<AdmissionOutboxDeliveryResult, AdmissionOutboxDeliveryError> {
+        if message.purpose != AdmissionOutboxPurpose::CancelRequested {
+            return Ok(AdmissionOutboxDeliveryResult::Deferred);
         }
         let session = match route {
-            Some(AdmissionOutboxDeliveryRouteV1::Continuation(address)) => self
+            Some(AdmissionOutboxDeliveryRoute::Continuation(address)) => self
                 .sessions
                 .dial_admission_continuation(address)
                 .await
                 .map_err(|_| AdmissionOutboxDeliveryError)?,
-            Some(AdmissionOutboxDeliveryRouteV1::Invitation(code)) => {
+            Some(AdmissionOutboxDeliveryRoute::Invitation(code)) => {
                 let invitation = std::str::from_utf8(code)
                     .map(InvitationCode::new)
                     .map_err(|_| AdmissionOutboxDeliveryError)?;
@@ -54,7 +54,7 @@ impl AdmissionOutboxDeliveryPort for PairingAdmissionOutboxDelivery {
                     .map_err(|_| AdmissionOutboxDeliveryError)?
                     .session_id
             }
-            None => return Ok(AdmissionOutboxDeliveryResultV1::Deferred),
+            None => return Ok(AdmissionOutboxDeliveryResult::Deferred),
         };
         let delivery = async {
             let payload = postcard::to_stdvec(message).map_err(|_| AdmissionOutboxDeliveryError)?;
@@ -85,15 +85,15 @@ impl AdmissionOutboxDeliveryPort for PairingAdmissionOutboxDelivery {
             {
                 return Err(AdmissionOutboxDeliveryError);
             }
-            let rejected: AdmissionOutboxMessageV1 =
+            let rejected: AdmissionOutboxMessage =
                 postcard::from_bytes(&frame.payload).map_err(|_| AdmissionOutboxDeliveryError)?;
-            if rejected.purpose != AdmissionOutboxPurposeV1::Rejected
+            if rejected.purpose != AdmissionOutboxPurpose::Rejected
                 || rejected.message_id != frame.message_id
                 || rejected.predecessor_message_id != frame.predecessor_message_id
             {
                 return Err(AdmissionOutboxDeliveryError);
             }
-            Ok(AdmissionOutboxDeliveryResultV1::Rejected(rejected))
+            Ok(AdmissionOutboxDeliveryResult::Rejected(rejected))
         }
         .await;
         self.sessions.close(&session, None).await;
@@ -154,17 +154,17 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_delivery_returns_the_remote_rejection() {
-        let attempt_id = AdmissionAttemptId::from_bytes([0x11; 32]);
-        let cancel = AdmissionOutboxMessageV1 {
-            purpose: AdmissionOutboxPurposeV1::CancelRequested,
+        let attempt_id = SpaceJoinRecordId::from_bytes([0x11; 32]);
+        let cancel = AdmissionOutboxMessage {
+            purpose: AdmissionOutboxPurpose::CancelRequested,
             recipient: b"invitation".to_vec(),
             message_id: [0x12; 32],
             predecessor_message_id: Some([0x13; 32]),
             payload: b"cancel_requested".to_vec(),
             superseded: false,
         };
-        let rejected = AdmissionOutboxMessageV1 {
-            purpose: AdmissionOutboxPurposeV1::Rejected,
+        let rejected = AdmissionOutboxMessage {
+            purpose: AdmissionOutboxPurpose::Rejected,
             recipient: cancel.recipient.clone(),
             message_id: [0x14; 32],
             predecessor_message_id: Some(cancel.message_id),
@@ -192,14 +192,14 @@ mod tests {
             .deliver(
                 attempt_id,
                 &cancel,
-                Some(&AdmissionOutboxDeliveryRouteV1::Continuation(
+                Some(&AdmissionOutboxDeliveryRoute::Continuation(
                     b"sponsor-address".to_vec(),
                 )),
             )
             .await
             .unwrap();
 
-        assert_eq!(result, AdmissionOutboxDeliveryResultV1::Rejected(rejected));
+        assert_eq!(result, AdmissionOutboxDeliveryResult::Rejected(rejected));
         assert!(matches!(
             sessions.sent.lock().unwrap().first(),
             Some(PairingSessionMessage::DurableAdmission(frame))

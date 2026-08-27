@@ -10,6 +10,7 @@ use tracing::error;
 use uc_application::facade::{
     AppFacade, UnlockSpaceError, UnlockSpaceInput as AppUnlockSpaceInput,
 };
+use uc_core::crypto::domain::Passphrase;
 
 pub async fn execute_unlock_space(
     facade: &AppFacade,
@@ -17,7 +18,7 @@ pub async fn execute_unlock_space(
 ) -> Result<OperationResult, EngineError> {
     let result = facade
         .unlock_space(AppUnlockSpaceInput {
-            passphrase: input.passphrase.expose().to_owned(),
+            passphrase: Passphrase::new(input.passphrase.expose()),
         })
         .await
         .map_err(map_unlock_space_error)?;

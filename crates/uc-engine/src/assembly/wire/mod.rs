@@ -54,16 +54,17 @@ use uc_infra::db::pool::{init_db_pool, DbPool};
 #[cfg(feature = "lan-compat")]
 use uc_infra::db::repositories::DieselMobileDeviceRepository;
 use uc_infra::db::repositories::{
-    DieselAdmissionAttemptStore, DieselBlobMigrationRepository, DieselBlobReferenceRepository,
-    DieselBlobRepository, DieselClipboardEntryReplaceRepository, DieselClipboardEntryRepository,
+    DieselBlobMigrationRepository, DieselBlobReferenceRepository, DieselBlobRepository,
+    DieselClipboardEntryReplaceRepository, DieselClipboardEntryRepository,
     DieselClipboardEventRepository, DieselClipboardRepresentationRepository,
     DieselClipboardSelectionRepository, DieselEntryAvailabilityRepository,
     DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
-    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository,
-    DieselSpaceSecurityStore, DieselThumbnailRepository, DieselTrustedPeerRepository,
-    DieselWorkspaceConvergenceStore, EncryptedMembershipAnnouncementRepository,
-    EncryptedMembershipAppliedSecurityUpdateRepository, EncryptedMembershipCandidateRepository,
-    EncryptedMembershipOutboxRepository, EncryptedRelationshipStore,
+    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceJoinRecordStore,
+    DieselSpaceMemberRepository, DieselSpaceSecurityStore, DieselThumbnailRepository,
+    DieselTrustedPeerRepository, DieselWorkspaceConvergenceStore,
+    EncryptedMembershipAnnouncementRepository, EncryptedMembershipAppliedSecurityUpdateRepository,
+    EncryptedMembershipCandidateRepository, EncryptedMembershipOutboxRepository,
+    EncryptedRelationshipStore,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::fs::VaultLayout;
@@ -129,6 +130,7 @@ struct InfraLayer {
     // 升级游标（"上次运行版本"）。落点 = app_data_root/upgrade-cursor.json，
     // 与 vault/keyring/settings.json 同级，profile 隔离由调用方上层保证。
     app_version_state: Arc<dyn AppVersionStatePort>,
+    engine_version_state: Arc<dyn uc_core::ports::EngineVersionStatePort>,
 
     // 首次同步事件去重 flag。落点 = app_data_root/first-sync-state.json，
     // 与 upgrade-cursor.json 同级；schema 三 flag 一文件，port impl 内部
@@ -324,13 +326,12 @@ pub fn wire_dependencies_from_inputs(
         Arc::clone(&infra.db_executor),
         platform.session.as_ref().clone(),
     ));
-    let admission_store = Arc::new(DieselAdmissionAttemptStore::new(
+    let admission_store = Arc::new(DieselSpaceJoinRecordStore::new(
         Arc::clone(&infra.db_executor),
         admission_keys.as_ref().clone(),
     ));
-    let admission_attempt_repository: Arc<
-        dyn uc_application::deps::AdmissionAttemptRepositoryPort,
-    > = admission_store.clone();
+    let admission_attempt_repository: Arc<dyn uc_application::deps::SpaceJoinRecordStorePort> =
+        admission_store.clone();
     let membership_history_repository: Arc<
         dyn uc_application::deps::MembershipHistoryRepositoryPort,
     > = admission_store;
@@ -688,6 +689,7 @@ pub fn wire_dependencies_from_inputs(
         portable_current_space_identity,
         config_migration,
         app_version_state: infra.app_version_state,
+        engine_version_state: infra.engine_version_state,
         first_sync_state: infra.first_sync_state,
         storage: StoragePorts {
             blob_store: platform.blob_store,
