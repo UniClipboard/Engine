@@ -929,6 +929,9 @@ function checkInfraSpaceAdmissionOwnership() {
     'joiner/source_snapshot.rs',
     'recovery/mod.rs',
     'recovery/pending_state.rs',
+    'sponsor/mod.rs',
+    'sponsor/base_snapshot.rs',
+    'sponsor/join_request_state.rs',
   ]
   const retiredEntries = [
     'crates/uc-infra/src/db/repositories/space_join_record_store.rs',

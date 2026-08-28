@@ -34,6 +34,34 @@ pub(in crate::space::admission) fn recovery_token(
     hasher.finalize().into()
 }
 
+pub(in crate::space::admission) fn sponsor_existing_token(
+    profile_generation: [u8; 16],
+    aggregate: &SpaceAdmissionAggregate,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/space-admission/sponsor-existing-token/v1\0");
+    hasher.update(profile_generation);
+    hasher.update(aggregate.admission_id().as_bytes());
+    hasher.update(aggregate.record_version().to_be_bytes());
+    hasher.finalize().into()
+}
+
+pub(in crate::space::admission) fn sponsor_fresh_token(
+    state: &PersistedSpaceAdmissionRepositoryV1,
+    admission_id: [u8; 32],
+    invitation_id: [u8; 32],
+    base_snapshot: &[u8],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/space-admission/sponsor-fresh-token/v1\0");
+    hasher.update(state.profile_generation);
+    hasher.update(admission_id);
+    hasher.update(invitation_id);
+    hasher.update((base_snapshot.len() as u64).to_be_bytes());
+    hasher.update(base_snapshot);
+    hasher.finalize().into()
+}
+
 fn append_optional_id(hasher: &mut Sha256, value: Option<[u8; 32]>) {
     match value {
         Some(value) => {

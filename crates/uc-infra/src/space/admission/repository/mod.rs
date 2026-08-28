@@ -4,6 +4,8 @@ pub(super) mod token;
 
 use std::sync::Arc;
 
+use uc_application::deps::LoadMembershipLedgerPort;
+
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 
@@ -11,6 +13,7 @@ pub struct SqliteSpaceAdmissionState<E> {
     pub(super) executor: E,
     pub(super) keys: Arc<AdmissionKeyManager>,
     pub(super) manifests: Arc<ActiveSpaceGenerationManifestStore>,
+    pub(super) membership: Arc<dyn LoadMembershipLedgerPort>,
 }
 
 impl<E> SqliteSpaceAdmissionState<E> {
@@ -18,11 +21,13 @@ impl<E> SqliteSpaceAdmissionState<E> {
         executor: E,
         keys: Arc<AdmissionKeyManager>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
+        membership: Arc<dyn LoadMembershipLedgerPort>,
     ) -> Self {
         Self {
             executor,
             keys,
             manifests,
+            membership,
         }
     }
 }

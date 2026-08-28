@@ -8,6 +8,7 @@ use diesel::sql_types::Binary;
 use tempfile::TempDir;
 use uc_application::deps::{
     AdmissionRecoveryTrigger, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
+    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
     PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
 use uc_core::ids::DeviceId;
@@ -25,6 +26,9 @@ use uc_infra::db::executor::DieselSqliteExecutor;
 use uc_infra::db::pool::init_db_pool;
 use uc_infra::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_infra::space::SqliteSpaceAdmissionState;
+
+#[path = "space_admission_state/sponsor.rs"]
+mod sponsor;
 
 #[derive(Default)]
 struct MemorySecureStorage {
@@ -50,6 +54,15 @@ impl SecureStoragePort for MemorySecureStorage {
     }
 }
 
+struct UnusedMembershipLedger;
+
+#[async_trait::async_trait]
+impl LoadMembershipLedgerPort for UnusedMembershipLedger {
+    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        Err(MembershipLedgerError::Unavailable)
+    }
+}
+
 struct Fixture {
     _temp: TempDir,
     db_path: PathBuf,
@@ -70,7 +83,12 @@ impl Fixture {
             temp.path().join("vault"),
             Arc::clone(&keys),
         ));
-        let store = SqliteSpaceAdmissionState::new(executor, keys, Arc::clone(&manifests));
+        let store = SqliteSpaceAdmissionState::new(
+            executor,
+            keys,
+            Arc::clone(&manifests),
+            Arc::new(UnusedMembershipLedger),
+        );
         Self {
             _temp: temp,
             db_path,
@@ -92,7 +110,7 @@ impl Fixture {
             self._temp.path().join("vault"),
             Arc::clone(&keys),
         ));
-        SqliteSpaceAdmissionState::new(executor, keys, manifests)
+        SqliteSpaceAdmissionState::new(executor, keys, manifests, Arc::new(UnusedMembershipLedger))
     }
 
     fn execute(&self, sql: &str) {

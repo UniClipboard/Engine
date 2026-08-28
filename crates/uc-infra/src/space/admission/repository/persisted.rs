@@ -18,6 +18,7 @@ pub(in crate::space::admission) struct PersistedSpaceAdmissionRepositoryV1 {
     pub(in crate::space::admission) profile_generation: [u8; 16],
     pub(in crate::space::admission) next_local_join_ordinal: u64,
     pub(in crate::space::admission) current_local_join_id: Option<[u8; 32]>,
+    pub(in crate::space::admission) claimed_invitations: BTreeMap<[u8; 32], [u8; 32]>,
     pub(in crate::space::admission) records: BTreeMap<[u8; 32], StoredSpaceAdmissionV1>,
 }
 
@@ -28,6 +29,7 @@ impl PersistedSpaceAdmissionRepositoryV1 {
             profile_generation,
             next_local_join_ordinal: 0,
             current_local_join_id: None,
+            claimed_invitations: BTreeMap::new(),
             records: BTreeMap::new(),
         }
     }

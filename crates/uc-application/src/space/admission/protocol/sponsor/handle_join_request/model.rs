@@ -33,7 +33,7 @@ impl AuthenticatedSpaceAdmissionMessage {
         &self.envelope
     }
 
-    pub(crate) fn into_parts(
+    pub fn into_parts(
         self,
     ) -> (
         AdmissionPeerBinding,
@@ -87,7 +87,7 @@ impl LoadedSponsorJoinRequest {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (SponsorJoinRequestState, SponsorJoinRequestCommitToken) {
+    pub fn into_parts(self) -> (SponsorJoinRequestState, SponsorJoinRequestCommitToken) {
         (self.state, self.commit_token)
     }
 }
@@ -108,7 +108,7 @@ impl CommittedSponsorAdmission {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (SpaceAdmissionAggregate, SponsorJoinRequestCommitToken) {
+    pub fn into_parts(self) -> (SpaceAdmissionAggregate, SponsorJoinRequestCommitToken) {
         (self.aggregate, self.commit_token)
     }
 }
@@ -161,7 +161,7 @@ pub struct SponsorAdmissionMutation {
 }
 
 impl SponsorAdmissionMutation {
-    pub(crate) const fn new(transition: AdmissionTransition) -> Self {
+    pub const fn new(transition: AdmissionTransition) -> Self {
         Self { transition }
     }
 
