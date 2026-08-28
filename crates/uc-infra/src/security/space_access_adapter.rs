@@ -2051,8 +2051,8 @@ impl DefaultSpaceAccessAdapter {
 mod intent_ports {
     use super::*;
     use uc_application::deps::{
-        GroupAdmissionPort, InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort,
-        ProbeProfileKeyAccessPort, ResumeSpaceSessionPort,
+        InitializeSpacePort, IsSpaceUnlockedPort, LockSpacePort, ProbeProfileKeyAccessPort,
+        ResumeSpaceSessionPort,
     };
     use uc_core::ports::space::{
         CurrentSessionProofKeyPort, DeriveAdmissionProofKeyPort, DeriveProofKeyPort,
@@ -2193,42 +2193,6 @@ mod intent_ports {
                 pairing_session_id,
             )
             .await
-        }
-    }
-
-    #[async_trait]
-    impl GroupAdmissionPort for DefaultSpaceAccessAdapter {
-        async fn prepare_group_join(
-            &self,
-            device_id: &DeviceId,
-        ) -> Result<PreparedGroupJoin, SpaceAccessError> {
-            DefaultSpaceAccessAdapter::prepare_group_join(self, device_id).await
-        }
-
-        async fn prepared_join_membership_credential(
-            &self,
-            pending: &PreparedGroupJoin,
-        ) -> Result<uc_core::membership::MembershipCredential, SpaceAccessError> {
-            let public_key = MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(
-                pending.private_state().to_vec(),
-            ))
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
-            Ok(uc_core::membership::MembershipCredential::new(
-                uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
-                public_key,
-            ))
-        }
-
-        async fn sign_prepared_join_payload(
-            &self,
-            pending: &PreparedGroupJoin,
-            payload: &[u8],
-        ) -> Result<Vec<u8>, SpaceAccessError> {
-            MlsGroupEngine::sign_pending_member_payload(
-                &MlsClientState::from_bytes(pending.private_state().to_vec()),
-                payload,
-            )
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))
         }
     }
 }

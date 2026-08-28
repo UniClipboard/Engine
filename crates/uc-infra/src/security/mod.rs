@@ -35,7 +35,7 @@ pub use active_space_generation_manifest_store::{
 };
 pub use adapters::SpaceSessionRebindAdapter;
 pub use admission_key_manager::{
-    AdmissionKeyError, AdmissionKeyManager, WrappedSpaceJoinRecordDataKey,
+    AdmissionKeyError, AdmissionKeyManager, WrappedSpaceAdmissionDataKey,
 };
 pub use admission_proof::HmacProofAdapter;
 pub use admission_security_transition::AdmissionSecurityTransitionAdapter;

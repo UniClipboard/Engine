@@ -915,6 +915,55 @@ function checkSpaceAdmissionPersistenceOwnership() {
   return problems
 }
 
+function checkInfraSpaceAdmissionOwnership() {
+  const problems = []
+  const admissionRoot = 'crates/uc-infra/src/space/admission'
+  const requiredEntries = [
+    'mod.rs',
+    'repository/mod.rs',
+    'repository/persisted.rs',
+    'repository/codec.rs',
+    'repository/token.rs',
+    'joiner/mod.rs',
+    'joiner/start_state.rs',
+    'joiner/source_snapshot.rs',
+    'recovery/mod.rs',
+    'recovery/pending_state.rs',
+  ]
+  const retiredEntries = [
+    'crates/uc-infra/src/db/repositories/space_join_record_store.rs',
+    'crates/uc-infra/src/network/iroh/admission_completion_recovery_adapter.rs',
+    'crates/uc-infra/src/pairing/admission_outbox_delivery.rs',
+  ]
+
+  for (const entry of requiredEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, admissionRoot, entry))) {
+      addProblem(
+        problems,
+        'infra space admission ownership',
+        `missing role-owned admission implementation: ${admissionRoot}/${entry}`
+      )
+    }
+  }
+  for (const path of retiredEntries) {
+    if (existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'infra space admission ownership', `retired admission path remains: ${path}`)
+    }
+  }
+  if (
+    existsSync(join(REPOSITORY_ROOT, admissionRoot)) &&
+    readSourceTree(admissionRoot).includes('SpaceJoinRecord')
+  ) {
+    addProblem(
+      problems,
+      'infra space admission ownership',
+      'new admission implementation depends on retired SpaceJoinRecord types'
+    )
+  }
+
+  return problems
+}
+
 function repositorySources() {
   return {
     engine: read('crates/uc-engine/src/lib.rs'),
@@ -944,6 +993,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkSpaceModuleInterface(),
     ...checkSpaceAdmissionProtocolOwnership(),
     ...checkSpaceAdmissionPersistenceOwnership(),
+    ...checkInfraSpaceAdmissionOwnership(),
     ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
     ...(includePlaintext ? checkPlaintextScanner() : []),

@@ -31,7 +31,7 @@ use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::{debug, info, instrument, warn};
-use uc_application::deps::{AdmissionCompletionRecoveryEndpointPort, CurrentMemberSignaturePort};
+use uc_application::deps::CurrentMemberSignaturePort;
 use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -64,9 +64,6 @@ use super::active_clipboard::{
     ACTIVE_CLIPBOARD_PULL_ALPN,
 };
 use super::addr_filter::{apply_addr_filter, enumerate_local_lan_v4};
-use super::admission_completion_recovery_adapter::{
-    IrohAdmissionCompletionRecoveryAdapter, ADMISSION_COMPLETION_RECOVERY_ALPN,
-};
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 #[cfg(test)]
 use super::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
@@ -998,29 +995,6 @@ impl IrohNodeBuilder {
         self.router_builder = Some(builder.accept(
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
             adapter.handler(member_repo, fingerprint_factory, endpoint),
-        ));
-        Ok(())
-    }
-
-    pub fn build_admission_completion_recovery_adapter(
-        &self,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-    ) -> Arc<IrohAdmissionCompletionRecoveryAdapter> {
-        Arc::new(IrohAdmissionCompletionRecoveryAdapter::new(
-            Arc::clone(&self.endpoint),
-            peer_addr_repo,
-        ))
-    }
-
-    pub fn install_admission_completion_recovery(
-        &mut self,
-        adapter: &IrohAdmissionCompletionRecoveryAdapter,
-        endpoint: Arc<dyn AdmissionCompletionRecoveryEndpointPort>,
-    ) -> Result<(), IrohNodeError> {
-        let builder = self.take_router_builder()?;
-        self.router_builder = Some(builder.accept(
-            ADMISSION_COMPLETION_RECOVERY_ALPN,
-            adapter.handler(endpoint),
         ));
         Ok(())
     }

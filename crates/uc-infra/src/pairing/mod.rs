@@ -15,7 +15,6 @@
 //!
 //! [`PairingSessionMessage`]: uc_core::pairing::PairingSessionMessage
 
-mod admission_outbox_delivery;
 pub mod code_mint;
 pub mod discovery_constants;
 pub mod mdns_publisher;
@@ -23,7 +22,6 @@ pub mod mdns_resolver;
 pub mod session;
 pub mod wire;
 
-pub use admission_outbox_delivery::PairingAdmissionOutboxDelivery;
 pub use code_mint::mint_invitation_code;
 pub use mdns_publisher::{MdnsPairingPublisher, MdnsPublisherError, PublisherHandle};
 pub use mdns_resolver::{MdnsPairingResolver, MdnsResolverError};

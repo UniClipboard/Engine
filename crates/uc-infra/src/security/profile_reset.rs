@@ -278,7 +278,7 @@ mod tests {
     use uc_core::ports::security::secure_storage::{SecureStorageError, SecureStoragePort};
     use uc_core::ports::security::MigrationRunId;
 
-    use super::{ProfileKeyWiper, ProfileStateCleaner};
+    use super::{ProfileGeneration, ProfileKeyWiper, ProfileStateCleaner};
 
     #[derive(Default)]
     struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);

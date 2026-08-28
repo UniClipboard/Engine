@@ -106,7 +106,7 @@ impl LoadedJoinerStartState {
     }
 
     /// 一次性取出开始加入所需事实，避免旧视图被重复用于后续提交。
-    pub(crate) fn into_parts(
+    pub fn into_parts(
         self,
     ) -> (
         u64,

@@ -79,7 +79,7 @@ impl LoadedPendingAdmission {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (SpaceAdmissionAggregate, AdmissionRecoveryCommitToken) {
+    pub fn into_parts(self) -> (SpaceAdmissionAggregate, AdmissionRecoveryCommitToken) {
         (self.aggregate, self.commit_token)
     }
 }
