@@ -50,6 +50,7 @@ pub use terminal::{
     SpaceAdmissionSupersededTerminal,
 };
 pub use view::{
-    AdmissionPendingRecovery, JoinerAppliedPreparation, SponsorCandidatePreparation,
-    SponsorCommitPreparation,
+    AdmissionPendingRecovery, JoinerActivationPreparation, JoinerAppliedPreparation,
+    JoinerCompletePreparation, SponsorCandidatePreparation, SponsorCommitPreparation,
+    SponsorCompletePreparation, SponsorSettlementPreparation,
 };

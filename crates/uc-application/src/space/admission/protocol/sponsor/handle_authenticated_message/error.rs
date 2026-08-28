@@ -2,7 +2,8 @@ use crate::error::anyhow_error_constructor;
 use uc_core::membership::{AdmissionReplayError, SpaceAdmissionAggregateError};
 
 use super::super::{
-    PrepareSponsorCandidateError, PrepareSponsorCommitError, SponsorAdmissionStateError,
+    PrepareSponsorCandidateError, PrepareSponsorCommitError, PrepareSponsorCompleteError,
+    PrepareSponsorSettledError, SponsorAdmissionStateError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -94,6 +95,24 @@ impl From<PrepareSponsorCommitError> for HandleAuthenticatedSpaceAdmissionMessag
         match error {
             PrepareSponsorCommitError::Invalid { .. } => Self::invalid(error),
             PrepareSponsorCommitError::Unavailable { .. } => Self::unavailable(error),
+        }
+    }
+}
+
+impl From<PrepareSponsorCompleteError> for HandleAuthenticatedSpaceAdmissionMessageError {
+    fn from(error: PrepareSponsorCompleteError) -> Self {
+        match error {
+            PrepareSponsorCompleteError::Invalid { .. } => Self::invalid(error),
+            PrepareSponsorCompleteError::Unavailable { .. } => Self::unavailable(error),
+        }
+    }
+}
+
+impl From<PrepareSponsorSettledError> for HandleAuthenticatedSpaceAdmissionMessageError {
+    fn from(error: PrepareSponsorSettledError) -> Self {
+        match error {
+            PrepareSponsorSettledError::Invalid { .. } => Self::invalid(error),
+            PrepareSponsorSettledError::Unavailable { .. } => Self::unavailable(error),
         }
     }
 }

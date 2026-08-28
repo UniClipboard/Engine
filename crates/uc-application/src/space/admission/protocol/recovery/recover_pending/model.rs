@@ -28,6 +28,15 @@ pub struct AdmissionRecoveryReport {
     pub recovery_required_count: usize,
 }
 
+impl AdmissionRecoveryReport {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.advanced_count += other.advanced_count;
+        self.deferred_count += other.deferred_count;
+        self.rejected_count += other.rejected_count;
+        self.recovery_required_count += other.recovery_required_count;
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct AdmissionRecoveryCommitToken([u8; 32]);
 

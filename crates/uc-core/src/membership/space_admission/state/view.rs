@@ -26,9 +26,89 @@ pub struct SponsorCommitPreparation<'a> {
     staged_security: &'a AdmissionStagedSecurityState,
 }
 
+pub struct SponsorCompletePreparation<'a> {
+    commit_reply: &'a SpaceAdmissionEnvelopeV1,
+    committed_history: &'a AdmissionSignedMembershipHistory,
+    sealed_security: &'a AdmissionSealedSecurityState,
+}
+
+pub struct SponsorSettlementPreparation<'a> {
+    complete_reply: &'a SpaceAdmissionEnvelopeV1,
+}
+
+impl SponsorSettlementPreparation<'_> {
+    pub const fn complete_reply(&self) -> &SpaceAdmissionEnvelopeV1 {
+        self.complete_reply
+    }
+}
+
+impl SponsorCompletePreparation<'_> {
+    pub const fn commit_reply(&self) -> &SpaceAdmissionEnvelopeV1 {
+        self.commit_reply
+    }
+
+    pub const fn committed_history(&self) -> &AdmissionSignedMembershipHistory {
+        self.committed_history
+    }
+
+    pub const fn sealed_security(&self) -> &AdmissionSealedSecurityState {
+        self.sealed_security
+    }
+}
+
 pub struct JoinerAppliedPreparation<'a> {
     exact_commit: &'a SpaceAdmissionEnvelopeV1,
     staged_target: &'a AdmissionStagedTarget,
+}
+
+pub struct JoinerCompletePreparation<'a> {
+    source_snapshot: &'a AdmissionSourceSnapshot,
+    exact_commit: &'a SpaceAdmissionEnvelopeV1,
+    staged_target: &'a AdmissionStagedTarget,
+    applied_request: &'a SpaceAdmissionEnvelopeV1,
+}
+
+pub struct JoinerActivationPreparation<'a> {
+    space_transition: &'a AdmissionSpaceTransition,
+    completion: &'a SpaceAdmissionEnvelopeV1,
+    exact_commit: &'a SpaceAdmissionEnvelopeV1,
+    staged_target: &'a AdmissionStagedTarget,
+}
+
+impl JoinerActivationPreparation<'_> {
+    pub const fn space_transition(&self) -> &AdmissionSpaceTransition {
+        self.space_transition
+    }
+
+    pub const fn completion(&self) -> &SpaceAdmissionEnvelopeV1 {
+        self.completion
+    }
+
+    pub const fn exact_commit(&self) -> &SpaceAdmissionEnvelopeV1 {
+        self.exact_commit
+    }
+
+    pub const fn staged_target(&self) -> &AdmissionStagedTarget {
+        self.staged_target
+    }
+}
+
+impl JoinerCompletePreparation<'_> {
+    pub const fn source_snapshot(&self) -> &AdmissionSourceSnapshot {
+        self.source_snapshot
+    }
+
+    pub const fn exact_commit(&self) -> &SpaceAdmissionEnvelopeV1 {
+        self.exact_commit
+    }
+
+    pub const fn staged_target(&self) -> &AdmissionStagedTarget {
+        self.staged_target
+    }
+
+    pub const fn applied_request(&self) -> &SpaceAdmissionEnvelopeV1 {
+        self.applied_request
+    }
 }
 
 impl JoinerAppliedPreparation<'_> {
@@ -76,6 +156,15 @@ impl SponsorCandidatePreparation<'_> {
 impl SpaceAdmissionAggregate {
     pub const fn is_terminal(&self) -> bool {
         matches!(self.state, SpaceAdmissionRecordState::Terminal(_))
+    }
+
+    pub const fn is_active_settled(&self) -> bool {
+        matches!(
+            self.state,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
+                SpaceAdmissionActiveState::Settled(_)
+            ))
+        )
     }
 
     pub fn pending_recovery(&self) -> Option<AdmissionPendingRecovery<'_>> {
@@ -181,6 +270,30 @@ impl SpaceAdmissionAggregate {
         })
     }
 
+    pub fn sponsor_complete_preparation(&self) -> Option<SponsorCompletePreparation<'_>> {
+        let SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Committed(state)) =
+            &self.state
+        else {
+            return None;
+        };
+        Some(SponsorCompletePreparation {
+            commit_reply: state.saved_reply.exact_reply_envelope(),
+            committed_history: &state.committed_history,
+            sealed_security: &state.sealed_security,
+        })
+    }
+
+    pub fn sponsor_settlement_preparation(&self) -> Option<SponsorSettlementPreparation<'_>> {
+        let SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state)) =
+            &self.state
+        else {
+            return None;
+        };
+        Some(SponsorSettlementPreparation {
+            complete_reply: state.saved_reply.exact_reply_envelope(),
+        })
+    }
+
     pub fn joiner_applied_preparation(&self) -> Option<JoinerAppliedPreparation<'_>> {
         let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Committed(state)) =
             &self.state
@@ -188,6 +301,34 @@ impl SpaceAdmissionAggregate {
             return None;
         };
         Some(JoinerAppliedPreparation {
+            exact_commit: &state.exact_commit,
+            staged_target: &state.staged_target,
+        })
+    }
+
+    pub fn joiner_complete_preparation(&self) -> Option<JoinerCompletePreparation<'_>> {
+        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Applied(state)) =
+            &self.state
+        else {
+            return None;
+        };
+        Some(JoinerCompletePreparation {
+            source_snapshot: &state.source_snapshot,
+            exact_commit: &state.exact_commit,
+            staged_target: &state.staged_target,
+            applied_request: state.pending_exchange.request_envelope(),
+        })
+    }
+
+    pub fn joiner_activation_preparation(&self) -> Option<JoinerActivationPreparation<'_>> {
+        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Activating(state)) =
+            &self.state
+        else {
+            return None;
+        };
+        Some(JoinerActivationPreparation {
+            space_transition: &state.space_transition,
+            completion: &state.completion,
             exact_commit: &state.exact_commit,
             staged_target: &state.staged_target,
         })

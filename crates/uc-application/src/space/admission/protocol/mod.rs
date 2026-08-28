@@ -9,9 +9,13 @@ mod tests;
 
 pub(crate) use joiner::JoinerAdmissionService;
 pub use joiner::{
-    JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
-    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, PrepareJoinerAppliedError,
-    PrepareJoinerAppliedPort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
+    CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
+    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationStateError,
+    JoinerActivationStatePort, JoinerStartMaterial, JoinerStartMaterialError,
+    JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
+    LoadedJoinerActivation, LoadedJoinerStartState, PrepareJoinerActivationError,
+    PrepareJoinerActivationPort, PrepareJoinerAppliedError, PrepareJoinerAppliedPort,
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PreparedJoinerActivation,
     PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, SpaceAdmissionCommitToken,
 };
 pub(crate) use protocol::SpaceAdmissionProtocol;
@@ -27,8 +31,10 @@ pub use sponsor::{
     AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
     HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
     LoadedSponsorAdmission, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
-    PrepareSponsorCommitError, PrepareSponsorCommitPort, PreparedSponsorCandidate,
-    PreparedSponsorCommit, SpaceAdmissionMessageReply, SponsorAdmissionCommitToken,
+    PrepareSponsorCommitError, PrepareSponsorCommitPort, PrepareSponsorCompleteError,
+    PrepareSponsorCompletePort, PrepareSponsorSettledError, PrepareSponsorSettledPort,
+    PreparedSponsorCandidate, PreparedSponsorCommit, PreparedSponsorComplete,
+    PreparedSponsorSettled, SpaceAdmissionMessageReply, SponsorAdmissionCommitToken,
     SponsorAdmissionMutation, SponsorAdmissionState, SponsorAdmissionStateError,
     SponsorAdmissionStatePort,
 };

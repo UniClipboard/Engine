@@ -13,9 +13,11 @@ use uc_core::ports::PresenceEvent;
 
 use crate::space::admission::{
     AdmissionRecoveryService, CancelSpaceJoinUseCase, CompletePendingSpaceTransitionUseCase,
-    HandleAuthenticatedSpaceAdmissionMessagePort, JoinerAdmissionService, JoinerStartMaterialPort,
-    JoinerStartStatePort, PendingAdmissionRecoveryStatePort, PrepareJoinerAppliedPort,
-    PrepareJoinerCandidatePort, PrepareSponsorCandidatePort, PrepareSponsorCommitPort,
+    ExecuteJoinerActivationPort, HandleAuthenticatedSpaceAdmissionMessagePort,
+    JoinerActivationStatePort, JoinerAdmissionService, JoinerStartMaterialPort,
+    JoinerStartStatePort, PendingAdmissionRecoveryStatePort, PrepareJoinerActivationPort,
+    PrepareJoinerAppliedPort, PrepareJoinerCandidatePort, PrepareSponsorCandidatePort,
+    PrepareSponsorCommitPort, PrepareSponsorCompletePort, PrepareSponsorSettledPort,
     QueryPendingSpaceTransitionUseCase, SpaceAdmissionProtocol, SpaceAdmissionTransportPort,
     SponsorAdmissionService, SponsorAdmissionStatePort,
 };
@@ -88,8 +90,13 @@ pub struct SpaceApplicationDeps {
     pub sponsor_admission_state: Arc<dyn SponsorAdmissionStatePort>,
     pub prepare_sponsor_candidate: Arc<dyn PrepareSponsorCandidatePort>,
     pub prepare_sponsor_commit: Arc<dyn PrepareSponsorCommitPort>,
+    pub prepare_sponsor_complete: Arc<dyn PrepareSponsorCompletePort>,
+    pub prepare_sponsor_settled: Arc<dyn PrepareSponsorSettledPort>,
     pub prepare_joiner_candidate: Arc<dyn PrepareJoinerCandidatePort>,
     pub prepare_joiner_applied: Arc<dyn PrepareJoinerAppliedPort>,
+    pub prepare_joiner_activation: Arc<dyn PrepareJoinerActivationPort>,
+    pub joiner_activation_state: Arc<dyn JoinerActivationStatePort>,
+    pub execute_joiner_activation: Arc<dyn ExecuteJoinerActivationPort>,
     pub device_trust_observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     pub membership_history_transport: Arc<dyn MembershipHistoryExchangePort>,
     pub admission_outbox_delivery: Arc<dyn crate::deps::AdmissionOutboxDeliveryPort>,
@@ -158,12 +165,17 @@ impl SpaceApplication {
             deps.joiner_start_state,
             deps.prepare_joiner_candidate,
             deps.prepare_joiner_applied,
+            deps.prepare_joiner_activation,
+            deps.joiner_activation_state,
+            deps.execute_joiner_activation,
             deferred_maintenance_wake.clone(),
         );
         let sponsor_admission = SponsorAdmissionService::new(
             deps.sponsor_admission_state,
             deps.prepare_sponsor_candidate,
             deps.prepare_sponsor_commit,
+            deps.prepare_sponsor_complete,
+            deps.prepare_sponsor_settled,
         );
         let admission_recovery = AdmissionRecoveryService::new(
             deps.pending_admission_recovery_state,

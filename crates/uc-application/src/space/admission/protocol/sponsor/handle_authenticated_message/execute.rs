@@ -26,6 +26,8 @@ impl SponsorAdmissionService {
         match message.envelope().kind() {
             SpaceAdmissionMessageKind::JoinRequest => self.handle_join_request(message).await,
             SpaceAdmissionMessageKind::Prepared => self.handle_prepared(message).await,
+            SpaceAdmissionMessageKind::Applied => self.handle_applied(message).await,
+            SpaceAdmissionMessageKind::CompleteAck => self.handle_complete_ack(message).await,
             _ => Err(HandleAuthenticatedSpaceAdmissionMessageError::out_of_order(
                 anyhow::anyhow!("the Sponsor cannot handle this admission message kind"),
             )),

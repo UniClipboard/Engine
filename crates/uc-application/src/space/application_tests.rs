@@ -316,6 +316,30 @@ impl PrepareSponsorCommitPort for PassivePorts {
 }
 
 #[async_trait]
+impl PrepareSponsorCompletePort for PassivePorts {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: SponsorCompletePreparation<'_>,
+        _applied: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedSponsorComplete, PrepareSponsorCompleteError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl PrepareSponsorSettledPort for PassivePorts {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: SponsorSettlementPreparation<'_>,
+        _complete_ack: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedSponsorSettled, PrepareSponsorSettledError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
 impl PrepareJoinerCandidatePort for PassivePorts {
     async fn prepare(
         &self,
@@ -332,6 +356,44 @@ impl PrepareJoinerAppliedPort for PassivePorts {
         _admission_id: SpaceAdmissionId,
         _preparation: JoinerAppliedPreparation<'_>,
     ) -> Result<PreparedJoinerAppliedMaterial, PrepareJoinerAppliedError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl PrepareJoinerActivationPort for PassivePorts {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: JoinerCompletePreparation<'_>,
+        _complete: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedJoinerActivation, PrepareJoinerActivationError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl JoinerActivationStatePort for PassivePorts {
+    async fn load(&self) -> Result<Option<LoadedJoinerActivation>, JoinerActivationStateError> {
+        Ok(None)
+    }
+
+    async fn commit(
+        &self,
+        _token: JoinerActivationCommitToken,
+        _mutation: JoinerActivationMutation,
+    ) -> Result<(), JoinerActivationStateError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl ExecuteJoinerActivationPort for PassivePorts {
+    async fn execute(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: JoinerActivationPreparation<'_>,
+    ) -> Result<CompletedJoinerActivation, ExecuteJoinerActivationError> {
         unreachable!()
     }
 }
@@ -479,8 +541,13 @@ async fn complete_application_starts_from_only_target_ports() {
             sponsor_admission_state: passive.clone(),
             prepare_sponsor_candidate: passive.clone(),
             prepare_sponsor_commit: passive.clone(),
+            prepare_sponsor_complete: passive.clone(),
+            prepare_sponsor_settled: passive.clone(),
             prepare_joiner_candidate: passive.clone(),
             prepare_joiner_applied: passive.clone(),
+            prepare_joiner_activation: passive.clone(),
+            joiner_activation_state: passive.clone(),
+            execute_joiner_activation: passive.clone(),
             device_trust_observations: passive.clone(),
             membership_history_transport: passive.clone(),
             admission_outbox_delivery: passive.clone(),

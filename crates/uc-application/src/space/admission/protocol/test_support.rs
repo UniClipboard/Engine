@@ -2,20 +2,22 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use uc_core::membership::{
-    AdmissionActivationReceipt, AdmissionAppliedV1, AdmissionBaseSnapshot, AdmissionCandidateV1,
-    AdmissionChangeFacts, AdmissionChannelPeerId, AdmissionCommitV1,
+    AdmissionActivatedSecurityState, AdmissionActivationReceipt, AdmissionAppliedV1,
+    AdmissionBaseSnapshot, AdmissionCandidateV1, AdmissionChangeFacts, AdmissionChannelPeerId,
+    AdmissionCommitV1, AdmissionCompleteAckV1, AdmissionCompleteV1, AdmissionCompletionV1,
     AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
     AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinRequestV1,
     AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome,
     AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecoveryPublicKey, AdmissionRetryState,
     AdmissionRole, AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState,
-    AdmissionSecurityCommitmentV1, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
-    AdmissionStagedSecurityState, AdmissionStagedTarget, AdmissionStagedTargetInput,
-    AdmissionTransition, BaseMembershipHistoryPosition, InvitationId, JoinId, MemberInstanceId,
-    MembershipAdmissionV2, MembershipCredential, MembershipEventV2, MembershipOperationV2,
-    PendingAdmissionExchange, PreparedAdmissionProofV1, SpaceAdmissionAggregate,
-    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
-    SpaceAdmissionRoute, UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    AdmissionSecurityCommitmentV1, AdmissionSettledV1, AdmissionSignedMembershipHistory,
+    AdmissionSourceSnapshot, AdmissionSpaceTransitionResult, AdmissionStagedSecurityState,
+    AdmissionStagedTarget, AdmissionStagedTargetInput, AdmissionTransition,
+    BaseMembershipHistoryPosition, InvitationId, JoinId, MemberInstanceId, MembershipAdmissionV2,
+    MembershipCredential, MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange,
+    PreparedAdmissionProofV1, SpaceAdmissionAggregate, SpaceAdmissionBodyV1,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionRoute,
+    UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
     ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 use uc_core::ports::SettingsPort;
@@ -25,14 +27,20 @@ use uc_core::DeviceId;
 use super::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryService, AdmissionRecoveryTrigger,
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
-    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, JoinerAdmissionService,
-    JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
-    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, LoadedPendingAdmission,
-    LoadedSponsorAdmission, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
-    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCandidateError,
-    PrepareJoinerCandidatePort, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
-    PrepareSponsorCommitError, PrepareSponsorCommitPort, PreparedJoinerAppliedMaterial,
-    PreparedJoinerCandidateMaterial, PreparedSponsorCandidate, PreparedSponsorCommit,
+    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, CompletedJoinerActivation,
+    ExecuteJoinerActivationError, ExecuteJoinerActivationPort, JoinerActivationCommitToken,
+    JoinerActivationMutation, JoinerActivationStateError, JoinerActivationStatePort,
+    JoinerAdmissionService, JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort,
+    JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort, LoadedJoinerActivation,
+    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAdmission,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
+    PrepareJoinerAppliedPort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
+    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
+    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
+    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
+    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedSponsorCandidate,
+    PreparedSponsorCommit, PreparedSponsorComplete, PreparedSponsorSettled,
     SpaceAdmissionCommitToken, SpaceAdmissionProtocol, SpaceAdmissionTransportError,
     SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
     SponsorAdmissionService, SponsorAdmissionState, SponsorAdmissionStateError,
@@ -51,11 +59,19 @@ pub(super) enum ProtocolEvent {
     JoinerSavedPrepared,
     JoinerContinuationChannelRequested,
     JoinerPreparedExchanged,
+    JoinerAppliedExchanged,
     JoinerSavedCommitted,
     JoinerSavedApplied,
+    JoinerSavedActivating,
+    JoinerActivationExecuted,
+    JoinerSavedActivePendingSettlement,
+    JoinerCompleteAckExchanged,
+    JoinerSavedActiveSettled,
     SponsorSavedAccepted,
     SponsorSavedCandidate,
     SponsorSavedCommitted,
+    SponsorSavedApplied,
+    SponsorSavedCompleted,
 }
 
 pub(super) struct SpaceAdmissionProtocolTestPair {
@@ -78,9 +94,17 @@ struct FixedSponsorCandidate;
 
 struct FixedSponsorCommit;
 
+struct FixedSponsorComplete;
+
+struct FixedSponsorSettled;
+
 struct FixedJoinerCandidate;
 
 struct FixedJoinerApplied;
+
+struct FixedJoinerActivation {
+    events: Arc<Mutex<Vec<ProtocolEvent>>>,
+}
 
 #[derive(Clone, Copy)]
 enum TransportMode {
@@ -88,6 +112,7 @@ enum TransportMode {
     AuthenticateThenDefer,
     AuthenticateThenCandidate,
     AuthenticateThenCandidateAndCommit,
+    AuthenticateThenCandidateCommitAndComplete,
 }
 
 struct RecordingMaintenanceWake {
@@ -104,6 +129,8 @@ struct ExchangeThenDeferred {
     continuation: Option<AdmissionContinuationCredential>,
     candidate_reply: bool,
     commit_reply: bool,
+    complete_reply: bool,
+    settled_reply: bool,
 }
 
 struct RecordingJoinerStartState {
@@ -111,6 +138,7 @@ struct RecordingJoinerStartState {
     current_join: Mutex<Option<SpaceAdmissionAggregate>>,
     created_join: Mutex<Option<SpaceAdmissionAggregate>>,
     superseded: AtomicBool,
+    fail_next_activation_commit: AtomicBool,
 }
 
 struct RecordingSettings {
@@ -164,6 +192,68 @@ impl PrepareSponsorCommitPort for UnusedSponsorPorts {
         _preparation: uc_core::membership::SponsorCommitPreparation<'_>,
         _prepared: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedSponsorCommit, PrepareSponsorCommitError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl PrepareSponsorCompletePort for UnusedSponsorPorts {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: uc_core::membership::SponsorCompletePreparation<'_>,
+        _applied: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedSponsorComplete, PrepareSponsorCompleteError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl PrepareSponsorSettledPort for UnusedSponsorPorts {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: uc_core::membership::SponsorSettlementPreparation<'_>,
+        _complete_ack: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedSponsorSettled, PrepareSponsorSettledError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl PrepareJoinerActivationPort for UnusedSponsorPorts {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: uc_core::membership::JoinerCompletePreparation<'_>,
+        _complete: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedJoinerActivation, PrepareJoinerActivationError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl JoinerActivationStatePort for UnusedSponsorPorts {
+    async fn load(&self) -> Result<Option<LoadedJoinerActivation>, JoinerActivationStateError> {
+        unreachable!()
+    }
+
+    async fn commit(
+        &self,
+        _token: JoinerActivationCommitToken,
+        _mutation: JoinerActivationMutation,
+    ) -> Result<(), JoinerActivationStateError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl ExecuteJoinerActivationPort for UnusedSponsorPorts {
+    async fn execute(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: uc_core::membership::JoinerActivationPreparation<'_>,
+    ) -> Result<CompletedJoinerActivation, ExecuteJoinerActivationError> {
         unreachable!()
     }
 }
@@ -225,20 +315,20 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
         &self,
         _trigger: AdmissionRecoveryTrigger,
     ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError> {
-        Ok(self
-            .created_join
-            .lock()
-            .expect("created join is available")
-            .take()
-            .map(|aggregate| {
-                LoadedPendingAdmission::new(
-                    aggregate,
-                    AdmissionRecoveryCommitToken::from_bytes([0x26; 32])
-                        .expect("valid recovery commit token"),
-                )
-            })
-            .into_iter()
-            .collect())
+        let stored = self.created_join.lock().expect("created join is available");
+        let Some(aggregate) = stored.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let persisted = aggregate
+            .encode_persisted()
+            .expect("pending aggregate can be persisted");
+        let aggregate = SpaceAdmissionAggregate::decode_persisted(&persisted)
+            .expect("pending aggregate can be reopened");
+        Ok(vec![LoadedPendingAdmission::new(
+            aggregate,
+            AdmissionRecoveryCommitToken::from_bytes([0x26; 32])
+                .expect("valid recovery commit token"),
+        )])
     }
 
     async fn commit(
@@ -272,6 +362,17 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
                 );
                 (ProtocolEvent::JoinerSavedApplied, 0x2b)
             }
+            6 => {
+                assert_eq!(
+                    effects,
+                    &[uc_core::membership::AdmissionEffect::ActivateSpace]
+                );
+                (ProtocolEvent::JoinerSavedActivating, 0x2c)
+            }
+            8 if aggregate.is_active_settled() => {
+                assert!(effects.is_empty());
+                (ProtocolEvent::JoinerSavedActiveSettled, 0x2e)
+            }
             _ => return Err(PendingAdmissionRecoveryStateError::RecoveryRequired),
         };
         let persisted = aggregate
@@ -290,6 +391,64 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
             AdmissionRecoveryCommitToken::from_bytes([next_token_byte; 32])
                 .expect("valid next recovery commit token"),
         ))
+    }
+}
+
+#[async_trait]
+impl JoinerActivationStatePort for RecordingJoinerStartState {
+    async fn load(&self) -> Result<Option<LoadedJoinerActivation>, JoinerActivationStateError> {
+        let stored = self.created_join.lock().expect("created join is available");
+        let Some(aggregate) = stored.as_ref() else {
+            return Ok(None);
+        };
+        if aggregate.joiner_activation_preparation().is_none() {
+            return Ok(None);
+        }
+        let persisted = aggregate
+            .encode_persisted()
+            .expect("activating aggregate can be persisted");
+        let aggregate = SpaceAdmissionAggregate::decode_persisted(&persisted)
+            .expect("activating aggregate can be reopened");
+        Ok(Some(LoadedJoinerActivation::new(
+            aggregate,
+            JoinerActivationCommitToken::from_bytes([0xbd; 32])
+                .expect("valid activation commit token"),
+        )))
+    }
+
+    async fn commit(
+        &self,
+        token: JoinerActivationCommitToken,
+        mutation: JoinerActivationMutation,
+    ) -> Result<(), JoinerActivationStateError> {
+        assert_eq!(token.as_bytes(), &[0xbd; 32]);
+        let transition = mutation.into_transition();
+        assert_eq!(
+            transition.effects(),
+            &[uc_core::membership::AdmissionEffect::PublishActive]
+        );
+        let aggregate = transition.into_replacement();
+        assert_eq!(aggregate.record_version(), 7);
+        if self
+            .fail_next_activation_commit
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(JoinerActivationStateError::state_changed(anyhow::anyhow!(
+                "simulated activation commit conflict"
+            )));
+        }
+        let persisted = aggregate
+            .encode_persisted()
+            .expect("active aggregate can be persisted");
+        *self.created_join.lock().expect("created join is available") = Some(
+            SpaceAdmissionAggregate::decode_persisted(&persisted)
+                .expect("active aggregate can be reopened"),
+        );
+        self.events
+            .lock()
+            .expect("event recorder is available")
+            .push(ProtocolEvent::JoinerSavedActivePendingSettlement);
+        Ok(())
     }
 }
 
@@ -321,8 +480,11 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
                 self.mode,
                 TransportMode::AuthenticateThenCandidate
                     | TransportMode::AuthenticateThenCandidateAndCommit
+                    | TransportMode::AuthenticateThenCandidateCommitAndComplete
             ),
             commit_reply: false,
+            complete_reply: false,
+            settled_reply: false,
         }))
     }
 
@@ -333,7 +495,11 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
         _peer_binding: AdmissionPeerBinding,
         _continuation_credential: &AdmissionContinuationCredential,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
-        if !matches!(self.mode, TransportMode::AuthenticateThenCandidateAndCommit) {
+        if !matches!(
+            self.mode,
+            TransportMode::AuthenticateThenCandidateAndCommit
+                | TransportMode::AuthenticateThenCandidateCommitAndComplete
+        ) {
             return Err(SpaceAdmissionTransportError::Deferred);
         }
         self.events
@@ -345,6 +511,14 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             continuation: None,
             candidate_reply: false,
             commit_reply: true,
+            complete_reply: matches!(
+                self.mode,
+                TransportMode::AuthenticateThenCandidateCommitAndComplete
+            ),
+            settled_reply: matches!(
+                self.mode,
+                TransportMode::AuthenticateThenCandidateCommitAndComplete
+            ),
         }))
     }
 }
@@ -389,8 +563,7 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
             return Ok(AuthenticatedAdmissionReply::new(candidate, [0x7d; 32])
                 .expect("valid authenticated reply"));
         }
-        if self.commit_reply {
-            assert_eq!(request.kind(), SpaceAdmissionMessageKind::Prepared);
+        if self.commit_reply && request.kind() == SpaceAdmissionMessageKind::Prepared {
             self.events
                 .lock()
                 .expect("event recorder is available")
@@ -412,6 +585,60 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
             .expect("valid Commit reply");
             return Ok(AuthenticatedAdmissionReply::new(commit, [0x9d; 32])
                 .expect("valid authenticated Commit"));
+        }
+        if self.complete_reply && request.kind() == SpaceAdmissionMessageKind::Applied {
+            self.events
+                .lock()
+                .expect("event recorder is available")
+                .push(ProtocolEvent::JoinerAppliedExchanged);
+            let SpaceAdmissionBodyV1::Applied(applied_body) = request.body() else {
+                return Err(SpaceAdmissionTransportError::ProtocolRejected);
+            };
+            let receipt = applied_body.activation_receipt();
+            let completion = AdmissionCompletionV1::new(
+                *request.header().admission_id().as_bytes(),
+                receipt.event_id,
+                [0xb1; 32],
+                receipt.installed_security_commitment_id,
+                MemberInstanceId::from_bytes([0xb2; 32]),
+                MembershipCredential::new(1, vec![0xb3; 32]).credential_id,
+                BaseMembershipHistoryPosition {
+                    event_id: Some(receipt.event_id),
+                    depth: 1,
+                    history_digest: [0xb4; 32],
+                },
+                vec![0xb5; 64],
+            );
+            let complete = SpaceAdmissionEnvelopeV1::new(
+                request.header().admission_id(),
+                AdmissionRole::Sponsor,
+                2,
+                AdmissionMessageId::from_bytes([0xb6; 32]).expect("valid Complete message id"),
+                Some(request.header().message_id()),
+                SpaceAdmissionBodyV1::Complete(AdmissionCompleteV1::new(completion)),
+            )
+            .expect("valid Complete reply");
+            return Ok(AuthenticatedAdmissionReply::new(complete, [0xb7; 32])
+                .expect("valid authenticated Complete"));
+        }
+        if self.settled_reply && request.kind() == SpaceAdmissionMessageKind::CompleteAck {
+            self.events
+                .lock()
+                .expect("event recorder is available")
+                .push(ProtocolEvent::JoinerCompleteAckExchanged);
+            let settled = SpaceAdmissionEnvelopeV1::new(
+                request.header().admission_id(),
+                AdmissionRole::Sponsor,
+                3,
+                AdmissionMessageId::from_bytes([0xc5; 32]).expect("valid Settled message id"),
+                Some(request.header().message_id()),
+                SpaceAdmissionBodyV1::Settled(
+                    AdmissionSettledV1::new([0xc6; 32]).expect("valid completion digest"),
+                ),
+            )
+            .expect("valid Settled reply");
+            return Ok(AuthenticatedAdmissionReply::new(settled, [0xc7; 32])
+                .expect("valid authenticated Settled"));
         }
         Err(SpaceAdmissionTransportError::Deferred)
     }
@@ -489,6 +716,20 @@ impl SponsorAdmissionStatePort for RecordingSponsorState {
                     &[uc_core::membership::AdmissionEffect::CommitMembership]
                 );
                 ProtocolEvent::SponsorSavedCommitted
+            }
+            Some(SpaceAdmissionMessageKind::Complete) => {
+                assert_eq!(
+                    effects,
+                    &[
+                        uc_core::membership::AdmissionEffect::ActivateSecurity,
+                        uc_core::membership::AdmissionEffect::PublishMembership,
+                    ]
+                );
+                ProtocolEvent::SponsorSavedApplied
+            }
+            Some(SpaceAdmissionMessageKind::Settled) => {
+                assert!(effects.is_empty());
+                ProtocolEvent::SponsorSavedCompleted
             }
             _ => {
                 return Err(SponsorAdmissionStateError::recovery_required(
@@ -569,6 +810,84 @@ impl PrepareSponsorCommitPort for FixedSponsorCommit {
                 .expect("valid sealed security"),
             commit,
         ))
+    }
+}
+
+#[async_trait]
+impl PrepareSponsorCompletePort for FixedSponsorComplete {
+    async fn prepare(
+        &self,
+        admission_id: SpaceAdmissionId,
+        preparation: uc_core::membership::SponsorCompletePreparation<'_>,
+        applied: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedSponsorComplete, PrepareSponsorCompleteError> {
+        assert_eq!(
+            preparation.commit_reply().kind(),
+            SpaceAdmissionMessageKind::Commit
+        );
+        assert!(!preparation.committed_history().as_bytes().is_empty());
+        assert!(!preparation.sealed_security().as_bytes().is_empty());
+        let SpaceAdmissionBodyV1::Applied(applied_body) = applied.body() else {
+            return Err(PrepareSponsorCompleteError::invalid(anyhow::anyhow!(
+                "fixture requires an Applied message"
+            )));
+        };
+        let receipt = applied_body.activation_receipt();
+        let completion = AdmissionCompletionV1::new(
+            *admission_id.as_bytes(),
+            receipt.event_id,
+            [0xaa; 32],
+            receipt.installed_security_commitment_id,
+            MemberInstanceId::from_bytes([0xab; 32]),
+            MembershipCredential::new(1, vec![0xac; 32]).credential_id,
+            BaseMembershipHistoryPosition {
+                event_id: Some(receipt.event_id),
+                depth: 1,
+                history_digest: [0xad; 32],
+            },
+            vec![0xae; 64],
+        );
+        let complete = SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Sponsor,
+            2,
+            AdmissionMessageId::from_bytes([0xaf; 32]).expect("valid Complete message id"),
+            Some(applied.header().message_id()),
+            SpaceAdmissionBodyV1::Complete(AdmissionCompleteV1::new(completion)),
+        )
+        .expect("valid Complete reply");
+        Ok(PreparedSponsorComplete::new(
+            AdmissionActivatedSecurityState::from_bytes(vec![0xb0; 128])
+                .expect("valid activated security"),
+            complete,
+        ))
+    }
+}
+
+#[async_trait]
+impl PrepareSponsorSettledPort for FixedSponsorSettled {
+    async fn prepare(
+        &self,
+        admission_id: SpaceAdmissionId,
+        preparation: uc_core::membership::SponsorSettlementPreparation<'_>,
+        complete_ack: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedSponsorSettled, PrepareSponsorSettledError> {
+        assert_eq!(
+            preparation.complete_reply().kind(),
+            SpaceAdmissionMessageKind::Complete
+        );
+        let settled = SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Sponsor,
+            3,
+            AdmissionMessageId::from_bytes([0xc5; 32]).expect("valid Settled message id"),
+            Some(complete_ack.header().message_id()),
+            SpaceAdmissionBodyV1::Settled(
+                AdmissionSettledV1::new([0xc6; 32]).expect("valid CompleteAck digest"),
+            ),
+        )
+        .expect("valid Settled reply");
+        Ok(PreparedSponsorSettled::new(settled))
     }
 }
 
@@ -669,6 +988,78 @@ impl PrepareJoinerAppliedPort for FixedJoinerApplied {
     }
 }
 
+#[async_trait]
+impl PrepareJoinerActivationPort for FixedJoinerActivation {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        preparation: uc_core::membership::JoinerCompletePreparation<'_>,
+        complete: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedJoinerActivation, PrepareJoinerActivationError> {
+        assert!(!preparation.source_snapshot().as_bytes().is_empty());
+        assert!(!preparation.staged_target().as_bytes().is_empty());
+        assert_eq!(
+            preparation.exact_commit().kind(),
+            SpaceAdmissionMessageKind::Commit
+        );
+        assert_eq!(
+            preparation.applied_request().kind(),
+            SpaceAdmissionMessageKind::Applied
+        );
+        assert_eq!(complete.kind(), SpaceAdmissionMessageKind::Complete);
+        Ok(PreparedJoinerActivation::new(
+            uc_core::membership::AdmissionSpaceTransition::from_bytes(vec![0xb8; 128])
+                .expect("valid activation plan"),
+        ))
+    }
+}
+
+#[async_trait]
+impl ExecuteJoinerActivationPort for FixedJoinerActivation {
+    async fn execute(
+        &self,
+        admission_id: SpaceAdmissionId,
+        preparation: uc_core::membership::JoinerActivationPreparation<'_>,
+    ) -> Result<CompletedJoinerActivation, ExecuteJoinerActivationError> {
+        assert!(!preparation.space_transition().as_bytes().is_empty());
+        assert!(!preparation.staged_target().as_bytes().is_empty());
+        assert_eq!(
+            preparation.exact_commit().kind(),
+            SpaceAdmissionMessageKind::Commit
+        );
+        let completion = preparation.completion();
+        assert_eq!(completion.kind(), SpaceAdmissionMessageKind::Complete);
+        self.events
+            .lock()
+            .expect("event recorder is available")
+            .push(ProtocolEvent::JoinerActivationExecuted);
+        let complete_ack = SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Joiner,
+            3,
+            AdmissionMessageId::from_bytes([0xbe; 32]).expect("valid CompleteAck message id"),
+            Some(completion.header().message_id()),
+            SpaceAdmissionBodyV1::CompleteAck(
+                AdmissionCompleteAckV1::new([0xbf; 32]).expect("valid completion digest"),
+            ),
+        )
+        .expect("valid CompleteAck request");
+        let pending_exchange = PendingAdmissionExchange::new(
+            SpaceAdmissionRoute::from_bytes(vec![0xc0; 32])
+                .expect("valid CompleteAck continuation route"),
+            complete_ack,
+            SpaceAdmissionMessageKind::Settled,
+            AdmissionRetryState::new(0, 0).expect("valid retry state"),
+        )
+        .expect("CompleteAck expects Settled");
+        Ok(CompletedJoinerActivation::new(
+            AdmissionSpaceTransitionResult::from_bytes(vec![0xc1; 128])
+                .expect("valid activation result"),
+            pending_exchange,
+        ))
+    }
+}
+
 impl SpaceAdmissionProtocolTestPair {
     pub(super) async fn fresh() -> Self {
         Self::with_mode(None, TransportMode::DeferInitial).await
@@ -686,6 +1077,14 @@ impl SpaceAdmissionProtocolTestPair {
         Self::with_mode(None, TransportMode::AuthenticateThenCandidateAndCommit).await
     }
 
+    pub(super) async fn receiving_complete() -> Self {
+        Self::with_mode(
+            None,
+            TransportMode::AuthenticateThenCandidateCommitAndComplete,
+        )
+        .await
+    }
+
     pub(super) async fn with_current_join(current_join: Option<SpaceAdmissionAggregate>) -> Self {
         Self::with_mode(current_join, TransportMode::DeferInitial).await
     }
@@ -697,10 +1096,14 @@ impl SpaceAdmissionProtocolTestPair {
             current_join: Mutex::new(current_join),
             created_join: Mutex::new(None),
             superseded: AtomicBool::new(false),
+            fail_next_activation_commit: AtomicBool::new(false),
         });
         let sponsor_state = Arc::new(RecordingSponsorState {
             events: Arc::clone(&events),
             current: Mutex::new(None),
+        });
+        let joiner_activation = Arc::new(FixedJoinerActivation {
+            events: Arc::clone(&events),
         });
         Self {
             joiner: SpaceAdmissionProtocol::new(
@@ -713,11 +1116,16 @@ impl SpaceAdmissionProtocolTestPair {
                     state.clone(),
                     Arc::new(FixedJoinerCandidate),
                     Arc::new(FixedJoinerApplied),
+                    joiner_activation.clone(),
+                    state.clone(),
+                    joiner_activation.clone(),
                     Arc::new(RecordingMaintenanceWake {
                         events: Arc::clone(&events),
                     }),
                 ),
                 SponsorAdmissionService::new(
+                    Arc::new(UnusedSponsorPorts),
+                    Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
@@ -740,6 +1148,9 @@ impl SpaceAdmissionProtocolTestPair {
                     state.clone(),
                     Arc::new(FixedJoinerCandidate),
                     Arc::new(FixedJoinerApplied),
+                    joiner_activation.clone(),
+                    state.clone(),
+                    joiner_activation,
                     Arc::new(RecordingMaintenanceWake {
                         events: Arc::clone(&events),
                     }),
@@ -748,6 +1159,8 @@ impl SpaceAdmissionProtocolTestPair {
                     sponsor_state.clone(),
                     Arc::new(FixedSponsorCandidate),
                     Arc::new(FixedSponsorCommit),
+                    Arc::new(FixedSponsorComplete),
+                    Arc::new(FixedSponsorSettled),
                 ),
                 AdmissionRecoveryService::new(
                     state.clone(),
@@ -791,6 +1204,12 @@ impl SpaceAdmissionProtocolTestPair {
             .expect("one join was committed")
     }
 
+    pub(super) fn fail_next_activation_commit(&self) {
+        self.state
+            .fail_next_activation_commit
+            .store(true, Ordering::SeqCst);
+    }
+
     pub(super) fn superseded_previous_join(&self) -> bool {
         self.state.superseded.load(Ordering::SeqCst)
     }
@@ -819,6 +1238,70 @@ pub(super) fn authenticated_prepared(
     candidate: &SpaceAdmissionEnvelopeV1,
 ) -> AuthenticatedSpaceAdmissionMessage {
     authenticated_prepared_with_peers(candidate, 0x53, 0x54)
+}
+
+pub(super) fn authenticated_applied(
+    commit: &SpaceAdmissionEnvelopeV1,
+) -> AuthenticatedSpaceAdmissionMessage {
+    let SpaceAdmissionBodyV1::Commit(commit_body) = commit.body() else {
+        panic!("fixture Commit body is required");
+    };
+    let candidate = commit_body.exact_candidate();
+    let applied = SpaceAdmissionEnvelopeV1::new(
+        commit.header().admission_id(),
+        AdmissionRole::Joiner,
+        2,
+        AdmissionMessageId::from_bytes([0xa5; 32]).expect("valid Applied message id"),
+        Some(commit.header().message_id()),
+        SpaceAdmissionBodyV1::Applied(AdmissionAppliedV1::new(AdmissionActivationReceipt::new(
+            1,
+            *commit.header().admission_id().as_bytes(),
+            candidate.candidate_event().event_id(),
+            [0xa6; 32],
+            candidate.security_commitment().security_commitment_id,
+            MemberInstanceId::from_bytes([0xa7; 32]),
+            vec![0xa8; 64],
+        ))),
+    )
+    .expect("valid Applied request");
+    AuthenticatedSpaceAdmissionMessage::new(
+        AdmissionPeerBinding::new(
+            AdmissionChannelPeerId::from_bytes([0x53; 32]).expect("valid local peer"),
+            AdmissionChannelPeerId::from_bytes([0x54; 32]).expect("valid remote peer"),
+        )
+        .expect("distinct peers"),
+        applied,
+        [0xa9; 32],
+        None,
+    )
+    .expect("valid authenticated Applied")
+}
+
+pub(super) fn authenticated_complete_ack(
+    complete: &SpaceAdmissionEnvelopeV1,
+) -> AuthenticatedSpaceAdmissionMessage {
+    let complete_ack = SpaceAdmissionEnvelopeV1::new(
+        complete.header().admission_id(),
+        AdmissionRole::Joiner,
+        3,
+        AdmissionMessageId::from_bytes([0xc2; 32]).expect("valid CompleteAck message id"),
+        Some(complete.header().message_id()),
+        SpaceAdmissionBodyV1::CompleteAck(
+            AdmissionCompleteAckV1::new([0xc3; 32]).expect("valid completion digest"),
+        ),
+    )
+    .expect("valid CompleteAck request");
+    AuthenticatedSpaceAdmissionMessage::new(
+        AdmissionPeerBinding::new(
+            AdmissionChannelPeerId::from_bytes([0x53; 32]).expect("valid local peer"),
+            AdmissionChannelPeerId::from_bytes([0x54; 32]).expect("valid remote peer"),
+        )
+        .expect("distinct peers"),
+        complete_ack,
+        [0xc4; 32],
+        None,
+    )
+    .expect("valid authenticated CompleteAck")
 }
 
 pub(super) fn authenticated_prepared_with_peers(

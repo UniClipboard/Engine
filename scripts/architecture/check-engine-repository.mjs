@@ -720,10 +720,15 @@ function checkSpaceAdmissionProtocolOwnership() {
     'joiner/start_join/execute.rs',
     'joiner/handle_candidate/execute.rs',
     'joiner/handle_commit/execute.rs',
+    'joiner/handle_complete/execute.rs',
+    'joiner/activate_complete/execute.rs',
+    'joiner/handle_settled/execute.rs',
     'sponsor/mod.rs',
     'sponsor/handle_authenticated_message/execute.rs',
     'sponsor/handle_join_request/execute.rs',
     'sponsor/handle_prepared/execute.rs',
+    'sponsor/handle_applied/execute.rs',
+    'sponsor/handle_complete_ack/execute.rs',
     'sponsor/state/mod.rs',
     'sponsor/state/error.rs',
     'sponsor/state/model.rs',
@@ -766,9 +771,14 @@ function checkSpaceAdmissionProtocolOwnership() {
   const joinerStart = roleSource('joiner/start_join/execute.rs')
   const joinerCandidate = roleSource('joiner/handle_candidate/execute.rs')
   const joinerCommit = roleSource('joiner/handle_commit/execute.rs')
+  const joinerComplete = roleSource('joiner/handle_complete/execute.rs')
+  const joinerActivation = roleSource('joiner/activate_complete/execute.rs')
+  const joinerSettled = roleSource('joiner/handle_settled/execute.rs')
   const recovery = roleSource('recovery/recover_pending/execute.rs')
   const sponsorMessage = roleSource('sponsor/handle_join_request/execute.rs')
   const sponsorPrepared = roleSource('sponsor/handle_prepared/execute.rs')
+  const sponsorApplied = roleSource('sponsor/handle_applied/execute.rs')
+  const sponsorCompleteAck = roleSource('sponsor/handle_complete_ack/execute.rs')
 
   for (const child of ['joiner', 'sponsor', 'recovery']) {
     if (!moduleSurface.includes(`mod ${child};`)) {
@@ -805,8 +815,13 @@ function checkSpaceAdmissionProtocolOwnership() {
     'SponsorAdmissionStatePort',
     'PrepareSponsorCandidatePort',
     'PrepareSponsorCommitPort',
+    'PrepareSponsorCompletePort',
+    'PrepareSponsorSettledPort',
     'PrepareJoinerCandidatePort',
     'PrepareJoinerAppliedPort',
+    'PrepareJoinerActivationPort',
+    'JoinerActivationStatePort',
+    'ExecuteJoinerActivationPort',
   ]) {
     if (protocol.includes(leakedDependency)) {
       addProblem(
@@ -821,8 +836,13 @@ function checkSpaceAdmissionProtocolOwnership() {
     [joinerStart, 'JoinerAdmissionService', 'start'],
     [joinerCandidate, 'JoinerAdmissionService', 'handle_candidate'],
     [joinerCommit, 'JoinerAdmissionService', 'handle_commit'],
+    [joinerComplete, 'JoinerAdmissionService', 'handle_complete'],
+    [joinerActivation, 'JoinerAdmissionService', 'recover_activation'],
+    [joinerSettled, 'JoinerAdmissionService', 'handle_settled'],
     [sponsorMessage, 'SponsorAdmissionService', 'handle_join_request'],
     [sponsorPrepared, 'SponsorAdmissionService', 'handle_prepared'],
+    [sponsorApplied, 'SponsorAdmissionService', 'handle_applied'],
+    [sponsorCompleteAck, 'SponsorAdmissionService', 'handle_complete_ack'],
     [recovery, 'AdmissionRecoveryService', 'recover_pending'],
   ]) {
     if (!source.includes(`impl ${owner}`) || !source.includes(`async fn ${action}(`)) {

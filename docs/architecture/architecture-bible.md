@@ -272,7 +272,7 @@ Core 对外只提供 Aggregate、Transition、消息、待发送交换、稳定�
 
 Infra 的准入实现统一位于 `crates/uc-infra/src/space/admission/`。共享 repository 复用 `admission_repository_state` 单行密文表和 `AdmissionKeyManager`，内部以 profile 密钥保护仓库、以每次 admission 的独立密钥保护 Aggregate；Joiner、Sponsor 与 Recovery 在各自目录实现其 Application 状态能力，但共享同一 repository 实例。开始加入时旧记录取代和新记录创建处于同一 SQLite 事务；Sponsor 从一次完整成员账本读取形成候选基础快照，并在保存 Accepted 状态时原子占用邀请；Recovery 提交绑定 admission id 与记录版本，旧 token 不能覆盖新状态。来源 Space 快照只包含加密保存所需的 generation manifest 事实，不保存文件路径。旧 `space_join_record_store`、完成恢复通道和 outbox 投递实现已删除，不保留双路径。
 
-当前 Core 已完成封闭状态和类型化交换基础，Application 的唯一 `SpaceAdmissionProtocol` 已从初始 JoinRequest/Candidate/Prepared 推进到 Commit 与 Joiner Applied 待发送：Sponsor 通过统一认证消息入口按类型委托 JoinRequest 或 Prepared 动作，Prepared 必须继续使用已保存的双方连接身份，正式提交和固定 Commit reply 在返回前保存；Joiner 后台恢复 Prepared、保存 Commit、准备并保存 Applied 后才唤醒下一轮。重复 Prepared 只重放已保存 Commit。Commit 和 Applied 的状态能力接收完整 Transition，必须把 replacement 与声明的成员影响作为一个持久结果，不能只保存状态。协议内部固定为 `joiner/`、`sponsor/` 和 `recovery/` 三个私有角色目录；Sponsor 跨动作状态提升到角色级 `state/`，动作各自持有 Candidate、Commit 或 Applied 准备能力。`SpaceAdmissionProtocol` 仍只保留三个内部负责人和同一 profile 的串行约束，不暴露内部步骤。Application admission 的稳定错误分类携带原始错误链，不把来源字符串化或抹平。
+当前 Core 已完成封闭状态和类型化交换基础，Application 的唯一 `SpaceAdmissionProtocol` 已贯通 JoinRequest、Candidate、Prepared、Commit、Applied、Complete、CompleteAck 和 Settled 正常流程。Sponsor 每次先保存固定回复再返回，重复 Prepared 与 CompleteAck 只重放原回复；后续消息必须继续匹配已保存的双方连接身份。Joiner 收到 Complete 后先保存可恢复的本机激活计划，后台维护在同一串行约束内执行并保存 Active PendingSettlement，下一轮才发送 CompleteAck；本机激活执行成功但保存冲突时，下一轮必须以同一计划幂等重试并得到同一结果。收到 Settled 后保存最终 Active Settled，不再进入待恢复扫描。各状态能力接收完整 Transition，必须把 replacement 与声明的影响作为一个持久结果，不能只保存状态。协议内部固定为 `joiner/`、`sponsor/` 和 `recovery/` 三个私有角色目录；各动作持有自己完成业务结果所需的准备、状态或执行能力。`SpaceAdmissionProtocol` 仍只保留三个内部负责人和同一 profile 的串行约束，不暴露内部步骤。Application admission 的稳定错误分类携带原始错误链，不把来源字符串化或抹平。
 
 Infra 仍需接入 OPAQUE、OpenMLS、加密存储和新 Iroh 通道，Engine 仍需完成 endpoint-before-router-before-runtime 构造顺序。完成这些切换并删除旧协议前，本节的新流程不属于已发布运行路径。
 
@@ -1503,6 +1503,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-28 | 单一 Space 准入 Sponsor 状态存储 | 同一加密 repository 实现 Sponsor 加入请求状态能力；候选基础快照来自一次完整成员账本读取，邀请占用与 Accepted 状态在同一事务保存，重复请求可在重启后读回既有状态，旧读取结果和重复邀请均不能推进。未新增数据表或兼容格式；candidate material、transport 与 Engine 最终接线仍待后续步骤。 |
 | 2026-08-28 | 单一 Space 准入 Commit 纵向流程 | Application 统一认证消息入口新增 Prepared 分发；Sponsor 先核对同一次 admission 保存的双方连接身份，再保存正式 Commit 后回复，重复 Prepared 精确重放；Joiner 后台恢复 Prepared，保存 Commit 与 Applied 待发送后再唤醒。Sponsor 跨动作状态归入角色级 `state/`，Candidate、Commit 和 Applied 准备能力分别由业务结果负责人持有，总协调器字段不增加。相关错误使用携带原始来源的稳定分类，保留错误链与回溯。 |
 | 2026-08-28 | 仓库异常转换规则 | 根维护规则固定 Application 异常转换方式：稳定分类保留原始 source，优先由目标错误实现 `From` 并使用 `?`；`map_err` 不得字符串化、忽略或吞掉下层错误。纯业务判断没有下层异常时继续使用明确结果。架构错误章节同步记录该边界。 |
+| 2026-08-28 | 单一 Space 准入完成与落定流程 | Application 正常流程从 Applied 继续贯通到双方最终状态：Sponsor 保存 Complete 和 Settled 后才回复，Joiner 先保存可恢复的本机激活计划，再由后台维护执行并保存 Active，最终接收 Settled 后结束恢复。重复 CompleteAck 精确重放同一 Settled；本机激活与网络推进共用同一串行入口。真实密码、网络、加密存储实现和 Engine 组装仍属于后续接入。 |
 
 ## 相关文档
 

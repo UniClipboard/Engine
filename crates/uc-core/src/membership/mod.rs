@@ -102,12 +102,14 @@ pub use space_admission::{
     AdmissionSealedSecurityState, AdmissionSettledV1, AdmissionSignedMembershipHistory,
     AdmissionSourceSnapshot, AdmissionSpaceTransition, AdmissionSpaceTransitionResult,
     AdmissionStagedSecurityState, AdmissionStagedTarget, AdmissionStagedTargetInput,
-    AdmissionTransition, InvitationId, JoinId, JoinerAppliedPreparation, PendingAdmissionExchange,
+    AdmissionTransition, InvitationId, JoinId, JoinerActivationPreparation,
+    JoinerAppliedPreparation, JoinerCompletePreparation, PendingAdmissionExchange,
     SpaceAdmissionAggregate, SpaceAdmissionAggregateError, SpaceAdmissionBodyV1,
     SpaceAdmissionEnvelopeHeaderV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
     SpaceAdmissionMessageKind, SpaceAdmissionPersistenceError, SpaceAdmissionProtocolVersion,
     SpaceAdmissionRejectionReason, SpaceAdmissionRoute, SponsorCandidatePreparation,
-    SponsorCommitPreparation, UnreadableHistoryPolicy, SPACE_ADMISSION_RECORD_FORMAT_V1,
+    SponsorCommitPreparation, SponsorCompletePreparation, SponsorSettlementPreparation,
+    UnreadableHistoryPolicy, SPACE_ADMISSION_RECORD_FORMAT_V1,
 };
 #[allow(deprecated)]
 pub use space_join_record::{

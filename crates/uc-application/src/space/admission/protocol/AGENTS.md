@@ -4,8 +4,8 @@
 
 ## 内部负责人
 
-- `joiner/` 包含 `JoinerAdmissionService`、开始加入、处理 Candidate、处理 Commit 以及后续 Joiner 推进；设置、开始材料、开始状态、Joiner 候选与 Applied 准备和成功后的维护唤醒能力都留在本目录。
-- `sponsor/` 包含 `SponsorAdmissionService`、统一认证消息分发、处理 JoinRequest、处理 Prepared 以及后续 Sponsor 推进；角色内共享状态、Candidate 与 Commit 准备能力都留在本目录。
+- `joiner/` 包含 `JoinerAdmissionService`、开始加入、处理 Candidate、Commit、Complete、执行本机激活和处理 Settled；设置、开始材料、开始状态、各阶段准备、本机激活状态与执行、成功后的维护唤醒能力都留在本目录。
+- `sponsor/` 包含 `SponsorAdmissionService`、统一认证消息分发、处理 JoinRequest、Prepared、Applied 和 CompleteAck；角色内共享状态与各阶段回复准备能力都留在本目录。
 - `recovery/` 包含 `AdmissionRecoveryService`、扫描待恢复记录、建立或恢复连接、交换消息和保存恢复推进；恢复状态、transport、触发原因和恢复报告都留在本目录。
 - `SpaceAdmissionProtocol` 只选择一个完整角色动作并执行 profile 级串行约束。三个内部负责人不得从 `protocol` 模块外取得，也不得成为调用方需要编排的步骤入口。
 - 一个 Port 由对其业务结果负责的内部负责人持有。不得为缩短构造参数把无关能力集中到 `SpaceAdmissionProtocol` 或新增无生命周期职责的 `AdmissionRuntime`。
@@ -13,7 +13,7 @@
 ## 先按角色，再按业务动作组织
 
 - 协议根目录只按 `joiner/`、`sponsor/` 和 `recovery/` 三个角色划分，不在根目录平铺角色文件或业务动作目录。
-- 每个角色内部再按完整业务动作组织，例如 `joiner/start_join/`、`joiner/handle_candidate/`、`joiner/handle_commit/`、`sponsor/handle_join_request/`、`sponsor/handle_prepared/` 和 `recovery/recover_pending/`。
+- 每个角色内部再按完整业务动作组织，例如 `joiner/start_join/`、`joiner/handle_candidate/`、`joiner/activate_complete/`、`sponsor/handle_join_request/`、`sponsor/handle_complete_ack/` 和 `recovery/recover_pending/`。
 - 每个业务动作在自己的目录内管理实现、模型、外部能力、错误和测试。通常分别放在 `execute.rs`、`model.rs`、`ports.rs` 和 `tests.rs`；只有角色内两个或更多动作已经使用且含义相同的内容，才提升到该角色的 `mod.rs`。
 - 业务动作目录不是对外负责人，也不得向调用方公开步骤式入口。动作实现放到对应内部负责人，总入口只委托一个完整动作；调用方仍只使用 `SpaceAdmissionProtocol` 的完整方法。
 

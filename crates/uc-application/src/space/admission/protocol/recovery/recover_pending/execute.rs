@@ -25,8 +25,15 @@ impl SpaceAdmissionProtocol {
         &self,
         trigger: AdmissionRecoveryTrigger,
     ) -> AdmissionRecoveryReport {
-        self.execute_exclusively(self.recovery.recover_pending(&self.joiner, trigger))
-            .await
+        self.execute_exclusively(async {
+            let mut report = self.joiner.recover_activation().await;
+            if report.advanced_count > 0 {
+                return report;
+            }
+            report.merge(self.recovery.recover_pending(&self.joiner, trigger).await);
+            report
+        })
+        .await
     }
 }
 
@@ -282,6 +289,16 @@ impl AdmissionRecoveryService {
             SpaceAdmissionMessageKind::Commit => {
                 joiner
                     .handle_commit(self, report, aggregate, token, reply, canonical_digest)
+                    .await;
+            }
+            SpaceAdmissionMessageKind::Complete => {
+                joiner
+                    .handle_complete(self, report, aggregate, token, reply, canonical_digest)
+                    .await;
+            }
+            SpaceAdmissionMessageKind::Settled => {
+                joiner
+                    .handle_settled(self, report, aggregate, token, reply, canonical_digest)
                     .await;
             }
             _ => {

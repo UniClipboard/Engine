@@ -187,6 +187,123 @@ async fn commit_is_applied_and_saved_before_the_next_exchange_is_woken() {
     );
 }
 
+#[tokio::test]
+async fn complete_is_saved_as_an_activation_plan_before_local_activation() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
+    pair.joiner()
+        .start_join(join_input("complete-join"))
+        .await
+        .expect("the join request should be saved before recovery");
+    pair.joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    pair.joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.advanced_count, 1);
+    assert_eq!(report.recovery_required_count, 0);
+    assert!(pair.events().ends_with(&[
+        ProtocolEvent::JoinerContinuationChannelRequested,
+        ProtocolEvent::JoinerAppliedExchanged,
+        ProtocolEvent::JoinerSavedActivating,
+    ]));
+}
+
+#[tokio::test]
+async fn saved_activation_is_executed_before_complete_ack_is_woken() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
+    pair.joiner()
+        .start_join(join_input("activate-complete"))
+        .await
+        .expect("the join request should be saved before recovery");
+    for _ in 0..3 {
+        pair.joiner()
+            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+            .await;
+    }
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.advanced_count, 1);
+    assert_eq!(report.deferred_count, 0);
+    assert!(pair.events().ends_with(&[
+        ProtocolEvent::JoinerActivationExecuted,
+        ProtocolEvent::JoinerSavedActivePendingSettlement,
+        ProtocolEvent::AdmissionRecoveryWoken,
+    ]));
+}
+
+#[tokio::test]
+async fn activation_is_retried_from_the_saved_plan_after_commit_conflict() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
+    pair.joiner()
+        .start_join(join_input("retry-activation"))
+        .await
+        .expect("the join request should be saved before recovery");
+    for _ in 0..3 {
+        pair.joiner()
+            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+            .await;
+    }
+    pair.fail_next_activation_commit();
+
+    let conflicted = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+    let recovered = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(conflicted.deferred_count, 1);
+    assert_eq!(conflicted.advanced_count, 0);
+    assert_eq!(recovered.advanced_count, 1);
+    assert!(pair.events().ends_with(&[
+        ProtocolEvent::JoinerActivationExecuted,
+        ProtocolEvent::JoinerActivationExecuted,
+        ProtocolEvent::JoinerSavedActivePendingSettlement,
+        ProtocolEvent::AdmissionRecoveryWoken,
+    ]));
+}
+
+#[tokio::test]
+async fn settled_is_saved_and_finishes_joiner_recovery() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
+    pair.joiner()
+        .start_join(join_input("settled-join"))
+        .await
+        .expect("the join request should be saved before recovery");
+    for _ in 0..4 {
+        pair.joiner()
+            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+            .await;
+    }
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.advanced_count, 1);
+    assert_eq!(report.recovery_required_count, 0);
+    assert!(pair.events().ends_with(&[
+        ProtocolEvent::JoinerContinuationChannelRequested,
+        ProtocolEvent::JoinerCompleteAckExchanged,
+        ProtocolEvent::JoinerSavedActiveSettled,
+    ]));
+    assert!(pair.take_created_join().is_active_settled());
+}
+
 fn join_input(code: &str) -> JoinSpaceInput {
     JoinSpaceInput {
         invitation_code: uc_core::pairing::InvitationCode::new(code),
