@@ -185,7 +185,7 @@ Relationship: 合并为一个 runtime，业务恢复顺序交给一个维护用�
 - 输出：按类别统计完成、延后和稳定失败数量。
 - 关系：内部固定恢复顺序；runtime 不知道 admission、效果、决定或分页步骤。
 
-### `SpaceMembershipRuntime`
+### `SpaceMembershipMaintenanceRuntime`
 
 - 路径：`crates/uc-application/src/space/membership/maintenance/runtime.rs`
 - 职责：拥有 presence 订阅、定时器、退避、唤醒、暂停、恢复和关闭。

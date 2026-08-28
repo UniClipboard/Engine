@@ -33,7 +33,7 @@ use crate::space::membership::{
 };
 use crate::space::membership::{
     CleanupLegacyMembershipDataPort, MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase,
-    MembershipNetworkActivityPort, SpaceMembershipRuntime,
+    MembershipNetworkActivityPort, SpaceMembershipMaintenanceRuntime,
 };
 use crate::space::membership::{LoadDeviceTrustObservationsPort, QueryDeviceTrustUseCase};
 
@@ -112,8 +112,8 @@ pub(crate) struct SpaceApplication {
     query_pending_space_transition: Arc<QueryPendingSpaceTransitionUseCase>,
     membership_history_endpoint: Arc<HandleMembershipHistoryMessageUseCase>,
     initialize_membership: Arc<InitializeSpaceMembershipUseCase>,
-    membership_activity: crate::space::membership::SpaceMembershipActivity,
-    runtime: Option<SpaceMembershipRuntime>,
+    membership_activity: crate::space::membership::SpaceMembershipMaintenanceActivity,
+    runtime: Option<SpaceMembershipMaintenanceRuntime>,
 }
 
 impl SpaceApplication {
@@ -193,7 +193,7 @@ impl SpaceApplication {
                 cleanup: deps.cleanup_legacy_membership_data,
             },
         ));
-        let runtime = SpaceMembershipRuntime::start(
+        let runtime = SpaceMembershipMaintenanceRuntime::start(
             maintain,
             presence_events,
             Duration::from_secs(30),

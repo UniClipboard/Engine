@@ -273,7 +273,7 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
         },
     ));
     let (presence_tx, presence_rx) = tokio::sync::broadcast::channel(8);
-    let runtime = SpaceMembershipRuntime::start(
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         presence_rx,
         std::time::Duration::from_secs(3600),
@@ -332,7 +332,7 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
         release,
     });
     let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
-    let runtime = SpaceMembershipRuntime::start(
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         presence_rx,
         std::time::Duration::from_secs(3600),
@@ -379,7 +379,7 @@ async fn shutdown_uses_one_five_second_budget_without_aborting_the_active_round(
         },
     ));
     let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
-    let runtime = SpaceMembershipRuntime::start(
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         presence_rx,
         std::time::Duration::from_secs(3600),
@@ -422,7 +422,7 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
         },
     ));
     let (presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
-    let runtime = SpaceMembershipRuntime::start(
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
         maintain,
         presence_rx,
         std::time::Duration::from_secs(3600),

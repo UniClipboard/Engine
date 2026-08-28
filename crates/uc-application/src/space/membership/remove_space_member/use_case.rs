@@ -6,16 +6,14 @@ use uc_core::membership::{MembershipHistoryRelationship, MembershipHistoryV2Rece
 
 use crate::space::membership::QueryDeviceTrustUseCase;
 use crate::space::membership::RecoverMembershipEffectsPort;
+use crate::space::membership::WakeSpaceMembershipMaintenancePort;
 use crate::space::membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 use crate::space::membership::{
     MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
     PendingMembershipEffect, RestrictedMembershipDelivery,
 };
 
-use super::{
-    MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
-    WakeSpaceMembershipMaintenancePort,
-};
+use super::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
 
 pub(crate) struct RemoveSpaceMemberUseCase {
     ledger: Arc<MembershipLedger>,

@@ -607,7 +607,7 @@ function checkApplicationMembershipCutover() {
   const facadeSurface = read('crates/uc-application/src/facade/mod.rs')
   for (const marker of [
     'MemberRosterFacade',
-    'SpaceMembershipRuntime',
+    'SpaceMembershipMaintenanceRuntime',
     'QueryDeviceTrustUseCase',
     'RemoveSpaceMemberUseCase',
     'DecideDeviceTrustChangeUseCase',
@@ -824,6 +824,62 @@ function checkSpaceAdmissionProtocolOwnership() {
   return problems
 }
 
+function checkSpaceMembershipMaintenanceOwnership() {
+  const problems = []
+  const runtimePath = 'crates/uc-application/src/space/membership/maintenance/runtime.rs'
+  const portsPath = 'crates/uc-application/src/space/membership/maintenance/ports.rs'
+  const retiredWakePath =
+    'crates/uc-application/src/space/membership/remove_space_member/ports.rs'
+  const runtime = read(runtimePath)
+  const ports = read(portsPath)
+
+  for (const required of [
+    'SpaceMembershipMaintenanceRuntime',
+    'SpaceMembershipMaintenanceActivity',
+    'SpaceMembershipMaintenanceRuntimeError',
+  ]) {
+    if (!runtime.includes(required)) {
+      addProblem(
+        problems,
+        'space membership maintenance ownership',
+        `${runtimePath} is missing ${required}`
+      )
+    }
+  }
+
+  const spaceSources = readSourceTree('crates/uc-application/src/space')
+  for (const retired of [
+    'SpaceMembershipRuntime',
+    'SpaceMembershipActivity',
+    'SpaceMembershipRuntimeError',
+  ]) {
+    if (spaceSources.includes(retired)) {
+      addProblem(
+        problems,
+        'space membership maintenance ownership',
+        `retired broad runtime name remains: ${retired}`
+      )
+    }
+  }
+
+  if (!ports.includes('pub trait WakeSpaceMembershipMaintenancePort')) {
+    addProblem(
+      problems,
+      'space membership maintenance ownership',
+      `${portsPath} must own WakeSpaceMembershipMaintenancePort`
+    )
+  }
+  if (existsSync(join(REPOSITORY_ROOT, retiredWakePath))) {
+    addProblem(
+      problems,
+      'space membership maintenance ownership',
+      `retired wake-port path remains: ${retiredWakePath}`
+    )
+  }
+
+  return problems
+}
+
 function repositorySources() {
   return {
     engine: read('crates/uc-engine/src/lib.rs'),
@@ -852,6 +908,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkApplicationMembershipCutover(),
     ...checkSpaceModuleInterface(),
     ...checkSpaceAdmissionProtocolOwnership(),
+    ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
     ...(includePlaintext ? checkPlaintextScanner() : []),
   ]

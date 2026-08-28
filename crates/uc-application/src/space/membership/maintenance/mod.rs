@@ -9,9 +9,10 @@ pub use model::{
 pub use ports::{
     CleanupLegacyMembershipDataPort, DeliverRestrictedMembershipPort, RecoverMembershipEffectsPort,
     RecoverSpaceAdmissionsPort, SynchronizeMembershipMaintenancePort,
+    WakeSpaceMembershipMaintenancePort,
 };
 pub use runtime::MembershipNetworkActivityPort;
-pub(crate) use runtime::{SpaceMembershipActivity, SpaceMembershipRuntime};
+pub(crate) use runtime::{SpaceMembershipMaintenanceActivity, SpaceMembershipMaintenanceRuntime};
 pub(crate) use use_case::{MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase};
 
 #[cfg(test)]

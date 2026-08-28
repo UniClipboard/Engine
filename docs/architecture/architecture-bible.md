@@ -220,7 +220,7 @@ Space
 - Core `SpaceAdmissionAggregate` 是新准入协议唯一状态负责人：类型化消息、双方独立序号、前序关系、精确重放、Joiner/Sponsor/CompletionHelper 合法推进、取消、取代、稳定拒绝、恢复要求和终态压缩都由它决定。每次推进返回 `AdmissionTransition`，统一携带 replacement、原样回复和本次原子影响；Application 不匹配内部阶段。
 - V2 签名成员历史是唯一正向成员资格；最终授权范围只在 ledger 内派生。成员资料、可信关系、地址、在线状态和偏好只能缩小普通操作目标，不能授予资格。
 - 查询、移除、决定、历史发送、历史接收、准入入站和后台维护分别拥有一个完整入口。提交后的网络失败不会回滚正式历史，后台只从已保存事实继续。
-- 成员后台只保留一套。启动、恢复、状态变化、定时和设备上线都进入同一维护顺序；暂停先通知网络工作停止，再等待当前保存边界完成，关闭等待最多五秒。
+- 成员后台只保留一套 `SpaceMembershipMaintenanceRuntime`。它只负责启动、恢复、状态变化、定时、设备上线、暂停和关闭，并将每次触发交给固定维护顺序；唤醒契约由 `membership/maintenance/ports.rs` 定义，准入、移除和信任决定不拥有第二套后台。暂停先通知网络工作停止，再等待当前保存边界完成，关闭等待最多五秒。
 - 旧成员总对象、旧准入 owner、旧 gossip、旧综合状态、旧仓储接口、旧诊断入口、旧连接后台和 side facade 已物理删除，不保留别名、双写、回退或 feature 控制的第二实现。
 - 旧资料仍不转换成员授权；重建会一次清空旧历史、关系、传输、效果和加入记录，再建立单设备 V2 根并要求其他设备重新配对。
 
@@ -980,6 +980,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 ## 文档维护记录
 
 - 2026-08-26：完成 application Space 内部结构整理。根部只保留 Facade、组装、准入、生命周期、成员关系和连接恢复；原平铺的生命周期、session、成员 ledger、信任、历史、维护 runtime、签名和 re-pairing 模块分别迁入 `lifecycle/` 与 `membership/`，网络恢复迁入 `connectivity/recovery/`。四个责任区的子模块均为私有，跨区协作只经过各自根出口；旧路径物理删除且由仓库检查禁止恢复。运行行为和既有公开出口不变。
+- 2026-08-28：将唯一成员维护后台明确命名为 `SpaceMembershipMaintenanceRuntime`，并同步收紧 activity 与错误名称；运行文件继续位于 `membership/maintenance/`。`WakeSpaceMembershipMaintenancePort` 从成员移除动作迁入维护能力目录，由准入、移除和信任决定共同使用；调度、暂停、恢复、定时和关闭行为不变，仓库检查禁止旧宽泛名称与旧能力路径恢复。
 - 2026-08-26：收紧 application Space 模块出口。将 `SpaceFacade` 的唯一实现及其输入、错误和依赖定义迁入私有 Space 模块；`space/mod.rs` 改为私有子模块加逐项出口，`facade/space_setup` 只保留既有公开调用清单，`deps` 和其他 application 模块不再穿透 Space 子目录。新增仓库检查阻止公开子模块、外部深层引用、Space 对公开 Facade 的反向依赖和旧实现路径回归；运行行为、产品操作和公开结果不变。
 - 2026-08-26：新增 `crates/uc-application/src/space/AGENTS.md`，按当前实现记录 Space 的公开入口、内部组装、每个 case、成员事实、网络入口、后台恢复、代码地图、设计图和修改检查；同步修正 Space 模块入口中过时的旧结构说明。本次只补充维护文档，不改变运行行为。
 - 2026-08-25：完成规格 027 的 application 一次性切换。`SpaceFacade` 成为唯一公开 Space 业务入口，`SpaceApplication` 统一构造用户用例、两类网络入口和唯一成员后台；新增加密 ledger 原子边界与最终授权范围，删除旧成员总对象、旧准入 owner、旧 gossip、旧综合状态、旧仓储接口、旧连接后台、side facade 和兼容路径。Core、Infra、Engine、绑定、数据库和真实网络接入仍按规格边界留待后续适配。

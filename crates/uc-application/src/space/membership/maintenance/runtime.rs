@@ -22,47 +22,47 @@ enum RuntimeCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum SpaceMembershipRuntimeError {
-    #[error("space membership runtime is closed")]
+pub enum SpaceMembershipMaintenanceRuntimeError {
+    #[error("space membership maintenance runtime is closed")]
     Closed,
 }
 
 #[derive(Clone)]
-pub(crate) struct SpaceMembershipActivity {
+pub(crate) struct SpaceMembershipMaintenanceActivity {
     commands: mpsc::UnboundedSender<RuntimeCommand>,
 }
 
-impl SpaceMembershipActivity {
-    pub async fn pause(&self) -> Result<(), SpaceMembershipRuntimeError> {
+impl SpaceMembershipMaintenanceActivity {
+    pub async fn pause(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
         self.request(RuntimeCommand::Pause).await
     }
 
-    pub async fn resume(&self) -> Result<(), SpaceMembershipRuntimeError> {
+    pub async fn resume(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
         self.request(RuntimeCommand::Resume).await
     }
 
-    pub fn request_state_changed(&self) -> Result<(), SpaceMembershipRuntimeError> {
+    pub fn request_state_changed(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
         self.commands
             .send(RuntimeCommand::StateChanged)
-            .map_err(|_| SpaceMembershipRuntimeError::Closed)
+            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
     }
 
     async fn request(
         &self,
         command: impl FnOnce(oneshot::Sender<()>) -> RuntimeCommand,
-    ) -> Result<(), SpaceMembershipRuntimeError> {
+    ) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
         let (completed, receiver) = oneshot::channel();
         self.commands
             .send(command(completed))
-            .map_err(|_| SpaceMembershipRuntimeError::Closed)?;
+            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)?;
         receiver
             .await
-            .map_err(|_| SpaceMembershipRuntimeError::Closed)
+            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
     }
 }
 
 #[async_trait::async_trait]
-impl crate::space::lifecycle::MembershipSessionActivityPort for SpaceMembershipActivity {
+impl crate::space::lifecycle::MembershipSessionActivityPort for SpaceMembershipMaintenanceActivity {
     async fn pause(&self) -> Result<(), String> {
         self.pause().await.map_err(|error| error.to_string())
     }
@@ -72,12 +72,12 @@ impl crate::space::lifecycle::MembershipSessionActivityPort for SpaceMembershipA
     }
 }
 
-pub(crate) struct SpaceMembershipRuntime {
-    activity: SpaceMembershipActivity,
+pub(crate) struct SpaceMembershipMaintenanceRuntime {
+    activity: SpaceMembershipMaintenanceActivity,
     task: Option<JoinHandle<()>>,
 }
 
-impl SpaceMembershipRuntime {
+impl SpaceMembershipMaintenanceRuntime {
     pub(crate) fn start(
         maintain: Arc<MaintainSpaceMembershipUseCase>,
         mut presence_events: broadcast::Receiver<PresenceEvent>,
@@ -85,7 +85,7 @@ impl SpaceMembershipRuntime {
         network_activity: Arc<dyn MembershipNetworkActivityPort>,
     ) -> Self {
         let (commands, mut command_rx) = mpsc::unbounded_channel();
-        let activity = SpaceMembershipActivity { commands };
+        let activity = SpaceMembershipMaintenanceActivity { commands };
         let task = tokio::spawn(async move {
             let mut paused = false;
             let mut presence_open = true;
@@ -184,7 +184,7 @@ impl SpaceMembershipRuntime {
         }
     }
 
-    pub fn activity(&self) -> SpaceMembershipActivity {
+    pub fn activity(&self) -> SpaceMembershipMaintenanceActivity {
         self.activity.clone()
     }
 
@@ -232,7 +232,7 @@ fn schedule_round(
     }
 }
 
-impl Drop for SpaceMembershipRuntime {
+impl Drop for SpaceMembershipMaintenanceRuntime {
     fn drop(&mut self) {
         if let Some(task) = &self.task {
             task.abort();

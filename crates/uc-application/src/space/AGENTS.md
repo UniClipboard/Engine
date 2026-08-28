@@ -58,7 +58,7 @@ flowchart LR
         SpaceApp --> HistoryTx[历史发送 case]
         SpaceApp --> HistoryRx[历史接收 endpoint]
         SpaceApp --> AdmissionRx[准入接收 endpoint]
-        SpaceApp --> Runtime[SpaceMembershipRuntime]
+        SpaceApp --> Runtime[SpaceMembershipMaintenanceRuntime]
         Runtime --> Maintain[MaintainSpaceMembershipUseCase]
         Trust --> Ledger[MembershipLedger]
         HistoryTx --> Ledger
@@ -212,7 +212,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Trigger[Startup / Resume / Periodic / StateChanged / PeerOnline] --> Runtime[SpaceMembershipRuntime]
+    Trigger[Startup / Resume / Periodic / StateChanged / PeerOnline] --> Runtime[SpaceMembershipMaintenanceRuntime]
     Runtime --> OneRound[同一时间最多一轮]
     OneRound --> Admission[1. Recover admissions]
     Admission --> Effects[2. Recover effects]
@@ -424,7 +424,7 @@ flowchart TD
 
 - **入口**：`MembershipMaintenanceTrigger -> MembershipMaintenanceReport`。
 - **职责/作用**：隐藏完整恢复顺序：admission -> effects -> restricted delivery -> conditional history sync -> cleanup。
-- **关系**：唯一由 `SpaceMembershipRuntime` 调度；各步骤只通过窄 maintenance port 暴露。
+- **关系**：唯一由 `SpaceMembershipMaintenanceRuntime` 调度；各步骤只通过窄 maintenance port 暴露。
 - **重点关注**：Deferred/StableFailure 按依赖关系继续；Corrupt 立即停止会扩大权限的后续步骤；PeerOnline 只运行该 peer 所需的受限投递和同步。
 
 #### `RecoverMembershipEffectsUseCase`

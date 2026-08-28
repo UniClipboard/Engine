@@ -45,15 +45,14 @@ pub(super) use ledger::{
 };
 pub(super) use maintenance::{
     MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase, MembershipMaintenanceReport,
-    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, SpaceMembershipActivity,
-    SpaceMembershipRuntime, SynchronizeMembershipMaintenancePort,
+    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    SpaceMembershipMaintenanceActivity, SpaceMembershipMaintenanceRuntime,
+    SynchronizeMembershipMaintenancePort, WakeSpaceMembershipMaintenancePort,
 };
 #[cfg(test)]
 pub(super) use query_admission::{MembershipAdmissionSnapshot, QueryMembershipAdmissionError};
 pub(super) use query_admission::{QueryMembershipAdmissionPort, QueryMembershipAdmissionUseCase};
 pub(super) use query_device_trust::{project_current_join, QueryDeviceTrustUseCase};
 pub(super) use re_pairing::{RePairingState, ResolveRePairingPort};
-pub(super) use remove_space_member::{
-    RemoveSpaceMemberUseCase, WakeSpaceMembershipMaintenancePort,
-};
+pub(super) use remove_space_member::RemoveSpaceMemberUseCase;
 pub(super) use synchronize_history::SynchronizeMembershipHistoryUseCase;

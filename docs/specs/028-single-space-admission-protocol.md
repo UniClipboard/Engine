@@ -790,7 +790,7 @@ SpaceAdmissionAggregate::replay_or_reject(evidence)
 - 用户 start 先保存后网络；Sponsor claim 先保存后 Candidate reply；duplicate JoinRequest exact replay。
 - 实现 typed authenticated-message endpoint 和 continuation 原子保存；Application 测试只使用 in-memory typed transport，不构造 duplex/Iroh。
 - `SpaceFacade` 的 Join/Cancel/Query 直接委托 protocol 完整方法，不调用 preparation/store/send 组合。
-- `SpaceMembershipRuntime` 只持有 `RecoverSpaceAdmissionsPort`，其 adapter 是 protocol 自身；报告不解释 stage。
+- `SpaceMembershipMaintenanceRuntime` 只持有 `RecoverSpaceAdmissionsPort`，其 adapter 是 protocol 自身；报告不解释 stage。
 
 **Risk:** 为了 tracer bullet 暂时保留现有 `Prepare*Port` 会形成第二入口。旧 use case 可以在工作分支短暂存在但不得被新代码调用，Step 8 必须删除且中间不可发布。
 

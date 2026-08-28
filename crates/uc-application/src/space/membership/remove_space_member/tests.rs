@@ -13,6 +13,7 @@ use uc_core::membership::{
 use uc_core::ports::ReachabilityState;
 
 use super::*;
+use crate::space::membership::WakeSpaceMembershipMaintenancePort;
 use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
     MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,

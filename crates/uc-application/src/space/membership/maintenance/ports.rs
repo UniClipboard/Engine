@@ -2,6 +2,16 @@ use async_trait::async_trait;
 
 use super::{MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger};
 
+pub trait WakeSpaceMembershipMaintenancePort: Send + Sync {
+    fn wake(&self);
+}
+
+impl WakeSpaceMembershipMaintenancePort for super::SpaceMembershipMaintenanceActivity {
+    fn wake(&self) {
+        let _ = self.request_state_changed();
+    }
+}
+
 #[async_trait]
 pub trait RecoverSpaceAdmissionsPort: Send + Sync {
     async fn recover_space_admissions(
