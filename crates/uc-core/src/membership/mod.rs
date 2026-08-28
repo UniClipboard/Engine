@@ -105,8 +105,9 @@ pub use space_admission::{
     AdmissionTransition, InvitationId, JoinId, PendingAdmissionExchange, SpaceAdmissionAggregate,
     SpaceAdmissionAggregateError, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeHeaderV1,
     SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
-    SpaceAdmissionProtocolVersion, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
-    SponsorCandidatePreparation, UnreadableHistoryPolicy, SPACE_ADMISSION_RECORD_FORMAT_V1,
+    SpaceAdmissionPersistenceError, SpaceAdmissionProtocolVersion, SpaceAdmissionRejectionReason,
+    SpaceAdmissionRoute, SponsorCandidatePreparation, UnreadableHistoryPolicy,
+    SPACE_ADMISSION_RECORD_FORMAT_V1,
 };
 #[allow(deprecated)]
 pub use space_join_record::{

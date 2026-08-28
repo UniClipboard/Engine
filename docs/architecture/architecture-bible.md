@@ -268,7 +268,7 @@ Application 的规格 027 切换和新准入 Core 已分别完成；两者之间
 
 规格 028 取代旧配对会话编排作为下一版唯一准入方向。Core 已只保留一套类型化业务消息和封闭状态记录，完整表达 JoinRequest、Candidate、Prepared、Commit、Applied、Complete、CompleteAck、Settled、CancelRequested 与 Rejected；相同消息只重放已保存结果，冲突、乱序和错误前序不推进状态。正式 Commit 是唯一新增成员事实，Active 只能在本机 Space 切换完成后保存，Prepared 以后禁止新加入取代，Commit 以后取消稳定返回 TooLateCommitted。
 
-Core 对外只提供 Aggregate、Transition、消息、待发送交换、稳定错误分类和本次影响。Joiner、Sponsor、CompletionHelper 与 Terminal 的具体状态类型只在 Core 内部可见；Application 后台通过统一待发送读取恢复，消息入口先调用统一重放裁决，不能逐阶段读取或修改字段。CompletionHelper 只能根据已验证 Commit 和回执生成等价 Complete，不能创建或修改成员事实。
+Core 对外只提供 Aggregate、Transition、消息、待发送交换、稳定错误分类和本次影响。Joiner、Sponsor、CompletionHelper 与 Terminal 的具体状态类型只在 Core 内部可见；Application 后台通过统一待发送读取恢复，消息入口先调用统一重放裁决，不能逐阶段读取或修改字段。CompletionHelper 只能根据已验证 Commit 和回执生成等价 Complete，不能创建或修改成员事实。Aggregate 的持久化入口固定为 `encode_persisted` / `decode_persisted`，版本保存在私有持久结构内部；Joiner、Sponsor、CompletionHelper、Active 和全部终止状态均可完整往返，消息证据、固定回复、待发送交换、重试进度和安全材料不会被省略。恢复时重新验证版本、消息前后关系和 admission 归属，不能把结构可解码但业务不合法的数据装回 Aggregate，也不能退回旧 `SpaceJoinRecord`。持久化内部按总调度、早期状态、Joiner、Sponsor、Helper/终止状态、消息和基础值分文件维护，格式变体顺序仍集中保存在目录入口；这些文件全部私有，不形成新的 Core 接口。
 
 当前 Core 已完成封闭状态和类型化交换基础，Application 已建立唯一 `SpaceAdmissionProtocol` 的最小纵向流程。协议内部固定为 `joiner/`、`sponsor/` 和 `recovery/` 三个私有角色目录；每个目录同时包含负责人、完整动作、该动作定义的能力、模型和测试，不再把负责人定义与动作实现分散在协议根目录。`SpaceAdmissionProtocol` 只保留三个内部负责人和同一 profile 的串行约束，对产品、网络入口和成员维护仍提供一个完整流程，不暴露内部步骤。
 
@@ -1491,6 +1491,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-27 | 单一 Space 准入 Application 最小纵向流程 | 新 `SpaceAdmissionProtocol` 接管 Pending 恢复和已认证消息入口：首次认证先保存 continuation 再发送原 JoinRequest，Sponsor 先保存 Accepted/Candidate 再回复，重复 JoinRequest 重放固定 Candidate，Joiner 依次保存 Candidate/Prepared 并唤醒后续恢复。维护运行期改为只调用新协议；Application 仅依赖状态、连接和候选准备能力，不感知具体网络实现。生产 Infra 适配和测试执行尚未完成。 |
 | 2026-08-27 | 单一 Space 准入内部角色归属 | `SpaceAdmissionProtocol` 内部拆分 Joiner、Sponsor 和 Recovery 三个私有负责人；设置、状态、候选准备、连接和维护唤醒分别归负责其业务结果的角色持有，总入口只保留三个负责人和统一串行约束。公开入口、协议顺序和持久结果不变；仓库检查禁止具体能力重新堆回总入口。 |
 | 2026-08-28 | 单一 Space 准入角色模块完整归位 | 将 Joiner、Sponsor 和 Recovery 从三个依赖容器文件改为完整私有角色目录；开始加入、候选处理、加入请求和待办恢复连同各自能力、模型与测试归入对应角色。协议根只保留总入口、角色声明和稳定契约转出；仓库检查同时禁止旧单文件负责人和根级动作目录恢复。 |
+| 2026-08-28 | 单一 Space 准入全状态持久化契约 | Core 以私有版本化结构覆盖 Aggregate 的全部合法状态，保留既有状态编码顺序；认证材料、消息证据、固定回复、原请求、路由、预期回复、重试进度及各阶段安全材料均可无损恢复。恢复会重新验证内部关系，错误版本和损坏数据失败关闭；数据库、MasterKey 加密存储和运行接线仍由后续 Infra 步骤完成。 |
+| 2026-08-28 | 单一 Space 准入持久化内部拆分 | 将 2000 多行单文件替换为私有责任目录：总调度、早期状态、Joiner、Sponsor、Helper/终止状态、消息和基础值分别维护；仓库检查禁止旧单文件恢复。公开保存入口、错误、格式变体顺序和运行行为不变。 |
 
 ## 相关文档
 

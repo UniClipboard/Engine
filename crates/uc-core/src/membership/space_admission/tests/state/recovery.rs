@@ -9,7 +9,10 @@ fn initiated_joiner_exposes_one_complete_initial_recovery_view() {
     let AdmissionPendingRecovery::Initial {
         encrypted_password_equivalent,
         pending_exchange,
-    } = recovery;
+    } = recovery
+    else {
+        panic!("unauthenticated Joiner must require initial recovery");
+    };
     assert_eq!(encrypted_password_equivalent.as_bytes(), &[0xf8; 32]);
     assert_eq!(pending_exchange.route().as_bytes(), &[0xf9; 32]);
     assert_eq!(

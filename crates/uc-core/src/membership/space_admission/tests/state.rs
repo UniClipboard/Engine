@@ -8,3 +8,4 @@ include!("state/cancellation.rs");
 include!("state/replay.rs");
 include!("state/helper.rs");
 include!("state/recovery.rs");
+include!("state/persistence.rs");

@@ -880,6 +880,41 @@ function checkSpaceMembershipMaintenanceOwnership() {
   return problems
 }
 
+function checkSpaceAdmissionPersistenceOwnership() {
+  const problems = []
+  const stateRoot = 'crates/uc-core/src/membership/space_admission/state'
+  const persistenceRoot = `${stateRoot}/persistence`
+  const requiredEntries = [
+    'mod.rs',
+    'aggregate.rs',
+    'initial.rs',
+    'joiner.rs',
+    'sponsor.rs',
+    'terminal.rs',
+    'message.rs',
+    'value.rs',
+  ]
+
+  if (existsSync(join(REPOSITORY_ROOT, `${stateRoot}/persistence.rs`))) {
+    addProblem(
+      problems,
+      'space admission persistence ownership',
+      `${stateRoot}/persistence.rs must be replaced by role-owned persistence files`
+    )
+  }
+  for (const entry of requiredEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, persistenceRoot, entry))) {
+      addProblem(
+        problems,
+        'space admission persistence ownership',
+        `missing persistence responsibility file: ${persistenceRoot}/${entry}`
+      )
+    }
+  }
+
+  return problems
+}
+
 function repositorySources() {
   return {
     engine: read('crates/uc-engine/src/lib.rs'),
@@ -908,6 +943,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkApplicationMembershipCutover(),
     ...checkSpaceModuleInterface(),
     ...checkSpaceAdmissionProtocolOwnership(),
+    ...checkSpaceAdmissionPersistenceOwnership(),
     ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
     ...(includePlaintext ? checkPlaintextScanner() : []),

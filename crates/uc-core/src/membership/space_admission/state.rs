@@ -1,6 +1,7 @@
 mod aggregate;
 mod helper;
 mod joiner;
+mod persistence;
 mod replay;
 mod sponsor;
 mod terminal;
@@ -36,6 +37,7 @@ pub use joiner::{
     SpaceAdmissionJoinerCandidate, SpaceAdmissionJoinerChannelState, SpaceAdmissionJoinerCommitted,
     SpaceAdmissionJoinerInitiated, SpaceAdmissionJoinerPrepared, SpaceAdmissionJoinerState,
 };
+pub use persistence::SpaceAdmissionPersistenceError;
 pub use sponsor::{
     SpaceAdmissionSponsorAccepted, SpaceAdmissionSponsorApplied, SpaceAdmissionSponsorCandidate,
     SpaceAdmissionSponsorCommitted, SpaceAdmissionSponsorState,
