@@ -4,13 +4,16 @@ use super::{
     LoadedPendingAdmission, PendingAdmissionRecoveryStateError, PrepareJoinerCandidateError,
     SpaceAdmissionTransportError,
 };
-use crate::space::admission::protocol::SpaceAdmissionProtocol;
+use crate::space::admission::protocol::{
+    AdmissionRecoveryService, JoinerAdmissionService, SpaceAdmissionProtocol,
+};
 use crate::space::membership::{
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
 };
 use uc_core::membership::{
     AdmissionPendingRecovery, AdmissionRecoveryCategory, AdmissionTransition,
-    SpaceAdmissionAggregate, SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
+    SpaceAdmissionAggregate, SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind,
+    SpaceAdmissionRejectionReason,
 };
 
 #[derive(Clone, Copy)]
@@ -24,9 +27,19 @@ impl SpaceAdmissionProtocol {
         &self,
         trigger: AdmissionRecoveryTrigger,
     ) -> AdmissionRecoveryReport {
-        let _guard = self.execution_lock.lock().await;
+        self.execute_exclusively(self.recovery.recover_pending(&self.joiner, trigger))
+            .await
+    }
+}
+
+impl AdmissionRecoveryService {
+    async fn recover_pending(
+        &self,
+        joiner: &JoinerAdmissionService,
+        trigger: AdmissionRecoveryTrigger,
+    ) -> AdmissionRecoveryReport {
         let mut report = AdmissionRecoveryReport::default();
-        let loaded = match self.pending_admission_recovery_state.load(trigger).await {
+        let loaded = match self.state.load(trigger).await {
             Ok(loaded) => loaded,
             Err(error) => {
                 record_state_error(&mut report, error);
@@ -45,7 +58,7 @@ impl SpaceAdmissionProtocol {
                     pending_exchange,
                 } => (
                     RecoveryChannel::Initial,
-                    self.space_admission_transport
+                    self.transport
                         .establish_initial(
                             aggregate.admission_id(),
                             pending_exchange.route(),
@@ -59,7 +72,7 @@ impl SpaceAdmissionProtocol {
                     pending_exchange,
                 } => (
                     RecoveryChannel::Continuation,
-                    self.space_admission_transport
+                    self.transport
                         .resume(
                             aggregate.admission_id(),
                             pending_exchange.route(),
@@ -129,7 +142,7 @@ impl SpaceAdmissionProtocol {
             };
             match exchange.exchange(pending_exchange.request_envelope()).await {
                 Ok(reply) => {
-                    self.commit_joiner_reply(&mut report, aggregate, commit_token, reply)
+                    self.commit_joiner_reply(joiner, &mut report, aggregate, commit_token, reply)
                         .await;
                 }
                 Err(_) => report.deferred_count += 1,
@@ -144,9 +157,7 @@ impl SpaceAdmissionProtocol {
         token: AdmissionRecoveryCommitToken,
         transition: AdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
-        self.pending_admission_recovery_state
-            .commit(token, transition)
-            .await
+        self.state.commit(token, transition).await
     }
 
     async fn record_connection_failure(
@@ -252,6 +263,7 @@ impl SpaceAdmissionProtocol {
 
     async fn commit_joiner_reply(
         &self,
+        joiner: &JoinerAdmissionService,
         report: &mut AdmissionRecoveryReport,
         aggregate: SpaceAdmissionAggregate,
         token: AdmissionRecoveryCommitToken,
@@ -273,54 +285,9 @@ impl SpaceAdmissionProtocol {
                 }
             }
             SpaceAdmissionMessageKind::Candidate => {
-                let prepared = match self.prepare_joiner_candidate.prepare(&reply).await {
-                    Ok(prepared) => prepared,
-                    Err(PrepareJoinerCandidateError::Unavailable) => {
-                        report.deferred_count += 1;
-                        return;
-                    }
-                    Err(PrepareJoinerCandidateError::Invalid) => {
-                        report.recovery_required_count += 1;
-                        return;
-                    }
-                };
-                let (staged_input, verified_history, staged_target, prepared_exchange) =
-                    prepared.into_parts();
-                let transition =
-                    match aggregate.accept_candidate(reply, canonical_digest, staged_input) {
-                        Ok(transition) => transition,
-                        Err(_) => {
-                            report.recovery_required_count += 1;
-                            return;
-                        }
-                    };
-                let committed = match self.commit_recovery(token, transition).await {
-                    Ok(committed) => committed,
-                    Err(error) => {
-                        record_state_error(report, error);
-                        return;
-                    }
-                };
-                report.advanced_count += 1;
-                let (aggregate, token) = committed.into_parts();
-                let transition = match aggregate.prepare_candidate(
-                    verified_history,
-                    staged_target,
-                    prepared_exchange,
-                ) {
-                    Ok(transition) => transition,
-                    Err(_) => {
-                        report.recovery_required_count += 1;
-                        return;
-                    }
-                };
-                match self.commit_recovery(token, transition).await {
-                    Ok(_) => {
-                        report.advanced_count += 1;
-                        self.maintenance_wake.wake();
-                    }
-                    Err(error) => record_state_error(report, error),
-                }
+                joiner
+                    .handle_candidate(self, report, aggregate, token, reply, canonical_digest)
+                    .await;
             }
             _ => {
                 self.save_recovery_required(
@@ -331,6 +298,63 @@ impl SpaceAdmissionProtocol {
                 )
                 .await;
             }
+        }
+    }
+}
+
+impl JoinerAdmissionService {
+    async fn handle_candidate(
+        &self,
+        recovery: &AdmissionRecoveryService,
+        report: &mut AdmissionRecoveryReport,
+        aggregate: SpaceAdmissionAggregate,
+        token: AdmissionRecoveryCommitToken,
+        reply: SpaceAdmissionEnvelopeV1,
+        canonical_digest: [u8; 32],
+    ) {
+        let prepared = match self.prepare_candidate.prepare(&reply).await {
+            Ok(prepared) => prepared,
+            Err(PrepareJoinerCandidateError::Unavailable) => {
+                report.deferred_count += 1;
+                return;
+            }
+            Err(PrepareJoinerCandidateError::Invalid) => {
+                report.recovery_required_count += 1;
+                return;
+            }
+        };
+        let (staged_input, verified_history, staged_target, prepared_exchange) =
+            prepared.into_parts();
+        let transition = match aggregate.accept_candidate(reply, canonical_digest, staged_input) {
+            Ok(transition) => transition,
+            Err(_) => {
+                report.recovery_required_count += 1;
+                return;
+            }
+        };
+        let committed = match recovery.commit_recovery(token, transition).await {
+            Ok(committed) => committed,
+            Err(error) => {
+                record_state_error(report, error);
+                return;
+            }
+        };
+        report.advanced_count += 1;
+        let (aggregate, token) = committed.into_parts();
+        let transition =
+            match aggregate.prepare_candidate(verified_history, staged_target, prepared_exchange) {
+                Ok(transition) => transition,
+                Err(_) => {
+                    report.recovery_required_count += 1;
+                    return;
+                }
+            };
+        match recovery.commit_recovery(token, transition).await {
+            Ok(_) => {
+                report.advanced_count += 1;
+                self.maintenance_wake.wake();
+            }
+            Err(error) => record_state_error(report, error),
         }
     }
 }

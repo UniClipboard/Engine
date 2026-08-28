@@ -34,9 +34,10 @@ use super::recover_pending::{
     PreparedJoinerCandidateMaterial, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
 };
 use super::{
-    JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
-    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, SpaceAdmissionCommitToken,
-    SpaceAdmissionProtocol,
+    AdmissionRecoveryService, JoinerAdmissionService, JoinerStartMaterial,
+    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
+    JoinerStartStatePort, LoadedJoinerStartState, SpaceAdmissionCommitToken,
+    SpaceAdmissionProtocol, SponsorAdmissionService,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,42 +491,54 @@ impl SpaceAdmissionProtocolTestPair {
         });
         Self {
             joiner: SpaceAdmissionProtocol::new(
-                Arc::new(RecordingSettings {
-                    value: Mutex::new(Default::default()),
-                    events: Arc::clone(&events),
-                }),
-                Arc::new(FixedJoinerStartMaterial),
-                state.clone(),
-                state.clone(),
-                Arc::new(RecordingSpaceAdmissionTransport {
-                    events: Arc::clone(&events),
-                    mode,
-                }),
-                Arc::new(RecordingMaintenanceWake {
-                    events: Arc::clone(&events),
-                }),
-                Arc::new(UnusedSponsorPorts),
-                Arc::new(UnusedSponsorPorts),
-                Arc::new(FixedJoinerCandidate),
+                JoinerAdmissionService::new(
+                    Arc::new(RecordingSettings {
+                        value: Mutex::new(Default::default()),
+                        events: Arc::clone(&events),
+                    }),
+                    Arc::new(FixedJoinerStartMaterial),
+                    state.clone(),
+                    Arc::new(FixedJoinerCandidate),
+                    Arc::new(RecordingMaintenanceWake {
+                        events: Arc::clone(&events),
+                    }),
+                ),
+                SponsorAdmissionService::new(
+                    Arc::new(UnusedSponsorPorts),
+                    Arc::new(UnusedSponsorPorts),
+                ),
+                AdmissionRecoveryService::new(
+                    state.clone(),
+                    Arc::new(RecordingSpaceAdmissionTransport {
+                        events: Arc::clone(&events),
+                        mode,
+                    }),
+                ),
             ),
             sponsor: SpaceAdmissionProtocol::new(
-                Arc::new(RecordingSettings {
-                    value: Mutex::new(Default::default()),
-                    events: Arc::clone(&events),
-                }),
-                Arc::new(FixedJoinerStartMaterial),
-                state.clone(),
-                state.clone(),
-                Arc::new(RecordingSpaceAdmissionTransport {
-                    events: Arc::clone(&events),
-                    mode: TransportMode::DeferInitial,
-                }),
-                Arc::new(RecordingMaintenanceWake {
-                    events: Arc::clone(&events),
-                }),
-                sponsor_state.clone(),
-                Arc::new(FixedSponsorCandidate),
-                Arc::new(FixedJoinerCandidate),
+                JoinerAdmissionService::new(
+                    Arc::new(RecordingSettings {
+                        value: Mutex::new(Default::default()),
+                        events: Arc::clone(&events),
+                    }),
+                    Arc::new(FixedJoinerStartMaterial),
+                    state.clone(),
+                    Arc::new(FixedJoinerCandidate),
+                    Arc::new(RecordingMaintenanceWake {
+                        events: Arc::clone(&events),
+                    }),
+                ),
+                SponsorAdmissionService::new(
+                    sponsor_state.clone(),
+                    Arc::new(FixedSponsorCandidate),
+                ),
+                AdmissionRecoveryService::new(
+                    state.clone(),
+                    Arc::new(RecordingSpaceAdmissionTransport {
+                        events: Arc::clone(&events),
+                        mode: TransportMode::DeferInitial,
+                    }),
+                ),
             ),
             state,
             sponsor_state,

@@ -12,11 +12,11 @@ use uc_core::membership::{
 use uc_core::ports::PresenceEvent;
 
 use crate::space::admission::{
-    CancelSpaceJoinUseCase, CompletePendingSpaceTransitionUseCase,
-    HandleAuthenticatedSpaceAdmissionMessagePort, JoinerStartMaterialPort, JoinerStartStatePort,
-    PendingAdmissionRecoveryStatePort, PrepareJoinerCandidatePort, PrepareSponsorCandidatePort,
-    QueryPendingSpaceTransitionUseCase, SpaceAdmissionProtocol, SpaceAdmissionTransportPort,
-    SponsorJoinRequestStatePort,
+    AdmissionRecoveryService, CancelSpaceJoinUseCase, CompletePendingSpaceTransitionUseCase,
+    HandleAuthenticatedSpaceAdmissionMessagePort, JoinerAdmissionService, JoinerStartMaterialPort,
+    JoinerStartStatePort, PendingAdmissionRecoveryStatePort, PrepareJoinerCandidatePort,
+    PrepareSponsorCandidatePort, QueryPendingSpaceTransitionUseCase, SpaceAdmissionProtocol,
+    SpaceAdmissionTransportPort, SponsorAdmissionService, SponsorJoinRequestStatePort,
 };
 use crate::space::membership::CurrentMemberSignaturePort;
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
@@ -149,16 +149,25 @@ impl SpaceApplication {
             deps.membership_history_transport,
         ));
         let deferred_maintenance_wake = Arc::new(DeferredMaintenanceWake::new());
-        let space_admission = Arc::new(SpaceAdmissionProtocol::new(
+        let joiner_admission = JoinerAdmissionService::new(
             deps.settings,
             deps.joiner_start_material,
             deps.joiner_start_state,
-            deps.pending_admission_recovery_state,
-            deps.space_admission_transport,
+            deps.prepare_joiner_candidate,
             deferred_maintenance_wake.clone(),
+        );
+        let sponsor_admission = SponsorAdmissionService::new(
             deps.sponsor_join_request_state,
             deps.prepare_sponsor_candidate,
-            deps.prepare_joiner_candidate,
+        );
+        let admission_recovery = AdmissionRecoveryService::new(
+            deps.pending_admission_recovery_state,
+            deps.space_admission_transport,
+        );
+        let space_admission = Arc::new(SpaceAdmissionProtocol::new(
+            joiner_admission,
+            sponsor_admission,
+            admission_recovery,
         ));
         let membership_activation = Arc::new(RePairingAwareMembershipActivation::new(
             deps.activate_membership_effect,

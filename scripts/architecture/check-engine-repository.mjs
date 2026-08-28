@@ -710,6 +710,78 @@ function checkSpaceModuleInterface() {
   return problems
 }
 
+function checkSpaceAdmissionProtocolOwnership() {
+  const problems = []
+  const protocolRoot = 'crates/uc-application/src/space/admission/protocol'
+  const protocol = read(`${protocolRoot}/protocol.rs`)
+  const moduleSurface = read(`${protocolRoot}/mod.rs`)
+  const joinerStart = read(`${protocolRoot}/start_join/execute.rs`)
+  const recovery = read(`${protocolRoot}/recover_pending/execute.rs`)
+  const sponsorMessage = read(`${protocolRoot}/handle_authenticated_message/execute.rs`)
+
+  for (const child of ['joiner', 'sponsor', 'recovery']) {
+    if (!moduleSurface.includes(`mod ${child};`)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `protocol must contain a private ${child} responsibility module`
+      )
+    }
+  }
+
+  for (const field of [
+    'joiner: JoinerAdmissionService',
+    'sponsor: SponsorAdmissionService',
+    'recovery: AdmissionRecoveryService',
+    'execution_lock: tokio::sync::Mutex<()>',
+  ]) {
+    if (!protocol.includes(field)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `SpaceAdmissionProtocol is missing ${field}`
+      )
+    }
+  }
+
+  for (const leakedDependency of [
+    'SettingsPort',
+    'JoinerStartMaterialPort',
+    'JoinerStartStatePort',
+    'PendingAdmissionRecoveryStatePort',
+    'SpaceAdmissionTransportPort',
+    'WakeSpaceMembershipMaintenancePort',
+    'SponsorJoinRequestStatePort',
+    'PrepareSponsorCandidatePort',
+    'PrepareJoinerCandidatePort',
+  ]) {
+    if (protocol.includes(leakedDependency)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `SpaceAdmissionProtocol directly owns ${leakedDependency}`
+      )
+    }
+  }
+
+  for (const [source, owner, action] of [
+    [joinerStart, 'JoinerAdmissionService', 'start'],
+    [recovery, 'JoinerAdmissionService', 'handle_candidate'],
+    [sponsorMessage, 'SponsorAdmissionService', 'handle_join_request'],
+    [recovery, 'AdmissionRecoveryService', 'recover_pending'],
+  ]) {
+    if (!source.includes(`impl ${owner}`) || !source.includes(`async fn ${action}(`)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `${owner} must own ${action}`
+      )
+    }
+  }
+
+  return problems
+}
+
 function repositorySources() {
   return {
     engine: read('crates/uc-engine/src/lib.rs'),
@@ -737,6 +809,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkCurrentPeerScopeOwnership(),
     ...checkApplicationMembershipCutover(),
     ...checkSpaceModuleInterface(),
+    ...checkSpaceAdmissionProtocolOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
     ...(includePlaintext ? checkPlaintextScanner() : []),
   ]

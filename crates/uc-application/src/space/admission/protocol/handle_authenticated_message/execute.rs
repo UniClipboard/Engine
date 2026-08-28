@@ -6,7 +6,7 @@ use super::{
     HandleAuthenticatedSpaceAdmissionMessagePort, SpaceAdmissionMessageReply,
     SponsorAdmissionMutation, SponsorJoinRequestState, SponsorJoinRequestStateError,
 };
-use crate::space::admission::protocol::SpaceAdmissionProtocol;
+use crate::space::admission::protocol::{SpaceAdmissionProtocol, SponsorAdmissionService};
 
 #[async_trait]
 impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
@@ -14,9 +14,18 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
         &self,
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
-        let _guard = self.execution_lock.lock().await;
+        self.execute_exclusively(self.sponsor.handle_join_request(message))
+            .await
+    }
+}
+
+impl SponsorAdmissionService {
+    async fn handle_join_request(
+        &self,
+        message: AuthenticatedSpaceAdmissionMessage,
+    ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
         let loaded = self
-            .sponsor_join_request_state
+            .join_request_state
             .load(&message)
             .await
             .map_err(map_state_error)?;
@@ -59,7 +68,7 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
                     continuation,
                 )
                 .map_err(|_| HandleAuthenticatedSpaceAdmissionMessageError::Invalid)?;
-                self.sponsor_join_request_state
+                self.join_request_state
                     .commit(commit_token, SponsorAdmissionMutation::new(transition))
                     .await
                     .map_err(map_state_error)?
@@ -71,7 +80,7 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
             .sponsor_candidate_preparation()
             .ok_or(HandleAuthenticatedSpaceAdmissionMessageError::RecoveryRequired)?;
         let prepared = self
-            .prepare_sponsor_candidate
+            .prepare_candidate
             .prepare(aggregate.admission_id(), preparation)
             .await
             .map_err(|error| match error {
@@ -87,7 +96,7 @@ impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
             .fix_candidate(candidate_reply, staged_security)
             .map_err(|_| HandleAuthenticatedSpaceAdmissionMessageError::Invalid)?;
         let committed = self
-            .sponsor_join_request_state
+            .join_request_state
             .commit(commit_token, SponsorAdmissionMutation::new(transition))
             .await
             .map_err(map_state_error)?;

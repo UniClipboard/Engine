@@ -1,4 +1,4 @@
-use super::super::SpaceAdmissionProtocol;
+use super::super::{JoinerAdmissionService, SpaceAdmissionProtocol};
 use super::JoinerStartMutation;
 use crate::space::admission::{CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 use uc_core::membership::{
@@ -12,9 +12,14 @@ impl SpaceAdmissionProtocol {
         &self,
         input: JoinSpaceInput,
     ) -> Result<JoinSpaceResult, JoinSpaceError> {
-        let _guard = self.execution_lock.lock().await;
+        self.execute_exclusively(self.joiner.start(input)).await
+    }
+}
+
+impl JoinerAdmissionService {
+    async fn start(&self, input: JoinSpaceInput) -> Result<JoinSpaceResult, JoinSpaceError> {
         persist_device_name(self.settings.as_ref(), input.device_name.as_deref()).await?;
-        let loaded = self.joiner_start_state.load().await?;
+        let loaded = self.start_state.load().await?;
         let (
             next_local_join_ordinal,
             source_snapshot,
@@ -28,7 +33,7 @@ impl SpaceAdmissionProtocol {
             .transpose()
             .map_err(|_| JoinSpaceError::PreviousJoinCannotBeSuperseded)?;
 
-        let material = self.joiner_start_material.create(&input).await?;
+        let material = self.start_material.create(&input).await?;
         let (admission_id, join_id, route, join_request, encrypted_password_equivalent) =
             material.into_parts();
         let pending_exchange = PendingAdmissionExchange::new(
@@ -48,7 +53,7 @@ impl SpaceAdmissionProtocol {
         )
         .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
 
-        self.joiner_start_state
+        self.start_state
             .commit(
                 commit_token,
                 JoinerStartMutation::new(transition, superseded),

@@ -270,7 +270,9 @@ Application 的规格 027 切换和新准入 Core 已分别完成；两者之间
 
 Core 对外只提供 Aggregate、Transition、消息、待发送交换、稳定错误分类和本次影响。Joiner、Sponsor、CompletionHelper 与 Terminal 的具体状态类型只在 Core 内部可见；Application 后台通过统一待发送读取恢复，消息入口先调用统一重放裁决，不能逐阶段读取或修改字段。CompletionHelper 只能根据已验证 Commit 和回执生成等价 Complete，不能创建或修改成员事实。
 
-当前实现边界止于 Core。Application 仍需建立唯一 `SpaceAdmissionProtocol`，Infra 仍需接入 OPAQUE、OpenMLS、加密存储和新 Iroh 通道，Engine 仍需完成 endpoint-before-router-before-runtime 构造顺序。完成这些切换并删除旧协议前，本节的新流程不属于已发布运行路径。
+当前 Core 已完成封闭状态和类型化交换基础，Application 已建立唯一 `SpaceAdmissionProtocol` 的最小纵向流程。协议内部由 `JoinerAdmissionService`、`SponsorAdmissionService` 和 `AdmissionRecoveryService` 分别集中加入方推进、担保方推进和持久恢复；各角色只持有自己负责结果所需的能力。`SpaceAdmissionProtocol` 只保留三个内部负责人和同一 profile 的串行约束，对产品、网络入口和成员维护仍提供一个完整流程，不暴露内部步骤。
+
+Infra 仍需接入 OPAQUE、OpenMLS、加密存储和新 Iroh 通道，Engine 仍需完成 endpoint-before-router-before-runtime 构造顺序。完成这些切换并删除旧协议前，本节的新流程不属于已发布运行路径。
 
 以下 ADR-017/规格 023 内容保留为业务约束来源；其中旧 `WorkspaceConvergence`、旧尝试仓储、outbox 和完成接力通道名称不再代表目标代码归属。
 
@@ -1486,6 +1488,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-27 | 单一 Space 准入恢复状态能力目标测试 | Application 协议测试装配开始要求恢复动作通过自己的状态能力按触发原因读取待恢复 Aggregate，不允许恢复负责人直接读取成员账本。当前仅建立失败测试。 |
 | 2026-08-27 | 单一 Space 准入首次连接能力目标测试 | Application 恢复测试要求 Infra 连接能力接收同一 admission 的原路由和原认证材料；暂时不可达时保留 Pending 并在恢复报告记录一次暂缓。当前仅建立失败测试。 |
 | 2026-08-27 | 单一 Space 准入 Application 最小纵向流程 | 新 `SpaceAdmissionProtocol` 接管 Pending 恢复和已认证消息入口：首次认证先保存 continuation 再发送原 JoinRequest，Sponsor 先保存 Accepted/Candidate 再回复，重复 JoinRequest 重放固定 Candidate，Joiner 依次保存 Candidate/Prepared 并唤醒后续恢复。维护运行期改为只调用新协议；Application 仅依赖状态、连接和候选准备能力，不感知具体网络实现。生产 Infra 适配和测试执行尚未完成。 |
+| 2026-08-27 | 单一 Space 准入内部角色归属 | `SpaceAdmissionProtocol` 内部拆分 Joiner、Sponsor 和 Recovery 三个私有负责人；设置、状态、候选准备、连接和维护唤醒分别归负责其业务结果的角色持有，总入口只保留三个负责人和统一串行约束。公开入口、协议顺序和持久结果不变；仓库检查禁止具体能力重新堆回总入口。 |
 
 ## 相关文档
 

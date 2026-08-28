@@ -80,5 +80,8 @@ pub(super) use invitation::{
     IssuePairingInvitationForAddressUseCase, IssuePairingInvitationUseCase,
     PairingInvitationIssuer, QueryPairingInvitationAddressesUseCase,
 };
-pub(super) use protocol::SpaceAdmissionProtocol;
+pub(super) use protocol::{
+    AdmissionRecoveryService, JoinerAdmissionService, SpaceAdmissionProtocol,
+    SponsorAdmissionService,
+};
 pub(super) use query_pending_space_transition::QueryPendingSpaceTransitionUseCase;
