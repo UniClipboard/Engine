@@ -1015,11 +1015,64 @@ function checkSpaceAdmissionPersistenceOwnership() {
   return problems
 }
 
+function checkDualInvitationEntry() {
+  const problems = []
+  const invitationPortPath = 'crates/uc-core/src/ports/pairing_invitation.rs'
+  const invitationPort = read(invitationPortPath)
+  for (const required of [
+    'pub invitation_id: InvitationId',
+    'pub full_invitation: FullInvitation',
+  ]) {
+    if (!invitationPort.includes(required)) {
+      addProblem(
+        problems,
+        'dual invitation entry',
+        `${invitationPortPath} is missing ${required}`
+      )
+    }
+  }
+
+  const codecPath = 'crates/uc-infra/src/space/admission/full_invitation.rs'
+  const codec = read(codecPath)
+  for (const required of [
+    'FULL_INVITATION_PREFIX',
+    'decode_invitation_entry',
+    'InvitationId::from_bytes',
+  ]) {
+    if (!codec.includes(required)) {
+      addProblem(problems, 'dual invitation entry', `${codecPath} is missing ${required}`)
+    }
+  }
+
+  const uniffiRuntimePath = 'bindings/uc-engine-uniffi/src/runtime.rs'
+  const uniffiRuntime = read(uniffiRuntimePath)
+  for (const required of [
+    '.field("invitation_code", &"[REDACTED]")',
+    '.field("full_invitation", &"[REDACTED]")',
+  ]) {
+    if (!uniffiRuntime.includes(required)) {
+      addProblem(problems, 'dual invitation entry', `${uniffiRuntimePath} is missing ${required}`)
+    }
+  }
+
+  for (const path of [
+    'crates/uc-infra/src/rendezvous/invitation_adapter.rs',
+    'crates/uc-infra/src/pairing/session.rs',
+  ]) {
+    if (/code\s*=\s*%code\.as_str\(\)/.test(read(path))) {
+      addProblem(problems, 'dual invitation entry', `${path} logs a full invitation code`)
+    }
+  }
+
+  return problems
+}
+
 function checkInfraSpaceAdmissionOwnership() {
   const problems = []
   const admissionRoot = 'crates/uc-infra/src/space/admission'
   const requiredEntries = [
     'mod.rs',
+    'full_invitation.rs',
     'security/mod.rs',
     'security/transition.rs',
     'repository/mod.rs',
@@ -1147,6 +1200,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkSpaceAdmissionPersistenceOwnership(),
     ...checkInfraSpaceAdmissionOwnership(),
     ...checkInfraSpaceSecurityOwnership(),
+    ...checkDualInvitationEntry(),
     ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
     ...(includePlaintext ? checkPlaintextScanner() : []),

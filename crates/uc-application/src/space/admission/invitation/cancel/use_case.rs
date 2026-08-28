@@ -37,7 +37,10 @@ mod tests {
     fn pending_invitation(code: &str) -> PairingInvitation {
         let issued_at = Utc.with_ymd_and_hms(2026, 8, 23, 10, 0, 0).unwrap();
         let (invitation, _) = PairingInvitation::issue(
+            uc_core::membership::InvitationId::from_bytes([0x42; 32]).expect("valid invitation id"),
             InvitationCode::new(code),
+            uc_core::pairing::invitation::FullInvitation::new(format!("ucspace1_{code}"))
+                .expect("valid full invitation"),
             issued_at,
             issued_at + Duration::minutes(5),
             DeviceId::new("device-a"),

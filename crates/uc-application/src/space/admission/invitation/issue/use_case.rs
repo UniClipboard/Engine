@@ -71,8 +71,8 @@ mod tests {
     use chrono::{DateTime, Duration, Utc};
 
     use uc_core::ids::DeviceId;
-    use uc_core::membership::MembershipAdmissionDecision;
-    use uc_core::pairing::invitation::{InvitationCode, InvitationState};
+    use uc_core::membership::{InvitationId, MembershipAdmissionDecision};
+    use uc_core::pairing::invitation::{FullInvitation, InvitationCode, InvitationState};
     use uc_core::ports::pairing_invitation::{
         CodeOrigin, InvitationError, PairingInvitationByAddressPort,
     };
@@ -147,9 +147,14 @@ mod tests {
         }
 
         fn with_origin(code: &str, expires_at: DateTime<Utc>, code_origin: CodeOrigin) -> Self {
+            let invitation_id = InvitationId::from_bytes([0x61; 32]).expect("valid invitation id");
+            let full_invitation =
+                FullInvitation::new(format!("ucspace1_{code}")).expect("valid full invitation");
             Self {
                 next: StdMutex::new(FakeOutcome::Ok(IssuedInvitation {
+                    invitation_id,
                     code: InvitationCode::new(code),
+                    full_invitation,
                     expires_at,
                     code_origin,
                 })),
@@ -346,6 +351,7 @@ mod tests {
         let result = h.uc.execute().await.unwrap();
 
         assert_eq!(result.code.as_str(), "ABCD-1234");
+        assert_eq!(result.full_invitation.as_str(), "ucspace1_ABCD-1234");
         assert_eq!(result.expires_at, expires_at());
         assert_eq!(
             result.availability,
@@ -359,6 +365,8 @@ mod tests {
             .await
             .expect("aggregate parked");
         assert_eq!(stored.code().as_str(), "ABCD-1234");
+        assert_eq!(stored.invitation_id().as_bytes(), &[0x61; 32]);
+        assert_eq!(stored.full_invitation(), &result.full_invitation);
         assert_eq!(stored.issuer_device_id().as_str(), "sponsor-1");
         match stored.state() {
             InvitationState::Pending { expires_at: e } => assert_eq!(*e, expires_at()),
@@ -501,7 +509,9 @@ mod tests {
 
         // Second issue: reset the fake port's next outcome.
         *port.next.lock().unwrap() = FakeOutcome::Ok(IssuedInvitation {
+            invitation_id: InvitationId::from_bytes([0x62; 32]).expect("valid invitation id"),
             code: InvitationCode::new("SAME"),
+            full_invitation: FullInvitation::new("ucspace1_SAME-2").expect("valid full invitation"),
             expires_at: second_expiry,
             code_origin: CodeOrigin::DirectoryIssued,
         });

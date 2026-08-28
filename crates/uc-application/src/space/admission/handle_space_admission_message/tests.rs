@@ -187,7 +187,10 @@ async fn inbound_admission_commits_all_facts_before_returning_the_reply() {
     let code = InvitationCode::new("123456");
     let now = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(1_800_000_000_000).unwrap();
     let (invitation, _) = PairingInvitation::issue(
+        uc_core::membership::InvitationId::from_bytes([0x44; 32]).expect("valid invitation id"),
         code.clone(),
+        uc_core::pairing::invitation::FullInvitation::new("ucspace1_ABCD-1234")
+            .expect("valid full invitation"),
         now,
         now + chrono::Duration::minutes(5),
         DeviceId::new("local"),

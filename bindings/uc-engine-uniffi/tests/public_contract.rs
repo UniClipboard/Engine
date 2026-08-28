@@ -769,6 +769,7 @@ fn pairing_methods_return_invitation_data_and_stable_join_errors() {
         .issue_invitation()
         .expect("binding must return a pairing invitation");
     assert!(!invitation.invitation_code.is_empty());
+    assert!(!invitation.full_invitation.is_empty());
     assert!(invitation.expires_at_ms > 0);
 
     let error = engine

@@ -20,6 +20,7 @@ pub async fn execute_issue_invitation(facade: &AppFacade) -> Result<OperationRes
         .map_err(map_issue_invitation_error)?;
     Ok(OperationResult::InvitationIssued {
         invitation_code: invitation.code.as_str().to_string(),
+        full_invitation: invitation.full_invitation.into_string(),
         expires_at_ms: invitation.expires_at.timestamp_millis(),
         availability: match invitation.availability {
             uc_application::facade::space_setup::InvitationAvailability::CrossNetwork => {

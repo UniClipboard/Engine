@@ -785,6 +785,8 @@ Pending -> Consumed
    +----> Expired
 ```
 
+每次邀请只有一个 Sponsor 生成的 256-bit 内部身份，同时表现为可手输的短码和可用于二维码、链接或直接文本的完整邀请。完整邀请以版本化编码携带内部身份、Sponsor 不透明地址和有效期，不携带口令、私钥或 Space 内容。完整邀请可在本地解析；短码只是云端或局域网中的查询别名，查询结果必须返回同一份完整邀请。Sponsor holder 以内部身份和短码共同指向同一邀请，任一入口消费、过期或撤销都使另一入口同时失效。两种邀请原文均不进入 Debug 或日志。
+
 邀请只允许使用一次。撤销和过期都是终态，不能重新激活。
 
 ### 内容物化
@@ -1510,6 +1512,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-28 | 单一 Space 准入 Joiner 激活状态存储 | 现有加密准入仓库实现 Joiner 本机激活状态能力：只加载当前 Activating 记录，以独立版本凭证提交唯一 PublishActive 变化，并原子保存 Active 与清除当前加入指针。SQLite 测试覆盖非激活过滤、重启、旧凭证、错误影响和密文扫描；未新增表或持久化格式。 |
 | 2026-08-28 | 单一 Space 准入 Joiner J0 私密材料生命周期 | 新增自动清零的不透明 Joiner 私密材料；开始材料与 JoinRequest 同时交给 Core，Initiated 状态和现有加密仓库完整保存，认证重启后仍可通过 Candidate 准备视图借用。Candidate 提交以 staged target input 替代原材料，旧字节不再进入后续记录；未实现真实 OPAQUE、邀请解析或 OpenMLS 生成器。 |
 | 2026-08-28 | Infra Space 成员安全归位 | MLS 成员组、Space 访问、运行会话、历史验签、连接准入和成员安全更新迁入 `crates/uc-infra/src/space/security/`；准入专属转换迁入 `space/admission/security/`。已迁移实现的旧路径和导出物理删除；准入记录密钥、活动 Space 清单和 Space 切换不在本次范围，运行行为不变。 |
+| 2026-08-29 | Space 双邀请入口 | Sponsor 每次生成一个随机 256-bit 邀请身份，并产出指向同一邀请的短码与完整长邀请。云端和 mDNS 以不透明内容发布完整邀请；短码解析后与长邀请直接解码得到同一 Sponsor 地址和邀请身份。Application holder 同时以短码和邀请身份索引同一对象，Engine 及绑定返回两种形式；邀请原文不进入 Debug 或日志。待解析短码的持久状态、OPAQUE 和新准入通道仍属后续阶段。 |
 
 ## 相关文档
 

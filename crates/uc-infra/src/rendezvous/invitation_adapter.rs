@@ -24,6 +24,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use iroh::{Endpoint, EndpointAddr, TransportAddr};
+use rand::RngCore;
 use tokio::runtime::Handle as RuntimeHandle;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument, warn};
@@ -123,13 +124,21 @@ impl RendezvousPairingInvitationAdapter {
     ) -> Result<IssuedInvitation, InvitationError> {
         let device_name = Self::resolve_device_name(&settings)?;
         let device_id = self.device_identity.current_device_id();
+        let invitation_id = mint_invitation_id();
+        let expires_at = Utc::now() + LOCAL_MINT_TTL;
+        let full_invitation = crate::space::encode_full_invitation(
+            invitation_id,
+            ticket.as_bytes(),
+            expires_at.timestamp_millis(),
+        )
+        .map_err(|_| InvitationError::Internal("failed to encode full invitation".to_owned()))?;
 
         let req = CreatePairingRequest {
             sponsor_device_id: device_id.as_str().to_string(),
             sponsor_device_name: device_name,
             sponsor_endpoint_id: endpoint_id.clone(),
-            sponsor_ticket: ticket.clone(),
-            ttl_secs: None,
+            sponsor_ticket: full_invitation.as_str().to_owned(),
+            ttl_secs: Some(LOCAL_MINT_TTL.num_seconds() as u32),
         };
 
         // ── Cloud channel (best-effort, gated by LAN-only mode) ────────
@@ -139,14 +148,12 @@ impl RendezvousPairingInvitationAdapter {
         // locally — the LAN channel will be the only publish surface.
         if runtime_consts::lan_only() {
             let code = InvitationCode::new(mint_invitation_code());
-            let expires_at = Utc::now() + LOCAL_MINT_TTL;
             debug!(
-                code = %code.as_str(),
                 %expires_at,
                 "LAN-only mode: minted invitation locally, skipping cloud channel"
             );
             if let Err(err) = self
-                .start_mdns_publisher(&code, &endpoint_id, &ticket, expires_at)
+                .start_mdns_publisher(&code, &endpoint_id, full_invitation.as_str(), expires_at)
                 .await
             {
                 // mDNS is the only publish surface in LAN-only mode, so a
@@ -156,25 +163,25 @@ impl RendezvousPairingInvitationAdapter {
                 // undialable code.
                 warn!(
                     error = %err,
-                    code = %code.as_str(),
                     "mDNS publisher start failed in LAN-only mode; this invitation cannot be discovered",
                 );
                 return Err(InvitationError::Internal(format!(
                     "mDNS publisher start failed in LAN-only mode: {err}"
                 )));
             }
-            return Ok(IssuedInvitation {
+            return build_issued_invitation(
+                invitation_id,
                 code,
+                full_invitation,
                 expires_at,
-                code_origin: CodeOrigin::LocallyMintedLanOnly,
-            });
+                CodeOrigin::LocallyMintedLanOnly,
+            );
         }
 
-        let (code, expires_at, cloud_ok) = match self.rendezvous.create_pairing(&req).await {
+        let (code, cloud_ok) = match self.rendezvous.create_pairing(&req).await {
             Ok(parsed) => {
                 let code = InvitationCode::new(parsed.code);
-                let expires_at = Utc
-                    .timestamp_millis_opt(parsed.expires_at_ms)
+                Utc.timestamp_millis_opt(parsed.expires_at_ms)
                     .single()
                     .ok_or_else(|| {
                         InvitationError::Internal(format!(
@@ -182,8 +189,13 @@ impl RendezvousPairingInvitationAdapter {
                             parsed.expires_at_ms
                         ))
                     })?;
+                if parsed.expires_at_ms < expires_at.timestamp_millis() {
+                    return Err(InvitationError::Internal(
+                        "rendezvous expiry precedes the full invitation expiry".to_owned(),
+                    ));
+                }
                 debug!(%expires_at, "cloud channel issued invitation");
-                (code, expires_at, true)
+                (code, true)
             }
             Err(err) => {
                 // Cloud unreachable: local mint + mDNS only.
@@ -194,24 +206,21 @@ impl RendezvousPairingInvitationAdapter {
                     return Err(map_create_err(err));
                 }
                 let code = InvitationCode::new(mint_invitation_code());
-                let expires_at = Utc::now() + LOCAL_MINT_TTL;
                 warn!(
                     error = %err,
-                    code = %code.as_str(),
                     "cloud channel unreachable; minted invitation locally — only LAN joiners will resolve",
                 );
-                (code, expires_at, false)
+                (code, false)
             }
         };
 
         // ── LAN channel (best-effort, window-scoped) ───────────────────
         if let Err(err) = self
-            .start_mdns_publisher(&code, &endpoint_id, &ticket, expires_at)
+            .start_mdns_publisher(&code, &endpoint_id, full_invitation.as_str(), expires_at)
             .await
         {
             warn!(
                 error = %err,
-                code = %code.as_str(),
                 cloud_ok,
                 "mDNS publisher start failed; LAN joiners will not resolve via this code",
             );
@@ -232,17 +241,19 @@ impl RendezvousPairingInvitationAdapter {
         } else {
             CodeOrigin::LocallyMintedDirectoryUnreachable
         };
-        Ok(IssuedInvitation {
+        build_issued_invitation(
+            invitation_id,
             code,
+            full_invitation,
             expires_at,
             code_origin,
-        })
+        )
     }
 
     /// Starts a window-scoped mDNS publisher and stores its handle so
     /// `consume_invitation` can drop it later.
     ///
-    /// The mDNS ticket is encoded as `hex(postcard(EndpointAddr))`, then
+    /// The full invitation is hex encoded, then
     /// split into ordered bounded TXT attributes by the publisher. This
     /// preserves every dialable address without exceeding DNS-SD's
     /// per-attribute limit.
@@ -250,7 +261,7 @@ impl RendezvousPairingInvitationAdapter {
         &self,
         code: &InvitationCode,
         endpoint_id: &str,
-        ticket_json: &str,
+        full_invitation: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), String> {
         // Sweep stale handles before inserting; a sponsor that has
@@ -258,10 +269,7 @@ impl RendezvousPairingInvitationAdapter {
         // multicast sockets until process exit.
         self.gc_expired_publishers(Utc::now()).await;
 
-        // Re-encode the EndpointAddr in the cloud-channel JSON ticket
-        // into postcard+hex before the publisher splits it into bounded
-        // TXT attributes.
-        let ticket_hex = encode_mdns_ticket(ticket_json)?;
+        let ticket_hex = encode_mdns_ticket(full_invitation)?;
         // Pick the iroh endpoint's UDP port for the announce. The LAN IPs
         // we publish come from `if-addrs` inside the publisher, not from
         // iroh's filtered list — that keeps the publisher's "what to put
@@ -303,14 +311,38 @@ impl RendezvousPairingInvitationAdapter {
     }
 }
 
-/// Re-encode the cloud-channel JSON ticket as `hex(postcard(EndpointAddr))`
-/// for bounded mDNS publishing.
-fn encode_mdns_ticket(ticket_json: &str) -> Result<String, String> {
-    let addr: EndpointAddr = serde_json::from_str(ticket_json)
-        .map_err(|err| format!("ticket JSON decode for mDNS re-encode: {err}"))?;
-    let bytes = postcard::to_allocvec(&addr)
-        .map_err(|err| format!("ticket postcard encode for mDNS: {err}"))?;
-    Ok(hex::encode(bytes))
+fn build_issued_invitation(
+    invitation_id: uc_core::membership::InvitationId,
+    code: InvitationCode,
+    full_invitation: uc_core::pairing::invitation::FullInvitation,
+    expires_at: DateTime<Utc>,
+    code_origin: CodeOrigin,
+) -> Result<IssuedInvitation, InvitationError> {
+    Ok(IssuedInvitation {
+        invitation_id,
+        code,
+        full_invitation,
+        expires_at,
+        code_origin,
+    })
+}
+
+fn mint_invitation_id() -> uc_core::membership::InvitationId {
+    loop {
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        if let Some(invitation_id) = uc_core::membership::InvitationId::from_bytes(bytes) {
+            return invitation_id;
+        }
+    }
+}
+
+/// Encode the same full invitation used by cloud discovery for bounded mDNS publishing.
+fn encode_mdns_ticket(full_invitation: &str) -> Result<String, String> {
+    if full_invitation.is_empty() {
+        return Err("full invitation is empty".to_owned());
+    }
+    Ok(hex::encode(full_invitation.as_bytes()))
 }
 
 /// Cloud-side errors we treat as "try LAN-only instead." Transport
@@ -422,7 +454,7 @@ impl PairingInvitationPort for RendezvousPairingInvitationAdapter {
             .await
     }
 
-    #[instrument(skip(self), fields(code = %code.as_str()))]
+    #[instrument(skip_all)]
     async fn consume_invitation(
         &self,
         code: &InvitationCode,
@@ -727,15 +759,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn full_invitation_round_trips_identity_route_and_expiry() {
+        let invitation_id =
+            uc_core::membership::InvitationId::from_bytes([0x41; 32]).expect("valid invitation id");
+        let route = br#"{"node":"sponsor"}"#;
+        let expires_at_ms = 1_800_000_000_000_i64;
+
+        let invitation = crate::space::encode_full_invitation(invitation_id, route, expires_at_ms)
+            .expect("full invitation should encode");
+        let decoded = crate::space::decode_full_invitation(&invitation, expires_at_ms - 1)
+            .expect("full invitation should decode");
+
+        assert!(invitation.as_str().starts_with("ucspace1_"));
+        assert_eq!(decoded.invitation_id(), invitation_id);
+        assert_eq!(decoded.route(), route);
+        assert_eq!(decoded.expires_at_ms(), expires_at_ms);
+
+        let mdns_ticket = encode_mdns_ticket(invitation.as_str()).expect("encode mDNS ticket");
+        let mdns_bytes = hex::decode(mdns_ticket).expect("decode mDNS ticket");
+        assert_eq!(mdns_bytes, invitation.as_str().as_bytes());
+    }
+
     #[tokio::test]
     async fn issue_invitation_happy_path() {
         let ep = loopback_endpoint().await;
+        let expected_sponsor_id = ep.id();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/pairings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "code": "ABCD-EFGH",
-                "expiresAtMs": 1_700_000_000_000_i64,
+                "expiresAtMs": 1_900_000_000_000_i64,
             })))
             .expect(1)
             .mount(&server)
@@ -746,10 +801,29 @@ mod tests {
             InMemorySettings::with_device_name(Some("mac")),
             server.uri(),
         );
+        let before = Utc::now();
         let issued = adapter.issue_invitation().await.expect("happy path");
+        let after = Utc::now();
 
         assert_eq!(issued.code.as_str(), "ABCD-EFGH");
-        assert_eq!(issued.expires_at, utc_from_ms(1_700_000_000_000));
+        assert!(
+            issued.expires_at >= before + LOCAL_MINT_TTL
+                && issued.expires_at <= after + LOCAL_MINT_TTL
+        );
+        let decoded = crate::space::decode_full_invitation(
+            &issued.full_invitation,
+            issued.expires_at.timestamp_millis() - 1,
+        )
+        .expect("issued full invitation should decode");
+        let decoded_route: EndpointAddr =
+            serde_json::from_slice(decoded.route()).expect("decode Sponsor route");
+        assert_eq!(decoded.invitation_id(), issued.invitation_id);
+        assert_eq!(decoded_route.id, expected_sponsor_id);
+        assert!(!decoded_route.addrs.is_empty());
+        assert_eq!(
+            decoded.expires_at_ms(),
+            issued.expires_at.timestamp_millis()
+        );
     }
 
     #[tokio::test]
@@ -766,7 +840,7 @@ mod tests {
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "code": "ABCD-EFGH",
-                "expiresAtMs": 1_700_000_000_000_i64,
+                "expiresAtMs": 1_900_000_000_000_i64,
             })))
             .expect(1)
             .mount(&server)
@@ -777,7 +851,18 @@ mod tests {
             InMemorySettings::with_device_name(Some("mac")),
             server.uri(),
         );
-        adapter.issue_invitation().await.expect("body matches");
+        let issued = adapter.issue_invitation().await.expect("body matches");
+        let requests = server
+            .received_requests()
+            .await
+            .expect("recorded rendezvous requests");
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("decode request body");
+        let published = body["sponsorTicket"]
+            .as_str()
+            .expect("opaque Sponsor ticket");
+
+        assert_eq!(published, issued.full_invitation.as_str());
     }
 
     #[tokio::test]
@@ -924,6 +1009,33 @@ mod tests {
             matches!(err, InvitationError::Internal(ref m) if m.contains("expires_at_ms")),
             "got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn issue_invitation_rejects_directory_expiry_before_full_invitation() {
+        let ep = loopback_endpoint().await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/pairings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": "ABCD-EFGH",
+                "expiresAtMs": 1_i64,
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(
+            ep,
+            InMemorySettings::with_device_name(Some("mac")),
+            server.uri(),
+        );
+
+        let error = adapter
+            .issue_invitation()
+            .await
+            .expect_err("directory alias cannot expire before the full invitation");
+
+        assert!(matches!(error, InvitationError::Internal(_)));
     }
 
     // ── consume_invitation ───────────────────────────────────────────────

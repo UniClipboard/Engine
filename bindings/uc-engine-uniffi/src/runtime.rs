@@ -122,6 +122,7 @@ pub struct LocalDevice {
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct InvitationIssued {
     pub invitation_code: String,
+    pub full_invitation: String,
     pub expires_at_ms: i64,
     pub availability: InvitationAvailability,
 }
@@ -131,6 +132,7 @@ impl std::fmt::Debug for InvitationIssued {
         formatter
             .debug_struct("InvitationIssued")
             .field("invitation_code", &"[REDACTED]")
+            .field("full_invitation", &"[REDACTED]")
             .field("expires_at_ms", &self.expires_at_ms)
             .field("availability", &self.availability)
             .finish()
@@ -212,10 +214,22 @@ pub struct NetworkRecoveryStatus {
     pub next_retry_in_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SpaceInvitation {
     pub invitation_code: String,
+    pub full_invitation: String,
     pub expires_at_ms: i64,
+}
+
+impl std::fmt::Debug for SpaceInvitation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SpaceInvitation")
+            .field("invitation_code", &"[REDACTED]")
+            .field("full_invitation", &"[REDACTED]")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -1883,6 +1897,7 @@ fn map_space_state(result: OperationResult) -> Result<SpaceState, BindingError> 
         space_id: state.space_id,
         current_invitation: state.current_invitation.map(|invitation| SpaceInvitation {
             invitation_code: invitation.invitation_code,
+            full_invitation: invitation.full_invitation,
             expires_at_ms: invitation.expires_at_ms,
         }),
         device_name: state.device_name,
@@ -2001,10 +2016,12 @@ fn map_local_device(result: OperationResult) -> Result<LocalDevice, BindingError
 fn map_invitation_issued(result: OperationResult) -> Result<InvitationIssued, BindingError> {
     unpack_operation!(result, OperationResult::InvitationIssued {
         invitation_code,
+        full_invitation,
         expires_at_ms,
         availability,
     } => InvitationIssued {
         invitation_code,
+        full_invitation,
         expires_at_ms,
         availability: map_invitation_availability(availability),
     })
@@ -2756,6 +2773,7 @@ mod tests {
         ] {
             let invitation = map_invitation_issued(OperationResult::InvitationIssued {
                 invitation_code: "NEVER-SHOW".to_owned(),
+                full_invitation: "ucspace1_NEVER-SHOW-FULL".to_owned(),
                 expires_at_ms: 1,
                 availability: engine_availability,
             })

@@ -15,7 +15,7 @@
 //!   locates the aggregate by code, drives it through `consume(code, now)`,
 //!   and removes it from the map on success or terminal failure.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use thiserror::Error;
@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 
 use crate::space::lifecycle::PendingSpaceInvitationResetPort;
 
+use uc_core::membership::InvitationId;
 use uc_core::pairing::invitation::{
     ConsumeError, InvitationCode, InvitationState, PairingInvitation,
 };
@@ -33,13 +34,19 @@ use uc_core::pairing::invitation::{
 /// event (P7e) carries only the joiner-echoed code, not the aggregate's
 /// internal pointer.
 pub(crate) struct InMemoryPairingInvitationHolder {
-    by_code: Mutex<HashMap<InvitationCode, PairingInvitation>>,
+    state: Mutex<InvitationHolderState>,
+}
+
+#[derive(Default)]
+struct InvitationHolderState {
+    by_code: HashMap<InvitationCode, PairingInvitation>,
+    code_by_id: BTreeMap<InvitationId, InvitationCode>,
 }
 
 impl InMemoryPairingInvitationHolder {
     pub(crate) fn new() -> Self {
         Self {
-            by_code: Mutex::new(HashMap::new()),
+            state: Mutex::new(InvitationHolderState::default()),
         }
     }
 
@@ -52,7 +59,15 @@ impl InMemoryPairingInvitationHolder {
     /// that's a UI-level policy decision, not a core invariant.
     pub(crate) async fn insert(&self, invitation: PairingInvitation) {
         let code = invitation.code().clone();
-        self.by_code.lock().await.insert(code, invitation);
+        let invitation_id = invitation.invitation_id();
+        let mut state = self.state.lock().await;
+        if let Some(previous) = state.by_code.remove(&code) {
+            state.code_by_id.remove(&previous.invitation_id());
+        }
+        if let Some(previous_code) = state.code_by_id.insert(invitation_id, code.clone()) {
+            state.by_code.remove(&previous_code);
+        }
+        state.by_code.insert(code, invitation);
     }
 
     /// Atomically locate + consume the aggregate matching `code`.
@@ -77,20 +92,28 @@ impl InMemoryPairingInvitationHolder {
         code: &InvitationCode,
         now: DateTime<Utc>,
     ) -> Result<PairingInvitation, TakeMatchingError> {
-        let mut map = self.by_code.lock().await;
-        let Some(mut invitation) = map.remove(code) else {
+        let mut state = self.state.lock().await;
+        let Some(invitation) = state.by_code.remove(code) else {
             return Err(TakeMatchingError::NotFound);
         };
-        match invitation.consume(code, now) {
-            Ok(_event) => Ok(invitation),
-            Err(ConsumeError::Expired) => Err(TakeMatchingError::Expired),
-            Err(ConsumeError::CodeMismatch) => Err(TakeMatchingError::Internal(
-                "holder key mismatches aggregate code — holder invariant broken".into(),
-            )),
-            Err(ConsumeError::NotPending) => Err(TakeMatchingError::Internal(
-                "holder stored a non-pending aggregate — insert/issue invariant broken".into(),
-            )),
-        }
+        state.code_by_id.remove(&invitation.invitation_id());
+        consume_removed(invitation, code, now)
+    }
+
+    pub(crate) async fn take_by_id(
+        &self,
+        invitation_id: InvitationId,
+        now: DateTime<Utc>,
+    ) -> Result<PairingInvitation, TakeMatchingError> {
+        let mut state = self.state.lock().await;
+        let code = state
+            .code_by_id
+            .remove(&invitation_id)
+            .ok_or(TakeMatchingError::NotFound)?;
+        let invitation = state.by_code.remove(&code).ok_or_else(|| {
+            TakeMatchingError::Internal("invitation id index is stale".to_owned())
+        })?;
+        consume_removed(invitation, &code, now)
     }
 
     pub(crate) async fn inspect_matching(
@@ -98,14 +121,42 @@ impl InMemoryPairingInvitationHolder {
         code: &InvitationCode,
         now: DateTime<Utc>,
     ) -> Result<PairingInvitation, TakeMatchingError> {
-        let mut map = self.by_code.lock().await;
-        let Some(invitation) = map.get(code).cloned() else {
+        let mut state = self.state.lock().await;
+        let Some(invitation) = state.by_code.get(code).cloned() else {
             return Err(TakeMatchingError::NotFound);
         };
         match invitation.state() {
             InvitationState::Pending { expires_at } if now < *expires_at => Ok(invitation),
             InvitationState::Pending { .. } => {
-                map.remove(code);
+                state.by_code.remove(code);
+                state.code_by_id.remove(&invitation.invitation_id());
+                Err(TakeMatchingError::Expired)
+            }
+            _ => Err(TakeMatchingError::Internal(
+                "holder stored a non-pending aggregate".to_owned(),
+            )),
+        }
+    }
+
+    pub(crate) async fn inspect_by_id(
+        &self,
+        invitation_id: InvitationId,
+        now: DateTime<Utc>,
+    ) -> Result<PairingInvitation, TakeMatchingError> {
+        let mut state = self.state.lock().await;
+        let code = state
+            .code_by_id
+            .get(&invitation_id)
+            .cloned()
+            .ok_or(TakeMatchingError::NotFound)?;
+        let invitation = state.by_code.get(&code).cloned().ok_or_else(|| {
+            TakeMatchingError::Internal("invitation id index is stale".to_owned())
+        })?;
+        match invitation.state() {
+            InvitationState::Pending { expires_at } if now < *expires_at => Ok(invitation),
+            InvitationState::Pending { .. } => {
+                state.by_code.remove(&code);
+                state.code_by_id.remove(&invitation_id);
                 Err(TakeMatchingError::Expired)
             }
             _ => Err(TakeMatchingError::Internal(
@@ -120,14 +171,26 @@ impl InMemoryPairingInvitationHolder {
     /// (Slice4 P3 T3.2 `SpaceFacade::query_setup_state`). Callers
     /// must not assume a single pending invitation exists; this just
     /// gives a deterministic representative when multiple are parked.
-    pub(crate) async fn snapshot_earliest(&self) -> Option<(InvitationCode, DateTime<Utc>)> {
-        let map = self.by_code.lock().await;
-        map.values()
+    pub(crate) async fn snapshot_earliest(
+        &self,
+    ) -> Option<(
+        InvitationCode,
+        uc_core::pairing::invitation::FullInvitation,
+        DateTime<Utc>,
+    )> {
+        let state = self.state.lock().await;
+        state
+            .by_code
+            .values()
             .filter_map(|inv| match inv.state() {
-                InvitationState::Pending { expires_at } => Some((inv.code().clone(), *expires_at)),
+                InvitationState::Pending { expires_at } => Some((
+                    inv.code().clone(),
+                    inv.full_invitation().clone(),
+                    *expires_at,
+                )),
                 _ => None,
             })
-            .min_by_key(|(_, exp)| *exp)
+            .min_by_key(|(_, _, exp)| *exp)
     }
 
     /// Drop every outstanding invitation, returning the count removed.
@@ -137,9 +200,10 @@ impl InMemoryPairingInvitationHolder {
     /// `Consumed` are not present in the holder (they are removed at
     /// `take_matching` time), so this only clears `Pending` entries.
     pub(crate) async fn cancel_all(&self) -> usize {
-        let mut map = self.by_code.lock().await;
-        let count = map.len();
-        map.clear();
+        let mut state = self.state.lock().await;
+        let count = state.by_code.len();
+        state.by_code.clear();
+        state.code_by_id.clear();
         count
     }
 
@@ -147,13 +211,30 @@ impl InMemoryPairingInvitationHolder {
     /// application-facing surface).
     #[cfg(test)]
     pub(crate) async fn len(&self) -> usize {
-        self.by_code.lock().await.len()
+        self.state.lock().await.by_code.len()
     }
 
     /// Test-only: look up by code without consuming the aggregate.
     #[cfg(test)]
     pub(crate) async fn get_for_test(&self, code: &InvitationCode) -> Option<PairingInvitation> {
-        self.by_code.lock().await.get(code).cloned()
+        self.state.lock().await.by_code.get(code).cloned()
+    }
+}
+
+fn consume_removed(
+    mut invitation: PairingInvitation,
+    code: &InvitationCode,
+    now: DateTime<Utc>,
+) -> Result<PairingInvitation, TakeMatchingError> {
+    match invitation.consume(code, now) {
+        Ok(_event) => Ok(invitation),
+        Err(ConsumeError::Expired) => Err(TakeMatchingError::Expired),
+        Err(ConsumeError::CodeMismatch) => Err(TakeMatchingError::Internal(
+            "holder key mismatches aggregate code — holder invariant broken".into(),
+        )),
+        Err(ConsumeError::NotPending) => Err(TakeMatchingError::Internal(
+            "holder stored a non-pending aggregate — insert/issue invariant broken".into(),
+        )),
     }
 }
 
@@ -206,8 +287,13 @@ mod tests {
     fn pending(code: &str) -> PairingInvitation {
         let issued = fixed_now();
         let expires = issued + Duration::minutes(5);
+        let invitation_byte = code.as_bytes().first().copied().unwrap_or(1);
         let (invitation, _) = PairingInvitation::issue(
+            uc_core::membership::InvitationId::from_bytes([invitation_byte; 32])
+                .expect("valid invitation id"),
             InvitationCode::new(code),
+            uc_core::pairing::invitation::FullInvitation::new(format!("ucspace1_{code}"))
+                .expect("valid full invitation"),
             issued,
             expires,
             DeviceId::new("device-1"),
@@ -226,6 +312,22 @@ mod tests {
             .await
             .expect("aggregate stored");
         assert!(matches!(stored.state(), InvitationState::Pending { .. }));
+    }
+
+    #[tokio::test]
+    async fn insert_stores_the_same_aggregate_by_invitation_id() {
+        let holder = InMemoryPairingInvitationHolder::new();
+        let invitation = pending("ABCD-1234");
+        let invitation_id = invitation.invitation_id();
+        holder.insert(invitation).await;
+
+        let stored = holder
+            .inspect_by_id(invitation_id, fixed_now())
+            .await
+            .expect("aggregate stored by invitation id");
+
+        assert_eq!(stored.code().as_str(), "ABCD-1234");
+        assert_eq!(stored.invitation_id(), invitation_id);
     }
 
     #[tokio::test]
@@ -262,6 +364,27 @@ mod tests {
             0,
             "aggregate must be removed from the map once consumed"
         );
+    }
+
+    #[tokio::test]
+    async fn take_by_id_consumes_the_short_code_slot_too() {
+        let holder = InMemoryPairingInvitationHolder::new();
+        let invitation = pending("ABCD-1234");
+        let invitation_id = invitation.invitation_id();
+        holder.insert(invitation).await;
+
+        let taken = holder
+            .take_by_id(invitation_id, fixed_now())
+            .await
+            .expect("pending aggregate should be consumed by id");
+
+        assert_eq!(taken.state(), &InvitationState::Consumed);
+        assert!(matches!(
+            holder
+                .take_matching(&InvitationCode::new("ABCD-1234"), fixed_now())
+                .await,
+            Err(TakeMatchingError::NotFound)
+        ));
     }
 
     #[tokio::test]

@@ -55,8 +55,9 @@ pub enum InvitationAvailability {
 pub struct IssuePairingInvitationResult {
     /// Short human-typable code the sponsor shows to the joiner.
     pub code: InvitationCode,
-    /// Server-authoritative expiry; UI should display a countdown from
-    /// this value rather than computing its own.
+    /// Self-contained invitation for QR, link, or direct text transfer.
+    pub full_invitation: uc_core::pairing::invitation::FullInvitation,
+    /// Sponsor-authoritative expiry shared by both invitation forms.
     pub expires_at: DateTime<Utc>,
     /// Network scope in which the code can be resolved.
     pub availability: InvitationAvailability,

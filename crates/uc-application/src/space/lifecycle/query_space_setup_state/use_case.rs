@@ -36,11 +36,13 @@ impl QuerySpaceSetupStateUseCase {
             .current_space_id()
             .await
             .map_err(|error| QuerySetupStateError::StorageFailed(error.to_string()))?;
-        let current_invitation = self
-            .invitation_holder
-            .snapshot_earliest()
-            .await
-            .map(|(code, expires_at)| CurrentInvitation { code, expires_at });
+        let current_invitation = self.invitation_holder.snapshot_earliest().await.map(
+            |(code, full_invitation, expires_at)| CurrentInvitation {
+                code,
+                full_invitation,
+                expires_at,
+            },
+        );
         let settings = self
             .settings
             .load()
@@ -175,7 +177,10 @@ mod tests {
         let issued_at = Utc.with_ymd_and_hms(2026, 8, 23, 10, 0, 0).unwrap();
         let expires_at = issued_at + Duration::minutes(5);
         let (invitation, _) = PairingInvitation::issue(
+            uc_core::membership::InvitationId::from_bytes([0x43; 32]).expect("valid invitation id"),
             InvitationCode::new("ABCD-1234"),
+            uc_core::pairing::invitation::FullInvitation::new("ucspace1_ABCD-1234")
+                .expect("valid full invitation"),
             issued_at,
             expires_at,
             DeviceId::new("device-a"),
@@ -189,6 +194,10 @@ mod tests {
             state.current_invitation,
             Some(CurrentInvitation {
                 code: InvitationCode::new("ABCD-1234"),
+                full_invitation: uc_core::pairing::invitation::FullInvitation::new(
+                    "ucspace1_ABCD-1234",
+                )
+                .expect("valid full invitation"),
                 expires_at,
             })
         );

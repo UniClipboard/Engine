@@ -63,10 +63,8 @@ impl MdnsPairingResolver {
     /// process happens to publish elsewhere. Pass an empty string if
     /// the caller has no node id (rare — only diagnostic tools).
     ///
-    /// Returns the matching ticket as a hex string exactly as the
-    /// publisher wrote it. Decoding into an `EndpointAddr` is the
-    /// caller's responsibility — that keeps this module independent of
-    /// the iroh type surface.
+    /// Returns the matching full invitation as a hex string exactly as the
+    /// publisher wrote it. Decoding remains the caller's responsibility.
     pub async fn resolve(
         handle: &Handle,
         self_node_id: &str,

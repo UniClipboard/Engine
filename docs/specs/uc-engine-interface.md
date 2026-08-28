@@ -77,9 +77,9 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `CreateSpace` | 创建空间、设备身份和加密存储 |
 | `UnlockSpace` | 使用口令恢复当前空间会话 |
 | `RecoverSession` | 按宿主策略从系统安全存储恢复加密与空间会话 |
-| `JoinSpace` | 发起或继续同一次空间加入，返回 Active、Pending 或 Rejected，并携带稳定 `join_id` |
+| `JoinSpace` | 接受完整长邀请或可手输短码，发起或继续同一次空间加入，返回 Active、Pending 或 Rejected，并携带稳定 `join_id` |
 | `CancelJoinSpace` | 请求取消指定的本机加入；只与发起方正式提交点竞争 |
-| `IssueInvitation` | 签发一次配对邀请 |
+| `IssueInvitation` | 签发一次配对邀请，同时返回指向同一邀请身份的短码与完整长邀请 |
 | `CancelInvitation` | 取消当前尚未兑换的配对邀请 |
 | `ResetSpace` | 保留本机资料、设置、身份和解锁能力，废弃全部旧设备关系并建立只含本机的新空间 |
 | `FactoryResetSpace` | 停止旧运行入口后依次清除密钥材料、空间状态和邀请，使设备可重新初始化 |

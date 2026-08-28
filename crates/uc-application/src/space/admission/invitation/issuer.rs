@@ -86,7 +86,9 @@ impl PairingInvitationIssuer {
         let issued_at = self.now_utc()?;
         let device_id = self.device_identity.current_device_id();
         let (invitation, _) = PairingInvitation::issue(
+            issued.invitation_id,
             issued.code.clone(),
+            issued.full_invitation.clone(),
             issued_at,
             issued.expires_at,
             device_id,
@@ -96,6 +98,7 @@ impl PairingInvitationIssuer {
 
         Ok(IssuePairingInvitationResult {
             code: issued.code,
+            full_invitation: issued.full_invitation,
             expires_at: issued.expires_at,
             availability,
         })

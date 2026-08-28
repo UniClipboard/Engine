@@ -20,6 +20,7 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
+use crate::membership::InvitationId;
 use crate::pairing::{InvitationCode, PairingSessionMessage};
 
 /// Opaque identifier for an in-flight pairing session.
@@ -92,6 +93,8 @@ pub enum DialError {
 /// adapters with a single channel always report that channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryChannel {
+    /// Decoded locally from a self-contained full invitation.
+    Direct,
     /// Resolved via the directory service.
     Cloud,
     /// Resolved via local-network discovery.
@@ -101,6 +104,8 @@ pub enum DiscoveryChannel {
 /// Outcome of a successful [`PairingSessionPort::dial_by_invitation`].
 #[derive(Debug, Clone)]
 pub struct DialOutcome {
+    /// Sponsor-issued invitation identity shared by all entry forms.
+    pub invitation_id: InvitationId,
     /// Handle for the opened pairing session.
     pub session_id: PairingSessionId,
     /// The discovery channel whose resolution won the dial.

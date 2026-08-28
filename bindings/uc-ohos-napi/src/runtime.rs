@@ -210,10 +210,12 @@ impl OhEngine {
         match result {
             OperationResult::InvitationIssued {
                 invitation_code,
+                full_invitation,
                 expires_at_ms,
                 availability,
             } => Ok(OhInvitationIssued {
                 invitation_code,
+                full_invitation,
                 expires_at_ms: expires_at_ms as f64,
                 availability: invitation_availability(availability).to_owned(),
             }),

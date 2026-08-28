@@ -100,6 +100,7 @@ pub struct OhActiveClipboard {
 #[napi(object)]
 pub struct OhInvitationIssued {
     pub invitation_code: String,
+    pub full_invitation: String,
     pub expires_at_ms: f64,
     pub availability: String,
 }

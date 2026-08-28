@@ -431,6 +431,7 @@ pub enum OperationResult {
     },
     InvitationIssued {
         invitation_code: String,
+        full_invitation: String,
         expires_at_ms: i64,
         availability: InvitationAvailability,
     },
@@ -788,6 +789,7 @@ impl fmt::Debug for OperationResult {
 #[derive(Clone, PartialEq, Eq)]
 pub struct SetupInvitationSummary {
     pub invitation_code: String,
+    pub full_invitation: String,
     pub expires_at_ms: i64,
 }
 
@@ -796,6 +798,7 @@ impl fmt::Debug for SetupInvitationSummary {
         formatter
             .debug_struct("SetupInvitationSummary")
             .field("invitation_code", &"[REDACTED]")
+            .field("full_invitation", &"[REDACTED]")
             .field("expires_at_ms", &self.expires_at_ms)
             .finish()
     }

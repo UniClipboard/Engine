@@ -16,9 +16,10 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::membership::InvitationId;
 use crate::DeviceId;
 
-use super::code::InvitationCode;
+use super::code::{FullInvitation, InvitationCode};
 use super::error::{ConsumeError, RevokeError};
 use super::events::InvitationEvent;
 
@@ -38,7 +39,9 @@ pub enum InvitationState {
 /// Sponsor-side aggregate for one outstanding invitation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingInvitation {
+    invitation_id: InvitationId,
     code: InvitationCode,
+    full_invitation: FullInvitation,
     issued_at: DateTime<Utc>,
     admission_generation: u64,
     issuer_device_id: DeviceId,
@@ -49,7 +52,9 @@ impl PairingInvitation {
     /// Construct a fresh invitation in `Pending` state and pair it with the
     /// `Issued` domain event so publishers cannot forget to emit.
     pub fn issue(
+        invitation_id: InvitationId,
         code: InvitationCode,
+        full_invitation: FullInvitation,
         issued_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
         issuer_device_id: DeviceId,
@@ -61,7 +66,9 @@ impl PairingInvitation {
             issuer_device_id: issuer_device_id.clone(),
         };
         let invitation = Self {
+            invitation_id,
             code,
+            full_invitation,
             issued_at,
             admission_generation,
             issuer_device_id,
@@ -70,8 +77,16 @@ impl PairingInvitation {
         (invitation, event)
     }
 
+    pub const fn invitation_id(&self) -> InvitationId {
+        self.invitation_id
+    }
+
     pub fn code(&self) -> &InvitationCode {
         &self.code
+    }
+
+    pub const fn full_invitation(&self) -> &FullInvitation {
+        &self.full_invitation
     }
 
     pub fn issued_at(&self) -> DateTime<Utc> {
@@ -168,7 +183,9 @@ mod tests {
         let issued = fixed_now();
         let expires = issued + Duration::minutes(5);
         PairingInvitation::issue(
+            InvitationId::from_bytes([0x31; 32]).expect("valid invitation id"),
             InvitationCode::new("ABCD-1234"),
+            FullInvitation::new("ucspace1_ABCD-1234").expect("valid full invitation"),
             issued,
             expires,
             fixed_issuer(),

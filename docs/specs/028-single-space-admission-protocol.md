@@ -281,7 +281,7 @@ Membership runtime
 | `SpaceAdmissionId` | 每次公开 JoinSpace 生成随机 256-bit；网络、持久和恢复唯一身份 |
 | `JoinId` | 每次公开 JoinSpace 生成独立随机 128-bit；只用于产品查询/取消 |
 | `AdmissionMessageId` | 每条 durable message 随机 256-bit，生成后持久，不从敏感 payload 直接充当数据库 key |
-| `InvitationId` | 随邀请生成的随机 256-bit 内部身份；短 code 只解析到它 |
+| `InvitationId` | 随邀请生成的随机 256-bit 内部身份；完整邀请直接携带，短 code 只查询到同一份完整邀请 |
 | `AdmissionProtocolVersion` | 只接受 `1`；未知值关闭连接并记录固定分类 |
 | `AdmissionChannelPeerId` | transport-agnostic opaque 认证通道身份；Infra 从 Iroh remote identity 规范派生，Application 不可反解 |
 
@@ -585,9 +585,10 @@ SpaceAdmissionAggregate::replay_or_reject(evidence)
 ### Invitation
 
 1. IssueInvitation 检查当前 Space active、OPAQUE record 可读、没有占用 admission slot。
-2. 生成随机 InvitationId、短 code、expiry 和 sponsor Iroh route；holder 只在内存保存完整 invitation，rendezvous/mDNS 只发布发现资料。
-3. code 不进入日志。未知/过期 code 不返回 Space、成员、移除或 admission slot 细节。
-4. 本机受理 JoinRequest 时才原子保存 claim；渠道 consume 在提交后后台清理。
+2. 生成随机 InvitationId、短 code、expiry 和 sponsor Iroh route，再编码一份不含口令或私钥的版本化完整邀请。holder 以 InvitationId 和短 code 索引同一 invitation。
+3. rendezvous/mDNS 将完整邀请作为不透明内容发布；短 code 只是查询别名，完整邀请可从二维码、链接或直接文本在本地解码。两条路径必须得到同一 InvitationId、route 和 expiry。
+4. code 和完整邀请都不进入 Debug 或日志。未知/过期/损坏邀请不返回 Space、成员、移除或 admission slot 细节。
+5. 本机受理 JoinRequest 时才原子保存 claim；渠道 consume 在提交后后台清理。
 
 ### J0 and initial authenticated JoinRequest
 

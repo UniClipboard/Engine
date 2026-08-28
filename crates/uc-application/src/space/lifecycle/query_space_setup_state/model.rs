@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use uc_core::ids::SpaceId;
+use uc_core::pairing::invitation::FullInvitation;
 use uc_core::pairing::InvitationCode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,5 +15,6 @@ pub struct SetupStateView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentInvitation {
     pub code: InvitationCode,
+    pub full_invitation: FullInvitation,
     pub expires_at: DateTime<Utc>,
 }

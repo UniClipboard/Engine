@@ -1461,17 +1461,21 @@ fn cancel_invitation_has_a_stable_terminal_result() {
 fn invitation_result_exposes_where_the_code_can_be_resolved() {
     let result = OperationResult::InvitationIssued {
         invitation_code: "NEVER-SHOW".into(),
+        full_invitation: "ucspace1_NEVER-SHOW-FULL".into(),
         expires_at_ms: 1234,
         availability: InvitationAvailability::SameLocalNetwork,
     };
 
     assert!(matches!(
-        result,
+        &result,
         OperationResult::InvitationIssued {
             availability: InvitationAvailability::SameLocalNetwork,
+            full_invitation,
             ..
-        }
+        } if full_invitation == "ucspace1_NEVER-SHOW-FULL"
     ));
+    let debug = format!("{result:?}");
+    assert!(!debug.contains("NEVER-SHOW"));
 }
 
 #[test]
@@ -1486,6 +1490,7 @@ fn setup_state_result_preserves_invitation_and_redacts_user_content() {
         space_id: Some("space-1".into()),
         current_invitation: Some(SetupInvitationSummary {
             invitation_code: "NEVER-SHOW".into(),
+            full_invitation: "ucspace1_NEVER-SHOW-FULL".into(),
             expires_at_ms: 1234,
         }),
         device_name: Some("Private Device".into()),
@@ -1691,6 +1696,7 @@ fn operation_result_debug_output_redacts_user_content() {
     let results = [
         OperationResult::InvitationIssued {
             invitation_code: "NEVER-SHOW-INVITATION".into(),
+            full_invitation: "ucspace1_NEVER-SHOW-FULL".into(),
             expires_at_ms: 1,
             availability: InvitationAvailability::CrossNetwork,
         },

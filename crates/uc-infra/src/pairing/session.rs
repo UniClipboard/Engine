@@ -155,16 +155,34 @@ impl IrohPairingSessionAdapter {
     async fn resolve_invitation(
         &self,
         code: &InvitationCode,
-    ) -> Result<(EndpointAddr, DiscoveryChannel), DialError> {
+    ) -> Result<
+        (
+            uc_core::membership::InvitationId,
+            EndpointAddr,
+            DiscoveryChannel,
+        ),
+        DialError,
+    > {
         use futures_util::future::{select, Either};
         use std::pin::pin;
 
+        if let Some(decoded) = crate::space::decode_invitation_entry(
+            code.as_str(),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .map_err(map_full_invitation_error)?
+        {
+            let invitation_id = decoded.invitation_id();
+            let sponsor_addr = decode_sponsor_route(decoded.route())?;
+            return Ok((invitation_id, sponsor_addr, DiscoveryChannel::Direct));
+        }
+
         if crate::network::iroh::runtime_consts::lan_only() {
-            debug!(code = %code.as_str(), "LAN-only mode: skipping cloud channel");
+            debug!("LAN-only mode: skipping cloud channel");
             return self
                 .resolve_via_mdns(code)
                 .await
-                .map(|addr| (addr, DiscoveryChannel::Lan));
+                .map(|(invitation_id, addr)| (invitation_id, addr, DiscoveryChannel::Lan));
         }
 
         let cloud_fut = self.resolve_via_cloud(code);
@@ -172,26 +190,24 @@ impl IrohPairingSessionAdapter {
         let cloud_fut = pin!(cloud_fut);
         let mdns_fut = pin!(mdns_fut);
 
-        let (resolved, channel) = match select(cloud_fut, mdns_fut).await {
-            Either::Left((Ok(addr), _)) => {
-                debug!(code = %code.as_str(), channel = "cloud", "discovery race winner");
-                (addr, DiscoveryChannel::Cloud)
+        let ((invitation_id, resolved), channel) = match select(cloud_fut, mdns_fut).await {
+            Either::Left((Ok(resolved), _)) => {
+                debug!(channel = "cloud", "discovery race winner");
+                (resolved, DiscoveryChannel::Cloud)
             }
-            Either::Right((Ok(addr), _)) => {
-                debug!(code = %code.as_str(), channel = "lan", "discovery race winner");
-                (addr, DiscoveryChannel::Lan)
+            Either::Right((Ok(resolved), _)) => {
+                debug!(channel = "lan", "discovery race winner");
+                (resolved, DiscoveryChannel::Lan)
             }
             Either::Left((Err(cloud_err), pending_mdns)) => {
                 debug!(
-                    code = %code.as_str(),
                     cloud_err = ?cloud_err,
                     "cloud channel failed; waiting for LAN channel"
                 );
                 match pending_mdns.await {
-                    Ok(addr) => (addr, DiscoveryChannel::Lan),
+                    Ok(resolved) => (resolved, DiscoveryChannel::Lan),
                     Err(mdns_err) => {
                         warn!(
-                            code = %code.as_str(),
                             cloud = ?cloud_err,
                             lan = ?mdns_err,
                             "all discovery channels failed"
@@ -202,15 +218,13 @@ impl IrohPairingSessionAdapter {
             }
             Either::Right((Err(mdns_err), pending_cloud)) => {
                 debug!(
-                    code = %code.as_str(),
                     lan_err = ?mdns_err,
                     "LAN channel failed; waiting for cloud channel"
                 );
                 match pending_cloud.await {
-                    Ok(addr) => (addr, DiscoveryChannel::Cloud),
+                    Ok(resolved) => (resolved, DiscoveryChannel::Cloud),
                     Err(cloud_err) => {
                         warn!(
-                            code = %code.as_str(),
                             cloud = ?cloud_err,
                             lan = ?mdns_err,
                             "all discovery channels failed"
@@ -222,26 +236,30 @@ impl IrohPairingSessionAdapter {
         };
 
         info!(
-            code = %code.as_str(),
             sponsor = %resolved.id.fmt_short(),
             transport_addr_count = resolved.addrs.len(),
             ?channel,
             "pairing invitation resolved; sponsor address ready"
         );
-        Ok((resolved, channel))
+        Ok((invitation_id, resolved, channel))
     }
 
-    async fn resolve_via_cloud(&self, code: &InvitationCode) -> Result<EndpointAddr, DialError> {
+    async fn resolve_via_cloud(
+        &self,
+        code: &InvitationCode,
+    ) -> Result<(uc_core::membership::InvitationId, EndpointAddr), DialError> {
         let resp = self
             .rendezvous
             .resolve_pairing(code.as_str())
             .await
             .map_err(map_resolve_err)?;
-        serde_json::from_str::<EndpointAddr>(&resp.sponsor_ticket)
-            .map_err(|err| DialError::Internal(format!("sponsor ticket decode: {err}")))
+        decode_full_invitation_route(&resp.sponsor_ticket)
     }
 
-    async fn resolve_via_mdns(&self, code: &InvitationCode) -> Result<EndpointAddr, DialError> {
+    async fn resolve_via_mdns(
+        &self,
+        code: &InvitationCode,
+    ) -> Result<(uc_core::membership::InvitationId, EndpointAddr), DialError> {
         use std::time::Duration as StdDuration;
 
         use crate::pairing::MdnsPairingResolver;
@@ -269,14 +287,11 @@ impl IrohPairingSessionAdapter {
             return Err(DialError::InvitationNotFound);
         };
 
-        // mDNS ticket wire format: `hex(postcard(EndpointAddr))`.
-        // Matches the sponsor's `encode_mdns_ticket` exactly; JSON is
-        // used only on the cloud channel where TXT-size constraints
-        // don't apply.
         let ticket_bytes = hex::decode(&ticket_hex)
             .map_err(|err| DialError::Internal(format!("LAN ticket hex decode: {err}")))?;
-        postcard::from_bytes::<EndpointAddr>(&ticket_bytes)
-            .map_err(|err| DialError::Internal(format!("LAN ticket postcard decode: {err}")))
+        let invitation =
+            std::str::from_utf8(&ticket_bytes).map_err(|_| DialError::InvitationNotFound)?;
+        decode_full_invitation_route(invitation)
     }
 
     /// Install a ready-built session into the map and return the minted id.
@@ -648,9 +663,9 @@ impl PairingEventPort for IrohPairingSessionAdapter {
 
 #[async_trait]
 impl PairingSessionPort for IrohPairingSessionAdapter {
-    #[instrument(skip_all, fields(code = %code.as_str()))]
+    #[instrument(skip_all)]
     async fn dial_by_invitation(&self, code: &InvitationCode) -> Result<DialOutcome, DialError> {
-        let (sponsor_addr, channel) = self.resolve_invitation(code).await?;
+        let (invitation_id, sponsor_addr, channel) = self.resolve_invitation(code).await?;
         let continuation_address = postcard::to_stdvec(&sponsor_addr)
             .map_err(|error| DialError::Internal(format!("encode sponsor address: {error}")))?;
         let sponsor_id = sponsor_addr.id.fmt_short().to_string();
@@ -713,6 +728,7 @@ impl PairingSessionPort for IrohPairingSessionAdapter {
             "pairing outbound session registered"
         );
         Ok(DialOutcome {
+            invitation_id,
             session_id: session,
             channel,
             continuation_address,
@@ -840,6 +856,33 @@ impl PairingSessionPort for IrohPairingSessionAdapter {
 
     async fn local_transport_public_key(&self) -> Option<Vec<u8>> {
         Some(self.endpoint.id().as_bytes().to_vec())
+    }
+}
+
+fn decode_full_invitation_route(
+    invitation: &str,
+) -> Result<(uc_core::membership::InvitationId, EndpointAddr), DialError> {
+    let decoded =
+        crate::space::decode_invitation_entry(invitation, chrono::Utc::now().timestamp_millis())
+            .map_err(map_full_invitation_error)?
+            .ok_or(DialError::InvitationNotFound)?;
+    let invitation_id = decoded.invitation_id();
+    let sponsor_addr = decode_sponsor_route(decoded.route())?;
+    Ok((invitation_id, sponsor_addr))
+}
+
+fn decode_sponsor_route(route: &[u8]) -> Result<EndpointAddr, DialError> {
+    serde_json::from_slice(route).map_err(|_| DialError::InvitationNotFound)
+}
+
+fn map_full_invitation_error(error: crate::space::FullInvitationCodecError) -> DialError {
+    match error {
+        crate::space::FullInvitationCodecError::Expired => DialError::InvitationExpired,
+        crate::space::FullInvitationCodecError::InvalidRoute
+        | crate::space::FullInvitationCodecError::InvalidEncoding
+        | crate::space::FullInvitationCodecError::UnsupportedVersion => {
+            DialError::InvitationNotFound
+        }
     }
 }
 
@@ -1102,6 +1145,18 @@ mod tests {
     }
 
     async fn mock_resolve(server: &MockServer, code: &str, ticket: String) {
+        let ticket = if ticket.starts_with("ucspace1_") {
+            ticket
+        } else {
+            crate::space::encode_full_invitation(
+                uc_core::membership::InvitationId::from_bytes([0x72; 32])
+                    .expect("valid invitation id"),
+                ticket.as_bytes(),
+                chrono::Utc::now().timestamp_millis() + 60_000,
+            )
+            .expect("encode full invitation")
+            .into_string()
+        };
         let body = serde_json::json!({
             "sponsorTicket": ticket,
             "sponsorEndpointId": "ignored-for-tests",
@@ -1198,6 +1253,48 @@ mod tests {
             Err(SessionError::NotFound(id)) => assert_eq!(id.as_str(), session.as_str()),
             other => panic!("expected NotFound after close, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn short_and_full_invitation_dial_the_same_sponsor_and_identity() {
+        let sponsor_endpoint = bound_endpoint().await;
+        wait_for_direct_addrs(&sponsor_endpoint).await;
+        let route = serde_json::to_string(&sponsor_endpoint.addr()).expect("encode Sponsor route");
+        let invitation_id =
+            uc_core::membership::InvitationId::from_bytes([0x71; 32]).expect("valid invitation id");
+        let full_invitation = crate::space::encode_full_invitation(
+            invitation_id,
+            route.as_bytes(),
+            chrono::Utc::now().timestamp_millis() + 60_000,
+        )
+        .expect("encode full invitation");
+        let _echo = spawn_echo_sponsor(sponsor_endpoint);
+
+        let rendezvous = MockServer::start().await;
+        mock_resolve(
+            &rendezvous,
+            "CODE-9999",
+            full_invitation.as_str().to_owned(),
+        )
+        .await;
+        let joiner_endpoint = bound_endpoint().await;
+        wait_for_direct_addrs(&joiner_endpoint).await;
+        let adapter = adapter_with_rendezvous(joiner_endpoint, rendezvous.uri());
+
+        let short = adapter
+            .dial_by_invitation(&InvitationCode::new("CODE-9999"))
+            .await
+            .expect("short code should dial");
+        adapter.close(&short.session_id, None).await;
+        let full = adapter
+            .dial_by_invitation(&InvitationCode::new(full_invitation.as_str()))
+            .await
+            .expect("full invitation should dial directly");
+
+        assert_eq!(short.invitation_id, invitation_id);
+        assert_eq!(full.invitation_id, invitation_id);
+        assert_eq!(short.channel, DiscoveryChannel::Cloud);
+        assert_eq!(full.channel, DiscoveryChannel::Direct);
     }
 
     #[tokio::test]

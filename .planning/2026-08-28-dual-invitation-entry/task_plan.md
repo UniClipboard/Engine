@@ -1,0 +1,59 @@
+# Dual Invitation Entry
+
+## Goal
+Support both a self-contained long invitation and a human-entered short code, with both resolving to one Sponsor-issued invitation identity and one route before the new admission flow consumes them.
+
+## Completion Criteria
+- Sponsor creates a random 256-bit `InvitationId` for every invitation.
+- Sponsor produces one versioned full invitation containing the id, opaque Sponsor route, and expiry.
+- The existing short code is only an alias for that same full invitation through cloud or LAN discovery.
+- Full invitations decode locally; short codes resolve through existing discovery channels.
+- Both paths return the same typed resolved invitation and reject malformed, expired, or mismatched data.
+- Invitation text and routes remain redacted from Debug and logs.
+- Existing public short-code behavior continues while a long-invitation result becomes available to QR/link callers.
+- Each implementation phase is test-first, documented, checked, reviewed, and committed independently.
+
+## Phases
+
+### Phase 1: Canonical invitation and Sponsor issuance
+- [x] Trace the current invitation result through Core, Application, Engine, and bindings
+- [x] Add failing tests for one identity shared by short and full invitation forms
+- [x] Implement versioned full invitation encoding and Sponsor generation
+- [x] Return both forms from the existing invitation result
+- [x] Keep the existing short-code dial path behavior unchanged in this phase
+- [x] Update docs, verify, and review
+- [x] Commit the phase
+- **Status:** complete
+
+### Phase 2: Unified resolution
+- [x] Add one resolved invitation result used by both entry forms
+- [x] Full invitation resolves locally without network I/O
+- [x] Short code cloud/LAN records return the exact same full invitation
+- [x] Reject expiry, corruption, identity mismatch, and route mismatch
+- **Status:** complete
+
+### Phase 3: Durable unresolved short-code state
+- [ ] Add a pre-network Joiner state for unresolved short codes
+- [ ] Persist before discovery and recover after restart
+- [ ] Transition to J0 only after a full invitation is available
+- [ ] Full invitation bypasses discovery and enters J0 directly
+- **Status:** pending
+
+### Phase 4: Standard authentication and Joiner start material
+- [ ] Integrate fixed-version OPAQUE per Spec 028 and validate it
+- [ ] Generate complete JoinRequest identity, OpenMLS, recovery, and password material
+- [ ] Implement production `JoinerStartMaterialPort`
+- [ ] Keep Candidate, transport, and Engine final wiring outside this phase
+- **Status:** pending
+
+## Decisions
+- A short code and a full invitation are two entry forms for one invitation, not two protocols.
+- The full invitation is the canonical fact; discovery channels store and return it as opaque data.
+- The full invitation contains no passphrase or private key material.
+- Existing rendezvous and mDNS transports remain indexes; they do not become admission state owners.
+- No id is derived from the 40-bit short code.
+
+## Errors Encountered
+
+| Error | Resolution |
+|---|---|

@@ -24,7 +24,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use thiserror::Error;
 
-pub use crate::pairing::invitation::InvitationCode;
+use crate::membership::InvitationId;
+pub use crate::pairing::invitation::{FullInvitation, InvitationCode};
 
 /// Provenance of an issued invitation code, and — when minted locally —
 /// the reason the directory was not used.
@@ -56,8 +57,12 @@ pub enum CodeOrigin {
 /// adapter's status surface for that, not this struct.
 #[derive(Debug, Clone)]
 pub struct IssuedInvitation {
+    /// Stable internal identity shared by the short and full forms.
+    pub invitation_id: InvitationId,
     /// Code the joiner enters.
     pub code: InvitationCode,
+    /// Self-contained invitation for QR, link, or direct text transfer.
+    pub full_invitation: FullInvitation,
     /// Adapter-decided expiry. Treated as ground truth by callers; the
     /// adapter is responsible for keeping all publish channels and the
     /// local aggregate aligned on the same instant.
