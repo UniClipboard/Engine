@@ -703,6 +703,10 @@ MasterKey 或清理成员关系；分叉本身不强制整个 Space 切换。
 
 真正的基础设施失败才转换为公共错误。底层数据库错误、文件路径、网络库错误、密钥信息和用户内容不得进入公共结果或调试输出。
 
+### 内部错误链
+
+Application 可以把依赖失败转换为稳定类别，但转换不能删除原始错误。来自存储、网络、系统、密码能力或其他 Port 的失败必须作为 `source` 保留，并通过目标错误模块的 `From` 实现和 `?` 向上传播；只有需要改变语义类别或增加固定脱敏上下文时才使用 `map_err`。禁止把下层错误转为字符串、忽略原错误或用无来源枚举替代。纯业务判断本身没有下层异常时继续返回明确结果或普通枚举，不伪造错误链。Engine 最终只向宿主公开稳定编号、类别和重试建议，内部 source chain 与 backtrace 只用于受控诊断，且任何层都不得向其中加入敏感负载。
+
 ### 操作终态
 
 每个已接受的操作都必须产生一次 `OperationFinished`：成功、失败或取消。生命周期截止时间到达时，未完成操作先被取消并收到终态事件，不能静默消失。
@@ -1498,6 +1502,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-28 | 单一 Space 准入 Infra 状态存储 | 新增 `space/admission` 责任目录，以一个加密 SQLite repository 同时实现 Joiner 开始状态和 Pending Recovery 状态能力；新建、取代、版本检查和重启恢复均使用 Core Aggregate。真实 SQLite 测试覆盖原子回滚、旧 token、损坏密文、活动 Space 快照和数据库明文扫描；旧 `SpaceJoinRecord` 仓库、旧完成恢复通道、旧 outbox 投递和已失去接口的收敛仓库删除。Sponsor、transport、candidate material 与 Engine 最终接线仍待后续步骤。 |
 | 2026-08-28 | 单一 Space 准入 Sponsor 状态存储 | 同一加密 repository 实现 Sponsor 加入请求状态能力；候选基础快照来自一次完整成员账本读取，邀请占用与 Accepted 状态在同一事务保存，重复请求可在重启后读回既有状态，旧读取结果和重复邀请均不能推进。未新增数据表或兼容格式；candidate material、transport 与 Engine 最终接线仍待后续步骤。 |
 | 2026-08-28 | 单一 Space 准入 Commit 纵向流程 | Application 统一认证消息入口新增 Prepared 分发；Sponsor 先核对同一次 admission 保存的双方连接身份，再保存正式 Commit 后回复，重复 Prepared 精确重放；Joiner 后台恢复 Prepared，保存 Commit 与 Applied 待发送后再唤醒。Sponsor 跨动作状态归入角色级 `state/`，Candidate、Commit 和 Applied 准备能力分别由业务结果负责人持有，总协调器字段不增加。相关错误使用携带原始来源的稳定分类，保留错误链与回溯。 |
+| 2026-08-28 | 仓库异常转换规则 | 根维护规则固定 Application 异常转换方式：稳定分类保留原始 source，优先由目标错误实现 `From` 并使用 `?`；`map_err` 不得字符串化、忽略或吞掉下层错误。纯业务判断没有下层异常时继续使用明确结果。架构错误章节同步记录该边界。 |
 
 ## 相关文档
 

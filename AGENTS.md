@@ -32,6 +32,15 @@
 - 生产代码禁止 `unwrap()`、`expect()`、`println!()` 和 `eprintln!()`。
 - 日志不得包含剪贴板内容、密码、密钥、完整令牌、文件名或文件路径。
 
+### 异常处理与转换
+
+- Application 对依赖、存储、网络、系统或密码能力失败进行稳定分类时，错误 variant 必须使用 `#[source] source: anyhow::Error`，或携带另一个实现 `std::error::Error` 的具体 source。构造方式遵循 `crates/uc-application/src/error.rs`；不得为了 `Clone`、`Copy`、`Eq` 或简化匹配而丢弃 source。
+- 错误向上传播优先实现 `From<LowerError>` 并使用 `?`。转换实现归目标错误所在模块所有，来源错误模块不得反向依赖上层错误。
+- 只有需要改变语义分类或补充安全上下文时才允许使用 `map_err`。转换后仍必须把原错误作为 source；禁止 `map_err(|error| Error::X(error.to_string()))`、`map_err(|_| Error::X)`、无来源 unit variant，以及其他字符串化或吞掉原错误的写法。
+- 使用 `anyhow::Context` 或构造 source 时只能增加固定、脱敏的动作上下文，不得写入剪贴板内容、密码、密钥、令牌、文件名、文件路径、设备名或其他敏感负载。
+- 纯业务判断在没有任何下层异常时可以使用普通枚举或明确结果；不得伪造 `anyhow::Error`。一旦错误来自被调用能力，就必须保留完整 source chain 和 backtrace。
+- 新增或修改错误转换时，测试必须至少验证稳定分类和 `source()` 非空；只断言显示文本不算完成。
+
 ### 防止复杂度外泄
 
 - 禁止把同一功能的判断规则、流程推进、通信、持久化、失败恢复、后台重试和启动接线同时暴露给调用方或评审者。内部实现可以复杂，但使用者必须只需理解一个主要入口、必要输入和少量明确结果。
