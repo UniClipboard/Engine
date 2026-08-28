@@ -715,9 +715,51 @@ function checkSpaceAdmissionProtocolOwnership() {
   const protocolRoot = 'crates/uc-application/src/space/admission/protocol'
   const protocol = read(`${protocolRoot}/protocol.rs`)
   const moduleSurface = read(`${protocolRoot}/mod.rs`)
-  const joinerStart = read(`${protocolRoot}/start_join/execute.rs`)
-  const recovery = read(`${protocolRoot}/recover_pending/execute.rs`)
-  const sponsorMessage = read(`${protocolRoot}/handle_authenticated_message/execute.rs`)
+  const requiredRoleEntries = [
+    'joiner/mod.rs',
+    'joiner/start_join/execute.rs',
+    'joiner/handle_candidate/execute.rs',
+    'sponsor/mod.rs',
+    'sponsor/handle_join_request/execute.rs',
+    'recovery/mod.rs',
+    'recovery/recover_pending/execute.rs',
+  ]
+  for (const entry of requiredRoleEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, protocolRoot, entry))) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `missing role-owned entry: ${protocolRoot}/${entry}`
+      )
+    }
+  }
+
+  const retiredSplitEntries = [
+    'joiner.rs',
+    'sponsor.rs',
+    'recovery.rs',
+    'start_join',
+    'handle_authenticated_message',
+    'recover_pending',
+  ]
+  for (const entry of retiredSplitEntries) {
+    if (existsSync(join(REPOSITORY_ROOT, protocolRoot, entry))) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `split role entry must be removed: ${protocolRoot}/${entry}`
+      )
+    }
+  }
+
+  const roleSource = entry => {
+    const path = join(REPOSITORY_ROOT, protocolRoot, entry)
+    return existsSync(path) ? read(`${protocolRoot}/${entry}`) : ''
+  }
+  const joinerStart = roleSource('joiner/start_join/execute.rs')
+  const joinerCandidate = roleSource('joiner/handle_candidate/execute.rs')
+  const recovery = roleSource('recovery/recover_pending/execute.rs')
+  const sponsorMessage = roleSource('sponsor/handle_join_request/execute.rs')
 
   for (const child of ['joiner', 'sponsor', 'recovery']) {
     if (!moduleSurface.includes(`mod ${child};`)) {
@@ -766,7 +808,7 @@ function checkSpaceAdmissionProtocolOwnership() {
 
   for (const [source, owner, action] of [
     [joinerStart, 'JoinerAdmissionService', 'start'],
-    [recovery, 'JoinerAdmissionService', 'handle_candidate'],
+    [joinerCandidate, 'JoinerAdmissionService', 'handle_candidate'],
     [sponsorMessage, 'SponsorAdmissionService', 'handle_join_request'],
     [recovery, 'AdmissionRecoveryService', 'recover_pending'],
   ]) {

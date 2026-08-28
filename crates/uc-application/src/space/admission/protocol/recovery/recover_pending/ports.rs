@@ -4,8 +4,8 @@ use uc_core::membership::{
     AdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
 };
 
+use super::AuthenticatedAdmissionReply;
 use super::{AdmissionRecoveryTrigger, LoadedPendingAdmission};
-use super::{AuthenticatedAdmissionReply, PreparedJoinerCandidateMaterial};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PendingAdmissionRecoveryStateError {
@@ -68,22 +68,6 @@ pub trait AuthenticatedAdmissionExchangePort: Send {
         self: Box<Self>,
         request: &SpaceAdmissionEnvelopeV1,
     ) -> Result<AuthenticatedAdmissionReply, SpaceAdmissionTransportError>;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum PrepareJoinerCandidateError {
-    #[error("joiner candidate material is invalid")]
-    Invalid,
-    #[error("joiner candidate material is unavailable")]
-    Unavailable,
-}
-
-#[async_trait]
-pub trait PrepareJoinerCandidatePort: Send + Sync {
-    async fn prepare(
-        &self,
-        candidate: &SpaceAdmissionEnvelopeV1,
-    ) -> Result<PreparedJoinerCandidateMaterial, PrepareJoinerCandidateError>;
 }
 
 #[async_trait]

@@ -1,8 +1,18 @@
 use std::sync::Arc;
 
-use super::{JoinerStartMaterialPort, JoinerStartStatePort, PrepareJoinerCandidatePort};
 use crate::space::membership::WakeSpaceMembershipMaintenancePort;
 use uc_core::ports::SettingsPort;
+
+mod handle_candidate;
+mod start_join;
+
+pub use handle_candidate::{
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PreparedJoinerCandidateMaterial,
+};
+pub use start_join::{
+    JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
+    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, SpaceAdmissionCommitToken,
+};
 
 pub(crate) struct JoinerAdmissionService {
     pub(super) settings: Arc<dyn SettingsPort>,

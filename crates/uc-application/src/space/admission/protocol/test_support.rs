@@ -21,23 +21,19 @@ use uc_core::ports::SettingsPort;
 use uc_core::security::IdentityFingerprint;
 use uc_core::DeviceId;
 
-use super::handle_authenticated_message::{
-    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, LoadedSponsorJoinRequest,
-    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PreparedSponsorCandidate,
-    SponsorAdmissionMutation, SponsorJoinRequestCommitToken, SponsorJoinRequestStateError,
-    SponsorJoinRequestStatePort,
-};
-use super::recover_pending::{
-    AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,
-    AuthenticatedAdmissionReply, LoadedPendingAdmission, PendingAdmissionRecoveryStateError,
-    PendingAdmissionRecoveryStatePort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
-    PreparedJoinerCandidateMaterial, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
-};
 use super::{
-    AdmissionRecoveryService, JoinerAdmissionService, JoinerStartMaterial,
-    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
-    JoinerStartStatePort, LoadedJoinerStartState, SpaceAdmissionCommitToken,
-    SpaceAdmissionProtocol, SponsorAdmissionService,
+    AdmissionRecoveryCommitToken, AdmissionRecoveryService, AdmissionRecoveryTrigger,
+    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
+    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, JoinerAdmissionService,
+    JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
+    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, LoadedPendingAdmission,
+    LoadedSponsorJoinRequest, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
+    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PreparedJoinerCandidateMaterial,
+    PreparedSponsorCandidate, SpaceAdmissionCommitToken, SpaceAdmissionProtocol,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionMutation,
+    SponsorAdmissionService, SponsorJoinRequestCommitToken, SponsorJoinRequestState,
+    SponsorJoinRequestStateError, SponsorJoinRequestStatePort,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,14 +340,12 @@ impl SponsorJoinRequestStatePort for RecordingSponsorState {
             .lock()
             .expect("sponsor state is available")
             .take()
-            .map(super::handle_authenticated_message::SponsorJoinRequestState::Existing)
-            .unwrap_or_else(|| {
-                super::handle_authenticated_message::SponsorJoinRequestState::Fresh {
-                    invitation_claim: AdmissionInvitationClaim::from_bytes(vec![0x41; 32])
-                        .expect("valid invitation claim"),
-                    base_snapshot: AdmissionBaseSnapshot::from_bytes(vec![0x42; 64])
-                        .expect("valid base snapshot"),
-                }
+            .map(SponsorJoinRequestState::Existing)
+            .unwrap_or_else(|| SponsorJoinRequestState::Fresh {
+                invitation_claim: AdmissionInvitationClaim::from_bytes(vec![0x41; 32])
+                    .expect("valid invitation claim"),
+                base_snapshot: AdmissionBaseSnapshot::from_bytes(vec![0x42; 64])
+                    .expect("valid base snapshot"),
             });
         Ok(LoadedSponsorJoinRequest::new(
             state,

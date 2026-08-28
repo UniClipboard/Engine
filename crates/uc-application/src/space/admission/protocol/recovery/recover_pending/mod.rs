@@ -6,10 +6,9 @@ mod tests;
 
 pub use model::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
-    AuthenticatedAdmissionReply, LoadedPendingAdmission, PreparedJoinerCandidateMaterial,
+    AuthenticatedAdmissionReply, LoadedPendingAdmission,
 };
 pub use ports::{
     AuthenticatedAdmissionExchangePort, PendingAdmissionRecoveryStateError,
-    PendingAdmissionRecoveryStatePort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
-    SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    PendingAdmissionRecoveryStatePort, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
 };

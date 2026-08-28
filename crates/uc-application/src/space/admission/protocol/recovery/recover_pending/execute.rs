@@ -1,8 +1,7 @@
 use super::model::AdmissionRecoveryReport;
 use super::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AuthenticatedAdmissionReply,
-    LoadedPendingAdmission, PendingAdmissionRecoveryStateError, PrepareJoinerCandidateError,
-    SpaceAdmissionTransportError,
+    LoadedPendingAdmission, SpaceAdmissionTransportError,
 };
 use crate::space::admission::protocol::{
     AdmissionRecoveryService, JoinerAdmissionService, SpaceAdmissionProtocol,
@@ -11,9 +10,8 @@ use crate::space::membership::{
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
 };
 use uc_core::membership::{
-    AdmissionPendingRecovery, AdmissionRecoveryCategory, AdmissionTransition,
-    SpaceAdmissionAggregate, SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind,
-    SpaceAdmissionRejectionReason,
+    AdmissionPendingRecovery, AdmissionRecoveryCategory, SpaceAdmissionAggregate,
+    SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
 };
 
 #[derive(Clone, Copy)]
@@ -42,7 +40,7 @@ impl AdmissionRecoveryService {
         let loaded = match self.state.load(trigger).await {
             Ok(loaded) => loaded,
             Err(error) => {
-                record_state_error(&mut report, error);
+                self.record_state_error(&mut report, error);
                 return report;
             }
         };
@@ -125,7 +123,7 @@ impl AdmissionRecoveryService {
                             loaded
                         }
                         Err(error) => {
-                            record_state_error(&mut report, error);
+                            self.record_state_error(&mut report, error);
                             continue;
                         }
                     }
@@ -150,14 +148,6 @@ impl AdmissionRecoveryService {
         }
 
         report
-    }
-
-    async fn commit_recovery(
-        &self,
-        token: AdmissionRecoveryCommitToken,
-        transition: AdmissionTransition,
-    ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
-        self.state.commit(token, transition).await
     }
 
     async fn record_connection_failure(
@@ -237,7 +227,7 @@ impl AdmissionRecoveryService {
         };
         match self.commit_recovery(token, transition).await {
             Ok(_) => report.rejected_count += 1,
-            Err(error) => record_state_error(report, error),
+            Err(error) => self.record_state_error(report, error),
         }
     }
 
@@ -257,7 +247,7 @@ impl AdmissionRecoveryService {
         };
         match self.commit_recovery(token, transition).await {
             Ok(_) => report.recovery_required_count += 1,
-            Err(error) => record_state_error(report, error),
+            Err(error) => self.record_state_error(report, error),
         }
     }
 
@@ -281,7 +271,7 @@ impl AdmissionRecoveryService {
                 };
                 match self.commit_recovery(token, transition).await {
                     Ok(_) => report.rejected_count += 1,
-                    Err(error) => record_state_error(report, error),
+                    Err(error) => self.record_state_error(report, error),
                 }
             }
             SpaceAdmissionMessageKind::Candidate => {
@@ -299,77 +289,6 @@ impl AdmissionRecoveryService {
                 .await;
             }
         }
-    }
-}
-
-impl JoinerAdmissionService {
-    async fn handle_candidate(
-        &self,
-        recovery: &AdmissionRecoveryService,
-        report: &mut AdmissionRecoveryReport,
-        aggregate: SpaceAdmissionAggregate,
-        token: AdmissionRecoveryCommitToken,
-        reply: SpaceAdmissionEnvelopeV1,
-        canonical_digest: [u8; 32],
-    ) {
-        let prepared = match self.prepare_candidate.prepare(&reply).await {
-            Ok(prepared) => prepared,
-            Err(PrepareJoinerCandidateError::Unavailable) => {
-                report.deferred_count += 1;
-                return;
-            }
-            Err(PrepareJoinerCandidateError::Invalid) => {
-                report.recovery_required_count += 1;
-                return;
-            }
-        };
-        let (staged_input, verified_history, staged_target, prepared_exchange) =
-            prepared.into_parts();
-        let transition = match aggregate.accept_candidate(reply, canonical_digest, staged_input) {
-            Ok(transition) => transition,
-            Err(_) => {
-                report.recovery_required_count += 1;
-                return;
-            }
-        };
-        let committed = match recovery.commit_recovery(token, transition).await {
-            Ok(committed) => committed,
-            Err(error) => {
-                record_state_error(report, error);
-                return;
-            }
-        };
-        report.advanced_count += 1;
-        let (aggregate, token) = committed.into_parts();
-        let transition =
-            match aggregate.prepare_candidate(verified_history, staged_target, prepared_exchange) {
-                Ok(transition) => transition,
-                Err(_) => {
-                    report.recovery_required_count += 1;
-                    return;
-                }
-            };
-        match recovery.commit_recovery(token, transition).await {
-            Ok(_) => {
-                report.advanced_count += 1;
-                self.maintenance_wake.wake();
-            }
-            Err(error) => record_state_error(report, error),
-        }
-    }
-}
-
-fn record_state_error(
-    report: &mut AdmissionRecoveryReport,
-    error: PendingAdmissionRecoveryStateError,
-) {
-    match error {
-        PendingAdmissionRecoveryStateError::RecoveryRequired => {
-            report.recovery_required_count += 1;
-        }
-        PendingAdmissionRecoveryStateError::Locked
-        | PendingAdmissionRecoveryStateError::Unavailable
-        | PendingAdmissionRecoveryStateError::StateChanged => report.deferred_count += 1,
     }
 }
 

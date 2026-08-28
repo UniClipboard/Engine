@@ -1,5 +1,6 @@
-use super::super::{JoinerAdmissionService, SpaceAdmissionProtocol};
+use super::super::JoinerAdmissionService;
 use super::JoinerStartMutation;
+use crate::space::admission::protocol::SpaceAdmissionProtocol;
 use crate::space::admission::{CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 use uc_core::membership::{
     AdmissionRetryState, PendingAdmissionExchange, SpaceAdmissionAggregate,
