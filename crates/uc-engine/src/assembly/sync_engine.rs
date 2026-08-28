@@ -85,8 +85,8 @@ use uc_infra::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
 pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
-use uc_infra::security::DefaultMembershipSecurityUpdateAdapter;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
+use uc_infra::space::DefaultMembershipSecurityUpdateAdapter;
 
 #[derive(Default)]
 struct DeferredCurrentWorkspacePeerScope {
@@ -678,10 +678,10 @@ pub async fn build_sync_engine_assembly(
             join_records: Arc::clone(&space_setup.admission_attempt_repository),
             membership_history_repo: Arc::clone(&space_setup.membership_history_repository),
             historical_membership_signatures: Arc::new(
-                uc_infra::security::OpenMlsHistoricalSignatureVerifier,
+                uc_infra::space::OpenMlsHistoricalSignatureVerifier,
             ),
             admission_security_transition: Arc::new(
-                uc_infra::security::AdmissionSecurityTransitionAdapter,
+                uc_infra::space::AdmissionSecurityTransitionAdapter,
             ),
             prepare_sponsor_admission_security: Arc::clone(
                 &deps

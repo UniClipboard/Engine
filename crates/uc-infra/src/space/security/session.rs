@@ -21,7 +21,7 @@ use uc_core::membership::{
     GroupEpoch, ProtectionGroupId, SpaceKeyMaterial, SpaceSecurityMode,
 };
 
-use super::secrets::MasterKey;
+use crate::security::MasterKey;
 
 #[derive(Clone, Debug)]
 struct State {
@@ -73,7 +73,7 @@ impl ResolvedContentKey {
 
 /// In-memory master-key 容器,线程安全。
 ///
-/// `MasterKey` 派生 `ZeroizeOnDrop`(见 `super::secrets`),所以
+/// `MasterKey` 派生 `ZeroizeOnDrop`(见 `crate::security::secrets`),所以
 /// `set_master_key` 替换旧值、`clear` 把 `Option` 置空、整个 `InMemorySession`
 /// 被 drop 等路径都会就地把 32 字节密钥清零——会话生命周期结束后,残留密钥
 /// 物料就不会停留在堆/栈/swap 页面里。

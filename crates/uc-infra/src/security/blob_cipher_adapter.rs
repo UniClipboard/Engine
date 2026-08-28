@@ -26,8 +26,8 @@ use uc_core::ports::security::blob_cipher::{BlobCipherError, BlobCipherPort};
 
 use super::crypto_model::EncryptedBlob;
 use super::key_epoch_aad;
-use super::session::InMemorySession;
 use super::v1_aead;
+use crate::space::InMemorySession;
 
 pub struct BlobCipherAdapter {
     session: Arc<InMemorySession>,

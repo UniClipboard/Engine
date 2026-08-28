@@ -16,7 +16,7 @@ use uc_core::membership::{
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 
-use super::secrets::MasterKey;
+use crate::security::MasterKey;
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 const STATE_VERSION: u8 = 1;
@@ -778,7 +778,7 @@ fn export_wrapping_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::OpenMlsHistoricalSignatureVerifier;
+    use crate::space::OpenMlsHistoricalSignatureVerifier;
     use uc_core::membership::{
         BaseMembershipHistoryPosition, HistoricalMembershipSignatureVerifier, MembershipEventId,
         ED25519_SIGNATURE_ALGORITHM_V1,

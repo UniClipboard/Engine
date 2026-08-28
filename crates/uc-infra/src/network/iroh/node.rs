@@ -56,7 +56,7 @@ use uc_core::ports::{
 
 use crate::pairing::{IrohPairingSessionAdapter, PAIRING_ALPN};
 use crate::rendezvous::{RendezvousClient, RendezvousPairingInvitationAdapter};
-use crate::security::InMemorySession;
+use crate::space::InMemorySession;
 
 use super::active_clipboard::{
     IrohActiveClipboardDispatchAdapter, IrohActiveClipboardPullClientAdapter,
@@ -1420,7 +1420,8 @@ mod tests {
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
     use uc_core::settings::model::Settings;
 
-    use crate::security::{InMemorySession, MasterKey, Sha256IdentityFingerprintFactory};
+    use crate::security::{MasterKey, Sha256IdentityFingerprintFactory};
+    use crate::space::InMemorySession;
 
     #[derive(Default)]
     struct InMemorySecureStorage {

@@ -146,7 +146,7 @@ Relationship: 当前加入方在 Ready 前已安装安全状态，发起方之�
 
 ```text
 Component: MlsGroupEngine and security adapters
-Path: crates/uc-infra/src/security/mls_group.rs
+Path: crates/uc-infra/src/space/security/mls_group.rs
 Responsibility: 建立、加入、更新和持久化 OpenMLS 安全状态。
 Relationship: OpenMLS 内部已有 staged commit 概念，但当前 admit/apply 路径立即 merge 并返回活动状态，
               没有成为 WorkspaceConvergence 可持久恢复的“暂存、激活、放弃”能力。
@@ -163,7 +163,7 @@ Relationship: 已有版本迁移框架；更早的移除因果资料曾保存 si
 
 ```text
 Component: Active Space session and key material
-Path: crates/uc-infra/src/security/session.rs, crates/uc-infra/src/security/space_access_adapter.rs
+Path: crates/uc-infra/src/space/security/session.rs, crates/uc-infra/src/space/security/access.rs
 Responsibility: 保存当前唯一活动 Space 的 MasterKey、keyslot 和 OpenMLS 安全状态。
 Relationship: 当前 install_group_join 在完整历史核对前替换活动 session/keyslot；收敛仓储也只能从活动
               session 取 Space 和 MasterKey，不能在来源 Space 保持活动时冷恢复目标 Space 尝试。
@@ -1318,7 +1318,7 @@ Candidate -> Complete、精确历史验签和当前成员接收者；再补每�
 
 ## Step 3: 在 `uc-infra` 实现显式公钥验证、暂存安全状态和加密迁移
 
-**File:** `crates/uc-infra/src/security/mls_group.rs`、现有安全适配器、
+**File:** `crates/uc-infra/src/space/security/mls_group.rs`、现有安全适配器、
 `crates/uc-infra/src/db/repositories/workspace_convergence_store.rs`、相关 migration 和测试
 
 **Change:** 提供显式算法和公钥验签；把 OpenMLS admission 拆成可冷恢复的 prepare/activate/discard，并

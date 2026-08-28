@@ -239,7 +239,7 @@ Membership runtime
 ### Infra OPAQUE/OpenMLS adapters
 
 - **Path:** `crates/uc-infra/src/security/space_admission_auth.rs`
-- **Path:** `crates/uc-infra/src/security/admission_security_transition.rs`
+- **Path:** `crates/uc-infra/src/space/admission/security/transition.rs`
 - **职责:** Infra channel adapter 使用固定 `opaque-ke` + Argon2 ciphersuite 完成 OPAQUE/continuation authentication；现有 OpenMLS adapter 完成 KeyPackage/Add/Commit/Welcome/stage/apply/export commitment。
 - **输入:** application 给出的明确身份 binding、加密 verifier/client material 或 current Space security snapshot。
 - **输出:** authenticated channel secrets 或 staged MLS result；不决定业务 stage。
@@ -727,7 +727,7 @@ SpaceAdmissionAggregate::replay_or_reject(evidence)
 
 **File:** `crates/uc-infra/src/security/space_admission_auth.rs`
 
-**File:** `crates/uc-infra/src/security/admission_security_transition.rs`
+**File:** `crates/uc-infra/src/space/admission/security/transition.rs`
 
 **File:** `tests/openmls-validation/`
 

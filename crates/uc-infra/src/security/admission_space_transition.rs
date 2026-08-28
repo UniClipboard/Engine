@@ -46,9 +46,9 @@ use crate::search::render_payload::RenderPayloadCodec;
 
 use super::{
     active_space_generation_manifest_store::DeviceManagementResetJournalV1,
-    ActiveSpaceGenerationManifestStore, BlobCipherAdapter, DefaultSpaceAccessAdapter,
-    EncryptedBlobStore, InMemorySession,
+    ActiveSpaceGenerationManifestStore, BlobCipherAdapter, EncryptedBlobStore,
 };
+use crate::space::{DefaultSpaceAccessAdapter, InMemorySession};
 
 struct TargetSessionSubkeyDeriver(InMemorySession);
 
@@ -2750,9 +2750,9 @@ mod tests {
     use crate::search::render_payload::{RenderFields, RenderPayloadCodec};
     use crate::security::{
         ActiveSpaceGenerationManifestStore, AdmissionKeyManager, BlobCipherAdapter,
-        DefaultCurrentProfile, DefaultSpaceAccessAdapter, EncryptedBlobStore, InMemorySession,
-        KeyMaterialStore, MasterKey,
+        DefaultCurrentProfile, EncryptedBlobStore, MasterKey,
     };
+    use crate::space::{DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore};
 
     use super::{
         ensure_reset_capacity, DurableAdmissionSpaceTransition, SqliteSpaceGenerationStore,

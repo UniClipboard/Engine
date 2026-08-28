@@ -5,7 +5,7 @@ use uc_application::deps::{RebindSpaceSessionPort, SpaceSessionRebindError};
 use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::SpaceId;
 
-use crate::security::InMemorySession;
+use super::session::InMemorySession;
 
 pub struct SpaceSessionRebindAdapter {
     session: Arc<InMemorySession>,

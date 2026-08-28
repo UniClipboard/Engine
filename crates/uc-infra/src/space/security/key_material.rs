@@ -11,8 +11,9 @@ use uc_core::{
 
 use crate::fs::key_slot_store::KeySlotStore;
 use crate::security::crypto_model::{KeyScope, KeySlot, KeySlotFile};
-use crate::security::scope_identifier::scope_identifier;
-use crate::security::secrets::Kek;
+use crate::security::Kek;
+
+use super::scope_identifier::scope_identifier;
 
 pub struct KeyMaterialStore {
     secure_storage: Arc<dyn SecureStoragePort>,

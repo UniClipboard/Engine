@@ -272,6 +272,8 @@ Core 以一份完整 Aggregate 保存全部协议事实，但 Application 只能
 
 Infra 的准入实现统一位于 `crates/uc-infra/src/space/admission/`。共享 repository 复用 `admission_repository_state` 单行密文表和 `AdmissionKeyManager`，内部以 profile 密钥保护仓库、以每次 admission 的独立密钥保护 Aggregate；Joiner J0 本机私密材料随同一 Aggregate 密文保存，数据库、日志和 transport 均不能得到明文副本。解码记录后必须在仓储适配位置取得 Joiner 或 Sponsor 能力对象，角色不匹配是纯状态判断，无法取得时按损坏状态拒绝。Joiner、Sponsor 与 Recovery 在各自目录实现其 Application 状态能力，但共享同一 repository 实例。开始加入时旧记录取代和新记录创建处于同一 SQLite 事务；Sponsor 从一次完整成员账本读取形成候选基础快照，并在保存 Accepted 状态时原子占用邀请；Recovery 提交绑定 admission id 与记录版本，旧 token 不能覆盖新状态。Joiner 本机激活只读取当前 Activating 记录，使用独立版本凭证提交唯一 `PublishActive` 变化，并在同一事务保存 Active、清除当前加入指针；重启、旧凭证和错误影响均失败关闭。来源 Space 快照只包含加密保存所需的 generation manifest 事实，不保存文件路径。旧 `space_join_record_store`、完成恢复通道和 outbox 投递实现已删除，不保留双路径。
 
+Space 共用的成员安全实现统一位于 `crates/uc-infra/src/space/security/`，包含 MLS 成员组、Space 访问、运行会话、历史验签、连接准入和成员安全更新。准入专属的安全结果转换位于 `crates/uc-infra/src/space/admission/security/`。通用 AEAD、密钥类型和哈希继续位于 `crates/uc-infra/src/security/`；准入记录密钥、活动 Space 清单和 Space 切换本次不迁移。已迁移的 Space 成员安全实现不保留旧路径或转发别名。
+
 当前 Core 已完成封闭状态和类型化交换基础，Application 的唯一 `SpaceAdmissionProtocol` 已贯通 JoinRequest、Candidate、Prepared、Commit、Applied、Complete、CompleteAck 和 Settled 正常流程。Sponsor 每次先保存固定回复再返回，重复 Prepared 与 CompleteAck 只重放原回复；后续消息必须继续匹配已保存的双方连接身份。Joiner 收到 Complete 后先保存可恢复的本机激活计划，后台维护在同一串行约束内执行并保存 Active PendingSettlement，下一轮才发送 CompleteAck；本机激活执行成功但保存冲突时，下一轮必须以同一计划幂等重试并得到同一结果。收到 Settled 后保存最终 Active Settled，不再进入待恢复扫描。各状态能力只接收对应角色的变化结果，必须把完整替换状态与声明的影响作为一个持久结果，不能只保存状态。协议内部固定为 `joiner/`、`sponsor/` 和 `recovery/` 三个私有角色目录；各动作持有自己完成业务结果所需的准备、状态或执行能力。`SpaceAdmissionProtocol` 仍只保留三个内部负责人和同一 profile 的串行约束，不暴露内部步骤或完整 Aggregate。Application admission 的稳定错误分类携带原始错误链，不把来源字符串化或抹平。
 
 Infra 仍需接入 OPAQUE、OpenMLS、加密存储和新 Iroh 通道，Engine 仍需完成 endpoint-before-router-before-runtime 构造顺序。完成这些切换并删除旧协议前，本节的新流程不属于已发布运行路径。
@@ -1507,6 +1509,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-28 | 单一 Space 准入角色能力接口 | Core 保留一份完整准入记录，但 Application 状态能力改为只传递 Joiner 或 Sponsor 角色对象及对应变化结果；完整 Aggregate 的角色变化收回 Core 内部，Application 仓库检查禁止重新引用。Infra 在解码后取得指定角色能力，角色不匹配按损坏状态拒绝；数据库、密文格式、协议顺序和产品结果不变。 |
 | 2026-08-28 | 单一 Space 准入 Joiner 激活状态存储 | 现有加密准入仓库实现 Joiner 本机激活状态能力：只加载当前 Activating 记录，以独立版本凭证提交唯一 PublishActive 变化，并原子保存 Active 与清除当前加入指针。SQLite 测试覆盖非激活过滤、重启、旧凭证、错误影响和密文扫描；未新增表或持久化格式。 |
 | 2026-08-28 | 单一 Space 准入 Joiner J0 私密材料生命周期 | 新增自动清零的不透明 Joiner 私密材料；开始材料与 JoinRequest 同时交给 Core，Initiated 状态和现有加密仓库完整保存，认证重启后仍可通过 Candidate 准备视图借用。Candidate 提交以 staged target input 替代原材料，旧字节不再进入后续记录；未实现真实 OPAQUE、邀请解析或 OpenMLS 生成器。 |
+| 2026-08-28 | Infra Space 成员安全归位 | MLS 成员组、Space 访问、运行会话、历史验签、连接准入和成员安全更新迁入 `crates/uc-infra/src/space/security/`；准入专属转换迁入 `space/admission/security/`。已迁移实现的旧路径和导出物理删除；准入记录密钥、活动 Space 清单和 Space 切换不在本次范围，运行行为不变。 |
 
 ## 相关文档
 

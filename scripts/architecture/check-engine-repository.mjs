@@ -1020,6 +1020,8 @@ function checkInfraSpaceAdmissionOwnership() {
   const admissionRoot = 'crates/uc-infra/src/space/admission'
   const requiredEntries = [
     'mod.rs',
+    'security/mod.rs',
+    'security/transition.rs',
     'repository/mod.rs',
     'repository/persisted.rs',
     'repository/codec.rs',
@@ -1068,6 +1070,52 @@ function checkInfraSpaceAdmissionOwnership() {
   return problems
 }
 
+function checkInfraSpaceSecurityOwnership() {
+  const problems = []
+  const securityRoot = 'crates/uc-infra/src/space/security'
+  const requiredEntries = [
+    'mod.rs',
+    'access.rs',
+    'history_signature.rs',
+    'key_material.rs',
+    'membership_update.rs',
+    'mls_group.rs',
+    'peer_admission.rs',
+    'scope_identifier.rs',
+    'session.rs',
+    'session_rebind.rs',
+  ]
+  const retiredEntries = [
+    'crates/uc-infra/src/security/adapters/space_session_rebind.rs',
+    'crates/uc-infra/src/security/admission_security_transition.rs',
+    'crates/uc-infra/src/security/historical_signature_adapter.rs',
+    'crates/uc-infra/src/security/key_material.rs',
+    'crates/uc-infra/src/security/membership_security_update_adapter.rs',
+    'crates/uc-infra/src/security/mls_group.rs',
+    'crates/uc-infra/src/security/peer_admission_adapter.rs',
+    'crates/uc-infra/src/security/scope_identifier.rs',
+    'crates/uc-infra/src/security/session.rs',
+    'crates/uc-infra/src/security/space_access_adapter.rs',
+  ]
+
+  for (const entry of requiredEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, securityRoot, entry))) {
+      addProblem(
+        problems,
+        'infra space security ownership',
+        `missing Space security implementation: ${securityRoot}/${entry}`
+      )
+    }
+  }
+  for (const path of retiredEntries) {
+    if (existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'infra space security ownership', `retired security path remains: ${path}`)
+    }
+  }
+
+  return problems
+}
+
 function repositorySources() {
   return {
     engine: read('crates/uc-engine/src/lib.rs'),
@@ -1098,6 +1146,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkSpaceAdmissionProtocolOwnership(),
     ...checkSpaceAdmissionPersistenceOwnership(),
     ...checkInfraSpaceAdmissionOwnership(),
+    ...checkInfraSpaceSecurityOwnership(),
     ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
     ...(includePlaintext ? checkPlaintextScanner() : []),

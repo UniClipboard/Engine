@@ -1,7 +1,7 @@
 use super::*;
 
 struct ApplicationSpaceUnlockAdapter {
-    inner: Arc<uc_infra::security::DefaultSpaceAccessAdapter>,
+    inner: Arc<uc_infra::space::DefaultSpaceAccessAdapter>,
 }
 
 #[async_trait::async_trait]
@@ -40,7 +40,7 @@ pub(super) fn build_space_access_ports(
     db_executor: &Arc<DieselSqliteExecutor>,
 ) -> (
     SpaceAccessPorts,
-    Arc<uc_infra::security::DefaultSpaceAccessAdapter>,
+    Arc<uc_infra::space::DefaultSpaceAccessAdapter>,
     Arc<dyn uc_application::deps::CurrentMemberSignaturePort>,
     Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
 ) {
@@ -55,7 +55,7 @@ pub(super) fn build_space_access_ports(
     let space_security_reset: Arc<dyn uc_core::membership::SpaceSecurityStateResetPort> =
         security_repository.clone();
     let space_access_adapter = Arc::new(
-        uc_infra::security::DefaultSpaceAccessAdapter::new_with_security_repositories(
+        uc_infra::space::DefaultSpaceAccessAdapter::new_with_security_repositories(
             key_material.clone(),
             current_profile.clone(),
             session.clone(),
@@ -68,9 +68,9 @@ pub(super) fn build_space_access_ports(
     let unlock = Arc::new(ApplicationSpaceUnlockAdapter {
         inner: Arc::clone(&space_access_adapter),
     });
-    let rebind = Arc::new(uc_infra::security::SpaceSessionRebindAdapter::new(
-        Arc::clone(session),
-    ));
+    let rebind = Arc::new(uc_infra::space::SpaceSessionRebindAdapter::new(Arc::clone(
+        session,
+    )));
     let space_access_ports = SpaceAccessPorts {
         adopt_isolated_space: rebind,
         initialize: space_access_adapter.clone(),
@@ -104,7 +104,7 @@ pub(super) fn build_peer_admission_port(
     let repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
         DieselSpaceSecurityStore::new(db_executor.clone(), session.as_ref().clone()),
     );
-    Arc::new(uc_infra::security::MlsPeerAdmissionAdapter::new(
+    Arc::new(uc_infra::space::MlsPeerAdmissionAdapter::new(
         session.clone(),
         repository,
     ))

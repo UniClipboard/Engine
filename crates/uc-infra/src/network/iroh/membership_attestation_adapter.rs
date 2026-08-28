@@ -23,7 +23,7 @@ use uc_core::ports::{DeviceIdentityPort, PeerAddressRepositoryPort, SettingsPort
 use uc_core::security::IdentityFingerprint;
 
 use crate::pairing::session::legacy_pairing_protocol_is_reachable;
-use crate::security::InMemorySession;
+use crate::space::InMemorySession;
 
 use super::connect_with_staggered_retry;
 use super::persistable_addr::to_persistable_addr;
@@ -1052,7 +1052,8 @@ mod tests {
         WireMessage, WireReject, MAX_MESSAGE_SIZE, MEMBERSHIP_ATTESTATION_ALPN, WIRE_VERSION,
     };
     use crate::pairing::session::LEGACY_PAIRING_ALPN;
-    use crate::security::{InMemorySession, MasterKey, Sha256IdentityFingerprintFactory};
+    use crate::security::{MasterKey, Sha256IdentityFingerprintFactory};
+    use crate::space::InMemorySession;
 
     struct FixedDeviceIdentity(DeviceId);
 

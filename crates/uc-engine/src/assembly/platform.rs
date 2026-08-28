@@ -18,7 +18,8 @@ use uc_infra::blob::{
 use uc_infra::clipboard::ClipboardRepresentationNormalizer;
 use uc_infra::config::ClipboardStorageConfig;
 use uc_infra::device::LocalDeviceIdentity;
-use uc_infra::security::{EncryptedBlobStore, InMemorySession};
+use uc_infra::security::EncryptedBlobStore;
+use uc_infra::space::InMemorySession;
 
 /// Platform layer implementations
 pub struct PlatformLayer {

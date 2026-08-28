@@ -39,10 +39,8 @@ use uc_infra::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
 use uc_infra::db::pool::{init_db_pool, DbPool};
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
-use uc_infra::security::{
-    DefaultCurrentProfile, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
-    Sha256IdentityFingerprintFactory,
-};
+use uc_infra::security::{DefaultCurrentProfile, Sha256IdentityFingerprintFactory};
+use uc_infra::space::{DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore};
 use uc_infra::SystemClock;
 #[derive(Default)]
 struct TestSecureStorage {

@@ -3,7 +3,7 @@
 //! Slice 3 - C8 起完全独立运行: 不再依赖任何已删除的 port trait
 //! (EncryptionPort / EncryptionSessionPort / KeyMaterialPort),
 //! 改用 uc-infra 内部具体类型 `KeyMaterialStore` + `InMemorySession`,
-//! AEAD 算法走 `super::v1_aead` helper。
+//! AEAD 算法走 `crate::security::v1_aead` helper。
 //!
 //! 该 adapter 实现内层聚合 trait `SpaceAccessStore`,并把每个窄意图 port
 //! application/core intent ports are delegated through narrow implementations
@@ -34,8 +34,8 @@ use uc_application::deps::{
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 
-use super::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
-use super::secrets::{Kek, MasterKey};
+use crate::security::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
+use crate::security::{v1_aead, Kek, MasterKey};
 use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
 use uc_core::membership::{
     AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort,
@@ -60,7 +60,6 @@ use super::key_material::KeyMaterialStore;
 use super::mls_group::{MlsClientState, MlsGroupEngine, PendingMlsJoin};
 use super::scope_identifier::scope_identifier;
 use super::session::InMemorySession;
-use super::v1_aead;
 
 const MAX_STALLED_REVOCATION_ITERATIONS: usize = 3;
 
@@ -217,7 +216,7 @@ fn map_and_log_local_crypto_error(
 #[derive(Debug, Serialize, Deserialize)]
 struct AdmissionKdfOffer {
     version: String,
-    kdf: super::crypto_model::KdfParams,
+    kdf: crate::security::crypto_model::KdfParams,
     salt: Vec<u8>,
 }
 

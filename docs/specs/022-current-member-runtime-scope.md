@@ -109,7 +109,7 @@ Relationship: 分别从成员表、可信关系或地址表取得候选，再由
 ```text
 Component: Network identity and admission adapters
 Path: crates/uc-infra/src/network/iroh/
-Path: crates/uc-infra/src/security/peer_admission_adapter.rs
+Path: crates/uc-infra/src/space/security/peer_admission.rs
 Responsibility: 把网络身份解析为设备，并检查具体协议是否允许该设备进入。
 Relationship: 身份解析可使用历史资料；普通协议授权不得仅因解析成功或旧安全资料仍存在而通过。
 ```
@@ -340,7 +340,7 @@ Engine 入口。内部错误按现有稳定类别映射；列表和后台任务�
 ## Step 6: 收紧网络身份解析与授权
 
 **File:** `crates/uc-infra/src/network/iroh/`
-**File:** `crates/uc-infra/src/security/peer_admission_adapter.rs`
+**File:** `crates/uc-infra/src/space/security/peer_admission.rs`
 **Change:** 保留历史身份解析，但普通协议在解析后必须检查当前范围和自身关系门禁；受限成员历史通道
 使用独立授权，不向普通协议复用例外。
 **Risk:** 不能因删除旧身份资料导致历史决定无法送达，也不能因身份可解析而恢复普通权限。

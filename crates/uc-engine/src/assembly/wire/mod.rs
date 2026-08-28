@@ -73,11 +73,11 @@ use uc_infra::search::{HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchInde
 use uc_infra::security::{
     space_generation_directory, ActiveSpaceGenerationManifestStore, AdmissionKeyManager,
     Argon2PinHasher, Blake3Hasher, DecryptingClipboardRepresentationRepository,
-    EncryptingClipboardEventWriter, EncryptingInboundReceiveCommit, InMemorySession,
-    KeyMaterialStore, ProfileLifecycleRepository, Sha256IdentityFingerprintFactory,
-    Sha256ShortCodeGenerator,
+    EncryptingClipboardEventWriter, EncryptingInboundReceiveCommit, ProfileLifecycleRepository,
+    Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
+use uc_infra::space::{InMemorySession, KeyMaterialStore};
 use uc_infra::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
 use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 

@@ -7,7 +7,7 @@
 //! Slice 4 (U4-D) 起作为 uc-infra adapter 私有 helper,避免 uc-core 泄漏
 //! 持久化格式细节。
 
-use super::crypto_model::KeyScope;
+use crate::security::crypto_model::KeyScope;
 
 pub(crate) fn scope_identifier(scope: &KeyScope) -> String {
     format!("profile:{}", scope.profile_id)

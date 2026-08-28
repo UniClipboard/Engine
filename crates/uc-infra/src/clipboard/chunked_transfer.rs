@@ -37,7 +37,8 @@ use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::ports::{TransferCipherError, TransferCipherPort};
 use uuid::Uuid;
 
-use crate::security::{key_epoch_aad, InMemorySession, MasterKey};
+use crate::security::{key_epoch_aad, MasterKey};
+use crate::space::InMemorySession;
 
 /// Nominal chunk size: 256 KB.
 /// Peak memory per encode or decode call: ~2 x CHUNK_SIZE.

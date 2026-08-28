@@ -88,7 +88,7 @@ pub struct SyncEngineDeps {
     /// Independent member signatures from the current OpenMLS member tree.
     pub current_member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     /// The same unlocked session used by space access and encrypted storage.
-    pub membership_session: Arc<uc_infra::security::InMemorySession>,
+    pub membership_session: Arc<uc_infra::space::InMemorySession>,
     /// Encrypted persistence for the unified workspace convergence state.
     pub workspace_convergence_repository: Arc<dyn SpaceMembershipStateRepositoryPort>,
     /// Profile-scoped encrypted persistence for durable admission attempts.

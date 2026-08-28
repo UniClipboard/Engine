@@ -31,9 +31,9 @@ use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::{blob::ports::BlobReaderPort, crypto::aad, BlobId, ContentHash};
 
 use super::key_epoch_aad;
-use super::session::InMemorySession;
 use super::v1_aead;
 use crate::blob::{BlobStorePort, StoredPathBlob};
+use crate::space::InMemorySession;
 
 /// Magic bytes identifying a UniClipboard blob file ("UCBL")
 const BLOB_MAGIC: [u8; 4] = [0x55, 0x43, 0x42, 0x4C];

@@ -8,7 +8,7 @@ mod tests;
 
 use uc_core::membership::KeyEpochError;
 
-use crate::security::InMemorySession;
+use crate::space::InMemorySession;
 
 pub struct DieselSpaceSecurityStore<E> {
     executor: E,

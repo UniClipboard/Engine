@@ -7,7 +7,7 @@ use uc_core::membership::{
     MembershipSecurityUpdatePort,
 };
 
-use super::InMemorySession;
+use super::session::InMemorySession;
 
 pub struct DefaultMembershipSecurityUpdateAdapter {
     session: Arc<InMemorySession>,

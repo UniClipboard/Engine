@@ -13,7 +13,8 @@ use uc_core::membership::{
 use super::DieselSpaceSecurityStore;
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::pool::{init_db_pool, DbPool};
-use crate::security::{InMemorySession, MasterKey};
+use crate::security::MasterKey;
+use crate::space::InMemorySession;
 
 fn make_repo() -> (
     DieselSpaceSecurityStore<DieselSqliteExecutor>,
