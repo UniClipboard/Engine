@@ -719,8 +719,15 @@ function checkSpaceAdmissionProtocolOwnership() {
     'joiner/mod.rs',
     'joiner/start_join/execute.rs',
     'joiner/handle_candidate/execute.rs',
+    'joiner/handle_commit/execute.rs',
     'sponsor/mod.rs',
+    'sponsor/handle_authenticated_message/execute.rs',
     'sponsor/handle_join_request/execute.rs',
+    'sponsor/handle_prepared/execute.rs',
+    'sponsor/state/mod.rs',
+    'sponsor/state/error.rs',
+    'sponsor/state/model.rs',
+    'sponsor/state/ports.rs',
     'recovery/mod.rs',
     'recovery/recover_pending/execute.rs',
   ]
@@ -758,8 +765,10 @@ function checkSpaceAdmissionProtocolOwnership() {
   }
   const joinerStart = roleSource('joiner/start_join/execute.rs')
   const joinerCandidate = roleSource('joiner/handle_candidate/execute.rs')
+  const joinerCommit = roleSource('joiner/handle_commit/execute.rs')
   const recovery = roleSource('recovery/recover_pending/execute.rs')
   const sponsorMessage = roleSource('sponsor/handle_join_request/execute.rs')
+  const sponsorPrepared = roleSource('sponsor/handle_prepared/execute.rs')
 
   for (const child of ['joiner', 'sponsor', 'recovery']) {
     if (!moduleSurface.includes(`mod ${child};`)) {
@@ -793,9 +802,11 @@ function checkSpaceAdmissionProtocolOwnership() {
     'PendingAdmissionRecoveryStatePort',
     'SpaceAdmissionTransportPort',
     'WakeSpaceMembershipMaintenancePort',
-    'SponsorJoinRequestStatePort',
+    'SponsorAdmissionStatePort',
     'PrepareSponsorCandidatePort',
+    'PrepareSponsorCommitPort',
     'PrepareJoinerCandidatePort',
+    'PrepareJoinerAppliedPort',
   ]) {
     if (protocol.includes(leakedDependency)) {
       addProblem(
@@ -809,7 +820,9 @@ function checkSpaceAdmissionProtocolOwnership() {
   for (const [source, owner, action] of [
     [joinerStart, 'JoinerAdmissionService', 'start'],
     [joinerCandidate, 'JoinerAdmissionService', 'handle_candidate'],
+    [joinerCommit, 'JoinerAdmissionService', 'handle_commit'],
     [sponsorMessage, 'SponsorAdmissionService', 'handle_join_request'],
+    [sponsorPrepared, 'SponsorAdmissionService', 'handle_prepared'],
     [recovery, 'AdmissionRecoveryService', 'recover_pending'],
   ]) {
     if (!source.includes(`impl ${owner}`) || !source.includes(`async fn ${action}(`)) {
@@ -931,7 +944,7 @@ function checkInfraSpaceAdmissionOwnership() {
     'recovery/pending_state.rs',
     'sponsor/mod.rs',
     'sponsor/base_snapshot.rs',
-    'sponsor/join_request_state.rs',
+    'sponsor/state.rs',
   ]
   const retiredEntries = [
     'crates/uc-infra/src/db/repositories/space_join_record_store.rs',

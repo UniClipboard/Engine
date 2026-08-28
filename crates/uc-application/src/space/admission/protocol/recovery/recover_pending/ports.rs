@@ -29,6 +29,9 @@ pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
         trigger: AdmissionRecoveryTrigger,
     ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError>;
 
+    /// Commits the replacement and every declared admission effect as one
+    /// durable result. Returning success after saving only the replacement is
+    /// invalid.
     async fn commit(
         &self,
         token: super::AdmissionRecoveryCommitToken,

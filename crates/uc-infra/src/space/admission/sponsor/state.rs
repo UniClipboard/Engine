@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uc_application::deps::{
-    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, LoadedSponsorJoinRequest,
-    SponsorAdmissionMutation, SponsorJoinRequestCommitToken, SponsorJoinRequestState,
-    SponsorJoinRequestStateError, SponsorJoinRequestStatePort,
+    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, LoadedSponsorAdmission,
+    SponsorAdmissionCommitToken, SponsorAdmissionMutation, SponsorAdmissionState,
+    SponsorAdmissionStateError, SponsorAdmissionStatePort,
 };
 use uc_core::membership::{
     AdmissionInvitationClaim, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
@@ -25,12 +25,12 @@ struct PersistedInvitationClaimV1 {
 }
 
 #[async_trait]
-impl<E: DbExecutor + Send + Sync> SponsorJoinRequestStatePort for SqliteSpaceAdmissionState<E> {
+impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmissionState<E> {
     #[tracing::instrument(name = "space_admission.sponsor_state.load", skip_all, err)]
     async fn load(
         &self,
         message: &AuthenticatedSpaceAdmissionMessage,
-    ) -> Result<LoadedSponsorJoinRequest, SponsorJoinRequestStateError> {
+    ) -> Result<LoadedSponsorAdmission, SponsorAdmissionStateError> {
         let admission_id = *message.envelope().header().admission_id().as_bytes();
         let invitation_id =
             join_request_invitation_id(message.envelope()).map_err(map_sponsor_error)?;
@@ -46,12 +46,12 @@ impl<E: DbExecutor + Send + Sync> SponsorJoinRequestStatePort for SqliteSpaceAdm
                         let aggregate = self
                             .open_record(admission_id, stored)
                             .map_err(into_anyhow)?;
-                        let token = SponsorJoinRequestCommitToken::from_bytes(
+                        let token = SponsorAdmissionCommitToken::from_bytes(
                             sponsor_existing_token(state.profile_generation, &aggregate),
                         )
                         .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
-                        Ok(LoadedSponsorJoinRequest::new(
-                            SponsorJoinRequestState::Existing(aggregate),
+                        Ok(LoadedSponsorAdmission::new(
+                            SponsorAdmissionState::Existing(aggregate),
                             token,
                         ))
                     })
@@ -74,13 +74,13 @@ impl<E: DbExecutor + Send + Sync> SponsorJoinRequestStatePort for SqliteSpaceAdm
                     let aggregate = self
                         .open_record(admission_id, stored)
                         .map_err(into_anyhow)?;
-                    let token = SponsorJoinRequestCommitToken::from_bytes(sponsor_existing_token(
+                    let token = SponsorAdmissionCommitToken::from_bytes(sponsor_existing_token(
                         state.profile_generation,
                         &aggregate,
                     ))
                     .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
-                    return Ok(LoadedSponsorJoinRequest::new(
-                        SponsorJoinRequestState::Existing(aggregate),
+                    return Ok(LoadedSponsorAdmission::new(
+                        SponsorAdmissionState::Existing(aggregate),
                         token,
                     ));
                 }
@@ -89,15 +89,15 @@ impl<E: DbExecutor + Send + Sync> SponsorJoinRequestStatePort for SqliteSpaceAdm
                 }
                 let claim =
                     encode_invitation_claim(admission_id, invitation_id).map_err(into_anyhow)?;
-                let token = SponsorJoinRequestCommitToken::from_bytes(sponsor_fresh_token(
+                let token = SponsorAdmissionCommitToken::from_bytes(sponsor_fresh_token(
                     &state,
                     admission_id,
                     invitation_id,
                     base_snapshot.as_bytes(),
                 ))
                 .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
-                Ok(LoadedSponsorJoinRequest::new(
-                    SponsorJoinRequestState::Fresh {
+                Ok(LoadedSponsorAdmission::new(
+                    SponsorAdmissionState::Fresh {
                         invitation_claim: claim,
                         base_snapshot,
                     },
@@ -111,9 +111,9 @@ impl<E: DbExecutor + Send + Sync> SponsorJoinRequestStatePort for SqliteSpaceAdm
     #[tracing::instrument(name = "space_admission.sponsor_state.commit", skip_all, err)]
     async fn commit(
         &self,
-        token: SponsorJoinRequestCommitToken,
+        token: SponsorAdmissionCommitToken,
         mutation: SponsorAdmissionMutation,
-    ) -> Result<CommittedSponsorAdmission, SponsorJoinRequestStateError> {
+    ) -> Result<CommittedSponsorAdmission, SponsorAdmissionStateError> {
         let replacement = mutation.into_transition().into_replacement();
         self.executor
             .run(|conn| {
@@ -165,7 +165,7 @@ impl<E: DbExecutor + Send + Sync> SponsorJoinRequestStatePort for SqliteSpaceAdm
                             .insert(invitation_id, admission_id);
                     }
                     self.save_state_on(conn, &state).map_err(into_anyhow)?;
-                    let next_token = SponsorJoinRequestCommitToken::from_bytes(
+                    let next_token = SponsorAdmissionCommitToken::from_bytes(
                         sponsor_existing_token(state.profile_generation, &replacement),
                     )
                     .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
@@ -200,11 +200,15 @@ fn encode_invitation_claim(
         .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)
 }
 
-fn map_sponsor_error(error: SpaceAdmissionStateStoreError) -> SponsorJoinRequestStateError {
-    match error {
-        SpaceAdmissionStateStoreError::Locked => SponsorJoinRequestStateError::Locked,
-        SpaceAdmissionStateStoreError::Conflict => SponsorJoinRequestStateError::StateChanged,
-        SpaceAdmissionStateStoreError::Corrupt => SponsorJoinRequestStateError::RecoveryRequired,
-        SpaceAdmissionStateStoreError::Unavailable => SponsorJoinRequestStateError::Unavailable,
+fn map_sponsor_error(error: SpaceAdmissionStateStoreError) -> SponsorAdmissionStateError {
+    match &error {
+        SpaceAdmissionStateStoreError::Locked => SponsorAdmissionStateError::locked(error),
+        SpaceAdmissionStateStoreError::Conflict => SponsorAdmissionStateError::state_changed(error),
+        SpaceAdmissionStateStoreError::Corrupt => {
+            SponsorAdmissionStateError::recovery_required(error)
+        }
+        SpaceAdmissionStateStoreError::Unavailable => {
+            SponsorAdmissionStateError::unavailable(error)
+        }
     }
 }

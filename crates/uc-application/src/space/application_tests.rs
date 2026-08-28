@@ -275,19 +275,19 @@ impl SpaceAdmissionTransportPort for PassivePorts {
 }
 
 #[async_trait]
-impl SponsorJoinRequestStatePort for PassivePorts {
+impl SponsorAdmissionStatePort for PassivePorts {
     async fn load(
         &self,
         _message: &AuthenticatedSpaceAdmissionMessage,
-    ) -> Result<LoadedSponsorJoinRequest, SponsorJoinRequestStateError> {
+    ) -> Result<LoadedSponsorAdmission, SponsorAdmissionStateError> {
         unreachable!()
     }
 
     async fn commit(
         &self,
-        _token: SponsorJoinRequestCommitToken,
+        _token: SponsorAdmissionCommitToken,
         _mutation: SponsorAdmissionMutation,
-    ) -> Result<CommittedSponsorAdmission, SponsorJoinRequestStateError> {
+    ) -> Result<CommittedSponsorAdmission, SponsorAdmissionStateError> {
         unreachable!()
     }
 }
@@ -304,11 +304,34 @@ impl PrepareSponsorCandidatePort for PassivePorts {
 }
 
 #[async_trait]
+impl PrepareSponsorCommitPort for PassivePorts {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: SponsorCommitPreparation<'_>,
+        _prepared: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<PreparedSponsorCommit, PrepareSponsorCommitError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
 impl PrepareJoinerCandidatePort for PassivePorts {
     async fn prepare(
         &self,
         _candidate: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedJoinerCandidateMaterial, PrepareJoinerCandidateError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl PrepareJoinerAppliedPort for PassivePorts {
+    async fn prepare(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _preparation: JoinerAppliedPreparation<'_>,
+    ) -> Result<PreparedJoinerAppliedMaterial, PrepareJoinerAppliedError> {
         unreachable!()
     }
 }
@@ -453,9 +476,11 @@ async fn complete_application_starts_from_only_target_ports() {
             joiner_start_state: passive.clone(),
             pending_admission_recovery_state: passive.clone(),
             space_admission_transport: passive.clone(),
-            sponsor_join_request_state: passive.clone(),
+            sponsor_admission_state: passive.clone(),
             prepare_sponsor_candidate: passive.clone(),
+            prepare_sponsor_commit: passive.clone(),
             prepare_joiner_candidate: passive.clone(),
+            prepare_joiner_applied: passive.clone(),
             device_trust_observations: passive.clone(),
             membership_history_transport: passive.clone(),
             admission_outbox_delivery: passive.clone(),

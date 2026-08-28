@@ -14,9 +14,10 @@ use uc_core::ports::PresenceEvent;
 use crate::space::admission::{
     AdmissionRecoveryService, CancelSpaceJoinUseCase, CompletePendingSpaceTransitionUseCase,
     HandleAuthenticatedSpaceAdmissionMessagePort, JoinerAdmissionService, JoinerStartMaterialPort,
-    JoinerStartStatePort, PendingAdmissionRecoveryStatePort, PrepareJoinerCandidatePort,
-    PrepareSponsorCandidatePort, QueryPendingSpaceTransitionUseCase, SpaceAdmissionProtocol,
-    SpaceAdmissionTransportPort, SponsorAdmissionService, SponsorJoinRequestStatePort,
+    JoinerStartStatePort, PendingAdmissionRecoveryStatePort, PrepareJoinerAppliedPort,
+    PrepareJoinerCandidatePort, PrepareSponsorCandidatePort, PrepareSponsorCommitPort,
+    QueryPendingSpaceTransitionUseCase, SpaceAdmissionProtocol, SpaceAdmissionTransportPort,
+    SponsorAdmissionService, SponsorAdmissionStatePort,
 };
 use crate::space::membership::CurrentMemberSignaturePort;
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
@@ -84,9 +85,11 @@ pub struct SpaceApplicationDeps {
     pub joiner_start_state: Arc<dyn JoinerStartStatePort>,
     pub pending_admission_recovery_state: Arc<dyn PendingAdmissionRecoveryStatePort>,
     pub space_admission_transport: Arc<dyn SpaceAdmissionTransportPort>,
-    pub sponsor_join_request_state: Arc<dyn SponsorJoinRequestStatePort>,
+    pub sponsor_admission_state: Arc<dyn SponsorAdmissionStatePort>,
     pub prepare_sponsor_candidate: Arc<dyn PrepareSponsorCandidatePort>,
+    pub prepare_sponsor_commit: Arc<dyn PrepareSponsorCommitPort>,
     pub prepare_joiner_candidate: Arc<dyn PrepareJoinerCandidatePort>,
+    pub prepare_joiner_applied: Arc<dyn PrepareJoinerAppliedPort>,
     pub device_trust_observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     pub membership_history_transport: Arc<dyn MembershipHistoryExchangePort>,
     pub admission_outbox_delivery: Arc<dyn crate::deps::AdmissionOutboxDeliveryPort>,
@@ -154,11 +157,13 @@ impl SpaceApplication {
             deps.joiner_start_material,
             deps.joiner_start_state,
             deps.prepare_joiner_candidate,
+            deps.prepare_joiner_applied,
             deferred_maintenance_wake.clone(),
         );
         let sponsor_admission = SponsorAdmissionService::new(
-            deps.sponsor_join_request_state,
+            deps.sponsor_admission_state,
             deps.prepare_sponsor_candidate,
+            deps.prepare_sponsor_commit,
         );
         let admission_recovery = AdmissionRecoveryService::new(
             deps.pending_admission_recovery_state,

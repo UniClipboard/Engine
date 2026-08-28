@@ -1,6 +1,5 @@
 use uc_core::membership::{
-    AdmissionBaseSnapshot, AdmissionContinuationCredential, AdmissionInvitationClaim,
-    AdmissionPeerBinding, AdmissionStagedSecurityState, AdmissionTransition,
+    AdmissionContinuationCredential, AdmissionPeerBinding, AdmissionStagedSecurityState,
     SpaceAdmissionAggregate, SpaceAdmissionEnvelopeV1,
 };
 
@@ -50,69 +49,6 @@ impl AuthenticatedSpaceAdmissionMessage {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct SponsorJoinRequestCommitToken([u8; 32]);
-
-impl SponsorJoinRequestCommitToken {
-    pub fn from_bytes(bytes: [u8; 32]) -> Option<Self> {
-        (bytes != [0; 32]).then_some(Self(bytes))
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-pub enum SponsorJoinRequestState {
-    Fresh {
-        invitation_claim: AdmissionInvitationClaim,
-        base_snapshot: AdmissionBaseSnapshot,
-    },
-    Existing(SpaceAdmissionAggregate),
-}
-
-pub struct LoadedSponsorJoinRequest {
-    state: SponsorJoinRequestState,
-    commit_token: SponsorJoinRequestCommitToken,
-}
-
-impl LoadedSponsorJoinRequest {
-    pub fn new(
-        state: SponsorJoinRequestState,
-        commit_token: SponsorJoinRequestCommitToken,
-    ) -> Self {
-        Self {
-            state,
-            commit_token,
-        }
-    }
-
-    pub fn into_parts(self) -> (SponsorJoinRequestState, SponsorJoinRequestCommitToken) {
-        (self.state, self.commit_token)
-    }
-}
-
-pub struct CommittedSponsorAdmission {
-    aggregate: SpaceAdmissionAggregate,
-    commit_token: SponsorJoinRequestCommitToken,
-}
-
-impl CommittedSponsorAdmission {
-    pub fn new(
-        aggregate: SpaceAdmissionAggregate,
-        commit_token: SponsorJoinRequestCommitToken,
-    ) -> Self {
-        Self {
-            aggregate,
-            commit_token,
-        }
-    }
-
-    pub fn into_parts(self) -> (SpaceAdmissionAggregate, SponsorJoinRequestCommitToken) {
-        (self.aggregate, self.commit_token)
-    }
-}
-
 pub struct PreparedSponsorCandidate {
     candidate_reply: SpaceAdmissionEnvelopeV1,
     staged_security: AdmissionStagedSecurityState,
@@ -153,19 +89,5 @@ impl SpaceAdmissionMessageReply {
     #[cfg(test)]
     pub(crate) fn into_aggregate(self) -> SpaceAdmissionAggregate {
         self.committed
-    }
-}
-
-pub struct SponsorAdmissionMutation {
-    transition: AdmissionTransition,
-}
-
-impl SponsorAdmissionMutation {
-    pub const fn new(transition: AdmissionTransition) -> Self {
-        Self { transition }
-    }
-
-    pub fn into_transition(self) -> AdmissionTransition {
-        self.transition
     }
 }

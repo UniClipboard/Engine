@@ -1,62 +1,49 @@
-use async_trait::async_trait;
-use uc_core::membership::{AdmissionReplayDecision, AdmissionReplayError, SpaceAdmissionAggregate};
+use uc_core::membership::{AdmissionReplayDecision, SpaceAdmissionAggregate};
 
-use super::{
-    AuthenticatedSpaceAdmissionMessage, HandleAuthenticatedSpaceAdmissionMessageError,
-    HandleAuthenticatedSpaceAdmissionMessagePort, SpaceAdmissionMessageReply,
-    SponsorAdmissionMutation, SponsorJoinRequestState, SponsorJoinRequestStateError,
+use super::{AuthenticatedSpaceAdmissionMessage, SpaceAdmissionMessageReply};
+use crate::space::admission::protocol::{
+    CommittedSponsorAdmission, HandleAuthenticatedSpaceAdmissionMessageError,
+    SponsorAdmissionMutation, SponsorAdmissionService, SponsorAdmissionState,
 };
-use crate::space::admission::protocol::{SpaceAdmissionProtocol, SponsorAdmissionService};
-
-#[async_trait]
-impl HandleAuthenticatedSpaceAdmissionMessagePort for SpaceAdmissionProtocol {
-    async fn handle(
-        &self,
-        message: AuthenticatedSpaceAdmissionMessage,
-    ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
-        self.execute_exclusively(self.sponsor.handle_join_request(message))
-            .await
-    }
-}
 
 impl SponsorAdmissionService {
-    async fn handle_join_request(
+    pub(in crate::space::admission::protocol::sponsor) async fn handle_join_request(
         &self,
         message: AuthenticatedSpaceAdmissionMessage,
     ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
-        let loaded = self
-            .join_request_state
-            .load(&message)
-            .await
-            .map_err(map_state_error)?;
+        let loaded = self.state.load(&message).await?;
         let (peer_binding, envelope, canonical_digest, continuation) = message.into_parts();
-        let evidence = envelope
-            .evidence(canonical_digest)
-            .ok_or(HandleAuthenticatedSpaceAdmissionMessageError::Invalid)?;
+        let evidence = envelope.evidence(canonical_digest).ok_or_else(|| {
+            HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!(
+                "the JoinRequest canonical digest is invalid"
+            ))
+        })?;
         let (state, commit_token) = loaded.into_parts();
 
         let committed = match state {
-            SponsorJoinRequestState::Existing(aggregate) => {
-                match aggregate
-                    .replay_or_reject(&evidence)
-                    .map_err(map_replay_error)?
-                {
+            SponsorAdmissionState::Existing(aggregate) => {
+                match aggregate.replay_or_reject(&evidence)? {
                     AdmissionReplayDecision::ExactReply(_) => {
-                        return SpaceAdmissionMessageReply::new(aggregate).ok_or(
-                            HandleAuthenticatedSpaceAdmissionMessageError::RecoveryRequired,
-                        );
+                        return SpaceAdmissionMessageReply::new(aggregate).ok_or_else(|| {
+                            HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(
+                                anyhow::anyhow!("the saved JoinRequest reply is unavailable"),
+                            )
+                        });
                     }
                     AdmissionReplayDecision::Duplicate | AdmissionReplayDecision::New => {
-                        super::CommittedSponsorAdmission::new(aggregate, commit_token)
+                        CommittedSponsorAdmission::new(aggregate, commit_token)
                     }
                 }
             }
-            SponsorJoinRequestState::Fresh {
+            SponsorAdmissionState::Fresh {
                 invitation_claim,
                 base_snapshot,
             } => {
-                let continuation =
-                    continuation.ok_or(HandleAuthenticatedSpaceAdmissionMessageError::Invalid)?;
+                let continuation = continuation.ok_or_else(|| {
+                    HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!(
+                        "a fresh JoinRequest requires a continuation credential"
+                    ))
+                })?;
                 let admission_id = envelope.header().admission_id();
                 let transition = SpaceAdmissionAggregate::accept_join_request(
                     admission_id,
@@ -66,70 +53,34 @@ impl SponsorAdmissionService {
                     base_snapshot,
                     peer_binding,
                     continuation,
-                )
-                .map_err(|_| HandleAuthenticatedSpaceAdmissionMessageError::Invalid)?;
-                self.join_request_state
+                )?;
+                self.state
                     .commit(commit_token, SponsorAdmissionMutation::new(transition))
-                    .await
-                    .map_err(map_state_error)?
+                    .await?
             }
         };
 
         let (aggregate, commit_token) = committed.into_parts();
-        let preparation = aggregate
-            .sponsor_candidate_preparation()
-            .ok_or(HandleAuthenticatedSpaceAdmissionMessageError::RecoveryRequired)?;
+        let preparation = aggregate.sponsor_candidate_preparation().ok_or_else(|| {
+            HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!(
+                "the accepted Sponsor state has no Candidate preparation"
+            ))
+        })?;
         let prepared = self
             .prepare_candidate
             .prepare(aggregate.admission_id(), preparation)
-            .await
-            .map_err(|error| match error {
-                super::PrepareSponsorCandidateError::Invalid => {
-                    HandleAuthenticatedSpaceAdmissionMessageError::Invalid
-                }
-                super::PrepareSponsorCandidateError::Unavailable => {
-                    HandleAuthenticatedSpaceAdmissionMessageError::Unavailable
-                }
-            })?;
+            .await?;
         let (candidate_reply, staged_security) = prepared.into_parts();
-        let transition = aggregate
-            .fix_candidate(candidate_reply, staged_security)
-            .map_err(|_| HandleAuthenticatedSpaceAdmissionMessageError::Invalid)?;
+        let transition = aggregate.fix_candidate(candidate_reply, staged_security)?;
         let committed = self
-            .join_request_state
+            .state
             .commit(commit_token, SponsorAdmissionMutation::new(transition))
-            .await
-            .map_err(map_state_error)?;
+            .await?;
         let (aggregate, _) = committed.into_parts();
-        SpaceAdmissionMessageReply::new(aggregate)
-            .ok_or(HandleAuthenticatedSpaceAdmissionMessageError::RecoveryRequired)
-    }
-}
-
-fn map_state_error(
-    error: SponsorJoinRequestStateError,
-) -> HandleAuthenticatedSpaceAdmissionMessageError {
-    match error {
-        SponsorJoinRequestStateError::Locked => {
-            HandleAuthenticatedSpaceAdmissionMessageError::Locked
-        }
-        SponsorJoinRequestStateError::StateChanged => {
-            HandleAuthenticatedSpaceAdmissionMessageError::StateChanged
-        }
-        SponsorJoinRequestStateError::RecoveryRequired => {
-            HandleAuthenticatedSpaceAdmissionMessageError::RecoveryRequired
-        }
-        SponsorJoinRequestStateError::Unavailable => {
-            HandleAuthenticatedSpaceAdmissionMessageError::Unavailable
-        }
-    }
-}
-
-fn map_replay_error(error: AdmissionReplayError) -> HandleAuthenticatedSpaceAdmissionMessageError {
-    match error {
-        AdmissionReplayError::Conflict => HandleAuthenticatedSpaceAdmissionMessageError::Conflict,
-        AdmissionReplayError::OutOfOrder => {
-            HandleAuthenticatedSpaceAdmissionMessageError::OutOfOrder
-        }
+        SpaceAdmissionMessageReply::new(aggregate).ok_or_else(|| {
+            HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!(
+                "the committed Sponsor Candidate reply is unavailable"
+            ))
+        })
     }
 }

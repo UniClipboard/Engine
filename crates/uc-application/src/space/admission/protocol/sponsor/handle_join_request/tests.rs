@@ -1,9 +1,9 @@
 use uc_core::membership::SpaceAdmissionMessageKind;
 
-use super::HandleAuthenticatedSpaceAdmissionMessagePort;
 use crate::space::admission::protocol::test_support::{
     authenticated_join_request, ProtocolEvent, SpaceAdmissionProtocolTestPair,
 };
+use crate::space::admission::protocol::HandleAuthenticatedSpaceAdmissionMessagePort;
 
 #[tokio::test]
 async fn sponsor_saves_accepted_then_candidate_before_returning_the_reply() {

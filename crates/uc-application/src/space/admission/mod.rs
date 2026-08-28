@@ -48,13 +48,14 @@ pub use protocol::{
     HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
     JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
     JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, LoadedPendingAdmission,
-    LoadedSponsorJoinRequest, PendingAdmissionRecoveryStateError,
-    PendingAdmissionRecoveryStatePort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
-    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PreparedJoinerCandidateMaterial,
-    PreparedSponsorCandidate, SpaceAdmissionCommitToken, SpaceAdmissionMessageReply,
-    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionMutation,
-    SponsorJoinRequestCommitToken, SponsorJoinRequestState, SponsorJoinRequestStateError,
-    SponsorJoinRequestStatePort,
+    LoadedSponsorAdmission, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCandidateError,
+    PrepareJoinerCandidatePort, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
+    PrepareSponsorCommitError, PrepareSponsorCommitPort, PreparedJoinerAppliedMaterial,
+    PreparedJoinerCandidateMaterial, PreparedSponsorCandidate, PreparedSponsorCommit,
+    SpaceAdmissionCommitToken, SpaceAdmissionMessageReply, SpaceAdmissionTransportError,
+    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
+    SponsorAdmissionState, SponsorAdmissionStateError, SponsorAdmissionStatePort,
 };
 pub use query_pending_space_transition::QueryPendingSpaceTransitionError;
 pub use security_transition::{

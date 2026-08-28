@@ -1,16 +1,12 @@
+mod error;
 mod execute;
 mod model;
 mod ports;
 #[cfg(test)]
 mod tests;
 
+pub use error::PrepareSponsorCandidateError;
 pub use model::{
-    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, LoadedSponsorJoinRequest,
-    PreparedSponsorCandidate, SpaceAdmissionMessageReply, SponsorAdmissionMutation,
-    SponsorJoinRequestCommitToken, SponsorJoinRequestState,
+    AuthenticatedSpaceAdmissionMessage, PreparedSponsorCandidate, SpaceAdmissionMessageReply,
 };
-pub use ports::{
-    HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
-    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, SponsorJoinRequestStateError,
-    SponsorJoinRequestStatePort,
-};
+pub use ports::PrepareSponsorCandidatePort;

@@ -1,29 +1,42 @@
 use std::sync::Arc;
 
+mod handle_authenticated_message;
 mod handle_join_request;
+mod handle_prepared;
+mod state;
 
-pub use handle_join_request::{
-    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
+pub use handle_authenticated_message::{
     HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
-    LoadedSponsorJoinRequest, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
-    PreparedSponsorCandidate, SpaceAdmissionMessageReply, SponsorAdmissionMutation,
-    SponsorJoinRequestCommitToken, SponsorJoinRequestState, SponsorJoinRequestStateError,
-    SponsorJoinRequestStatePort,
+};
+pub use handle_join_request::{
+    AuthenticatedSpaceAdmissionMessage, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
+    PreparedSponsorCandidate, SpaceAdmissionMessageReply,
+};
+pub use handle_prepared::{
+    PrepareSponsorCommitError, PrepareSponsorCommitPort, PreparedSponsorCommit,
+};
+pub use state::{
+    CommittedSponsorAdmission, LoadedSponsorAdmission, SponsorAdmissionCommitToken,
+    SponsorAdmissionMutation, SponsorAdmissionState, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort,
 };
 
 pub(crate) struct SponsorAdmissionService {
-    pub(super) join_request_state: Arc<dyn SponsorJoinRequestStatePort>,
+    pub(super) state: Arc<dyn SponsorAdmissionStatePort>,
     pub(super) prepare_candidate: Arc<dyn PrepareSponsorCandidatePort>,
+    pub(super) prepare_commit: Arc<dyn PrepareSponsorCommitPort>,
 }
 
 impl SponsorAdmissionService {
     pub(crate) fn new(
-        join_request_state: Arc<dyn SponsorJoinRequestStatePort>,
+        state: Arc<dyn SponsorAdmissionStatePort>,
         prepare_candidate: Arc<dyn PrepareSponsorCandidatePort>,
+        prepare_commit: Arc<dyn PrepareSponsorCommitPort>,
     ) -> Self {
         Self {
-            join_request_state,
+            state,
             prepare_candidate,
+            prepare_commit,
         }
     }
 }

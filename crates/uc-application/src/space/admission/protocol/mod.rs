@@ -4,13 +4,15 @@ mod recovery;
 mod sponsor;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use joiner::JoinerAdmissionService;
 pub use joiner::{
     JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
-    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState,
-    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PreparedJoinerCandidateMaterial,
-    SpaceAdmissionCommitToken,
+    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, PrepareJoinerAppliedError,
+    PrepareJoinerAppliedPort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
+    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, SpaceAdmissionCommitToken,
 };
 pub(crate) use protocol::SpaceAdmissionProtocol;
 pub(crate) use recovery::AdmissionRecoveryService;
@@ -24,8 +26,9 @@ pub(crate) use sponsor::SponsorAdmissionService;
 pub use sponsor::{
     AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
     HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
-    LoadedSponsorJoinRequest, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
-    PreparedSponsorCandidate, SpaceAdmissionMessageReply, SponsorAdmissionMutation,
-    SponsorJoinRequestCommitToken, SponsorJoinRequestState, SponsorJoinRequestStateError,
-    SponsorJoinRequestStatePort,
+    LoadedSponsorAdmission, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
+    PrepareSponsorCommitError, PrepareSponsorCommitPort, PreparedSponsorCandidate,
+    PreparedSponsorCommit, SpaceAdmissionMessageReply, SponsorAdmissionCommitToken,
+    SponsorAdmissionMutation, SponsorAdmissionState, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort,
 };

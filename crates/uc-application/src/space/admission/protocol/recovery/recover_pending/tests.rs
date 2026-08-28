@@ -109,6 +109,84 @@ async fn candidate_is_saved_then_prepared_before_the_next_exchange_is_woken() {
     );
 }
 
+#[tokio::test]
+async fn prepared_is_exchanged_and_commit_is_saved_on_the_next_recovery() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_commit().await;
+    pair.joiner()
+        .start_join(join_input("commit-join"))
+        .await
+        .expect("the join request should be saved before recovery");
+    pair.joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.advanced_count, 2);
+    assert_eq!(report.deferred_count, 0);
+    assert_eq!(
+        pair.events(),
+        &[
+            ProtocolEvent::DeviceNameSaved,
+            ProtocolEvent::JoinerSavedJoinRequest,
+            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::JoinerInitialChannelRequested,
+            ProtocolEvent::JoinerAuthenticatedChannelSaved,
+            ProtocolEvent::JoinerJoinRequestExchanged,
+            ProtocolEvent::JoinerSavedCandidate,
+            ProtocolEvent::JoinerSavedPrepared,
+            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::JoinerContinuationChannelRequested,
+            ProtocolEvent::JoinerPreparedExchanged,
+            ProtocolEvent::JoinerSavedCommitted,
+            ProtocolEvent::JoinerSavedApplied,
+            ProtocolEvent::AdmissionRecoveryWoken,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn commit_is_applied_and_saved_before_the_next_exchange_is_woken() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_commit().await;
+    pair.joiner()
+        .start_join(join_input("apply-commit"))
+        .await
+        .expect("the join request should be saved before recovery");
+    pair.joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.advanced_count, 2);
+    assert_eq!(report.deferred_count, 0);
+    assert_eq!(
+        pair.events(),
+        &[
+            ProtocolEvent::DeviceNameSaved,
+            ProtocolEvent::JoinerSavedJoinRequest,
+            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::JoinerInitialChannelRequested,
+            ProtocolEvent::JoinerAuthenticatedChannelSaved,
+            ProtocolEvent::JoinerJoinRequestExchanged,
+            ProtocolEvent::JoinerSavedCandidate,
+            ProtocolEvent::JoinerSavedPrepared,
+            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::JoinerContinuationChannelRequested,
+            ProtocolEvent::JoinerPreparedExchanged,
+            ProtocolEvent::JoinerSavedCommitted,
+            ProtocolEvent::JoinerSavedApplied,
+            ProtocolEvent::AdmissionRecoveryWoken,
+        ]
+    );
+}
+
 fn join_input(code: &str) -> JoinSpaceInput {
     JoinSpaceInput {
         invitation_code: uc_core::pairing::InvitationCode::new(code),

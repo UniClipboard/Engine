@@ -279,6 +279,11 @@ impl AdmissionRecoveryService {
                     .handle_candidate(self, report, aggregate, token, reply, canonical_digest)
                     .await;
             }
+            SpaceAdmissionMessageKind::Commit => {
+                joiner
+                    .handle_commit(self, report, aggregate, token, reply, canonical_digest)
+                    .await;
+            }
             _ => {
                 self.save_recovery_required(
                     report,

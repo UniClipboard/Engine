@@ -4,8 +4,8 @@
 
 ## 内部负责人
 
-- `joiner/` 包含 `JoinerAdmissionService`、开始加入、处理 Candidate 以及后续 Joiner 推进；设置、开始材料、开始状态、Joiner 候选准备和成功后的维护唤醒能力都留在本目录。
-- `sponsor/` 包含 `SponsorAdmissionService`、处理 JoinRequest 以及后续 Sponsor 推进；Sponsor 状态和候选准备能力都留在本目录。
+- `joiner/` 包含 `JoinerAdmissionService`、开始加入、处理 Candidate、处理 Commit 以及后续 Joiner 推进；设置、开始材料、开始状态、Joiner 候选与 Applied 准备和成功后的维护唤醒能力都留在本目录。
+- `sponsor/` 包含 `SponsorAdmissionService`、统一认证消息分发、处理 JoinRequest、处理 Prepared 以及后续 Sponsor 推进；角色内共享状态、Candidate 与 Commit 准备能力都留在本目录。
 - `recovery/` 包含 `AdmissionRecoveryService`、扫描待恢复记录、建立或恢复连接、交换消息和保存恢复推进；恢复状态、transport、触发原因和恢复报告都留在本目录。
 - `SpaceAdmissionProtocol` 只选择一个完整角色动作并执行 profile 级串行约束。三个内部负责人不得从 `protocol` 模块外取得，也不得成为调用方需要编排的步骤入口。
 - 一个 Port 由对其业务结果负责的内部负责人持有。不得为缩短构造参数把无关能力集中到 `SpaceAdmissionProtocol` 或新增无生命周期职责的 `AdmissionRuntime`。
@@ -13,7 +13,7 @@
 ## 先按角色，再按业务动作组织
 
 - 协议根目录只按 `joiner/`、`sponsor/` 和 `recovery/` 三个角色划分，不在根目录平铺角色文件或业务动作目录。
-- 每个角色内部再按完整业务动作组织，例如 `joiner/start_join/`、`joiner/handle_candidate/`、`sponsor/handle_join_request/` 和 `recovery/recover_pending/`。
+- 每个角色内部再按完整业务动作组织，例如 `joiner/start_join/`、`joiner/handle_candidate/`、`joiner/handle_commit/`、`sponsor/handle_join_request/`、`sponsor/handle_prepared/` 和 `recovery/recover_pending/`。
 - 每个业务动作在自己的目录内管理实现、模型、外部能力、错误和测试。通常分别放在 `execute.rs`、`model.rs`、`ports.rs` 和 `tests.rs`；只有角色内两个或更多动作已经使用且含义相同的内容，才提升到该角色的 `mod.rs`。
 - 业务动作目录不是对外负责人，也不得向调用方公开步骤式入口。动作实现放到对应内部负责人，总入口只委托一个完整动作；调用方仍只使用 `SpaceAdmissionProtocol` 的完整方法。
 
@@ -29,7 +29,7 @@
 
 - 外部能力由需要它的业务动作定义，Infra 提供实现，Engine 负责组装。Application 不得引用具体网络、数据库或密码库类型。
 - 一个能力应隐藏该动作需要的完整外部行为，不得暴露成员账本内部字段、版本、历史摘要或步骤式存储方法。
-- 外部能力产生的错误放在对应动作的 `ports.rs`；动作自己的输入、读取视图、完整变化和结果放在 `model.rs`。
+- 外部能力产生的错误放在对应动作的 `error.rs`，稳定分类必须携带 `#[source] anyhow::Error`，通过构造器和 `From` + `?` 保留来源与回溯；不得用无来源 unit variant 或字符串化 `map_err` 抹平错误链。动作自己的输入、读取视图、完整变化和结果放在 `model.rs`。
 - 只有稳定产品结果才能继续向 `space/admission` 或更外层导出，内部阶段和实现错误不得泄露给调用方。
 
 ## 修改检查
