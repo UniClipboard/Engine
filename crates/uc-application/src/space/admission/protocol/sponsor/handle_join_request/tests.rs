@@ -44,7 +44,7 @@ async fn duplicate_join_request_returns_the_saved_candidate_without_new_commits(
         .expect("Candidate reply must be available")
         .header()
         .message_id();
-    pair.seed_sponsor(first.into_aggregate());
+    pair.seed_sponsor(first.into_admission());
 
     let replay = pair
         .sponsor()

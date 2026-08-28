@@ -6,7 +6,8 @@ use uc_application::deps::{
     SponsorAdmissionStateError, SponsorAdmissionStatePort,
 };
 use uc_core::membership::{
-    AdmissionInvitationClaim, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
+    AdmissionInvitationClaim, AdmissionRecordPersistence, SpaceAdmissionBodyV1,
+    SpaceAdmissionEnvelopeV1, SponsorAdmission,
 };
 
 use crate::db::ports::DbExecutor;
@@ -46,6 +47,8 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                         let aggregate = self
                             .open_record(admission_id, stored)
                             .map_err(into_anyhow)?;
+                        let aggregate = SponsorAdmission::try_from_record(aggregate)
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
                         let token = SponsorAdmissionCommitToken::from_bytes(
                             sponsor_existing_token(state.profile_generation, &aggregate),
                         )
@@ -74,6 +77,8 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                     let aggregate = self
                         .open_record(admission_id, stored)
                         .map_err(into_anyhow)?;
+                    let aggregate = SponsorAdmission::try_from_record(aggregate)
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
                     let token = SponsorAdmissionCommitToken::from_bytes(sponsor_existing_token(
                         state.profile_generation,
                         &aggregate,

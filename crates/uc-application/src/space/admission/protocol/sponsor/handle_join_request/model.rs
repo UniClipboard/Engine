@@ -1,6 +1,6 @@
 use uc_core::membership::{
     AdmissionContinuationCredential, AdmissionPeerBinding, AdmissionStagedSecurityState,
-    SpaceAdmissionAggregate, SpaceAdmissionEnvelopeV1,
+    SpaceAdmissionEnvelopeV1, SponsorAdmission,
 };
 
 pub struct AuthenticatedSpaceAdmissionMessage {
@@ -71,11 +71,11 @@ impl PreparedSponsorCandidate {
 }
 
 pub struct SpaceAdmissionMessageReply {
-    committed: SpaceAdmissionAggregate,
+    committed: SponsorAdmission,
 }
 
 impl SpaceAdmissionMessageReply {
-    pub(crate) fn new(committed: SpaceAdmissionAggregate) -> Option<Self> {
+    pub(crate) fn new(committed: SponsorAdmission) -> Option<Self> {
         committed
             .current_exact_reply()
             .is_some()
@@ -87,7 +87,7 @@ impl SpaceAdmissionMessageReply {
     }
 
     #[cfg(test)]
-    pub(crate) fn into_aggregate(self) -> SpaceAdmissionAggregate {
+    pub(crate) fn into_admission(self) -> SponsorAdmission {
         self.committed
     }
 }

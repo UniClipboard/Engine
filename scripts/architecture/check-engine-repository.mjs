@@ -713,6 +713,7 @@ function checkSpaceModuleInterface() {
 function checkSpaceAdmissionProtocolOwnership() {
   const problems = []
   const protocolRoot = 'crates/uc-application/src/space/admission/protocol'
+  const coreStateRoot = 'crates/uc-core/src/membership/space_admission/state'
   const protocol = read(`${protocolRoot}/protocol.rs`)
   const moduleSurface = read(`${protocolRoot}/mod.rs`)
   const requiredRoleEntries = [
@@ -850,6 +851,56 @@ function checkSpaceAdmissionProtocolOwnership() {
         problems,
         'space admission protocol ownership',
         `${owner} must own ${action}`
+      )
+    }
+  }
+
+  for (const { path, source } of rustSourcesUnder('crates/uc-application/src')) {
+    if (path.endsWith('/tests.rs') || path.endsWith('/test_support.rs')) continue
+    if (/\bSpaceAdmissionAggregate\b/.test(source)) {
+      addProblem(
+        problems,
+        'space admission role capabilities',
+        `${path} exposes the complete admission record to Application`
+      )
+    }
+    if (/\bAdmissionRecordPersistence\b/.test(source)) {
+      addProblem(
+        problems,
+        'space admission role capabilities',
+        `${path} exposes admission persistence capability to Application`
+      )
+    }
+  }
+
+  const capabilityPath = `${coreStateRoot}/capability.rs`
+  if (!existsSync(join(REPOSITORY_ROOT, capabilityPath))) {
+    addProblem(
+      problems,
+      'space admission role capabilities',
+      `missing Core role capability module: ${capabilityPath}`
+    )
+  } else {
+    const capability = read(capabilityPath)
+    for (const role of ['JoinerAdmission', 'SponsorAdmission']) {
+      if (!capability.includes(`pub struct ${role}`)) {
+        addProblem(
+          problems,
+          'space admission role capabilities',
+          `${capabilityPath} is missing ${role}`
+        )
+      }
+    }
+  }
+
+  for (const role of ['joiner', 'sponsor', 'helper', 'terminal']) {
+    const transitionPath = `${coreStateRoot}/transition/${role}.rs`
+    const transition = read(transitionPath)
+    if (/\n\s*pub fn /.test(transition)) {
+      addProblem(
+        problems,
+        'space admission role capabilities',
+        `${transitionPath} still publishes raw Aggregate transitions`
       )
     }
   }

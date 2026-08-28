@@ -246,7 +246,7 @@ impl PendingAdmissionRecoveryStatePort for PassivePorts {
     async fn commit(
         &self,
         _token: AdmissionRecoveryCommitToken,
-        _transition: AdmissionTransition,
+        _transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
         unreachable!()
     }

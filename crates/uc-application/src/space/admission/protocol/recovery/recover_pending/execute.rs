@@ -10,7 +10,7 @@ use crate::space::membership::{
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
 };
 use uc_core::membership::{
-    AdmissionPendingRecovery, AdmissionRecoveryCategory, SpaceAdmissionAggregate,
+    AdmissionPendingRecovery, AdmissionRecoveryCategory, JoinerAdmission,
     SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
 };
 
@@ -161,7 +161,7 @@ impl AdmissionRecoveryService {
         &self,
         report: &mut AdmissionRecoveryReport,
         channel: RecoveryChannel,
-        aggregate: SpaceAdmissionAggregate,
+        aggregate: JoinerAdmission,
         token: AdmissionRecoveryCommitToken,
         error: SpaceAdmissionTransportError,
     ) {
@@ -221,7 +221,7 @@ impl AdmissionRecoveryService {
     async fn save_initial_rejection(
         &self,
         report: &mut AdmissionRecoveryReport,
-        aggregate: SpaceAdmissionAggregate,
+        aggregate: JoinerAdmission,
         token: AdmissionRecoveryCommitToken,
         reason: SpaceAdmissionRejectionReason,
     ) {
@@ -241,7 +241,7 @@ impl AdmissionRecoveryService {
     async fn save_recovery_required(
         &self,
         report: &mut AdmissionRecoveryReport,
-        aggregate: SpaceAdmissionAggregate,
+        aggregate: JoinerAdmission,
         token: AdmissionRecoveryCommitToken,
         category: AdmissionRecoveryCategory,
     ) {
@@ -262,7 +262,7 @@ impl AdmissionRecoveryService {
         &self,
         joiner: &JoinerAdmissionService,
         report: &mut AdmissionRecoveryReport,
-        aggregate: SpaceAdmissionAggregate,
+        aggregate: JoinerAdmission,
         token: AdmissionRecoveryCommitToken,
         reply: AuthenticatedAdmissionReply,
     ) {

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use uc_core::membership::{
     AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding,
-    AdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
+    JoinerAdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
 };
 
 use super::AuthenticatedAdmissionReply;
@@ -35,7 +35,7 @@ pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
     async fn commit(
         &self,
         token: super::AdmissionRecoveryCommitToken,
-        transition: AdmissionTransition,
+        transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError>;
 }
 

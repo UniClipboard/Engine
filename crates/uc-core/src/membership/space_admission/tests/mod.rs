@@ -30,7 +30,8 @@ use super::{
     SpaceAdmissionId, SpaceAdmissionJoinerChannelState, SpaceAdmissionJoinerState,
     SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion, SpaceAdmissionRecordState,
     SpaceAdmissionRejectedState, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
-    SpaceAdmissionSponsorState, SpaceAdmissionTerminalState, UnreadableHistoryPolicy,
+    SpaceAdmissionSponsorState, SpaceAdmissionTerminalState, SponsorAdmission,
+    UnreadableHistoryPolicy,
 };
 
 mod exchange;

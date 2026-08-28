@@ -3,7 +3,7 @@ use uc_application::deps::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, LoadedPendingAdmission,
     PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
-use uc_core::membership::AdmissionTransition;
+use uc_core::membership::{AdmissionRecordPersistence, JoinerAdmission, JoinerAdmissionTransition};
 
 use crate::db::ports::DbExecutor;
 
@@ -31,6 +31,8 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                     if aggregate.pending_recovery().is_none() {
                         continue;
                     }
+                    let aggregate = JoinerAdmission::try_from_record(aggregate)
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
                     let token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
                         state.profile_generation,
                         &aggregate,
@@ -48,7 +50,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     async fn commit(
         &self,
         token: AdmissionRecoveryCommitToken,
-        transition: AdmissionTransition,
+        transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
         let replacement = transition.into_replacement();
         self.executor

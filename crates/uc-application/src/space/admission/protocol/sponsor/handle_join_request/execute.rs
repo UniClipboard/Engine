@@ -1,4 +1,4 @@
-use uc_core::membership::{AdmissionReplayDecision, SpaceAdmissionAggregate};
+use uc_core::membership::{AdmissionReplayDecision, SponsorAdmission};
 
 use super::{AuthenticatedSpaceAdmissionMessage, SpaceAdmissionMessageReply};
 use crate::space::admission::protocol::{
@@ -45,7 +45,7 @@ impl SponsorAdmissionService {
                     ))
                 })?;
                 let admission_id = envelope.header().admission_id();
-                let transition = SpaceAdmissionAggregate::accept_join_request(
+                let transition = SponsorAdmission::accept_join_request(
                     admission_id,
                     invitation_claim,
                     envelope,

@@ -146,6 +146,7 @@ fn completion_helper_can_settle_its_exact_complete_reply() {
         completed.state(),
         SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(_))
     ));
+    assert!(SponsorAdmission::try_from_record(completed.into_replacement()).is_none());
 }
 
 fn challenged_helper_with_counter(counter: u64) -> SpaceAdmissionAggregate {

@@ -3,8 +3,7 @@ use super::JoinerStartMutation;
 use crate::space::admission::protocol::SpaceAdmissionProtocol;
 use crate::space::admission::{CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 use uc_core::membership::{
-    AdmissionRetryState, PendingAdmissionExchange, SpaceAdmissionAggregate,
-    SpaceAdmissionMessageKind,
+    AdmissionRetryState, JoinerAdmission, PendingAdmissionExchange, SpaceAdmissionMessageKind,
 };
 use uc_core::ports::SettingsPort;
 
@@ -30,7 +29,7 @@ impl JoinerAdmissionService {
         ) = loaded.into_parts();
 
         let superseded = current_join
-            .map(SpaceAdmissionAggregate::supersede)
+            .map(JoinerAdmission::supersede)
             .transpose()
             .map_err(|_| JoinSpaceError::PreviousJoinCannotBeSuperseded)?;
 
@@ -44,7 +43,7 @@ impl JoinerAdmissionService {
             AdmissionRetryState::new(0, 0).map_err(|_| JoinSpaceError::InvalidStartMaterial)?,
         )
         .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
-        let transition = SpaceAdmissionAggregate::start_join(
+        let transition = JoinerAdmission::start_join(
             admission_id,
             join_id,
             next_local_join_ordinal,

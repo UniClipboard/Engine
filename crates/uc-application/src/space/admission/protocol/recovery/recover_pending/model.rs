@@ -1,5 +1,5 @@
 use uc_core::ids::DeviceId;
-use uc_core::membership::{SpaceAdmissionAggregate, SpaceAdmissionEnvelopeV1};
+use uc_core::membership::{JoinerAdmission, SpaceAdmissionEnvelopeV1};
 
 /// 是什么事情唤醒了恢复流程
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,7 +55,7 @@ impl AdmissionRecoveryCommitToken {
 }
 
 pub struct LoadedPendingAdmission {
-    aggregate: SpaceAdmissionAggregate,
+    aggregate: JoinerAdmission,
     commit_token: AdmissionRecoveryCommitToken,
 }
 
@@ -78,17 +78,14 @@ impl AuthenticatedAdmissionReply {
 }
 
 impl LoadedPendingAdmission {
-    pub fn new(
-        aggregate: SpaceAdmissionAggregate,
-        commit_token: AdmissionRecoveryCommitToken,
-    ) -> Self {
+    pub fn new(aggregate: JoinerAdmission, commit_token: AdmissionRecoveryCommitToken) -> Self {
         Self {
             aggregate,
             commit_token,
         }
     }
 
-    pub fn into_parts(self) -> (SpaceAdmissionAggregate, AdmissionRecoveryCommitToken) {
+    pub fn into_parts(self) -> (JoinerAdmission, AdmissionRecoveryCommitToken) {
         (self.aggregate, self.commit_token)
     }
 }

@@ -1,7 +1,7 @@
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::Binary;
-use uc_core::membership::SpaceAdmissionAggregate;
+use uc_core::membership::{AdmissionRecordPersistence, SpaceAdmissionAggregate};
 
 use super::persisted::{
     PersistedSpaceAdmissionRepositoryV1, StoredSpaceAdmissionV1,
@@ -98,9 +98,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         Ok(aggregate)
     }
 
-    pub(in crate::space::admission) fn seal_new_record(
+    pub(in crate::space::admission) fn seal_new_record<R: AdmissionRecordPersistence>(
         &self,
-        aggregate: &SpaceAdmissionAggregate,
+        aggregate: &R,
     ) -> Result<StoredSpaceAdmissionV1, SpaceAdmissionStateStoreError> {
         let admission_id = *aggregate.admission_id().as_bytes();
         let wrapped = self
@@ -110,9 +110,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         self.seal_record(aggregate, wrapped)
     }
 
-    pub(in crate::space::admission) fn seal_record(
+    pub(in crate::space::admission) fn seal_record<R: AdmissionRecordPersistence>(
         &self,
-        aggregate: &SpaceAdmissionAggregate,
+        aggregate: &R,
         wrapped_data_key: WrappedSpaceAdmissionDataKey,
     ) -> Result<StoredSpaceAdmissionV1, SpaceAdmissionStateStoreError> {
         let admission_id = *aggregate.admission_id().as_bytes();

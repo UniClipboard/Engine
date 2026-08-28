@@ -20,7 +20,7 @@ async fn prepared_is_committed_before_the_sponsor_returns_commit() {
             .envelope()
             .expect("Candidate reply must be available"),
     );
-    pair.seed_sponsor(candidate.into_aggregate());
+    pair.seed_sponsor(candidate.into_admission());
 
     let commit = pair
         .sponsor()
@@ -58,14 +58,14 @@ async fn complete_ack_is_saved_before_the_sponsor_returns_settled() {
             .envelope()
             .expect("Candidate reply must be available"),
     );
-    pair.seed_sponsor(candidate.into_aggregate());
+    pair.seed_sponsor(candidate.into_admission());
     let commit = pair
         .sponsor()
         .handle(prepared)
         .await
         .expect("Prepared should produce Commit");
     let applied = authenticated_applied(commit.envelope().expect("Commit reply must be available"));
-    pair.seed_sponsor(commit.into_aggregate());
+    pair.seed_sponsor(commit.into_admission());
     let complete = pair
         .sponsor()
         .handle(applied)
@@ -76,7 +76,7 @@ async fn complete_ack_is_saved_before_the_sponsor_returns_settled() {
             .envelope()
             .expect("Complete reply must be available"),
     );
-    pair.seed_sponsor(complete.into_aggregate());
+    pair.seed_sponsor(complete.into_admission());
 
     let settled = pair
         .sponsor()
@@ -116,14 +116,14 @@ async fn duplicate_complete_ack_replays_settled_without_a_new_commit() {
             .envelope()
             .expect("Candidate reply must be available"),
     );
-    pair.seed_sponsor(candidate.into_aggregate());
+    pair.seed_sponsor(candidate.into_admission());
     let commit = pair
         .sponsor()
         .handle(prepared)
         .await
         .expect("Prepared should produce Commit");
     let applied = authenticated_applied(commit.envelope().expect("Commit reply must be available"));
-    pair.seed_sponsor(commit.into_aggregate());
+    pair.seed_sponsor(commit.into_admission());
     let complete = pair
         .sponsor()
         .handle(applied)
@@ -139,7 +139,7 @@ async fn duplicate_complete_ack_replays_settled_without_a_new_commit() {
             .envelope()
             .expect("Complete reply must be available"),
     );
-    pair.seed_sponsor(complete.into_aggregate());
+    pair.seed_sponsor(complete.into_admission());
     let settled = pair
         .sponsor()
         .handle(first_complete_ack)
@@ -150,7 +150,7 @@ async fn duplicate_complete_ack_replays_settled_without_a_new_commit() {
         .expect("Settled reply must be available")
         .header()
         .message_id();
-    pair.seed_sponsor(settled.into_aggregate());
+    pair.seed_sponsor(settled.into_admission());
 
     let replay = pair
         .sponsor()
@@ -191,14 +191,14 @@ async fn applied_is_saved_before_the_sponsor_returns_complete() {
             .envelope()
             .expect("Candidate reply must be available"),
     );
-    pair.seed_sponsor(candidate.into_aggregate());
+    pair.seed_sponsor(candidate.into_admission());
     let commit = pair
         .sponsor()
         .handle(prepared)
         .await
         .expect("Prepared should produce Commit");
     let applied = authenticated_applied(commit.envelope().expect("Commit reply must be available"));
-    pair.seed_sponsor(commit.into_aggregate());
+    pair.seed_sponsor(commit.into_admission());
 
     let complete = pair
         .sponsor()
@@ -230,7 +230,7 @@ async fn prepared_from_a_different_authenticated_peer_is_rejected_before_commit(
         0xa3,
         0xa4,
     );
-    pair.seed_sponsor(candidate.into_aggregate());
+    pair.seed_sponsor(candidate.into_admission());
 
     assert!(matches!(
         pair.sponsor().handle(prepared).await,
@@ -263,7 +263,7 @@ async fn duplicate_prepared_replays_the_saved_commit_without_a_new_commit() {
             .envelope()
             .expect("Candidate reply must be available"),
     );
-    pair.seed_sponsor(candidate.into_aggregate());
+    pair.seed_sponsor(candidate.into_admission());
     let committed = pair
         .sponsor()
         .handle(first_prepared)
@@ -274,7 +274,7 @@ async fn duplicate_prepared_replays_the_saved_commit_without_a_new_commit() {
         .expect("Commit reply must be available")
         .header()
         .message_id();
-    pair.seed_sponsor(committed.into_aggregate());
+    pair.seed_sponsor(committed.into_admission());
 
     let replay = pair
         .sponsor()

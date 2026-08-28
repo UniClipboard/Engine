@@ -15,10 +15,11 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     ActiveSpaceGenerationManifestV2, AdmissionChannelPeerId, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionJoinRequestV1,
-    AdmissionKeyPackage, AdmissionPeerBinding, AdmissionRecoveryPublicKey, AdmissionRetryState,
-    AdmissionRole, AdmissionSourceSnapshot, InvitationId, JoinId, MembershipCredential,
-    PendingAdmissionExchange, SpaceAdmissionAggregate, SpaceAdmissionBodyV1,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionRoute,
+    AdmissionKeyPackage, AdmissionPeerBinding, AdmissionRecordPersistence,
+    AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole, AdmissionSourceSnapshot,
+    InvitationId, JoinId, JoinerAdmission, JoinerAdmissionTransition, MembershipCredential,
+    PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionMessageKind, SpaceAdmissionRoute, SponsorAdmission, SponsorAdmissionTransition,
     UnreadableHistoryPolicy,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
@@ -412,7 +413,7 @@ fn start_join_transition(
     join_byte: u8,
     ordinal: u64,
     source_snapshot: AdmissionSourceSnapshot,
-) -> uc_core::membership::AdmissionTransition {
+) -> JoinerAdmissionTransition {
     let admission_id = SpaceAdmissionId::from_bytes([admission_byte; 32]).unwrap();
     let request = SpaceAdmissionEnvelopeV1::new(
         admission_id,
@@ -441,7 +442,7 @@ fn start_join_transition(
         AdmissionRetryState::new(0, 0).unwrap(),
     )
     .unwrap();
-    SpaceAdmissionAggregate::start_join(
+    JoinerAdmission::start_join(
         admission_id,
         JoinId::from_bytes([join_byte; 16]).unwrap(),
         ordinal,

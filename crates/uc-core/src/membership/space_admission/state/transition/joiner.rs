@@ -1,7 +1,7 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
-    pub fn reject_before_authentication(
+    pub(crate) fn reject_before_authentication(
         mut self,
         reason: SpaceAdmissionRejectionReason,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
@@ -38,7 +38,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn cancel_before_authentication(
+    pub(crate) fn cancel_before_authentication(
         mut self,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
         let record_version = self
@@ -66,7 +66,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn with_authenticated_channel(
+    pub(crate) fn with_authenticated_channel(
         mut self,
         peer_binding: AdmissionPeerBinding,
         continuation_credential: AdmissionContinuationCredential,
@@ -100,7 +100,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn accept_candidate(
+    pub(crate) fn accept_candidate(
         mut self,
         candidate: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
@@ -155,7 +155,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn prepare_candidate(
+    pub(crate) fn prepare_candidate(
         mut self,
         verified_history: AdmissionSignedMembershipHistory,
         staged_target: AdmissionStagedTarget,
@@ -207,7 +207,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn accept_commit(
+    pub(crate) fn accept_commit(
         mut self,
         commit: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
@@ -269,7 +269,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn apply_commit(
+    pub(crate) fn apply_commit(
         mut self,
         pending_exchange: PendingAdmissionExchange,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
@@ -331,7 +331,7 @@ impl SpaceAdmissionAggregate {
         ))
     }
 
-    pub fn accept_complete(
+    pub(crate) fn accept_complete(
         mut self,
         complete: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
@@ -396,7 +396,7 @@ impl SpaceAdmissionAggregate {
         ))
     }
 
-    pub fn activate_complete(
+    pub(crate) fn activate_complete(
         mut self,
         transition_result: AdmissionSpaceTransitionResult,
         pending_exchange: PendingAdmissionExchange,
@@ -441,7 +441,7 @@ impl SpaceAdmissionAggregate {
         ))
     }
 
-    pub fn accept_settled(
+    pub(crate) fn accept_settled(
         mut self,
         settled: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
@@ -482,7 +482,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn cancel(
+    pub(crate) fn cancel(
         mut self,
         pending_exchange: PendingAdmissionExchange,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
@@ -541,7 +541,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn supersede(mut self) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+    pub(crate) fn supersede(mut self) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
         let record_version = self
             .record_version
             .checked_add(1)
@@ -582,7 +582,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn accept_rejection(
+    pub(crate) fn accept_rejection(
         mut self,
         rejected: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],

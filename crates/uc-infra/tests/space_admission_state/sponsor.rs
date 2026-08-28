@@ -60,7 +60,7 @@ async fn accepted_sponsor_record_survives_restart_and_loads_existing() {
     };
     let (peer_binding, envelope, digest, continuation) = message.into_parts();
     let evidence = envelope.evidence(digest).unwrap();
-    let transition = SpaceAdmissionAggregate::accept_join_request(
+    let transition = SponsorAdmission::accept_join_request(
         envelope.header().admission_id(),
         invitation_claim,
         envelope,
@@ -240,7 +240,7 @@ fn accepted_mutation(
 fn accepted_transition(
     message: AuthenticatedSpaceAdmissionMessage,
     state: SponsorAdmissionState,
-) -> uc_core::membership::AdmissionTransition {
+) -> SponsorAdmissionTransition {
     let SponsorAdmissionState::Fresh {
         invitation_claim,
         base_snapshot,
@@ -250,7 +250,7 @@ fn accepted_transition(
     };
     let (peer_binding, envelope, digest, continuation) = message.into_parts();
     let evidence = envelope.evidence(digest).unwrap();
-    SpaceAdmissionAggregate::accept_join_request(
+    SponsorAdmission::accept_join_request(
         envelope.header().admission_id(),
         invitation_claim,
         envelope,

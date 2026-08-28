@@ -1,4 +1,5 @@
 mod aggregate;
+mod capability;
 mod helper;
 mod joiner;
 mod persistence;
@@ -27,6 +28,10 @@ pub use aggregate::{
     AdmissionEffect, AdmissionRecoveryCategory, AdmissionTransition, SpaceAdmissionAggregate,
     SpaceAdmissionAggregateError, SpaceAdmissionRecordState, SpaceAdmissionTerminalState,
     SPACE_ADMISSION_RECORD_FORMAT_V1,
+};
+pub use capability::{
+    AdmissionRecordPersistence, JoinerAdmission, JoinerAdmissionTransition, SponsorAdmission,
+    SponsorAdmissionTransition,
 };
 pub use helper::{
     SpaceAdmissionCompletionHelperApplied, SpaceAdmissionCompletionHelperChallenged,

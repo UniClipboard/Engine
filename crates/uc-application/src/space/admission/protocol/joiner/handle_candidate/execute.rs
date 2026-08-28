@@ -1,4 +1,4 @@
-use uc_core::membership::{SpaceAdmissionAggregate, SpaceAdmissionEnvelopeV1};
+use uc_core::membership::{JoinerAdmission, SpaceAdmissionEnvelopeV1};
 
 use super::PrepareJoinerCandidateError;
 use crate::space::admission::protocol::{
@@ -11,7 +11,7 @@ impl JoinerAdmissionService {
         &self,
         recovery: &AdmissionRecoveryService,
         report: &mut AdmissionRecoveryReport,
-        aggregate: SpaceAdmissionAggregate,
+        aggregate: JoinerAdmission,
         token: AdmissionRecoveryCommitToken,
         reply: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],

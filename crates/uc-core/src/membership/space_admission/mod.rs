@@ -32,11 +32,13 @@ pub use message::{
     SpaceAdmissionRejectionReason, UnreadableHistoryPolicy,
 };
 pub use state::{
-    AdmissionEffect, AdmissionPendingRecovery, AdmissionRecoveryCategory, AdmissionTransition,
-    JoinerActivationPreparation, JoinerAppliedPreparation, JoinerCompletePreparation,
+    AdmissionEffect, AdmissionPendingRecovery, AdmissionRecordPersistence,
+    AdmissionRecoveryCategory, JoinerActivationPreparation, JoinerAdmission,
+    JoinerAdmissionTransition, JoinerAppliedPreparation, JoinerCompletePreparation,
     SpaceAdmissionAggregate, SpaceAdmissionAggregateError, SpaceAdmissionPersistenceError,
-    SponsorCandidatePreparation, SponsorCommitPreparation, SponsorCompletePreparation,
-    SponsorSettlementPreparation, SPACE_ADMISSION_RECORD_FORMAT_V1,
+    SponsorAdmission, SponsorAdmissionTransition, SponsorCandidatePreparation,
+    SponsorCommitPreparation, SponsorCompletePreparation, SponsorSettlementPreparation,
+    SPACE_ADMISSION_RECORD_FORMAT_V1,
 };
 #[cfg(test)]
 pub(crate) use state::{

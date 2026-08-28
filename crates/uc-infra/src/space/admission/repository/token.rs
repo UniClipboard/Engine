@@ -1,11 +1,10 @@
-use sha2::{Digest, Sha256};
-use uc_core::membership::SpaceAdmissionAggregate;
-
 use super::persisted::PersistedSpaceAdmissionRepositoryV1;
+use sha2::{Digest, Sha256};
+use uc_core::membership::AdmissionRecordPersistence;
 
-pub(in crate::space::admission) fn joiner_start_token(
+pub(in crate::space::admission) fn joiner_start_token<R: AdmissionRecordPersistence>(
     state: &PersistedSpaceAdmissionRepositoryV1,
-    current: Option<&SpaceAdmissionAggregate>,
+    current: Option<&R>,
     source_snapshot: &[u8],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -15,16 +14,16 @@ pub(in crate::space::admission) fn joiner_start_token(
     append_optional_id(&mut hasher, state.current_local_join_id);
     append_optional_version(
         &mut hasher,
-        current.map(SpaceAdmissionAggregate::record_version),
+        current.map(AdmissionRecordPersistence::record_version),
     );
     hasher.update((source_snapshot.len() as u64).to_be_bytes());
     hasher.update(source_snapshot);
     hasher.finalize().into()
 }
 
-pub(in crate::space::admission) fn recovery_token(
+pub(in crate::space::admission) fn recovery_token<R: AdmissionRecordPersistence>(
     profile_generation: [u8; 16],
-    aggregate: &SpaceAdmissionAggregate,
+    aggregate: &R,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"uniclipboard/space-admission/recovery-token/v1\0");
@@ -34,9 +33,9 @@ pub(in crate::space::admission) fn recovery_token(
     hasher.finalize().into()
 }
 
-pub(in crate::space::admission) fn sponsor_existing_token(
+pub(in crate::space::admission) fn sponsor_existing_token<R: AdmissionRecordPersistence>(
     profile_generation: [u8; 16],
-    aggregate: &SpaceAdmissionAggregate,
+    aggregate: &R,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"uniclipboard/space-admission/sponsor-existing-token/v1\0");

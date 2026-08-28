@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use uc_core::membership::AdmissionTransition;
+use uc_core::membership::JoinerAdmissionTransition;
 
 mod recover_pending;
 
@@ -27,7 +27,7 @@ impl AdmissionRecoveryService {
     pub(super) async fn commit_recovery(
         &self,
         token: AdmissionRecoveryCommitToken,
-        transition: AdmissionTransition,
+        transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
         self.state.commit(token, transition).await
     }

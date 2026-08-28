@@ -1,7 +1,7 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
-    pub fn start_join(
+    pub(crate) fn start_join(
         admission_id: SpaceAdmissionId,
         join_id: JoinId,
         local_join_ordinal: u64,
@@ -37,7 +37,7 @@ impl SpaceAdmissionAggregate {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn accept_join_request(
+    pub(crate) fn accept_join_request(
         admission_id: SpaceAdmissionId,
         invitation_claim: AdmissionInvitationClaim,
         join_request: SpaceAdmissionEnvelopeV1,

@@ -30,10 +30,6 @@ impl AdmissionTransition {
         }
     }
 
-    pub const fn replacement(&self) -> &SpaceAdmissionAggregate {
-        &self.replacement
-    }
-
     pub fn into_replacement(self) -> SpaceAdmissionAggregate {
         self.replacement
     }
@@ -42,7 +38,8 @@ impl AdmissionTransition {
         self.effects
     }
 
-    pub fn exact_reply(&self) -> Option<&SpaceAdmissionEnvelopeV1> {
+    #[cfg(test)]
+    pub(crate) fn exact_reply(&self) -> Option<&SpaceAdmissionEnvelopeV1> {
         self.replacement.current_exact_reply()
     }
 }

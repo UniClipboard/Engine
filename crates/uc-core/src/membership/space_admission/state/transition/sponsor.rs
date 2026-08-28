@@ -1,7 +1,7 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
-    pub fn fix_candidate(
+    pub(crate) fn fix_candidate(
         mut self,
         candidate_reply: SpaceAdmissionEnvelopeV1,
         staged_security: AdmissionStagedSecurityState,
@@ -38,7 +38,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn commit_prepared(
+    pub(crate) fn commit_prepared(
         mut self,
         prepared: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
@@ -108,7 +108,7 @@ impl SpaceAdmissionAggregate {
         ))
     }
 
-    pub fn complete_applied(
+    pub(crate) fn complete_applied(
         mut self,
         applied: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
@@ -191,7 +191,7 @@ impl SpaceAdmissionAggregate {
         ))
     }
 
-    pub fn settle_complete_ack(
+    pub(crate) fn settle_complete_ack(
         mut self,
         complete_ack: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
@@ -268,7 +268,7 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn reject_cancel(
+    pub(crate) fn reject_cancel(
         mut self,
         cancel_request: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],

@@ -5,21 +5,22 @@ use uc_core::membership::{
     AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionInvitationClaim,
     AdmissionJoinRequestV1, AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit,
     AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPendingRecovery, AdmissionPreparedV1,
-    AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole, AdmissionSecurityCommitmentV1,
-    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionStagedSecurityState,
-    AdmissionStagedTarget, AdmissionStagedTargetInput, BaseMembershipHistoryPosition, InvitationId,
-    JoinId, MemberInstanceId, MembershipAdmissionV2, MembershipCredential, MembershipEventV2,
-    MembershipOperationV2, PendingAdmissionExchange, PreparedAdmissionProofV1,
-    SpaceAdmissionAggregate, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionPersistenceError, SpaceAdmissionRoute,
-    UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-    ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
+    AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
+    AdmissionSecurityCommitmentV1, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
+    AdmissionStagedSecurityState, AdmissionStagedTarget, AdmissionStagedTargetInput,
+    BaseMembershipHistoryPosition, InvitationId, JoinId, JoinerAdmission, MemberInstanceId,
+    MembershipAdmissionV2, MembershipCredential, MembershipEventV2, MembershipOperationV2,
+    PendingAdmissionExchange, PreparedAdmissionProofV1, SpaceAdmissionBodyV1,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
+    SpaceAdmissionPersistenceError, SpaceAdmissionRoute, SponsorAdmission, UnreadableHistoryPolicy,
+    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+    MEMBERSHIP_EVENT_FORMAT_V2,
 };
 use uc_core::security::IdentityFingerprint;
 
 #[test]
 fn initiated_joiner_awaiting_authentication_round_trips_through_persistence() {
-    let decoded = round_trip(initiated_joiner_fixture());
+    let decoded = round_trip_joiner(initiated_joiner_fixture());
     assert!(matches!(
         decoded.pending_recovery(),
         Some(AdmissionPendingRecovery::Initial { .. })
@@ -28,7 +29,7 @@ fn initiated_joiner_awaiting_authentication_round_trips_through_persistence() {
 
 #[test]
 fn initiated_joiner_authenticated_channel_round_trips_through_persistence() {
-    let decoded = round_trip(authenticated_joiner_fixture());
+    let decoded = round_trip_joiner(authenticated_joiner_fixture());
     assert!(matches!(
         decoded.pending_recovery(),
         Some(AdmissionPendingRecovery::Continuation { .. })
@@ -37,12 +38,12 @@ fn initiated_joiner_authenticated_channel_round_trips_through_persistence() {
 
 #[test]
 fn joiner_candidate_round_trips_through_persistence() {
-    round_trip(joiner_candidate_fixture());
+    round_trip_joiner(joiner_candidate_fixture());
 }
 
 #[test]
 fn joiner_prepared_round_trips_through_persistence() {
-    let decoded = round_trip(joiner_prepared_fixture());
+    let decoded = round_trip_joiner(joiner_prepared_fixture());
     assert_eq!(
         decoded.current_exact_reply().map(|reply| reply.kind()),
         Some(SpaceAdmissionMessageKind::Prepared)
@@ -51,13 +52,13 @@ fn joiner_prepared_round_trips_through_persistence() {
 
 #[test]
 fn sponsor_accepted_round_trips_through_persistence() {
-    let decoded = round_trip(sponsor_accepted_fixture());
+    let decoded = round_trip_sponsor(sponsor_accepted_fixture());
     assert!(decoded.sponsor_candidate_preparation().is_some());
 }
 
 #[test]
 fn sponsor_candidate_round_trips_through_persistence_with_exact_reply() {
-    let decoded = round_trip(sponsor_candidate_fixture());
+    let decoded = round_trip_sponsor(sponsor_candidate_fixture());
     assert_eq!(
         decoded.current_exact_reply().map(|reply| reply.kind()),
         Some(SpaceAdmissionMessageKind::Candidate)
@@ -72,11 +73,11 @@ fn persistence_rejects_unknown_version_and_corrupt_payload() {
     unknown_version[0] = 2;
 
     assert_eq!(
-        SpaceAdmissionAggregate::decode_persisted(&unknown_version),
+        JoinerAdmission::decode_persisted(&unknown_version),
         Err(SpaceAdmissionPersistenceError::UnsupportedVersion)
     );
     assert_eq!(
-        SpaceAdmissionAggregate::decode_persisted(&[0xff]),
+        JoinerAdmission::decode_persisted(&[0xff]),
         Err(SpaceAdmissionPersistenceError::InvalidEncoding)
     );
 }
@@ -88,12 +89,27 @@ fn superseded_terminal_round_trips_through_persistence() {
         .expect("Initiated Joiner can be superseded")
         .into_replacement();
 
-    round_trip(superseded);
+    round_trip_joiner(superseded);
 }
 
-fn initiated_joiner_fixture() -> SpaceAdmissionAggregate {
+#[test]
+fn persisted_records_reject_the_wrong_role_capability() {
+    let joiner = initiated_joiner_fixture();
+    let sponsor = sponsor_accepted_fixture();
+
+    assert_eq!(
+        SponsorAdmission::decode_persisted(&joiner.encode_persisted().unwrap()),
+        Err(SpaceAdmissionPersistenceError::InvalidState)
+    );
+    assert_eq!(
+        JoinerAdmission::decode_persisted(&sponsor.encode_persisted().unwrap()),
+        Err(SpaceAdmissionPersistenceError::InvalidState)
+    );
+}
+
+fn initiated_joiner_fixture() -> JoinerAdmission {
     let admission_id = admission_id();
-    SpaceAdmissionAggregate::start_join(
+    JoinerAdmission::start_join(
         admission_id,
         JoinId::from_bytes([0x82; 16]).expect("non-zero join id fixture"),
         7,
@@ -113,14 +129,14 @@ fn initiated_joiner_fixture() -> SpaceAdmissionAggregate {
     .into_replacement()
 }
 
-fn authenticated_joiner_fixture() -> SpaceAdmissionAggregate {
+fn authenticated_joiner_fixture() -> JoinerAdmission {
     initiated_joiner_fixture()
         .with_authenticated_channel(peer_binding(), continuation_credential())
         .expect("initial Joiner can save an authenticated channel")
         .into_replacement()
 }
 
-fn joiner_candidate_fixture() -> SpaceAdmissionAggregate {
+fn joiner_candidate_fixture() -> JoinerAdmission {
     authenticated_joiner_fixture()
         .accept_candidate(
             candidate_envelope(admission_id()),
@@ -132,7 +148,7 @@ fn joiner_candidate_fixture() -> SpaceAdmissionAggregate {
         .into_replacement()
 }
 
-fn joiner_prepared_fixture() -> SpaceAdmissionAggregate {
+fn joiner_prepared_fixture() -> JoinerAdmission {
     let candidate = joiner_candidate_fixture();
     let candidate_material = candidate_body_fixture();
     let prepared = SpaceAdmissionEnvelopeV1::new(
@@ -166,13 +182,13 @@ fn joiner_prepared_fixture() -> SpaceAdmissionAggregate {
         .into_replacement()
 }
 
-fn sponsor_accepted_fixture() -> SpaceAdmissionAggregate {
+fn sponsor_accepted_fixture() -> SponsorAdmission {
     let admission_id = admission_id();
     let join_request = join_request_envelope(admission_id);
     let evidence = join_request
         .evidence([0xa1; 32])
         .expect("non-zero canonical digest fixture");
-    SpaceAdmissionAggregate::accept_join_request(
+    SponsorAdmission::accept_join_request(
         admission_id,
         AdmissionInvitationClaim::from_bytes(vec![0xa2; 32])
             .expect("bounded invitation claim fixture"),
@@ -186,7 +202,7 @@ fn sponsor_accepted_fixture() -> SpaceAdmissionAggregate {
     .into_replacement()
 }
 
-fn sponsor_candidate_fixture() -> SpaceAdmissionAggregate {
+fn sponsor_candidate_fixture() -> SponsorAdmission {
     sponsor_accepted_fixture()
         .fix_candidate(
             candidate_envelope(admission_id()),
@@ -325,11 +341,21 @@ fn prepared_proof(
     )
 }
 
-fn round_trip(original: SpaceAdmissionAggregate) -> SpaceAdmissionAggregate {
+fn round_trip_joiner(original: JoinerAdmission) -> JoinerAdmission {
     let encoded = original
         .encode_persisted()
         .expect("tracer admission state should encode");
-    let decoded = SpaceAdmissionAggregate::decode_persisted(&encoded)
+    let decoded = JoinerAdmission::decode_persisted(&encoded)
+        .expect("encoded tracer admission state should decode");
+    assert_eq!(decoded, original);
+    decoded
+}
+
+fn round_trip_sponsor(original: SponsorAdmission) -> SponsorAdmission {
+    let encoded = original
+        .encode_persisted()
+        .expect("tracer admission state should encode");
+    let decoded = SponsorAdmission::decode_persisted(&encoded)
         .expect("encoded tracer admission state should decode");
     assert_eq!(decoded, original);
     decoded

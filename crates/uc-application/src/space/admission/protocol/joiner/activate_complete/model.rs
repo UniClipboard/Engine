@@ -1,6 +1,6 @@
 use uc_core::membership::{
-    AdmissionSpaceTransitionResult, AdmissionTransition, PendingAdmissionExchange,
-    SpaceAdmissionAggregate,
+    AdmissionSpaceTransitionResult, JoinerAdmission, JoinerAdmissionTransition,
+    PendingAdmissionExchange,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -17,22 +17,19 @@ impl JoinerActivationCommitToken {
 }
 
 pub struct LoadedJoinerActivation {
-    aggregate: SpaceAdmissionAggregate,
+    aggregate: JoinerAdmission,
     commit_token: JoinerActivationCommitToken,
 }
 
 impl LoadedJoinerActivation {
-    pub fn new(
-        aggregate: SpaceAdmissionAggregate,
-        commit_token: JoinerActivationCommitToken,
-    ) -> Self {
+    pub fn new(aggregate: JoinerAdmission, commit_token: JoinerActivationCommitToken) -> Self {
         Self {
             aggregate,
             commit_token,
         }
     }
 
-    pub fn into_parts(self) -> (SpaceAdmissionAggregate, JoinerActivationCommitToken) {
+    pub fn into_parts(self) -> (JoinerAdmission, JoinerActivationCommitToken) {
         (self.aggregate, self.commit_token)
     }
 }
@@ -59,15 +56,15 @@ impl CompletedJoinerActivation {
 }
 
 pub struct JoinerActivationMutation {
-    transition: AdmissionTransition,
+    transition: JoinerAdmissionTransition,
 }
 
 impl JoinerActivationMutation {
-    pub const fn new(transition: AdmissionTransition) -> Self {
+    pub const fn new(transition: JoinerAdmissionTransition) -> Self {
         Self { transition }
     }
 
-    pub fn into_transition(self) -> AdmissionTransition {
+    pub fn into_transition(self) -> JoinerAdmissionTransition {
         self.transition
     }
 }

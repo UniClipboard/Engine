@@ -1,7 +1,7 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
-    pub fn require_recovery(
+    pub(crate) fn require_recovery(
         mut self,
         category: AdmissionRecoveryCategory,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {

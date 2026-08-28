@@ -1,7 +1,8 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
-    pub fn challenge_completion_helper(
+    #[cfg(test)]
+    pub(crate) fn challenge_completion_helper(
         admission_id: SpaceAdmissionId,
         peer_binding: AdmissionPeerBinding,
         continuation_credential: AdmissionContinuationCredential,
@@ -33,7 +34,8 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(replacement, &[]))
     }
 
-    pub fn complete_as_helper(
+    #[cfg(test)]
+    pub(crate) fn complete_as_helper(
         mut self,
         inbound_evidence: AdmissionMessageEvidence,
         verified_commit: SpaceAdmissionEnvelopeV1,
@@ -105,7 +107,8 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
-    pub fn advance_helper_challenge(
+    #[cfg(test)]
+    pub(crate) fn advance_helper_challenge(
         mut self,
         nonce: AdmissionHelperNonce,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {

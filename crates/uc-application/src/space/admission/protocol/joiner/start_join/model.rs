@@ -1,6 +1,6 @@
 use uc_core::membership::{
-    AdmissionEncryptedPasswordEquivalent, AdmissionSourceSnapshot, AdmissionTransition, JoinId,
-    SpaceAdmissionAggregate, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
+    AdmissionEncryptedPasswordEquivalent, AdmissionSourceSnapshot, JoinId, JoinerAdmission,
+    JoinerAdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
 };
 
 pub struct JoinerStartMaterial {
@@ -80,7 +80,7 @@ pub struct LoadedJoinerStartState {
     /// 开始加入时仍需保留的来源 Space 事实，供后续切换和恢复使用。
     source_snapshot: AdmissionSourceSnapshot,
     /// 当前尚未结束的本机加入；用于判断能否安全取代，而不是另开一条并行流程。
-    current_join: Option<SpaceAdmissionAggregate>,
+    current_join: Option<JoinerAdmission>,
     /// 本次加入完成后是否需要切换当前 Space 会话。
     requires_session_transition: bool,
     /// 绑定本次读取结果的不透明凭证；提交完整变化时必须原样交回。
@@ -92,7 +92,7 @@ impl LoadedJoinerStartState {
     pub fn new(
         next_local_join_ordinal: u64,
         source_snapshot: AdmissionSourceSnapshot,
-        current_join: Option<SpaceAdmissionAggregate>,
+        current_join: Option<JoinerAdmission>,
         requires_session_transition: bool,
         commit_token: SpaceAdmissionCommitToken,
     ) -> Self {
@@ -111,7 +111,7 @@ impl LoadedJoinerStartState {
     ) -> (
         u64,
         AdmissionSourceSnapshot,
-        Option<SpaceAdmissionAggregate>,
+        Option<JoinerAdmission>,
         bool,
         SpaceAdmissionCommitToken,
     ) {
@@ -127,19 +127,22 @@ impl LoadedJoinerStartState {
 
 /// 一次开始新加入必须共同保存的完整变化。
 pub struct JoinerStartMutation {
-    created: AdmissionTransition,
-    superseded: Option<AdmissionTransition>,
+    created: JoinerAdmissionTransition,
+    superseded: Option<JoinerAdmissionTransition>,
 }
 
 impl JoinerStartMutation {
-    pub fn new(created: AdmissionTransition, superseded: Option<AdmissionTransition>) -> Self {
+    pub fn new(
+        created: JoinerAdmissionTransition,
+        superseded: Option<JoinerAdmissionTransition>,
+    ) -> Self {
         Self {
             created,
             superseded,
         }
     }
 
-    pub fn into_parts(self) -> (AdmissionTransition, Option<AdmissionTransition>) {
+    pub fn into_parts(self) -> (JoinerAdmissionTransition, Option<JoinerAdmissionTransition>) {
         (self.created, self.superseded)
     }
 }

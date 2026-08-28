@@ -3,6 +3,7 @@ use uc_application::deps::{
     JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState,
     SpaceAdmissionCommitToken,
 };
+use uc_core::membership::{AdmissionRecordPersistence, JoinerAdmission};
 
 use crate::db::ports::DbExecutor;
 
@@ -29,10 +30,11 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                             .records
                             .get(&id)
                             .ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
-                        self.open_record(id, stored)
+                        let record = self.open_record(id, stored)?;
+                        JoinerAdmission::try_from_record(record)
+                            .ok_or(SpaceAdmissionStateStoreError::Corrupt)
                     })
-                    .transpose()
-                    .map_err(into_anyhow)?;
+                    .transpose()?;
                 let token = SpaceAdmissionCommitToken::from_bytes(joiner_start_token(
                     &state,
                     current_join.as_ref(),
@@ -77,10 +79,11 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                                 .records
                                 .get(&id)
                                 .ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
-                            self.open_record(id, stored)
+                            let record = self.open_record(id, stored)?;
+                            JoinerAdmission::try_from_record(record)
+                                .ok_or(SpaceAdmissionStateStoreError::Corrupt)
                         })
-                        .transpose()
-                        .map_err(into_anyhow)?;
+                        .transpose()?;
                     let expected = joiner_start_token(&state, current.as_ref(), &source_bytes);
                     if token.as_bytes() != &expected {
                         return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict));

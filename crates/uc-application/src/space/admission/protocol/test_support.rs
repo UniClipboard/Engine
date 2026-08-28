@@ -8,17 +8,18 @@ use uc_core::membership::{
     AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
     AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinRequestV1,
     AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome,
-    AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecoveryPublicKey, AdmissionRetryState,
-    AdmissionRole, AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState,
-    AdmissionSecurityCommitmentV1, AdmissionSettledV1, AdmissionSignedMembershipHistory,
-    AdmissionSourceSnapshot, AdmissionSpaceTransitionResult, AdmissionStagedSecurityState,
-    AdmissionStagedTarget, AdmissionStagedTargetInput, AdmissionTransition,
-    BaseMembershipHistoryPosition, InvitationId, JoinId, MemberInstanceId, MembershipAdmissionV2,
+    AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecordPersistence,
+    AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
+    AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState, AdmissionSecurityCommitmentV1,
+    AdmissionSettledV1, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
+    AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
+    AdmissionStagedTargetInput, BaseMembershipHistoryPosition, InvitationId, JoinId,
+    JoinerAdmission, JoinerAdmissionTransition, MemberInstanceId, MembershipAdmissionV2,
     MembershipCredential, MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange,
-    PreparedAdmissionProofV1, SpaceAdmissionAggregate, SpaceAdmissionBodyV1,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionRoute,
-    UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-    ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
+    PreparedAdmissionProofV1, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionMessageKind, SpaceAdmissionRoute, SponsorAdmission, UnreadableHistoryPolicy,
+    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+    MEMBERSHIP_EVENT_FORMAT_V2,
 };
 use uc_core::ports::SettingsPort;
 use uc_core::security::IdentityFingerprint;
@@ -87,7 +88,7 @@ struct UnusedSponsorPorts;
 
 struct RecordingSponsorState {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
-    current: Mutex<Option<SpaceAdmissionAggregate>>,
+    current: Mutex<Option<SponsorAdmission>>,
 }
 
 struct FixedSponsorCandidate;
@@ -135,8 +136,8 @@ struct ExchangeThenDeferred {
 
 struct RecordingJoinerStartState {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
-    current_join: Mutex<Option<SpaceAdmissionAggregate>>,
-    created_join: Mutex<Option<SpaceAdmissionAggregate>>,
+    current_join: Mutex<Option<JoinerAdmission>>,
+    created_join: Mutex<Option<JoinerAdmission>>,
     superseded: AtomicBool,
     fail_next_activation_commit: AtomicBool,
 }
@@ -296,7 +297,7 @@ impl JoinerStartStatePort for RecordingJoinerStartState {
     ) -> Result<(), JoinerStartStateError> {
         assert_eq!(token.as_bytes(), &[0x25; 32]);
         let (created, superseded) = mutation.into_parts();
-        assert_eq!(created.record_version(), 0);
+        assert_eq!(created.replacement().record_version(), 0);
         self.superseded
             .store(superseded.is_some(), Ordering::SeqCst);
         *self.created_join.lock().expect("created join is available") =
@@ -322,7 +323,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
         let persisted = aggregate
             .encode_persisted()
             .expect("pending aggregate can be persisted");
-        let aggregate = SpaceAdmissionAggregate::decode_persisted(&persisted)
+        let aggregate = JoinerAdmission::decode_persisted(&persisted)
             .expect("pending aggregate can be reopened");
         Ok(vec![LoadedPendingAdmission::new(
             aggregate,
@@ -334,7 +335,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
     async fn commit(
         &self,
         _token: AdmissionRecoveryCommitToken,
-        transition: AdmissionTransition,
+        transition: JoinerAdmissionTransition,
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
         let effects = transition.effects();
         let aggregate = transition.into_replacement();
@@ -379,8 +380,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
             .encode_persisted()
             .expect("test aggregate can be persisted");
         *self.created_join.lock().expect("created join is available") = Some(
-            SpaceAdmissionAggregate::decode_persisted(&persisted)
-                .expect("test aggregate can be reopened"),
+            JoinerAdmission::decode_persisted(&persisted).expect("test aggregate can be reopened"),
         );
         self.events
             .lock()
@@ -407,7 +407,7 @@ impl JoinerActivationStatePort for RecordingJoinerStartState {
         let persisted = aggregate
             .encode_persisted()
             .expect("activating aggregate can be persisted");
-        let aggregate = SpaceAdmissionAggregate::decode_persisted(&persisted)
+        let aggregate = JoinerAdmission::decode_persisted(&persisted)
             .expect("activating aggregate can be reopened");
         Ok(Some(LoadedJoinerActivation::new(
             aggregate,
@@ -441,7 +441,7 @@ impl JoinerActivationStatePort for RecordingJoinerStartState {
             .encode_persisted()
             .expect("active aggregate can be persisted");
         *self.created_join.lock().expect("created join is available") = Some(
-            SpaceAdmissionAggregate::decode_persisted(&persisted)
+            JoinerAdmission::decode_persisted(&persisted)
                 .expect("active aggregate can be reopened"),
         );
         self.events
@@ -1085,11 +1085,11 @@ impl SpaceAdmissionProtocolTestPair {
         .await
     }
 
-    pub(super) async fn with_current_join(current_join: Option<SpaceAdmissionAggregate>) -> Self {
+    pub(super) async fn with_current_join(current_join: Option<JoinerAdmission>) -> Self {
         Self::with_mode(current_join, TransportMode::DeferInitial).await
     }
 
-    async fn with_mode(current_join: Option<SpaceAdmissionAggregate>, mode: TransportMode) -> Self {
+    async fn with_mode(current_join: Option<JoinerAdmission>, mode: TransportMode) -> Self {
         let events = Arc::new(Mutex::new(Vec::new()));
         let state = Arc::new(RecordingJoinerStartState {
             events: Arc::clone(&events),
@@ -1183,19 +1183,19 @@ impl SpaceAdmissionProtocolTestPair {
         &self.sponsor
     }
 
-    pub(super) fn seed_sponsor(&self, aggregate: SpaceAdmissionAggregate) {
+    pub(super) fn seed_sponsor(&self, admission: SponsorAdmission) {
         *self
             .sponsor_state
             .current
             .lock()
-            .expect("sponsor state is available") = Some(aggregate);
+            .expect("sponsor state is available") = Some(admission);
     }
 
     pub(super) fn events(&self) -> Vec<ProtocolEvent> {
         self.state.events.lock().unwrap().clone()
     }
 
-    pub(super) fn take_created_join(&self) -> SpaceAdmissionAggregate {
+    pub(super) fn take_created_join(&self) -> JoinerAdmission {
         self.state
             .created_join
             .lock()

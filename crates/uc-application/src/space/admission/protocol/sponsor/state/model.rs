@@ -1,5 +1,5 @@
 use uc_core::membership::{
-    AdmissionBaseSnapshot, AdmissionInvitationClaim, AdmissionTransition, SpaceAdmissionAggregate,
+    AdmissionBaseSnapshot, AdmissionInvitationClaim, SponsorAdmission, SponsorAdmissionTransition,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub enum SponsorAdmissionState {
         invitation_claim: AdmissionInvitationClaim,
         base_snapshot: AdmissionBaseSnapshot,
     },
-    Existing(SpaceAdmissionAggregate),
+    Existing(SponsorAdmission),
 }
 
 pub struct LoadedSponsorAdmission {
@@ -42,36 +42,33 @@ impl LoadedSponsorAdmission {
 }
 
 pub struct CommittedSponsorAdmission {
-    aggregate: SpaceAdmissionAggregate,
+    aggregate: SponsorAdmission,
     commit_token: SponsorAdmissionCommitToken,
 }
 
 impl CommittedSponsorAdmission {
-    pub fn new(
-        aggregate: SpaceAdmissionAggregate,
-        commit_token: SponsorAdmissionCommitToken,
-    ) -> Self {
+    pub fn new(aggregate: SponsorAdmission, commit_token: SponsorAdmissionCommitToken) -> Self {
         Self {
             aggregate,
             commit_token,
         }
     }
 
-    pub fn into_parts(self) -> (SpaceAdmissionAggregate, SponsorAdmissionCommitToken) {
+    pub fn into_parts(self) -> (SponsorAdmission, SponsorAdmissionCommitToken) {
         (self.aggregate, self.commit_token)
     }
 }
 
 pub struct SponsorAdmissionMutation {
-    transition: AdmissionTransition,
+    transition: SponsorAdmissionTransition,
 }
 
 impl SponsorAdmissionMutation {
-    pub const fn new(transition: AdmissionTransition) -> Self {
+    pub const fn new(transition: SponsorAdmissionTransition) -> Self {
         Self { transition }
     }
 
-    pub fn into_transition(self) -> AdmissionTransition {
+    pub fn into_transition(self) -> SponsorAdmissionTransition {
         self.transition
     }
 }
