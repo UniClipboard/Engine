@@ -297,6 +297,24 @@ fn admission_artifacts_reject_empty_and_oversized_bytes() {
 }
 
 #[test]
+fn joiner_private_state_is_bounded_and_redacted() {
+    assert_eq!(
+        AdmissionJoinerPrivateState::from_bytes(Vec::new()),
+        Err(AdmissionArtifactError::Empty)
+    );
+    assert_eq!(
+        AdmissionJoinerPrivateState::from_bytes(vec![0x5a; 4 * 1024 * 1024 + 1]),
+        Err(AdmissionArtifactError::Oversized)
+    );
+    let state = AdmissionJoinerPrivateState::from_bytes(vec![0x5a; 64])
+        .expect("bounded Joiner private state");
+
+    let output = format!("{state:?}");
+    assert!(!output.contains("5a5a"));
+    assert!(!output.contains("90"));
+}
+
+#[test]
 fn fixed_size_recovery_and_completion_values_reject_zero() {
     assert!(AdmissionRecoveryPublicKey::from_bytes([0; 32]).is_none());
     assert!(AdmissionCompleteAckV1::new([0; 32]).is_none());

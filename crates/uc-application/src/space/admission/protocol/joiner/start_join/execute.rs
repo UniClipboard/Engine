@@ -34,8 +34,14 @@ impl JoinerAdmissionService {
             .map_err(|_| JoinSpaceError::PreviousJoinCannotBeSuperseded)?;
 
         let material = self.start_material.create(&input).await?;
-        let (admission_id, join_id, route, join_request, encrypted_password_equivalent) =
-            material.into_parts();
+        let (
+            admission_id,
+            join_id,
+            route,
+            join_request,
+            private_state,
+            encrypted_password_equivalent,
+        ) = material.into_parts();
         let pending_exchange = PendingAdmissionExchange::new(
             route,
             join_request,
@@ -48,6 +54,7 @@ impl JoinerAdmissionService {
             join_id,
             next_local_join_ordinal,
             source_snapshot,
+            private_state,
             encrypted_password_equivalent,
             pending_exchange,
         )

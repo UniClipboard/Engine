@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use uc_core::membership::SpaceAdmissionEnvelopeV1;
+use uc_core::membership::{JoinerCandidatePreparation, SpaceAdmissionEnvelopeV1};
 
 use super::PreparedJoinerCandidateMaterial;
 
@@ -15,6 +15,7 @@ pub enum PrepareJoinerCandidateError {
 pub trait PrepareJoinerCandidatePort: Send + Sync {
     async fn prepare(
         &self,
+        preparation: JoinerCandidatePreparation<'_>,
         candidate: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedJoinerCandidateMaterial, PrepareJoinerCandidateError>;
 }

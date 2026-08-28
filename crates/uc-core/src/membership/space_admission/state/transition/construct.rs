@@ -6,6 +6,7 @@ impl SpaceAdmissionAggregate {
         join_id: JoinId,
         local_join_ordinal: u64,
         source_snapshot: AdmissionSourceSnapshot,
+        private_state: AdmissionJoinerPrivateState,
         encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent,
         pending_exchange: PendingAdmissionExchange,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
@@ -26,6 +27,7 @@ impl SpaceAdmissionAggregate {
                     join_id,
                     local_join_ordinal,
                     source_snapshot,
+                    private_state,
                     channel_state: SpaceAdmissionJoinerChannelState::AwaitingAuthentication {
                         encrypted_password_equivalent,
                     },

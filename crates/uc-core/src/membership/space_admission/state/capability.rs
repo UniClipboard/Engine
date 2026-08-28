@@ -115,6 +115,7 @@ impl JoinerAdmission {
         join_id: JoinId,
         local_join_ordinal: u64,
         source_snapshot: AdmissionSourceSnapshot,
+        private_state: AdmissionJoinerPrivateState,
         encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent,
         pending_exchange: PendingAdmissionExchange,
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
@@ -123,6 +124,7 @@ impl JoinerAdmission {
             join_id,
             local_join_ordinal,
             source_snapshot,
+            private_state,
             encrypted_password_equivalent,
             pending_exchange,
         )
@@ -147,6 +149,10 @@ impl JoinerAdmission {
 
     pub fn current_exact_reply(&self) -> Option<&SpaceAdmissionEnvelopeV1> {
         self.record.current_exact_reply()
+    }
+
+    pub fn joiner_candidate_preparation(&self) -> Option<JoinerCandidatePreparation<'_>> {
+        self.record.joiner_candidate_preparation()
     }
 
     pub fn joiner_applied_preparation(&self) -> Option<JoinerAppliedPreparation<'_>> {

@@ -16,6 +16,7 @@ pub struct SpaceAdmissionJoinerInitiated {
     pub(super) join_id: JoinId,
     pub(super) local_join_ordinal: u64,
     pub(super) source_snapshot: AdmissionSourceSnapshot,
+    pub(super) private_state: AdmissionJoinerPrivateState,
     pub(super) channel_state: SpaceAdmissionJoinerChannelState,
     pub(super) pending_exchange: PendingAdmissionExchange,
 }

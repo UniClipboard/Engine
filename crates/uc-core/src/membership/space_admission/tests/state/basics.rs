@@ -46,6 +46,8 @@ fn new_joiner_aggregate_starts_with_all_required_durable_material() {
         7,
         AdmissionSourceSnapshot::from_bytes(vec![0xeb; 64])
             .expect("bounded source snapshot fixture"),
+        AdmissionJoinerPrivateState::from_bytes(vec![0xed; 64])
+            .expect("bounded Joiner private state fixture"),
         AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0xec; 64])
             .expect("bounded encrypted password fixture"),
         exchange,
@@ -94,6 +96,8 @@ fn new_joiner_aggregate_rejects_an_exchange_for_another_admission() {
             1,
             AdmissionSourceSnapshot::from_bytes(vec![0xf2])
                 .expect("bounded source snapshot fixture"),
+            AdmissionJoinerPrivateState::from_bytes(vec![0xf4])
+                .expect("bounded Joiner private state fixture"),
             AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0xf3])
                 .expect("bounded encrypted password fixture"),
             exchange,
@@ -115,6 +119,8 @@ fn initiated_joiner_aggregate_fixture() -> SpaceAdmissionAggregate {
         2,
         AdmissionSourceSnapshot::from_bytes(vec![0xf7; 32])
             .expect("bounded source snapshot fixture"),
+        AdmissionJoinerPrivateState::from_bytes(vec![0xfa; 32])
+            .expect("bounded Joiner private state fixture"),
         AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0xf8; 32])
             .expect("bounded encrypted password fixture"),
         PendingAdmissionExchange::new(

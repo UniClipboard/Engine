@@ -13,10 +13,10 @@ use super::super::AdmissionActivationReceipt;
 use super::artifact::{
     AdmissionActivatedSecurityState, AdmissionBaseSnapshot, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionHelperNonce, AdmissionHelperSecurityState,
-    AdmissionInvitationClaim, AdmissionPeerBinding, AdmissionSealedSecurityState,
-    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionSpaceTransition,
-    AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
-    AdmissionStagedTargetInput,
+    AdmissionInvitationClaim, AdmissionJoinerPrivateState, AdmissionPeerBinding,
+    AdmissionSealedSecurityState, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
+    AdmissionSpaceTransition, AdmissionSpaceTransitionResult, AdmissionStagedSecurityState,
+    AdmissionStagedTarget, AdmissionStagedTargetInput,
 };
 use super::exchange::{
     AdmissionErrorCategory, AdmissionMessageEvidence, PendingAdmissionExchange, SavedAdmissionReply,
@@ -56,6 +56,6 @@ pub use terminal::{
 };
 pub use view::{
     AdmissionPendingRecovery, JoinerActivationPreparation, JoinerAppliedPreparation,
-    JoinerCompletePreparation, SponsorCandidatePreparation, SponsorCommitPreparation,
-    SponsorCompletePreparation, SponsorSettlementPreparation,
+    JoinerCandidatePreparation, JoinerCompletePreparation, SponsorCandidatePreparation,
+    SponsorCommitPreparation, SponsorCompletePreparation, SponsorSettlementPreparation,
 };

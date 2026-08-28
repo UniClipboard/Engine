@@ -90,6 +90,7 @@ impl SpaceAdmissionAggregate {
                 join_id: state.join_id,
                 local_join_ordinal: state.local_join_ordinal,
                 source_snapshot: state.source_snapshot,
+                private_state: state.private_state,
                 channel_state: SpaceAdmissionJoinerChannelState::Authenticated {
                     peer_binding,
                     continuation_credential,

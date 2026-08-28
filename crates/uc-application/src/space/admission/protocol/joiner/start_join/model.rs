@@ -1,6 +1,7 @@
 use uc_core::membership::{
-    AdmissionEncryptedPasswordEquivalent, AdmissionSourceSnapshot, JoinId, JoinerAdmission,
-    JoinerAdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
+    AdmissionEncryptedPasswordEquivalent, AdmissionJoinerPrivateState, AdmissionSourceSnapshot,
+    JoinId, JoinerAdmission, JoinerAdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionRoute,
 };
 
 pub struct JoinerStartMaterial {
@@ -8,6 +9,7 @@ pub struct JoinerStartMaterial {
     join_id: JoinId,
     route: SpaceAdmissionRoute,
     join_request: SpaceAdmissionEnvelopeV1,
+    private_state: AdmissionJoinerPrivateState,
     encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent,
 }
 
@@ -17,6 +19,7 @@ impl JoinerStartMaterial {
         join_id: JoinId,
         route: SpaceAdmissionRoute,
         join_request: SpaceAdmissionEnvelopeV1,
+        private_state: AdmissionJoinerPrivateState,
         encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent,
     ) -> Self {
         Self {
@@ -24,6 +27,7 @@ impl JoinerStartMaterial {
             join_id,
             route,
             join_request,
+            private_state,
             encrypted_password_equivalent,
         }
     }
@@ -35,6 +39,7 @@ impl JoinerStartMaterial {
         JoinId,
         SpaceAdmissionRoute,
         SpaceAdmissionEnvelopeV1,
+        AdmissionJoinerPrivateState,
         AdmissionEncryptedPasswordEquivalent,
     ) {
         (
@@ -42,6 +47,7 @@ impl JoinerStartMaterial {
             self.join_id,
             self.route,
             self.join_request,
+            self.private_state,
             self.encrypted_password_equivalent,
         )
     }

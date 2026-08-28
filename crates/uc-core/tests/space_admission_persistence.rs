@@ -3,15 +3,15 @@ use uc_core::membership::{
     AdmissionBaseSnapshot, AdmissionCandidateV1, AdmissionChangeFacts, AdmissionChannelPeerId,
     AdmissionContinuationCredential, AdmissionContinuationRoute,
     AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionInvitationClaim,
-    AdmissionJoinRequestV1, AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit,
-    AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPendingRecovery, AdmissionPreparedV1,
-    AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
-    AdmissionSecurityCommitmentV1, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
-    AdmissionStagedSecurityState, AdmissionStagedTarget, AdmissionStagedTargetInput,
-    BaseMembershipHistoryPosition, InvitationId, JoinId, JoinerAdmission, MemberInstanceId,
-    MembershipAdmissionV2, MembershipCredential, MembershipEventV2, MembershipOperationV2,
-    PendingAdmissionExchange, PreparedAdmissionProofV1, SpaceAdmissionBodyV1,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
+    AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId,
+    AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPendingRecovery,
+    AdmissionPreparedV1, AdmissionRecordPersistence, AdmissionRecoveryPublicKey,
+    AdmissionRetryState, AdmissionRole, AdmissionSecurityCommitmentV1,
+    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionStagedSecurityState,
+    AdmissionStagedTarget, AdmissionStagedTargetInput, BaseMembershipHistoryPosition, InvitationId,
+    JoinId, JoinerAdmission, MemberInstanceId, MembershipAdmissionV2, MembershipCredential,
+    MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange, PreparedAdmissionProofV1,
+    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
     SpaceAdmissionPersistenceError, SpaceAdmissionRoute, SponsorAdmission, UnreadableHistoryPolicy,
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     MEMBERSHIP_EVENT_FORMAT_V2,
@@ -34,11 +34,20 @@ fn initiated_joiner_authenticated_channel_round_trips_through_persistence() {
         decoded.pending_recovery(),
         Some(AdmissionPendingRecovery::Continuation { .. })
     ));
+    assert_eq!(
+        decoded
+            .joiner_candidate_preparation()
+            .expect("authenticated Joiner retains private state")
+            .private_state()
+            .as_bytes(),
+        &[0x80; 64]
+    );
 }
 
 #[test]
 fn joiner_candidate_round_trips_through_persistence() {
-    round_trip_joiner(joiner_candidate_fixture());
+    let candidate = round_trip_joiner(joiner_candidate_fixture());
+    assert_joiner_private_state_absent(&candidate);
 }
 
 #[test]
@@ -89,7 +98,8 @@ fn superseded_terminal_round_trips_through_persistence() {
         .expect("Initiated Joiner can be superseded")
         .into_replacement();
 
-    round_trip_joiner(superseded);
+    let superseded = round_trip_joiner(superseded);
+    assert_joiner_private_state_absent(&superseded);
 }
 
 #[test]
@@ -115,6 +125,8 @@ fn initiated_joiner_fixture() -> JoinerAdmission {
         7,
         AdmissionSourceSnapshot::from_bytes(vec![0x83; 64])
             .expect("bounded source snapshot fixture"),
+        AdmissionJoinerPrivateState::from_bytes(vec![0x80; 64])
+            .expect("bounded Joiner private state fixture"),
         AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0x84; 64])
             .expect("bounded encrypted password fixture"),
         PendingAdmissionExchange::new(
@@ -349,6 +361,14 @@ fn round_trip_joiner(original: JoinerAdmission) -> JoinerAdmission {
         .expect("encoded tracer admission state should decode");
     assert_eq!(decoded, original);
     decoded
+}
+
+fn assert_joiner_private_state_absent(joiner: &JoinerAdmission) {
+    let encoded = joiner
+        .encode_persisted()
+        .expect("Joiner state should encode");
+
+    assert!(!encoded.windows(64).any(|window| window == [0x80; 64]));
 }
 
 fn round_trip_sponsor(original: SponsorAdmission) -> SponsorAdmission {

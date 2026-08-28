@@ -7,8 +7,8 @@ use uc_core::membership::{
     AdmissionCommitV1, AdmissionCompleteAckV1, AdmissionCompleteV1, AdmissionCompletionV1,
     AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
     AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinRequestV1,
-    AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome,
-    AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecordPersistence,
+    AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit,
+    AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecordPersistence,
     AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
     AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState, AdmissionSecurityCommitmentV1,
     AdmissionSettledV1, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
@@ -648,6 +648,7 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
 impl PrepareJoinerCandidatePort for UnusedSponsorPorts {
     async fn prepare(
         &self,
+        _preparation: uc_core::membership::JoinerCandidatePreparation<'_>,
         _candidate: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedJoinerCandidateMaterial, PrepareJoinerCandidateError> {
         unreachable!()
@@ -895,8 +896,10 @@ impl PrepareSponsorSettledPort for FixedSponsorSettled {
 impl PrepareJoinerCandidatePort for FixedJoinerCandidate {
     async fn prepare(
         &self,
+        preparation: uc_core::membership::JoinerCandidatePreparation<'_>,
         candidate: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedJoinerCandidateMaterial, PrepareJoinerCandidateError> {
+        assert_eq!(preparation.private_state().as_bytes(), &[0x1b; 64]);
         let SpaceAdmissionBodyV1::Candidate(candidate_body) = candidate.body() else {
             return Err(PrepareJoinerCandidateError::Invalid);
         };
@@ -1484,6 +1487,8 @@ impl JoinerStartMaterialPort for FixedJoinerStartMaterial {
             join_id,
             SpaceAdmissionRoute::from_bytes(vec![0x19; 32]).expect("valid route"),
             join_request,
+            AdmissionJoinerPrivateState::from_bytes(vec![0x1b; 64])
+                .expect("valid Joiner private state"),
             AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0x1a; 64])
                 .expect("valid password material"),
         ))

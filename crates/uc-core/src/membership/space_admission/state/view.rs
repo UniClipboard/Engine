@@ -13,6 +13,16 @@ pub enum AdmissionPendingRecovery<'a> {
     },
 }
 
+pub struct JoinerCandidatePreparation<'a> {
+    private_state: &'a AdmissionJoinerPrivateState,
+}
+
+impl JoinerCandidatePreparation<'_> {
+    pub const fn private_state(&self) -> &AdmissionJoinerPrivateState {
+        self.private_state
+    }
+}
+
 pub struct SponsorCandidatePreparation<'a> {
     admission_id: SpaceAdmissionId,
     join_request: &'a SpaceAdmissionEnvelopeV1,
@@ -217,6 +227,23 @@ impl SpaceAdmissionAggregate {
             }),
             _ => None,
         }
+    }
+
+    pub fn joiner_candidate_preparation(&self) -> Option<JoinerCandidatePreparation<'_>> {
+        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) =
+            &self.state
+        else {
+            return None;
+        };
+        if !matches!(
+            state.channel_state,
+            SpaceAdmissionJoinerChannelState::Authenticated { .. }
+        ) {
+            return None;
+        }
+        Some(JoinerCandidatePreparation {
+            private_state: &state.private_state,
+        })
     }
 
     pub fn sponsor_candidate_preparation(&self) -> Option<SponsorCandidatePreparation<'_>> {

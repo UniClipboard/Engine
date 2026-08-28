@@ -15,12 +15,12 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     ActiveSpaceGenerationManifestV2, AdmissionChannelPeerId, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionJoinRequestV1,
-    AdmissionKeyPackage, AdmissionPeerBinding, AdmissionRecordPersistence,
-    AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole, AdmissionSourceSnapshot,
-    InvitationId, JoinId, JoinerAdmission, JoinerAdmissionTransition, MembershipCredential,
-    PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionRoute, SponsorAdmission, SponsorAdmissionTransition,
-    UnreadableHistoryPolicy,
+    AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionPeerBinding,
+    AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
+    AdmissionSourceSnapshot, InvitationId, JoinId, JoinerAdmission, JoinerAdmissionTransition,
+    MembershipCredential, PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
+    SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionRoute, SponsorAdmission,
+    SponsorAdmissionTransition, UnreadableHistoryPolicy,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra::db::executor::DieselSqliteExecutor;
@@ -316,6 +316,7 @@ async fn sqlite_payload_does_not_contain_admission_plaintext() {
 
     assert!(!encrypted.windows(32).any(|window| window == [0xa8; 32]));
     assert!(!encrypted.windows(64).any(|window| window == [0xa9; 64]));
+    assert!(!encrypted.windows(64).any(|window| window == [0xaa; 64]));
 }
 
 #[tokio::test]
@@ -449,6 +450,7 @@ fn start_join_transition(
         JoinId::from_bytes([join_byte; 16]).unwrap(),
         ordinal,
         source_snapshot,
+        AdmissionJoinerPrivateState::from_bytes(vec![admission_byte.wrapping_add(9); 64]).unwrap(),
         AdmissionEncryptedPasswordEquivalent::from_bytes(vec![admission_byte + 8; 64]).unwrap(),
         pending,
     )

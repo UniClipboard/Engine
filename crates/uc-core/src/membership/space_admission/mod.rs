@@ -8,9 +8,9 @@ pub use artifact::{
     AdmissionActivatedSecurityState, AdmissionArtifactError, AdmissionBaseSnapshot,
     AdmissionContinuationCredential, AdmissionContinuationRoute,
     AdmissionEncryptedPasswordEquivalent, AdmissionHelperNonce, AdmissionHelperSecurityState,
-    AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionKeyPackage, AdmissionMlsCommit,
-    AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionRecoveryPublicKey,
-    AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState,
+    AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinerPrivateState,
+    AdmissionKeyPackage, AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionPeerBinding,
+    AdmissionRecoveryPublicKey, AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState,
     AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionSpaceTransition,
     AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
     AdmissionStagedTargetInput, SpaceAdmissionRoute,
@@ -34,11 +34,11 @@ pub use message::{
 pub use state::{
     AdmissionEffect, AdmissionPendingRecovery, AdmissionRecordPersistence,
     AdmissionRecoveryCategory, JoinerActivationPreparation, JoinerAdmission,
-    JoinerAdmissionTransition, JoinerAppliedPreparation, JoinerCompletePreparation,
-    SpaceAdmissionAggregate, SpaceAdmissionAggregateError, SpaceAdmissionPersistenceError,
-    SponsorAdmission, SponsorAdmissionTransition, SponsorCandidatePreparation,
-    SponsorCommitPreparation, SponsorCompletePreparation, SponsorSettlementPreparation,
-    SPACE_ADMISSION_RECORD_FORMAT_V1,
+    JoinerAdmissionTransition, JoinerAppliedPreparation, JoinerCandidatePreparation,
+    JoinerCompletePreparation, SpaceAdmissionAggregate, SpaceAdmissionAggregateError,
+    SpaceAdmissionPersistenceError, SponsorAdmission, SponsorAdmissionTransition,
+    SponsorCandidatePreparation, SponsorCommitPreparation, SponsorCompletePreparation,
+    SponsorSettlementPreparation, SPACE_ADMISSION_RECORD_FORMAT_V1,
 };
 #[cfg(test)]
 pub(crate) use state::{

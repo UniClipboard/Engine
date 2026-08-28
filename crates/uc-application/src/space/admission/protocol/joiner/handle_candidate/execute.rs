@@ -16,7 +16,14 @@ impl JoinerAdmissionService {
         reply: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
     ) {
-        let prepared = match self.prepare_candidate.prepare(&reply).await {
+        let preparation = match aggregate.joiner_candidate_preparation() {
+            Some(preparation) => preparation,
+            None => {
+                report.recovery_required_count += 1;
+                return;
+            }
+        };
+        let prepared = match self.prepare_candidate.prepare(preparation, &reply).await {
             Ok(prepared) => prepared,
             Err(PrepareJoinerCandidateError::Unavailable) => {
                 report.deferred_count += 1;

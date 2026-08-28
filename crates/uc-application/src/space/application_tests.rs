@@ -206,6 +206,8 @@ impl JoinerStartMaterialPort for PassivePorts {
             join_id,
             SpaceAdmissionRoute::from_bytes(vec![0x89; 32]).expect("valid route"),
             request,
+            AdmissionJoinerPrivateState::from_bytes(vec![0x8d; 64])
+                .expect("valid Joiner private state"),
             AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0x8a; 64])
                 .expect("valid password material"),
         ))
@@ -343,6 +345,7 @@ impl PrepareSponsorSettledPort for PassivePorts {
 impl PrepareJoinerCandidatePort for PassivePorts {
     async fn prepare(
         &self,
+        _preparation: JoinerCandidatePreparation<'_>,
         _candidate: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedJoinerCandidateMaterial, PrepareJoinerCandidateError> {
         unreachable!()

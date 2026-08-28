@@ -80,6 +80,7 @@ struct PersistedJoinerInitiatedV1 {
     join_id: [u8; 16],
     local_join_ordinal: u64,
     source_snapshot: Vec<u8>,
+    private_state: Vec<u8>,
     channel_state: PersistedJoinerChannelStateV1,
     pending_exchange: PersistedPendingExchangeV1,
 }

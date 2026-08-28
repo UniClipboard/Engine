@@ -23,6 +23,7 @@ impl TryFrom<&SpaceAdmissionJoinerInitiated> for PersistedJoinerInitiatedV1 {
             join_id: *state.join_id.as_bytes(),
             local_join_ordinal: state.local_join_ordinal,
             source_snapshot: state.source_snapshot.as_bytes().to_vec(),
+            private_state: state.private_state.as_bytes().to_vec(),
             channel_state,
             pending_exchange: PersistedPendingExchangeV1::try_from(&state.pending_exchange)?,
         })
@@ -66,6 +67,8 @@ impl PersistedJoinerInitiatedV1 {
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             local_join_ordinal: self.local_join_ordinal,
             source_snapshot: AdmissionSourceSnapshot::from_bytes(self.source_snapshot)
+                .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
+            private_state: AdmissionJoinerPrivateState::from_bytes(self.private_state)
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             channel_state,
             pending_exchange: self.pending_exchange.into_domain(admission_id)?,

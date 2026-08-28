@@ -995,6 +995,22 @@ function checkSpaceAdmissionPersistenceOwnership() {
       )
     }
   }
+  const joinerState = read(`${stateRoot}/joiner.rs`)
+  const initialPersistence = read(`${persistenceRoot}/initial.rs`)
+  if (!joinerState.includes('private_state: AdmissionJoinerPrivateState')) {
+    addProblem(
+      problems,
+      'space admission persistence ownership',
+      'Joiner Initiated must own its opaque private state'
+    )
+  }
+  if (!initialPersistence.includes('private_state: state.private_state.as_bytes().to_vec()')) {
+    addProblem(
+      problems,
+      'space admission persistence ownership',
+      'Joiner private state must be included in encrypted admission persistence'
+    )
+  }
 
   return problems
 }
