@@ -1009,6 +1009,7 @@ function checkInfraSpaceAdmissionOwnership() {
     'repository/codec.rs',
     'repository/token.rs',
     'joiner/mod.rs',
+    'joiner/activation_state.rs',
     'joiner/start_state.rs',
     'joiner/source_snapshot.rs',
     'recovery/mod.rs',

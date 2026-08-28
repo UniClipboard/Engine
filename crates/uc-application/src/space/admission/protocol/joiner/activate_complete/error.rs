@@ -25,10 +25,10 @@ pub enum JoinerActivationStateError {
 }
 
 impl JoinerActivationStateError {
-    anyhow_error_constructor!(locked, Locked);
-    anyhow_error_constructor!(state_changed, StateChanged);
-    anyhow_error_constructor!(recovery_required, RecoveryRequired);
-    anyhow_error_constructor!(unavailable, Unavailable);
+    anyhow_error_constructor!(pub locked, Locked);
+    anyhow_error_constructor!(pub state_changed, StateChanged);
+    anyhow_error_constructor!(pub recovery_required, RecoveryRequired);
+    anyhow_error_constructor!(pub unavailable, Unavailable);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +46,6 @@ pub enum ExecuteJoinerActivationError {
 }
 
 impl ExecuteJoinerActivationError {
-    anyhow_error_constructor!(invalid, Invalid);
-    anyhow_error_constructor!(unavailable, Unavailable);
+    anyhow_error_constructor!(pub invalid, Invalid);
+    anyhow_error_constructor!(pub unavailable, Unavailable);
 }

@@ -28,6 +28,8 @@ use uc_infra::db::pool::init_db_pool;
 use uc_infra::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_infra::space::SqliteSpaceAdmissionState;
 
+#[path = "space_admission_state/activation.rs"]
+mod activation;
 #[path = "space_admission_state/sponsor.rs"]
 mod sponsor;
 

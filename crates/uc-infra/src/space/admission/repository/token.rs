@@ -33,6 +33,18 @@ pub(in crate::space::admission) fn recovery_token<R: AdmissionRecordPersistence>
     hasher.finalize().into()
 }
 
+pub(in crate::space::admission) fn joiner_activation_token<R: AdmissionRecordPersistence>(
+    profile_generation: [u8; 16],
+    admission: &R,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/space-admission/joiner-activation-token/v1\0");
+    hasher.update(profile_generation);
+    hasher.update(admission.admission_id().as_bytes());
+    hasher.update(admission.record_version().to_be_bytes());
+    hasher.finalize().into()
+}
+
 pub(in crate::space::admission) fn sponsor_existing_token<R: AdmissionRecordPersistence>(
     profile_generation: [u8; 16],
     aggregate: &R,
