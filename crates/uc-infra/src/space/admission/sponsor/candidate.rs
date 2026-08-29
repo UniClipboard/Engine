@@ -18,6 +18,7 @@ use uc_core::membership::{
 };
 
 use super::base_snapshot::decode_sponsor_base_snapshot;
+use crate::space::admission::recovery_material::seal_recovery_material;
 
 const SPONSOR_CANDIDATE_STAGED_FORMAT_V1: u16 = 1;
 
@@ -48,12 +49,13 @@ impl DefaultSponsorCandidatePreparation {
 }
 
 #[derive(Serialize, Deserialize)]
-struct SponsorCandidateStagedV1 {
-    format_version: u16,
-    staged_state: Vec<u8>,
-    target_protection_group_id: String,
-    target_key_catalog: uc_core::membership::AdmissionContentKeyCatalogV1,
-    existing_member_deliveries: Vec<SponsorAdmissionSecurityDelivery>,
+pub(super) struct SponsorCandidateStagedV1 {
+    pub(super) format_version: u16,
+    pub(super) staged_state: Vec<u8>,
+    pub(super) target_protection_group_id: String,
+    pub(super) target_key_catalog: uc_core::membership::AdmissionContentKeyCatalogV1,
+    pub(super) existing_member_deliveries: Vec<SponsorAdmissionSecurityDelivery>,
+    pub(super) sealed_recovery_material: Vec<u8>,
 }
 
 #[async_trait]
@@ -203,12 +205,28 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
             SpaceAdmissionBodyV1::Candidate(candidate),
         )
         .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
+        let recovery_plaintext = postcard::to_stdvec(&SponsorCandidateStagedV1 {
+            format_version: SPONSOR_CANDIDATE_STAGED_FORMAT_V1,
+            staged_state: security.staged_state.clone(),
+            target_protection_group_id: security.target_protection_group_id.clone(),
+            target_key_catalog: security.target_key_catalog.clone(),
+            existing_member_deliveries: security.existing_member_deliveries.clone(),
+            sealed_recovery_material: Vec::new(),
+        })
+        .map_err(|error| PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error)))?;
+        let sealed_recovery_material = seal_recovery_material(
+            admission_id.as_bytes(),
+            request.recovery_public_key().as_bytes(),
+            &recovery_plaintext,
+        )
+        .map_err(|error| PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error)))?;
         let staged = postcard::to_stdvec(&SponsorCandidateStagedV1 {
             format_version: SPONSOR_CANDIDATE_STAGED_FORMAT_V1,
             staged_state: security.staged_state,
             target_protection_group_id: security.target_protection_group_id,
             target_key_catalog: security.target_key_catalog,
             existing_member_deliveries: security.existing_member_deliveries,
+            sealed_recovery_material,
         })
         .map_err(|error| PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error)))?;
         let staged_security = AdmissionStagedSecurityState::from_bytes(staged)
@@ -233,22 +251,23 @@ fn mint_message_id() -> uc_core::membership::AdmissionMessageId {
 #[cfg(test)]
 mod tests {
     use uc_application::deps::{
-        AdmissionSecurityTransitionError, CurrentMemberSignatureError,
+        AdmissionSecurityTransitionError, CurrentMemberSignatureError, PrepareSponsorCommitPort,
         SponsorPreparedAdmissionSecurity,
     };
     use uc_core::membership::{
         AdmissionBaseSnapshot, AdmissionChangeFacts, AdmissionChannelPeerId,
         AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, AdmissionContinuationCredential,
         AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinRequestV1,
-        AdmissionKeyPackage, AdmissionMessageId, AdmissionPeerBinding, AdmissionRecoveryPublicKey,
-        HistoricalMembershipSignatureError, MembershipCredential, SpaceAdmissionMessageKind,
-        UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-        ED25519_SIGNATURE_ALGORITHM_V1,
+        AdmissionKeyPackage, AdmissionMessageId, AdmissionPeerBinding, AdmissionPreparedV1,
+        AdmissionRecoveryPublicKey, HistoricalMembershipSignatureError, MembershipCredential,
+        PreparedAdmissionProofV1, SpaceAdmissionMessageKind, UnreadableHistoryPolicy,
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::security::IdentityFingerprint;
 
     use super::*;
     use crate::space::admission::sponsor::base_snapshot::PersistedSponsorBaseSnapshotV1;
+    use crate::space::admission::sponsor::DefaultSponsorCommitPreparation;
 
     struct DeterministicSignatures {
         device_id: DeviceId,
@@ -422,22 +441,76 @@ mod tests {
             sponsor_device,
             b"continuation-route".to_vec(),
             signatures.clone(),
-            signatures,
+            signatures.clone(),
             Arc::new(FixedSecurity),
         );
 
-        let prepared = adapter
+        let candidate_material = adapter
             .prepare(
                 admission_id,
                 accepted
                     .sponsor_candidate_preparation()
                     .expect("Accepted exposes Candidate preparation"),
             )
-            .await;
-
-        if let Err(error) = prepared {
-            panic!("Sponsor Candidate preparation failed: {error:?}");
-        }
+            .await
+            .unwrap_or_else(|error| panic!("Sponsor Candidate preparation failed: {error:?}"));
+        let (candidate_reply, staged_security) = candidate_material.into_parts();
+        let candidate_message_id = candidate_reply.header().message_id();
+        let candidate = match candidate_reply.body() {
+            SpaceAdmissionBodyV1::Candidate(candidate) => candidate,
+            _ => panic!("Sponsor reply must be Candidate"),
+        };
+        let MembershipOperationV2::AddDevice { admission } = &candidate.candidate_event().operation
+        else {
+            panic!("Candidate must add one member");
+        };
+        let commitment = candidate.security_commitment();
+        let mut proof = PreparedAdmissionProofV1::new(
+            *admission_id.as_bytes(),
+            commitment.lineage_id.clone(),
+            commitment.base_history_position.clone(),
+            candidate.candidate_event().event_id(),
+            candidate.candidate_event().resulting_members_digest,
+            commitment.security_commitment_id,
+            admission.facts.member_instance,
+            admission.membership_credential.credential_id,
+            Vec::new(),
+        );
+        proof.signature = DeterministicSignatures::sign(
+            &admission.membership_credential,
+            &proof.signing_payload(),
+        );
+        let prepared_request = SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Joiner,
+            1,
+            AdmissionMessageId::from_bytes([0x90; 32]).expect("valid Prepared id"),
+            Some(candidate_message_id),
+            SpaceAdmissionBodyV1::Prepared(AdmissionPreparedV1::new(proof)),
+        )
+        .expect("valid Prepared request");
+        let candidate_state = accepted
+            .fix_candidate(candidate_reply, staged_security)
+            .expect("Sponsor fixes Candidate")
+            .into_replacement();
+        let commit = DefaultSponsorCommitPreparation::new(signatures)
+            .prepare(
+                admission_id,
+                candidate_state
+                    .sponsor_commit_preparation()
+                    .expect("Candidate exposes Commit preparation"),
+                &prepared_request,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("Sponsor Commit preparation failed: {error:?}"));
+        let (committed_history, sealed_security, commit_reply) = commit.into_parts();
+        assert!(!committed_history.as_bytes().is_empty());
+        assert!(!sealed_security.as_bytes().is_empty());
+        assert_eq!(commit_reply.kind(), SpaceAdmissionMessageKind::Commit);
+        assert_eq!(
+            commit_reply.header().predecessor_message_id(),
+            Some(prepared_request.header().message_id())
+        );
     }
 
     fn join_request(admission_id: SpaceAdmissionId) -> SpaceAdmissionEnvelopeV1 {

@@ -21,7 +21,7 @@ impl PreparedSponsorCommit {
         }
     }
 
-    pub(crate) fn into_parts(
+    pub fn into_parts(
         self,
     ) -> (
         AdmissionSignedMembershipHistory,

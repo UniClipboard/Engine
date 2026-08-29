@@ -65,7 +65,7 @@ impl PreparedSponsorCandidate {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (SpaceAdmissionEnvelopeV1, AdmissionStagedSecurityState) {
+    pub fn into_parts(self) -> (SpaceAdmissionEnvelopeV1, AdmissionStagedSecurityState) {
         (self.candidate_reply, self.staged_security)
     }
 }

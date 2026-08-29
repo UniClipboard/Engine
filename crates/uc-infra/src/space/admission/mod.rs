@@ -2,6 +2,7 @@ mod credentials;
 mod full_invitation;
 mod joiner;
 mod recovery;
+mod recovery_material;
 mod repository;
 mod security;
 mod sponsor;
@@ -17,4 +18,4 @@ pub use joiner::{
 };
 pub use repository::SqliteSpaceAdmissionState;
 pub use security::AdmissionSecurityTransitionAdapter;
-pub use sponsor::DefaultSponsorCandidatePreparation;
+pub use sponsor::{DefaultSponsorCandidatePreparation, DefaultSponsorCommitPreparation};
