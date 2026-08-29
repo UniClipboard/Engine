@@ -7,13 +7,13 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_memory_storage::MemoryStorage;
 use openmls_rust_crypto::RustCrypto;
 use openmls_traits::{
-    OpenMlsProvider, crypto::OpenMlsCrypto, signatures::Signer, storage::StorageProvider,
-    types::SignatureScheme,
+    crypto::OpenMlsCrypto, signatures::Signer, storage::StorageProvider, types::SignatureScheme,
+    OpenMlsProvider,
 };
 use sha2::{Digest, Sha256};
 use uc_core::membership::{
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, AdmissionSecurityCommitmentV1,
-    BaseMembershipHistoryPosition, ED25519_SIGNATURE_ALGORITHM_V1, MembershipCredential,
+    AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition, MembershipCredential,
+    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 
 use crate::security::MasterKey;
@@ -780,8 +780,8 @@ mod tests {
     use super::*;
     use crate::space::OpenMlsHistoricalSignatureVerifier;
     use uc_core::membership::{
-        BaseMembershipHistoryPosition, ED25519_SIGNATURE_ALGORITHM_V1,
-        HistoricalMembershipSignatureVerifier, MembershipEventId,
+        BaseMembershipHistoryPosition, HistoricalMembershipSignatureVerifier, MembershipEventId,
+        ED25519_SIGNATURE_ALGORITHM_V1,
     };
 
     #[test]
@@ -909,24 +909,20 @@ mod tests {
         )
         .unwrap();
 
-        assert!(
-            !MlsGroupEngine::verify_member_payload(
-                &bob.client_state,
-                b"alice",
-                b"changed-transcript",
-                &signature,
-            )
-            .unwrap()
-        );
-        assert!(
-            !MlsGroupEngine::verify_member_payload(
-                &bob.client_state,
-                b"bob",
-                b"member-attestation-transcript",
-                &signature,
-            )
-            .unwrap()
-        );
+        assert!(!MlsGroupEngine::verify_member_payload(
+            &bob.client_state,
+            b"alice",
+            b"changed-transcript",
+            &signature,
+        )
+        .unwrap());
+        assert!(!MlsGroupEngine::verify_member_payload(
+            &bob.client_state,
+            b"bob",
+            b"member-attestation-transcript",
+            &signature,
+        )
+        .unwrap());
     }
 
     #[test]
@@ -941,15 +937,13 @@ mod tests {
         let signature = MlsGroupEngine::sign_member_payload(&bob.client_state, payload).unwrap();
         let removal = MlsGroupEngine::remove_member(&admission.sponsor_state, b"bob").unwrap();
 
-        assert!(
-            !MlsGroupEngine::verify_member_payload(
-                &removal.sponsor_state,
-                b"bob",
-                payload,
-                &signature,
-            )
-            .unwrap()
-        );
+        assert!(!MlsGroupEngine::verify_member_payload(
+            &removal.sponsor_state,
+            b"bob",
+            payload,
+            &signature,
+        )
+        .unwrap());
     }
 
     #[test]

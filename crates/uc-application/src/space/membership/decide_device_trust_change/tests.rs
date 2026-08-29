@@ -302,6 +302,7 @@ async fn accepting_local_removal_requires_explicit_confirmation_before_writing()
     let query = Arc::new(QueryDeviceTrustUseCase::new(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
     ));
     let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let decide = DecideDeviceTrustChangeUseCase::new(
@@ -347,6 +348,7 @@ async fn confirmed_acceptance_commits_the_decision_and_stops_local_access() {
     let query = Arc::new(QueryDeviceTrustUseCase::new(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
     ));
     let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let decide = DecideDeviceTrustChangeUseCase::new(
@@ -422,6 +424,7 @@ async fn rejection_keeps_local_membership_and_diverges_only_the_proposer() {
     let query = Arc::new(QueryDeviceTrustUseCase::new(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
     ));
     let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let decide = DecideDeviceTrustChangeUseCase::new(
@@ -490,6 +493,7 @@ async fn repeated_decision_returns_the_original_result_without_a_second_commit()
     let query = Arc::new(QueryDeviceTrustUseCase::new(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
     ));
     let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let effects = Arc::new(EffectCounter(AtomicUsize::new(0)));
@@ -538,6 +542,7 @@ async fn one_decision_conflict_is_retried_from_a_fresh_snapshot() {
     let query = Arc::new(QueryDeviceTrustUseCase::new(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
     ));
     let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let decide = DecideDeviceTrustChangeUseCase::new(

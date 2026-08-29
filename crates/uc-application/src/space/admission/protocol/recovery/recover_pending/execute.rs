@@ -26,7 +26,7 @@ impl SpaceAdmissionProtocol {
         trigger: AdmissionRecoveryTrigger,
     ) -> AdmissionRecoveryReport {
         self.execute_exclusively(async {
-            let mut report = self.joiner.recover_activation().await;
+            let (mut report, _) = self.joiner.recover_activation().await;
             if report.advanced_count > 0 {
                 return report;
             }

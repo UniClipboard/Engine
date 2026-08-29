@@ -266,6 +266,7 @@ async fn removal_commits_all_local_facts_once_before_returning_success() {
     let query = Arc::new(QueryDeviceTrustUseCase::new(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
     ));
     let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let effects = Arc::new(EffectCounter(AtomicUsize::new(0)));
@@ -342,6 +343,7 @@ async fn one_persistence_conflict_is_retried_from_a_fresh_snapshot() {
     let query = Arc::new(QueryDeviceTrustUseCase::new(
         Arc::clone(&ledger),
         Arc::new(OfflineObservations),
+        Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
     ));
     let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let remove = RemoveSpaceMemberUseCase::new(

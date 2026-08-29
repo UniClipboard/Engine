@@ -29,8 +29,8 @@ pub use maintenance::{
 };
 pub use query_device_trust::{
     DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
-    DeviceTrustStatus, DeviceTrustSyncState, LoadDeviceTrustObservationsPort,
-    PendingDeviceTrustChange, QueryDeviceTrustError,
+    DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
+    LoadDeviceTrustObservationsPort, PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
 pub use remove_space_member::{
@@ -54,7 +54,7 @@ pub(super) use maintenance::{
 #[cfg(test)]
 pub(super) use query_admission::{MembershipAdmissionSnapshot, QueryMembershipAdmissionError};
 pub(super) use query_admission::{QueryMembershipAdmissionPort, QueryMembershipAdmissionUseCase};
-pub(super) use query_device_trust::{project_current_join, QueryDeviceTrustUseCase};
+pub(super) use query_device_trust::QueryDeviceTrustUseCase;
 pub(super) use re_pairing::{RePairingState, ResolveRePairingPort};
 pub(super) use remove_space_member::RemoveSpaceMemberUseCase;
 pub(super) use synchronize_history::SynchronizeMembershipHistoryUseCase;

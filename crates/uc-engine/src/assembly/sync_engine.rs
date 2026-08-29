@@ -84,14 +84,14 @@ pub(crate) use uc_infra::network::iroh::IrohNodeConfig;
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 use uc_infra::space::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
-    DefaultJoinerAppliedPreparation, DefaultJoinerCandidatePreparation,
-    DefaultJoinerInvitationPreparation, DefaultJoinerStartMaterial,
-    DefaultMembershipSecurityUpdateAdapter, DefaultSponsorCandidatePreparation,
-    DefaultSponsorCommitPreparation, DefaultSponsorCompletePreparation,
-    DefaultSponsorSettledPreparation, DeviceTrustObservationsAdapter,
-    GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport, MembershipActivationAdapter,
-    MembershipMemberFactsAdapter, MembershipNetworkGate, MembershipProjectionCleanupAdapter,
-    OpenMlsHistoricalSignatureVerifier,
+    DefaultJoinerAppliedPreparation, DefaultJoinerCancellationPreparation,
+    DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
+    DefaultJoinerStartMaterial, DefaultMembershipSecurityUpdateAdapter,
+    DefaultSponsorCandidatePreparation, DefaultSponsorCommitPreparation,
+    DefaultSponsorCompletePreparation, DefaultSponsorSettledPreparation,
+    DeviceTrustObservationsAdapter, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
+    MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
+    MembershipProjectionCleanupAdapter, OpenMlsHistoricalSignatureVerifier,
 };
 
 #[derive(Default)]
@@ -830,6 +830,9 @@ pub async fn build_sync_engine_assembly(
             )),
             joiner_start_state: space_setup.admission_state.clone()
                 as Arc<dyn uc_application::deps::JoinerStartStatePort>,
+            current_join_admission_state: space_setup.admission_state.clone()
+                as Arc<dyn uc_application::deps::CurrentJoinAdmissionStatePort>,
+            prepare_joiner_cancellation: Arc::new(DefaultJoinerCancellationPreparation),
             pending_admission_recovery_state: space_setup.admission_state.clone()
                 as Arc<dyn uc_application::deps::PendingAdmissionRecoveryStatePort>,
             space_admission_transport: admission_transport,
@@ -869,20 +872,22 @@ pub async fn build_sync_engine_assembly(
                 historical_signatures.clone(),
             )),
             prepare_joiner_activation: Arc::new(DefaultJoinerActivationPreparation::new(
-                historical_signatures,
+                historical_signatures.clone(),
                 Arc::clone(&space_setup.admission_space_transition),
             )),
             joiner_activation_state: space_setup.admission_state.clone()
                 as Arc<dyn uc_application::deps::JoinerActivationStatePort>,
-            execute_joiner_activation: Arc::new(DefaultJoinerActivationExecutor::new(Arc::clone(
-                &space_setup.admission_space_transition,
-            ))),
+            execute_joiner_activation: Arc::new(DefaultJoinerActivationExecutor::new(
+                Arc::clone(&space_setup.admission_space_transition),
+                historical_signatures,
+            )),
             device_trust_observations: Arc::new(DeviceTrustObservationsAdapter::new(
                 Arc::clone(&deps.device.member_repo),
                 Arc::clone(&presence),
             )),
+            current_join_status: space_setup.admission_state.clone()
+                as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
             membership_history_transport: membership_history_transport.clone(),
-            admission_space_transition: Arc::clone(&space_setup.admission_space_transition),
             apply_membership_member_facts: Arc::new(MembershipMemberFactsAdapter::new(
                 Arc::clone(&deps.device.member_repo),
                 Arc::clone(&shared.trusted_peer_repo),

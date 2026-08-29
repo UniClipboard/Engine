@@ -6,6 +6,9 @@ mod ports;
 pub use error::{ExecuteJoinerActivationError, JoinerActivationStateError};
 pub use model::{
     CompletedJoinerActivation, JoinerActivationCommitToken, JoinerActivationMutation,
-    LoadedJoinerActivation,
+    JoinerActivationOutcome, LoadedJoinerActivation,
 };
 pub use ports::{ExecuteJoinerActivationPort, JoinerActivationStatePort};
+
+#[cfg(test)]
+mod tests;

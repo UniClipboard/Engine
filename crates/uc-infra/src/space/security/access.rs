@@ -12,15 +12,15 @@
 //! XChaCha20-Poly1305 wrap/unwrap) ironclad 保留。
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use hkdf::Hkdf;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{Instrument, debug, error, info, info_span, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 use zeroize::Zeroize;
 
 use uc_application::deps::{
@@ -28,14 +28,15 @@ use uc_application::deps::{
     ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
     ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
     AdmissionSecurityTransitionInput, CurrentMemberSignatureError, CurrentMemberSignaturePort,
-    PrepareSponsorAdmissionSecurityPort, ProfileKeyAccessProbe, ProfileKeyAccessProbePortError,
-    SponsorAdmissionSecurityRequest, SponsorPreparedAdmissionSecurity,
+    PrepareSponsorAdmissionSecurityPort, PreparedMemberSecurityDelivery, ProfileKeyAccessProbe,
+    ProfileKeyAccessProbePortError, SponsorAdmissionSecurityRequest,
+    SponsorPreparedAdmissionSecurity,
 };
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 
 use crate::security::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
-use crate::security::{Kek, MasterKey, v1_aead};
+use crate::security::{v1_aead, Kek, MasterKey};
 use uc_core::ids::{DeviceId, ProfileId, SessionId, SpaceId};
 use uc_core::membership::{
     AdmissionReplayId, BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort,
@@ -46,7 +47,6 @@ use uc_core::membership::{
     RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
     RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError,
     SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
-    SponsorAdmissionSecurityDelivery,
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
@@ -2706,7 +2706,7 @@ impl PrepareSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
         let existing_member_deliveries = request
             .existing_recipients
             .iter()
-            .map(|recipient| SponsorAdmissionSecurityDelivery {
+            .map(|recipient| PreparedMemberSecurityDelivery {
                 recipient: recipient.device_id.clone(),
                 credential_id: recipient.credential_id,
                 payload: update_payload.clone(),
@@ -2953,7 +2953,7 @@ fn admission_bundle_digest(
     candidate_core_digest: [u8; 32],
     welcome: &[u8],
     target_key_catalog: &[u8],
-    deliveries: &[SponsorAdmissionSecurityDelivery],
+    deliveries: &[PreparedMemberSecurityDelivery],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"uniclipboard/admission-bundle/v1\0");
@@ -3005,7 +3005,7 @@ mod admission_tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use tempfile::{TempDir, tempdir};
+    use tempfile::{tempdir, TempDir};
     use uc_core::crypto::domain::Passphrase;
     use uc_core::membership::{
         BeginRevocationOutcome, BootstrapError, BootstrapId, ContentKeyId, ContentKeyPurpose,
@@ -3551,20 +3551,16 @@ mod admission_tests {
                 .map(|id| id.as_str()),
             Some(bootstrap_id.as_str())
         );
-        assert!(
-            MlsGroupEngine::contains_active_member(
-                &MlsClientState::from_bytes(stage.material().group_state().to_vec()),
-                sponsor.as_str().as_bytes(),
-            )
-            .unwrap()
-        );
-        assert!(
-            !MlsGroupEngine::contains_active_member(
-                &MlsClientState::from_bytes(stage.material().group_state().to_vec()),
-                retained.as_str().as_bytes(),
-            )
-            .unwrap()
-        );
+        assert!(MlsGroupEngine::contains_active_member(
+            &MlsClientState::from_bytes(stage.material().group_state().to_vec()),
+            sponsor.as_str().as_bytes(),
+        )
+        .unwrap());
+        assert!(!MlsGroupEngine::contains_active_member(
+            &MlsClientState::from_bytes(stage.material().group_state().to_vec()),
+            retained.as_str().as_bytes(),
+        )
+        .unwrap());
         assert_eq!(
             session
                 .current_content_key(&space_id, ContentKeyPurpose::Content)
@@ -3758,13 +3754,11 @@ mod admission_tests {
                 .epoch(),
             material.state().epoch()
         );
-        assert!(
-            sponsor
-                .resume_group_revocations(201)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(sponsor
+            .resume_group_revocations(201)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -4026,13 +4020,11 @@ mod admission_tests {
             Arc::new(repository),
         );
 
-        assert!(
-            adapter
-                .resume_group_revocations(200)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(adapter
+            .resume_group_revocations(200)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -4148,18 +4140,14 @@ mod admission_tests {
             credential.member_instance_id(&device_id),
             adapter.current_member_instance(&device_id).await.unwrap()
         );
-        assert!(
-            adapter
-                .verify_current_member_payload(&device_id, payload, &signature)
-                .await
-                .unwrap()
-        );
-        assert!(
-            !adapter
-                .verify_current_member_payload(&DeviceId::new("missing"), payload, &signature)
-                .await
-                .unwrap()
-        );
+        assert!(adapter
+            .verify_current_member_payload(&device_id, payload, &signature)
+            .await
+            .unwrap());
+        assert!(!adapter
+            .verify_current_member_payload(&DeviceId::new("missing"), payload, &signature)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -4170,7 +4158,7 @@ mod admission_tests {
             SponsorAdmissionSecurityRequest,
         };
         use uc_core::membership::{
-            BaseMembershipHistoryPosition, ED25519_SIGNATURE_ALGORITHM_V1, MembershipCredential,
+            BaseMembershipHistoryPosition, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
         };
 
         let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
@@ -4274,7 +4262,7 @@ mod admission_tests {
             SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
         };
         use uc_core::membership::{
-            BaseMembershipHistoryPosition, ED25519_SIGNATURE_ALGORITHM_V1, MembershipCredential,
+            BaseMembershipHistoryPosition, MembershipCredential, ED25519_SIGNATURE_ALGORITHM_V1,
         };
 
         let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
@@ -4683,19 +4671,17 @@ mod admission_tests {
             .await
             .unwrap();
         fail_saves.store(true, Ordering::Release);
-        assert!(
-            joiner
-                .install_group_join(
-                    &target_space,
-                    &Passphrase::new("new passphrase is not committed"),
-                    pending,
-                    &admission.welcome,
-                    &admission.encrypted_key_catalog,
-                    admission.group_epoch,
-                )
-                .await
-                .is_err()
-        );
+        assert!(joiner
+            .install_group_join(
+                &target_space,
+                &Passphrase::new("new passphrase is not committed"),
+                pending,
+                &admission.welcome,
+                &admission.encrypted_key_catalog,
+                admission.group_epoch,
+            )
+            .await
+            .is_err());
 
         assert_eq!(joiner_session.current_space_id().unwrap(), old_space);
         assert_eq!(joiner_session.get_master_key().unwrap(), old_root);
@@ -5248,11 +5234,9 @@ mod admission_tests {
         );
         let payload = b"member-attestation-after-relayed-update";
         let signature = device_c.sign_current_member_payload(payload).await.unwrap();
-        assert!(
-            device_a
-                .verify_current_member_payload(&device_c_id, payload, &signature)
-                .await
-                .unwrap()
-        );
+        assert!(device_a
+            .verify_current_member_payload(&device_c_id, payload, &signature)
+            .await
+            .unwrap());
     }
 }

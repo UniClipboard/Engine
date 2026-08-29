@@ -15,11 +15,11 @@ use super::errors::IssuePairingInvitationError;
 use crate::facade::roster::{MemberRosterDeps, MemberRosterFacade};
 use crate::space::admission::{
     CancelInvitationError, CancelPairingInvitationUseCase, CompletePendingSpaceTransitionError,
-    CompletePendingSpaceTransitionUseCase, InMemoryPairingInvitationHolder,
-    IssuePairingInvitationForAddressUseCase, IssuePairingInvitationUseCase, JoinSpaceError,
-    JoinSpaceInput, JoinSpaceResult, PairingInvitationAddressCandidate, PairingInvitationIssuer,
+    InMemoryPairingInvitationHolder, IssuePairingInvitationForAddressUseCase,
+    IssuePairingInvitationUseCase, JoinSpaceError, JoinSpaceInput, JoinSpaceResult,
+    PairingInvitationAddressCandidate, PairingInvitationIssuer,
     QueryPairingInvitationAddressesError, QueryPairingInvitationAddressesUseCase,
-    QueryPendingSpaceTransitionError, QueryPendingSpaceTransitionUseCase,
+    QueryPendingSpaceTransitionError, SpaceAdmissionProtocol,
 };
 use crate::space::application::SpaceApplication;
 use crate::space::lifecycle::combine_space_session_activity;
@@ -56,8 +56,7 @@ pub struct SpaceFacade {
     issue_pairing_invitation: Arc<IssuePairingInvitationUseCase>,
     issue_pairing_invitation_for_address: Arc<IssuePairingInvitationForAddressUseCase>,
     query_pairing_invitation_addresses: Arc<QueryPairingInvitationAddressesUseCase>,
-    complete_pending_space_transition: Arc<CompletePendingSpaceTransitionUseCase>,
-    query_pending_space_transition: Arc<QueryPendingSpaceTransitionUseCase>,
+    space_admission: Arc<SpaceAdmissionProtocol>,
     session_activity: Arc<dyn crate::space::lifecycle::SpaceSessionActivityPort>,
     membership_maintenance: Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>,
     lock_space_session: Arc<LockSpaceSessionUseCase>,
@@ -116,9 +115,8 @@ impl SpaceFacade {
         let peer_scope = application.current_scope();
         let membership_reset = application.membership_reset();
         let membership_history_endpoint = application.membership_history_endpoint();
+        let space_admission = application.space_admission();
         let space_admission_endpoint = application.space_admission_endpoint();
-        let complete_pending_space_transition = application.complete_pending_space_transition();
-        let query_pending_space_transition = application.query_pending_space_transition();
         let membership_session_activity = application.membership_session_activity();
         let membership_maintenance = application.membership_maintenance_wake();
         let SpaceSessionDeps {
@@ -276,8 +274,7 @@ impl SpaceFacade {
             issue_pairing_invitation,
             issue_pairing_invitation_for_address,
             query_pairing_invitation_addresses,
-            complete_pending_space_transition,
-            query_pending_space_transition,
+            space_admission,
             session_activity: activity,
             membership_maintenance,
             lock_space_session,
@@ -489,24 +486,29 @@ impl SpaceFacade {
             .lock()
             .await
             .as_ref()
-            .map(SpaceApplication::cancel_space_join)
+            .map(SpaceApplication::space_admission_for_cancel)
             .ok_or_else(|| {
-                crate::facade::CancelSpaceJoinError::State("space application is closed".to_owned())
+                crate::facade::CancelSpaceJoinError::state(anyhow::anyhow!(
+                    "space application is closed"
+                ))
             })?;
-        cancel.execute(join_id).await
+        cancel.cancel_join(join_id).await
     }
 
     pub async fn has_pending_space_transition(
         &self,
     ) -> Result<bool, QueryPendingSpaceTransitionError> {
-        self.query_pending_space_transition.execute().await
+        self.space_admission.has_pending_space_transition().await
     }
 
     pub async fn complete_pending_space_transition(
         &self,
     ) -> Result<crate::space::admission::CurrentJoinStatus, CompletePendingSpaceTransitionError>
     {
-        let result = self.complete_pending_space_transition.execute().await?;
+        let result = self
+            .space_admission
+            .complete_pending_space_transition()
+            .await?;
         self.membership_maintenance.wake();
         Ok(result)
     }

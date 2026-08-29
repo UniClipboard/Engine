@@ -6,15 +6,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uc_application::deps::{
     CurrentMemberSignaturePort, PrepareSponsorAdmissionSecurityPort, PrepareSponsorCandidateError,
-    PrepareSponsorCandidatePort, PreparedSponsorCandidate, SponsorAdmissionSecurityRecipient,
-    SponsorAdmissionSecurityRequest,
+    PrepareSponsorCandidatePort, PreparedMemberSecurityDelivery, PreparedSponsorCandidate,
+    SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
 };
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     AdmissionCandidateV1, AdmissionContinuationRoute, AdmissionMlsCommit, AdmissionMlsWelcome,
     AdmissionRole, AdmissionStagedSecurityState, HistoricalMembershipSignatureVerifier,
     MembershipOperationV2, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SponsorAdmissionSecurityDelivery, SponsorCandidatePreparation, VersionedMembershipHistory,
+    SponsorCandidatePreparation, VersionedMembershipHistory,
 };
 
 use super::base_snapshot::decode_sponsor_base_snapshot;
@@ -55,8 +55,7 @@ pub(in crate::space::admission) struct SponsorCandidateStagedV1 {
     pub(in crate::space::admission) target_protection_group_id: String,
     pub(in crate::space::admission) target_key_catalog:
         uc_core::membership::AdmissionContentKeyCatalogV1,
-    pub(in crate::space::admission) existing_member_deliveries:
-        Vec<SponsorAdmissionSecurityDelivery>,
+    pub(in crate::space::admission) existing_member_deliveries: Vec<PreparedMemberSecurityDelivery>,
     pub(in crate::space::admission) sealed_recovery_material: Vec<u8>,
 }
 
@@ -277,14 +276,14 @@ mod tests {
         PrepareSponsorCompletePort, SponsorPreparedAdmissionSecurity,
     };
     use uc_core::membership::{
-        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, AdmissionActivationReceipt, AdmissionAppliedV1,
-        AdmissionBaseSnapshot, AdmissionChangeFacts, AdmissionChannelPeerId,
-        AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, AdmissionContinuationCredential,
-        AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinRequestV1,
-        AdmissionKeyPackage, AdmissionMessageId, AdmissionPeerBinding, AdmissionPreparedV1,
-        AdmissionRecoveryPublicKey, AdmissionSignedMembershipHistory,
-        ED25519_SIGNATURE_ALGORITHM_V1, HistoricalMembershipSignatureError, MembershipCredential,
+        AdmissionActivationReceipt, AdmissionAppliedV1, AdmissionBaseSnapshot,
+        AdmissionChangeFacts, AdmissionChannelPeerId, AdmissionContentKeyCatalogV1,
+        AdmissionContentKeyEntryV1, AdmissionContinuationCredential, AdmissionIdentitySignature,
+        AdmissionInvitationClaim, AdmissionJoinRequestV1, AdmissionKeyPackage, AdmissionMessageId,
+        AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecoveryPublicKey,
+        AdmissionSignedMembershipHistory, HistoricalMembershipSignatureError, MembershipCredential,
         PreparedAdmissionProofV1, SpaceAdmissionMessageKind, UnreadableHistoryPolicy,
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::security::IdentityFingerprint;
 

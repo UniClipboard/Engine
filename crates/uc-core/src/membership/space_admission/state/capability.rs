@@ -165,8 +165,68 @@ impl JoinerAdmission {
         self.record.admission_id()
     }
 
+    /// 返回本机加入动作的稳定标识，不暴露内部阶段表示。
+    pub fn join_id(&self) -> JoinId {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+                state,
+            )) => state.join_id,
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(
+                state,
+            )) => state.join_id,
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) => {
+                state.join_id
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Candidate(state)) => {
+                state.join_id
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state)) => {
+                state.join_id
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Committed(state)) => {
+                state.join_id
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Applied(state)) => {
+                state.join_id
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Activating(state)) => {
+                state.join_id
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(state)) => {
+                state.join_id
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
+                SpaceAdmissionActiveState::PendingSettlement(state),
+            )) => state.join_id,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
+                SpaceAdmissionActiveState::Settled(state),
+            )) => state.join_id,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(state)) => {
+                match state {
+                    SpaceAdmissionSupersededState::Initiated { join_id }
+                    | SpaceAdmissionSupersededState::Authenticated { join_id, .. } => *join_id,
+                    SpaceAdmissionSupersededState::Candidate(state) => state.join_id,
+                }
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::LocalJoiner(state),
+            )) => state.join_id,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Joiner(state),
+            )) => state.join_id,
+            _ => unreachable!("JoinerAdmission only contains joiner-owned states"),
+        }
+    }
+
     pub const fn is_active_settled(&self) -> bool {
         self.record.is_active_settled()
+    }
+
+    pub const fn is_cancelling(&self) -> bool {
+        matches!(
+            self.record.state,
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(_))
+        )
     }
 
     pub fn pending_recovery(&self) -> Option<AdmissionPendingRecovery<'_>> {
@@ -254,9 +314,23 @@ impl JoinerAdmission {
         message_id: AdmissionMessageId,
         retry_state: AdmissionRetryState,
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
-        self.record
-            .request_cancel(message_id, retry_state)
-            .map(JoinerAdmissionTransition::from_transition)
+        if matches!(
+            self.record.state,
+            SpaceAdmissionRecordState::Joiner(
+                SpaceAdmissionJoinerState::ResolvingInvitation(_)
+                    | SpaceAdmissionJoinerState::ResolvedInvitation(_)
+            ) | SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(
+                SpaceAdmissionJoinerInitiated {
+                    channel_state: SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. },
+                    ..
+                }
+            ))
+        ) {
+            self.record.cancel_before_authentication()
+        } else {
+            self.record.request_cancel(message_id, retry_state)
+        }
+        .map(JoinerAdmissionTransition::from_transition)
     }
 
     pub fn with_authenticated_channel(

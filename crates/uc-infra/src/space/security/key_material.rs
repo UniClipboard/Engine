@@ -10,8 +10,8 @@ use uc_core::{
 };
 
 use crate::fs::key_slot_store::KeySlotStore;
-use crate::security::Kek;
 use crate::security::crypto_model::{KeyScope, KeySlot, KeySlotFile};
+use crate::security::Kek;
 
 use super::scope_identifier::scope_identifier;
 

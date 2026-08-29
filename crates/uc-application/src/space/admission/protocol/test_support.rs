@@ -46,24 +46,27 @@ use super::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryService, AdmissionRecoveryTrigger,
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
     AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, CompletedJoinerActivation,
-    ExecuteJoinerActivationError, ExecuteJoinerActivationPort, JoinerActivationCommitToken,
-    JoinerActivationMutation, JoinerActivationStateError, JoinerActivationStatePort,
-    JoinerAdmissionService, JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort,
-    JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort, LoadedJoinerActivation,
-    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAdmission,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
-    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
-    PrepareJoinerAppliedPort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
-    PrepareJoinerInvitationError, PrepareJoinerInvitationPort, PrepareSponsorCandidateError,
-    PrepareSponsorCandidatePort, PrepareSponsorCommitError, PrepareSponsorCommitPort,
-    PrepareSponsorCompleteError, PrepareSponsorCompletePort, PrepareSponsorSettledError,
-    PrepareSponsorSettledPort, PreparedJoinerActivation, PreparedJoinerAppliedMaterial,
-    PreparedJoinerCandidateMaterial, PreparedJoinerInvitation, PreparedSponsorCandidate,
-    PreparedSponsorCommit, PreparedSponsorComplete, PreparedSponsorSettled,
-    ResolveJoinerInvitationError, ResolveJoinerInvitationPort, SpaceAdmissionCommitToken,
-    SpaceAdmissionProtocol, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
-    SponsorAdmissionCommitToken, SponsorAdmissionMutation, SponsorAdmissionService,
-    SponsorAdmissionState, SponsorAdmissionStateError, SponsorAdmissionStatePort,
+    CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
+    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationOutcome,
+    JoinerActivationStateError, JoinerActivationStatePort, JoinerAdmissionService,
+    JoinerCancellationCommitToken, JoinerCancellationMaterial, JoinerCancellationMaterialError,
+    JoinerCancellationMutation, JoinerCancellationStateError, JoinerStartMaterial,
+    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
+    JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState,
+    LoadedPendingAdmission, LoadedSponsorAdmission, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
+    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
+    PrepareJoinerInvitationPort, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
+    PrepareSponsorCommitError, PrepareSponsorCommitPort, PrepareSponsorCompleteError,
+    PrepareSponsorCompletePort, PrepareSponsorSettledError, PrepareSponsorSettledPort,
+    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
+    PreparedJoinerInvitation, PreparedSponsorCandidate, PreparedSponsorCommit,
+    PreparedSponsorComplete, PreparedSponsorSettled, ResolveJoinerInvitationError,
+    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken, SpaceAdmissionProtocol,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionCommitToken,
+    SponsorAdmissionMutation, SponsorAdmissionService, SponsorAdmissionState,
+    SponsorAdmissionStateError, SponsorAdmissionStatePort,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +133,8 @@ struct FixedJoinerCandidate;
 
 struct FixedJoinerApplied;
 
+struct FixedJoinerCancellation;
+
 struct FixedJoinerActivation {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
 }
@@ -180,6 +185,16 @@ impl crate::space::membership::WakeSpaceMembershipMaintenancePort for RecordingM
             .lock()
             .expect("event recorder is available")
             .push(ProtocolEvent::AdmissionRecoveryWoken);
+    }
+}
+
+#[async_trait]
+impl PrepareJoinerCancellationPort for FixedJoinerCancellation {
+    async fn prepare(&self) -> Result<JoinerCancellationMaterial, JoinerCancellationMaterialError> {
+        Ok(JoinerCancellationMaterial::new(
+            AdmissionMessageId::from_bytes([0xd1; 32]).expect("valid cancellation message id"),
+            AdmissionRetryState::new(0, 0).expect("valid cancellation retry state"),
+        ))
     }
 }
 
@@ -341,6 +356,48 @@ impl JoinerStartStatePort for RecordingJoinerStartState {
             .lock()
             .expect("event recorder is available")
             .push(event);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CurrentJoinAdmissionStatePort for RecordingJoinerStartState {
+    async fn load(
+        &self,
+        join_id: JoinId,
+    ) -> Result<Option<LoadedCurrentJoin>, JoinerCancellationStateError> {
+        let stored = self.created_join.lock().expect("created join is available");
+        let Some(admission) = stored.as_ref() else {
+            return Ok(None);
+        };
+        if admission.join_id() != join_id {
+            return Ok(None);
+        }
+        let persisted = admission
+            .encode_persisted()
+            .expect("current join can be persisted");
+        let admission =
+            JoinerAdmission::decode_persisted(&persisted).expect("current join can be reopened");
+        Ok(Some(LoadedCurrentJoin::new(
+            admission,
+            JoinerCancellationCommitToken::from_bytes([0xd2; 32])
+                .expect("valid cancellation token"),
+        )))
+    }
+
+    async fn commit(
+        &self,
+        token: JoinerCancellationCommitToken,
+        mutation: JoinerCancellationMutation,
+    ) -> Result<(), JoinerCancellationStateError> {
+        assert_eq!(token.as_bytes(), &[0xd2; 32]);
+        let replacement = mutation.into_transition().into_replacement();
+        let persisted = replacement
+            .encode_persisted()
+            .expect("cancelled join can be persisted");
+        *self.created_join.lock().expect("created join is available") = Some(
+            JoinerAdmission::decode_persisted(&persisted).expect("cancelled join can be reopened"),
+        );
         Ok(())
     }
 }
@@ -1112,6 +1169,22 @@ impl ExecuteJoinerActivationPort for FixedJoinerActivation {
             AdmissionSpaceTransitionResult::from_bytes(vec![0xc1; 128])
                 .expect("valid activation result"),
             pending_exchange,
+            JoinerActivationOutcome {
+                join_id: *preparation.join_id().as_bytes(),
+                sponsor_device_id: DeviceId::new("sponsor-device"),
+                sponsor_identity_fingerprint: IdentityFingerprint::from_display_string(
+                    "1111-2222-3333-4444",
+                )
+                .expect("valid sponsor fingerprint"),
+                space_id: "target-space".to_owned(),
+                self_device_id: DeviceId::new("joining-device"),
+                self_identity_fingerprint: IdentityFingerprint::from_display_string(
+                    "ABCD-EFGH-IJKL-MNOP",
+                )
+                .expect("valid joiner fingerprint"),
+                migrated_records: None,
+                preserved_unreadable_records: None,
+            },
         ))
     }
 }
@@ -1178,6 +1251,8 @@ impl SpaceAdmissionProtocolTestPair {
                     }),
                     Arc::new(FixedJoinerStartMaterial),
                     state.clone(),
+                    state.clone(),
+                    Arc::new(FixedJoinerCancellation),
                     Arc::new(FixedJoinerCandidate),
                     Arc::new(FixedJoinerApplied),
                     joiner_activation.clone(),
@@ -1214,6 +1289,8 @@ impl SpaceAdmissionProtocolTestPair {
                     }),
                     Arc::new(FixedJoinerStartMaterial),
                     state.clone(),
+                    state.clone(),
+                    Arc::new(FixedJoinerCancellation),
                     Arc::new(FixedJoinerCandidate),
                     Arc::new(FixedJoinerApplied),
                     joiner_activation.clone(),

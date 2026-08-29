@@ -650,24 +650,20 @@ mod tests {
         let space_id = SpaceId::from_str("space-a");
         session.set_master_key_for_space(space_id.clone(), key(1));
 
-        assert!(
-            session
-                .content_key(
-                    &SpaceId::from_str("space-b"),
-                    &ContentKeyId::legacy_v1(),
-                    ContentKeyPurpose::Content,
-                )
-                .is_err()
-        );
-        assert!(
-            session
-                .content_key(
-                    &space_id,
-                    &ContentKeyId::from_string("missing").unwrap(),
-                    ContentKeyPurpose::Content,
-                )
-                .is_err()
-        );
+        assert!(session
+            .content_key(
+                &SpaceId::from_str("space-b"),
+                &ContentKeyId::legacy_v1(),
+                ContentKeyPurpose::Content,
+            )
+            .is_err());
+        assert!(session
+            .content_key(
+                &space_id,
+                &ContentKeyId::from_string("missing").unwrap(),
+                ContentKeyPurpose::Content,
+            )
+            .is_err());
     }
 
     #[test]
@@ -733,11 +729,9 @@ mod tests {
             .unwrap();
         local.install_space_material(&merged).unwrap();
 
-        assert!(
-            local
-                .content_key(&space_id, &local_key_id, ContentKeyPurpose::Content)
-                .is_ok()
-        );
+        assert!(local
+            .content_key(&space_id, &local_key_id, ContentKeyPurpose::Content)
+            .is_ok());
         assert_eq!(
             merged.state().protection_group_id().unwrap().as_str(),
             "group-a"

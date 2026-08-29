@@ -30,6 +30,6 @@ pub enum CurrentJoinStatus {
     },
     Rejected {
         join_id: [u8; 16],
-        reason: uc_core::membership::AdmissionRejectionReason,
+        reason: uc_core::membership::SpaceAdmissionRejectionReason,
     },
 }

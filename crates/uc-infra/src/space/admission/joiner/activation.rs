@@ -6,8 +6,8 @@ use serde::Deserialize;
 use uc_application::deps::{
     AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
     AdmissionSpaceTransitionStepV2, CompletedJoinerActivation, ExecuteJoinerActivationError,
-    ExecuteJoinerActivationPort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
-    PreparedJoinerActivation,
+    ExecuteJoinerActivationPort, JoinerActivationOutcome, PrepareJoinerActivationError,
+    PrepareJoinerActivationPort, PreparedJoinerActivation,
 };
 use uc_core::membership::{
     AdmissionCompleteAckV1, AdmissionCompletionV1, AdmissionRetryState, AdmissionSpaceTransition,
@@ -21,7 +21,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::space::admission::digest::completion_digest;
 use crate::space::admission::recovery_material::open_recovery_material;
 
-use super::super::sponsor::{SponsorCandidateStagedV1, activation_receipt_digest};
+use super::super::sponsor::{activation_receipt_digest, SponsorCandidateStagedV1};
 
 const JOINER_STAGED_TARGET_FORMAT_V2: u16 = 2;
 const MAX_TRANSITION_ADVANCES: usize = 16;
@@ -45,11 +45,18 @@ impl DefaultJoinerActivationPreparation {
 
 pub struct DefaultJoinerActivationExecutor {
     transition: Arc<dyn AdmissionSpaceTransitionPort>,
+    history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
 }
 
 impl DefaultJoinerActivationExecutor {
-    pub fn new(transition: Arc<dyn AdmissionSpaceTransitionPort>) -> Self {
-        Self { transition }
+    pub fn new(
+        transition: Arc<dyn AdmissionSpaceTransitionPort>,
+        history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
+    ) -> Self {
+        Self {
+            transition,
+            history_verifier,
+        }
     }
 }
 
@@ -246,6 +253,12 @@ impl ExecuteJoinerActivationPort for DefaultJoinerActivationExecutor {
             }
             completed.ok_or_else(|| invalid_execution("the Space transition exceeded its bound"))?
         };
+        let outcome = activation_outcome(
+            preparation.join_id(),
+            preparation.exact_commit(),
+            &result,
+            self.history_verifier.as_ref(),
+        )?;
         let encoded = result
             .encode()
             .ok_or_else(|| invalid_execution("the Space transition result cannot be encoded"))?;
@@ -282,8 +295,57 @@ impl ExecuteJoinerActivationPort for DefaultJoinerActivationExecutor {
             })?,
         )
         .map_err(|error| ExecuteJoinerActivationError::invalid(anyhow::Error::new(error)))?;
-        Ok(CompletedJoinerActivation::new(transition_result, pending))
+        Ok(CompletedJoinerActivation::new(
+            transition_result,
+            pending,
+            outcome,
+        ))
     }
+}
+
+fn activation_outcome(
+    join_id: uc_core::membership::JoinId,
+    exact_commit: &SpaceAdmissionEnvelopeV1,
+    result: &uc_core::membership::AdmissionSpaceTransitionResultV2,
+    history_verifier: &dyn HistoricalMembershipSignatureVerifier,
+) -> Result<JoinerActivationOutcome, ExecuteJoinerActivationError> {
+    let commit = match exact_commit.body() {
+        SpaceAdmissionBodyV1::Commit(commit) => commit,
+        _ => return Err(invalid_execution("the saved Commit is invalid")),
+    };
+    let candidate = commit.exact_candidate();
+    let local_facts = match &candidate.candidate_event().operation {
+        MembershipOperationV2::AddDevice { admission } => &admission.facts,
+        _ => return Err(invalid_execution("the Candidate event is not AddDevice")),
+    };
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        commit.target_membership_history().as_bytes(),
+        history_verifier,
+    )
+    .map_err(|error| ExecuteJoinerActivationError::invalid(anyhow::Error::new(error)))?;
+    let sponsor_facts = history
+        .admission_facts_for(candidate.candidate_event().author_member_instance_id)
+        .ok_or_else(|| invalid_execution("the Candidate author has no admission facts"))?;
+    let (migrated_records, preserved_unreadable_records) = match result {
+        uc_core::membership::AdmissionSpaceTransitionResultV2::Fresh { .. } => (None, None),
+        uc_core::membership::AdmissionSpaceTransitionResultV2::SameSpace { .. } => {
+            (Some(0), Some(0))
+        }
+        uc_core::membership::AdmissionSpaceTransitionResultV2::CrossSpace(result) => (
+            Some(result.migrated_records),
+            Some(result.preserved_unreadable_records),
+        ),
+    };
+    Ok(JoinerActivationOutcome {
+        join_id: *join_id.as_bytes(),
+        sponsor_device_id: sponsor_facts.device_id.clone(),
+        sponsor_identity_fingerprint: sponsor_facts.identity_fingerprint.clone(),
+        space_id: candidate.security_commitment().lineage_id.clone(),
+        self_device_id: local_facts.device_id.clone(),
+        self_identity_fingerprint: local_facts.identity_fingerprint.clone(),
+        migrated_records,
+        preserved_unreadable_records,
+    })
 }
 
 fn validate_completion(

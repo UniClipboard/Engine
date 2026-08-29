@@ -278,6 +278,41 @@ impl JoinerStartStatePort for PassivePorts {
 }
 
 #[async_trait]
+impl CurrentJoinAdmissionStatePort for PassivePorts {
+    async fn load(
+        &self,
+        _join_id: JoinId,
+    ) -> Result<Option<LoadedCurrentJoin>, JoinerCancellationStateError> {
+        Ok(None)
+    }
+
+    async fn commit(
+        &self,
+        _token: JoinerCancellationCommitToken,
+        _mutation: JoinerCancellationMutation,
+    ) -> Result<(), JoinerCancellationStateError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl PrepareJoinerCancellationPort for PassivePorts {
+    async fn prepare(&self) -> Result<JoinerCancellationMaterial, JoinerCancellationMaterialError> {
+        Ok(JoinerCancellationMaterial::new(
+            AdmissionMessageId::from_bytes([0x8d; 32]).expect("valid cancellation message id"),
+            AdmissionRetryState::new(0, 0).expect("valid cancellation retry state"),
+        ))
+    }
+}
+
+#[async_trait]
+impl LoadCurrentJoinStatusPort for PassivePorts {
+    async fn load_current_join(&self) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
+        Ok(None)
+    }
+}
+
+#[async_trait]
 impl PendingAdmissionRecoveryStatePort for PassivePorts {
     async fn load(
         &self,
@@ -464,18 +499,6 @@ impl MembershipHistoryExchangePort for PassivePorts {
 }
 
 #[async_trait]
-impl AdmissionOutboxDeliveryPort for PassivePorts {
-    async fn deliver(
-        &self,
-        _attempt_id: SpaceJoinRecordId,
-        _message: &AdmissionOutboxMessage,
-        _route: Option<&AdmissionOutboxDeliveryRoute>,
-    ) -> Result<AdmissionOutboxDeliveryResult, AdmissionOutboxDeliveryError> {
-        unreachable!()
-    }
-}
-
-#[async_trait]
 impl AdmissionSpaceTransitionPort for PassivePorts {
     async fn prepare_if_needed(
         &self,
@@ -561,9 +584,9 @@ impl ResolveRePairingPort for PassivePorts {
 
 #[tokio::test]
 async fn complete_application_exposes_endpoints_before_runtime_starts() {
-    let mut initial = LoadedMembershipLedger::no_current_space();
-    initial.admission_profile = Some(AdmissionProfileMetadata::fresh([0x71; 16]));
-    let repository = Arc::new(MemoryLedger(Mutex::new(initial)));
+    let repository = Arc::new(MemoryLedger(Mutex::new(
+        LoadedMembershipLedger::no_current_space(),
+    )));
     let passive = Arc::new(PassivePorts::default());
     let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
     let mut application = SpaceApplication::build(
@@ -582,6 +605,8 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             resolve_joiner_invitation: passive.clone(),
             joiner_start_material: passive.clone(),
             joiner_start_state: passive.clone(),
+            current_join_admission_state: passive.clone(),
+            prepare_joiner_cancellation: passive.clone(),
             pending_admission_recovery_state: passive.clone(),
             space_admission_transport: passive.clone(),
             sponsor_admission_state: passive.clone(),
@@ -595,8 +620,8 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             joiner_activation_state: passive.clone(),
             execute_joiner_activation: passive.clone(),
             device_trust_observations: passive.clone(),
+            current_join_status: passive.clone(),
             membership_history_transport: passive.clone(),
-            admission_space_transition: passive.clone(),
             apply_membership_member_facts: passive.clone(),
             apply_membership_security: passive.clone(),
             activate_membership_effect: passive.clone(),

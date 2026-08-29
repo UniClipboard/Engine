@@ -98,6 +98,7 @@ pub struct JoinerCompletePreparation<'a> {
 }
 
 pub struct JoinerActivationPreparation<'a> {
+    join_id: JoinId,
     space_transition: &'a AdmissionSpaceTransition,
     completion: &'a SpaceAdmissionEnvelopeV1,
     exact_commit: &'a SpaceAdmissionEnvelopeV1,
@@ -105,6 +106,10 @@ pub struct JoinerActivationPreparation<'a> {
 }
 
 impl JoinerActivationPreparation<'_> {
+    pub const fn join_id(&self) -> JoinId {
+        self.join_id
+    }
+
     pub const fn space_transition(&self) -> &AdmissionSpaceTransition {
         self.space_transition
     }
@@ -401,6 +406,7 @@ impl SpaceAdmissionAggregate {
             return None;
         };
         Some(JoinerActivationPreparation {
+            join_id: state.join_id,
             space_transition: &state.space_transition,
             completion: &state.completion,
             exact_commit: &state.exact_commit,

@@ -18,7 +18,6 @@ mod complete_pending_space_transition;
 mod invitation;
 mod join_space;
 mod model;
-mod outbox;
 mod protocol;
 mod query_pending_space_transition;
 mod security_transition;
@@ -31,33 +30,31 @@ pub use invitation::{
 };
 pub use join_space::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 pub use model::{CurrentJoinStatus, JoinedSpace, PendingInboundMember};
-pub use outbox::{
-    AdmissionOutboxDeliveryError, AdmissionOutboxDeliveryPort, AdmissionOutboxDeliveryResult,
-    AdmissionOutboxDeliveryRoute, InvitationConsumeDeliveryResult,
-};
 pub use protocol::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
     AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, CompletedJoinerActivation,
-    ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
+    CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
     HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
-    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationStateError,
-    JoinerActivationStatePort, JoinerStartMaterial, JoinerStartMaterialError,
+    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationOutcome,
+    JoinerActivationStateError, JoinerActivationStatePort, JoinerCancellationCommitToken,
+    JoinerCancellationMaterial, JoinerCancellationMaterialError, JoinerCancellationMutation,
+    JoinerCancellationStateError, JoinerStartMaterial, JoinerStartMaterialError,
     JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
-    LoadedJoinerActivation, LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAdmission,
-    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState, LoadedPendingAdmission,
+    LoadedSponsorAdmission, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
     PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
-    PrepareJoinerAppliedPort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
-    PrepareJoinerInvitationError, PrepareJoinerInvitationPort, PrepareSponsorCandidateError,
-    PrepareSponsorCandidatePort, PrepareSponsorCommitError, PrepareSponsorCommitPort,
-    PrepareSponsorCompleteError, PrepareSponsorCompletePort, PrepareSponsorSettledError,
-    PrepareSponsorSettledPort, PreparedJoinerActivation, PreparedJoinerAppliedMaterial,
-    PreparedJoinerCandidateMaterial, PreparedJoinerInvitation, PreparedSponsorCandidate,
-    PreparedSponsorCommit, PreparedSponsorComplete, PreparedSponsorSettled,
-    ResolveJoinerInvitationError, ResolveJoinerInvitationPort, SpaceAdmissionCommitToken,
-    SpaceAdmissionMessageReply, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
-    SponsorAdmissionCommitToken, SponsorAdmissionMutation, SponsorAdmissionState,
-    SponsorAdmissionStateError, SponsorAdmissionStatePort,
+    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
+    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
+    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
+    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
+    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
+    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedJoinerInvitation,
+    PreparedSponsorCandidate, PreparedSponsorCommit, PreparedSponsorComplete,
+    PreparedSponsorSettled, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
+    SpaceAdmissionCommitToken, SpaceAdmissionMessageReply, SpaceAdmissionTransportError,
+    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
+    SponsorAdmissionState, SponsorAdmissionStateError, SponsorAdmissionStatePort,
 };
 pub use query_pending_space_transition::QueryPendingSpaceTransitionError;
 pub use security_transition::{
@@ -66,7 +63,7 @@ pub use security_transition::{
     ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
     AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
     JoinerStagedSecurityTransition, PrepareSponsorAdmissionSecurityPort,
-    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRecipient,
+    PreparedMemberSecurityDelivery, SponsorAdmissionSecurityRecipient,
     SponsorAdmissionSecurityRequest, SponsorPreparedAdmissionSecurity,
     SponsorPreparedSecurityTransition,
 };
@@ -76,8 +73,6 @@ pub use space_transition::{
     DeviceManagementResetDataPort,
 };
 
-pub(super) use cancel_space_join::CancelSpaceJoinUseCase;
-pub(super) use complete_pending_space_transition::CompletePendingSpaceTransitionUseCase;
 pub(super) use invitation::{
     CancelPairingInvitationUseCase, InMemoryPairingInvitationHolder,
     IssuePairingInvitationForAddressUseCase, IssuePairingInvitationUseCase,
@@ -87,4 +82,3 @@ pub(super) use protocol::{
     AdmissionRecoveryService, JoinerAdmissionService, SpaceAdmissionProtocol,
     SponsorAdmissionService,
 };
-pub(super) use query_pending_space_transition::QueryPendingSpaceTransitionUseCase;

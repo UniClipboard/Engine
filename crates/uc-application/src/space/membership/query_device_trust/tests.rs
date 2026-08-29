@@ -3,14 +3,15 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionChangeFacts, AdmissionProfileMetadata, HistoricalMembershipSignatureError,
-    HistoricalMembershipSignatureVerifier, JoinerAdmissionStage, MembershipActivationBaselineV2,
-    MembershipCredential, MembershipEventId, MembershipHistoryRelationship, MembershipOperationV2,
-    SpaceJoinRecord, SpaceJoinRecordId, VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
+    AdmissionChangeFacts, HistoricalMembershipSignatureError,
+    HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipCredential,
+    MembershipEventId, MembershipHistoryRelationship, MembershipOperationV2,
+    VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::ports::ReachabilityState;
 
 use super::*;
+use crate::space::admission::CurrentJoinStatus;
 use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedger,
     MembershipLedgerError, MembershipLedgerMutation,
@@ -165,6 +166,15 @@ struct StaticObservations {
     calls: Arc<Mutex<Vec<Vec<DeviceId>>>>,
 }
 
+struct StaticCurrentJoin(Option<CurrentJoinStatus>);
+
+#[async_trait]
+impl LoadCurrentJoinStatusPort for StaticCurrentJoin {
+    async fn load_current_join(&self) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
+        Ok(self.0.clone())
+    }
+}
+
 #[async_trait]
 impl LoadDeviceTrustObservationsPort for StaticObservations {
     async fn load(
@@ -197,7 +207,11 @@ async fn profile_without_a_space_returns_an_explicit_empty_status() {
         repository,
         Arc::new(AcceptingVerifier),
     ));
-    let query = QueryDeviceTrustUseCase::new(ledger, Arc::new(UnexpectedObservations));
+    let query = QueryDeviceTrustUseCase::new(
+        ledger,
+        Arc::new(UnexpectedObservations),
+        Arc::new(StaticCurrentJoin(None)),
+    );
 
     let status = query.execute().await.unwrap();
 
@@ -227,6 +241,7 @@ async fn active_status_combines_verified_members_with_one_observation_read() {
         Arc::new(StaticObservations {
             calls: Arc::clone(&calls),
         }),
+        Arc::new(StaticCurrentJoin(None)),
     );
 
     let status = query.execute().await.unwrap();
@@ -269,6 +284,7 @@ async fn status_exposes_the_current_pending_removal_facts() {
         Arc::new(StaticObservations {
             calls: Arc::new(Mutex::new(Vec::new())),
         }),
+        Arc::new(StaticCurrentJoin(None)),
     );
 
     let status = query.execute().await.unwrap();
@@ -292,18 +308,10 @@ async fn status_exposes_the_current_pending_removal_facts() {
 }
 
 #[tokio::test]
-async fn status_projects_the_current_pending_local_join_from_the_ledger() {
-    let mut loaded = active_ledger();
-    let record_id = SpaceJoinRecordId::from_bytes([0xa1; 32]);
-    let mut join =
-        SpaceJoinRecord::new_joiner(record_id, [0xa2; 16], JoinerAdmissionStage::Initiated);
-    join.local_join_ordinal = Some(1);
-    join.lineage_id = Some("target-space".to_owned());
-    loaded.admission_records.insert(*record_id.as_bytes(), join);
-    let mut profile = AdmissionProfileMetadata::fresh([0xa3; 16]);
-    profile.next_local_join_ordinal = 1;
-    loaded.admission_profile = Some(profile);
-    let repository = Arc::new(MemoryLedgerRepository { loaded });
+async fn status_uses_the_current_join_projection_from_admission_state() {
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: active_ledger(),
+    });
     let ledger = Arc::new(MembershipLedger::new(
         repository.clone(),
         repository,
@@ -314,6 +322,13 @@ async fn status_projects_the_current_pending_local_join_from_the_ledger() {
         Arc::new(StaticObservations {
             calls: Arc::new(Mutex::new(Vec::new())),
         }),
+        Arc::new(StaticCurrentJoin(Some(CurrentJoinStatus::Pending {
+            join_id: [0xa2; 16],
+            target_space_id: Some("target-space".to_owned()),
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: false,
+        }))),
     );
 
     let status = query.execute().await.unwrap();

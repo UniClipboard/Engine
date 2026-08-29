@@ -10,13 +10,14 @@ mod sponsor;
 
 pub use credentials::{SpaceAdmissionCredentialStoreError, SqliteSpaceAdmissionCredentials};
 pub(crate) use full_invitation::{
-    DecodedFullInvitation, FullInvitationCodecError, decode_full_invitation,
-    decode_invitation_entry, encode_full_invitation,
+    decode_full_invitation, decode_invitation_entry, encode_full_invitation, DecodedFullInvitation,
+    FullInvitationCodecError,
 };
 pub use joiner::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
-    DefaultJoinerAppliedPreparation, DefaultJoinerCandidatePreparation,
-    DefaultJoinerInvitationPreparation, DefaultJoinerStartMaterial,
+    DefaultJoinerAppliedPreparation, DefaultJoinerCancellationPreparation,
+    DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
+    DefaultJoinerStartMaterial,
 };
 pub use repository::SqliteSpaceAdmissionState;
 pub use security::AdmissionSecurityTransitionAdapter;

@@ -9,16 +9,19 @@ mod tests;
 
 pub(crate) use joiner::JoinerAdmissionService;
 pub use joiner::{
-    CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
-    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationStateError,
-    JoinerActivationStatePort, JoinerStartMaterial, JoinerStartMaterialError,
-    JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
-    LoadedJoinerActivation, LoadedJoinerStartState, PrepareJoinerActivationError,
-    PrepareJoinerActivationPort, PrepareJoinerAppliedError, PrepareJoinerAppliedPort,
-    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
-    PrepareJoinerInvitationPort, PreparedJoinerActivation, PreparedJoinerAppliedMaterial,
-    PreparedJoinerCandidateMaterial, PreparedJoinerInvitation, ResolveJoinerInvitationError,
-    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken,
+    CompletedJoinerActivation, CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError,
+    ExecuteJoinerActivationPort, JoinerActivationCommitToken, JoinerActivationMutation,
+    JoinerActivationOutcome, JoinerActivationStateError, JoinerActivationStatePort,
+    JoinerCancellationCommitToken, JoinerCancellationMaterial, JoinerCancellationMaterialError,
+    JoinerCancellationMutation, JoinerCancellationStateError, JoinerStartMaterial,
+    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
+    JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState,
+    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
+    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
+    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
+    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
+    PreparedJoinerInvitation, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
+    SpaceAdmissionCommitToken,
 };
 pub(crate) use protocol::SpaceAdmissionProtocol;
 pub(crate) use recovery::AdmissionRecoveryService;

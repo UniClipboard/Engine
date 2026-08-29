@@ -2,6 +2,8 @@ use uc_core::membership::{
     AdmissionSpaceTransitionResult, JoinerAdmission, JoinerAdmissionTransition,
     PendingAdmissionExchange,
 };
+use uc_core::security::IdentityFingerprint;
+use uc_core::DeviceId;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct JoinerActivationCommitToken([u8; 32]);
@@ -37,22 +39,43 @@ impl LoadedJoinerActivation {
 pub struct CompletedJoinerActivation {
     transition_result: AdmissionSpaceTransitionResult,
     pending_exchange: PendingAdmissionExchange,
+    outcome: JoinerActivationOutcome,
 }
 
 impl CompletedJoinerActivation {
     pub fn new(
         transition_result: AdmissionSpaceTransitionResult,
         pending_exchange: PendingAdmissionExchange,
+        outcome: JoinerActivationOutcome,
     ) -> Self {
         Self {
             transition_result,
             pending_exchange,
+            outcome,
         }
     }
 
-    pub(crate) fn into_parts(self) -> (AdmissionSpaceTransitionResult, PendingAdmissionExchange) {
-        (self.transition_result, self.pending_exchange)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        AdmissionSpaceTransitionResult,
+        PendingAdmissionExchange,
+        JoinerActivationOutcome,
+    ) {
+        (self.transition_result, self.pending_exchange, self.outcome)
     }
+}
+
+/// 激活完成后返回给产品的稳定摘要；不暴露切换步骤或持久化表示。
+pub struct JoinerActivationOutcome {
+    pub join_id: [u8; 16],
+    pub sponsor_device_id: DeviceId,
+    pub sponsor_identity_fingerprint: IdentityFingerprint,
+    pub space_id: String,
+    pub self_device_id: DeviceId,
+    pub self_identity_fingerprint: IdentityFingerprint,
+    pub migrated_records: Option<u64>,
+    pub preserved_unreadable_records: Option<u64>,
 }
 
 pub struct JoinerActivationMutation {

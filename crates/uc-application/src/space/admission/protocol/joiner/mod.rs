@@ -4,6 +4,7 @@ use crate::space::membership::WakeSpaceMembershipMaintenancePort;
 use uc_core::ports::SettingsPort;
 
 mod activate_complete;
+mod cancel_join;
 mod handle_candidate;
 mod handle_commit;
 mod handle_complete;
@@ -13,8 +14,13 @@ mod start_join;
 
 pub use activate_complete::{
     CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
-    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationStateError,
-    JoinerActivationStatePort, LoadedJoinerActivation,
+    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationOutcome,
+    JoinerActivationStateError, JoinerActivationStatePort, LoadedJoinerActivation,
+};
+pub use cancel_join::{
+    CurrentJoinAdmissionStatePort, JoinerCancellationCommitToken, JoinerCancellationMaterial,
+    JoinerCancellationMaterialError, JoinerCancellationMutation, JoinerCancellationStateError,
+    LoadedCurrentJoin, PrepareJoinerCancellationPort,
 };
 pub use handle_candidate::{
     PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PreparedJoinerCandidateMaterial,
@@ -39,6 +45,8 @@ pub(crate) struct JoinerAdmissionService {
     pub(super) resolve_invitation: Arc<dyn ResolveJoinerInvitationPort>,
     pub(super) start_material: Arc<dyn JoinerStartMaterialPort>,
     pub(super) start_state: Arc<dyn JoinerStartStatePort>,
+    pub(super) cancellation_state: Arc<dyn CurrentJoinAdmissionStatePort>,
+    pub(super) prepare_cancellation: Arc<dyn PrepareJoinerCancellationPort>,
     pub(super) prepare_candidate: Arc<dyn PrepareJoinerCandidatePort>,
     pub(super) prepare_applied: Arc<dyn PrepareJoinerAppliedPort>,
     pub(super) prepare_activation: Arc<dyn PrepareJoinerActivationPort>,
@@ -54,6 +62,8 @@ impl JoinerAdmissionService {
         resolve_invitation: Arc<dyn ResolveJoinerInvitationPort>,
         start_material: Arc<dyn JoinerStartMaterialPort>,
         start_state: Arc<dyn JoinerStartStatePort>,
+        cancellation_state: Arc<dyn CurrentJoinAdmissionStatePort>,
+        prepare_cancellation: Arc<dyn PrepareJoinerCancellationPort>,
         prepare_candidate: Arc<dyn PrepareJoinerCandidatePort>,
         prepare_applied: Arc<dyn PrepareJoinerAppliedPort>,
         prepare_activation: Arc<dyn PrepareJoinerActivationPort>,
@@ -67,6 +77,8 @@ impl JoinerAdmissionService {
             resolve_invitation,
             start_material,
             start_state,
+            cancellation_state,
+            prepare_cancellation,
             prepare_candidate,
             prepare_applied,
             prepare_activation,

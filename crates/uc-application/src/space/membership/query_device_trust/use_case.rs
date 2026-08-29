@@ -2,41 +2,43 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use uc_core::membership::{
-    AdmissionIdentityBindingV1, AdmissionSpaceTransitionResultV2, AdmissionTerminalResult,
     MemberInstanceId, MembershipHistoryRelationship, MembershipOperationV2,
     VersionedMembershipHistory,
 };
 
-use crate::space::admission::{CurrentJoinStatus, JoinedSpace};
-use crate::space::membership::{LoadedMembershipLedger, MembershipLedger};
+use crate::space::membership::MembershipLedger;
 
 use super::{
     DeviceTrustDevice, DeviceTrustMembership, DeviceTrustRelationship, DeviceTrustStatus,
-    DeviceTrustSyncState, LoadDeviceTrustObservationsPort, PendingDeviceTrustChange,
-    QueryDeviceTrustError,
+    DeviceTrustSyncState, LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort,
+    PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 
 pub(crate) struct QueryDeviceTrustUseCase {
     ledger: Arc<MembershipLedger>,
     observations: Arc<dyn LoadDeviceTrustObservationsPort>,
+    current_join: Arc<dyn LoadCurrentJoinStatusPort>,
 }
 
 impl QueryDeviceTrustUseCase {
     pub(crate) fn new(
         ledger: Arc<MembershipLedger>,
         observations: Arc<dyn LoadDeviceTrustObservationsPort>,
+        current_join: Arc<dyn LoadCurrentJoinStatusPort>,
     ) -> Self {
         Self {
             ledger,
             observations,
+            current_join,
         }
     }
 
     pub(crate) async fn execute(&self) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
         let snapshot = self.ledger.load_verified().await?;
+        let current_join = self.current_join.load_current_join().await?;
         if snapshot.history().is_none() {
             let mut status = DeviceTrustStatus::no_current_space(snapshot.record().revision);
-            status.current_join = current_join(snapshot.record())?;
+            status.current_join = current_join;
             return Ok(status);
         }
         let history = snapshot
@@ -158,7 +160,6 @@ impl QueryDeviceTrustUseCase {
         }
 
         let current_change = pending_change(history, local_member_instance)?;
-        let current_join = current_join(snapshot.record())?;
         Ok(DeviceTrustStatus {
             revision: snapshot.record().revision,
             local_device_id: Some(local_device_id),
@@ -174,94 +175,6 @@ impl QueryDeviceTrustUseCase {
             pending_inbound_member: None,
             devices,
         })
-    }
-}
-
-pub(crate) fn current_join(
-    record: &LoadedMembershipLedger,
-) -> Result<Option<CurrentJoinStatus>, QueryDeviceTrustError> {
-    let floor = record
-        .admission_profile
-        .as_ref()
-        .map(|metadata| metadata.join_projection_floor_ordinal)
-        .unwrap_or(0);
-    let Some(join) = record
-        .admission_records
-        .values()
-        .filter(|join| join.is_joiner())
-        .filter_map(|join| {
-            join.local_join_ordinal
-                .filter(|ordinal| *ordinal >= floor)
-                .map(|ordinal| (ordinal, join))
-        })
-        .max_by_key(|(ordinal, _)| *ordinal)
-        .map(|(_, join)| join)
-    else {
-        return Ok(None);
-    };
-    let join_id = join
-        .join_id
-        .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
-    match join.terminal_result {
-        None => {
-            let binding = join
-                .identity_binding
-                .as_deref()
-                .map(AdmissionIdentityBindingV1::decode)
-                .transpose()
-                .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
-            Ok(Some(CurrentJoinStatus::Pending {
-                join_id,
-                target_space_id: join.lineage_id.clone(),
-                sponsor_device_id: binding
-                    .as_ref()
-                    .map(|binding| binding.sponsor_device_id.clone()),
-                sponsor_identity_fingerprint: binding
-                    .map(|binding| binding.sponsor_identity_fingerprint),
-                cancel_requested: join.cancel_request.is_some(),
-            }))
-        }
-        Some(AdmissionTerminalResult::Rejected) => Ok(Some(CurrentJoinStatus::Rejected {
-            join_id,
-            reason: join
-                .rejection_reason
-                .ok_or(QueryDeviceTrustError::RecoveryRequired)?,
-        })),
-        Some(AdmissionTerminalResult::Active) => {
-            let binding = AdmissionIdentityBindingV1::decode(
-                join.identity_binding
-                    .as_deref()
-                    .ok_or(QueryDeviceTrustError::RecoveryRequired)?,
-            )
-            .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
-            let transition = join
-                .space_transition_result
-                .as_deref()
-                .and_then(AdmissionSpaceTransitionResultV2::decode);
-            let (migrated_records, preserved_unreadable_records) = match transition {
-                Some(AdmissionSpaceTransitionResultV2::CrossSpace(result)) => (
-                    Some(result.migrated_records),
-                    Some(result.preserved_unreadable_records),
-                ),
-                Some(AdmissionSpaceTransitionResultV2::SameSpace { .. }) => (Some(0), Some(0)),
-                Some(AdmissionSpaceTransitionResultV2::Fresh { .. }) | None => (None, None),
-            };
-            Ok(Some(CurrentJoinStatus::Active {
-                join_id,
-                joined_space: JoinedSpace {
-                    sponsor_device_id: binding.sponsor_device_id,
-                    sponsor_identity_fingerprint: binding.sponsor_identity_fingerprint,
-                    space_id: binding.lineage_id,
-                    self_device_id: binding.joiner_device_id,
-                    self_identity_fingerprint: binding.joiner_identity_fingerprint,
-                    migrated_records,
-                    preserved_unreadable_records,
-                },
-            }))
-        }
-        Some(AdmissionTerminalResult::Completed | AdmissionTerminalResult::SupersededByNewJoin) => {
-            Err(QueryDeviceTrustError::RecoveryRequired)
-        }
     }
 }
 

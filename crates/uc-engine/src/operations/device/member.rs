@@ -524,31 +524,31 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
         CurrentJoinStatus::Rejected { join_id, reason } => JoinSpaceStatusSummary::Rejected {
             join_id: encode_join_id(join_id),
             reason: match reason {
-                uc_core::membership::AdmissionRejectionReason::InvitationUnavailable => {
+                uc_core::membership::SpaceAdmissionRejectionReason::InvitationUnavailable => {
                     JoinSpaceRejectionReasonSummary::InvitationUnavailable
                 }
-                uc_core::membership::AdmissionRejectionReason::AuthenticationRejected => {
+                uc_core::membership::SpaceAdmissionRejectionReason::AuthenticationRejected => {
                     JoinSpaceRejectionReasonSummary::AuthenticationRejected
                 }
-                uc_core::membership::AdmissionRejectionReason::IdentityConflict => {
+                uc_core::membership::SpaceAdmissionRejectionReason::IdentityConflict => {
                     JoinSpaceRejectionReasonSummary::IdentityConflict
                 }
-                uc_core::membership::AdmissionRejectionReason::BaseHistoryChanged => {
+                uc_core::membership::SpaceAdmissionRejectionReason::BaseHistoryChanged => {
                     JoinSpaceRejectionReasonSummary::BaseHistoryChanged
                 }
-                uc_core::membership::AdmissionRejectionReason::JoinerHistoryAhead => {
+                uc_core::membership::SpaceAdmissionRejectionReason::JoinerHistoryAhead => {
                     JoinSpaceRejectionReasonSummary::JoinerHistoryAhead
                 }
-                uc_core::membership::AdmissionRejectionReason::HistoryConflict => {
+                uc_core::membership::SpaceAdmissionRejectionReason::HistoryConflict => {
                     JoinSpaceRejectionReasonSummary::HistoryConflict
                 }
-                uc_core::membership::AdmissionRejectionReason::PeerUpgradeRequired => {
+                uc_core::membership::SpaceAdmissionRejectionReason::PeerUpgradeRequired => {
                     JoinSpaceRejectionReasonSummary::PeerUpgradeRequired
                 }
-                uc_core::membership::AdmissionRejectionReason::Cancelled => {
+                uc_core::membership::SpaceAdmissionRejectionReason::Cancelled => {
                     JoinSpaceRejectionReasonSummary::Cancelled
                 }
-                uc_core::membership::AdmissionRejectionReason::RemovedBeforeActivation => {
+                uc_core::membership::SpaceAdmissionRejectionReason::RemovedBeforeActivation => {
                     JoinSpaceRejectionReasonSummary::RemovedBeforeActivation
                 }
             },

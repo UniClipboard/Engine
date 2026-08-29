@@ -6,7 +6,7 @@ pub use ports::{
     ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
     AdmissionSecurityTransitionInput, AdmissionSecurityTransitionPort,
     JoinerStagedSecurityTransition, PrepareSponsorAdmissionSecurityPort,
-    SponsorAdmissionSecurityDelivery, SponsorAdmissionSecurityRecipient,
+    PreparedMemberSecurityDelivery, SponsorAdmissionSecurityRecipient,
     SponsorAdmissionSecurityRequest, SponsorPreparedAdmissionSecurity,
     SponsorPreparedSecurityTransition,
 };

@@ -1,10 +1,28 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use uc_core::ids::{DeviceId, SpaceId};
-pub use uc_core::membership::SponsorAdmissionSecurityDelivery;
 use uc_core::membership::{
     AdmissionContentKeyCatalogV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition,
     MembershipCredentialId,
 };
+
+/// 为现有成员准备、等待随准入激活的安全更新。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedMemberSecurityDelivery {
+    pub recipient: DeviceId,
+    pub credential_id: MembershipCredentialId,
+    pub payload: Vec<u8>,
+}
+
+impl std::fmt::Debug for PreparedMemberSecurityDelivery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedMemberSecurityDelivery")
+            .field("recipient", &self.recipient)
+            .field("payload_len", &self.payload.len())
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum AdmissionSecurityTransitionError {
@@ -100,7 +118,7 @@ pub struct SponsorPreparedAdmissionSecurity {
     pub public_commitment: AdmissionSecurityCommitmentV1,
     pub target_protection_group_id: String,
     pub target_key_catalog: AdmissionContentKeyCatalogV1,
-    pub existing_member_deliveries: Vec<SponsorAdmissionSecurityDelivery>,
+    pub existing_member_deliveries: Vec<PreparedMemberSecurityDelivery>,
 }
 
 impl std::fmt::Debug for SponsorPreparedAdmissionSecurity {
@@ -162,7 +180,7 @@ pub struct ActivateCompletionHelperAdmissionSecurityRequest {
     pub security_commit: Vec<u8>,
     pub security_welcome: Vec<u8>,
     pub target_key_catalog: Vec<u8>,
-    pub existing_member_deliveries: Vec<SponsorAdmissionSecurityDelivery>,
+    pub existing_member_deliveries: Vec<PreparedMemberSecurityDelivery>,
     pub expected_commitment: AdmissionSecurityCommitmentV1,
 }
 
