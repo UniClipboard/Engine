@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionProfileMetadata, BaseMembershipHistoryPosition, MemberInstanceId,
     MembershipDecisionV2, MembershipHistoryPageV2, MembershipHistoryRelationship, SpaceJoinRecord,
 };
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerReconciliationRecord {
     pub peer_device_id: DeviceId,
     pub relationship: MembershipHistoryRelationship,
@@ -15,13 +17,13 @@ pub struct PeerReconciliationRecord {
     pub updated_at_ms: i64,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RestrictedMembershipDelivery {
     Event(uc_core::membership::MembershipEventV2),
     Decision(MembershipDecisionV2),
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundMembershipTransfer {
     pub source_device_id: DeviceId,
     pub transfer_id: [u8; 32],
@@ -30,13 +32,13 @@ pub struct InboundMembershipTransfer {
     pub total_bytes: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MembershipEffectKind {
     AddDevice,
     RemoveDevice,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MembershipEffectPhase {
     Prepared,
     MemberFactsApplied,
@@ -44,7 +46,7 @@ pub enum MembershipEffectPhase {
     Activated,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMembershipEffect {
     pub event_id: [u8; 32],
     pub kind: MembershipEffectKind,
@@ -53,7 +55,7 @@ pub struct PendingMembershipEffect {
     pub payload: Vec<u8>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadedMembershipLedger {
     pub revision: u64,
     pub lineage_id: Option<String>,

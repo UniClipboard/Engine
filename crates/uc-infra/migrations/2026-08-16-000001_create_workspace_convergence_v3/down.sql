@@ -1,3 +1,4 @@
+DROP TABLE membership_ledger_state;
 DROP TABLE admission_repository_state;
 DROP TABLE workspace_convergence_v3_migrations;
 DROP TABLE workspace_convergence_v3_active;
