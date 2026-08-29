@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use rand::RngCore;
 use serde::Serialize;
@@ -9,10 +11,11 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature,
     AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId,
-    AdmissionRecoveryPublicKey, AdmissionRole, ED25519_SIGNATURE_ALGORITHM_V1, JoinId,
-    MembershipCredential, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionRoute, UnreadableHistoryPolicy,
+    AdmissionRecoveryPublicKey, AdmissionRole, JoinId, MembershipCredential, SpaceAdmissionBodyV1,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
+    ED25519_SIGNATURE_ALGORITHM_V1,
 };
+use uc_core::ports::SettingsPort;
 use uc_core::security::IdentityFingerprint;
 use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecret};
 use zeroize::Zeroizing;
@@ -25,7 +28,7 @@ const JOINER_PRIVATE_STATE_FORMAT_V2: u16 = 2;
 /// Infra owns the complete, one-shot construction of a Joiner's initial admission material.
 pub struct DefaultJoinerStartMaterial {
     device_id: DeviceId,
-    device_name: String,
+    settings: Arc<dyn SettingsPort>,
     identity_fingerprint: IdentityFingerprint,
     transport_public_key: Vec<u8>,
     transport_address_blob: Vec<u8>,
@@ -34,14 +37,14 @@ pub struct DefaultJoinerStartMaterial {
 impl DefaultJoinerStartMaterial {
     pub fn new(
         device_id: DeviceId,
-        device_name: String,
+        settings: Arc<dyn SettingsPort>,
         identity_fingerprint: IdentityFingerprint,
         transport_public_key: Vec<u8>,
         transport_address_blob: Vec<u8>,
     ) -> Self {
         Self {
             device_id,
-            device_name,
+            settings,
             identity_fingerprint,
             transport_public_key,
             transport_address_blob,
@@ -72,6 +75,20 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
 
         let admission_id = mint_admission_id();
         let join_id = mint_join_id();
+        let settings = self.settings.load().await.map_err(|error| {
+            JoinerStartMaterialError::unavailable(
+                error.context("load the local device name for Space admission"),
+            )
+        })?;
+        let device_name = settings
+            .general
+            .device_name
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| {
+                JoinerStartMaterialError::unavailable(anyhow::anyhow!(
+                    "the local device name is unavailable for Space admission"
+                ))
+            })?;
         let pending = MlsGroupEngine::prepare_join(self.device_id.as_str().as_bytes())
             .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
         let signing_public_key = MlsGroupEngine::signing_public_key(&pending.client_state)
@@ -98,7 +115,7 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
         let mut identity_facts = AdmissionChangeFacts {
             member_instance: credential.member_instance_id(&self.device_id),
             device_id: self.device_id.clone(),
-            device_name: self.device_name.clone(),
+            device_name,
             identity_fingerprint: self.identity_fingerprint.clone(),
             transport_public_key: self.transport_public_key.clone(),
             transport_address_blob: self.transport_address_blob.clone(),
@@ -208,8 +225,10 @@ fn mint_message_id() -> AdmissionMessageId {
 mod tests {
     use std::error::Error;
 
+    use async_trait::async_trait;
     use uc_core::crypto::domain::Passphrase;
     use uc_core::pairing::InvitationCode;
+    use uc_core::settings::model::Settings;
 
     use super::*;
     use crate::space::encode_full_invitation;
@@ -254,13 +273,28 @@ mod tests {
     }
 
     fn adapter() -> DefaultJoinerStartMaterial {
+        let mut settings = Settings::default();
+        settings.general.device_name = Some("Joining device".to_owned());
         DefaultJoinerStartMaterial::new(
             DeviceId::new("joining-device"),
-            "Joining device".to_owned(),
+            Arc::new(FixedSettings(settings)),
             IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
                 .expect("valid fingerprint fixture"),
             vec![0x71; 32],
             vec![0x72; 32],
         )
+    }
+
+    struct FixedSettings(Settings);
+
+    #[async_trait]
+    impl SettingsPort for FixedSettings {
+        async fn load(&self) -> anyhow::Result<Settings> {
+            Ok(self.0.clone())
+        }
+
+        async fn save(&self, _settings: &Settings) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 }

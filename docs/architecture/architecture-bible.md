@@ -764,6 +764,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 新准入恢复收口 | `SpaceApplication` 只使用类型化准入 aggregate 与认证 transport 恢复，不再依赖旧 admission outbox delivery。 |
 | 2026-08-30 | 当前成员范围出口 | `SpaceFacade` 只向运行期暴露成员账本推导的最终可通信范围，不暴露账本验证、维护或效果推进步骤。 |
 | 2026-08-30 | Space activity 启动门禁 | Space 生命周期活动未完成运行期绑定时明确返回 unavailable；不得静默跳过搜索、接收或成员维护的暂停与恢复。 |
+| 2026-08-30 | 准入设备名 | Joiner 创建签名准入事实时读取 start-join 已持久化的当前设备名，不使用 daemon 启动期快照。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |
