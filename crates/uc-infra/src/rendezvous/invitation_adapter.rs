@@ -126,9 +126,17 @@ impl RendezvousPairingInvitationAdapter {
         let device_id = self.device_identity.current_device_id();
         let invitation_id = mint_invitation_id();
         let expires_at = Utc::now() + LOCAL_MINT_TTL;
+        let endpoint_addr: EndpointAddr = serde_json::from_str(&ticket).map_err(|_| {
+            InvitationError::Internal("failed to decode Sponsor endpoint address".to_owned())
+        })?;
+        let admission_route =
+            crate::network::iroh::encode_space_admission_route(&endpoint_addr, Some(invitation_id))
+                .map_err(|_| {
+                    InvitationError::Internal("failed to encode Space admission route".to_owned())
+                })?;
         let full_invitation = crate::space::encode_full_invitation(
             invitation_id,
-            ticket.as_bytes(),
+            &admission_route,
             expires_at.timestamp_millis(),
         )
         .map_err(|_| InvitationError::Internal("failed to encode full invitation".to_owned()))?;
@@ -786,11 +794,16 @@ mod tests {
         let ep = loopback_endpoint().await;
         let expected_sponsor_id = ep.id();
         let server = MockServer::start().await;
+        // The directory alias must outlive the opaque full invitation. Give
+        // the response a margin so setup time cannot make the two five-minute
+        // windows race at millisecond precision.
+        let directory_expires_at_ms =
+            (Utc::now() + LOCAL_MINT_TTL + chrono::Duration::minutes(1)).timestamp_millis();
         Mock::given(method("POST"))
             .and(path("/v1/pairings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "code": "ABCD-EFGH",
-                "expiresAtMs": 1_900_000_000_000_i64,
+                "expiresAtMs": directory_expires_at_ms,
             })))
             .expect(1)
             .mount(&server)
@@ -815,9 +828,13 @@ mod tests {
             issued.expires_at.timestamp_millis() - 1,
         )
         .expect("issued full invitation should decode");
-        let decoded_route: EndpointAddr =
-            serde_json::from_slice(decoded.route()).expect("decode Sponsor route");
+        let (decoded_route, route_invitation_id) =
+            crate::network::iroh::space_admission::decode_space_admission_route_for_test(
+                decoded.route(),
+            )
+            .expect("decode Sponsor admission route");
         assert_eq!(decoded.invitation_id(), issued.invitation_id);
+        assert_eq!(route_invitation_id, Some(issued.invitation_id));
         assert_eq!(decoded_route.id, expected_sponsor_id);
         assert!(!decoded_route.addrs.is_empty());
         assert_eq!(

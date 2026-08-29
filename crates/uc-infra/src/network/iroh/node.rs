@@ -651,22 +651,24 @@ impl IrohNodeBuilder {
             .ok_or(IrohNodeError::InstallAfterSpawn)
     }
 
-    /// Installs the direct Space-admission handler before router spawn and
-    /// returns the outbound transport backed by the same endpoint.
+    /// 在 Application 构造前取得同一 endpoint 支撑的被动出站能力。
+    pub fn space_admission_transport(&self) -> Arc<dyn SpaceAdmissionTransportPort> {
+        Arc::new(IrohSpaceAdmissionTransport::new(Arc::clone(&self.endpoint)))
+    }
+
+    /// 在 Router spawn 前一次性安装 Application 的认证消息 endpoint。
     pub fn install_space_admission(
         &mut self,
         endpoint: Arc<dyn HandleAuthenticatedSpaceAdmissionMessagePort>,
         credentials: Arc<dyn SpaceAdmissionChannelCredentialPort>,
-    ) -> Result<Arc<dyn SpaceAdmissionTransportPort>, IrohNodeError> {
+    ) -> Result<(), IrohNodeError> {
         let handler = IrohSpaceAdmissionHandler::new(&self.endpoint, endpoint, credentials)
             .map_err(|source| IrohNodeError::AdmissionInstall {
                 source: anyhow::anyhow!(source),
             })?;
         let builder = self.take_router_builder()?;
         self.router_builder = Some(builder.accept(SPACE_ADMISSION_ALPN, handler));
-        Ok(Arc::new(IrohSpaceAdmissionTransport::new(Arc::clone(
-            &self.endpoint,
-        ))))
+        Ok(())
     }
 
     /// Bind the iroh endpoint, reusing the Ed25519 secret persisted by

@@ -591,6 +591,19 @@ fn decode_route(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn decode_space_admission_route_for_test(
+    route: &[u8],
+) -> Result<(EndpointAddr, Option<InvitationId>), SpaceAdmissionTransportError> {
+    let route = SpaceAdmissionRoute::from_bytes(route.to_vec())
+        .map_err(|_| SpaceAdmissionTransportError::ProtocolRejected)?;
+    let decoded = decode_route(&route, true)?;
+    Ok((
+        decoded.endpoint_addr,
+        decoded.invitation_id.and_then(InvitationId::from_bytes),
+    ))
+}
+
 async fn connect(
     endpoint: &Endpoint,
     addr: EndpointAddr,

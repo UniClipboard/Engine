@@ -1555,6 +1555,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | SpaceApplication dormant 生命周期 | `SpaceApplication::build` 只构造用例、认证 endpoint 和尚未运行的维护任务材料；调用方可先取得 endpoint 并完成网络绑定，`start_runtime` 才消费一次性启动材料并 spawn 首轮恢复。`SpaceFacade::new_dormant` 与显式 runtime 启动入口为 Engine 固定 `build → bind → Router → runtime` 顺序；现有 `new` 暂时保持立即启动语义，待 Engine clean cutover 后删除。 |
 | 2026-08-29 | 代码注释语言约定 | 仓库维护规则改为项目文档和代码注释均使用中文，代码标识符和提交信息继续使用英文；运行架构和产品行为不变。 |
 | 2026-08-29 | Sponsor Candidate 中文代码说明 | 为 Sponsor Candidate 生产准备流程补充中文注释，说明历史与身份验证、两阶段事件构造、MLS 材料绑定、恢复密封以及公开回复与本地暂存状态的边界；运行架构和产品行为不变。 |
+| 2026-08-29 | 生产邀请路由切换 | Sponsor 发布的完整邀请不再嵌入旧配对 ticket，而是嵌入带邀请身份的 Iroh Space admission 路由；地址筛选规则保持不变，Joiner 解码后可直接进入唯一新准入 ALPN。Iroh node 同时提供 Router 启动前可取得的被动出站 transport，并将认证 endpoint 安装与 transport 构造分离，为 Engine 严格执行 `transport → dormant application → handler → Router → runtime` 做准备。 |
 
 ## 相关文档
 
