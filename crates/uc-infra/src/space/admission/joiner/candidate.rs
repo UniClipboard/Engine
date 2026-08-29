@@ -8,6 +8,8 @@ use uc_application::deps::{
     AdmissionSecurityTransitionInput, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
     PreparedJoinerCandidateMaterial,
 };
+use uc_core::crypto::domain::Passphrase;
+use uc_core::ids::SpaceId;
 use uc_core::membership::{
     AdmissionPreparedV1, AdmissionRetryState, AdmissionSignedMembershipHistory,
     AdmissionStagedTarget, AdmissionStagedTargetInput, HistoricalMembershipSignatureVerifier,
@@ -15,21 +17,29 @@ use uc_core::membership::{
     SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind,
     VersionedMembershipHistory,
 };
+use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::space::admission::security::AdmissionSecurityTransitionAdapter;
 use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine};
 
 const JOINER_STAGED_INPUT_FORMAT_V1: u16 = 1;
-const JOINER_STAGED_TARGET_FORMAT_V1: u16 = 1;
+const JOINER_STAGED_TARGET_FORMAT_V2: u16 = 2;
 
 pub struct DefaultJoinerCandidatePreparation {
     history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
+    target_access: Arc<dyn PrepareAdmissionTargetAccessPort>,
 }
 
 impl DefaultJoinerCandidatePreparation {
-    pub fn new(history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>) -> Self {
-        Self { history_verifier }
+    pub fn new(
+        history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
+        target_access: Arc<dyn PrepareAdmissionTargetAccessPort>,
+    ) -> Self {
+        Self {
+            history_verifier,
+            target_access,
+        }
     }
 }
 
@@ -45,6 +55,7 @@ struct JoinerStagedTargetV1<'a> {
     format_version: u16,
     mls_state: &'a [u8],
     recovery_secret: &'a [u8; 32],
+    target_access: &'a [u8],
 }
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -52,6 +63,7 @@ struct OwnedJoinerPrivateStateV1 {
     format_version: u16,
     mls_state: Vec<u8>,
     recovery_secret: [u8; 32],
+    passphrase: Vec<u8>,
 }
 
 #[async_trait]
@@ -122,7 +134,7 @@ impl PrepareJoinerCandidatePort for DefaultJoinerCandidatePreparation {
         let private: OwnedJoinerPrivateStateV1 =
             postcard::from_bytes(preparation.private_state().as_bytes())
                 .map_err(PrepareJoinerCandidateError::invalid)?;
-        if private.format_version != 1 {
+        if private.format_version != 2 {
             return Err(PrepareJoinerCandidateError::Invalid);
         }
         let transition_input = AdmissionSecurityTransitionInput {
@@ -144,6 +156,16 @@ impl PrepareJoinerCandidatePort for DefaultJoinerCandidatePreparation {
         if staged.public_commitment != *commitment {
             return Err(PrepareJoinerCandidateError::Invalid);
         }
+        let passphrase = std::str::from_utf8(&private.passphrase)
+            .map_err(PrepareJoinerCandidateError::invalid)?;
+        let target_access = self
+            .target_access
+            .prepare_target_access(
+                &SpaceId::from_str(&commitment.lineage_id),
+                &Passphrase::new(passphrase),
+            )
+            .await
+            .map_err(PrepareJoinerCandidateError::unavailable)?;
 
         let mut proof = PreparedAdmissionProofV1::new(
             commitment.attempt_id,
@@ -191,9 +213,10 @@ impl PrepareJoinerCandidatePort for DefaultJoinerCandidatePreparation {
         .map_err(PrepareJoinerCandidateError::invalid)?;
         let staged_target = AdmissionStagedTarget::from_bytes(
             postcard::to_stdvec(&JoinerStagedTargetV1 {
-                format_version: JOINER_STAGED_TARGET_FORMAT_V1,
+                format_version: JOINER_STAGED_TARGET_FORMAT_V2,
                 mls_state: &staged.staged_state,
                 recovery_secret: &private.recovery_secret,
+                target_access: target_access.as_bytes(),
             })
             .map_err(PrepareJoinerCandidateError::unavailable)?,
         )
@@ -249,12 +272,27 @@ mod tests {
         SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
         ED25519_SIGNATURE_ALGORITHM_V1,
     };
+    use uc_core::ports::space::SpaceAccessError;
     use uc_core::security::IdentityFingerprint;
+    use uc_core::space_access::PreparedAdmissionTargetAccess;
 
     use super::*;
     use crate::space::admission::joiner::DefaultJoinerAppliedPreparation;
     use crate::space::security::mls_group::MlsGroupEngine;
     use crate::space::OpenMlsHistoricalSignatureVerifier;
+
+    struct FixedTargetAccess;
+
+    #[async_trait]
+    impl PrepareAdmissionTargetAccessPort for FixedTargetAccess {
+        async fn prepare_target_access(
+            &self,
+            _target_space_id: &SpaceId,
+            _passphrase: &Passphrase,
+        ) -> Result<PreparedAdmissionTargetAccess, SpaceAccessError> {
+            Ok(PreparedAdmissionTargetAccess::from_bytes(vec![0x40; 96]))
+        }
+    }
 
     #[tokio::test]
     async fn production_joiner_candidate_validates_real_openmls_and_prepares_reply() {
@@ -364,9 +402,10 @@ mod tests {
         .expect("Candidate envelope");
         let private_state = AdmissionJoinerPrivateState::from_bytes(
             postcard::to_stdvec(&super::super::start_material::JoinerPrivateStateV1 {
-                format_version: 1,
+                format_version: 2,
                 mls_state: pending.client_state.as_bytes(),
                 recovery_secret: &[0x48; 32],
+                passphrase: b"target passphrase",
             })
             .expect("private state encodes"),
         )
@@ -402,8 +441,10 @@ mod tests {
         )
         .expect("authenticated channel")
         .into_replacement();
-        let adapter =
-            DefaultJoinerCandidatePreparation::new(Arc::new(OpenMlsHistoricalSignatureVerifier));
+        let adapter = DefaultJoinerCandidatePreparation::new(
+            Arc::new(OpenMlsHistoricalSignatureVerifier),
+            Arc::new(FixedTargetAccess),
+        );
 
         let prepared_material = adapter
             .prepare(

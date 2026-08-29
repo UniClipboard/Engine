@@ -280,6 +280,8 @@ Sponsor 的 S2 material preparation 由 `DefaultSponsorCommitPreparation` 完整
 
 Joiner 的 J2 material preparation 由 `DefaultJoinerAppliedPreparation` 完整负责。它只接受 Core 从 Committed Joiner 暴露的 exact Commit 与 staged target，重新导出 OpenMLS public commitment 并逐字段匹配 Candidate，完整验证 Commit 目标历史包含原样 AddDevice，随后用 staged Joiner credential 签署固定 activation receipt，生成 continuation route 上的 exact Applied request。receipt 的 applied digest 使用 AddDevice 的 resulting members digest；不得用历史结构摘要代替，也不得重新生成 MLS state、member instance 或 Candidate。
 
+Joiner 的 J1 target preparation 同时负责目标访问材料。正确口令只在 J0 加密 Aggregate 的自动清零 private state 内保留；Candidate 验证成功后，`DefaultJoinerCandidatePreparation` 调用唯一 `PrepareAdmissionTargetAccessPort` 为 Candidate lineage 生成不透明 target keyslot/access state，并把它与 staged OpenMLS state、recovery secret 一同写入自动清零 staged target。提交 Prepared 时 private state 与 password-equivalent 被单向替代，后续阶段不再保存或重建原口令。这样 J3 的 Fresh/SameSpace/CrossSpace transition 持有完整目标输入，Engine 无需接触口令或内部 keyslot 步骤。
+
 Sponsor 的 S3 material preparation 由 `DefaultSponsorCompletePreparation` 完整负责。它验证 Applied predecessor、receipt 与 exact Commit 的 admission/event/security binding，并用 Joiner 的历史 credential 验签后把 receipt 纳入版本化成员历史；然后由当前 Sponsor credential 签署 Complete。preparation 只生成包含 staged MLS state、exact Commit、预期 commitment 和 receipt 后历史的 `AdmissionActivatedSecurityState` 恢复计划，不直接改变本机 MLS；Application 必须先把 Aggregate、正式成员事实、pending security effect 与 exact Complete 原子保存，后台 effect executor 才执行该计划，避免副作用先于事实提交。
 
 Space 共用的成员安全实现统一位于 `crates/uc-infra/src/space/security/`，包含 MLS 成员组、Space 访问、运行会话、历史验签、连接准入和成员安全更新。准入专属的安全结果转换位于 `crates/uc-infra/src/space/admission/security/`。通用 AEAD、密钥类型和哈希继续位于 `crates/uc-infra/src/security/`；准入记录密钥、活动 Space 清单和 Space 切换本次不迁移。已迁移的 Space 成员安全实现不保留旧路径或转发别名。
@@ -1545,6 +1547,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | Sponsor S2 Commit 生产材料 | 新增 `DefaultSponsorCommitPreparation`：Candidate 用 Joiner recovery public key 封存固定 staged recovery material，S2 严格验证 Prepared 与 Candidate、Joiner credential signature 和基础历史位置，随后生成正式目标历史、sealed local security 与 exact Commit。测试贯通生产 Candidate→Prepared→Commit，并证明 recovery ciphertext 绑定 admission 与接收方且不含明文。 |
 | 2026-08-29 | Joiner J2 Applied 生产材料 | 新增 `DefaultJoinerAppliedPreparation`：从 exact Commit 和 staged OpenMLS target 重新验证同一 public commitment 与完整目标历史，用 staged Joiner key 签署永久 activation receipt，并建立只等待 Complete 的 exact Applied exchange。真实 OpenMLS 测试贯通 Candidate→Prepared→Commit→Applied。 |
 | 2026-08-29 | Sponsor S3 Complete 生产材料 | 新增 `DefaultSponsorCompletePreparation`：严格验证 Applied receipt 并写入目标历史，以当前 Sponsor credential 签署 exact Complete，同时生成可恢复 security activation plan。preparation 不提前激活 MLS；真实激活留给 Aggregate 与 pending effect 原子保存后的执行器。集成测试贯通 Sponsor Candidate→Commit→Applied→Complete preparation。 |
+| 2026-08-29 | Joiner J1 target access | Joiner private-state format 推进到 V2，在加密且自动清零的 J0 状态内暂存正确口令；生产 Candidate preparation 一次性生成 Candidate lineage 的 target access material，并以 V2 staged target 替代口令与 password-equivalent。真实 OpenMLS 测试证明后续 Commit/Applied 继续使用同一 staged target。 |
 | 2026-08-29 | 代码注释语言约定 | 仓库维护规则改为项目文档和代码注释均使用中文，代码标识符和提交信息继续使用英文；运行架构和产品行为不变。 |
 
 ## 相关文档

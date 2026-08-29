@@ -18,7 +18,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::space::admission::security::AdmissionSecurityTransitionAdapter;
 use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine};
 
-const JOINER_STAGED_TARGET_FORMAT_V1: u16 = 1;
+const JOINER_STAGED_TARGET_FORMAT_V2: u16 = 2;
 const ACTIVATION_RECEIPT_FORMAT_V1: u16 = 1;
 
 pub struct DefaultJoinerAppliedPreparation {
@@ -36,6 +36,7 @@ struct OwnedJoinerStagedTargetV1 {
     format_version: u16,
     mls_state: Vec<u8>,
     recovery_secret: [u8; 32],
+    target_access: Vec<u8>,
 }
 
 #[async_trait]
@@ -57,7 +58,7 @@ impl PrepareJoinerAppliedPort for DefaultJoinerAppliedPreparation {
         let mut staged: OwnedJoinerStagedTargetV1 =
             postcard::from_bytes(preparation.staged_target().as_bytes())
                 .map_err(|error| PrepareJoinerAppliedError::invalid(anyhow::Error::new(error)))?;
-        if staged.format_version != JOINER_STAGED_TARGET_FORMAT_V1 {
+        if staged.format_version != JOINER_STAGED_TARGET_FORMAT_V2 {
             return Err(invalid("the staged Joiner target format is unsupported"));
         }
         let transition_input = AdmissionSecurityTransitionInput {

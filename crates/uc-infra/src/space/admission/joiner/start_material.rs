@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 use crate::space::decode_invitation_entry;
 use crate::space::security::mls_group::MlsGroupEngine;
 
-const JOINER_PRIVATE_STATE_FORMAT_V1: u16 = 1;
+const JOINER_PRIVATE_STATE_FORMAT_V2: u16 = 2;
 
 /// Infra owns the complete, one-shot construction of a Joiner's initial admission material.
 pub struct DefaultJoinerStartMaterial {
@@ -54,6 +54,7 @@ pub(super) struct JoinerPrivateStateV1<'a> {
     pub(super) format_version: u16,
     pub(super) mls_state: &'a [u8],
     pub(super) recovery_secret: &'a [u8; 32],
+    pub(super) passphrase: &'a [u8],
 }
 
 #[async_trait]
@@ -136,9 +137,10 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
         .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
 
         let private_state = postcard::to_stdvec(&JoinerPrivateStateV1 {
-            format_version: JOINER_PRIVATE_STATE_FORMAT_V1,
+            format_version: JOINER_PRIVATE_STATE_FORMAT_V2,
             mls_state: pending.client_state.as_bytes(),
             recovery_secret: &recovery_secret_bytes,
+            passphrase: input.passphrase.expose().as_bytes(),
         })
         .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
         let private_state = AdmissionJoinerPrivateState::from_bytes(private_state)
