@@ -107,8 +107,7 @@ fn aad(
     aad
 }
 
-#[cfg(test)]
-fn open_recovery_material(
+pub(super) fn open_recovery_material(
     admission_id: &[u8; 32],
     recipient_secret: &[u8; 32],
     encoded: &[u8],

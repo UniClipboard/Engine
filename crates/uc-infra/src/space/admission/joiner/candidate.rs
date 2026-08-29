@@ -56,6 +56,7 @@ struct JoinerStagedTargetV1<'a> {
     mls_state: &'a [u8],
     recovery_secret: &'a [u8; 32],
     target_access: &'a [u8],
+    preserve_unreadable_history: bool,
 }
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -217,6 +218,10 @@ impl PrepareJoinerCandidatePort for DefaultJoinerCandidatePreparation {
                 mls_state: &staged.staged_state,
                 recovery_secret: &private.recovery_secret,
                 target_access: target_access.as_bytes(),
+                preserve_unreadable_history: matches!(
+                    original_request.unreadable_history_policy(),
+                    uc_core::membership::UnreadableHistoryPolicy::Preserve
+                ),
             })
             .map_err(PrepareJoinerCandidateError::unavailable)?,
         )

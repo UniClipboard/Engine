@@ -37,6 +37,7 @@ struct OwnedJoinerStagedTargetV1 {
     mls_state: Vec<u8>,
     recovery_secret: [u8; 32],
     target_access: Vec<u8>,
+    preserve_unreadable_history: bool,
 }
 
 #[async_trait]

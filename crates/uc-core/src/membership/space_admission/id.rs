@@ -1,6 +1,8 @@
 macro_rules! define_redacted_id {
     ($name:ident, $size:expr) => {
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(
+            Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+        )]
         pub struct $name([u8; $size]);
 
         impl $name {

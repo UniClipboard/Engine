@@ -9,7 +9,8 @@ pub(crate) use admission::{
     FullInvitationCodecError,
 };
 pub use admission::{
-    AdmissionSecurityTransitionAdapter, DefaultJoinerAppliedPreparation,
+    AdmissionSecurityTransitionAdapter, DefaultJoinerActivationExecutor,
+    DefaultJoinerActivationPreparation, DefaultJoinerAppliedPreparation,
     DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
     DefaultJoinerStartMaterial, DefaultSponsorCandidatePreparation,
     DefaultSponsorCommitPreparation, DefaultSponsorCompletePreparation,

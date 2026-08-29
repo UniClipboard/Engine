@@ -1229,7 +1229,7 @@ impl SpaceJoinRecord {
             .as_deref()
             .and_then(AdmissionSpaceTransitionV2::decode)
             .ok_or(SpaceJoinTransitionError::StoredTransitionInvalid)?;
-        if stored != *current || current.attempt_id() != self.record_id {
+        if stored != *current || current.attempt_id().as_bytes() != self.record_id.as_bytes() {
             return Err(SpaceJoinTransitionError::TransitionMismatch);
         }
         Ok(())
@@ -1431,7 +1431,8 @@ mod tests {
     ) -> AdmissionSpaceTransitionV2 {
         AdmissionSpaceTransitionV2::Fresh(FreshSpaceTransitionV1 {
             transition_format_version: FRESH_SPACE_TRANSITION_FORMAT_V1,
-            attempt_id: record_id,
+            attempt_id: crate::membership::SpaceAdmissionId::from_bytes(*record_id.as_bytes())
+                .expect("non-zero legacy record id fixture"),
             target_space_id: "target-space".to_owned(),
             target_generation: [12; 16],
             target_keyslot_ref: vec![13],

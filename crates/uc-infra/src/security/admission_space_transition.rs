@@ -393,7 +393,7 @@ impl DurableAdmissionSpaceTransition {
 
     fn active_generation_manifest_for(
         &self,
-        attempt_id: uc_core::membership::SpaceJoinRecordId,
+        attempt_id: uc_core::membership::SpaceAdmissionId,
         target_space_id: &str,
         target_generation: [u8; 16],
     ) -> Result<ActiveSpaceGenerationManifestV2, AdmissionSpaceTransitionError> {
@@ -2722,7 +2722,7 @@ mod tests {
         AdmissionSecurityCommitmentV1, AdmissionSpaceTransitionResultV2,
         AdmissionSpaceTransitionV2, BaseMembershipHistoryPosition, ContentKeyPurpose,
         CrossSpaceTransitionPhaseV2, MembershipCredential, PendingGroupUpdate,
-        RevocationRepositoryPort, SpaceJoinRecordId, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+        RevocationRepositoryPort, SpaceAdmissionId, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
         ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::ports::security::current_profile::CurrentProfilePort;
@@ -3125,7 +3125,7 @@ mod tests {
             b"sealed-existing-member-update".to_vec(),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
-            attempt_id: SpaceJoinRecordId::from_bytes([0x72; 32]),
+            attempt_id: SpaceAdmissionId::from_bytes([0x72; 32]).expect("valid admission id"),
             target_space_id: target_space.as_ref().to_owned(),
             target_security_commitment: test_security_commitment(&target_space, [0x72; 32]),
             target_membership_history: b"verified history".to_vec(),
@@ -3337,7 +3337,7 @@ mod tests {
             Arc::clone(&current_profile),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
-            attempt_id: SpaceJoinRecordId::from_bytes([0x92; 32]),
+            attempt_id: SpaceAdmissionId::from_bytes([0x92; 32]).expect("valid admission id"),
             target_space_id: target_space.as_ref().to_owned(),
             target_security_commitment: test_security_commitment(&target_space, [0x92; 32]),
             target_membership_history: b"verified fresh history".to_vec(),
@@ -3499,7 +3499,7 @@ mod tests {
             Arc::new(DefaultCurrentProfile::new()),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
-            attempt_id: SpaceJoinRecordId::from_bytes([0xa2; 32]),
+            attempt_id: SpaceAdmissionId::from_bytes([0xa2; 32]).expect("valid admission id"),
             target_space_id: target_space.as_ref().to_owned(),
             target_security_commitment: test_security_commitment_with_catalog(
                 &target_space,

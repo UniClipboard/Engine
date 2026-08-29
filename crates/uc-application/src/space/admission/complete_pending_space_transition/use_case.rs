@@ -71,7 +71,11 @@ impl CompletePendingSpaceTransitionUseCase {
                         .advanced_space_transition(&transition, &next)
                         .map_err(state)?;
                     self.persist(record).await?;
-                    record = self.load_required(transition.attempt_id()).await?;
+                    record = self
+                        .load_required(SpaceJoinRecordId::from_bytes(
+                            *transition.attempt_id().as_bytes(),
+                        ))
+                        .await?;
                 }
                 AdmissionSpaceTransitionStepV2::Finished(result) => {
                     let (record, history) = record

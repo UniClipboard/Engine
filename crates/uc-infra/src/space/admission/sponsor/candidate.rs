@@ -49,13 +49,15 @@ impl DefaultSponsorCandidatePreparation {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct SponsorCandidateStagedV1 {
-    pub(super) format_version: u16,
-    pub(super) staged_state: Vec<u8>,
-    pub(super) target_protection_group_id: String,
-    pub(super) target_key_catalog: uc_core::membership::AdmissionContentKeyCatalogV1,
-    pub(super) existing_member_deliveries: Vec<SponsorAdmissionSecurityDelivery>,
-    pub(super) sealed_recovery_material: Vec<u8>,
+pub(in crate::space::admission) struct SponsorCandidateStagedV1 {
+    pub(in crate::space::admission) format_version: u16,
+    pub(in crate::space::admission) staged_state: Vec<u8>,
+    pub(in crate::space::admission) target_protection_group_id: String,
+    pub(in crate::space::admission) target_key_catalog:
+        uc_core::membership::AdmissionContentKeyCatalogV1,
+    pub(in crate::space::admission) existing_member_deliveries:
+        Vec<SponsorAdmissionSecurityDelivery>,
+    pub(in crate::space::admission) sealed_recovery_material: Vec<u8>,
 }
 
 #[async_trait]

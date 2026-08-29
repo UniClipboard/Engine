@@ -13,6 +13,7 @@ pub(crate) use full_invitation::{
     FullInvitationCodecError,
 };
 pub use joiner::{
+    DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
     DefaultJoinerAppliedPreparation, DefaultJoinerCandidatePreparation,
     DefaultJoinerInvitationPreparation, DefaultJoinerStartMaterial,
 };
