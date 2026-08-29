@@ -22,7 +22,6 @@ mod model;
 mod outbox;
 mod protocol;
 mod query_pending_space_transition;
-mod recover_space_admissions;
 mod security_transition;
 mod space_transition;
 
