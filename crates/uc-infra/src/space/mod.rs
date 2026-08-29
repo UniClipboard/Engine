@@ -8,8 +8,9 @@ pub(crate) use admission::{
     FullInvitationCodecError,
 };
 pub use admission::{
-    AdmissionSecurityTransitionAdapter, DefaultJoinerInvitationPreparation,
-    DefaultJoinerStartMaterial, DefaultSponsorCandidatePreparation, SqliteSpaceAdmissionState,
+    AdmissionSecurityTransitionAdapter, DefaultJoinerCandidatePreparation,
+    DefaultJoinerInvitationPreparation, DefaultJoinerStartMaterial,
+    DefaultSponsorCandidatePreparation, SqliteSpaceAdmissionState,
 };
 pub use security::{
     DefaultMembershipSecurityUpdateAdapter, DefaultSpaceAccessAdapter, InMemorySession,

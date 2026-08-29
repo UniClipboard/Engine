@@ -51,10 +51,10 @@ impl DefaultJoinerStartMaterial {
 }
 
 #[derive(Serialize)]
-struct JoinerPrivateStateV1<'a> {
-    format_version: u16,
-    mls_state: &'a [u8],
-    recovery_secret: &'a [u8; 32],
+pub(super) struct JoinerPrivateStateV1<'a> {
+    pub(super) format_version: u16,
+    pub(super) mls_state: &'a [u8],
+    pub(super) recovery_secret: &'a [u8; 32],
 }
 
 #[async_trait]

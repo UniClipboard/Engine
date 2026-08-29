@@ -29,11 +29,16 @@ pub enum AdmissionPendingRecovery<'a> {
 
 pub struct JoinerCandidatePreparation<'a> {
     private_state: &'a AdmissionJoinerPrivateState,
+    join_request: &'a SpaceAdmissionEnvelopeV1,
 }
 
 impl JoinerCandidatePreparation<'_> {
     pub const fn private_state(&self) -> &AdmissionJoinerPrivateState {
         self.private_state
+    }
+
+    pub const fn join_request(&self) -> &SpaceAdmissionEnvelopeV1 {
+        self.join_request
     }
 }
 
@@ -284,6 +289,7 @@ impl SpaceAdmissionAggregate {
         }
         Some(JoinerCandidatePreparation {
             private_state: &state.private_state,
+            join_request: state.pending_exchange.request_envelope(),
         })
     }
 

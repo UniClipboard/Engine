@@ -118,7 +118,7 @@ define_zeroizing_artifact!(
     4 * 1024 * 1024
 );
 
-define_redacted_artifact!(
+define_zeroizing_artifact!(
     /// Joiner 放入 `JoinRequest` 的候选成员密钥材料，用于把本次加入绑定到后续候选结果。
     AdmissionKeyPackage,
     1024 * 1024
@@ -193,7 +193,7 @@ define_redacted_artifact!(
     AdmissionStagedTargetInput,
     4 * 1024 * 1024
 );
-define_redacted_artifact!(
+define_zeroizing_artifact!(
     /// Joiner 已验证但尚未激活的目标 Space 状态；完成切换前不能成为活动状态。
     AdmissionStagedTarget,
     4 * 1024 * 1024

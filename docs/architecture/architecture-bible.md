@@ -1526,6 +1526,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | JoinRequest 完整身份事实 | Phase 5 Candidate 生产接入前补齐 typed JoinRequest：设备名、身份指纹、传输公钥、传输地址和成员实例连同身份签名作为一个 `AdmissionChangeFacts` 保存并往返；Core 拒绝与 DeviceId、MembershipCredential 或签名字节不一致的请求。Joiner 材料改为对这份完整事实签名，Sponsor 不再需要补造 AddDevice 身份字段。 |
 | 2026-08-29 | Candidate 两阶段事件构造 | `VersionedMembershipHistory` 新增唯一的本机 AddDevice Candidate 草案与安全承诺绑定入口：先固定成员事实、凭据、恢复公钥摘要和结果成员摘要，供 OpenMLS 计算公开承诺；再核对同一历史位置和 candidate core digest 后写入承诺标识。避免 Infra 手工拼成员历史事件或形成摘要循环。 |
 | 2026-08-29 | Sponsor Candidate 生产准备 | 新增 `DefaultSponsorCandidatePreparation` 作为 `PrepareSponsorCandidatePort` 的生产实现：严格恢复同一次基础历史，验证 JoinRequest 身份签名，从历史派生活动收件人，调用既有 OpenMLS 安全准备能力，绑定并签署 AddDevice Candidate，最后一次返回 exact Candidate reply 与不透明 staged security。Application、网络和 Engine 不编排内部密码步骤，正式 AddDevice 仍未提交。 |
+| 2026-08-29 | Joiner Candidate 生产准备 | 新增 `DefaultJoinerCandidatePreparation` 作为 `PrepareJoinerCandidatePort` 的生产实现：以原始 JoinRequest 为唯一身份基准，验证 Candidate 前驱、成员历史、AddDevice 事实、安全承诺及真实 OpenMLS Welcome/Commit，一次生成成员签名的 Prepared reply、已验证历史和暂存目标。Application 仍只编排单一材料入口；依赖失败保留 source，私密 MLS 与恢复材料在析构时清零，正式目标 Space 尚未激活。 |
 
 ## 相关文档
 

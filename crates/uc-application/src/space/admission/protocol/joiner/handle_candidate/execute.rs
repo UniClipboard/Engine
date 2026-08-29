@@ -25,11 +25,14 @@ impl JoinerAdmissionService {
         };
         let prepared = match self.prepare_candidate.prepare(preparation, &reply).await {
             Ok(prepared) => prepared,
-            Err(PrepareJoinerCandidateError::Unavailable) => {
+            Err(PrepareJoinerCandidateError::Unavailable { .. }) => {
                 report.deferred_count += 1;
                 return;
             }
-            Err(PrepareJoinerCandidateError::Invalid) => {
+            Err(
+                PrepareJoinerCandidateError::Invalid
+                | PrepareJoinerCandidateError::InvalidSource { .. },
+            ) => {
                 report.recovery_required_count += 1;
                 return;
             }

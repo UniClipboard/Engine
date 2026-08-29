@@ -127,6 +127,7 @@
 | Phase 5 JoinRequest identity-facts red/green | Core mismatch test failed before implementation, then passed with persistence and scoped crate checks |
 | Phase 5 Candidate event two-stage binding | passed, focused Core test |
 | Phase 5 production Sponsor Candidate adapter | passed, focused end-to-end adapter test and Infra all-target check |
+| Phase 5 production Joiner Candidate adapter | passed, real OpenMLS Candidate verification and Prepared-reply test; staged MLS and recovery artifacts zeroize on drop |
 
 ## Errors
 
