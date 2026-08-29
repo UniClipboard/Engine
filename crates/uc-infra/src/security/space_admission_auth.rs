@@ -7,15 +7,17 @@ use opaque_ke::rand::rngs::OsRng;
 use opaque_ke::rand::RngCore;
 use opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-    ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest,
-    CredentialResponse, ServerLogin, ServerLoginParameters, ServerRegistration,
-    ServerRegistrationLen, ServerSetup, TripleDh,
+    ClientRegistrationFinishParameters, CredentialFinalization, CredentialFinalizationLen,
+    CredentialRequest, CredentialRequestLen, CredentialResponse, CredentialResponseLen,
+    ServerLogin, ServerLoginParameters, ServerRegistration, ServerRegistrationLen, ServerSetup,
+    TripleDh,
 };
 use sha2::{Digest, Sha512};
 use subtle::ConstantTimeEq;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::membership::{
-    AdmissionChannelPeerId, InvitationId, SpaceAdmissionId, SpaceAdmissionProtocolVersion,
+    AdmissionChannelPeerId, AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
+    InvitationId, SpaceAdmissionId, SpaceAdmissionProtocolVersion,
 };
 use zeroize::Zeroizing;
 
@@ -174,6 +176,17 @@ impl SpaceAdmissionAuth {
         })
     }
 
+    pub fn register_password_equivalent(
+        server_setup: &SpaceAdmissionServerSetup,
+        password: &SpaceAdmissionPasswordEquivalent,
+    ) -> Result<SpaceAdmissionRegistration, SpaceAdmissionAuthError> {
+        register_secret(server_setup, password.as_bytes()).map_err(|source| {
+            SpaceAdmissionAuthError::Registration {
+                source: source.context("OPAQUE Space invitation registration"),
+            }
+        })
+    }
+
     pub fn decode_registration_after_decryption(
         encoded: &[u8],
     ) -> Result<SpaceAdmissionRegistration, SpaceAdmissionAuthError> {
@@ -194,19 +207,30 @@ impl SpaceAdmissionAuth {
         passphrase: &Passphrase,
         _context: &SpaceAdmissionAuthContext,
     ) -> Result<(SpaceAdmissionClientState, SpaceAdmissionKe1), SpaceAdmissionAuthError> {
+        Self::start_client_secret(passphrase.expose().as_bytes())
+    }
+
+    pub fn start_client_with_password_equivalent(
+        password: &AdmissionEncryptedPasswordEquivalent,
+        _context: &SpaceAdmissionAuthContext,
+    ) -> Result<(SpaceAdmissionClientState, SpaceAdmissionKe1), SpaceAdmissionAuthError> {
+        Self::start_client_secret(password.as_bytes())
+    }
+
+    fn start_client_secret(
+        password: &[u8],
+    ) -> Result<(SpaceAdmissionClientState, SpaceAdmissionKe1), SpaceAdmissionAuthError> {
         let mut rng = OsRng;
-        let result = ClientLogin::<SpaceAdmissionCipherSuite>::start(
-            &mut rng,
-            passphrase.expose().as_bytes(),
-        )
-        .map_err(|source| SpaceAdmissionAuthError::Authentication {
-            source: anyhow::Error::new(source).context("OPAQUE client authentication start"),
-        })?;
+        let result = ClientLogin::<SpaceAdmissionCipherSuite>::start(&mut rng, password).map_err(
+            |source| SpaceAdmissionAuthError::Authentication {
+                source: anyhow::Error::new(source).context("OPAQUE client authentication start"),
+            },
+        )?;
 
         Ok((
             SpaceAdmissionClientState {
                 state: result.state,
-                passphrase: Zeroizing::new(passphrase.expose().as_bytes().to_vec()),
+                passphrase: Zeroizing::new(password.to_vec()),
             },
             SpaceAdmissionKe1(result.message),
         ))
@@ -239,6 +263,68 @@ impl SpaceAdmissionAuth {
             SpaceAdmissionServerState(result.state),
             SpaceAdmissionKe2(result.message),
         ))
+    }
+}
+
+macro_rules! impl_handshake_encoding {
+    ($type:ident, $message:ty, $length:ty) => {
+        impl $type {
+            pub fn encode_for_transport(&self) -> Vec<u8> {
+                self.0.serialize().to_vec()
+            }
+
+            pub fn decode_from_transport(encoded: &[u8]) -> Result<Self, SpaceAdmissionAuthError> {
+                if encoded.len() != <$length as Unsigned>::USIZE {
+                    return Err(SpaceAdmissionAuthError::Authentication {
+                        source: anyhow::anyhow!("OPAQUE handshake message length is invalid"),
+                    });
+                }
+                <$message>::deserialize(encoded)
+                    .map(Self)
+                    .map_err(|source| SpaceAdmissionAuthError::Authentication {
+                        source: anyhow::Error::new(source)
+                            .context("decode OPAQUE handshake message"),
+                    })
+            }
+        }
+    };
+}
+
+impl_handshake_encoding!(
+    SpaceAdmissionKe1,
+    CredentialRequest<SpaceAdmissionCipherSuite>,
+    CredentialRequestLen<SpaceAdmissionCipherSuite>
+);
+impl_handshake_encoding!(
+    SpaceAdmissionKe2,
+    CredentialResponse<SpaceAdmissionCipherSuite>,
+    CredentialResponseLen<SpaceAdmissionCipherSuite>
+);
+impl_handshake_encoding!(
+    SpaceAdmissionKe3,
+    CredentialFinalization<SpaceAdmissionCipherSuite>,
+    CredentialFinalizationLen<SpaceAdmissionCipherSuite>
+);
+
+impl SpaceAdmissionContinuationCredential {
+    pub fn from_core(
+        credential: &AdmissionContinuationCredential,
+    ) -> Result<Self, SpaceAdmissionAuthError> {
+        let bytes: [u8; 64] = credential.as_bytes().try_into().map_err(|_| {
+            SpaceAdmissionAuthError::Authentication {
+                source: anyhow::anyhow!("continuation credential length is invalid"),
+            }
+        })?;
+        Ok(Self(Zeroizing::new(bytes)))
+    }
+
+    pub fn into_core(self) -> Result<AdmissionContinuationCredential, SpaceAdmissionAuthError> {
+        AdmissionContinuationCredential::from_bytes(self.0.to_vec()).map_err(|source| {
+            SpaceAdmissionAuthError::Authentication {
+                source: anyhow::Error::new(source)
+                    .context("construct admission continuation credential"),
+            }
+        })
     }
 }
 
@@ -379,12 +465,16 @@ fn register(
     server_setup: &SpaceAdmissionServerSetup,
     passphrase: &Passphrase,
 ) -> anyhow::Result<SpaceAdmissionRegistration> {
+    register_secret(server_setup, passphrase.expose().as_bytes())
+}
+
+fn register_secret(
+    server_setup: &SpaceAdmissionServerSetup,
+    password: &[u8],
+) -> anyhow::Result<SpaceAdmissionRegistration> {
     let mut rng = OsRng;
-    let client_start = ClientRegistration::<SpaceAdmissionCipherSuite>::start(
-        &mut rng,
-        passphrase.expose().as_bytes(),
-    )
-    .context("start OPAQUE client registration")?;
+    let client_start = ClientRegistration::<SpaceAdmissionCipherSuite>::start(&mut rng, password)
+        .context("start OPAQUE client registration")?;
     let mut credential_identifier = [0u8; 32];
     rng.fill_bytes(&mut credential_identifier);
     let server_start = ServerRegistration::<SpaceAdmissionCipherSuite>::start(
@@ -398,7 +488,7 @@ fn register(
         .state
         .finish(
             &mut rng,
-            passphrase.expose().as_bytes(),
+            password,
             server_start.message,
             ClientRegistrationFinishParameters::new(Default::default(), Some(&ksf)),
         )

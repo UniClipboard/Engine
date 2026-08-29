@@ -128,6 +128,7 @@
 | Phase 5 Candidate event two-stage binding | passed, focused Core test |
 | Phase 5 production Sponsor Candidate adapter | passed, focused end-to-end adapter test and Infra all-target check |
 | Phase 5 production Joiner Candidate adapter | passed, real OpenMLS Candidate verification and Prepared-reply test; staged MLS and recovery artifacts zeroize on drop |
+| Phase 5 bounded Iroh admission transport | passed, canonical envelope round-trip, pre-allocation frame rejection matrix, continuation MAC binding test, Infra all-target check |
 
 ## Errors
 

@@ -75,7 +75,7 @@ pub struct SpaceAdmissionMessageReply {
 }
 
 impl SpaceAdmissionMessageReply {
-    pub(crate) fn new(committed: SponsorAdmission) -> Option<Self> {
+    pub fn new(committed: SponsorAdmission) -> Option<Self> {
         committed
             .current_exact_reply()
             .is_some()

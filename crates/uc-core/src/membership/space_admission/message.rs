@@ -33,6 +33,23 @@ impl SpaceAdmissionProtocolVersion {
     }
 }
 
+impl SpaceAdmissionEnvelopeV1 {
+    /// Encodes the typed envelope for an authenticated transport. The wire and
+    /// encrypted persistence paths deliberately share one canonical mirror so
+    /// they cannot disagree about protocol fields or enum discriminants.
+    pub fn encode_canonical_v1(
+        &self,
+    ) -> Result<Vec<u8>, super::state::SpaceAdmissionPersistenceError> {
+        super::state::encode_envelope_v1(self)
+    }
+
+    pub fn decode_canonical_v1(
+        encoded: &[u8],
+    ) -> Result<Self, super::state::SpaceAdmissionPersistenceError> {
+        super::state::decode_envelope_v1(encoded)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRole {
     Joiner,

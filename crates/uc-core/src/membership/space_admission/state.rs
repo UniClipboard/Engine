@@ -47,6 +47,7 @@ pub use joiner::{
     SpaceAdmissionJoinerResolvingInvitation, SpaceAdmissionJoinerState,
 };
 pub use persistence::SpaceAdmissionPersistenceError;
+pub(crate) use persistence::{decode_envelope_v1, encode_envelope_v1};
 pub use sponsor::{
     SpaceAdmissionSponsorAccepted, SpaceAdmissionSponsorApplied, SpaceAdmissionSponsorCandidate,
     SpaceAdmissionSponsorCommitted, SpaceAdmissionSponsorState,

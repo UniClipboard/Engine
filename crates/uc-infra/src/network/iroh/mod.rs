@@ -23,6 +23,8 @@ pub mod persistable_addr;
 pub mod presence_adapter;
 pub mod relay_probe;
 pub(crate) mod runtime_consts;
+pub mod space_admission;
+mod space_admission_wire;
 pub mod transfer_progress_adapter;
 
 #[cfg(test)]
@@ -68,4 +70,9 @@ pub use presence_adapter::{IrohPresenceAdapter, IrohPresenceHandler, PRESENCE_AL
 pub use relay_probe::{
     IrohRelayProbeAdapter, RelayProbeError as IrohRelayProbeError,
     RelayProbeReport as IrohRelayProbeReport,
+};
+pub use space_admission::{
+    encode_space_admission_route, IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport,
+    SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
+    SponsorOpaqueMaterial, SPACE_ADMISSION_ALPN,
 };

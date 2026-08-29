@@ -35,6 +35,10 @@ use uc_application::deps::CurrentMemberSignaturePort;
 use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use uc_application::deps::{
+    HandleAuthenticatedSpaceAdmissionMessagePort, SpaceAdmissionTransportPort,
+};
+
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
     ContentExchangeGatePort, CurrentMembershipIdentityPort, CurrentWorkspacePeerScopePort,
@@ -82,6 +86,10 @@ use super::membership_history_exchange_adapter::{
 use super::net_recovery::DemandRecoveryCoordinator;
 use super::net_recovery::NetworkRecoveryObservationSource;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
+use super::space_admission::{
+    IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport, SpaceAdmissionChannelCredentialPort,
+    SPACE_ADMISSION_ALPN,
+};
 use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
 };
@@ -641,6 +649,24 @@ impl IrohNodeBuilder {
         self.router_builder
             .take()
             .ok_or(IrohNodeError::InstallAfterSpawn)
+    }
+
+    /// Installs the direct Space-admission handler before router spawn and
+    /// returns the outbound transport backed by the same endpoint.
+    pub fn install_space_admission(
+        &mut self,
+        endpoint: Arc<dyn HandleAuthenticatedSpaceAdmissionMessagePort>,
+        credentials: Arc<dyn SpaceAdmissionChannelCredentialPort>,
+    ) -> Result<Arc<dyn SpaceAdmissionTransportPort>, IrohNodeError> {
+        let handler = IrohSpaceAdmissionHandler::new(&self.endpoint, endpoint, credentials)
+            .map_err(|source| IrohNodeError::AdmissionInstall {
+                source: anyhow::anyhow!(source),
+            })?;
+        let builder = self.take_router_builder()?;
+        self.router_builder = Some(builder.accept(SPACE_ADMISSION_ALPN, handler));
+        Ok(Arc::new(IrohSpaceAdmissionTransport::new(Arc::clone(
+            &self.endpoint,
+        ))))
     }
 
     /// Bind the iroh endpoint, reusing the Ed25519 secret persisted by
@@ -1390,6 +1416,12 @@ pub enum IrohNodeError {
 
     #[error("iroh transport handlers must be installed before the router is spawned")]
     InstallAfterSpawn,
+
+    #[error("failed to install the Space admission transport")]
+    AdmissionInstall {
+        #[source]
+        source: anyhow::Error,
+    },
 
     #[error("invalid custom iroh relay URL `{value}`: {message}")]
     InvalidRelayUrl { value: String, message: String },

@@ -154,8 +154,15 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
                 .map_err(|error| {
                     JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
                 })?;
-        let route = SpaceAdmissionRoute::from_bytes(decoded.route().to_vec())
-            .map_err(|_| JoinerStartMaterialError::InvalidInvitation)?;
+        let route = crate::network::iroh::space_admission::encode_space_admission_route_bytes(
+            decoded.route(),
+            Some(decoded.invitation_id()),
+        )
+        .and_then(|route| {
+            SpaceAdmissionRoute::from_bytes(route)
+                .map_err(|_| uc_application::deps::SpaceAdmissionTransportError::Unavailable)
+        })
+        .map_err(|_| JoinerStartMaterialError::InvalidInvitation)?;
 
         Ok(JoinerStartMaterial::new(
             admission_id,

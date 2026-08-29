@@ -29,6 +29,24 @@ fn join_request_envelope_fixture(
 }
 
 #[test]
+fn canonical_transport_envelope_round_trips_the_complete_join_request() {
+    let admission_id =
+        SpaceAdmissionId::from_bytes([0xd1; 32]).expect("non-zero admission id fixture");
+    let original = join_request_envelope_fixture(
+        admission_id,
+        AdmissionMessageId::from_bytes([0xd2; 32]).expect("non-zero message id fixture"),
+    );
+
+    let encoded = original
+        .encode_canonical_v1()
+        .expect("typed envelope should encode");
+    let decoded = SpaceAdmissionEnvelopeV1::decode_canonical_v1(&encoded)
+        .expect("canonical envelope should decode");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
 fn new_joiner_aggregate_starts_with_all_required_durable_material() {
     let admission_id =
         SpaceAdmissionId::from_bytes([0xe7; 32]).expect("non-zero admission id fixture");

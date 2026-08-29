@@ -36,6 +36,21 @@ use value::*;
 
 const ADMISSION_ACTIVATION_RECEIPT_FORMAT_V1: u16 = 1;
 
+pub(crate) fn encode_envelope_v1(
+    envelope: &SpaceAdmissionEnvelopeV1,
+) -> Result<Vec<u8>, SpaceAdmissionPersistenceError> {
+    let persisted = PersistedEnvelopeV1::try_from(envelope)?;
+    postcard::to_stdvec(&persisted).map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)
+}
+
+pub(crate) fn decode_envelope_v1(
+    encoded: &[u8],
+) -> Result<SpaceAdmissionEnvelopeV1, SpaceAdmissionPersistenceError> {
+    let persisted: PersistedEnvelopeV1 = postcard::from_bytes(encoded)
+        .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+    persisted.into_domain()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SpaceAdmissionPersistenceError {
     #[error("the persisted admission encoding is invalid")]
