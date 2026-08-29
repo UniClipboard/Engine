@@ -17,13 +17,17 @@ use super::artifact::{
     AdmissionPeerBinding, AdmissionSealedSecurityState, AdmissionShortInvitationCode,
     AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionSpaceTransition,
     AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
-    AdmissionStagedTargetInput,
+    AdmissionStagedTargetInput, SpaceAdmissionRoute,
 };
 use super::exchange::{
-    AdmissionErrorCategory, AdmissionMessageEvidence, PendingAdmissionExchange, SavedAdmissionReply,
+    AdmissionErrorCategory, AdmissionMessageEvidence, AdmissionRetryState,
+    PendingAdmissionExchange, SavedAdmissionReply,
 };
 use super::id::{AdmissionMessageId, JoinId, SpaceAdmissionId};
-use super::message::{SpaceAdmissionEnvelopeV1, SpaceAdmissionRejectionReason};
+use super::message::{
+    AdmissionRole, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind,
+    SpaceAdmissionRejectionReason,
+};
 use crate::pairing::invitation::FullInvitation;
 
 pub use aggregate::{

@@ -582,6 +582,60 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
+    pub(crate) fn request_cancel(
+        self,
+        message_id: AdmissionMessageId,
+        retry_state: AdmissionRetryState,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let (route, predecessor, sender_sequence) = match &self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Candidate(state)) => {
+                let SpaceAdmissionBodyV1::Candidate(candidate) = state.candidate.body() else {
+                    return Err(SpaceAdmissionAggregateError::InvalidCandidateReply);
+                };
+                (
+                    SpaceAdmissionRoute::from_bytes(
+                        candidate.continuation_route().as_bytes().to_vec(),
+                    )
+                    .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?,
+                    state.candidate_evidence.message_id(),
+                    1,
+                )
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state)) => (
+                SpaceAdmissionRoute::from_bytes(state.pending_exchange.route().as_bytes().to_vec())
+                    .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?,
+                state.candidate_evidence.message_id(),
+                2,
+            ),
+            SpaceAdmissionRecordState::Joiner(
+                SpaceAdmissionJoinerState::Committed(_)
+                | SpaceAdmissionJoinerState::Applied(_)
+                | SpaceAdmissionJoinerState::Activating(_),
+            )
+            | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(_)) => {
+                return Err(SpaceAdmissionAggregateError::TooLateCommitted);
+            }
+            _ => return Err(SpaceAdmissionAggregateError::UnsafeCancellation),
+        };
+        let request = SpaceAdmissionEnvelopeV1::new(
+            self.admission_id,
+            AdmissionRole::Joiner,
+            sender_sequence,
+            message_id,
+            Some(predecessor),
+            SpaceAdmissionBodyV1::CancelRequested,
+        )
+        .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?;
+        let pending_exchange = PendingAdmissionExchange::new(
+            route,
+            request,
+            SpaceAdmissionMessageKind::Rejected,
+            retry_state,
+        )
+        .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?;
+        self.cancel(pending_exchange)
+    }
+
     pub(crate) fn cancel(
         mut self,
         pending_exchange: PendingAdmissionExchange,

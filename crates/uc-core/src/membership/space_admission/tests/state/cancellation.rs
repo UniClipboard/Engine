@@ -1,31 +1,11 @@
 #[test]
 fn joiner_candidate_saves_cancel_request_without_becoming_terminal() {
     let candidate = joiner_candidate_aggregate_fixture();
-    let candidate_message_id = match candidate.state() {
-        SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Candidate(state)) => {
-            state.candidate_evidence().message_id()
-        }
-        _ => panic!("fixture must be Candidate Joiner"),
-    };
-    let cancel_request = SpaceAdmissionEnvelopeV1::new(
-        candidate.admission_id(),
-        AdmissionRole::Joiner,
-        1,
-        AdmissionMessageId::from_bytes([0xb3; 32]).expect("non-zero message id fixture"),
-        Some(candidate_message_id),
-        SpaceAdmissionBodyV1::CancelRequested,
-    )
-    .expect("valid CancelRequested fixture");
-    let pending_exchange = PendingAdmissionExchange::new(
-        SpaceAdmissionRoute::from_bytes(vec![0xb4; 32]).expect("bounded route fixture"),
-        cancel_request,
-        SpaceAdmissionMessageKind::Rejected,
-        AdmissionRetryState::new(0, 0).expect("valid retry state"),
-    )
-    .expect("CancelRequested expects Rejected");
-
     let cancelling = candidate
-        .cancel(pending_exchange)
+        .request_cancel(
+        AdmissionMessageId::from_bytes([0xb3; 32]).expect("non-zero message id fixture"),
+        AdmissionRetryState::new(0, 0).expect("valid retry state"),
+        )
         .expect("Candidate Joiner can be cancelled");
 
     let state = match cancelling.state() {
@@ -69,31 +49,11 @@ fn initiated_joiner_can_be_superseded_before_authentication() {
 #[test]
 fn prepared_joiner_can_cancel_before_formal_commit() {
     let prepared = joiner_prepared_aggregate_fixture();
-    let candidate_message_id = match prepared.state() {
-        SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state)) => {
-            state.candidate_evidence().message_id()
-        }
-        _ => panic!("fixture must be Prepared Joiner"),
-    };
-    let cancel_request = SpaceAdmissionEnvelopeV1::new(
-        prepared.admission_id(),
-        AdmissionRole::Joiner,
-        2,
-        AdmissionMessageId::from_bytes([0xb5; 32]).expect("non-zero message id fixture"),
-        Some(candidate_message_id),
-        SpaceAdmissionBodyV1::CancelRequested,
-    )
-    .expect("valid CancelRequested fixture");
-    let pending_exchange = PendingAdmissionExchange::new(
-        SpaceAdmissionRoute::from_bytes(vec![0xb6; 32]).expect("bounded route fixture"),
-        cancel_request,
-        SpaceAdmissionMessageKind::Rejected,
-        AdmissionRetryState::new(0, 0).expect("valid retry state"),
-    )
-    .expect("CancelRequested expects Rejected");
-
     let cancelling = prepared
-        .cancel(pending_exchange)
+        .request_cancel(
+        AdmissionMessageId::from_bytes([0xb5; 32]).expect("non-zero message id fixture"),
+        AdmissionRetryState::new(0, 0).expect("valid retry state"),
+        )
         .expect("Prepared Joiner can cancel before Commit");
 
     assert!(matches!(

@@ -248,6 +248,17 @@ impl JoinerAdmission {
             .map(JoinerAdmissionTransition::from_transition)
     }
 
+    /// 根据当前阶段和已保存证据构造唯一合法的取消交换。
+    pub fn request_cancel(
+        self,
+        message_id: AdmissionMessageId,
+        retry_state: AdmissionRetryState,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .request_cancel(message_id, retry_state)
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
     pub fn with_authenticated_channel(
         self,
         peer_binding: AdmissionPeerBinding,
