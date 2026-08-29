@@ -46,13 +46,13 @@ pub enum HandleAuthenticatedSpaceAdmissionMessageError {
 }
 
 impl HandleAuthenticatedSpaceAdmissionMessageError {
-    anyhow_error_constructor!(invalid, Invalid);
-    anyhow_error_constructor!(conflict, Conflict);
-    anyhow_error_constructor!(out_of_order, OutOfOrder);
-    anyhow_error_constructor!(locked, Locked);
-    anyhow_error_constructor!(state_changed, StateChanged);
-    anyhow_error_constructor!(recovery_required, RecoveryRequired);
-    anyhow_error_constructor!(unavailable, Unavailable);
+    anyhow_error_constructor!(pub invalid, Invalid);
+    anyhow_error_constructor!(pub conflict, Conflict);
+    anyhow_error_constructor!(pub out_of_order, OutOfOrder);
+    anyhow_error_constructor!(pub locked, Locked);
+    anyhow_error_constructor!(pub state_changed, StateChanged);
+    anyhow_error_constructor!(pub recovery_required, RecoveryRequired);
+    anyhow_error_constructor!(pub unavailable, Unavailable);
 }
 
 impl From<AdmissionReplayError> for HandleAuthenticatedSpaceAdmissionMessageError {

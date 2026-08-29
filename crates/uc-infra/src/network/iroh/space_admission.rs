@@ -11,6 +11,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use tokio::sync::Semaphore;
+use tracing::debug;
 use uc_application::deps::{
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
     AuthenticatedSpaceAdmissionMessage, HandleAuthenticatedSpaceAdmissionMessagePort,
@@ -309,6 +310,12 @@ impl IrohSpaceAdmissionHandler {
         .await
         .map_err(|_| HandlerError::Protocol)?;
         send.finish().map_err(|_| HandlerError::Protocol)?;
+        let ack: u8 = read_typed(&mut receive, FrameKind::Ack, AUTH_FRAME_LIMIT)
+            .await
+            .map_err(|_| HandlerError::Protocol)?;
+        if ack != 1 {
+            return Err(HandlerError::Protocol);
+        }
         Ok(())
     }
 }
@@ -333,10 +340,15 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
         };
         match tokio::time::timeout(EXCHANGE_DEADLINE, self.run(&connection)).await {
             Ok(Ok(())) => {}
-            Ok(Err(HandlerError::Authentication)) => {
+            Ok(Err(error @ HandlerError::Authentication)) => {
+                debug!(?error, "Space admission exchange rejected");
                 connection.close(CLOSE_AUTHENTICATION.into(), b"authentication_rejected");
             }
-            _ => connection.close(CLOSE_PROTOCOL.into(), b"protocol_rejected"),
+            Ok(Err(error)) => {
+                debug!(?error, "Space admission exchange rejected");
+                connection.close(CLOSE_PROTOCOL.into(), b"protocol_rejected");
+            }
+            Err(_) => connection.close(CLOSE_PROTOCOL.into(), b"protocol_timeout"),
         }
         Ok(())
     }
@@ -409,6 +421,12 @@ impl AuthenticatedAdmissionExchangePort for EstablishedExchange {
             &wire.mac,
         )
         .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
+        write_typed(&mut self.send, FrameKind::Ack, &1u8, AUTH_FRAME_LIMIT)
+            .await
+            .map_err(|_| SpaceAdmissionTransportError::Unavailable)?;
+        self.send
+            .finish()
+            .map_err(|_| SpaceAdmissionTransportError::Unavailable)?;
         AuthenticatedAdmissionReply::new(reply, reply_digest)
             .ok_or(SpaceAdmissionTransportError::ProtocolRejected)
     }
@@ -683,6 +701,29 @@ enum HandlerError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use iroh::endpoint::presets;
+    use iroh::protocol::Router;
+    use iroh::RelayMode;
+    use tokio::sync::Mutex;
+    use uc_core::ids::DeviceId;
+    use uc_core::membership::{
+        AdmissionBaseSnapshot, AdmissionCandidateV1, AdmissionChangeFacts, AdmissionCommitV1,
+        AdmissionContinuationRoute, AdmissionIdentitySignature, AdmissionInvitationClaim,
+        AdmissionJoinRequestV1, AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit,
+        AdmissionMlsWelcome, AdmissionPreparedV1, AdmissionRecoveryPublicKey,
+        AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState,
+        AdmissionSecurityCommitmentV1, AdmissionSignedMembershipHistory,
+        AdmissionStagedSecurityState, BaseMembershipHistoryPosition, MemberInstanceId,
+        MembershipAdmissionV2, MembershipCredential, MembershipEventV2, MembershipOperationV2,
+        PreparedAdmissionProofV1, SponsorAdmission, UnreadableHistoryPolicy,
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+        MEMBERSHIP_EVENT_FORMAT_V2,
+    };
+    use uc_core::membership::{AdmissionRecordPersistence, AdmissionRole, SpaceAdmissionBodyV1};
+    use uc_core::security::IdentityFingerprint;
+
     use super::*;
 
     fn credential() -> AdmissionContinuationCredential {
@@ -776,5 +817,440 @@ mod tests {
             &mac,
         )
         .is_err());
+    }
+
+    struct LoopbackCredentials {
+        initial: Mutex<Option<SponsorOpaqueMaterial>>,
+        continuation: Mutex<Option<Vec<u8>>>,
+    }
+
+    #[async_trait]
+    impl SpaceAdmissionChannelCredentialPort for LoopbackCredentials {
+        async fn resolve_initial(
+            &self,
+            _invitation_id: InvitationId,
+            _admission_id: SpaceAdmissionId,
+        ) -> Result<SponsorOpaqueMaterial, SpaceAdmissionChannelCredentialError> {
+            self.initial.lock().await.take().ok_or_else(|| {
+                SpaceAdmissionChannelCredentialError::Rejected {
+                    source: anyhow::anyhow!("initial credential already consumed"),
+                }
+            })
+        }
+
+        async fn load_continuation(
+            &self,
+            _admission_id: SpaceAdmissionId,
+        ) -> Result<AdmissionContinuationCredential, SpaceAdmissionChannelCredentialError> {
+            let bytes = self.continuation.lock().await.clone().ok_or_else(|| {
+                SpaceAdmissionChannelCredentialError::Unavailable {
+                    source: anyhow::anyhow!("continuation is not committed"),
+                }
+            })?;
+            AdmissionContinuationCredential::from_bytes(bytes).map_err(|source| {
+                SpaceAdmissionChannelCredentialError::Rejected {
+                    source: anyhow::Error::new(source),
+                }
+            })
+        }
+    }
+
+    struct PersistingLoopbackEndpoint {
+        credentials: Arc<LoopbackCredentials>,
+        candidate_state: Mutex<Option<Vec<u8>>>,
+        calls: AtomicUsize,
+        completed: AtomicUsize,
+        continuation_route: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl HandleAuthenticatedSpaceAdmissionMessagePort for PersistingLoopbackEndpoint {
+        async fn handle(
+            &self,
+            message: AuthenticatedSpaceAdmissionMessage,
+        ) -> Result<
+            uc_application::deps::SpaceAdmissionMessageReply,
+            uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (binding, envelope, digest, continuation) = message.into_parts();
+            match envelope.body() {
+                SpaceAdmissionBodyV1::JoinRequest(_) => {
+                    let continuation = continuation.ok_or_else(|| {
+                        uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid(
+                            anyhow::anyhow!("fresh request missing continuation"),
+                        )
+                    })?;
+                    *self.credentials.continuation.lock().await =
+                        Some(continuation.as_bytes().to_vec());
+                    let admission_id = envelope.header().admission_id();
+                    let predecessor = envelope.header().message_id();
+                    let accepted = SponsorAdmission::accept_join_request(
+                        admission_id,
+                        AdmissionInvitationClaim::from_bytes(vec![0x41; 32]).map_err(
+                            uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid,
+                        )?,
+                        envelope,
+                        uc_core::membership::AdmissionMessageEvidence::new(
+                            AdmissionRole::Joiner,
+                            0,
+                            predecessor,
+                            None,
+                            digest,
+                        )
+                        .ok_or_else(|| uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!("invalid evidence")))?,
+                        AdmissionBaseSnapshot::from_bytes(vec![0x42; 64]).map_err(
+                            uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid,
+                        )?,
+                        binding,
+                        continuation,
+                    )
+                    .map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?
+                    .into_replacement();
+                    let candidate = SpaceAdmissionEnvelopeV1::new(
+                        admission_id,
+                        AdmissionRole::Sponsor,
+                        0,
+                        message_id(0x43),
+                        Some(predecessor),
+                        SpaceAdmissionBodyV1::Candidate(candidate_body(
+                            admission_id,
+                            self.continuation_route.clone(),
+                        )),
+                    )
+                    .map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?;
+                    let candidate = accepted
+                        .fix_candidate(
+                            candidate,
+                            AdmissionStagedSecurityState::from_bytes(vec![0x44; 64]).map_err(
+                                uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid,
+                            )?,
+                        )
+                        .map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?
+                        .into_replacement();
+                    let encoded = candidate.encode_persisted().map_err(
+                        uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid,
+                    )?;
+                    *self.candidate_state.lock().await = Some(encoded.clone());
+                    let reply = SponsorAdmission::decode_persisted(&encoded).map_err(
+                        uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid,
+                    )?;
+                    let reply = uc_application::deps::SpaceAdmissionMessageReply::new(reply).ok_or_else(|| {
+                        uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid(
+                            anyhow::anyhow!("candidate reply was not saved"),
+                        )
+                    })?;
+                    self.completed.store(1, Ordering::SeqCst);
+                    Ok(reply)
+                }
+                SpaceAdmissionBodyV1::Prepared(_) => {
+                    if continuation.is_some() {
+                        return Err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!("resume created a new continuation")));
+                    }
+                    let encoded = self.candidate_state.lock().await.clone().ok_or_else(|| {
+                        uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!("candidate state missing"))
+                    })?;
+                    let candidate = SponsorAdmission::decode_persisted(&encoded).map_err(
+                        uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid,
+                    )?;
+                    let fixed_bytes = candidate
+                        .sponsor_commit_preparation()
+                        .ok_or_else(|| uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!("fixed candidate missing")))?
+                        .candidate_reply()
+                        .encode_canonical_v1()
+                        .map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?;
+                    let fixed = match SpaceAdmissionEnvelopeV1::decode_canonical_v1(&fixed_bytes)
+                        .map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?
+                        .into_body()
+                    {
+                        SpaceAdmissionBodyV1::Candidate(body) => body,
+                        _ => return Err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::recovery_required(anyhow::anyhow!("fixed candidate body missing"))),
+                    };
+                    let history = AdmissionSignedMembershipHistory::from_bytes(vec![0x45; 64])
+                        .map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?;
+                    let commit = SpaceAdmissionEnvelopeV1::new(
+                        envelope.header().admission_id(),
+                        AdmissionRole::Sponsor,
+                        1,
+                        message_id(0x46),
+                        Some(envelope.header().message_id()),
+                        SpaceAdmissionBodyV1::Commit(AdmissionCommitV1::new(
+                            fixed,
+                            AdmissionSignedMembershipHistory::from_bytes(history.as_bytes().to_vec()).map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?,
+                            AdmissionSealedRecoveryMaterial::from_bytes(vec![0x47; 64]).map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?,
+                        )),
+                    ).map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?;
+                    let committed = candidate.commit_prepared(
+                        envelope,
+                        digest,
+                        history,
+                        AdmissionSealedSecurityState::from_bytes(vec![0x48; 64]).map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?,
+                        commit,
+                    ).map_err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid)?.into_replacement();
+                    uc_application::deps::SpaceAdmissionMessageReply::new(committed).ok_or_else(|| uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::invalid(anyhow::anyhow!("commit reply was not saved")))
+                }
+                _ => Err(uc_application::deps::HandleAuthenticatedSpaceAdmissionMessageError::out_of_order(anyhow::anyhow!("unexpected loopback message"))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn real_iroh_loopback_runs_initial_and_continuation_typed_exchanges() {
+        let sponsor = bound_endpoint().await;
+        wait_for_direct_addrs(&sponsor).await;
+        let joiner = bound_endpoint().await;
+        wait_for_direct_addrs(&joiner).await;
+        let invitation = InvitationId::from_bytes([0x51; 32]).expect("invitation id");
+        let admission = SpaceAdmissionId::from_bytes([0x52; 32]).expect("admission id");
+        let derived = SpaceAdmissionAuth::derive_password_equivalent(b"loopback-pass", invitation);
+        let setup = SpaceAdmissionAuth::generate_server_setup();
+        let registration = SpaceAdmissionAuth::register_password_equivalent(&setup, &derived)
+            .expect("registration");
+        let credentials = Arc::new(LoopbackCredentials {
+            initial: Mutex::new(Some(SponsorOpaqueMaterial::new(setup, registration))),
+            continuation: Mutex::new(None),
+        });
+        let route_bytes = encode_space_admission_route(&sponsor.addr(), Some(invitation))
+            .expect("route encoding");
+        let route = SpaceAdmissionRoute::from_bytes(route_bytes.clone()).expect("route");
+        let endpoint = Arc::new(PersistingLoopbackEndpoint {
+            credentials: Arc::clone(&credentials),
+            candidate_state: Mutex::new(None),
+            calls: AtomicUsize::new(0),
+            completed: AtomicUsize::new(0),
+            continuation_route: route_bytes,
+        });
+        let handler = Arc::new(
+            IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials)
+                .expect("handler"),
+        );
+        let router = Router::builder((*sponsor).clone())
+            .accept(SPACE_ADMISSION_ALPN, Arc::clone(&handler))
+            .spawn();
+        let transport = IrohSpaceAdmissionTransport::new(joiner.clone());
+        let password =
+            AdmissionEncryptedPasswordEquivalent::from_bytes(derived.as_bytes().to_vec())
+                .expect("password equivalent");
+        let mut initial = transport
+            .establish_initial(admission, &route, &password)
+            .await
+            .expect("initial OPAQUE");
+        let binding = initial.peer_binding();
+        let continuation = initial
+            .take_newly_established_continuation()
+            .expect("new continuation");
+        let join_request = join_request(admission, invitation);
+        let candidate_result = initial.exchange(&join_request).await;
+        assert_eq!(endpoint.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(endpoint.completed.load(Ordering::SeqCst), 1);
+        let saved = endpoint
+            .candidate_state
+            .lock()
+            .await
+            .clone()
+            .expect("candidate state persisted");
+        let saved = SponsorAdmission::decode_persisted(&saved).expect("candidate state decodes");
+        let saved_reply = saved.current_exact_reply().expect("candidate reply saved");
+        let canonical = saved_reply
+            .encode_canonical_v1()
+            .expect("candidate encodes");
+        SpaceAdmissionEnvelopeV1::decode_canonical_v1(&canonical)
+            .expect("candidate canonical reply decodes");
+        let candidate = candidate_result.expect("Candidate reply");
+        let (candidate, _) = candidate.into_parts();
+        assert_eq!(
+            candidate.kind(),
+            uc_core::membership::SpaceAdmissionMessageKind::Candidate
+        );
+
+        let prepared = prepared_request(admission, &candidate);
+        let resumed = transport
+            .resume(admission, &route, binding, &continuation)
+            .await
+            .expect("continuation authentication");
+        let commit = resumed.exchange(&prepared).await.expect("Commit reply");
+        let (commit, _) = commit.into_parts();
+        assert_eq!(
+            commit.kind(),
+            uc_core::membership::SpaceAdmissionMessageKind::Commit
+        );
+        assert_eq!(endpoint.calls.load(Ordering::SeqCst), 2);
+
+        router.shutdown().await.expect("router shutdown");
+        joiner.close().await;
+        sponsor.close().await;
+    }
+
+    async fn bound_endpoint() -> Arc<Endpoint> {
+        Arc::new(
+            Endpoint::builder(presets::N0)
+                .alpns(vec![SPACE_ADMISSION_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .expect("bind loopback endpoint"),
+        )
+    }
+
+    async fn wait_for_direct_addrs(endpoint: &Endpoint) {
+        for _ in 0..100 {
+            if !endpoint.addr().addrs.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("endpoint did not publish a direct address");
+    }
+
+    fn message_id(byte: u8) -> AdmissionMessageId {
+        AdmissionMessageId::from_bytes([byte; 32]).expect("non-zero message id")
+    }
+
+    fn join_request(
+        admission_id: SpaceAdmissionId,
+        invitation_id: InvitationId,
+    ) -> SpaceAdmissionEnvelopeV1 {
+        let device = DeviceId::new("loopback-joiner");
+        let credential = MembershipCredential::new(1, vec![0x61; 32]);
+        let signature = vec![0x62; 64];
+        let facts = AdmissionChangeFacts {
+            member_instance: credential.member_instance_id(&device),
+            device_id: device.clone(),
+            device_name: "Loopback joiner".to_owned(),
+            identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+                .expect("fingerprint"),
+            transport_public_key: vec![0x63; 32],
+            transport_address_blob: vec![0x64; 32],
+            identity_signature: signature.clone(),
+        };
+        let body = AdmissionJoinRequestV1::new(
+            invitation_id,
+            device,
+            facts,
+            credential,
+            AdmissionKeyPackage::from_bytes(vec![0x65; 48]).expect("key package"),
+            AdmissionRecoveryPublicKey::from_bytes([0x66; 32]).expect("recovery key"),
+            AdmissionIdentitySignature::from_bytes(signature).expect("identity signature"),
+            UnreadableHistoryPolicy::Discard,
+        )
+        .expect("JoinRequest");
+        SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Joiner,
+            0,
+            message_id(0x67),
+            None,
+            SpaceAdmissionBodyV1::JoinRequest(body),
+        )
+        .expect("JoinRequest envelope")
+    }
+
+    fn candidate_body(
+        admission_id: SpaceAdmissionId,
+        continuation_route: Vec<u8>,
+    ) -> AdmissionCandidateV1 {
+        let sponsor_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x71; 32]);
+        let joiner_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x72; 32]);
+        let joiner_device = DeviceId::new("candidate-joiner");
+        let admission = MembershipAdmissionV2 {
+            facts: AdmissionChangeFacts {
+                member_instance: joiner_credential.member_instance_id(&joiner_device),
+                device_id: joiner_device,
+                device_name: "candidate-joiner".to_owned(),
+                identity_fingerprint: IdentityFingerprint::from_display_string(
+                    "ABCD-EFGH-IJKL-MNOP",
+                )
+                .expect("fingerprint"),
+                transport_public_key: vec![0x73; 32],
+                transport_address_blob: vec![0x74; 16],
+                identity_signature: vec![0x75; 64],
+            },
+            membership_credential: joiner_credential,
+            resume_public_key_digest: [0x76; 32],
+            security_commitment_id: [0x77; 32],
+        };
+        let event = MembershipEventV2::new(
+            MEMBERSHIP_EVENT_FORMAT_V2,
+            "lineage".to_owned(),
+            None,
+            0,
+            [0x78; 16],
+            MemberInstanceId::from_bytes([0x79; 32]),
+            sponsor_credential.credential_id,
+            ED25519_SIGNATURE_ALGORITHM_V1,
+            MembershipOperationV2::AddDevice { admission },
+            [0x7a; 32],
+            [0x7b; 32],
+            vec![0x7c],
+            Some([0x7d; 32]),
+            vec![0x7e; 64],
+        );
+        let base = BaseMembershipHistoryPosition {
+            event_id: None,
+            depth: 0,
+            history_digest: [0x7f; 32],
+        };
+        let commitment = AdmissionSecurityCommitmentV1::new(
+            ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+            "lineage".to_owned(),
+            vec![0x80; 16],
+            *admission_id.as_bytes(),
+            base,
+            [0x81; 32],
+            1,
+            0,
+            1,
+            [0x82; 32],
+            [0x83; 32],
+            [0x84; 32],
+            [0x85; 32],
+            [0x86; 32],
+        )
+        .expect("security commitment");
+        AdmissionCandidateV1::new(
+            AdmissionSignedMembershipHistory::from_bytes(vec![0x87; 64]).expect("history"),
+            event,
+            commitment,
+            AdmissionMlsCommit::from_bytes(vec![0x88; 64]).expect("MLS commit"),
+            AdmissionMlsWelcome::from_bytes(vec![0x89; 64]).expect("MLS welcome"),
+            AdmissionContinuationRoute::from_bytes(continuation_route).expect("continuation route"),
+        )
+        .expect("Candidate")
+    }
+
+    fn prepared_request(
+        admission_id: SpaceAdmissionId,
+        candidate: &SpaceAdmissionEnvelopeV1,
+    ) -> SpaceAdmissionEnvelopeV1 {
+        let SpaceAdmissionBodyV1::Candidate(body) = candidate.body() else {
+            panic!("candidate fixture kind");
+        };
+        let operation = &body.candidate_event().operation;
+        let MembershipOperationV2::AddDevice { admission } = operation else {
+            panic!("candidate fixture operation");
+        };
+        let proof = PreparedAdmissionProofV1::new(
+            *admission_id.as_bytes(),
+            body.security_commitment().lineage_id.clone(),
+            body.security_commitment().base_history_position.clone(),
+            body.candidate_event().event_id(),
+            body.candidate_event().resulting_members_digest,
+            body.security_commitment().security_commitment_id,
+            admission.facts.member_instance,
+            admission.membership_credential.credential_id,
+            vec![0x91; 64],
+        );
+        SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Joiner,
+            1,
+            message_id(0x92),
+            Some(candidate.header().message_id()),
+            SpaceAdmissionBodyV1::Prepared(AdmissionPreparedV1::new(proof)),
+        )
+        .expect("Prepared envelope")
     }
 }

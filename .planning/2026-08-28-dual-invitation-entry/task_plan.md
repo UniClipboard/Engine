@@ -58,7 +58,7 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - [x] Implement the production Sponsor Candidate adapter behind `PrepareSponsorCandidatePort`
 - [x] Implement the production Joiner Candidate adapter behind `PrepareJoinerCandidatePort`
 - [x] Add the bounded Iroh admission wire and single authenticated ALPN handler/connector
-- [ ] Prove initial OPAQUE JoinRequest/Candidate and continuation Prepared/Commit loopback exchanges
+- [x] Prove initial OPAQUE JoinRequest/Candidate and continuation Prepared/Commit loopback exchanges
 - [ ] Wire the new admission repository, material, Candidate, and transport capabilities in `uc-engine`
 - [ ] Remove the remaining obsolete Engine admission assembly references instead of restoring aliases
 - [ ] Run scoped suites, workspace checks, architecture checks, review, and update the architecture bible

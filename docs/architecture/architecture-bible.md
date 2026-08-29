@@ -1528,6 +1528,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | Sponsor Candidate 生产准备 | 新增 `DefaultSponsorCandidatePreparation` 作为 `PrepareSponsorCandidatePort` 的生产实现：严格恢复同一次基础历史，验证 JoinRequest 身份签名，从历史派生活动收件人，调用既有 OpenMLS 安全准备能力，绑定并签署 AddDevice Candidate，最后一次返回 exact Candidate reply 与不透明 staged security。Application、网络和 Engine 不编排内部密码步骤，正式 AddDevice 仍未提交。 |
 | 2026-08-29 | Joiner Candidate 生产准备 | 新增 `DefaultJoinerCandidatePreparation` 作为 `PrepareJoinerCandidatePort` 的生产实现：以原始 JoinRequest 为唯一身份基准，验证 Candidate 前驱、成员历史、AddDevice 事实、安全承诺及真实 OpenMLS Welcome/Commit，一次生成成员签名的 Prepared reply、已验证历史和暂存目标。Application 仍只编排单一材料入口；依赖失败保留 source，私密 MLS 与恢复材料在析构时清零，正式目标 Space 尚未激活。 |
 | 2026-08-29 | Iroh 准入认证传输 | 新增唯一 `/uniclipboard/space-admission/1` ALPN 的 direct handler 与一次性交换 connector：Infra 在 64 KiB 认证帧、256 KiB 普通消息及 4 MiB 大消息固定上限和 deadline 内完成 OPAQUE 或 continuation HMAC，规范派生不透明 channel peer binding，再对每条 typed envelope 只调用一次 Application endpoint。Core canonical mirror 同时约束 wire 与加密持久化字段；无 event/subscriber/session map，Router spawn 前必须同时注入 endpoint 与 credential port。真实双 endpoint loopback 仍由下一验收切片证明。 |
+| 2026-08-29 | Iroh 准入双端验收 | 两个禁用 relay 的真实 Iroh endpoint 已通过同一新 ALPN 完成 Initial OPAQUE + JoinRequest/Candidate，并在全新连接上完成 continuation-authenticated Prepared/Commit；测试中的 endpoint 在发送前先保存 Candidate/Commit，且每条业务消息只调用一次。wire 增加有界 ACK 控制帧，避免 handler 返回导致 Router 释放连接时丢失已写 reply；ACK 只确认传输完成，不成为业务事实。 |
 
 ## 相关文档
 

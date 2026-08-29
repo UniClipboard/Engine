@@ -72,7 +72,7 @@ impl AuthenticatedAdmissionReply {
         })
     }
 
-    pub(crate) fn into_parts(self) -> (SpaceAdmissionEnvelopeV1, [u8; 32]) {
+    pub fn into_parts(self) -> (SpaceAdmissionEnvelopeV1, [u8; 32]) {
         (self.envelope, self.canonical_digest)
     }
 }

@@ -24,6 +24,7 @@ pub(super) enum FrameKind {
     ContinuationHello = 4,
     Request = 5,
     Reply = 6,
+    Ack = 7,
 }
 
 impl FrameKind {
@@ -35,6 +36,7 @@ impl FrameKind {
             4 => Ok(Self::ContinuationHello),
             5 => Ok(Self::Request),
             6 => Ok(Self::Reply),
+            7 => Ok(Self::Ack),
             _ => Err(WireError::UnknownFrame),
         }
     }

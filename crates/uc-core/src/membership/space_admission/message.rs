@@ -682,6 +682,10 @@ impl SpaceAdmissionEnvelopeV1 {
         &self.body
     }
 
+    pub fn into_body(self) -> SpaceAdmissionBodyV1 {
+        self.body
+    }
+
     pub fn evidence(&self, canonical_digest: [u8; 32]) -> Option<AdmissionMessageEvidence> {
         AdmissionMessageEvidence::new(
             self.header.sender_role(),
