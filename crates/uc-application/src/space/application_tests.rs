@@ -215,6 +215,26 @@ impl JoinerStartMaterialPort for PassivePorts {
 }
 
 #[async_trait]
+impl PrepareJoinerInvitationPort for PassivePorts {
+    async fn prepare(
+        &self,
+        _input: &JoinSpaceInput,
+    ) -> Result<PreparedJoinerInvitation, PrepareJoinerInvitationError> {
+        Ok(PreparedJoinerInvitation::Full)
+    }
+}
+
+#[async_trait]
+impl ResolveJoinerInvitationPort for PassivePorts {
+    async fn resolve_once(
+        &self,
+        _short_code: &AdmissionShortInvitationCode,
+    ) -> Result<uc_core::pairing::invitation::FullInvitation, ResolveJoinerInvitationError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
 impl JoinerStartStatePort for PassivePorts {
     async fn load(&self) -> Result<LoadedJoinerStartState, JoinerStartStateError> {
         Ok(LoadedJoinerStartState::new(
@@ -537,6 +557,8 @@ async fn complete_application_starts_from_only_target_ports() {
             group_bootstrap: passive.clone(),
             clock: passive.clone(),
             settings: passive.clone(),
+            prepare_joiner_invitation: passive.clone(),
+            resolve_joiner_invitation: passive.clone(),
             joiner_start_material: passive.clone(),
             joiner_start_state: passive.clone(),
             pending_admission_recovery_state: passive.clone(),

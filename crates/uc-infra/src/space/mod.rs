@@ -7,7 +7,10 @@ pub(crate) use admission::{
     decode_full_invitation, decode_invitation_entry, encode_full_invitation, DecodedFullInvitation,
     FullInvitationCodecError,
 };
-pub use admission::{AdmissionSecurityTransitionAdapter, SqliteSpaceAdmissionState};
+pub use admission::{
+    AdmissionSecurityTransitionAdapter, DefaultJoinerInvitationPreparation,
+    SqliteSpaceAdmissionState,
+};
 pub use security::{
     DefaultMembershipSecurityUpdateAdapter, DefaultSpaceAccessAdapter, InMemorySession,
     KeyMaterialStore, MlsPeerAdmissionAdapter, OpenMlsHistoricalSignatureVerifier,

@@ -1,6 +1,32 @@
 use super::*;
 
 #[derive(PartialEq, Eq)]
+pub enum SpaceAdmissionInvitationResolutionState {
+    Ready {
+        short_code: AdmissionShortInvitationCode,
+    },
+    Started,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct SpaceAdmissionJoinerResolvingInvitation {
+    pub(super) join_id: JoinId,
+    pub(super) local_join_ordinal: u64,
+    pub(super) source_snapshot: AdmissionSourceSnapshot,
+    pub(super) start_context: AdmissionJoinerStartContext,
+    pub(super) resolution: SpaceAdmissionInvitationResolutionState,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct SpaceAdmissionJoinerResolvedInvitation {
+    pub(super) join_id: JoinId,
+    pub(super) local_join_ordinal: u64,
+    pub(super) source_snapshot: AdmissionSourceSnapshot,
+    pub(super) start_context: AdmissionJoinerStartContext,
+    pub(super) full_invitation: FullInvitation,
+}
+
+#[derive(PartialEq, Eq)]
 pub enum SpaceAdmissionJoinerChannelState {
     AwaitingAuthentication {
         encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent,
@@ -340,6 +366,8 @@ impl SpaceAdmissionJoinerInitiated {
 
 #[derive(PartialEq, Eq)]
 pub enum SpaceAdmissionJoinerState {
+    ResolvingInvitation(SpaceAdmissionJoinerResolvingInvitation),
+    ResolvedInvitation(SpaceAdmissionJoinerResolvedInvitation),
     Initiated(SpaceAdmissionJoinerInitiated),
     Candidate(SpaceAdmissionJoinerCandidate),
     Prepared(SpaceAdmissionJoinerPrepared),

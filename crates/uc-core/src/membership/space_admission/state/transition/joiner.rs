@@ -1,6 +1,99 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
+    pub(crate) fn mark_invitation_resolution_started(
+        mut self,
+    ) -> Result<(AdmissionTransition, AdmissionShortInvitationCode), SpaceAdmissionAggregateError>
+    {
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+            state,
+        )) = self.state
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        let SpaceAdmissionInvitationResolutionState::Ready { short_code } = state.resolution else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        self.record_version = record_version;
+        self.state =
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+                SpaceAdmissionJoinerResolvingInvitation {
+                    join_id: state.join_id,
+                    local_join_ordinal: state.local_join_ordinal,
+                    source_snapshot: state.source_snapshot,
+                    start_context: state.start_context,
+                    resolution: SpaceAdmissionInvitationResolutionState::Started,
+                },
+            ));
+        Ok((AdmissionTransition::new(self, &[]), short_code))
+    }
+
+    pub(crate) fn save_resolved_invitation(
+        mut self,
+        full_invitation: FullInvitation,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+            state,
+        )) = self.state
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        if !matches!(
+            state.resolution,
+            SpaceAdmissionInvitationResolutionState::Started
+        ) {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        self.record_version = record_version;
+        self.state = SpaceAdmissionRecordState::Joiner(
+            SpaceAdmissionJoinerState::ResolvedInvitation(SpaceAdmissionJoinerResolvedInvitation {
+                join_id: state.join_id,
+                local_join_ordinal: state.local_join_ordinal,
+                source_snapshot: state.source_snapshot,
+                start_context: state.start_context,
+                full_invitation,
+            }),
+        );
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
+    pub(crate) fn reject_started_invitation_resolution(
+        mut self,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+            state,
+        )) = self.state
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        if !matches!(
+            state.resolution,
+            SpaceAdmissionInvitationResolutionState::Started
+        ) {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        self.record_version = record_version;
+        self.state = SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+            SpaceAdmissionRejectedState::LocalJoiner(SpaceAdmissionLocalJoinerRejected {
+                join_id: state.join_id,
+                reason: SpaceAdmissionRejectionReason::InvitationUnavailable,
+            }),
+        ));
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub(crate) fn reject_before_authentication(
         mut self,
         reason: SpaceAdmissionRejectionReason,
@@ -45,21 +138,27 @@ impl SpaceAdmissionAggregate {
             .record_version
             .checked_add(1)
             .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
-        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) =
-            self.state
-        else {
-            return Err(SpaceAdmissionAggregateError::UnsafeCancellation);
+        let join_id = match self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+                state,
+            )) => state.join_id,
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(
+                state,
+            )) => state.join_id,
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state))
+                if matches!(
+                    state.channel_state,
+                    SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. }
+                ) =>
+            {
+                state.join_id
+            }
+            _ => return Err(SpaceAdmissionAggregateError::UnsafeCancellation),
         };
-        if !matches!(
-            state.channel_state,
-            SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. }
-        ) {
-            return Err(SpaceAdmissionAggregateError::UnsafeCancellation);
-        }
         self.record_version = record_version;
         self.state = SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
             SpaceAdmissionRejectedState::LocalJoiner(SpaceAdmissionLocalJoinerRejected {
-                join_id: state.join_id,
+                join_id,
                 reason: SpaceAdmissionRejectionReason::Cancelled,
             }),
         ));
@@ -548,6 +647,16 @@ impl SpaceAdmissionAggregate {
             .checked_add(1)
             .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
         let superseded = match self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+                state,
+            )) => SpaceAdmissionSupersededState::Initiated {
+                join_id: state.join_id,
+            },
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(
+                state,
+            )) => SpaceAdmissionSupersededState::Initiated {
+                join_id: state.join_id,
+            },
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) => {
                 match state.channel_state {
                     SpaceAdmissionJoinerChannelState::AwaitingAuthentication { .. } => {

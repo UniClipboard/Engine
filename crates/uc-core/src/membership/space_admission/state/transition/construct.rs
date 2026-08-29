@@ -1,6 +1,37 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
+    pub(crate) fn start_resolving_invitation(
+        admission_id: SpaceAdmissionId,
+        join_id: JoinId,
+        local_join_ordinal: u64,
+        source_snapshot: AdmissionSourceSnapshot,
+        start_context: AdmissionJoinerStartContext,
+        short_code: AdmissionShortInvitationCode,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        Ok(AdmissionTransition::new(
+            Self {
+                format_version: SPACE_ADMISSION_RECORD_FORMAT_V1,
+                record_version: 0,
+                admission_id,
+                state: SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::ResolvingInvitation(
+                        SpaceAdmissionJoinerResolvingInvitation {
+                            join_id,
+                            local_join_ordinal,
+                            source_snapshot,
+                            start_context,
+                            resolution: SpaceAdmissionInvitationResolutionState::Ready {
+                                short_code,
+                            },
+                        },
+                    ),
+                ),
+            },
+            &[],
+        ))
+    }
+
     pub(crate) fn start_join(
         admission_id: SpaceAdmissionId,
         join_id: JoinId,

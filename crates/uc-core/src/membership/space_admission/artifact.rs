@@ -34,6 +34,39 @@ macro_rules! define_redacted_artifact {
     };
 }
 
+macro_rules! define_zeroizing_artifact {
+    ($(#[$metadata:meta])* $name:ident, $max_size:expr) => {
+        $(#[$metadata])*
+        #[derive(PartialEq, Eq)]
+        pub struct $name(Zeroizing<Vec<u8>>);
+
+        impl $name {
+            pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, AdmissionArtifactError> {
+                if bytes.is_empty() {
+                    return Err(AdmissionArtifactError::Empty);
+                }
+                if bytes.len() > $max_size {
+                    return Err(AdmissionArtifactError::Oversized);
+                }
+                Ok(Self(Zeroizing::new(bytes)))
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter
+                    .debug_struct(stringify!($name))
+                    .field("byte_len", &self.0.len())
+                    .finish_non_exhaustive()
+            }
+        }
+    };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 /// 构造不透明准入材料时的错误。
 ///
@@ -73,6 +106,17 @@ impl std::fmt::Debug for AdmissionJoinerPrivateState {
             .finish_non_exhaustive()
     }
 }
+
+define_zeroizing_artifact!(
+    /// Human-entered invitation alias retained only until its single resolution begins.
+    AdmissionShortInvitationCode,
+    1024
+);
+define_zeroizing_artifact!(
+    /// Opaque Infra-owned context required to finish Joiner start after invitation resolution.
+    AdmissionJoinerStartContext,
+    4 * 1024 * 1024
+);
 
 define_redacted_artifact!(
     /// Joiner 放入 `JoinRequest` 的候选成员密钥材料，用于把本次加入绑定到后续候选结果。

@@ -15,3 +15,6 @@
 - The full invitation can use `postcard` plus URL-safe base64 with an explicit prefix/version; the opaque Sponsor endpoint ticket is already available at issuance.
 - End-to-end tamper rejection can rely on the random 256-bit id and Sponsor holder binding: changing id, route, or expiry cannot match the Sponsor's in-memory invitation. Local decoding still rejects malformed/version/size errors.
 - Current `InvitationCode` derives Debug and several touched Infra logs print the full short code; the new work must make both invitation forms redacted and remove full-code logging in changed paths.
+- Product rule confirmed on 2026-08-29: cloud lookup consumes a short code on its first use even if pairing does not complete.
+- Therefore short-code lookup cannot be restart-retried after dispatch; a crash or lost response between cloud consumption and local full-invitation commit is terminal for that invitation.
+- The new admission path cannot reuse `PairingSessionPort::dial_by_invitation` because it combines lookup and dial; resolution must return and durably commit the full invitation first.

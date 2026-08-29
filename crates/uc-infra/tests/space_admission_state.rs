@@ -15,9 +15,10 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     ActiveSpaceGenerationManifestV2, AdmissionChannelPeerId, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionJoinRequestV1,
-    AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionPeerBinding,
-    AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
-    AdmissionSourceSnapshot, InvitationId, JoinId, JoinerAdmission, JoinerAdmissionTransition,
+    AdmissionJoinerPrivateState, AdmissionJoinerStartContext, AdmissionKeyPackage,
+    AdmissionPeerBinding, AdmissionRecordPersistence, AdmissionRecoveryPublicKey,
+    AdmissionRetryState, AdmissionRole, AdmissionShortInvitationCode, AdmissionSourceSnapshot,
+    InvitationId, JoinId, JoinerAdmission, JoinerAdmissionTransition, JoinerInvitationResolution,
     MembershipCredential, PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
     SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionRoute, SponsorAdmission,
     SponsorAdmissionTransition, UnreadableHistoryPolicy,
@@ -306,6 +307,59 @@ async fn recovery_commit_advances_record_and_rejects_old_token() {
             .await,
         Err(PendingAdmissionRecoveryStateError::StateChanged)
     ));
+}
+
+#[tokio::test]
+async fn short_code_is_removed_before_the_single_resolution_request() {
+    let fixture = Fixture::new();
+    let loaded = JoinerStartStatePort::load(&fixture.store).await.unwrap();
+    let (ordinal, snapshot, _, _, token) = loaded.into_parts();
+    let transition = JoinerAdmission::start_resolving_invitation(
+        SpaceAdmissionId::from_bytes([0x95; 32]).unwrap(),
+        JoinId::from_bytes([0x96; 16]).unwrap(),
+        ordinal,
+        snapshot,
+        AdmissionJoinerStartContext::from_bytes(b"secret-passphrase".to_vec()).unwrap(),
+        AdmissionShortInvitationCode::from_bytes(b"ONCE-CODE".to_vec()).unwrap(),
+    )
+    .unwrap();
+    JoinerStartStatePort::commit(
+        &fixture.store,
+        token,
+        JoinerStartMutation::new(transition, None),
+    )
+    .await
+    .unwrap();
+
+    let mut pending =
+        PendingAdmissionRecoveryStatePort::load(&fixture.store, AdmissionRecoveryTrigger::Startup)
+            .await
+            .unwrap();
+    let (ready, token) = pending.pop().unwrap().into_parts();
+    assert!(matches!(
+        ready.invitation_resolution(),
+        Some(JoinerInvitationResolution::Ready { short_code, .. })
+            if short_code.as_bytes() == b"ONCE-CODE"
+    ));
+    let started = ready.mark_invitation_resolution_started().unwrap();
+    let (transition, short_code) = started.into_parts();
+    assert_eq!(short_code.as_bytes(), b"ONCE-CODE");
+    let committed = PendingAdmissionRecoveryStatePort::commit(&fixture.store, token, transition)
+        .await
+        .unwrap();
+    let (started, _) = committed.into_parts();
+    assert!(matches!(
+        started.invitation_resolution(),
+        Some(JoinerInvitationResolution::Started { .. })
+    ));
+    assert!(!fixture
+        .encrypted_payload()
+        .windows(b"ONCE-CODE".len())
+        .any(|window| window == b"ONCE-CODE"));
+    assert!(!fixture
+        .encrypted_payload()
+        .windows(b"secret-passphrase".len())
+        .any(|window| window == b"secret-passphrase"));
 }
 
 #[tokio::test]

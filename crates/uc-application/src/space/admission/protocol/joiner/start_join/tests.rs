@@ -102,6 +102,32 @@ async fn fresh_join_is_saved_before_pending_is_returned() {
 }
 
 #[tokio::test]
+async fn short_code_is_saved_before_any_resolution_or_start_material() {
+    let pair = SpaceAdmissionProtocolTestPair::short_invitation().await;
+
+    let started = pair
+        .joiner()
+        .start_join(join_input("short-once"))
+        .await
+        .expect("the unresolved short code should be saved");
+
+    assert!(matches!(started.status, CurrentJoinStatus::Pending { .. }));
+    assert_eq!(
+        pair.events(),
+        &[
+            ProtocolEvent::DeviceNameSaved,
+            ProtocolEvent::JoinerSavedUnresolvedInvitation,
+            ProtocolEvent::AdmissionRecoveryWoken,
+        ]
+    );
+    assert!(matches!(
+        pair.take_created_join().invitation_resolution(),
+        Some(uc_core::membership::JoinerInvitationResolution::Ready { short_code, .. })
+            if short_code.as_bytes() == b"short-once"
+    ));
+}
+
+#[tokio::test]
 async fn a_replaceable_current_join_is_superseded_with_the_new_join_in_one_commit() {
     let first = SpaceAdmissionProtocolTestPair::fresh().await;
     first

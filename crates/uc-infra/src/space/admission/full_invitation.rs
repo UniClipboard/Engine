@@ -168,4 +168,46 @@ mod tests {
             Err(FullInvitationCodecError::UnsupportedVersion)
         ));
     }
+
+    #[tokio::test]
+    async fn production_joiner_preparation_separates_full_and_short_entries() {
+        use uc_application::deps::{PrepareJoinerInvitationPort, PreparedJoinerInvitation};
+        use uc_application::facade::JoinSpaceInput;
+        use uc_core::crypto::domain::Passphrase;
+        use uc_core::pairing::InvitationCode;
+
+        let adapter = crate::space::DefaultJoinerInvitationPreparation;
+        let full = encode_full_invitation(invitation_id(), b"route", 1_900_000_000_000)
+            .expect("valid full invitation");
+        let prepared = adapter
+            .prepare(&JoinSpaceInput {
+                invitation_code: InvitationCode::new(full.as_str()),
+                device_name: None,
+                passphrase: Passphrase::new("secret-passphrase"),
+                preserve_unreadable_history: false,
+            })
+            .await
+            .expect("full invitation should prepare locally");
+        assert!(matches!(prepared, PreparedJoinerInvitation::Full));
+
+        let prepared = adapter
+            .prepare(&JoinSpaceInput {
+                invitation_code: InvitationCode::new("ABCD-1234"),
+                device_name: None,
+                passphrase: Passphrase::new("secret-passphrase"),
+                preserve_unreadable_history: true,
+            })
+            .await
+            .expect("short code should prepare a durable context");
+        assert!(matches!(
+            prepared,
+            PreparedJoinerInvitation::Short {
+                short_code,
+                start_context,
+                ..
+            } if short_code.as_bytes() == b"ABCD-1234"
+                && !start_context.as_bytes().is_empty()
+                && !format!("{start_context:?}").contains("secret-passphrase")
+        ));
+    }
 }

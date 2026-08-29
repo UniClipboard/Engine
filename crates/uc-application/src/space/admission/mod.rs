@@ -54,14 +54,16 @@ pub use protocol::{
     PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
     PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
     PrepareJoinerAppliedPort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
-    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
-    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
-    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
-    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedSponsorCandidate,
+    PrepareJoinerInvitationError, PrepareJoinerInvitationPort, PrepareSponsorCandidateError,
+    PrepareSponsorCandidatePort, PrepareSponsorCommitError, PrepareSponsorCommitPort,
+    PrepareSponsorCompleteError, PrepareSponsorCompletePort, PrepareSponsorSettledError,
+    PrepareSponsorSettledPort, PreparedJoinerActivation, PreparedJoinerAppliedMaterial,
+    PreparedJoinerCandidateMaterial, PreparedJoinerInvitation, PreparedSponsorCandidate,
     PreparedSponsorCommit, PreparedSponsorComplete, PreparedSponsorSettled,
-    SpaceAdmissionCommitToken, SpaceAdmissionMessageReply, SpaceAdmissionTransportError,
-    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
-    SponsorAdmissionState, SponsorAdmissionStateError, SponsorAdmissionStatePort,
+    ResolveJoinerInvitationError, ResolveJoinerInvitationPort, SpaceAdmissionCommitToken,
+    SpaceAdmissionMessageReply, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    SponsorAdmissionCommitToken, SponsorAdmissionMutation, SponsorAdmissionState,
+    SponsorAdmissionStateError, SponsorAdmissionStatePort,
 };
 pub use query_pending_space_transition::QueryPendingSpaceTransitionError;
 pub use security_transition::{

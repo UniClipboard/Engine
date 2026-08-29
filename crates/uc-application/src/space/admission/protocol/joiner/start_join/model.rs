@@ -1,8 +1,34 @@
 use uc_core::membership::{
-    AdmissionEncryptedPasswordEquivalent, AdmissionJoinerPrivateState, AdmissionSourceSnapshot,
-    JoinId, JoinerAdmission, JoinerAdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionRoute,
+    AdmissionEncryptedPasswordEquivalent, AdmissionJoinerPrivateState, AdmissionJoinerStartContext,
+    AdmissionShortInvitationCode, AdmissionSourceSnapshot, JoinId, JoinerAdmission,
+    JoinerAdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
 };
+
+pub enum PreparedJoinerInvitation {
+    Full,
+    Short {
+        admission_id: SpaceAdmissionId,
+        join_id: JoinId,
+        start_context: AdmissionJoinerStartContext,
+        short_code: AdmissionShortInvitationCode,
+    },
+}
+
+impl PreparedJoinerInvitation {
+    pub fn short(
+        admission_id: SpaceAdmissionId,
+        join_id: JoinId,
+        start_context: AdmissionJoinerStartContext,
+        short_code: AdmissionShortInvitationCode,
+    ) -> Self {
+        Self::Short {
+            admission_id,
+            join_id,
+            start_context,
+            short_code,
+        }
+    }
+}
 
 pub struct JoinerStartMaterial {
     admission_id: SpaceAdmissionId,

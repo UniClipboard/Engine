@@ -31,6 +31,7 @@
 - 一个能力应隐藏该动作需要的完整外部行为，不得暴露成员账本内部字段、版本、历史摘要或步骤式存储方法。
 - Application 的准入生产代码只能接收 `JoinerAdmission` 或 `SponsorAdmission` 角色能力对象及对应变化结果，不得接收或引用完整 `SpaceAdmissionAggregate`。完整记录只供 Core 内部规则与 Infra 密文编解码使用。
 - Joiner J0 生成的本机私密材料必须与 JoinRequest 在同一 Initiated 记录内加密保存；认证期间保留，Candidate 准备只能借用，Candidate 状态提交后由 staged target input 替代。不得把私密材料交给 transport、写日志或在状态提交前单独删除。
+- 云端短码是一次性查询凭证。Application 必须先保存 Ready，再提交 Started 并从持久状态删除短码，之后才能调用解析能力一次。响应必须先保存完整邀请再连接 Sponsor；Started 重启、超时、响应丢失或保存失败均不得重用短码，必须结束并要求新邀请。
 - 外部能力产生的错误放在对应动作的 `error.rs`，稳定分类必须携带 `#[source] anyhow::Error`，通过构造器和 `From` + `?` 保留来源与回溯；不得用无来源 unit variant 或字符串化 `map_err` 抹平错误链。动作自己的输入、读取视图、完整变化和结果放在 `model.rs`。
 - 只有稳定产品结果才能继续向 `space/admission` 或更外层导出，内部阶段和实现错误不得泄露给调用方。
 

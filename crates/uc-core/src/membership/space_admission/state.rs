@@ -13,16 +13,18 @@ use super::super::AdmissionActivationReceipt;
 use super::artifact::{
     AdmissionActivatedSecurityState, AdmissionBaseSnapshot, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionHelperNonce, AdmissionHelperSecurityState,
-    AdmissionInvitationClaim, AdmissionJoinerPrivateState, AdmissionPeerBinding,
-    AdmissionSealedSecurityState, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
-    AdmissionSpaceTransition, AdmissionSpaceTransitionResult, AdmissionStagedSecurityState,
-    AdmissionStagedTarget, AdmissionStagedTargetInput,
+    AdmissionInvitationClaim, AdmissionJoinerPrivateState, AdmissionJoinerStartContext,
+    AdmissionPeerBinding, AdmissionSealedSecurityState, AdmissionShortInvitationCode,
+    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionSpaceTransition,
+    AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
+    AdmissionStagedTargetInput,
 };
 use super::exchange::{
     AdmissionErrorCategory, AdmissionMessageEvidence, PendingAdmissionExchange, SavedAdmissionReply,
 };
 use super::id::{AdmissionMessageId, JoinId, SpaceAdmissionId};
 use super::message::{SpaceAdmissionEnvelopeV1, SpaceAdmissionRejectionReason};
+use crate::pairing::invitation::FullInvitation;
 
 pub use aggregate::{
     AdmissionEffect, AdmissionRecoveryCategory, AdmissionTransition, SpaceAdmissionAggregate,
@@ -31,16 +33,18 @@ pub use aggregate::{
 };
 pub use capability::{
     AdmissionRecordPersistence, JoinerAdmission, JoinerAdmissionTransition, SponsorAdmission,
-    SponsorAdmissionTransition,
+    SponsorAdmissionTransition, StartedJoinerInvitationResolution,
 };
 pub use helper::{
     SpaceAdmissionCompletionHelperApplied, SpaceAdmissionCompletionHelperChallenged,
     SpaceAdmissionCompletionHelperState,
 };
 pub use joiner::{
-    SpaceAdmissionJoinerActivating, SpaceAdmissionJoinerApplied, SpaceAdmissionJoinerCancelling,
-    SpaceAdmissionJoinerCandidate, SpaceAdmissionJoinerChannelState, SpaceAdmissionJoinerCommitted,
-    SpaceAdmissionJoinerInitiated, SpaceAdmissionJoinerPrepared, SpaceAdmissionJoinerState,
+    SpaceAdmissionInvitationResolutionState, SpaceAdmissionJoinerActivating,
+    SpaceAdmissionJoinerApplied, SpaceAdmissionJoinerCancelling, SpaceAdmissionJoinerCandidate,
+    SpaceAdmissionJoinerChannelState, SpaceAdmissionJoinerCommitted, SpaceAdmissionJoinerInitiated,
+    SpaceAdmissionJoinerPrepared, SpaceAdmissionJoinerResolvedInvitation,
+    SpaceAdmissionJoinerResolvingInvitation, SpaceAdmissionJoinerState,
 };
 pub use persistence::SpaceAdmissionPersistenceError;
 pub use sponsor::{
@@ -56,6 +60,7 @@ pub use terminal::{
 };
 pub use view::{
     AdmissionPendingRecovery, JoinerActivationPreparation, JoinerAppliedPreparation,
-    JoinerCandidatePreparation, JoinerCompletePreparation, SponsorCandidatePreparation,
-    SponsorCommitPreparation, SponsorCompletePreparation, SponsorSettlementPreparation,
+    JoinerCandidatePreparation, JoinerCompletePreparation, JoinerInvitationResolution,
+    SponsorCandidatePreparation, SponsorCommitPreparation, SponsorCompletePreparation,
+    SponsorSettlementPreparation,
 };

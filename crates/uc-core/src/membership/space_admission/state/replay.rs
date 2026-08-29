@@ -61,6 +61,10 @@ impl SpaceAdmissionAggregate {
         Option<ExpectedEvidence>,
     ) {
         match &self.state {
+            SpaceAdmissionRecordState::Joiner(
+                SpaceAdmissionJoinerState::ResolvingInvitation(_)
+                | SpaceAdmissionJoinerState::ResolvedInvitation(_),
+            ) => (None, None),
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) => (
                 None,
                 Some(ExpectedEvidence {

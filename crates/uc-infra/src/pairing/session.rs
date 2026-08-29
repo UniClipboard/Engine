@@ -45,6 +45,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
+use uc_core::pairing::invitation::FullInvitation;
 use uc_core::pairing::{InvitationCode, PairingSessionMessage};
 use uc_core::ports::pairing::{
     DialError, DialOutcome, DiscoveryChannel, PairingEventPort, PairingSessionEvent,
@@ -163,18 +164,29 @@ impl IrohPairingSessionAdapter {
         ),
         DialError,
     > {
+        let (full_invitation, channel) = self.resolve_full_invitation_once(code).await?;
+        let (invitation_id, resolved) = decode_full_invitation_route(full_invitation.as_str())?;
+        info!(
+            sponsor = %resolved.id.fmt_short(),
+            transport_addr_count = resolved.addrs.len(),
+            ?channel,
+            "pairing invitation resolved; sponsor address ready"
+        );
+        Ok((invitation_id, resolved, channel))
+    }
+
+    async fn resolve_full_invitation_once(
+        &self,
+        code: &InvitationCode,
+    ) -> Result<(FullInvitation, DiscoveryChannel), DialError> {
         use futures_util::future::{select, Either};
         use std::pin::pin;
 
-        if let Some(decoded) = crate::space::decode_invitation_entry(
-            code.as_str(),
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .map_err(map_full_invitation_error)?
-        {
-            let invitation_id = decoded.invitation_id();
-            let sponsor_addr = decode_sponsor_route(decoded.route())?;
-            return Ok((invitation_id, sponsor_addr, DiscoveryChannel::Direct));
+        if code.as_str().starts_with("ucspace1_") {
+            let full_invitation = FullInvitation::new(code.as_str().to_owned())
+                .map_err(|_| DialError::InvitationNotFound)?;
+            decode_full_invitation_route(full_invitation.as_str())?;
+            return Ok((full_invitation, DiscoveryChannel::Direct));
         }
 
         if crate::network::iroh::runtime_consts::lan_only() {
@@ -182,7 +194,7 @@ impl IrohPairingSessionAdapter {
             return self
                 .resolve_via_mdns(code)
                 .await
-                .map(|(invitation_id, addr)| (invitation_id, addr, DiscoveryChannel::Lan));
+                .map(|invitation| (invitation, DiscoveryChannel::Lan));
         }
 
         let cloud_fut = self.resolve_via_cloud(code);
@@ -190,7 +202,7 @@ impl IrohPairingSessionAdapter {
         let cloud_fut = pin!(cloud_fut);
         let mdns_fut = pin!(mdns_fut);
 
-        let ((invitation_id, resolved), channel) = match select(cloud_fut, mdns_fut).await {
+        let (resolved, channel) = match select(cloud_fut, mdns_fut).await {
             Either::Left((Ok(resolved), _)) => {
                 debug!(channel = "cloud", "discovery race winner");
                 (resolved, DiscoveryChannel::Cloud)
@@ -235,31 +247,22 @@ impl IrohPairingSessionAdapter {
             }
         };
 
-        info!(
-            sponsor = %resolved.id.fmt_short(),
-            transport_addr_count = resolved.addrs.len(),
-            ?channel,
-            "pairing invitation resolved; sponsor address ready"
-        );
-        Ok((invitation_id, resolved, channel))
+        Ok((resolved, channel))
     }
 
-    async fn resolve_via_cloud(
-        &self,
-        code: &InvitationCode,
-    ) -> Result<(uc_core::membership::InvitationId, EndpointAddr), DialError> {
+    async fn resolve_via_cloud(&self, code: &InvitationCode) -> Result<FullInvitation, DialError> {
         let resp = self
             .rendezvous
             .resolve_pairing(code.as_str())
             .await
             .map_err(map_resolve_err)?;
-        decode_full_invitation_route(&resp.sponsor_ticket)
+        let invitation =
+            FullInvitation::new(resp.sponsor_ticket).map_err(|_| DialError::InvitationNotFound)?;
+        decode_full_invitation_route(invitation.as_str())?;
+        Ok(invitation)
     }
 
-    async fn resolve_via_mdns(
-        &self,
-        code: &InvitationCode,
-    ) -> Result<(uc_core::membership::InvitationId, EndpointAddr), DialError> {
+    async fn resolve_via_mdns(&self, code: &InvitationCode) -> Result<FullInvitation, DialError> {
         use std::time::Duration as StdDuration;
 
         use crate::pairing::MdnsPairingResolver;
@@ -291,7 +294,10 @@ impl IrohPairingSessionAdapter {
             .map_err(|err| DialError::Internal(format!("LAN ticket hex decode: {err}")))?;
         let invitation =
             std::str::from_utf8(&ticket_bytes).map_err(|_| DialError::InvitationNotFound)?;
-        decode_full_invitation_route(invitation)
+        let invitation = FullInvitation::new(invitation.to_owned())
+            .map_err(|_| DialError::InvitationNotFound)?;
+        decode_full_invitation_route(invitation.as_str())?;
+        Ok(invitation)
     }
 
     /// Install a ready-built session into the map and return the minted id.
@@ -658,6 +664,28 @@ impl PairingEventPort for IrohPairingSessionAdapter {
         }
         *guard = Some(tx);
         Ok(rx)
+    }
+}
+
+#[async_trait]
+impl uc_application::deps::ResolveJoinerInvitationPort for IrohPairingSessionAdapter {
+    async fn resolve_once(
+        &self,
+        short_code: &uc_core::membership::AdmissionShortInvitationCode,
+    ) -> Result<FullInvitation, uc_application::deps::ResolveJoinerInvitationError> {
+        let code = std::str::from_utf8(short_code.as_bytes()).map_err(|error| {
+            uc_application::deps::ResolveJoinerInvitationError::unavailable(anyhow::Error::new(
+                error,
+            ))
+        })?;
+        self.resolve_full_invitation_once(&InvitationCode::new(code))
+            .await
+            .map(|(invitation, _)| invitation)
+            .map_err(|error| {
+                uc_application::deps::ResolveJoinerInvitationError::unavailable(anyhow::Error::new(
+                    error,
+                ))
+            })
     }
 }
 

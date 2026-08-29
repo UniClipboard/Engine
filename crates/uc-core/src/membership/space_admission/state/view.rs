@@ -1,6 +1,20 @@
 use super::super::message::SpaceAdmissionEnvelopeV1;
 use super::*;
 
+pub enum JoinerInvitationResolution<'a> {
+    Ready {
+        short_code: &'a AdmissionShortInvitationCode,
+        start_context: &'a AdmissionJoinerStartContext,
+    },
+    Started {
+        start_context: &'a AdmissionJoinerStartContext,
+    },
+    Resolved {
+        full_invitation: &'a FullInvitation,
+        start_context: &'a AdmissionJoinerStartContext,
+    },
+}
+
 pub enum AdmissionPendingRecovery<'a> {
     Initial {
         encrypted_password_equivalent: &'a AdmissionEncryptedPasswordEquivalent,
@@ -164,6 +178,33 @@ impl SponsorCandidatePreparation<'_> {
 }
 
 impl SpaceAdmissionAggregate {
+    pub fn invitation_resolution(&self) -> Option<JoinerInvitationResolution<'_>> {
+        match &self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+                state,
+            )) => match &state.resolution {
+                SpaceAdmissionInvitationResolutionState::Ready { short_code } => {
+                    Some(JoinerInvitationResolution::Ready {
+                        short_code,
+                        start_context: &state.start_context,
+                    })
+                }
+                SpaceAdmissionInvitationResolutionState::Started => {
+                    Some(JoinerInvitationResolution::Started {
+                        start_context: &state.start_context,
+                    })
+                }
+            },
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(
+                state,
+            )) => Some(JoinerInvitationResolution::Resolved {
+                full_invitation: &state.full_invitation,
+                start_context: &state.start_context,
+            }),
+            _ => None,
+        }
+    }
+
     pub const fn is_terminal(&self) -> bool {
         matches!(self.state, SpaceAdmissionRecordState::Terminal(_))
     }
@@ -394,7 +435,9 @@ impl SpaceAdmissionAggregate {
                 SpaceAdmissionRejectedState::Sponsor(state),
             )) => Some(state.saved_reply.exact_reply_envelope()),
             SpaceAdmissionRecordState::Joiner(
-                SpaceAdmissionJoinerState::Initiated(_)
+                SpaceAdmissionJoinerState::ResolvingInvitation(_)
+                | SpaceAdmissionJoinerState::ResolvedInvitation(_)
+                | SpaceAdmissionJoinerState::Initiated(_)
                 | SpaceAdmissionJoinerState::Candidate(_)
                 | SpaceAdmissionJoinerState::Committed(_)
                 | SpaceAdmissionJoinerState::Activating(_),

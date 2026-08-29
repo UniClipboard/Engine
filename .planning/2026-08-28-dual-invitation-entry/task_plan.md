@@ -33,11 +33,13 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - **Status:** complete
 
 ### Phase 3: Durable unresolved short-code state
-- [ ] Add a pre-network Joiner state for unresolved short codes
-- [ ] Persist before discovery and recover after restart
-- [ ] Transition to J0 only after a full invitation is available
-- [ ] Full invitation bypasses discovery and enters J0 directly
-- **Status:** pending
+- [x] Add pre-network Joiner states for a saved short code and a saved full invitation
+- [x] Persist the short code before discovery, then atomically mark its single resolution attempt started
+- [x] Never retry a short code after the resolution request may have consumed it
+- [x] Save the returned full invitation before any Sponsor connection
+- [x] Treat timeout, lost response, save failure, or restart from in-flight resolution as requiring a new invitation
+- [x] Full invitations bypass discovery and continue through the locally validated start path
+- **Status:** complete
 
 ### Phase 4: Standard authentication and Joiner start material
 - [ ] Integrate fixed-version OPAQUE per Spec 028 and validate it
@@ -52,6 +54,9 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - The full invitation contains no passphrase or private key material.
 - Existing rendezvous and mDNS transports remain indexes; they do not become admission state owners.
 - No id is derived from the 40-bit short code.
+- Cloud short-code lookup is at-most-once: a successful lookup consumes the alias even when pairing never completes.
+- The only durable and retryable result of short-code lookup is the full invitation saved before dialing.
+- An ambiguous lookup outcome fails closed and asks for a newly issued invitation; it never reuses the short code.
 
 ## Errors Encountered
 

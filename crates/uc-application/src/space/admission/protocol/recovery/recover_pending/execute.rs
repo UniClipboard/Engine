@@ -54,6 +54,12 @@ impl AdmissionRecoveryService {
 
         for loaded_admission in loaded {
             let (aggregate, commit_token) = loaded_admission.into_parts();
+            if aggregate.invitation_resolution().is_some() {
+                joiner
+                    .recover_invitation_resolution(self, &mut report, aggregate, commit_token)
+                    .await;
+                continue;
+            }
             let Some(recovery) = aggregate.pending_recovery() else {
                 continue;
             };

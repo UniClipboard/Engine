@@ -9,11 +9,12 @@ pub use artifact::{
     AdmissionContinuationCredential, AdmissionContinuationRoute,
     AdmissionEncryptedPasswordEquivalent, AdmissionHelperNonce, AdmissionHelperSecurityState,
     AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinerPrivateState,
-    AdmissionKeyPackage, AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionPeerBinding,
-    AdmissionRecoveryPublicKey, AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState,
-    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionSpaceTransition,
-    AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
-    AdmissionStagedTargetInput, SpaceAdmissionRoute,
+    AdmissionJoinerStartContext, AdmissionKeyPackage, AdmissionMlsCommit, AdmissionMlsWelcome,
+    AdmissionPeerBinding, AdmissionRecoveryPublicKey, AdmissionSealedRecoveryMaterial,
+    AdmissionSealedSecurityState, AdmissionShortInvitationCode, AdmissionSignedMembershipHistory,
+    AdmissionSourceSnapshot, AdmissionSpaceTransition, AdmissionSpaceTransitionResult,
+    AdmissionStagedSecurityState, AdmissionStagedTarget, AdmissionStagedTargetInput,
+    SpaceAdmissionRoute,
 };
 #[cfg(test)]
 pub(crate) use exchange::SavedAdmissionReply;
@@ -35,10 +36,11 @@ pub use state::{
     AdmissionEffect, AdmissionPendingRecovery, AdmissionRecordPersistence,
     AdmissionRecoveryCategory, JoinerActivationPreparation, JoinerAdmission,
     JoinerAdmissionTransition, JoinerAppliedPreparation, JoinerCandidatePreparation,
-    JoinerCompletePreparation, SpaceAdmissionAggregate, SpaceAdmissionAggregateError,
-    SpaceAdmissionPersistenceError, SponsorAdmission, SponsorAdmissionTransition,
-    SponsorCandidatePreparation, SponsorCommitPreparation, SponsorCompletePreparation,
-    SponsorSettlementPreparation, SPACE_ADMISSION_RECORD_FORMAT_V1,
+    JoinerCompletePreparation, JoinerInvitationResolution, SpaceAdmissionAggregate,
+    SpaceAdmissionAggregateError, SpaceAdmissionPersistenceError, SponsorAdmission,
+    SponsorAdmissionTransition, SponsorCandidatePreparation, SponsorCommitPreparation,
+    SponsorCompletePreparation, SponsorSettlementPreparation, StartedJoinerInvitationResolution,
+    SPACE_ADMISSION_RECORD_FORMAT_V1,
 };
 #[cfg(test)]
 pub(crate) use state::{

@@ -6,6 +6,7 @@ use crate::space::admission::protocol::test_support::{
     ProtocolEvent, SpaceAdmissionProtocolTestPair,
 };
 use crate::space::admission::JoinSpaceInput;
+use uc_core::membership::AdmissionRecordPersistence;
 
 #[tokio::test]
 async fn loaded_pending_admission_keeps_the_aggregate_and_commit_token_together() {
@@ -47,6 +48,91 @@ async fn pending_join_recovery_requests_an_initial_channel_after_the_join_was_sa
             ProtocolEvent::JoinerSavedJoinRequest,
             ProtocolEvent::AdmissionRecoveryWoken,
             ProtocolEvent::JoinerInitialChannelRequested,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn short_code_resolution_is_marked_started_once_and_saves_the_full_invitation() {
+    let pair = SpaceAdmissionProtocolTestPair::short_invitation().await;
+    pair.joiner()
+        .start_join(join_input("short-once"))
+        .await
+        .expect("the short code should be saved before resolution");
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.advanced_count, 2);
+    assert_eq!(report.deferred_count, 1);
+    assert_eq!(
+        pair.events(),
+        &[
+            ProtocolEvent::DeviceNameSaved,
+            ProtocolEvent::JoinerSavedUnresolvedInvitation,
+            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::JoinerInvitationResolutionStarted,
+            ProtocolEvent::JoinerInvitationResolutionRequested,
+            ProtocolEvent::JoinerSavedResolvedInvitation,
+        ]
+    );
+    assert!(matches!(
+        pair.take_created_join().invitation_resolution(),
+        Some(uc_core::membership::JoinerInvitationResolution::Resolved {
+            full_invitation,
+            ..
+        }) if full_invitation.as_str() == "ucspace1_resolved-short-once"
+    ));
+}
+
+#[tokio::test]
+async fn restarted_in_flight_short_code_is_rejected_without_a_second_resolution() {
+    let pair = SpaceAdmissionProtocolTestPair::short_invitation().await;
+    pair.joiner()
+        .start_join(join_input("short-once"))
+        .await
+        .expect("the short code should be saved");
+    pair.simulate_invitation_resolution_started();
+    pair.clear_events();
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::Startup)
+        .await;
+
+    assert_eq!(report.rejected_count, 1);
+    assert_eq!(
+        pair.events(),
+        &[ProtocolEvent::JoinerRejectedConsumedInvitation]
+    );
+    assert!(pair.take_created_join().is_terminal());
+}
+
+#[tokio::test]
+async fn ambiguous_short_code_resolution_failure_is_rejected_without_retry() {
+    let pair = SpaceAdmissionProtocolTestPair::short_invitation().await;
+    pair.joiner()
+        .start_join(join_input("short-fail"))
+        .await
+        .expect("the short code should be saved");
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.rejected_count, 1);
+    assert_eq!(
+        pair.events(),
+        &[
+            ProtocolEvent::DeviceNameSaved,
+            ProtocolEvent::JoinerSavedUnresolvedInvitation,
+            ProtocolEvent::AdmissionRecoveryWoken,
+            ProtocolEvent::JoinerInvitationResolutionStarted,
+            ProtocolEvent::JoinerInvitationResolutionRequested,
+            ProtocolEvent::JoinerRejectedConsumedInvitation,
         ]
     );
 }

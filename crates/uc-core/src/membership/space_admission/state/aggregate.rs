@@ -189,6 +189,12 @@ pub struct SpaceAdmissionAggregate {
 impl std::fmt::Debug for SpaceAdmissionAggregate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = match self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+                _,
+            )) => "Joiner::ResolvingInvitation",
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(_)) => {
+                "Joiner::ResolvedInvitation"
+            }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(_)) => {
                 "Joiner::Initiated"
             }

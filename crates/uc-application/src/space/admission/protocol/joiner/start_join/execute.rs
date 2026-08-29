@@ -1,5 +1,5 @@
 use super::super::JoinerAdmissionService;
-use super::JoinerStartMutation;
+use super::{JoinerStartMutation, PreparedJoinerInvitation};
 use crate::space::admission::protocol::SpaceAdmissionProtocol;
 use crate::space::admission::{CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
 use uc_core::membership::{
@@ -33,32 +33,56 @@ impl JoinerAdmissionService {
             .transpose()
             .map_err(|_| JoinSpaceError::PreviousJoinCannotBeSuperseded)?;
 
-        let material = self.start_material.create(&input).await?;
-        let (
-            admission_id,
-            join_id,
-            route,
-            join_request,
-            private_state,
-            encrypted_password_equivalent,
-        ) = material.into_parts();
-        let pending_exchange = PendingAdmissionExchange::new(
-            route,
-            join_request,
-            SpaceAdmissionMessageKind::Candidate,
-            AdmissionRetryState::new(0, 0).map_err(|_| JoinSpaceError::InvalidStartMaterial)?,
-        )
-        .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
-        let transition = JoinerAdmission::start_join(
-            admission_id,
-            join_id,
-            next_local_join_ordinal,
-            source_snapshot,
-            private_state,
-            encrypted_password_equivalent,
-            pending_exchange,
-        )
-        .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
+        let prepared_invitation = self.prepare_invitation.prepare(&input).await?;
+        let (join_id, transition) = match prepared_invitation {
+            PreparedJoinerInvitation::Full => {
+                let material = self.start_material.create(&input).await?;
+                let (
+                    admission_id,
+                    join_id,
+                    route,
+                    join_request,
+                    private_state,
+                    encrypted_password_equivalent,
+                ) = material.into_parts();
+                let pending_exchange = PendingAdmissionExchange::new(
+                    route,
+                    join_request,
+                    SpaceAdmissionMessageKind::Candidate,
+                    AdmissionRetryState::new(0, 0)
+                        .map_err(|_| JoinSpaceError::InvalidStartMaterial)?,
+                )
+                .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
+                let transition = JoinerAdmission::start_join(
+                    admission_id,
+                    join_id,
+                    next_local_join_ordinal,
+                    source_snapshot,
+                    private_state,
+                    encrypted_password_equivalent,
+                    pending_exchange,
+                )
+                .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
+                (join_id, transition)
+            }
+            PreparedJoinerInvitation::Short {
+                admission_id,
+                join_id,
+                start_context,
+                short_code,
+            } => {
+                let transition = JoinerAdmission::start_resolving_invitation(
+                    admission_id,
+                    join_id,
+                    next_local_join_ordinal,
+                    source_snapshot,
+                    start_context,
+                    short_code,
+                )
+                .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
+                (join_id, transition)
+            }
+        };
 
         self.start_state
             .commit(

@@ -7,6 +7,16 @@ impl SpaceAdmissionAggregate {
             return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
         }
         let state = match &self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+                state,
+            )) => PersistedSpaceAdmissionStateV1::JoinerResolvingInvitation(
+                PersistedJoinerResolvingInvitationV1::from(state),
+            ),
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(
+                state,
+            )) => PersistedSpaceAdmissionStateV1::JoinerResolvedInvitation(
+                PersistedJoinerResolvedInvitationV1::from(state),
+            ),
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) => {
                 PersistedSpaceAdmissionStateV1::JoinerInitiated(
                     PersistedJoinerInitiatedV1::try_from(state)?,
@@ -116,6 +126,16 @@ impl SpaceAdmissionAggregate {
         let admission_id = SpaceAdmissionId::from_bytes(persisted.admission_id)
             .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
         let state = match persisted.state {
+            PersistedSpaceAdmissionStateV1::JoinerResolvingInvitation(state) => {
+                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
+                    state.into_domain()?,
+                ))
+            }
+            PersistedSpaceAdmissionStateV1::JoinerResolvedInvitation(state) => {
+                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(
+                    state.into_domain()?,
+                ))
+            }
             PersistedSpaceAdmissionStateV1::JoinerInitiated(state) => {
                 SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(
                     state.into_domain(admission_id)?,

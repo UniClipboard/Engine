@@ -972,6 +972,7 @@ function checkSpaceAdmissionPersistenceOwnership() {
     'mod.rs',
     'aggregate.rs',
     'initial.rs',
+    'invitation.rs',
     'joiner.rs',
     'sponsor.rs',
     'terminal.rs',
@@ -1044,6 +1045,49 @@ function checkDualInvitationEntry() {
     }
   }
 
+  const joinerStatePath =
+    'crates/uc-core/src/membership/space_admission/state/joiner.rs'
+  const joinerTransitionPath =
+    'crates/uc-core/src/membership/space_admission/state/transition/joiner.rs'
+  const joinerState = read(joinerStatePath)
+  const joinerTransition = read(joinerTransitionPath)
+  for (const required of [
+    'SpaceAdmissionInvitationResolutionState',
+    'Ready {',
+    'Started',
+    'ResolvedInvitation',
+  ]) {
+    if (!joinerState.includes(required)) {
+      addProblem(problems, 'dual invitation entry', `${joinerStatePath} is missing ${required}`)
+    }
+  }
+  for (const required of [
+    'mark_invitation_resolution_started',
+    'save_resolved_invitation',
+    'reject_started_invitation_resolution',
+  ]) {
+    if (!joinerTransition.includes(required)) {
+      addProblem(
+        problems,
+        'dual invitation entry',
+        `${joinerTransitionPath} is missing ${required}`
+      )
+    }
+  }
+
+  const resolutionPath =
+    'crates/uc-application/src/space/admission/protocol/joiner/resolve_invitation/execute.rs'
+  const resolution = read(resolutionPath)
+  const startedCommit = resolution.indexOf('commit_recovery(token, transition).await')
+  const resolveOnce = resolution.indexOf('resolve_once(&short_code).await')
+  if (startedCommit < 0 || resolveOnce < 0 || startedCommit > resolveOnce) {
+    addProblem(
+      problems,
+      'dual invitation entry',
+      `${resolutionPath} must commit Started before resolving the short code`
+    )
+  }
+
   const uniffiRuntimePath = 'bindings/uc-engine-uniffi/src/runtime.rs'
   const uniffiRuntime = read(uniffiRuntimePath)
   for (const required of [
@@ -1081,6 +1125,7 @@ function checkInfraSpaceAdmissionOwnership() {
     'repository/token.rs',
     'joiner/mod.rs',
     'joiner/activation_state.rs',
+    'joiner/invitation_start.rs',
     'joiner/start_state.rs',
     'joiner/source_snapshot.rs',
     'recovery/mod.rs',

@@ -5,8 +5,10 @@ mod ports;
 mod tests;
 
 pub use model::{
-    JoinerStartMaterial, JoinerStartMutation, LoadedJoinerStartState, SpaceAdmissionCommitToken,
+    JoinerStartMaterial, JoinerStartMutation, LoadedJoinerStartState, PreparedJoinerInvitation,
+    SpaceAdmissionCommitToken,
 };
 pub use ports::{
     JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartStateError, JoinerStartStatePort,
+    PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
 };

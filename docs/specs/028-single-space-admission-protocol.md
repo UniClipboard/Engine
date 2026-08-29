@@ -595,10 +595,11 @@ SpaceAdmissionAggregate::replay_or_reject(evidence)
 1. 用户调用 JoinSpace。Application 完成设备名、来源历史和 preserve choice 预检。
 2. 按 ADR-022 分类当前本机 admission；Initiated/Candidate 可原子 supersede，Prepared 及以后返回 PreviousJoinCannotBeSuperseded。
 3. 生成新 AdmissionId、JoinId、ordinal、成员 credential、KeyPackage、record data key 和初始 JoinRequest。
-4. 把 normalized password-equivalent、请求、route intent、source snapshot 和 DeviceTrust revision 加密保存；提交前不进行网络 I/O。
-5. 返回 Pending 并唤醒恢复。
-6. 恢复解析 code、打开新 ALPN stream，发送 ChannelHello，完成 OPAQUE；错误只更新 retry 或稳定 Rejected。
-7. OPAQUE 成功后双方派生 continuation key。Joiner 先保存 continuation 并删除 password-equivalent，再发送 JoinRequest。
+4. 完整邀请在本地验证并保存。短 code 则先与不透明开始上下文一同加密保存为 Ready，不进行网络 I/O。
+5. 返回 Pending 并唤醒恢复。短 code Ready 先原子提交 Started，持久记录在此时删除 code，然后只发起一次云端/局域网解析。
+6. 解析成功后先保存 Resolved 完整邀请。超时、响应丢失、保存失败或 Started 重启都稳定 Rejected(InvitationUnavailable)，不再使用短 code。
+7. 只有完整邀请已保存才可打开新 ALPN stream，发送 ChannelHello 并完成 OPAQUE。
+8. OPAQUE 成功后双方派生 continuation key。Joiner 先保存 continuation 并删除 password-equivalent，再发送 JoinRequest。
 
 ### S0/S1 Candidate
 

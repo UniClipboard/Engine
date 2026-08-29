@@ -15,8 +15,10 @@ pub use joiner::{
     JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
     LoadedJoinerActivation, LoadedJoinerStartState, PrepareJoinerActivationError,
     PrepareJoinerActivationPort, PrepareJoinerAppliedError, PrepareJoinerAppliedPort,
-    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PreparedJoinerActivation,
-    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, SpaceAdmissionCommitToken,
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
+    PrepareJoinerInvitationPort, PreparedJoinerActivation, PreparedJoinerAppliedMaterial,
+    PreparedJoinerCandidateMaterial, PreparedJoinerInvitation, ResolveJoinerInvitationError,
+    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken,
 };
 pub(crate) use protocol::SpaceAdmissionProtocol;
 pub(crate) use recovery::AdmissionRecoveryService;

@@ -37,20 +37,26 @@ use super::{
     PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
     PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
     PrepareJoinerAppliedPort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
-    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
-    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
-    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
-    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedSponsorCandidate,
+    PrepareJoinerInvitationError, PrepareJoinerInvitationPort, PrepareSponsorCandidateError,
+    PrepareSponsorCandidatePort, PrepareSponsorCommitError, PrepareSponsorCommitPort,
+    PrepareSponsorCompleteError, PrepareSponsorCompletePort, PrepareSponsorSettledError,
+    PrepareSponsorSettledPort, PreparedJoinerActivation, PreparedJoinerAppliedMaterial,
+    PreparedJoinerCandidateMaterial, PreparedJoinerInvitation, PreparedSponsorCandidate,
     PreparedSponsorCommit, PreparedSponsorComplete, PreparedSponsorSettled,
-    SpaceAdmissionCommitToken, SpaceAdmissionProtocol, SpaceAdmissionTransportError,
-    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
-    SponsorAdmissionService, SponsorAdmissionState, SponsorAdmissionStateError,
-    SponsorAdmissionStatePort,
+    ResolveJoinerInvitationError, ResolveJoinerInvitationPort, SpaceAdmissionCommitToken,
+    SpaceAdmissionProtocol, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    SponsorAdmissionCommitToken, SponsorAdmissionMutation, SponsorAdmissionService,
+    SponsorAdmissionState, SponsorAdmissionStateError, SponsorAdmissionStatePort,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProtocolEvent {
     DeviceNameSaved,
+    JoinerSavedUnresolvedInvitation,
+    JoinerInvitationResolutionStarted,
+    JoinerInvitationResolutionRequested,
+    JoinerSavedResolvedInvitation,
+    JoinerRejectedConsumedInvitation,
     JoinerSavedJoinRequest,
     AdmissionRecoveryWoken,
     JoinerInitialChannelRequested,
@@ -83,6 +89,10 @@ pub(super) struct SpaceAdmissionProtocolTestPair {
 }
 
 struct FixedJoinerStartMaterial;
+struct FixedJoinerInvitationPreparation;
+struct FixedJoinerInvitationResolver {
+    events: Arc<Mutex<Vec<ProtocolEvent>>>,
+}
 
 struct UnusedSponsorPorts;
 
@@ -300,12 +310,20 @@ impl JoinerStartStatePort for RecordingJoinerStartState {
         assert_eq!(created.replacement().record_version(), 0);
         self.superseded
             .store(superseded.is_some(), Ordering::SeqCst);
+        let event = if matches!(
+            created.replacement().invitation_resolution(),
+            Some(uc_core::membership::JoinerInvitationResolution::Ready { .. })
+        ) {
+            ProtocolEvent::JoinerSavedUnresolvedInvitation
+        } else {
+            ProtocolEvent::JoinerSavedJoinRequest
+        };
         *self.created_join.lock().expect("created join is available") =
             Some(created.into_replacement());
         self.events
             .lock()
             .expect("event recorder is available")
-            .push(ProtocolEvent::JoinerSavedJoinRequest);
+            .push(event);
         Ok(())
     }
 }
@@ -339,43 +357,61 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
     ) -> Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> {
         let effects = transition.effects();
         let aggregate = transition.into_replacement();
-        let (event, next_token_byte) = match aggregate.record_version() {
-            1 => {
-                assert!(effects.is_empty());
-                (ProtocolEvent::JoinerAuthenticatedChannelSaved, 0x27)
+        let resolution_event = match aggregate.invitation_resolution() {
+            Some(uc_core::membership::JoinerInvitationResolution::Started { .. }) => {
+                Some((ProtocolEvent::JoinerInvitationResolutionStarted, 0x27))
             }
-            2 => {
-                assert!(effects.is_empty());
-                (ProtocolEvent::JoinerSavedCandidate, 0x28)
+            Some(uc_core::membership::JoinerInvitationResolution::Resolved { .. }) => {
+                Some((ProtocolEvent::JoinerSavedResolvedInvitation, 0x28))
             }
-            3 => {
-                assert!(effects.is_empty());
-                (ProtocolEvent::JoinerSavedPrepared, 0x29)
-            }
-            4 => {
-                assert!(effects.is_empty());
-                (ProtocolEvent::JoinerSavedCommitted, 0x2a)
-            }
-            5 => {
-                assert_eq!(
-                    effects,
-                    &[uc_core::membership::AdmissionEffect::ApplyMembership]
-                );
-                (ProtocolEvent::JoinerSavedApplied, 0x2b)
-            }
-            6 => {
-                assert_eq!(
-                    effects,
-                    &[uc_core::membership::AdmissionEffect::ActivateSpace]
-                );
-                (ProtocolEvent::JoinerSavedActivating, 0x2c)
-            }
-            8 if aggregate.is_active_settled() => {
-                assert!(effects.is_empty());
-                (ProtocolEvent::JoinerSavedActiveSettled, 0x2e)
-            }
-            _ => return Err(PendingAdmissionRecoveryStateError::RecoveryRequired),
+            _ => None,
         };
+        let terminal_resolution_event = (aggregate.is_terminal()
+            && aggregate.record_version() == 2)
+            .then_some((ProtocolEvent::JoinerRejectedConsumedInvitation, 0x28));
+        let (event, next_token_byte) =
+            if let Some(event) = resolution_event.or(terminal_resolution_event) {
+                assert!(effects.is_empty());
+                event
+            } else {
+                match aggregate.record_version() {
+                    1 => {
+                        assert!(effects.is_empty());
+                        (ProtocolEvent::JoinerAuthenticatedChannelSaved, 0x27)
+                    }
+                    2 => {
+                        assert!(effects.is_empty());
+                        (ProtocolEvent::JoinerSavedCandidate, 0x28)
+                    }
+                    3 => {
+                        assert!(effects.is_empty());
+                        (ProtocolEvent::JoinerSavedPrepared, 0x29)
+                    }
+                    4 => {
+                        assert!(effects.is_empty());
+                        (ProtocolEvent::JoinerSavedCommitted, 0x2a)
+                    }
+                    5 => {
+                        assert_eq!(
+                            effects,
+                            &[uc_core::membership::AdmissionEffect::ApplyMembership]
+                        );
+                        (ProtocolEvent::JoinerSavedApplied, 0x2b)
+                    }
+                    6 => {
+                        assert_eq!(
+                            effects,
+                            &[uc_core::membership::AdmissionEffect::ActivateSpace]
+                        );
+                        (ProtocolEvent::JoinerSavedActivating, 0x2c)
+                    }
+                    8 if aggregate.is_active_settled() => {
+                        assert!(effects.is_empty());
+                        (ProtocolEvent::JoinerSavedActiveSettled, 0x2e)
+                    }
+                    _ => return Err(PendingAdmissionRecoveryStateError::RecoveryRequired),
+                }
+            };
         let persisted = aggregate
             .encode_persisted()
             .expect("test aggregate can be persisted");
@@ -1068,6 +1104,10 @@ impl SpaceAdmissionProtocolTestPair {
         Self::with_mode(None, TransportMode::DeferInitial).await
     }
 
+    pub(super) async fn short_invitation() -> Self {
+        Self::fresh().await
+    }
+
     pub(super) async fn authenticating() -> Self {
         Self::with_mode(None, TransportMode::AuthenticateThenDefer).await
     }
@@ -1115,6 +1155,10 @@ impl SpaceAdmissionProtocolTestPair {
                         value: Mutex::new(Default::default()),
                         events: Arc::clone(&events),
                     }),
+                    Arc::new(FixedJoinerInvitationPreparation),
+                    Arc::new(FixedJoinerInvitationResolver {
+                        events: Arc::clone(&events),
+                    }),
                     Arc::new(FixedJoinerStartMaterial),
                     state.clone(),
                     Arc::new(FixedJoinerCandidate),
@@ -1145,6 +1189,10 @@ impl SpaceAdmissionProtocolTestPair {
                 JoinerAdmissionService::new(
                     Arc::new(RecordingSettings {
                         value: Mutex::new(Default::default()),
+                        events: Arc::clone(&events),
+                    }),
+                    Arc::new(FixedJoinerInvitationPreparation),
+                    Arc::new(FixedJoinerInvitationResolver {
                         events: Arc::clone(&events),
                     }),
                     Arc::new(FixedJoinerStartMaterial),
@@ -1215,6 +1263,78 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) fn superseded_previous_join(&self) -> bool {
         self.state.superseded.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn simulate_invitation_resolution_started(&self) {
+        let aggregate = self
+            .state
+            .created_join
+            .lock()
+            .expect("created join is available")
+            .take()
+            .expect("created join exists");
+        let started = aggregate
+            .mark_invitation_resolution_started()
+            .expect("ready invitation can start");
+        let (transition, _short_code) = started.into_parts();
+        *self
+            .state
+            .created_join
+            .lock()
+            .expect("created join is available") = Some(transition.into_replacement());
+    }
+
+    pub(super) fn clear_events(&self) {
+        self.state
+            .events
+            .lock()
+            .expect("events are available")
+            .clear();
+    }
+}
+
+#[async_trait]
+impl PrepareJoinerInvitationPort for FixedJoinerInvitationPreparation {
+    async fn prepare(
+        &self,
+        input: &crate::space::admission::JoinSpaceInput,
+    ) -> Result<PreparedJoinerInvitation, PrepareJoinerInvitationError> {
+        if !input.invitation_code.as_str().starts_with("short-") {
+            return Ok(PreparedJoinerInvitation::Full);
+        }
+        Ok(PreparedJoinerInvitation::short(
+            SpaceAdmissionId::from_bytes([0x31; 32]).expect("valid admission id"),
+            JoinId::from_bytes([0x32; 16]).expect("valid join id"),
+            uc_core::membership::AdmissionJoinerStartContext::from_bytes(vec![0x33; 64])
+                .expect("valid start context"),
+            uc_core::membership::AdmissionShortInvitationCode::from_bytes(
+                input.invitation_code.as_str().as_bytes().to_vec(),
+            )
+            .expect("valid short code"),
+        ))
+    }
+}
+
+#[async_trait]
+impl ResolveJoinerInvitationPort for FixedJoinerInvitationResolver {
+    async fn resolve_once(
+        &self,
+        short_code: &uc_core::membership::AdmissionShortInvitationCode,
+    ) -> Result<uc_core::pairing::invitation::FullInvitation, ResolveJoinerInvitationError> {
+        self.events
+            .lock()
+            .expect("events are available")
+            .push(ProtocolEvent::JoinerInvitationResolutionRequested);
+        let code = std::str::from_utf8(short_code.as_bytes()).map_err(|error| {
+            ResolveJoinerInvitationError::unavailable(anyhow::Error::new(error))
+        })?;
+        if code == "short-fail" {
+            return Err(ResolveJoinerInvitationError::unavailable(anyhow::anyhow!(
+                "simulated consumed short code"
+            )));
+        }
+        uc_core::pairing::invitation::FullInvitation::new(format!("ucspace1_resolved-{code}"))
+            .map_err(|error| ResolveJoinerInvitationError::unavailable(anyhow::Error::new(error)))
     }
 }
 

@@ -3,20 +3,103 @@ use uc_core::membership::{
     AdmissionBaseSnapshot, AdmissionCandidateV1, AdmissionChangeFacts, AdmissionChannelPeerId,
     AdmissionContinuationCredential, AdmissionContinuationRoute,
     AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionInvitationClaim,
-    AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId,
-    AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPendingRecovery,
-    AdmissionPreparedV1, AdmissionRecordPersistence, AdmissionRecoveryPublicKey,
-    AdmissionRetryState, AdmissionRole, AdmissionSecurityCommitmentV1,
-    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionStagedSecurityState,
-    AdmissionStagedTarget, AdmissionStagedTargetInput, BaseMembershipHistoryPosition, InvitationId,
-    JoinId, JoinerAdmission, MemberInstanceId, MembershipAdmissionV2, MembershipCredential,
-    MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange, PreparedAdmissionProofV1,
-    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
-    SpaceAdmissionPersistenceError, SpaceAdmissionRoute, SponsorAdmission, UnreadableHistoryPolicy,
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
-    MEMBERSHIP_EVENT_FORMAT_V2,
+    AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionJoinerStartContext,
+    AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome,
+    AdmissionPeerBinding, AdmissionPendingRecovery, AdmissionPreparedV1,
+    AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
+    AdmissionSecurityCommitmentV1, AdmissionShortInvitationCode, AdmissionSignedMembershipHistory,
+    AdmissionSourceSnapshot, AdmissionStagedSecurityState, AdmissionStagedTarget,
+    AdmissionStagedTargetInput, BaseMembershipHistoryPosition, InvitationId, JoinId,
+    JoinerAdmission, JoinerInvitationResolution, MemberInstanceId, MembershipAdmissionV2,
+    MembershipCredential, MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange,
+    PreparedAdmissionProofV1, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionMessageKind, SpaceAdmissionPersistenceError, SpaceAdmissionRoute,
+    SponsorAdmission, UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
 };
+use uc_core::pairing::invitation::FullInvitation;
 use uc_core::security::IdentityFingerprint;
+
+#[test]
+fn joiner_short_invitation_resolution_is_at_most_once_and_persisted() {
+    let admission_id = admission_id();
+    let resolving = JoinerAdmission::start_resolving_invitation(
+        admission_id,
+        JoinId::from_bytes([0x72; 16]).expect("valid join id"),
+        8,
+        AdmissionSourceSnapshot::from_bytes(vec![0x73; 32]).expect("valid source snapshot"),
+        AdmissionJoinerStartContext::from_bytes(vec![0x74; 64]).expect("valid start context"),
+        AdmissionShortInvitationCode::from_bytes(b"ABCD-1234".to_vec()).expect("valid short code"),
+    )
+    .expect("short invitation resolution should start")
+    .into_replacement();
+    let resolving = round_trip_joiner(resolving);
+    assert!(matches!(
+        resolving.invitation_resolution(),
+        Some(JoinerInvitationResolution::Ready { short_code, .. })
+            if short_code.as_bytes() == b"ABCD-1234"
+    ));
+
+    let started = resolving
+        .mark_invitation_resolution_started()
+        .expect("saved short code can be consumed once");
+    let (started, short_code) = started.into_parts();
+    assert_eq!(short_code.as_bytes(), b"ABCD-1234");
+    let started = started.into_replacement();
+    let started_bytes = started
+        .encode_persisted()
+        .expect("started resolution should encode");
+    assert!(!started_bytes
+        .windows(b"ABCD-1234".len())
+        .any(|window| window == b"ABCD-1234"));
+    let started = round_trip_joiner(started);
+    assert!(matches!(
+        started.invitation_resolution(),
+        Some(JoinerInvitationResolution::Started { .. })
+    ));
+    let abandoned = JoinerAdmission::decode_persisted(&started_bytes)
+        .expect("started resolution should decode")
+        .reject_started_invitation_resolution()
+        .expect("an ambiguous started resolution must be abandoned")
+        .into_replacement();
+    assert!(abandoned.is_terminal());
+
+    let full_invitation =
+        FullInvitation::new("ucspace1_resolved-invitation").expect("valid full invitation");
+    let resolved = started
+        .save_resolved_invitation(full_invitation.clone())
+        .expect("the single response can be saved")
+        .into_replacement();
+    let resolved = round_trip_joiner(resolved);
+    assert!(matches!(
+        resolved.invitation_resolution(),
+        Some(JoinerInvitationResolution::Resolved {
+            full_invitation: saved,
+            start_context,
+        }) if saved == &full_invitation && start_context.as_bytes() == &[0x74; 64]
+    ));
+}
+
+#[test]
+fn joiner_invitation_resolution_can_cancel_before_any_connection() {
+    let ready = JoinerAdmission::start_resolving_invitation(
+        admission_id(),
+        JoinId::from_bytes([0x75; 16]).expect("valid join id"),
+        9,
+        AdmissionSourceSnapshot::from_bytes(vec![0x76; 32]).expect("valid source snapshot"),
+        AdmissionJoinerStartContext::from_bytes(vec![0x77; 64]).expect("valid start context"),
+        AdmissionShortInvitationCode::from_bytes(b"CANCEL-ME".to_vec()).expect("valid short code"),
+    )
+    .expect("ready resolution")
+    .into_replacement();
+
+    let cancelled = ready
+        .cancel_before_authentication()
+        .expect("pre-connection resolution can cancel")
+        .into_replacement();
+
+    assert!(cancelled.is_terminal());
+}
 
 #[test]
 fn initiated_joiner_awaiting_authentication_round_trips_through_persistence() {

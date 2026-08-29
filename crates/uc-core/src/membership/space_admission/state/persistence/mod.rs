@@ -23,6 +23,7 @@ use super::*;
 
 mod aggregate;
 mod initial;
+mod invitation;
 mod joiner;
 mod message;
 mod sponsor;
@@ -73,6 +74,32 @@ enum PersistedSpaceAdmissionStateV1 {
     Superseded(PersistedSupersededV1),
     Rejected(PersistedRejectedV1),
     RecoveryRequired(u8),
+    JoinerResolvingInvitation(PersistedJoinerResolvingInvitationV1),
+    JoinerResolvedInvitation(PersistedJoinerResolvedInvitationV1),
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedJoinerResolvingInvitationV1 {
+    join_id: [u8; 16],
+    local_join_ordinal: u64,
+    source_snapshot: Vec<u8>,
+    start_context: Vec<u8>,
+    resolution: PersistedInvitationResolutionV1,
+}
+
+#[derive(Serialize, Deserialize)]
+enum PersistedInvitationResolutionV1 {
+    Ready { short_code: Vec<u8> },
+    Started,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedJoinerResolvedInvitationV1 {
+    join_id: [u8; 16],
+    local_join_ordinal: u64,
+    source_snapshot: Vec<u8>,
+    start_context: Vec<u8>,
+    full_invitation: String,
 }
 
 #[derive(Serialize, Deserialize)]

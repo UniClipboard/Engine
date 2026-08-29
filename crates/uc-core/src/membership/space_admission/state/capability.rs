@@ -27,6 +27,17 @@ pub struct JoinerAdmissionTransition {
     effects: &'static [AdmissionEffect],
 }
 
+pub struct StartedJoinerInvitationResolution {
+    transition: JoinerAdmissionTransition,
+    short_code: AdmissionShortInvitationCode,
+}
+
+impl StartedJoinerInvitationResolution {
+    pub fn into_parts(self) -> (JoinerAdmissionTransition, AdmissionShortInvitationCode) {
+        (self.transition, self.short_code)
+    }
+}
+
 pub struct SponsorAdmissionTransition {
     replacement: SponsorAdmission,
     effects: &'static [AdmissionEffect],
@@ -93,6 +104,25 @@ impl SponsorAdmissionTransition {
 }
 
 impl JoinerAdmission {
+    pub fn start_resolving_invitation(
+        admission_id: SpaceAdmissionId,
+        join_id: JoinId,
+        local_join_ordinal: u64,
+        source_snapshot: AdmissionSourceSnapshot,
+        start_context: AdmissionJoinerStartContext,
+        short_code: AdmissionShortInvitationCode,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        SpaceAdmissionAggregate::start_resolving_invitation(
+            admission_id,
+            join_id,
+            local_join_ordinal,
+            source_snapshot,
+            start_context,
+            short_code,
+        )
+        .map(JoinerAdmissionTransition::from_transition)
+    }
+
     pub fn try_from_record(record: SpaceAdmissionAggregate) -> Option<Self> {
         if matches!(
             record.state,
@@ -153,6 +183,40 @@ impl JoinerAdmission {
 
     pub fn joiner_candidate_preparation(&self) -> Option<JoinerCandidatePreparation<'_>> {
         self.record.joiner_candidate_preparation()
+    }
+
+    pub fn invitation_resolution(&self) -> Option<JoinerInvitationResolution<'_>> {
+        self.record.invitation_resolution()
+    }
+
+    pub fn mark_invitation_resolution_started(
+        self,
+    ) -> Result<StartedJoinerInvitationResolution, SpaceAdmissionAggregateError> {
+        self.record
+            .mark_invitation_resolution_started()
+            .map(
+                |(transition, short_code)| StartedJoinerInvitationResolution {
+                    transition: JoinerAdmissionTransition::from_transition(transition),
+                    short_code,
+                },
+            )
+    }
+
+    pub fn save_resolved_invitation(
+        self,
+        full_invitation: FullInvitation,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .save_resolved_invitation(full_invitation)
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
+    pub fn reject_started_invitation_resolution(
+        self,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .reject_started_invitation_resolution()
+            .map(JoinerAdmissionTransition::from_transition)
     }
 
     pub fn joiner_applied_preparation(&self) -> Option<JoinerAppliedPreparation<'_>> {

@@ -1,6 +1,43 @@
 use super::model::{
-    JoinerStartMaterial, JoinerStartMutation, LoadedJoinerStartState, SpaceAdmissionCommitToken,
+    JoinerStartMaterial, JoinerStartMutation, LoadedJoinerStartState, PreparedJoinerInvitation,
+    SpaceAdmissionCommitToken,
 };
+
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareJoinerInvitationError {
+    #[error("the invitation is invalid")]
+    Invalid,
+    #[error("invitation preparation is unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl PrepareJoinerInvitationError {
+    pub fn unavailable(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: source.into(),
+        }
+    }
+}
+
+impl From<PrepareJoinerInvitationError> for JoinSpaceError {
+    fn from(error: PrepareJoinerInvitationError) -> Self {
+        match error {
+            PrepareJoinerInvitationError::Invalid => Self::InvalidInvitation,
+            PrepareJoinerInvitationError::Unavailable { .. } => Self::Unavailable,
+        }
+    }
+}
+
+#[async_trait]
+pub trait PrepareJoinerInvitationPort: Send + Sync {
+    async fn prepare(
+        &self,
+        input: &JoinSpaceInput,
+    ) -> Result<PreparedJoinerInvitation, PrepareJoinerInvitationError>;
+}
 use crate::space::admission::{JoinSpaceError, JoinSpaceInput};
 use async_trait::async_trait;
 

@@ -16,10 +16,11 @@ use crate::space::admission::{
     ExecuteJoinerActivationPort, HandleAuthenticatedSpaceAdmissionMessagePort,
     JoinerActivationStatePort, JoinerAdmissionService, JoinerStartMaterialPort,
     JoinerStartStatePort, PendingAdmissionRecoveryStatePort, PrepareJoinerActivationPort,
-    PrepareJoinerAppliedPort, PrepareJoinerCandidatePort, PrepareSponsorCandidatePort,
-    PrepareSponsorCommitPort, PrepareSponsorCompletePort, PrepareSponsorSettledPort,
-    QueryPendingSpaceTransitionUseCase, SpaceAdmissionProtocol, SpaceAdmissionTransportPort,
-    SponsorAdmissionService, SponsorAdmissionStatePort,
+    PrepareJoinerAppliedPort, PrepareJoinerCandidatePort, PrepareJoinerInvitationPort,
+    PrepareSponsorCandidatePort, PrepareSponsorCommitPort, PrepareSponsorCompletePort,
+    PrepareSponsorSettledPort, QueryPendingSpaceTransitionUseCase, ResolveJoinerInvitationPort,
+    SpaceAdmissionProtocol, SpaceAdmissionTransportPort, SponsorAdmissionService,
+    SponsorAdmissionStatePort,
 };
 use crate::space::membership::CurrentMemberSignaturePort;
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
@@ -83,6 +84,8 @@ pub struct SpaceApplicationDeps {
     pub group_bootstrap: Arc<dyn GroupBootstrapPort>,
     pub clock: Arc<dyn uc_core::ports::ClockPort>,
     pub settings: Arc<dyn uc_core::ports::SettingsPort>,
+    pub prepare_joiner_invitation: Arc<dyn PrepareJoinerInvitationPort>,
+    pub resolve_joiner_invitation: Arc<dyn ResolveJoinerInvitationPort>,
     pub joiner_start_material: Arc<dyn JoinerStartMaterialPort>,
     pub joiner_start_state: Arc<dyn JoinerStartStatePort>,
     pub pending_admission_recovery_state: Arc<dyn PendingAdmissionRecoveryStatePort>,
@@ -161,6 +164,8 @@ impl SpaceApplication {
         let deferred_maintenance_wake = Arc::new(DeferredMaintenanceWake::new());
         let joiner_admission = JoinerAdmissionService::new(
             deps.settings,
+            deps.prepare_joiner_invitation,
+            deps.resolve_joiner_invitation,
             deps.joiner_start_material,
             deps.joiner_start_state,
             deps.prepare_joiner_candidate,

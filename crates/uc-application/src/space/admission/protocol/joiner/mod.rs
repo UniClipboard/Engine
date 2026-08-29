@@ -8,6 +8,7 @@ mod handle_candidate;
 mod handle_commit;
 mod handle_complete;
 mod handle_settled;
+mod resolve_invitation;
 mod start_join;
 
 pub use activate_complete::{
@@ -24,13 +25,18 @@ pub use handle_commit::{
 pub use handle_complete::{
     PrepareJoinerActivationError, PrepareJoinerActivationPort, PreparedJoinerActivation,
 };
+pub use resolve_invitation::{ResolveJoinerInvitationError, ResolveJoinerInvitationPort};
 pub use start_join::{
     JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
-    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState, SpaceAdmissionCommitToken,
+    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState,
+    PrepareJoinerInvitationError, PrepareJoinerInvitationPort, PreparedJoinerInvitation,
+    SpaceAdmissionCommitToken,
 };
 
 pub(crate) struct JoinerAdmissionService {
     pub(super) settings: Arc<dyn SettingsPort>,
+    pub(super) prepare_invitation: Arc<dyn PrepareJoinerInvitationPort>,
+    pub(super) resolve_invitation: Arc<dyn ResolveJoinerInvitationPort>,
     pub(super) start_material: Arc<dyn JoinerStartMaterialPort>,
     pub(super) start_state: Arc<dyn JoinerStartStatePort>,
     pub(super) prepare_candidate: Arc<dyn PrepareJoinerCandidatePort>,
@@ -44,6 +50,8 @@ pub(crate) struct JoinerAdmissionService {
 impl JoinerAdmissionService {
     pub(crate) fn new(
         settings: Arc<dyn SettingsPort>,
+        prepare_invitation: Arc<dyn PrepareJoinerInvitationPort>,
+        resolve_invitation: Arc<dyn ResolveJoinerInvitationPort>,
         start_material: Arc<dyn JoinerStartMaterialPort>,
         start_state: Arc<dyn JoinerStartStatePort>,
         prepare_candidate: Arc<dyn PrepareJoinerCandidatePort>,
@@ -55,6 +63,8 @@ impl JoinerAdmissionService {
     ) -> Self {
         Self {
             settings,
+            prepare_invitation,
+            resolve_invitation,
             start_material,
             start_state,
             prepare_candidate,

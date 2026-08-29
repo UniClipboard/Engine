@@ -28,7 +28,9 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                     let aggregate = self
                         .open_record(*admission_id, stored)
                         .map_err(into_anyhow)?;
-                    if aggregate.pending_recovery().is_none() {
+                    if aggregate.pending_recovery().is_none()
+                        && aggregate.invitation_resolution().is_none()
+                    {
                         continue;
                     }
                     let aggregate = JoinerAdmission::try_from_record(aggregate)
