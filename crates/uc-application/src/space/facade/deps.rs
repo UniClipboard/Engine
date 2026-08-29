@@ -27,6 +27,7 @@ pub struct SpaceSessionDeps {
     pub current_engine_version: String,
     pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     pub initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
+    pub admission_credentials: Arc<dyn crate::deps::PrepareSpaceAdmissionCredentialsPort>,
     pub activity: Arc<dyn crate::space::lifecycle::SpaceSessionActivityPort>,
 }
 

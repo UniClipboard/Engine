@@ -44,7 +44,9 @@ use uc_observability_contract::analytics::{
     AnalyticsFacade, Event, NameLengthBucket, SelfMintedAdoptRequest, SetupEntry,
 };
 
-use crate::space::lifecycle::{CurrentSpaceIdentityPort, InitialSpaceActivationPort};
+use crate::space::lifecycle::{
+    CurrentSpaceIdentityPort, InitialSpaceActivationPort, PrepareSpaceAdmissionCredentialsPort,
+};
 
 use super::{
     InitializeSpaceError, InitializeSpacePort, InitializeSpaceRequest, InitializeSpaceResult,
@@ -58,6 +60,7 @@ pub(crate) struct InitializeSpaceUseCase {
     membership_initializer: Arc<dyn SpaceMembershipInitializerPort>,
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
+    admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
     settings: Arc<dyn SettingsPort>,
     clock: Arc<dyn ClockPort>,
     analytics: Arc<dyn AnalyticsFacade>,
@@ -72,6 +75,7 @@ impl InitializeSpaceUseCase {
         membership_initializer: Arc<dyn SpaceMembershipInitializerPort>,
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
         initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
+        admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
         settings: Arc<dyn SettingsPort>,
         clock: Arc<dyn ClockPort>,
         analytics: Arc<dyn AnalyticsFacade>,
@@ -84,6 +88,7 @@ impl InitializeSpaceUseCase {
             membership_initializer,
             current_space_identity,
             initial_space_activation,
+            admission_credentials,
             settings,
             clock,
             analytics,
@@ -187,6 +192,10 @@ impl InitializeSpaceUseCase {
             .activate_initial_space(&space_id)
             .await
             .map_err(InitializeSpaceError::storage)?;
+        self.admission_credentials
+            .ensure_for_unlocked_space(&cmd.passphrase)
+            .await
+            .map_err(InitializeSpaceError::internal)?;
         info!("space initialization completed");
 
         // Identity switches before `setup_completed` fires so that event
@@ -473,6 +482,22 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct RecordingAdmissionCredentials {
+        calls: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl PrepareSpaceAdmissionCredentialsPort for RecordingAdmissionCredentials {
+        async fn ensure_for_unlocked_space(
+            &self,
+            _passphrase: &Passphrase,
+        ) -> Result<(), crate::space::lifecycle::SpaceAdmissionCredentialPreparationError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
     struct InMemorySettings {
         settings: Mutex<Settings>,
     }
@@ -660,6 +685,7 @@ mod tests {
         profile_readiness: Arc<InMemoryProfileReadiness>,
         membership_initializer: Arc<FakeMembershipInitializer>,
         initial_space_activation: Arc<RecordingInitialSpaceActivation>,
+        admission_credentials: Arc<RecordingAdmissionCredentials>,
         settings: Arc<InMemorySettings>,
         analytics: Arc<CapturingAnalyticsSink>,
         analytics_identity: Arc<FakeAnalyticsIdentity>,
@@ -684,6 +710,7 @@ mod tests {
             activated: Mutex::new(Vec::new()),
             profile_readiness: Arc::clone(&profile_readiness),
         });
+        let admission_credentials = Arc::new(RecordingAdmissionCredentials::default());
         let clock: Arc<dyn ClockPort> = Arc::new(FixedClock(1_700_000_000_000));
         let analytics = Arc::new(CapturingAnalyticsSink::default());
         // Fixed UUID stands in for the sponsor device's anonymous_user_id
@@ -706,6 +733,7 @@ mod tests {
             membership_initializer.clone(),
             profile_readiness.clone(),
             initial_space_activation.clone(),
+            admission_credentials.clone(),
             settings.clone(),
             clock,
             facade,
@@ -718,6 +746,7 @@ mod tests {
             profile_readiness,
             membership_initializer,
             initial_space_activation,
+            admission_credentials,
             settings,
             analytics,
             analytics_identity,
@@ -762,6 +791,7 @@ mod tests {
         let status = h.profile_readiness.get_status().await;
         assert!(status.has_completed);
         assert_eq!(*h.membership_initializer.calls.lock().unwrap(), 1);
+        assert_eq!(*h.admission_credentials.calls.lock().unwrap(), 1);
         assert_eq!(
             *h.initial_space_activation.activated.lock().unwrap(),
             vec![result.space_id.clone()]

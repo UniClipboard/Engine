@@ -60,6 +60,11 @@ impl SponsorOpaqueMaterial {
             registration,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn into_parts(self) -> (SpaceAdmissionServerSetup, SpaceAdmissionRegistration) {
+        (self.server_setup, self.registration)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

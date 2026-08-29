@@ -119,6 +119,7 @@ impl SpaceFacade {
             current_engine_version,
             current_space_identity,
             initial_space_activation,
+            admission_credentials,
             activity: application_activity,
         } = session;
         let activity =
@@ -207,6 +208,7 @@ impl SpaceFacade {
             membership_initializer,
             Arc::clone(&current_space_identity),
             initial_space_activation,
+            Arc::clone(&admission_credentials),
             Arc::clone(&settings),
             Arc::clone(&clock),
             Arc::clone(&analytics),
@@ -239,6 +241,7 @@ impl SpaceFacade {
             Arc::clone(&space_access.unlock),
             Arc::clone(&current_space_identity),
             Arc::clone(&session_readiness),
+            admission_credentials,
             Arc::clone(&analytics),
         ));
         let lock_space_session = Arc::new(LockSpaceSessionUseCase::new(
@@ -345,7 +348,7 @@ impl SpaceFacade {
         self.session_activity
             .resume_after_session_ready()
             .await
-            .map_err(|error| UnlockSpaceError::Internal(error.to_string()))?;
+            .map_err(|error| UnlockSpaceError::internal(anyhow::anyhow!(error)))?;
         self.membership_maintenance.wake();
         Ok(UnlockSpaceResult { space_id })
     }

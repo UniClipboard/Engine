@@ -1,3 +1,4 @@
+mod admission_credentials;
 mod current_space;
 mod initialize_space;
 mod lock_space_session;
@@ -30,6 +31,9 @@ pub use session::{
 };
 pub use unlock_space::{UnlockSpaceError, UnlockSpacePort};
 
+pub use admission_credentials::{
+    PrepareSpaceAdmissionCredentialsPort, SpaceAdmissionCredentialPreparationError,
+};
 pub(super) use initialize_space::{InitializeSpaceRequest, InitializeSpaceUseCase};
 pub(super) use lock_space_session::LockSpaceSessionUseCase;
 pub(super) use query_space_access_state::QuerySpaceAccessStateUseCase;

@@ -17,7 +17,6 @@ use uc_core::security::IdentityFingerprint;
 use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecret};
 use zeroize::Zeroizing;
 
-use crate::security::SpaceAdmissionAuth;
 use crate::space::decode_invitation_entry;
 use crate::space::security::mls_group::MlsGroupEngine;
 
@@ -145,15 +144,13 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
         let private_state = AdmissionJoinerPrivateState::from_bytes(private_state)
             .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
 
-        let derived_password = SpaceAdmissionAuth::derive_password_equivalent(
-            input.passphrase.expose().as_bytes(),
-            decoded.invitation_id(),
-        );
-        let password_equivalent =
-            AdmissionEncryptedPasswordEquivalent::from_bytes(derived_password.as_bytes().to_vec())
-                .map_err(|error| {
-                    JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
-                })?;
+        // OPAQUE already binds the transcript to the invitation id. The
+        // password input must remain the same value used by the Sponsor's
+        // Space-scoped registration created during initialize/unlock.
+        let password_equivalent = AdmissionEncryptedPasswordEquivalent::from_bytes(
+            input.passphrase.expose().as_bytes().to_vec(),
+        )
+        .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
         let route = crate::network::iroh::space_admission::encode_space_admission_route_bytes(
             decoded.route(),
             Some(decoded.invitation_id()),

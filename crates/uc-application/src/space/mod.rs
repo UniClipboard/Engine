@@ -106,6 +106,9 @@ pub use lifecycle::{
 };
 pub use lifecycle::{InitializeSpacePort, LockSpacePort};
 pub use lifecycle::{
+    PrepareSpaceAdmissionCredentialsPort, SpaceAdmissionCredentialPreparationError,
+};
+pub use lifecycle::{
     RebindSpaceSessionPort, SpaceRebuildProgressError, SpaceRebuildProgressPort,
     SpaceSessionRebindError,
 };

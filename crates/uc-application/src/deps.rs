@@ -59,8 +59,9 @@ pub use crate::space::{
     LockSpacePort, MembershipEffectExecutionError, MembershipEffectKind, MembershipEffectPhase,
     MembershipLedgerError, MembershipLedgerMutation, MembershipNetworkActivityPort,
     MembershipSessionActivityPort, PausedSpaceMember, PeerReconciliationRecord,
-    PendingMembershipEffect, PortableCurrentSpaceIdentityPort, SpaceRebuildProgressError,
-    SpaceRebuildProgressPort, SpaceSessionRebindError, UnlockSpacePort,
+    PendingMembershipEffect, PortableCurrentSpaceIdentityPort,
+    PrepareSpaceAdmissionCredentialsPort, SpaceAdmissionCredentialPreparationError,
+    SpaceRebuildProgressError, SpaceRebuildProgressPort, SpaceSessionRebindError, UnlockSpacePort,
 };
 pub use crate::space::{
     ActivateCompletionHelperAdmissionSecurityPort,

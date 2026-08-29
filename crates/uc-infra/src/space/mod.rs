@@ -11,7 +11,8 @@ pub(crate) use admission::{
 pub use admission::{
     AdmissionSecurityTransitionAdapter, DefaultJoinerCandidatePreparation,
     DefaultJoinerInvitationPreparation, DefaultJoinerStartMaterial,
-    DefaultSponsorCandidatePreparation, SqliteSpaceAdmissionState,
+    DefaultSponsorCandidatePreparation, SpaceAdmissionCredentialStoreError,
+    SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
 pub use membership_ledger::SqliteMembershipLedger;
 pub use security::{

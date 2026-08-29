@@ -130,6 +130,8 @@
 | Phase 5 production Joiner Candidate adapter | passed, real OpenMLS Candidate verification and Prepared-reply test; staged MLS and recovery artifacts zeroize on drop |
 | Phase 5 bounded Iroh admission transport | passed, canonical envelope round-trip, pre-allocation frame rejection matrix, continuation MAC binding test, Infra all-target check |
 | Phase 5 real Iroh admission loopback | passed, two relay-disabled endpoints completed OPAQUE JoinRequest/Candidate then a fresh continuation-authenticated Prepared/Commit connection; endpoint call count was exactly two |
+| Phase 5 encrypted membership ledger | passed, real SQLite stores only profile-AEAD ciphertext, reloads the exact snapshot after reopen, and rejects a stale revision/history CAS; committed as `1e89f8d` |
+| Phase 5 OPAQUE credential lifecycle | passed, Initialize/Unlock ensure one encrypted registration, reopen completes a real KE1/KE2/KE3 exchange, plaintext passphrase is absent, and dependency failures retain their source chain |
 
 ## Errors
 
@@ -144,3 +146,4 @@
 | Architecture maintenance-record patch anchor did not match | Retried against the stable related-documents heading; the failed patch made no partial changes |
 | Workspace formatting changed two unrelated files while formatting the new module | Reverted only those formatter changes; the existing workspace format baseline remains separately recorded |
 | Workspace check remains blocked by existing Engine assembly removals | Verified this slice with the focused tests and `uc-infra --all-targets`; retained the 27 lib / 29 test baseline as failed |
+| Engine wiring audit exposed missing production ports beyond Candidate | The new `SpaceApplicationDeps` also requires Commit, Complete, settlement, Joiner activation, membership-effect, observation, cleanup, and activity capabilities. Do not conceal these with restored aliases or no-op adapters; complete the production vertical flow before final assembly. |

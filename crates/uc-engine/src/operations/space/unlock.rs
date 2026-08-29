@@ -50,7 +50,7 @@ fn map_unlock_space_error(error: UnlockSpaceError) -> EngineError {
             EngineErrorCategory::Internal,
             false,
         ),
-        UnlockSpaceError::Internal(_) => {
+        UnlockSpaceError::Internal { .. } => {
             error!(error = %error, "unlock space failed");
             EngineError::new(
                 UNLOCK_SPACE_FAILED_CODE,
@@ -81,8 +81,9 @@ mod tests {
     #[test]
     fn corrupted_unlock_material_is_distinct_from_internal_failure() {
         let corrupted = map_unlock_space_error(UnlockSpaceError::CorruptedKeyMaterial);
-        let internal =
-            map_unlock_space_error(UnlockSpaceError::Internal("migration failed".into()));
+        let internal = map_unlock_space_error(UnlockSpaceError::Internal {
+            source: anyhow::anyhow!("migration failed"),
+        });
 
         assert_ne!(corrupted.code(), internal.code());
     }

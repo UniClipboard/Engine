@@ -6,7 +6,7 @@ use uc_core::ids::SpaceId;
 use uc_core::ports::space::SpaceAccessError;
 use uc_observability_contract::analytics::{AnalyticsFacade, Event, UnlockFailureReason};
 
-use crate::space::lifecycle::CurrentSpaceIdentityPort;
+use crate::space::lifecycle::{CurrentSpaceIdentityPort, PrepareSpaceAdmissionCredentialsPort};
 
 use super::error::UnlockSpaceError;
 use super::ports::UnlockSpacePort;
@@ -16,6 +16,7 @@ pub(crate) struct UnlockSpaceUseCase {
     space_access: Arc<dyn UnlockSpacePort>,
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     readiness: Arc<PostSessionReadiness>,
+    admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
     analytics: Arc<dyn AnalyticsFacade>,
 }
 
@@ -24,12 +25,14 @@ impl UnlockSpaceUseCase {
         space_access: Arc<dyn UnlockSpacePort>,
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
         readiness: Arc<PostSessionReadiness>,
+        admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
         analytics: Arc<dyn AnalyticsFacade>,
     ) -> Self {
         Self {
             space_access,
             current_space_identity,
             readiness,
+            admission_credentials,
             analytics,
         }
     }
@@ -39,17 +42,21 @@ impl UnlockSpaceUseCase {
         &self,
         passphrase: Passphrase,
     ) -> Result<SpaceId, UnlockSpaceError> {
-        let space_id = self.unlock(passphrase).await?;
+        let space_id = self.unlock(&passphrase).await?;
+        self.admission_credentials
+            .ensure_for_unlocked_space(&passphrase)
+            .await
+            .map_err(UnlockSpaceError::internal)?;
 
         self.readiness
             .complete_after_unlock()
             .await
-            .map_err(UnlockSpaceError::Internal)?;
+            .map_err(|message| UnlockSpaceError::internal(anyhow::anyhow!(message)))?;
 
         Ok(space_id)
     }
 
-    async fn unlock(&self, passphrase: Passphrase) -> Result<SpaceId, UnlockSpaceError> {
+    async fn unlock(&self, passphrase: &Passphrase) -> Result<SpaceId, UnlockSpaceError> {
         let space_id = match self.current_space_identity.current_space_id().await {
             Ok(Some(space_id)) => space_id,
             Ok(None) => {
@@ -60,11 +67,11 @@ impl UnlockSpaceUseCase {
                 self.analytics.capture(Event::SpaceUnlockFailed {
                     failure_reason: UnlockFailureReason::Internal,
                 });
-                return Err(UnlockSpaceError::Internal(error.to_string()));
+                return Err(UnlockSpaceError::internal(error));
             }
         };
 
-        match self.space_access.unlock(&space_id, &passphrase).await {
+        match self.space_access.unlock(&space_id, passphrase).await {
             Ok(_) => {
                 info!("space unlocked");
                 self.analytics.capture(Event::SpaceUnlocked);
@@ -94,10 +101,10 @@ fn map_unlock_error(error: SpaceAccessError) -> UnlockSpaceError {
         SpaceAccessError::NotInitialized => UnlockSpaceError::SpaceNotInitialized,
         SpaceAccessError::WrongPassphrase => UnlockSpaceError::WrongPassphrase,
         SpaceAccessError::CorruptedKeyMaterial => UnlockSpaceError::CorruptedKeyMaterial,
-        SpaceAccessError::Internal(message) => UnlockSpaceError::Internal(message),
+        SpaceAccessError::Internal(message) => UnlockSpaceError::internal(anyhow::anyhow!(message)),
         other => {
             warn!(error = %other, "unexpected space access error during unlock");
-            UnlockSpaceError::Internal(other.to_string())
+            UnlockSpaceError::internal(other)
         }
     }
 }
