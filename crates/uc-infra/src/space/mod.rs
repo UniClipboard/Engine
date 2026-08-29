@@ -6,6 +6,7 @@ mod security;
 pub use adapters::{
     CurrentSpaceResolver, DeviceTrustObservationsAdapter, EncryptedRePairingStateStore,
     FileSpaceRebuildProgress, MembershipActivationAdapter, MembershipMemberFactsAdapter,
+    MembershipProjectionCleanupAdapter,
 };
 pub(crate) use admission::{
     decode_full_invitation, decode_invitation_entry, encode_full_invitation, DecodedFullInvitation,

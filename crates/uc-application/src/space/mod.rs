@@ -123,7 +123,8 @@ pub use membership::{
 };
 pub use membership::{
     CleanupLegacyMembershipDataPort, DeliverRestrictedMembershipPort,
-    MembershipNetworkActivityPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort, RecoverMembershipEffectsPort,
+    RecoverSpaceAdmissionsPort,
 };
 pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 pub use membership::{

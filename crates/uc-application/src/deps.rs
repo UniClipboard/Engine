@@ -57,9 +57,9 @@ pub use crate::space::{
     InvitationConsumeDeliveryResult, IsSpaceUnlockedPort, JoinerStagedSecurityTransition,
     LoadDeviceTrustObservationsPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
     LockSpacePort, MembershipEffectExecutionError, MembershipEffectKind, MembershipEffectPhase,
-    MembershipLedgerError, MembershipLedgerMutation, MembershipNetworkActivityPort,
-    MembershipSessionActivityPort, PausedSpaceMember, PeerReconciliationRecord,
-    PendingMembershipEffect, PortableCurrentSpaceIdentityPort,
+    MembershipLedgerError, MembershipLedgerMutation, MembershipMaintenanceStepOutcome,
+    MembershipNetworkActivityPort, MembershipSessionActivityPort, PausedSpaceMember,
+    PeerReconciliationRecord, PendingMembershipEffect, PortableCurrentSpaceIdentityPort,
     PrepareSpaceAdmissionCredentialsPort, SpaceAdmissionCredentialPreparationError,
     SpaceRebuildProgressError, SpaceRebuildProgressPort, SpaceSessionRebindError, UnlockSpacePort,
 };

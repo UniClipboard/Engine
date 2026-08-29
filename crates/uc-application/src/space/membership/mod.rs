@@ -22,11 +22,11 @@ pub use ledger::{
     PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
     RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
+pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
     CleanupLegacyMembershipDataPort, DeliverRestrictedMembershipPort,
     MembershipNetworkActivityPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
-pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use query_device_trust::{
     DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
     DeviceTrustStatus, DeviceTrustSyncState, LoadDeviceTrustObservationsPort,
@@ -44,11 +44,12 @@ pub(super) use ledger::{
     DeliverRestrictedMembershipUseCase, InitializeSpaceMembershipUseCase, MembershipLedger,
     RePairingAwareMembershipActivation, RecoverMembershipEffectsUseCase, VerifiedMembershipLedger,
 };
+pub use maintenance::MembershipMaintenanceStepOutcome;
 pub(super) use maintenance::{
     MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase, MembershipMaintenanceReport,
-    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
-    SpaceMembershipMaintenanceActivity, SpaceMembershipMaintenanceRuntime,
-    SynchronizeMembershipMaintenancePort, WakeSpaceMembershipMaintenancePort,
+    MembershipMaintenanceTrigger, SpaceMembershipMaintenanceActivity,
+    SpaceMembershipMaintenanceRuntime, SynchronizeMembershipMaintenancePort,
+    WakeSpaceMembershipMaintenancePort,
 };
 #[cfg(test)]
 pub(super) use query_admission::{MembershipAdmissionSnapshot, QueryMembershipAdmissionError};
