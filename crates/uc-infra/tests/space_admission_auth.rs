@@ -174,6 +174,65 @@ fn registration_encoding_rejects_wrong_marker_version_and_length() {
     assert_registration_encoding_is_rejected(&encoded);
 }
 
+#[test]
+fn restored_server_setup_authenticates_existing_registration() {
+    let passphrase = Passphrase::new("correct horse battery staple");
+    let context = authentication_context();
+    let server_setup = SpaceAdmissionAuth::generate_server_setup();
+    let registration = SpaceAdmissionAuth::register(&server_setup, &passphrase)
+        .expect("the Space passphrase should produce a registration record");
+    let encoded_setup = server_setup.encode_for_encryption();
+    let restored_setup =
+        SpaceAdmissionAuth::decode_server_setup_after_decryption(encoded_setup.as_bytes())
+            .expect("the decrypted server setup should restore");
+
+    let (client_state, ke1) = SpaceAdmissionAuth::start_client(&passphrase, &context)
+        .expect("the Joiner should create KE1");
+    let (server_state, ke2) =
+        SpaceAdmissionAuth::start_server(&restored_setup, &registration, &context, ke1)
+            .expect("the restored Sponsor setup should create KE2");
+    let (_client_credential, ke3) = client_state
+        .finish(&context, ke2)
+        .expect("the Joiner should authenticate the restored Sponsor setup");
+    server_state
+        .finish(&context, ke3)
+        .expect("the restored Sponsor setup should authenticate the Joiner");
+}
+
+#[test]
+fn changed_or_invalid_server_setup_cannot_resume_registration() {
+    let passphrase = Passphrase::new("correct horse battery staple");
+    let context = authentication_context();
+    let original_setup = SpaceAdmissionAuth::generate_server_setup();
+    let registration = SpaceAdmissionAuth::register(&original_setup, &passphrase)
+        .expect("the Space passphrase should produce a registration record");
+    let replacement_setup = SpaceAdmissionAuth::generate_server_setup();
+
+    let (client_state, ke1) = SpaceAdmissionAuth::start_client(&passphrase, &context)
+        .expect("the Joiner should create KE1");
+    let (_server_state, ke2) =
+        SpaceAdmissionAuth::start_server(&replacement_setup, &registration, &context, ke1)
+            .expect("the replacement setup should not reveal the mismatch before KE3");
+    let error = match client_state.finish(&context, ke2) {
+        Ok(_) => panic!("a replacement setup must not authenticate an existing registration"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        SpaceAdmissionAuthError::Authentication { .. }
+    ));
+    assert!(error.source().is_some());
+
+    let mut encoded = original_setup.encode_for_encryption().into_bytes();
+    encoded.pop();
+    let error = match SpaceAdmissionAuth::decode_server_setup_after_decryption(&encoded) {
+        Ok(_) => panic!("a truncated server setup must not restore"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, SpaceAdmissionAuthError::ServerSetup { .. }));
+    assert!(error.source().is_some());
+}
+
 fn assert_registration_encoding_is_rejected(encoded: &[u8]) {
     let error = match SpaceAdmissionAuth::decode_registration_after_decryption(encoded) {
         Ok(_) => panic!("an invalid registration encoding must be rejected"),

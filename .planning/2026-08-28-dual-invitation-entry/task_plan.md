@@ -42,11 +42,17 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - **Status:** complete
 
 ### Phase 4: Standard authentication and Joiner start material
-- [ ] Integrate fixed-version OPAQUE per Spec 028 and validate it (in progress: paired RED capability tests delegated to Codex)
+- [ ] Integrate fixed-version OPAQUE per Spec 028 and validate it
+  - [x] Correct/wrong passphrase, identity binding, registration restoration, and corrupt-record rejection
+  - [x] ServerSetup restoration and mismatched-setup rejection
+  - [ ] RFC 9807 vector evidence and secret/debug lifecycle checks (in progress)
+- [ ] Validate existing OpenMLS Add/Commit/Welcome, staged restore, and public commitment at the admission seam
 - [ ] Generate complete JoinRequest identity, OpenMLS, recovery, and password material
 - [ ] Implement production `JoinerStartMaterialPort`
 - [ ] Keep Candidate, transport, and Engine final wiring outside this phase
 - **Status:** in_progress
+
+**Next Step:** Import the applicable RFC 9807 vector evidence at the Infra seam without exposing third-party protocol types.
 
 ## Decisions
 - A short code and a full invitation are two entry forms for one invitation, not two protocols.

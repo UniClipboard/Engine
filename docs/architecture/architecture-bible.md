@@ -276,7 +276,7 @@ Space 共用的成员安全实现统一位于 `crates/uc-infra/src/space/securit
 
 当前 Core 已完成封闭状态和类型化交换基础，Application 的唯一 `SpaceAdmissionProtocol` 已贯通 JoinRequest、Candidate、Prepared、Commit、Applied、Complete、CompleteAck 和 Settled 正常流程。Sponsor 每次先保存固定回复再返回，重复 Prepared 与 CompleteAck 只重放原回复；后续消息必须继续匹配已保存的双方连接身份。Joiner 收到 Complete 后先保存可恢复的本机激活计划，后台维护在同一串行约束内执行并保存 Active PendingSettlement，下一轮才发送 CompleteAck；本机激活执行成功但保存冲突时，下一轮必须以同一计划幂等重试并得到同一结果。收到 Settled 后保存最终 Active Settled，不再进入待恢复扫描。各状态能力只接收对应角色的变化结果，必须把完整替换状态与声明的影响作为一个持久结果，不能只保存状态。协议内部固定为 `joiner/`、`sponsor/` 和 `recovery/` 三个私有角色目录；各动作持有自己完成业务结果所需的准备、状态或执行能力。`SpaceAdmissionProtocol` 仍只保留三个内部负责人和同一 profile 的串行约束，不暴露内部步骤或完整 Aggregate。Application admission 的稳定错误分类携带原始错误链，不把来源字符串化或抹平。
 
-Infra 已建立隐藏第三方类型的 OPAQUE registration 与认证能力，并提供仅供 MasterKey AEAD 边界使用的版本化 registration 编码；编码字节自动清零，错误 marker、版本、长度或 OPAQUE record 失败关闭，不得明文写入持久化。registration 与 server setup 的真实加密存储、OpenMLS、新 Iroh 通道仍待接入，Engine 仍需完成 endpoint-before-router-before-runtime 构造顺序。完成这些切换并删除旧协议前，本节的新流程不属于已发布运行路径。
+Infra 已建立隐藏第三方类型的 OPAQUE registration 与认证能力，并提供仅供 MasterKey AEAD 边界使用的版本化 registration 和 server setup 编码；编码字节自动清零，错误 marker、版本、长度或 OPAQUE record 失败关闭，不得明文写入持久化。恢复出的原 server setup 可继续使用既有 registration，新生成的 setup 不能冒充原 Sponsor。两者的真实加密存储、OpenMLS、新 Iroh 通道仍待接入，Engine 仍需完成 endpoint-before-router-before-runtime 构造顺序。完成这些切换并删除旧协议前，本节的新流程不属于已发布运行路径。
 
 以下 ADR-017/规格 023 内容保留为业务约束来源；其中旧 `WorkspaceConvergence`、旧尝试仓储、outbox 和完成接力通道名称不再代表目标代码归属。
 
@@ -1519,6 +1519,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | OPAQUE 正确口令认证切片 | Infra 的单一 `SpaceAdmissionAuth` 能力完成 OPAQUE registration 与 KE1/KE2/KE3，隐藏第三方密码库类型；正确口令和同一协议、准入、邀请及双方通道身份上下文让双方导出相同、自动清零的 continuation credential。固定 Ristretto255、TripleDH/SHA-512、HKDF-SHA-512 和 Argon2id 参数；按 RFC 9807 使用 OPRF key 作为秘密 salt，不另存 salt。认证失败保持稳定分类和原始 source。网络接线、registration 加密持久化、完整错误矩阵与官方向量仍属后续切片。 |
 | 2026-08-29 | OPAQUE 准入身份上下文验证 | Infra 公共认证 seam 新增身份绑定验证；准入 ID、邀请 ID、Joiner 通道 Peer ID 或 Sponsor 通道 Peer ID 任一不一致时，OPAQUE transcript 均拒绝认证并保留错误 source。现有协议版本只有 V1，跨版本合法值验证留待新增版本时完成；生产实现和架构边界不变。 |
 | 2026-08-29 | OPAQUE registration 加密前编码 | Infra 为 Sponsor registration 增加固定 marker、版本和严格长度的可恢复编码，只通过 `encode_for_encryption` 与 `decode_registration_after_decryption` 暴露安全意图；临时字节自动清零且不实现 Debug，截断或损坏数据以保留 source 的稳定分类拒绝。该能力尚未写入数据库；后续持久化必须复用 MasterKey AEAD，不得明文落库。 |
+| 2026-08-29 | OPAQUE Sponsor setup 重启恢复 | Infra 为固定 ciphersuite 的 `ServerSetup` 增加独立版本化加密前编码；原 setup 恢复后可继续认证既有 registration，重新生成或损坏的 setup 不能接管已有口令记录。临时序列化数组和编码均自动清零，错误使用独立稳定分类并保留 source；真实持久化仍须进入 MasterKey AEAD。 |
 
 ## 相关文档
 

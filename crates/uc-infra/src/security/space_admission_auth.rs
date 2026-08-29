@@ -22,6 +22,9 @@ use zeroize::Zeroizing;
 const REGISTRATION_ENCODING_MAGIC: &[u8; 8] = b"UCOPAQRG";
 const REGISTRATION_ENCODING_VERSION: u16 = 1;
 const REGISTRATION_ENCODING_HEADER_LEN: usize = REGISTRATION_ENCODING_MAGIC.len() + 2 + 32;
+const SERVER_SETUP_ENCODING_MAGIC: &[u8; 8] = b"UCOPAQS1";
+const SERVER_SETUP_ENCODING_VERSION: u16 = 1;
+const SERVER_SETUP_SERIALIZED_LEN: usize = 128;
 
 #[derive(Debug)]
 struct ContinuationCredentialExpansionError(hkdf::InvalidLength);
@@ -44,6 +47,16 @@ enum RegistrationEncodingError {
     UnsupportedVersion,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ServerSetupEncodingError {
+    #[error("OPAQUE server setup encoding length is invalid")]
+    InvalidLength,
+    #[error("OPAQUE server setup encoding marker is invalid")]
+    InvalidMarker,
+    #[error("OPAQUE server setup encoding version is unsupported")]
+    UnsupportedVersion,
+}
+
 pub struct SpaceAdmissionAuth;
 
 struct SpaceAdmissionCipherSuite;
@@ -55,6 +68,18 @@ impl CipherSuite for SpaceAdmissionCipherSuite {
 }
 
 pub struct SpaceAdmissionServerSetup(ServerSetup<SpaceAdmissionCipherSuite>);
+
+pub struct SpaceAdmissionServerSetupEncoding(Zeroizing<Vec<u8>>);
+
+impl SpaceAdmissionServerSetupEncoding {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_bytes(self) -> Zeroizing<Vec<u8>> {
+        self.0
+    }
+}
 
 pub struct SpaceAdmissionRegistration {
     credential_identifier: [u8; 32],
@@ -98,6 +123,11 @@ impl Eq for SpaceAdmissionContinuationCredential {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceAdmissionAuthError {
+    #[error("space admission server setup failed")]
+    ServerSetup {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("space admission registration failed")]
     Registration {
         #[source]
@@ -130,6 +160,14 @@ impl SpaceAdmissionAuth {
     ) -> Result<SpaceAdmissionRegistration, SpaceAdmissionAuthError> {
         decode_registration(encoded).map_err(|source| SpaceAdmissionAuthError::Registration {
             source: source.context("decode decrypted OPAQUE Space registration"),
+        })
+    }
+
+    pub fn decode_server_setup_after_decryption(
+        encoded: &[u8],
+    ) -> Result<SpaceAdmissionServerSetup, SpaceAdmissionAuthError> {
+        decode_server_setup(encoded).map_err(|source| SpaceAdmissionAuthError::ServerSetup {
+            source: source.context("decode decrypted OPAQUE server setup"),
         })
     }
 
@@ -182,6 +220,19 @@ impl SpaceAdmissionAuth {
             SpaceAdmissionServerState(result.state),
             SpaceAdmissionKe2(result.message),
         ))
+    }
+}
+
+impl SpaceAdmissionServerSetup {
+    pub fn encode_for_encryption(&self) -> SpaceAdmissionServerSetupEncoding {
+        let serialized_setup = Zeroizing::new(self.0.serialize());
+        let mut encoded = Zeroizing::new(Vec::with_capacity(
+            SERVER_SETUP_ENCODING_MAGIC.len() + 2 + serialized_setup.len(),
+        ));
+        encoded.extend_from_slice(SERVER_SETUP_ENCODING_MAGIC);
+        encoded.extend_from_slice(&SERVER_SETUP_ENCODING_VERSION.to_be_bytes());
+        encoded.extend_from_slice(&serialized_setup);
+        SpaceAdmissionServerSetupEncoding(encoded)
     }
 }
 
@@ -366,6 +417,26 @@ fn decode_registration(encoded: &[u8]) -> anyhow::Result<SpaceAdmissionRegistrat
         credential_identifier,
         record,
     })
+}
+
+fn decode_server_setup(encoded: &[u8]) -> anyhow::Result<SpaceAdmissionServerSetup> {
+    let header_len = SERVER_SETUP_ENCODING_MAGIC.len() + 2;
+    if encoded.len() != header_len + SERVER_SETUP_SERIALIZED_LEN {
+        return Err(ServerSetupEncodingError::InvalidLength.into());
+    }
+    if &encoded[..SERVER_SETUP_ENCODING_MAGIC.len()] != SERVER_SETUP_ENCODING_MAGIC {
+        return Err(ServerSetupEncodingError::InvalidMarker.into());
+    }
+
+    let version_offset = SERVER_SETUP_ENCODING_MAGIC.len();
+    let version = u16::from_be_bytes([encoded[version_offset], encoded[version_offset + 1]]);
+    if version != SERVER_SETUP_ENCODING_VERSION {
+        return Err(ServerSetupEncodingError::UnsupportedVersion.into());
+    }
+
+    let setup = ServerSetup::deserialize(&encoded[header_len..])
+        .context("deserialize OPAQUE server setup")?;
+    Ok(SpaceAdmissionServerSetup(setup))
 }
 
 fn admission_ksf() -> anyhow::Result<Argon2<'static>> {

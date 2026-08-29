@@ -23,6 +23,7 @@
 - Added a versioned OPAQUE registration encoding explicitly named for the encryption/decryption boundary. Its temporary bytes zeroize on drop, restored records authenticate normally, and truncated encodings fail with stable Registration classification and source.
 - Added same-length tamper evidence: a structurally decodable registration with a modified OPAQUE envelope cannot authenticate and retains the Authentication source chain.
 - Covered the registration envelope guards for a wrong marker, unsupported version, and trailing bytes; each fails with Registration classification and a non-empty source.
+- Added versioned, zeroizing `ServerSetup` encryption-bound encoding. Restoring the original setup authenticates an existing registration; a replacement setup or truncated encoding fails closed.
 
 ## TDD Evidence
 
@@ -74,6 +75,9 @@
 | GREEN | `restored_registration_authenticates_and_truncated_encoding_is_rejected` | passed; restored registration authenticated and truncated bytes were rejected with a source chain |
 | GREEN | `tampered_registration_record_cannot_authenticate` | passed; a same-length modified OPAQUE record reached protocol verification but could not authenticate |
 | GREEN | `registration_encoding_rejects_wrong_marker_version_and_length` | passed for marker, version, and trailing-byte corruption |
+| RED | `restored_server_setup_authenticates_existing_registration` | compile failed because ServerSetup had no encryption-bound encoding or restoration capability |
+| GREEN | `restored_server_setup_authenticates_existing_registration` | passed; the restored setup authenticated the existing registration |
+| GREEN | `changed_or_invalid_server_setup_cannot_resume_registration` | passed; replacement setup authentication and truncated setup restoration were rejected with sources |
 
 ## Verification
 
@@ -111,6 +115,7 @@
 | `opaque-ke` advisory/license review | no package advisory in current RustSec database; crate declares `Apache-2.0 OR MIT`; local `cargo-audit` and `cargo-deny` commands unavailable |
 | Phase 4 OPAQUE identity-binding tests | 3 focused tests passed; mismatch test covers 4 identity fields |
 | Phase 4 OPAQUE registration encoding tests | 6 focused tests passed |
+| Phase 4 OPAQUE restart tests | 8 focused tests passed |
 
 ## Errors
 
