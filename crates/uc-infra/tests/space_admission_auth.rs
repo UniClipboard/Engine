@@ -9,6 +9,21 @@ fn authentication_context() -> SpaceAdmissionAuthContext {
     authentication_context_with_ids([0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32])
 }
 
+#[test]
+fn password_equivalent_is_deterministic_and_invitation_bound() {
+    let invitation_a = InvitationId::from_bytes([0x11; 32]).expect("valid invitation fixture");
+    let invitation_b = InvitationId::from_bytes([0x12; 32]).expect("valid invitation fixture");
+    let first = SpaceAdmissionAuth::derive_password_equivalent(b"passphrase", invitation_a);
+    let repeated = SpaceAdmissionAuth::derive_password_equivalent(b"passphrase", invitation_a);
+    let other_invitation =
+        SpaceAdmissionAuth::derive_password_equivalent(b"passphrase", invitation_b);
+    let other_passphrase = SpaceAdmissionAuth::derive_password_equivalent(b"other", invitation_a);
+
+    assert_eq!(first.as_bytes(), repeated.as_bytes());
+    assert_ne!(first.as_bytes(), other_invitation.as_bytes());
+    assert_ne!(first.as_bytes(), other_passphrase.as_bytes());
+}
+
 fn authentication_context_with_ids(
     admission_id: [u8; 32],
     invitation_id: [u8; 32],

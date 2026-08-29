@@ -7321,6 +7321,7 @@ dependencies = [
  "uuid",
  "windows-sys 0.59.0",
  "wiremock",
+ "x25519-dalek",
  "zeroize",
  "zstd",
 ]

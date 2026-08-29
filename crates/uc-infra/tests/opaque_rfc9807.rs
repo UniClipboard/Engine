@@ -9,8 +9,8 @@ use sha2::Sha512;
 use static_assertions::assert_not_impl_any;
 use uc_infra::security::{
     SpaceAdmissionClientState, SpaceAdmissionContinuationCredential, SpaceAdmissionKe1,
-    SpaceAdmissionKe2, SpaceAdmissionKe3, SpaceAdmissionRegistration,
-    SpaceAdmissionRegistrationEncoding, SpaceAdmissionServerSetup,
+    SpaceAdmissionKe2, SpaceAdmissionKe3, SpaceAdmissionPasswordEquivalent,
+    SpaceAdmissionRegistration, SpaceAdmissionRegistrationEncoding, SpaceAdmissionServerSetup,
     SpaceAdmissionServerSetupEncoding, SpaceAdmissionServerState,
 };
 
@@ -24,6 +24,7 @@ assert_not_impl_any!(SpaceAdmissionKe1: Clone, std::fmt::Debug);
 assert_not_impl_any!(SpaceAdmissionKe2: Clone, std::fmt::Debug);
 assert_not_impl_any!(SpaceAdmissionKe3: Clone, std::fmt::Debug);
 assert_not_impl_any!(SpaceAdmissionContinuationCredential: Clone, std::fmt::Debug);
+assert_not_impl_any!(SpaceAdmissionPasswordEquivalent: Clone, std::fmt::Debug);
 
 struct Rfc9807CipherSuite;
 

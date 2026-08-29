@@ -53,7 +53,7 @@ pub(crate) use secrets::{Kek, MasterKey};
 pub use space_admission_auth::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError,
     SpaceAdmissionClientState, SpaceAdmissionContinuationCredential, SpaceAdmissionKe1,
-    SpaceAdmissionKe2, SpaceAdmissionKe3, SpaceAdmissionRegistration,
-    SpaceAdmissionRegistrationEncoding, SpaceAdmissionServerSetup,
+    SpaceAdmissionKe2, SpaceAdmissionKe3, SpaceAdmissionPasswordEquivalent,
+    SpaceAdmissionRegistration, SpaceAdmissionRegistrationEncoding, SpaceAdmissionServerSetup,
     SpaceAdmissionServerSetupEncoding, SpaceAdmissionServerState,
 };

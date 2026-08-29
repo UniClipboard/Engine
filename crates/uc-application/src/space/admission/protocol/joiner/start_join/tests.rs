@@ -70,9 +70,19 @@ fn joiner_start_material_errors_keep_distinct_join_space_categories() {
         JoinSpaceError::InvalidInvitation
     ));
     assert!(matches!(
-        JoinSpaceError::from(JoinerStartMaterialError::Unavailable),
+        JoinSpaceError::from(JoinerStartMaterialError::unavailable(anyhow::anyhow!(
+            "fixture"
+        ))),
         JoinSpaceError::Unavailable
     ));
+}
+
+#[test]
+fn unavailable_start_material_error_preserves_its_source() {
+    use std::error::Error;
+
+    let error = JoinerStartMaterialError::unavailable(anyhow::anyhow!("fixture"));
+    assert!(error.source().is_some());
 }
 
 #[tokio::test]

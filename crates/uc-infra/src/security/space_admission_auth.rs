@@ -11,7 +11,7 @@ use opaque_ke::{
     CredentialResponse, ServerLogin, ServerLoginParameters, ServerRegistration,
     ServerRegistrationLen, ServerSetup, TripleDh,
 };
-use sha2::Sha512;
+use sha2::{Digest, Sha512};
 use subtle::ConstantTimeEq;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::membership::{
@@ -113,6 +113,14 @@ pub struct SpaceAdmissionKe3(CredentialFinalization<SpaceAdmissionCipherSuite>);
 
 pub struct SpaceAdmissionContinuationCredential(Zeroizing<[u8; 64]>);
 
+pub struct SpaceAdmissionPasswordEquivalent(Zeroizing<[u8; 64]>);
+
+impl SpaceAdmissionPasswordEquivalent {
+    pub fn as_bytes(&self) -> &[u8; 64] {
+        &self.0
+    }
+}
+
 impl PartialEq for SpaceAdmissionContinuationCredential {
     fn eq(&self, other: &Self) -> bool {
         bool::from(self.0.as_ref().ct_eq(other.0.as_ref()))
@@ -141,6 +149,17 @@ pub enum SpaceAdmissionAuthError {
 }
 
 impl SpaceAdmissionAuth {
+    pub fn derive_password_equivalent(
+        passphrase: &[u8],
+        invitation_id: InvitationId,
+    ) -> SpaceAdmissionPasswordEquivalent {
+        let mut hasher = Sha512::new();
+        hasher.update(b"uc-space-admission-password-equivalent-v1");
+        hasher.update(invitation_id.as_bytes());
+        hasher.update(passphrase);
+        SpaceAdmissionPasswordEquivalent(Zeroizing::new(hasher.finalize().into()))
+    }
+
     pub fn generate_server_setup() -> SpaceAdmissionServerSetup {
         let mut rng = OsRng;
         SpaceAdmissionServerSetup(ServerSetup::<SpaceAdmissionCipherSuite>::new(&mut rng))

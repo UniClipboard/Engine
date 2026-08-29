@@ -116,6 +116,14 @@
 | Phase 4 OPAQUE identity-binding tests | 3 focused tests passed; mismatch test covers 4 identity fields |
 | Phase 4 OPAQUE registration encoding tests | 6 focused tests passed |
 | Phase 4 OPAQUE restart tests | 8 focused tests passed |
+| Phase 4 RFC 9807 vector | passed, 1 test plus compile-time secret constraints |
+| Phase 4 OpenMLS admission transition | passed, 1 focused test |
+| Phase 4 Joiner start material | passed, 2 Infra tests and Application source-chain test |
+| Phase 4 final Application tests | passed, 692 tests |
+| Phase 4 final Infra all-target check | passed |
+| Phase 4 final metadata / architecture / diff checks | passed |
+| Phase 4 final workspace check | existing Engine assembly failures remain (27 lib, 29 test) |
+| Phase 4 final workspace format check | existing differences remain in two unrelated files |
 
 ## Errors
 

@@ -41,20 +41,31 @@ pub trait PrepareJoinerInvitationPort: Send + Sync {
 use crate::space::admission::{JoinSpaceError, JoinSpaceInput};
 use async_trait::async_trait;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum JoinerStartMaterialError {
     #[error("the invitation cannot start a new admission")]
     InvalidInvitation,
 
     #[error("joiner start material is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl JoinerStartMaterialError {
+    pub fn unavailable(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: source.into(),
+        }
+    }
 }
 
 impl From<JoinerStartMaterialError> for JoinSpaceError {
     fn from(error: JoinerStartMaterialError) -> Self {
         match error {
             JoinerStartMaterialError::InvalidInvitation => Self::InvalidInvitation,
-            JoinerStartMaterialError::Unavailable => Self::Unavailable,
+            JoinerStartMaterialError::Unavailable { .. } => Self::Unavailable,
         }
     }
 }

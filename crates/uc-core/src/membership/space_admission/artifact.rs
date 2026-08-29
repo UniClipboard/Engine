@@ -163,7 +163,7 @@ define_redacted_artifact!(
     AdmissionSourceSnapshot,
     4 * 1024 * 1024
 );
-define_redacted_artifact!(
+define_zeroizing_artifact!(
     /// Joiner 首次认证前持有的口令等价材料；认证完成后必须由 continuation credential 替代。
     AdmissionEncryptedPasswordEquivalent,
     1024 * 1024
