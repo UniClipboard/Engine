@@ -9,9 +9,9 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature,
     AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId,
-    AdmissionRecoveryPublicKey, AdmissionRole, JoinId, MembershipCredential, SpaceAdmissionBodyV1,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
-    ED25519_SIGNATURE_ALGORITHM_V1,
+    AdmissionRecoveryPublicKey, AdmissionRole, ED25519_SIGNATURE_ALGORITHM_V1, JoinId,
+    MembershipCredential, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionRoute, UnreadableHistoryPolicy,
 };
 use uc_core::security::IdentityFingerprint;
 use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecret};

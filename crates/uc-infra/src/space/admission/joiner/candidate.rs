@@ -273,18 +273,18 @@ mod tests {
         AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit,
         AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionRecoveryPublicKey, AdmissionRole,
         AdmissionSealedRecoveryMaterial, AdmissionSourceSnapshot, BaseMembershipHistoryPosition,
-        InvitationId, JoinId, JoinerAdmission, MembershipCredential, PendingAdmissionExchange,
-        SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
-        ED25519_SIGNATURE_ALGORITHM_V1,
+        ED25519_SIGNATURE_ALGORITHM_V1, InvitationId, JoinId, JoinerAdmission,
+        MembershipCredential, PendingAdmissionExchange, SpaceAdmissionId, SpaceAdmissionRoute,
+        UnreadableHistoryPolicy,
     };
     use uc_core::ports::space::SpaceAccessError;
     use uc_core::security::IdentityFingerprint;
     use uc_core::space_access::PreparedAdmissionTargetAccess;
 
     use super::*;
+    use crate::space::OpenMlsHistoricalSignatureVerifier;
     use crate::space::admission::joiner::DefaultJoinerAppliedPreparation;
     use crate::space::security::mls_group::MlsGroupEngine;
-    use crate::space::OpenMlsHistoricalSignatureVerifier;
 
     struct FixedTargetAccess;
 

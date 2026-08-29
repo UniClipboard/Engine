@@ -166,8 +166,10 @@ mod tests {
         );
         assert!(open_recovery_material(&[0x33; 32], &recipient_secret, &sealed).is_err());
         assert!(open_recovery_material(&admission_id, &[0x34; 32], &sealed).is_err());
-        assert!(!sealed
-            .windows(plaintext.len())
-            .any(|window| window == plaintext));
+        assert!(
+            !sealed
+                .windows(plaintext.len())
+                .any(|window| window == plaintext)
+        );
     }
 }

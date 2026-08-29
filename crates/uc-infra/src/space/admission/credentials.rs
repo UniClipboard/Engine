@@ -121,12 +121,12 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
                         .seal_profile_payload(CREDENTIAL_PURPOSE, &plaintext)
                         .map_err(anyhow::Error::new)?;
                     sql_query(
-                    "INSERT INTO space_admission_credentials (singleton_id, encrypted_payload) \
+                        "INSERT INTO space_admission_credentials (singleton_id, encrypted_payload) \
                      VALUES (1, ?) ON CONFLICT(singleton_id) DO UPDATE SET \
                      encrypted_payload = excluded.encrypted_payload",
-                )
-                .bind::<Binary, _>(encrypted)
-                .execute(conn)?;
+                    )
+                    .bind::<Binary, _>(encrypted)
+                    .execute(conn)?;
                     self.load_on(conn, &manifest)?
                         .ok_or_else(|| anyhow::anyhow!("credential write was not durable"))?;
                     Ok(())
@@ -407,9 +407,11 @@ mod tests {
                 .encrypted_payload)
             })
             .unwrap();
-        assert!(!encrypted
-            .windows(passphrase.expose().len())
-            .any(|window| window == passphrase.expose().as_bytes()));
+        assert!(
+            !encrypted
+                .windows(passphrase.expose().len())
+                .any(|window| window == passphrase.expose().as_bytes())
+        );
 
         manifests
             .promote(
@@ -423,10 +425,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(open()
-            .resolve_initial(invitation_id, admission_id)
-            .await
-            .is_err());
+        assert!(
+            open()
+                .resolve_initial(invitation_id, admission_id)
+                .await
+                .is_err()
+        );
         open().ensure_registration(&passphrase).unwrap();
         let replacement = executor
             .run(|conn| {

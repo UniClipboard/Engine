@@ -4,8 +4,8 @@ use diesel::sql_types::Binary;
 use uc_core::membership::{AdmissionRecordPersistence, SpaceAdmissionAggregate};
 
 use super::persisted::{
-    PersistedSpaceAdmissionRepositoryV1, StoredSpaceAdmissionV1,
-    SPACE_ADMISSION_REPOSITORY_FORMAT_V1,
+    PersistedSpaceAdmissionRepositoryV1, SPACE_ADMISSION_REPOSITORY_FORMAT_V1,
+    StoredSpaceAdmissionV1,
 };
 use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 use crate::db::ports::DbExecutor;

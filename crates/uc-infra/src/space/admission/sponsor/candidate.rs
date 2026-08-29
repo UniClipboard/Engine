@@ -86,7 +86,7 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
             _ => {
                 return Err(PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
                     "the Sponsor Candidate input is not a JoinRequest"
-                )))
+                )));
             }
         };
         // JoinRequest 中的身份事实由申请者自己的成员凭据签名。这里先证明申请者
@@ -277,14 +277,14 @@ mod tests {
         PrepareSponsorCompletePort, SponsorPreparedAdmissionSecurity,
     };
     use uc_core::membership::{
-        AdmissionActivationReceipt, AdmissionAppliedV1, AdmissionBaseSnapshot,
-        AdmissionChangeFacts, AdmissionChannelPeerId, AdmissionContentKeyCatalogV1,
-        AdmissionContentKeyEntryV1, AdmissionContinuationCredential, AdmissionIdentitySignature,
-        AdmissionInvitationClaim, AdmissionJoinRequestV1, AdmissionKeyPackage, AdmissionMessageId,
-        AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecoveryPublicKey,
-        AdmissionSignedMembershipHistory, HistoricalMembershipSignatureError, MembershipCredential,
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, AdmissionActivationReceipt, AdmissionAppliedV1,
+        AdmissionBaseSnapshot, AdmissionChangeFacts, AdmissionChannelPeerId,
+        AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, AdmissionContinuationCredential,
+        AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinRequestV1,
+        AdmissionKeyPackage, AdmissionMessageId, AdmissionPeerBinding, AdmissionPreparedV1,
+        AdmissionRecoveryPublicKey, AdmissionSignedMembershipHistory,
+        ED25519_SIGNATURE_ALGORITHM_V1, HistoricalMembershipSignatureError, MembershipCredential,
         PreparedAdmissionProofV1, SpaceAdmissionMessageKind, UnreadableHistoryPolicy,
-        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::security::IdentityFingerprint;
 

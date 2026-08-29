@@ -1,8 +1,8 @@
 use openmls_rust_crypto::RustCrypto;
 use openmls_traits::{crypto::OpenMlsCrypto, types::SignatureScheme};
 use uc_core::membership::{
-    HistoricalMembershipSignatureError, HistoricalMembershipSignatureVerifier,
-    ED25519_SIGNATURE_ALGORITHM_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1, HistoricalMembershipSignatureError,
+    HistoricalMembershipSignatureVerifier,
 };
 
 pub struct OpenMlsHistoricalSignatureVerifier;
