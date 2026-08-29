@@ -22,3 +22,4 @@
 - Spec 028 fixes `opaque-ke = 4.0.1`, Ristretto255/SHA-512, Argon2id, and requires correct-password, wrong-password, identifier-binding, corrupt-record, and zeroization evidence.
 - Existing `zeroize`, `rand`, `hkdf`, `hmac`, and `sha2` dependencies are available in Infra; tests must not leak third-party OPAQUE types into Application/Core.
 - RFC 9807 §10.11 specifies that the OPRF key acts as the secret salt for the OPAQUE KSF; the protocol must not invent or persist an additional Argon2 salt. With the fixed SHA-512 ciphersuite, the KSF output is 64 bytes.
+- The existing OPAQUE transcript context already rejects independent changes to `SpaceAdmissionId`, `InvitationId`, Joiner peer id, and Sponsor peer id. `SpaceAdmissionProtocolVersion` currently exposes only `V1`, so a valid cross-version mismatch cannot yet be constructed.

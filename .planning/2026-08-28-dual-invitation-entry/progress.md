@@ -19,6 +19,7 @@
 - Completed the first Phase 4 OPAQUE tracer bullet: registration and KE1/KE2/KE3 now derive the same context-bound, zeroizing continuation credential for the matching passphrase.
 - Added minimal repository-rule coverage showing an authentication failure retains its stable classification and a non-empty source chain.
 - Corrected Spec 028 to RFC 9807 KSF salt semantics: the OPRF key is the secret salt and no extra Argon2 salt is persisted.
+- Validated the next OPAQUE slice at the established Infra seam: changing the admission id, invitation id, Joiner peer id, or Sponsor peer id independently causes authentication failure with its source chain preserved. No production adjustment was needed because the prior transcript binding was already complete.
 
 ## TDD Evidence
 
@@ -65,6 +66,7 @@
 | RED | `matching_passphrase_establishes_the_same_bound_continuation_credential` | compile failed only because `SpaceAdmissionAuth` and `SpaceAdmissionAuthContext` do not yet exist |
 | GREEN | `matching_passphrase_establishes_the_same_bound_continuation_credential` | passed; both peers derived the same context-bound continuation credential |
 | GREEN | `authentication_failure_preserves_classification_and_source` | passed; authentication failure retained stable classification and a non-empty source chain |
+| GREEN (existing behavior) | `mismatched_admission_identity_context_cannot_authenticate_the_exchange` | passed for independent admission, invitation, Joiner peer, and Sponsor peer mismatches; the prior context binding already enforced the requirement |
 
 ## Verification
 
@@ -100,6 +102,7 @@
 | Phase 4 workspace check | existing Engine assembly failures remain (27 lib, 29 test) |
 | Phase 4 workspace format check | existing differences remain in two unrelated files |
 | `opaque-ke` advisory/license review | no package advisory in current RustSec database; crate declares `Apache-2.0 OR MIT`; local `cargo-audit` and `cargo-deny` commands unavailable |
+| Phase 4 OPAQUE identity-binding tests | 3 focused tests passed; mismatch test covers 4 identity fields |
 
 ## Errors
 
