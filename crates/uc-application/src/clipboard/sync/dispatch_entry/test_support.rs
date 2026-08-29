@@ -20,7 +20,7 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ClipboardDispatchPort, ClipboardHeader, ClockPort, DispatchReport, FirstSyncStateError,
     FirstSyncStatePort, LocalIdentityError, LocalIdentityPort, PeerAddressError, PeerAddressRecord,
-    PeerAddressRepositoryPort, PeerReachabilityPort, PresenceError, PresenceEvent,
+    PeerAddressRepositoryPort, PeerReachabilityPort, PresenceError, PeerReachabilityChanged,
     ReachabilityState, SettingsPort, SyncPayload,
 };
 use uc_core::security::IdentityFingerprint;
@@ -123,7 +123,7 @@ impl PeerReachabilityPort for StaticPresence {
         self.0
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+    fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
         let (_tx, rx) = broadcast::channel(1);
         rx
     }

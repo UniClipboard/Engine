@@ -614,7 +614,7 @@ mod tests {
     use uc_core::ports::{
         ClipboardDispatchError, ClipboardHeader, ConnectionChannel, DispatchAck, DispatchReport,
         FirstSyncStateError, LocalIdentityError, PeerAddressError, PeerAddressRecord,
-        PresenceError, PresenceEvent, ReachabilityState, SyncPayload,
+        PeerReachabilityChanged, PresenceError, ReachabilityState, SyncPayload,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -661,7 +661,7 @@ mod tests {
                 device: &DeviceId,
             ) -> Result<ReachabilityState, PresenceError>;
             async fn current_state(&self, device: &DeviceId) -> ReachabilityState;
-            fn subscribe(&self) -> broadcast::Receiver<PresenceEvent>;
+            fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
         }
     }
 

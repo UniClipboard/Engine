@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use uc_core::ports::{PresenceEvent, ReachabilityState};
+use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 
 use super::{MaintainSpaceMembershipUseCase, MembershipMaintenanceTrigger};
 
@@ -77,15 +77,63 @@ pub(crate) struct SpaceMembershipMaintenanceRuntime {
     task: Option<JoinHandle<()>>,
 }
 
+pub(crate) struct PreparedSpaceMembershipMaintenanceRuntime {
+    maintain: Arc<MaintainSpaceMembershipUseCase>,
+    peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+    periodic_interval: Duration,
+    network_activity: Arc<dyn MembershipNetworkActivityPort>,
+    activity: SpaceMembershipMaintenanceActivity,
+    command_rx: mpsc::UnboundedReceiver<RuntimeCommand>,
+}
+
+impl PreparedSpaceMembershipMaintenanceRuntime {
+    pub(crate) fn activity(&self) -> SpaceMembershipMaintenanceActivity {
+        self.activity.clone()
+    }
+}
+
 impl SpaceMembershipMaintenanceRuntime {
+    pub(crate) fn prepare(
+        maintain: Arc<MaintainSpaceMembershipUseCase>,
+        peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
+        periodic_interval: Duration,
+        network_activity: Arc<dyn MembershipNetworkActivityPort>,
+    ) -> PreparedSpaceMembershipMaintenanceRuntime {
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let activity = SpaceMembershipMaintenanceActivity { commands };
+        PreparedSpaceMembershipMaintenanceRuntime {
+            maintain,
+            peer_reachability_changed_events,
+            periodic_interval,
+            network_activity,
+            activity,
+            command_rx,
+        }
+    }
+
     pub(crate) fn start(
         maintain: Arc<MaintainSpaceMembershipUseCase>,
-        mut presence_events: broadcast::Receiver<PresenceEvent>,
+        peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         periodic_interval: Duration,
         network_activity: Arc<dyn MembershipNetworkActivityPort>,
     ) -> Self {
-        let (commands, mut command_rx) = mpsc::unbounded_channel();
-        let activity = SpaceMembershipMaintenanceActivity { commands };
+        Self::start_prepared(Self::prepare(
+            maintain,
+            peer_reachability_changed_events,
+            periodic_interval,
+            network_activity,
+        ))
+    }
+
+    pub(crate) fn start_prepared(prepared: PreparedSpaceMembershipMaintenanceRuntime) -> Self {
+        let PreparedSpaceMembershipMaintenanceRuntime {
+            maintain,
+            peer_reachability_changed_events: mut reachability_changes,
+            periodic_interval,
+            network_activity,
+            activity,
+            mut command_rx,
+        } = prepared;
         let task = tokio::spawn(async move {
             let mut paused = false;
             let mut presence_open = true;
@@ -155,7 +203,7 @@ impl SpaceMembershipMaintenanceRuntime {
                             }
                         }
                     },
-                    event = presence_events.recv(), if !paused && presence_open => match event {
+                    event = reachability_changes.recv(), if !paused && presence_open => match event {
                         Ok(event) if event.state == ReachabilityState::Online => {
                             schedule_round(
                                 &maintain,

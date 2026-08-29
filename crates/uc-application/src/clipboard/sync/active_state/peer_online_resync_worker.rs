@@ -46,7 +46,7 @@ use tracing::{debug, info, instrument, warn};
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
 use uc_core::ports::clipboard::{ActiveClipboardDispatchPort, LoadActiveClipboardPort};
-use uc_core::ports::presence::{PresenceEvent, ReachabilityState};
+use uc_core::ports::presence::{PeerReachabilityChanged, ReachabilityState};
 use uc_core::ports::PeerReachabilityPort;
 use uc_core::MemberRepositoryPort;
 
@@ -142,7 +142,9 @@ impl PeerOnlineResyncWorker {
     /// Pull the next presence event that is an *online* transition, skipping
     /// offline / unknown transitions and lag gaps. Returns `None` when the
     /// subscription is closed.
-    async fn recv_next_online(rx: &mut broadcast::Receiver<PresenceEvent>) -> Option<DeviceId> {
+    async fn recv_next_online(
+        rx: &mut broadcast::Receiver<PeerReachabilityChanged>,
+    ) -> Option<DeviceId> {
         loop {
             match rx.recv().await {
                 Ok(event) if event.state == ReachabilityState::Online => {
@@ -257,10 +259,10 @@ mod tests {
     /// Presence port whose `subscribe()` hands out receivers attached to a
     /// caller-controlled broadcast sender.
     struct FakePresence {
-        tx: broadcast::Sender<PresenceEvent>,
+        tx: broadcast::Sender<PeerReachabilityChanged>,
     }
     impl FakePresence {
-        fn new() -> (Arc<Self>, broadcast::Sender<PresenceEvent>) {
+        fn new() -> (Arc<Self>, broadcast::Sender<PeerReachabilityChanged>) {
             let (tx, _) = broadcast::channel(16);
             (Arc::new(Self { tx: tx.clone() }), tx)
         }
@@ -276,20 +278,20 @@ mod tests {
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
             ReachabilityState::Unknown
         }
-        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
             self.tx.subscribe()
         }
     }
 
-    fn online(device: &str) -> PresenceEvent {
-        PresenceEvent {
+    fn online(device: &str) -> PeerReachabilityChanged {
+        PeerReachabilityChanged {
             device_id: DeviceId::new(device),
             state: ReachabilityState::Online,
             at: Utc::now(),
         }
     }
-    fn offline(device: &str) -> PresenceEvent {
-        PresenceEvent {
+    fn offline(device: &str) -> PeerReachabilityChanged {
+        PeerReachabilityChanged {
             device_id: DeviceId::new(device),
             state: ReachabilityState::Offline,
             at: Utc::now(),
@@ -492,7 +494,7 @@ mod tests {
         register: Option<ActiveClipboardState>,
     ) -> (
         PeerOnlineResyncWorker,
-        broadcast::Sender<PresenceEvent>,
+        broadcast::Sender<PeerReachabilityChanged>,
         Arc<DispatchSpy>,
     ) {
         let (presence, presence_tx) = FakePresence::new();

@@ -58,5 +58,6 @@ pub struct SpaceFacadeDeps {
     pub admission: SpaceAdmissionDeps,
     pub transition: SpaceTransitionDeps,
     pub application: SpaceApplicationDeps,
-    pub membership_presence_events: broadcast::Receiver<uc_core::ports::PresenceEvent>,
+    pub peer_reachability_changed_events:
+        broadcast::Receiver<uc_core::ports::PeerReachabilityChanged>,
 }

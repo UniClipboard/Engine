@@ -627,7 +627,8 @@ mod tests {
     };
     use uc_core::ports::{
         ClipboardSelectionRepositoryPort, PeerAddressError, PeerAddressRecord,
-        PeerReachabilityPort, PresenceError, PresenceEvent, ReachabilityState, SystemClipboardPort,
+        PeerReachabilityChanged, PeerReachabilityPort, PresenceError, ReachabilityState,
+        SystemClipboardPort,
     };
     use uc_core::{BlobId, MemberSyncPreferences};
 
@@ -647,7 +648,7 @@ mod tests {
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
             self.0
         }
-        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PeerReachabilityChanged> {
             tokio::sync::broadcast::channel(1).1
         }
     }

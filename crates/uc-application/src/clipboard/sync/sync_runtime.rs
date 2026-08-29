@@ -484,7 +484,7 @@ mod tests {
 
     use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError};
     use uc_core::ids::{EntryId, EventId};
-    use uc_core::ports::presence::{PresenceError, PresenceEvent};
+    use uc_core::ports::presence::{PresenceError, PeerReachabilityChanged};
     use uc_core::settings::model::Settings;
 
     struct FixedSettings {
@@ -620,7 +620,7 @@ mod tests {
     }
 
     struct IdlePresence {
-        tx: tokio::sync::broadcast::Sender<PresenceEvent>,
+        tx: tokio::sync::broadcast::Sender<PeerReachabilityChanged>,
     }
 
     #[async_trait]
@@ -636,7 +636,7 @@ mod tests {
             ReachabilityState::Unknown
         }
 
-        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PeerReachabilityChanged> {
             self.tx.subscribe()
         }
     }

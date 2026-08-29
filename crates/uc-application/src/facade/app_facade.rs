@@ -58,7 +58,7 @@ use crate::space::{
     NetworkRecoveryStatus, RecoverSpaceSessionError, RecoverSpaceSessionResult,
 };
 use uc_core::ids::DeviceId;
-use uc_core::ports::{PresenceEvent, ReachabilityState};
+use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 use uc_core::ClipboardChangeOrigin;
 use uc_core::SystemClipboardSnapshot;
 
@@ -785,7 +785,7 @@ pub enum AppPresenceSubscriptionError {
 
 /// application 层 presence 订阅句柄。
 pub struct AppPresenceSubscription {
-    inner: broadcast::Receiver<PresenceEvent>,
+    inner: broadcast::Receiver<PeerReachabilityChanged>,
 }
 
 impl AppPresenceSubscription {
@@ -803,7 +803,7 @@ impl AppPresenceSubscription {
     }
 }
 
-fn presence_event_to_app(event: PresenceEvent) -> AppPresenceEvent {
+fn presence_event_to_app(event: PeerReachabilityChanged) -> AppPresenceEvent {
     AppPresenceEvent {
         device_id: event.device_id.as_str().to_string(),
         state: reachability_state_to_string(event.state),

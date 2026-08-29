@@ -29,7 +29,7 @@ pub enum ReachabilityState {
 
 /// Notification delivered on state change.
 #[derive(Debug, Clone)]
-pub struct PresenceEvent {
+pub struct PeerReachabilityChanged {
     pub device_id: DeviceId,
     pub state: ReachabilityState,
     pub at: DateTime<Utc>,
@@ -54,7 +54,7 @@ pub trait PeerReachabilityPort: Send + Sync {
     /// on dial failure. A `NoAddress` error surfaces when the peer address
     /// repository has no record for this device.
     async fn ensure_reachable(&self, device: &DeviceId)
-        -> Result<ReachabilityState, PresenceError>;
+    -> Result<ReachabilityState, PresenceError>;
 
     /// Force-revalidate reachability, bypassing any cached "alive connection"
     /// fast-path inside the implementation.
@@ -86,7 +86,7 @@ pub trait PeerReachabilityPort: Send + Sync {
     ///   `device`, so the next [`current_state`] / [`ensure_reachable`] call
     ///   observes the failure rather than a stale Online assumption.
     /// * Persist `Offline` as the device's last observed state.
-    /// * Emit a single [`PresenceEvent`] with `state = Offline` on the
+    /// * Emit a single [`PeerReachabilityChanged`] with `state = Offline` on the
     ///   subscription channel.
     ///
     /// Idempotent: calling on a device already known Offline is a no-op
@@ -131,5 +131,5 @@ pub trait PeerReachabilityPort: Send + Sync {
     /// Each call returns a fresh receiver. Lagging receivers drop messages
     /// per `broadcast` contract — acceptable because the latest state can
     /// always be recovered via [`current_state`].
-    fn subscribe(&self) -> broadcast::Receiver<PresenceEvent>;
+    fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
 }

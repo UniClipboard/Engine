@@ -413,7 +413,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     use uc_core::ports::{
-        PeerAddressError, PeerAddressRecord, PresenceError, PresenceEvent, ReachabilityState,
+        PeerAddressError, PeerAddressRecord, PresenceError, PeerReachabilityChanged, ReachabilityState,
     };
 
     // PresencePort mock for the dispatch tests. None of the four tests in
@@ -437,7 +437,7 @@ mod tests {
                 device: &DeviceId,
             ) -> Result<ReachabilityState, PresenceError>;
             async fn current_state(&self, device: &DeviceId) -> ReachabilityState;
-            fn subscribe(&self) -> broadcast::Receiver<PresenceEvent>;
+            fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
         }
     }
 
@@ -724,7 +724,7 @@ mod tests {
     /// `presence_mock()` so any accidental call still panics.
     struct CountingPresence {
         mark_offline_calls: Arc<std::sync::atomic::AtomicUsize>,
-        events: broadcast::Sender<PresenceEvent>,
+        events: broadcast::Sender<PeerReachabilityChanged>,
     }
 
     impl CountingPresence {
@@ -752,7 +752,7 @@ mod tests {
             self.mark_offline_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
             self.events.subscribe()
         }
     }

@@ -283,7 +283,7 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
     wait_for_call_count(&calls, 5).await;
 
     activity.pause().await.unwrap();
-    let _ = presence_tx.send(uc_core::ports::PresenceEvent {
+    let _ = presence_tx.send(uc_core::ports::PeerReachabilityChanged {
         device_id: uc_core::ids::DeviceId::new("device-b"),
         state: uc_core::ports::ReachabilityState::Online,
         at: chrono::Utc::now(),
@@ -293,7 +293,7 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
 
     activity.resume().await.unwrap();
     wait_for_call_count(&calls, 10).await;
-    let _ = presence_tx.send(uc_core::ports::PresenceEvent {
+    let _ = presence_tx.send(uc_core::ports::PeerReachabilityChanged {
         device_id: uc_core::ids::DeviceId::new("device-b"),
         state: uc_core::ports::ReachabilityState::Online,
         at: chrono::Utc::now(),
@@ -430,7 +430,7 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
     );
     started.notified().await;
     for device in ["device-b", "device-c"] {
-        let _ = presence_tx.send(uc_core::ports::PresenceEvent {
+        let _ = presence_tx.send(uc_core::ports::PeerReachabilityChanged {
             device_id: uc_core::ids::DeviceId::new(device),
             state: uc_core::ports::ReachabilityState::Online,
             at: chrono::Utc::now(),

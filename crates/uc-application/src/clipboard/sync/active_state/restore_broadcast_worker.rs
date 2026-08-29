@@ -169,8 +169,8 @@ mod tests {
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::clipboard::ActiveClipboardDispatchError;
     use uc_core::ports::{
-        PeerAddressError, PeerAddressRecord, PeerReachabilityPort, PresenceError, PresenceEvent,
-        ReachabilityState,
+        PeerAddressError, PeerAddressRecord, PeerReachabilityChanged, PeerReachabilityPort,
+        PresenceError, ReachabilityState,
     };
     use uc_core::settings::model::Settings;
     use uc_core::MemberSyncPreferences;
@@ -190,7 +190,7 @@ mod tests {
         async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
             self.0
         }
-        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PeerReachabilityChanged> {
             tokio::sync::broadcast::channel(1).1
         }
     }

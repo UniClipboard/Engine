@@ -560,13 +560,13 @@ impl ResolveRePairingPort for PassivePorts {
 }
 
 #[tokio::test]
-async fn complete_application_starts_from_only_target_ports() {
+async fn complete_application_exposes_endpoints_before_runtime_starts() {
     let mut initial = LoadedMembershipLedger::no_current_space();
     initial.admission_profile = Some(AdmissionProfileMetadata::fresh([0x71; 16]));
     let repository = Arc::new(MemoryLedger(Mutex::new(initial)));
     let passive = Arc::new(PassivePorts::default());
     let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
-    let application = SpaceApplication::start(
+    let mut application = SpaceApplication::build(
         SpaceApplicationDeps {
             load_membership_ledger: repository.clone(),
             commit_membership_ledger: repository,
@@ -609,6 +609,9 @@ async fn complete_application_starts_from_only_target_ports() {
         passive.clone(),
     );
 
+    let _ = application.membership_history_endpoint();
+    let _ = application.space_admission_endpoint();
+
     let joined = application
         .space_admission()
         .start_join(JoinSpaceInput {
@@ -622,7 +625,7 @@ async fn complete_application_starts_from_only_target_ports() {
     assert!(matches!(joined.status, CurrentJoinStatus::Pending { .. }));
     assert_eq!(passive.join_commits.load(Ordering::SeqCst), 1);
 
-    let _ = application.membership_history_endpoint();
-    let _ = application.space_admission_endpoint();
+    assert!(application.start_runtime());
+    assert!(!application.start_runtime());
     application.shutdown().await;
 }

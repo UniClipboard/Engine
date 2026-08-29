@@ -138,7 +138,7 @@ pub use crate::clipboard::resource::{
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
     MemberProtectionStatusView, MemberProtectionView, MemberSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, PeerSnapshotView, PresenceEvent, RosterEntry, RosterError,
+    MemberSyncPreferencesView, PeerSnapshotView, PeerReachabilityChanged, RosterEntry, RosterError,
     SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{

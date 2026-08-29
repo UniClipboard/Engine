@@ -22,8 +22,8 @@ use crate::space::admission::{
     QueryPendingSpaceTransitionError, QueryPendingSpaceTransitionUseCase,
 };
 use crate::space::application::SpaceApplication;
-use crate::space::lifecycle::combine_space_session_activity;
 use crate::space::lifecycle::UpgradeSpaceUseCase;
+use crate::space::lifecycle::combine_space_session_activity;
 use crate::space::lifecycle::{
     InitializeSpaceError, InitializeSpaceRequest, InitializeSpaceResult, InitializeSpaceUseCase,
 };
@@ -76,16 +76,21 @@ pub struct SpaceFacade {
 impl SpaceFacade {
     /// Wire the complete Space application from one passive dependency bundle.
     pub fn new(deps: SpaceFacadeDeps) -> Self {
-        Self::new_internal(deps)
+        Self::new_internal(deps, true)
     }
 
-    fn new_internal(deps: SpaceFacadeDeps) -> Self {
+    /// 构造全部 Space 用例和认证消息 endpoint，但不启动任何后台维护任务。
+    pub fn new_dormant(deps: SpaceFacadeDeps) -> Self {
+        Self::new_internal(deps, false)
+    }
+
+    fn new_internal(deps: SpaceFacadeDeps, start_runtime: bool) -> Self {
         let SpaceFacadeDeps {
             session,
             admission,
             transition,
             application,
-            membership_presence_events,
+            peer_reachability_changed_events,
         } = deps;
         let SpaceTransitionDeps {
             device_management_reset_data,
@@ -96,12 +101,15 @@ impl SpaceFacade {
         } = transition;
         let re_pairing_state = Arc::new(RePairingState::new(re_pairing_state_store));
         let invitation_holder = Arc::new(InMemoryPairingInvitationHolder::new());
-        let application = SpaceApplication::start(
+        let mut application = SpaceApplication::build(
             application,
-            membership_presence_events,
+            peer_reachability_changed_events,
             Arc::clone(&re_pairing_state)
                 as Arc<dyn crate::space::membership::ResolveRePairingPort>,
         );
+        if start_runtime {
+            let _ = application.start_runtime();
+        }
         let membership_initializer = application.initialize_membership();
         let membership_admission = application.query_membership_admission();
         let peer_scope = application.current_scope();
@@ -294,6 +302,15 @@ impl SpaceFacade {
         &self,
     ) -> Arc<dyn crate::deps::HandleAuthenticatedSpaceAdmissionMessagePort> {
         Arc::clone(&self.space_admission_endpoint)
+    }
+
+    /// 在网络 handler 已绑定且 Router ready 后启动 Space 后台恢复。
+    /// 返回 `false` 表示 runtime 已启动或 facade 已关闭。
+    pub async fn start_application_runtime(&self) -> bool {
+        let mut application = self.application.lock().await;
+        application
+            .as_mut()
+            .is_some_and(SpaceApplication::start_runtime)
     }
 
     pub async fn lock_space_session(&self) -> Result<(), LockSpaceSessionError> {
@@ -577,7 +594,7 @@ impl SpaceFacade {
 
     pub fn subscribe_presence_events(
         &self,
-    ) -> tokio::sync::broadcast::Receiver<uc_core::ports::PresenceEvent> {
+    ) -> tokio::sync::broadcast::Receiver<uc_core::ports::PeerReachabilityChanged> {
         self.member_roster.subscribe_presence_events()
     }
 

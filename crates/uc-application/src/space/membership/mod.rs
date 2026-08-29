@@ -26,6 +26,7 @@ pub use maintenance::{
     CleanupLegacyMembershipDataPort, DeliverRestrictedMembershipPort,
     MembershipNetworkActivityPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
+pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use query_device_trust::{
     DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
     DeviceTrustStatus, DeviceTrustSyncState, LoadDeviceTrustObservationsPort,

@@ -18,7 +18,7 @@
 //!   [`TrackedPeer`] entry keyed by [`DeviceId`].
 //! * Spawns a **watchdog task per tracked peer** that awaits
 //!   `connection.closed()` and, on completion, removes the entry and
-//!   broadcasts a `PresenceEvent { state: Offline, .. }`.
+//!   broadcasts a `PeerReachabilityChanged { state: Offline, .. }`.
 //! * Exposes a second "last observed state" map so `current_state` can
 //!   return `Offline` for a peer whose dial failed (that peer is *not* in
 //!   the tracked map). `current_state` therefore reads from the last-state
@@ -67,8 +67,8 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{
-    ClockPort, PeerAddressRepositoryPort, PeerReachabilityPort, PresenceError, PresenceEvent,
-    ReachabilityState,
+    ClockPort, PeerAddressRepositoryPort, PeerReachabilityChanged, PeerReachabilityPort,
+    PresenceError, ReachabilityState,
 };
 use uc_core::security::IdentityFingerprint;
 
@@ -83,7 +83,7 @@ use super::net_recovery::{
 /// teardown via [`Connection::closed`].
 pub const PRESENCE_ALPN: &[u8] = b"uniclipboard/presence/1";
 
-/// Capacity of the [`broadcast`] channel that fans `PresenceEvent`s out to
+/// Capacity of the [`broadcast`] channel that fans `PeerReachabilityChanged`s out to
 /// subscribers. 64 sits comfortably above expected burst width (N ≤ 10
 /// members flipping state on an unlock); lagging subscribers recover via
 /// [`PresencePort::current_state`] per the broadcast contract.
@@ -166,7 +166,7 @@ struct HandlerState {
     last_offline_at: Arc<Mutex<HashMap<DeviceId, Instant>>>,
     inbound_connections: Arc<Mutex<HashMap<usize, Connection>>>,
     accepting: AtomicBool,
-    event_tx: broadcast::Sender<PresenceEvent>,
+    event_tx: broadcast::Sender<PeerReachabilityChanged>,
     clock: Arc<dyn ClockPort>,
 }
 
@@ -323,7 +323,7 @@ impl ProtocolHandler for IrohPresenceHandler {
                     let mut stamps = self.state.last_offline_at.lock().await;
                     stamps.remove(&device_id);
                 }
-                let _ = self.state.event_tx.send(PresenceEvent {
+                let _ = self.state.event_tx.send(PeerReachabilityChanged {
                     device_id,
                     state: ReachabilityState::Online,
                     at: now_at,
@@ -403,7 +403,7 @@ pub struct IrohPresenceAdapter {
     /// Owned here, cloned into [`HandlerState`] so the accept side can
     /// clear stamps under the same `Arc<Mutex>` the adapter reads from.
     last_offline_at: Arc<Mutex<HashMap<DeviceId, Instant>>>,
-    event_tx: broadcast::Sender<PresenceEvent>,
+    event_tx: broadcast::Sender<PeerReachabilityChanged>,
     /// Cheap-clone state for [`IrohPresenceHandler`]. Constructed once in
     /// [`IrohPresenceAdapter::new`] and handed out via
     /// [`IrohPresenceAdapter::handler`].
@@ -559,7 +559,7 @@ impl IrohPresenceAdapter {
         // Ignoring `SendError` is intentional: a `broadcast::Sender::send`
         // failure just means no one is subscribed yet. Subscribers catch up
         // via `current_state` which is always in sync with `last_state`.
-        let _ = self.event_tx.send(PresenceEvent {
+        let _ = self.event_tx.send(PeerReachabilityChanged {
             device_id,
             state,
             at,
@@ -1033,7 +1033,7 @@ impl PeerReachabilityPort for IrohPresenceAdapter {
         }
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+    fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
         self.event_tx.subscribe()
     }
 }
@@ -1051,14 +1051,14 @@ impl PeerReachabilityPort for IrohPresenceAdapter {
 ///   `JoinHandle` via `Drop`, but since we're the watchdog itself at that
 ///   point the abort is a no-op).
 /// * Writes `Offline` into the `last_state` cache.
-/// * Broadcasts a `PresenceEvent { state: Offline, .. }`.
+/// * Broadcasts a `PeerReachabilityChanged { state: Offline, .. }`.
 ///
 /// Errors on the broadcast send are ignored (no subscriber is a valid
 /// state; consumers recover via `current_state`).
 fn spawn_watchdog(
     peers: Arc<Mutex<HashMap<DeviceId, TrackedPeer>>>,
     last_state: Arc<Mutex<HashMap<DeviceId, ReachabilityState>>>,
-    event_tx: broadcast::Sender<PresenceEvent>,
+    event_tx: broadcast::Sender<PeerReachabilityChanged>,
     clock: Arc<dyn ClockPort>,
     device_id: DeviceId,
     connection: Connection,
@@ -1091,7 +1091,7 @@ fn spawn_watchdog(
             last.insert(device_id, ReachabilityState::Offline);
         }
 
-        let _ = event_tx.send(PresenceEvent {
+        let _ = event_tx.send(PeerReachabilityChanged {
             device_id,
             state: ReachabilityState::Offline,
             at,

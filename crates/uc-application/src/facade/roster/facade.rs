@@ -25,7 +25,7 @@ use uc_core::membership::{
     SpaceProtectionStatusPort,
 };
 use uc_core::ports::{
-    ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort, PresenceEvent,
+    ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort, PeerReachabilityChanged,
 };
 use uc_core::DeviceId;
 
@@ -288,7 +288,7 @@ impl MemberRosterFacade {
     /// `tokio::sync::broadcast` lag 语义:某个 subscriber 落后 capacity 时
     /// 最老的事件会被丢——acceptable,因为最新状态总能通过
     /// `list_with_presence` 或再来一次订阅重建。
-    pub fn subscribe_presence_events(&self) -> broadcast::Receiver<PresenceEvent> {
+    pub fn subscribe_presence_events(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
         self.presence.subscribe()
     }
 }
@@ -362,7 +362,7 @@ mod tests {
             ReachabilityState::Online
         }
 
-        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
             broadcast::channel(1).1
         }
     }

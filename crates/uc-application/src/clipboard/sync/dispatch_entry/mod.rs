@@ -667,8 +667,8 @@ mod tests {
     use uc_core::ports::{
         ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, DispatchTiming,
         FirstSyncStateError, LocalIdentityError, LocalIdentityPort, PeerAddressError,
-        PeerAddressRecord, PeerAddressRepositoryPort, PeerReachabilityPort, PresenceError,
-        PresenceEvent, ReachabilityState, SettingsPort,
+        PeerAddressRecord, PeerAddressRepositoryPort, PeerReachabilityChanged,
+        PeerReachabilityPort, PresenceError, ReachabilityState, SettingsPort,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
@@ -866,7 +866,7 @@ mod tests {
             self.0
         }
 
-        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
             let (_tx, rx) = broadcast::channel(1);
             rx
         }

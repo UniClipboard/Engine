@@ -12,7 +12,10 @@ pub use ports::{
     WakeSpaceMembershipMaintenancePort,
 };
 pub use runtime::MembershipNetworkActivityPort;
-pub(crate) use runtime::{SpaceMembershipMaintenanceActivity, SpaceMembershipMaintenanceRuntime};
+pub(crate) use runtime::{
+    PreparedSpaceMembershipMaintenanceRuntime, SpaceMembershipMaintenanceActivity,
+    SpaceMembershipMaintenanceRuntime,
+};
 pub(crate) use use_case::{MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase};
 
 #[cfg(test)]

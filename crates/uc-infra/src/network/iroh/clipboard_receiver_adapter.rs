@@ -333,8 +333,9 @@ mod tests {
 
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::{
-        ClipboardDispatchPort, ClipboardHeader, InboundClipboardDisposition, PresenceError,
-        PresenceEvent, PeerReachabilityPort, ReachabilityState, SyncPayload,
+        ClipboardDispatchPort, ClipboardHeader, InboundClipboardDisposition,
+        PeerReachabilityChanged, PeerReachabilityPort, PresenceError, ReachabilityState,
+        SyncPayload,
     };
     use uc_core::MemberSyncPreferences;
 
@@ -364,7 +365,7 @@ mod tests {
                 device: &DeviceId,
             ) -> Result<ReachabilityState, PresenceError>;
             async fn current_state(&self, device: &DeviceId) -> ReachabilityState;
-            fn subscribe(&self) -> broadcast::Receiver<PresenceEvent>;
+            fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
         }
     }
 

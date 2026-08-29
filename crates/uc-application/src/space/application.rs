@@ -1,6 +1,6 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::broadcast;
@@ -9,7 +9,7 @@ use uc_core::membership::{
     HistoricalMembershipSignatureVerifier, MembershipHistoryExchangeEndpointPort,
     MembershipHistoryExchangePort,
 };
-use uc_core::ports::PresenceEvent;
+use uc_core::ports::PeerReachabilityChanged;
 
 use crate::space::admission::{
     AdmissionRecoveryService, CancelSpaceJoinUseCase, CompletePendingSpaceTransitionUseCase,
@@ -25,6 +25,7 @@ use crate::space::admission::{
 use crate::space::membership::CurrentMemberSignaturePort;
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
 use crate::space::membership::HandleMembershipHistoryMessageUseCase;
+use crate::space::membership::PreparedSpaceMembershipMaintenanceRuntime;
 use crate::space::membership::QueryMembershipAdmissionUseCase;
 use crate::space::membership::RemoveSpaceMemberUseCase;
 use crate::space::membership::SynchronizeMembershipHistoryUseCase;
@@ -126,13 +127,14 @@ pub(crate) struct SpaceApplication {
     membership_history_endpoint: Arc<HandleMembershipHistoryMessageUseCase>,
     initialize_membership: Arc<InitializeSpaceMembershipUseCase>,
     membership_activity: crate::space::membership::SpaceMembershipMaintenanceActivity,
+    prepared_runtime: Option<PreparedSpaceMembershipMaintenanceRuntime>,
     runtime: Option<SpaceMembershipMaintenanceRuntime>,
 }
 
 impl SpaceApplication {
-    pub(crate) fn start(
+    pub(crate) fn build(
         deps: SpaceApplicationDeps,
-        presence_events: broadcast::Receiver<PresenceEvent>,
+        peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
         let ledger = Arc::new(MembershipLedger::new(
@@ -215,13 +217,13 @@ impl SpaceApplication {
                 cleanup: deps.cleanup_legacy_membership_data,
             },
         ));
-        let runtime = SpaceMembershipMaintenanceRuntime::start(
+        let prepared_runtime = SpaceMembershipMaintenanceRuntime::prepare(
             maintain,
-            presence_events,
+            peer_reachability_changed_events,
             Duration::from_secs(30),
             deps.membership_network_activity,
         );
-        let membership_activity = runtime.activity();
+        let membership_activity = prepared_runtime.activity();
         deferred_maintenance_wake.bind(Arc::new(membership_activity.clone()));
         let activity = Arc::new(membership_activity.clone());
         let remove_space_member = Arc::new(RemoveSpaceMemberUseCase::new(
@@ -266,8 +268,17 @@ impl SpaceApplication {
             membership_history_endpoint,
             initialize_membership,
             membership_activity,
-            runtime: Some(runtime),
+            prepared_runtime: Some(prepared_runtime),
+            runtime: None,
         }
+    }
+
+    pub(crate) fn start_runtime(&mut self) -> bool {
+        let Some(prepared) = self.prepared_runtime.take() else {
+            return false;
+        };
+        self.runtime = Some(SpaceMembershipMaintenanceRuntime::start_prepared(prepared));
+        true
     }
 
     pub(crate) fn query_device_trust(&self) -> Arc<QueryDeviceTrustUseCase> {
