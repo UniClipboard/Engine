@@ -766,15 +766,6 @@ mod tests {
             wiring
                 .wired
                 .sync_engine
-                .membership_candidate_repo
-                .list(&SpaceId::from("space-a"))
-                .await,
-            Err(MembershipCandidateRepositoryError::Locked)
-        );
-        assert_eq!(
-            wiring
-                .wired
-                .sync_engine
                 .current_member_signatures
                 .current_member_epoch()
                 .await,

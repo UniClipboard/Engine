@@ -73,18 +73,6 @@ pub struct SyncEngineDeps {
     pub relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort>,
     /// Removes persisted security state from the prior space after a successful switch.
     pub space_security_reset: Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
-    /// Encrypted, active-space-scoped candidate address book.
-    pub membership_candidate_repo: Arc<dyn uc_core::membership::MembershipCandidateRepositoryPort>,
-    /// Atomic persistence boundary for a fully verified peer relationship.
-    pub verified_peer_promotion: Arc<dyn uc_core::membership::VerifiedPeerPromotionPort>,
-    /// Encrypted self-signed membership announcements for digest exchange.
-    pub membership_announcement_repo:
-        Arc<dyn uc_core::membership::MembershipAnnouncementRepositoryPort>,
-    /// Encrypted pending membership batches for offline recipients.
-    pub membership_outbox_repo: Arc<dyn uc_core::membership::MembershipOutboxRepositoryPort>,
-    /// Encrypted security updates this device has applied and can relay.
-    pub membership_applied_security_update_repo:
-        Arc<dyn uc_core::membership::MembershipAppliedSecurityUpdateRepositoryPort>,
     /// Independent member signatures from the current OpenMLS member tree.
     pub current_member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     /// The same unlocked session used by space access and encrypted storage.
@@ -107,7 +95,6 @@ pub struct SyncEngineDeps {
     >,
     pub admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort>,
     pub device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort>,
-    pub legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort>,
     /// plaintext-hash → ciphertext-digest dedupe cache (Slice 3 Phase 1).
     pub blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,
     /// iroh-blobs store dir, used when assembling the iroh blob handler.

@@ -61,8 +61,6 @@ use uc_infra::db::repositories::{
     DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
     DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository,
     DieselSpaceSecurityStore, DieselThumbnailRepository, DieselTrustedPeerRepository,
-    EncryptedMembershipAnnouncementRepository, EncryptedMembershipAppliedSecurityUpdateRepository,
-    EncryptedMembershipCandidateRepository, EncryptedMembershipOutboxRepository,
     EncryptedRelationshipStore,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
@@ -370,26 +368,6 @@ pub fn wire_dependencies_from_inputs(
     let peer_addr_repo: Arc<dyn uc_core::ports::PeerAddressRepositoryPort> = Arc::new(
         DieselPeerAddressRepository::new(Arc::clone(&relationship_store)),
     );
-    let membership_candidate_repo: Arc<dyn uc_core::membership::MembershipCandidateRepositoryPort> =
-        Arc::new(EncryptedMembershipCandidateRepository::new(Arc::clone(
-            &relationship_store,
-        )));
-    let membership_announcement_repo: Arc<
-        dyn uc_core::membership::MembershipAnnouncementRepositoryPort,
-    > = Arc::new(EncryptedMembershipAnnouncementRepository::new(Arc::clone(
-        &relationship_store,
-    )));
-    let membership_outbox_repo: Arc<dyn uc_core::membership::MembershipOutboxRepositoryPort> =
-        Arc::new(EncryptedMembershipOutboxRepository::new(Arc::clone(
-            &relationship_store,
-        )));
-    let membership_applied_security_update_repo: Arc<
-        dyn uc_core::membership::MembershipAppliedSecurityUpdateRepositoryPort,
-    > = Arc::new(EncryptedMembershipAppliedSecurityUpdateRepository::new(
-        Arc::clone(&relationship_store),
-    ));
-    let verified_peer_promotion: Arc<dyn uc_core::membership::VerifiedPeerPromotionPort> =
-        relationship_store.clone();
     let relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort> =
         relationship_store;
 
@@ -588,9 +566,6 @@ pub fn wire_dependencies_from_inputs(
     // `key_migration` adapter consumes secure_storage from PlatformLayer,
     // so it's constructed here at wire_dependencies level rather than in
     // create_infra_layer.
-    let key_migration_for_wiring: Arc<dyn uc_core::ports::security::KeyMigrationPort> = Arc::new(
-        uc_infra::security::DefaultKeyMigrationAdapter::new(Arc::clone(&platform.secure_storage)),
-    );
     let profile_reset = ProfileResetDeps {
         lifecycle_repository: profile_lifecycle_repository,
         keys: Arc::new(uc_infra::security::ProfileKeyWiper::new(
@@ -607,15 +582,6 @@ pub fn wire_dependencies_from_inputs(
             db_path.clone(),
         )),
     };
-    let legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort> =
-        Arc::new(uc_infra::FileLegacyMigrationRecovery::with_defaults(
-            vault_path.clone(),
-            Arc::clone(&key_migration_for_wiring),
-            Arc::clone(&infra.blob_migration_repo),
-            blob_cipher.clone(),
-            Arc::clone(&analytics_facade),
-        ));
-
     // Whole-installation configuration migration (export / import preview /
     // staged import). Assembled in the sync wiring context because its inputs
     // (secure_storage, db pool, local-identity, filesystem layout, profile) are
@@ -759,11 +725,6 @@ pub fn wire_dependencies_from_inputs(
             peer_addr_repo: Arc::clone(&peer_addr_repo),
             relationship_reset,
             space_security_reset,
-            membership_candidate_repo,
-            verified_peer_promotion,
-            membership_announcement_repo,
-            membership_outbox_repo,
-            membership_applied_security_update_repo,
             current_member_signatures,
             membership_session,
             membership_ledger,
@@ -771,7 +732,6 @@ pub fn wire_dependencies_from_inputs(
             admission_credentials,
             admission_space_transition,
             device_management_reset_data,
-            legacy_migration_recovery,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             iroh_blob_store_dir: iroh_blob_store_dir_for_wiring,
             analytics_facade,
