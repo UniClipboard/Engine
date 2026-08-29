@@ -20,6 +20,9 @@
 - Added minimal repository-rule coverage showing an authentication failure retains its stable classification and a non-empty source chain.
 - Corrected Spec 028 to RFC 9807 KSF salt semantics: the OPRF key is the secret salt and no extra Argon2 salt is persisted.
 - Validated the next OPAQUE slice at the established Infra seam: changing the admission id, invitation id, Joiner peer id, or Sponsor peer id independently causes authentication failure with its source chain preserved. No production adjustment was needed because the prior transcript binding was already complete.
+- Added a versioned OPAQUE registration encoding explicitly named for the encryption/decryption boundary. Its temporary bytes zeroize on drop, restored records authenticate normally, and truncated encodings fail with stable Registration classification and source.
+- Added same-length tamper evidence: a structurally decodable registration with a modified OPAQUE envelope cannot authenticate and retains the Authentication source chain.
+- Covered the registration envelope guards for a wrong marker, unsupported version, and trailing bytes; each fails with Registration classification and a non-empty source.
 
 ## TDD Evidence
 
@@ -67,6 +70,10 @@
 | GREEN | `matching_passphrase_establishes_the_same_bound_continuation_credential` | passed; both peers derived the same context-bound continuation credential |
 | GREEN | `authentication_failure_preserves_classification_and_source` | passed; authentication failure retained stable classification and a non-empty source chain |
 | GREEN (existing behavior) | `mismatched_admission_identity_context_cannot_authenticate_the_exchange` | passed for independent admission, invitation, Joiner peer, and Sponsor peer mismatches; the prior context binding already enforced the requirement |
+| RED | `restored_registration_authenticates_and_truncated_encoding_is_rejected` | compile failed because registration had no encryption-bound encoding or restoration capability |
+| GREEN | `restored_registration_authenticates_and_truncated_encoding_is_rejected` | passed; restored registration authenticated and truncated bytes were rejected with a source chain |
+| GREEN | `tampered_registration_record_cannot_authenticate` | passed; a same-length modified OPAQUE record reached protocol verification but could not authenticate |
+| GREEN | `registration_encoding_rejects_wrong_marker_version_and_length` | passed for marker, version, and trailing-byte corruption |
 
 ## Verification
 
@@ -103,6 +110,7 @@
 | Phase 4 workspace format check | existing differences remain in two unrelated files |
 | `opaque-ke` advisory/license review | no package advisory in current RustSec database; crate declares `Apache-2.0 OR MIT`; local `cargo-audit` and `cargo-deny` commands unavailable |
 | Phase 4 OPAQUE identity-binding tests | 3 focused tests passed; mismatch test covers 4 identity fields |
+| Phase 4 OPAQUE registration encoding tests | 6 focused tests passed |
 
 ## Errors
 

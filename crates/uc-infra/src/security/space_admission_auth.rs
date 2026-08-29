@@ -2,13 +2,14 @@ use anyhow::Context;
 use hkdf::Hkdf;
 use opaque_ke::argon2::{Algorithm, Argon2, Params, Version};
 use opaque_ke::ciphersuite::CipherSuite;
+use opaque_ke::generic_array::typenum::Unsigned;
 use opaque_ke::rand::rngs::OsRng;
 use opaque_ke::rand::RngCore;
 use opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest,
-    CredentialResponse, ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
-    TripleDh,
+    CredentialResponse, ServerLogin, ServerLoginParameters, ServerRegistration,
+    ServerRegistrationLen, ServerSetup, TripleDh,
 };
 use sha2::Sha512;
 use subtle::ConstantTimeEq;
@@ -17,6 +18,10 @@ use uc_core::membership::{
     AdmissionChannelPeerId, InvitationId, SpaceAdmissionId, SpaceAdmissionProtocolVersion,
 };
 use zeroize::Zeroizing;
+
+const REGISTRATION_ENCODING_MAGIC: &[u8; 8] = b"UCOPAQRG";
+const REGISTRATION_ENCODING_VERSION: u16 = 1;
+const REGISTRATION_ENCODING_HEADER_LEN: usize = REGISTRATION_ENCODING_MAGIC.len() + 2 + 32;
 
 #[derive(Debug)]
 struct ContinuationCredentialExpansionError(hkdf::InvalidLength);
@@ -28,6 +33,16 @@ impl std::fmt::Display for ContinuationCredentialExpansionError {
 }
 
 impl std::error::Error for ContinuationCredentialExpansionError {}
+
+#[derive(Debug, thiserror::Error)]
+enum RegistrationEncodingError {
+    #[error("OPAQUE registration encoding length is invalid")]
+    InvalidLength,
+    #[error("OPAQUE registration encoding marker is invalid")]
+    InvalidMarker,
+    #[error("OPAQUE registration encoding version is unsupported")]
+    UnsupportedVersion,
+}
 
 pub struct SpaceAdmissionAuth;
 
@@ -44,6 +59,18 @@ pub struct SpaceAdmissionServerSetup(ServerSetup<SpaceAdmissionCipherSuite>);
 pub struct SpaceAdmissionRegistration {
     credential_identifier: [u8; 32],
     record: ServerRegistration<SpaceAdmissionCipherSuite>,
+}
+
+pub struct SpaceAdmissionRegistrationEncoding(Zeroizing<Vec<u8>>);
+
+impl SpaceAdmissionRegistrationEncoding {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_bytes(self) -> Zeroizing<Vec<u8>> {
+        self.0
+    }
 }
 
 pub struct SpaceAdmissionClientState {
@@ -98,6 +125,14 @@ impl SpaceAdmissionAuth {
         })
     }
 
+    pub fn decode_registration_after_decryption(
+        encoded: &[u8],
+    ) -> Result<SpaceAdmissionRegistration, SpaceAdmissionAuthError> {
+        decode_registration(encoded).map_err(|source| SpaceAdmissionAuthError::Registration {
+            source: source.context("decode decrypted OPAQUE Space registration"),
+        })
+    }
+
     pub fn start_client(
         passphrase: &Passphrase,
         _context: &SpaceAdmissionAuthContext,
@@ -147,6 +182,20 @@ impl SpaceAdmissionAuth {
             SpaceAdmissionServerState(result.state),
             SpaceAdmissionKe2(result.message),
         ))
+    }
+}
+
+impl SpaceAdmissionRegistration {
+    pub fn encode_for_encryption(&self) -> SpaceAdmissionRegistrationEncoding {
+        let serialized_record = Zeroizing::new(self.record.serialize());
+        let mut encoded = Zeroizing::new(Vec::with_capacity(
+            REGISTRATION_ENCODING_HEADER_LEN + serialized_record.len(),
+        ));
+        encoded.extend_from_slice(REGISTRATION_ENCODING_MAGIC);
+        encoded.extend_from_slice(&REGISTRATION_ENCODING_VERSION.to_be_bytes());
+        encoded.extend_from_slice(&self.credential_identifier);
+        encoded.extend_from_slice(&serialized_record);
+        SpaceAdmissionRegistrationEncoding(encoded)
     }
 }
 
@@ -288,6 +337,34 @@ fn register(
     Ok(SpaceAdmissionRegistration {
         credential_identifier,
         record: ServerRegistration::finish(client_finish.message),
+    })
+}
+
+fn decode_registration(encoded: &[u8]) -> anyhow::Result<SpaceAdmissionRegistration> {
+    let record_len = <ServerRegistrationLen<SpaceAdmissionCipherSuite> as Unsigned>::USIZE;
+    if encoded.len() != REGISTRATION_ENCODING_HEADER_LEN + record_len {
+        return Err(RegistrationEncodingError::InvalidLength.into());
+    }
+    if &encoded[..REGISTRATION_ENCODING_MAGIC.len()] != REGISTRATION_ENCODING_MAGIC {
+        return Err(RegistrationEncodingError::InvalidMarker.into());
+    }
+
+    let version_offset = REGISTRATION_ENCODING_MAGIC.len();
+    let version = u16::from_be_bytes([encoded[version_offset], encoded[version_offset + 1]]);
+    if version != REGISTRATION_ENCODING_VERSION {
+        return Err(RegistrationEncodingError::UnsupportedVersion.into());
+    }
+
+    let credential_identifier_offset = version_offset + 2;
+    let record_offset = credential_identifier_offset + 32;
+    let mut credential_identifier = [0u8; 32];
+    credential_identifier.copy_from_slice(&encoded[credential_identifier_offset..record_offset]);
+    let record = ServerRegistration::deserialize(&encoded[record_offset..])
+        .context("deserialize OPAQUE server registration")?;
+
+    Ok(SpaceAdmissionRegistration {
+        credential_identifier,
+        record,
     })
 }
 

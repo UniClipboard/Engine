@@ -58,7 +58,7 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - The only durable and retryable result of short-code lookup is the full invitation saved before dialing.
 - An ambiguous lookup outcome fails closed and asks for a newly issued invitation; it never reuses the short code.
 - The first Phase 4 TDD seam is the public Infra `space_admission_auth` capability; tests cover registration plus a complete KE1/KE2/KE3 exchange without exposing `opaque-ke` types above Infra.
-- During pairing, Codex writes the tests and the developer retains the production implementation.
+- The developer delegated the current Phase 4 OPAQUE slices to Codex; each remains independently test-first, reviewed, documented, and committed.
 
 ## Errors Encountered
 
