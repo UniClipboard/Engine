@@ -138,7 +138,7 @@ pub use crate::clipboard::resource::{
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
     MemberProtectionStatusView, MemberProtectionView, MemberSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, PeerSnapshotView, PeerReachabilityChanged, RosterEntry, RosterError,
+    MemberSyncPreferencesView, PeerReachabilityChanged, PeerSnapshotView, RosterEntry, RosterError,
     SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{
@@ -166,9 +166,9 @@ pub use space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
     IssuePairingInvitationResult, PairingInvitationAddressCandidate,
     QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
-    RedeemPairingInvitationError, ResetSpaceError, SetupStateView, SpaceAdmissionDeps, SpaceFacade,
-    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput,
-    UnlockSpaceResult,
+    RedeemPairingInvitationError, ResetSpaceError, SetupStateView, SpaceActivityError,
+    SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionActivityPort, SpaceSessionDeps,
+    SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use storage::{
     ClearCacheResultView, StorageFacade, StorageFacadeDeps, StorageFacadeError, StorageStatsView,

@@ -26,6 +26,8 @@ pub trait SpaceSessionActivityPort: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceActivityError {
+    #[error("space session activity is unavailable")]
+    Unavailable,
     #[error("search session activation failed: {0}")]
     Search(String),
     #[error("receive activation failed: {0}")]

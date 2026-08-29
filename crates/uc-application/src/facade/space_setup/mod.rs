@@ -8,8 +8,8 @@ pub use crate::space::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, InvitationAvailability,
     IssuePairingInvitationError, IssuePairingInvitationResult, PairingInvitationAddressCandidate,
     QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
-    RedeemPairingInvitationError, ResetSpaceError, SetupStateView, SpaceAdmissionDeps, SpaceFacade,
-    SpaceFacadeDeps, SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput,
-    UnlockSpaceResult,
+    RedeemPairingInvitationError, ResetSpaceError, SetupStateView, SpaceActivityError,
+    SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionActivityPort, SpaceSessionDeps,
+    SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use uc_observability_contract::analytics::PairingFailureReason;
