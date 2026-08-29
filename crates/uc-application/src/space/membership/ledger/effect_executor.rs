@@ -10,12 +10,17 @@ use super::{
     MembershipEffectPhase, MembershipLedger, MembershipLedgerError, PendingMembershipEffect,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum MembershipEffectExecutionError {
     #[error("membership effect is temporarily unavailable")]
     Deferred,
     #[error("membership effect state is corrupt")]
     Corrupt,
+    #[error("membership effect dependency failed")]
+    Dependency {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 #[async_trait]
@@ -158,6 +163,10 @@ impl RecoverMembershipEffectsUseCase {
                     }
                     Err(MembershipEffectExecutionError::Corrupt) => {
                         report.corrupt_count += 1;
+                        break;
+                    }
+                    Err(MembershipEffectExecutionError::Dependency { .. }) => {
+                        report.deferred_count += 1;
                         break;
                     }
                 }
