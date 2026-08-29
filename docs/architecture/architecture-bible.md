@@ -280,6 +280,8 @@ Sponsor 的 S2 material preparation 由 `DefaultSponsorCommitPreparation` 完整
 
 Joiner 的 J2 material preparation 由 `DefaultJoinerAppliedPreparation` 完整负责。它只接受 Core 从 Committed Joiner 暴露的 exact Commit 与 staged target，重新导出 OpenMLS public commitment 并逐字段匹配 Candidate，完整验证 Commit 目标历史包含原样 AddDevice，随后用 staged Joiner credential 签署固定 activation receipt，生成 continuation route 上的 exact Applied request。receipt 的 applied digest 使用 AddDevice 的 resulting members digest；不得用历史结构摘要代替，也不得重新生成 MLS state、member instance 或 Candidate。
 
+Sponsor 的 S3 material preparation 由 `DefaultSponsorCompletePreparation` 完整负责。它验证 Applied predecessor、receipt 与 exact Commit 的 admission/event/security binding，并用 Joiner 的历史 credential 验签后把 receipt 纳入版本化成员历史；然后由当前 Sponsor credential 签署 Complete。preparation 只生成包含 staged MLS state、exact Commit、预期 commitment 和 receipt 后历史的 `AdmissionActivatedSecurityState` 恢复计划，不直接改变本机 MLS；Application 必须先把 Aggregate、正式成员事实、pending security effect 与 exact Complete 原子保存，后台 effect executor 才执行该计划，避免副作用先于事实提交。
+
 Space 共用的成员安全实现统一位于 `crates/uc-infra/src/space/security/`，包含 MLS 成员组、Space 访问、运行会话、历史验签、连接准入和成员安全更新。准入专属的安全结果转换位于 `crates/uc-infra/src/space/admission/security/`。通用 AEAD、密钥类型和哈希继续位于 `crates/uc-infra/src/security/`；准入记录密钥、活动 Space 清单和 Space 切换本次不迁移。已迁移的 Space 成员安全实现不保留旧路径或转发别名。
 
 当前 Core 已完成封闭状态和类型化交换基础，Application 的唯一 `SpaceAdmissionProtocol` 已贯通 JoinRequest、Candidate、Prepared、Commit、Applied、Complete、CompleteAck 和 Settled 正常流程。Sponsor 每次先保存固定回复再返回，重复 Prepared 与 CompleteAck 只重放原回复；后续消息必须继续匹配已保存的双方连接身份。Joiner 收到 Complete 后先保存可恢复的本机激活计划，后台维护在同一串行约束内执行并保存 Active PendingSettlement，下一轮才发送 CompleteAck；本机激活执行成功但保存冲突时，下一轮必须以同一计划幂等重试并得到同一结果。收到 Settled 后保存最终 Active Settled，不再进入待恢复扫描。各状态能力只接收对应角色的变化结果，必须把完整替换状态与声明的影响作为一个持久结果，不能只保存状态。协议内部固定为 `joiner/`、`sponsor/` 和 `recovery/` 三个私有角色目录；各动作持有自己完成业务结果所需的准备、状态或执行能力。`SpaceAdmissionProtocol` 仍只保留三个内部负责人和同一 profile 的串行约束，不暴露内部步骤或完整 Aggregate。Application admission 的稳定错误分类携带原始错误链，不把来源字符串化或抹平。
@@ -940,7 +942,7 @@ iOS 和 Android 绑定提供两个启动方式：原启动方式不启用产品�
 
 ### 修改中
 
-- 项目文档使用中文；代码标识符、代码注释和提交信息使用英文。
+- 项目文档和代码注释使用中文；代码标识符和提交信息使用英文。
 - 保持单一事实来源，不长期保留新旧两套实现。
 - 生产代码禁止 `unwrap()`、`expect()`、`println!()` 和 `eprintln!()`。
 - 日志和 `Debug` 输出必须脱敏。
@@ -1542,6 +1544,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | OPAQUE credential Space generation 绑定 | registration 密文内部新增 active Space manifest 的 Space id、keyslot、database 和 security generation 绑定。同代 Unlock 只复用严格可读记录；Reset/rebuild 推进 generation 后旧记录不再可用于入站认证，下一次完整生命周期用已验证口令原子替换，并通过第二次真实 OPAQUE 往返验收。 |
 | 2026-08-29 | Sponsor S2 Commit 生产材料 | 新增 `DefaultSponsorCommitPreparation`：Candidate 用 Joiner recovery public key 封存固定 staged recovery material，S2 严格验证 Prepared 与 Candidate、Joiner credential signature 和基础历史位置，随后生成正式目标历史、sealed local security 与 exact Commit。测试贯通生产 Candidate→Prepared→Commit，并证明 recovery ciphertext 绑定 admission 与接收方且不含明文。 |
 | 2026-08-29 | Joiner J2 Applied 生产材料 | 新增 `DefaultJoinerAppliedPreparation`：从 exact Commit 和 staged OpenMLS target 重新验证同一 public commitment 与完整目标历史，用 staged Joiner key 签署永久 activation receipt，并建立只等待 Complete 的 exact Applied exchange。真实 OpenMLS 测试贯通 Candidate→Prepared→Commit→Applied。 |
+| 2026-08-29 | Sponsor S3 Complete 生产材料 | 新增 `DefaultSponsorCompletePreparation`：严格验证 Applied receipt 并写入目标历史，以当前 Sponsor credential 签署 exact Complete，同时生成可恢复 security activation plan。preparation 不提前激活 MLS；真实激活留给 Aggregate 与 pending effect 原子保存后的执行器。集成测试贯通 Sponsor Candidate→Commit→Applied→Complete preparation。 |
+| 2026-08-29 | 代码注释语言约定 | 仓库维护规则改为项目文档和代码注释均使用中文，代码标识符和提交信息继续使用英文；运行架构和产品行为不变。 |
 
 ## 相关文档
 

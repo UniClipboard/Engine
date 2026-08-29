@@ -252,14 +252,15 @@ fn mint_message_id() -> uc_core::membership::AdmissionMessageId {
 mod tests {
     use uc_application::deps::{
         AdmissionSecurityTransitionError, CurrentMemberSignatureError, PrepareSponsorCommitPort,
-        SponsorPreparedAdmissionSecurity,
+        PrepareSponsorCompletePort, SponsorPreparedAdmissionSecurity,
     };
     use uc_core::membership::{
-        AdmissionBaseSnapshot, AdmissionChangeFacts, AdmissionChannelPeerId,
-        AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, AdmissionContinuationCredential,
-        AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinRequestV1,
-        AdmissionKeyPackage, AdmissionMessageId, AdmissionPeerBinding, AdmissionPreparedV1,
-        AdmissionRecoveryPublicKey, HistoricalMembershipSignatureError, MembershipCredential,
+        AdmissionActivationReceipt, AdmissionAppliedV1, AdmissionBaseSnapshot,
+        AdmissionChangeFacts, AdmissionChannelPeerId, AdmissionContentKeyCatalogV1,
+        AdmissionContentKeyEntryV1, AdmissionContinuationCredential, AdmissionIdentitySignature,
+        AdmissionInvitationClaim, AdmissionJoinRequestV1, AdmissionKeyPackage, AdmissionMessageId,
+        AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecoveryPublicKey,
+        AdmissionSignedMembershipHistory, HistoricalMembershipSignatureError, MembershipCredential,
         PreparedAdmissionProofV1, SpaceAdmissionMessageKind, UnreadableHistoryPolicy,
         ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     };
@@ -267,7 +268,9 @@ mod tests {
 
     use super::*;
     use crate::space::admission::sponsor::base_snapshot::PersistedSponsorBaseSnapshotV1;
-    use crate::space::admission::sponsor::DefaultSponsorCommitPreparation;
+    use crate::space::admission::sponsor::{
+        DefaultSponsorCommitPreparation, DefaultSponsorCompletePreparation,
+    };
 
     struct DeterministicSignatures {
         device_id: DeviceId,
@@ -493,7 +496,7 @@ mod tests {
             .fix_candidate(candidate_reply, staged_security)
             .expect("Sponsor fixes Candidate")
             .into_replacement();
-        let commit = DefaultSponsorCommitPreparation::new(signatures)
+        let commit = DefaultSponsorCommitPreparation::new(signatures.clone())
             .prepare(
                 admission_id,
                 candidate_state
@@ -511,6 +514,72 @@ mod tests {
             commit_reply.header().predecessor_message_id(),
             Some(prepared_request.header().message_id())
         );
+        let commit_message_id = commit_reply.header().message_id();
+        let (candidate_event, joiner_credential, security_commitment_id) = match commit_reply.body()
+        {
+            SpaceAdmissionBodyV1::Commit(commit) => {
+                let candidate = commit.exact_candidate();
+                let MembershipOperationV2::AddDevice { admission } =
+                    &candidate.candidate_event().operation
+                else {
+                    panic!("Commit Candidate must add one member");
+                };
+                (
+                    candidate.candidate_event().clone(),
+                    admission.membership_credential.clone(),
+                    candidate.security_commitment().security_commitment_id,
+                )
+            }
+            _ => panic!("Sponsor reply must be Commit"),
+        };
+        let mut receipt = AdmissionActivationReceipt::new(
+            1,
+            *admission_id.as_bytes(),
+            candidate_event.event_id(),
+            candidate_event.resulting_members_digest,
+            security_commitment_id,
+            match &candidate_event.operation {
+                MembershipOperationV2::AddDevice { admission } => admission.facts.member_instance,
+                _ => panic!("Candidate must add one member"),
+            },
+            Vec::new(),
+        );
+        receipt.signature =
+            DeterministicSignatures::sign(&joiner_credential, &receipt.signing_payload());
+        let applied = SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Joiner,
+            2,
+            AdmissionMessageId::from_bytes([0x91; 32]).expect("valid Applied id"),
+            Some(commit_message_id),
+            SpaceAdmissionBodyV1::Applied(AdmissionAppliedV1::new(receipt)),
+        )
+        .expect("valid Applied request");
+        let committed_state = candidate_state
+            .commit_prepared(
+                prepared_request,
+                [0x92; 32],
+                AdmissionSignedMembershipHistory::from_bytes(committed_history.as_bytes().to_vec())
+                    .expect("committed history copy"),
+                sealed_security,
+                commit_reply,
+            )
+            .expect("Sponsor commits Prepared")
+            .into_replacement();
+        DefaultSponsorCompletePreparation::new(
+            DeviceId::new("sponsor-device"),
+            signatures.clone(),
+            signatures,
+        )
+        .prepare(
+            admission_id,
+            committed_state
+                .sponsor_complete_preparation()
+                .expect("Committed Sponsor exposes Complete preparation"),
+            &applied,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("Sponsor Complete preparation failed: {error:?}"));
     }
 
     fn join_request(admission_id: SpaceAdmissionId) -> SpaceAdmissionEnvelopeV1 {

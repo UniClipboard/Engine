@@ -135,6 +135,7 @@
 | Phase 5 OPAQUE Space-generation binding | passed, the full active manifest binds the encrypted registration; a generation change rejects the old record until lifecycle replacement, then a second real OPAQUE exchange succeeds |
 | Phase 5 Sponsor S2 material | passed, production Candidate output advances through a signed Prepared proof into exact Commit; recovery material is X25519/HKDF/XChaCha sealed and admission/recipient bound |
 | Phase 5 Joiner J2 material | passed, the real OpenMLS staged target re-derives the Candidate commitment, verifies the exact target history, signs the permanent activation receipt, and prepares Applied awaiting Complete |
+| Phase 5 Sponsor S3 material | passed, Applied receipt is verified into the target history and Complete is Sponsor-signed; activation is emitted as a durable plan rather than executed before the aggregate commit |
 
 ## Errors
 

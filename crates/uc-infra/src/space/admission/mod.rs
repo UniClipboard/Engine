@@ -18,4 +18,7 @@ pub use joiner::{
 };
 pub use repository::SqliteSpaceAdmissionState;
 pub use security::AdmissionSecurityTransitionAdapter;
-pub use sponsor::{DefaultSponsorCandidatePreparation, DefaultSponsorCommitPreparation};
+pub use sponsor::{
+    DefaultSponsorCandidatePreparation, DefaultSponsorCommitPreparation,
+    DefaultSponsorCompletePreparation,
+};
