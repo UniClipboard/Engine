@@ -18,3 +18,7 @@
 - Product rule confirmed on 2026-08-29: cloud lookup consumes a short code on its first use even if pairing does not complete.
 - Therefore short-code lookup cannot be restart-retried after dispatch; a crash or lost response between cloud consumption and local full-invitation commit is terminal for that invitation.
 - The new admission path cannot reuse `PairingSessionPort::dial_by_invitation` because it combines lookup and dial; resolution must return and durably commit the full invitation first.
+- Phase 4 has no `opaque-ke` dependency or `space_admission_auth` module yet; `uc-infra::security` is the correct public technical seam and already owns concrete cryptography.
+- Spec 028 fixes `opaque-ke = 4.0.1`, Ristretto255/SHA-512, Argon2id, and requires correct-password, wrong-password, identifier-binding, corrupt-record, and zeroization evidence.
+- Existing `zeroize`, `rand`, `hkdf`, `hmac`, and `sha2` dependencies are available in Infra; tests must not leak third-party OPAQUE types into Application/Core.
+- RFC 9807 §10.11 specifies that the OPRF key acts as the secret salt for the OPAQUE KSF; the protocol must not invent or persist an additional Argon2 salt. With the fixed SHA-512 ciphersuite, the KSF output is 64 bytes.

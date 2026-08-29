@@ -42,11 +42,11 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - **Status:** complete
 
 ### Phase 4: Standard authentication and Joiner start material
-- [ ] Integrate fixed-version OPAQUE per Spec 028 and validate it
+- [ ] Integrate fixed-version OPAQUE per Spec 028 and validate it (in progress: paired RED capability tests delegated to Codex)
 - [ ] Generate complete JoinRequest identity, OpenMLS, recovery, and password material
 - [ ] Implement production `JoinerStartMaterialPort`
 - [ ] Keep Candidate, transport, and Engine final wiring outside this phase
-- **Status:** pending
+- **Status:** in_progress
 
 ## Decisions
 - A short code and a full invitation are two entry forms for one invitation, not two protocols.
@@ -57,8 +57,13 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - Cloud short-code lookup is at-most-once: a successful lookup consumes the alias even when pairing never completes.
 - The only durable and retryable result of short-code lookup is the full invitation saved before dialing.
 - An ambiguous lookup outcome fails closed and asks for a newly issued invitation; it never reuses the short code.
+- The first Phase 4 TDD seam is the public Infra `space_admission_auth` capability; tests cover registration plus a complete KE1/KE2/KE3 exchange without exposing `opaque-ke` types above Infra.
+- During pairing, Codex writes the tests and the developer retains the production implementation.
 
 ## Errors Encountered
 
 | Error | Resolution |
 |---|---|
+| Architecture maintenance-record patch anchor did not match | Retried against the stable `## 相关文档` heading; no partial file changes occurred. |
+| Initial OPAQUE implementation patch no longer matched the paired skeleton | Re-read the complete module and applied the implementation against its current structure. |
+| Argon2 and HKDF dependency error types lacked `std::error::Error` support | Enabled Argon2 `std`; wrapped HKDF's preserved fixed-length error value in a concrete internal error before adding safe context. |

@@ -18,6 +18,7 @@ mod key_migration_adapter;
 mod profile_lifecycle;
 mod profile_reset;
 mod secrets;
+mod space_admission_auth;
 pub(crate) mod v1_aead;
 
 pub use active_space_generation_manifest_store::{
@@ -49,3 +50,9 @@ pub use key_migration_adapter::DefaultKeyMigrationAdapter;
 pub use profile_lifecycle::ProfileLifecycleRepository;
 pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
 pub(crate) use secrets::{Kek, MasterKey};
+pub use space_admission_auth::{
+    SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError,
+    SpaceAdmissionClientState, SpaceAdmissionContinuationCredential, SpaceAdmissionKe1,
+    SpaceAdmissionKe2, SpaceAdmissionKe3, SpaceAdmissionRegistration, SpaceAdmissionServerSetup,
+    SpaceAdmissionServerState,
+};

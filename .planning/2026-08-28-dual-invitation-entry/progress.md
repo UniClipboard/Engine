@@ -12,6 +12,13 @@
 - Revised Phase 3 so an in-flight or ambiguous short-code lookup never retries after restart.
 - Added the Core invitation-resolution lifecycle and encrypted persistence.
 - Added Application start/recovery ownership and production Infra preparation/resolution adapters.
+- Began paired Phase 4. The developer delegated the OPAQUE tests to Codex; the agreed first seam is an Infra public capability covering registration and a complete three-message authentication exchange.
+- Added the first Phase 4 tracer-bullet test for matching-passphrase registration and KE1/KE2/KE3. It deliberately targets the not-yet-existing Infra capability and must be recorded as RED before production implementation.
+- Added the developer-started `SpaceAdmissionAuthContext` module skeleton, completed its constructor and public capability export, and kept all `opaque-ke` types below Infra. The RED test now reaches the four missing behavior methods.
+- Fixed the OPAQUE ciphersuite to Ristretto255, TripleDH/SHA-512, and Argon2; wrapped the third-party server setup in a non-Debug Infra type and generated it with the crate-compatible OS RNG. The RED test now advances past setup generation to registration.
+- Completed the first Phase 4 OPAQUE tracer bullet: registration and KE1/KE2/KE3 now derive the same context-bound, zeroizing continuation credential for the matching passphrase.
+- Added minimal repository-rule coverage showing an authentication failure retains its stable classification and a non-empty source chain.
+- Corrected Spec 028 to RFC 9807 KSF salt semantics: the OPRF key is the secret salt and no extra Argon2 salt is persisted.
 
 ## TDD Evidence
 
@@ -55,6 +62,10 @@
 | RED | Ambiguous resolver failure | failed because the test path still used complete start material |
 | GREEN | Ambiguous resolver failure | passed; one resolver error commits stable rejection and never retries the code |
 
+| RED | `matching_passphrase_establishes_the_same_bound_continuation_credential` | compile failed only because `SpaceAdmissionAuth` and `SpaceAdmissionAuthContext` do not yet exist |
+| GREEN | `matching_passphrase_establishes_the_same_bound_continuation_credential` | passed; both peers derived the same context-bound continuation credential |
+| GREEN | `authentication_failure_preserves_classification_and_source` | passed; authentication failure retained stable classification and a non-empty source chain |
+
 ## Verification
 
 | Check | Result |
@@ -81,6 +92,14 @@
 | Phase 3 scoped all-target check | passed |
 | Phase 3 architecture preflight | passed |
 | Phase 3 workspace check | existing Engine assembly failures remain (27 lib, 29 test) |
+| Phase 4 OPAQUE focused tests | 2 passed |
+| Phase 4 Infra all-target check | passed |
+| Phase 4 metadata | passed |
+| Phase 4 architecture preflight | passed |
+| Phase 4 diff check | passed |
+| Phase 4 workspace check | existing Engine assembly failures remain (27 lib, 29 test) |
+| Phase 4 workspace format check | existing differences remain in two unrelated files |
+| `opaque-ke` advisory/license review | no package advisory in current RustSec database; crate declares `Apache-2.0 OR MIT`; local `cargo-audit` and `cargo-deny` commands unavailable |
 
 ## Errors
 
@@ -92,3 +111,6 @@
 | Strict review found direct long invitations could connect without an id-based consume path | Added atomic consume-by-id and a test proving the short-code slot disappears too |
 | Strict review found UniFFI setup invitation Debug would expose the new long invitation | Replaced derived Debug with explicit redaction and added an architecture guard |
 | Cargo accepts only one positional test filter | Re-ran the two recovery cases with the shared `short_code` filter; 4 matching tests passed |
+| Architecture maintenance-record patch anchor did not match | Retried against the stable related-documents heading; the failed patch made no partial changes |
+| Workspace formatting changed two unrelated files while formatting the new module | Reverted only those formatter changes; the existing workspace format baseline remains separately recorded |
+| Workspace check remains blocked by existing Engine assembly removals | Verified this slice with the focused tests and `uc-infra --all-targets`; retained the 27 lib / 29 test baseline as failed |

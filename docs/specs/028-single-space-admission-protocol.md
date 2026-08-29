@@ -738,7 +738,7 @@ SpaceAdmissionAggregate::replay_or_reject(evidence)
 - 固定 `opaque-ke = "=4.0.1"`（features: `argon2`, `ristretto255`）；提交前运行 advisory/license/audit 检查，若该精确版本不能通过则本步骤阻塞，不得换自制协议。
 - 使用 RFC 9807 官方向量覆盖 registration、KE1/KE2/KE3、wrong password、wrong identifiers、corrupt record 和 zeroization；测试位于 Infra，不把 OPAQUE frame 暴露给 Application。
 - 固定 ciphersuite：Ristretto255、SHA-512/HKDF-SHA-512/HMAC-SHA-512。
-- 固定 KSF：Argon2id v=0x13、m=65536 KiB、t=3、p=4、16-byte 随机 salt、32-byte tag，对应 RFC 9106 的内存受限环境第二推荐参数。参数写入加密 registration metadata，不是用户配置；Android/iOS/HarmonyOS 代表设备必须记录实际耗时和峰值内存，不能因超时私自降低。
+- 固定 KSF：Argon2id v=0x13、m=65536 KiB、t=3、p=4，SHA-512 ciphersuite 下输出 64 bytes，对应 RFC 9106 的内存受限环境第二推荐参数。按 RFC 9807 §10.11，OPAQUE 的 OPRF key 已充当秘密 salt，不额外生成或持久化 salt；参数由协议版本固定，不是用户配置。Android/iOS/HarmonyOS 代表设备必须记录实际耗时和峰值内存，不能因超时私自降低。
 - 将 protocol/admission/invitation/endpoint ids 和角色放入 OPAQUE identifiers/context。
 - 复用 OpenMLS 0.8.1 当前生产 adapter 生成 Add + Commit + Welcome；新增 standard vectors/fixture 验证双方导出相同公共 commitment。
 - 暂存结果必须可逐字节恢复；测试注入进程中断后不得生成新 Commit/Welcome。

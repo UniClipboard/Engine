@@ -1516,6 +1516,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-28 | Infra Space 成员安全归位 | MLS 成员组、Space 访问、运行会话、历史验签、连接准入和成员安全更新迁入 `crates/uc-infra/src/space/security/`；准入专属转换迁入 `space/admission/security/`。已迁移实现的旧路径和导出物理删除；准入记录密钥、活动 Space 清单和 Space 切换不在本次范围，运行行为不变。 |
 | 2026-08-29 | Space 双邀请入口 | Sponsor 每次生成一个随机 256-bit 邀请身份，并产出指向同一邀请的短码与完整长邀请。云端和 mDNS 以不透明内容发布完整邀请；短码解析后与长邀请直接解码得到同一 Sponsor 地址和邀请身份。Application holder 同时以短码和邀请身份索引同一对象，Engine 及绑定返回两种形式；邀请原文不进入 Debug 或日志。待解析短码的持久状态、OPAQUE 和新准入通道仍属后续阶段。 |
 | 2026-08-29 | 一次性短码解析持久边界 | Core 新增 Ready、Started 和 Resolved 邀请解析生命周期；Application 先保存 Ready，提交 Started 并从持久记录删除短码后才调用 Infra 一次性解析。完整邀请先加密保存再允许后续连接；Started 重启或任何模糊失败稳定拒绝并要求新邀请，不重用短码。OPAQUE 和 Resolved 到 J0 开始材料仍属下一阶段。 |
+| 2026-08-29 | OPAQUE 正确口令认证切片 | Infra 的单一 `SpaceAdmissionAuth` 能力完成 OPAQUE registration 与 KE1/KE2/KE3，隐藏第三方密码库类型；正确口令和同一协议、准入、邀请及双方通道身份上下文让双方导出相同、自动清零的 continuation credential。固定 Ristretto255、TripleDH/SHA-512、HKDF-SHA-512 和 Argon2id 参数；按 RFC 9807 使用 OPRF key 作为秘密 salt，不另存 salt。认证失败保持稳定分类和原始 source。网络接线、registration 加密持久化、完整错误矩阵与官方向量仍属后续切片。 |
 
 ## 相关文档
 
