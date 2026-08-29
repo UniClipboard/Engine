@@ -132,6 +132,7 @@
 | Phase 5 real Iroh admission loopback | passed, two relay-disabled endpoints completed OPAQUE JoinRequest/Candidate then a fresh continuation-authenticated Prepared/Commit connection; endpoint call count was exactly two |
 | Phase 5 encrypted membership ledger | passed, real SQLite stores only profile-AEAD ciphertext, reloads the exact snapshot after reopen, and rejects a stale revision/history CAS; committed as `1e89f8d` |
 | Phase 5 OPAQUE credential lifecycle | passed, Initialize/Unlock ensure one encrypted registration, reopen completes a real KE1/KE2/KE3 exchange, plaintext passphrase is absent, and dependency failures retain their source chain |
+| Phase 5 OPAQUE Space-generation binding | passed, the full active manifest binds the encrypted registration; a generation change rejects the old record until lifecycle replacement, then a second real OPAQUE exchange succeeds |
 
 ## Errors
 

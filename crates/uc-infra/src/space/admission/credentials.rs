@@ -9,7 +9,10 @@ use uc_application::deps::{
     PrepareSpaceAdmissionCredentialsPort, SpaceAdmissionCredentialPreparationError,
 };
 use uc_core::crypto::domain::Passphrase;
-use uc_core::membership::{AdmissionContinuationCredential, InvitationId, SpaceAdmissionId};
+use uc_core::membership::{
+    ActiveSpaceGenerationManifestV2, AdmissionContinuationCredential, InvitationId,
+    SpaceAdmissionId,
+};
 use zeroize::Zeroizing;
 
 use crate::db::ports::DbExecutor;
@@ -17,7 +20,9 @@ use crate::network::iroh::{
     SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
     SponsorOpaqueMaterial,
 };
-use crate::security::{AdmissionKeyError, AdmissionKeyManager, SpaceAdmissionAuth};
+use crate::security::{
+    ActiveSpaceGenerationManifestStore, AdmissionKeyError, AdmissionKeyManager, SpaceAdmissionAuth,
+};
 
 use super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 
@@ -47,6 +52,10 @@ pub enum SpaceAdmissionCredentialStoreError {
 struct PersistedCredentialsV1 {
     format_version: u16,
     profile_generation: [u8; 16],
+    space_id: String,
+    keyslot_generation: [u8; 16],
+    database_generation: [u8; 16],
+    security_generation: [u8; 16],
     server_setup: Vec<u8>,
     registration: Vec<u8>,
 }
@@ -60,6 +69,7 @@ struct EncryptedCredentialRow {
 pub struct SqliteSpaceAdmissionCredentials<E> {
     executor: E,
     keys: Arc<AdmissionKeyManager>,
+    manifests: Arc<ActiveSpaceGenerationManifestStore>,
     admissions: Arc<SqliteSpaceAdmissionState<E>>,
 }
 
@@ -67,11 +77,13 @@ impl<E> SqliteSpaceAdmissionCredentials<E> {
     pub fn new(
         executor: E,
         keys: Arc<AdmissionKeyManager>,
+        manifests: Arc<ActiveSpaceGenerationManifestStore>,
         admissions: Arc<SqliteSpaceAdmissionState<E>>,
     ) -> Self {
         Self {
             executor,
             keys,
+            manifests,
             admissions,
         }
     }
@@ -85,7 +97,8 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
         self.executor
             .run(|conn| {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    if self.load_on(conn)?.is_some() {
+                    let manifest = self.active_manifest()?;
+                    if self.load_on(conn, &manifest)?.is_some() {
                         return Ok(());
                     }
                     let server_setup = SpaceAdmissionAuth::generate_server_setup();
@@ -96,6 +109,10 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
                     let plaintext = Zeroizing::new(postcard::to_stdvec(&PersistedCredentialsV1 {
                         format_version: CREDENTIAL_FORMAT_V1,
                         profile_generation: self.keys.profile_generation(),
+                        space_id: manifest.space_id.clone(),
+                        keyslot_generation: manifest.keyslot_generation,
+                        database_generation: manifest.database_generation,
+                        security_generation: manifest.security_generation,
                         server_setup: setup.as_bytes().to_vec(),
                         registration: registration.as_bytes().to_vec(),
                     })?);
@@ -110,7 +127,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
                 )
                 .bind::<Binary, _>(encrypted)
                 .execute(conn)?;
-                    self.load_on(conn)?
+                    self.load_on(conn, &manifest)?
                         .ok_or_else(|| anyhow::anyhow!("credential write was not durable"))?;
                     Ok(())
                 })
@@ -121,6 +138,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
     fn load_on(
         &self,
         conn: &mut SqliteConnection,
+        manifest: &ActiveSpaceGenerationManifestV2,
     ) -> anyhow::Result<Option<SponsorOpaqueMaterial>> {
         let row = sql_query(
             "SELECT encrypted_payload FROM space_admission_credentials WHERE singleton_id = 1",
@@ -141,6 +159,13 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
         {
             return Err(anyhow::anyhow!("credential generation is inconsistent"));
         }
+        if persisted.space_id != manifest.space_id
+            || persisted.keyslot_generation != manifest.keyslot_generation
+            || persisted.database_generation != manifest.database_generation
+            || persisted.security_generation != manifest.security_generation
+        {
+            return Ok(None);
+        }
         let server_setup =
             SpaceAdmissionAuth::decode_server_setup_after_decryption(&persisted.server_setup)
                 .map_err(anyhow::Error::new)?;
@@ -151,12 +176,20 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
     }
 
     fn load_initial(&self) -> Result<SponsorOpaqueMaterial, SpaceAdmissionCredentialStoreError> {
+        let manifest = self.active_manifest().map_err(map_store_error)?;
         self.executor
             .run(|conn| {
-                self.load_on(conn)?
+                self.load_on(conn, &manifest)?
                     .ok_or_else(|| anyhow::anyhow!("space admission registration is missing"))
             })
             .map_err(map_store_error)
+    }
+
+    fn active_manifest(&self) -> anyhow::Result<ActiveSpaceGenerationManifestV2> {
+        self.manifests
+            .load_sync()
+            .map_err(anyhow::Error::new)?
+            .ok_or_else(|| anyhow::anyhow!("active Space generation is missing"))
     }
 }
 
@@ -305,22 +338,35 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("credentials.sqlite");
         let secure_storage = Arc::new(MemorySecureStorage::default());
+        let manifest_keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x81; 16]));
+        let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+            temp.path().join("vault"),
+            manifest_keys,
+        ));
+        manifests
+            .promote(
+                &ActiveSpaceGenerationManifestV2::new(
+                    "space-a".to_owned(),
+                    [0x91; 16],
+                    [0x92; 16],
+                    [0x93; 16],
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
         let open = || {
             let executor = Arc::new(DieselSqliteExecutor::new(
                 init_db_pool(db_path.to_str().unwrap()).unwrap(),
             ));
             let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x81; 16]));
-            let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
-                temp.path().join("vault"),
-                keys.clone(),
-            ));
             let admissions = Arc::new(SqliteSpaceAdmissionState::new(
                 executor.clone(),
                 keys.clone(),
-                manifests,
+                manifests.clone(),
                 Arc::new(EmptyLedger),
             ));
-            SqliteSpaceAdmissionCredentials::new(executor, keys, admissions)
+            SqliteSpaceAdmissionCredentials::new(executor, keys, manifests.clone(), admissions)
         };
         let passphrase = Passphrase::new("correct horse battery staple");
         open().ensure_registration(&passphrase).unwrap();
@@ -364,5 +410,45 @@ mod tests {
         assert!(!encrypted
             .windows(passphrase.expose().len())
             .any(|window| window == passphrase.expose().as_bytes()));
+
+        manifests
+            .promote(
+                &ActiveSpaceGenerationManifestV2::new(
+                    "space-b".to_owned(),
+                    [0xa1; 16],
+                    [0xa2; 16],
+                    [0xa3; 16],
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(open()
+            .resolve_initial(invitation_id, admission_id)
+            .await
+            .is_err());
+        open().ensure_registration(&passphrase).unwrap();
+        let replacement = executor
+            .run(|conn| {
+                Ok(sql_query(
+                    "SELECT encrypted_payload FROM space_admission_credentials WHERE singleton_id = 1",
+                )
+                .get_result::<Row>(conn)?
+                .encrypted_payload)
+            })
+            .unwrap();
+        assert_ne!(replacement, encrypted);
+
+        let replacement_material = open()
+            .resolve_initial(invitation_id, admission_id)
+            .await
+            .unwrap();
+        let (server_setup, registration) = replacement_material.into_parts();
+        let (client, ke1) = SpaceAdmissionAuth::start_client(&passphrase, &context).unwrap();
+        let (server, ke2) =
+            SpaceAdmissionAuth::start_server(&server_setup, &registration, &context, ke1).unwrap();
+        let (client_credential, ke3) = client.finish(&context, ke2).unwrap();
+        let server_credential = server.finish(&context, ke3).unwrap();
+        assert!(client_credential == server_credential);
     }
 }

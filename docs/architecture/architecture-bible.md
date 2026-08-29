@@ -274,7 +274,7 @@ Infra 的准入实现统一位于 `crates/uc-infra/src/space/admission/`。共�
 
 成员账本由 `SqliteMembershipLedger` 作为唯一生产持久化能力负责。它把完整 `LoadedMembershipLedger` 快照以 profile generation 绑定的 MasterKey AEAD 密文写入 `membership_ledger_state`，数据库只保存 singleton id 与密文；成员历史、设备身份、准入记录和待执行影响不得拆成明文字段。提交在 SQLite immediate transaction 内同时校验 revision 与当前历史摘要，replacement 必须严格推进一个 revision，保存后必须在同一事务重新解密核对，冲突、密钥不可用和损坏分别失败关闭。
 
-Space OPAQUE credential 由 `SqliteSpaceAdmissionCredentials` 唯一负责。InitializeSpace 在 Space access 接受口令后建立一次 server setup 与 registration，UnlockSpace 只在记录缺失时用已经验证的同一口令补齐；已有记录必须成功解密和严格解码，不能重新生成覆盖。setup 与 registration 以 profile generation 绑定的 MasterKey AEAD 密文写入 `space_admission_credentials`。入站首次认证从该记录取得 Sponsor 材料，continuation 只从同一次加密 admission Aggregate 取得；Engine 不持有口令或认证状态。
+Space OPAQUE credential 由 `SqliteSpaceAdmissionCredentials` 唯一负责。InitializeSpace 在 Space access 接受口令后建立一次 server setup 与 registration，UnlockSpace 只在记录缺失时用已经验证的同一口令补齐；同一 active Space generation 的已有记录必须成功解密和严格解码，不能重新生成覆盖。setup 与 registration 以 profile generation 绑定的 MasterKey AEAD 密文写入 `space_admission_credentials`，密文内部同时绑定 active manifest 的 Space id、keyslot、database 和 security generation；Reset/rebuild 推进任一绑定事实后必须建立新 registration。入站首次认证从该记录取得 Sponsor 材料，continuation 只从同一次加密 admission Aggregate 取得；Engine 不持有口令或认证状态。
 
 Space 共用的成员安全实现统一位于 `crates/uc-infra/src/space/security/`，包含 MLS 成员组、Space 访问、运行会话、历史验签、连接准入和成员安全更新。准入专属的安全结果转换位于 `crates/uc-infra/src/space/admission/security/`。通用 AEAD、密钥类型和哈希继续位于 `crates/uc-infra/src/security/`；准入记录密钥、活动 Space 清单和 Space 切换本次不迁移。已迁移的 Space 成员安全实现不保留旧路径或转发别名。
 
@@ -1535,6 +1535,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | Iroh 准入双端验收 | 两个禁用 relay 的真实 Iroh endpoint 已通过同一新 ALPN 完成 Initial OPAQUE + JoinRequest/Candidate，并在全新连接上完成 continuation-authenticated Prepared/Commit；测试中的 endpoint 在发送前先保存 Candidate/Commit，且每条业务消息只调用一次。wire 增加有界 ACK 控制帧，避免 handler 返回导致 Router 释放连接时丢失已写 reply；ACK 只确认传输完成，不成为业务事实。 |
 | 2026-08-29 | 成员账本加密持久化 | 新增唯一生产 `SqliteMembershipLedger`：完整成员账本以 profile MasterKey AEAD 密文保存，CAS 同时核对 revision 与历史摘要并要求 revision 单步推进，事务内回读核验。真实 SQLite 测试证明明文标记不落库、重启精确恢复且旧提交稳定冲突；该能力供 Phase 5 Engine 最终组装使用。 |
 | 2026-08-29 | OPAQUE credential 生产生命周期 | 新增加密 `SqliteSpaceAdmissionCredentials`，Initialize/Unlock 完整动作负责确保当前 Space 的 setup 与 registration；真实 OPAQUE 测试证明重启后可用同一 Space 口令完成 KE1/KE2/KE3，数据库不含口令明文。Joiner 首次认证改用与 Sponsor registration 相同的口令输入，邀请身份继续由认证 transcript 绑定；continuation 只从同一次加密 Aggregate 读取。成员账本与 credential 表迁入独立新 migration，已执行旧 migration 的升级安装也会正确建表。 |
+| 2026-08-29 | OPAQUE credential Space generation 绑定 | registration 密文内部新增 active Space manifest 的 Space id、keyslot、database 和 security generation 绑定。同代 Unlock 只复用严格可读记录；Reset/rebuild 推进 generation 后旧记录不再可用于入站认证，下一次完整生命周期用已验证口令原子替换，并通过第二次真实 OPAQUE 往返验收。 |
 
 ## 相关文档
 
