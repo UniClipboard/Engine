@@ -334,6 +334,7 @@ pub fn wire_dependencies_from_inputs(
         Arc::clone(&infra.db_executor),
         Arc::clone(&admission_keys),
         Arc::clone(&active_generation_manifest_store),
+        Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
         Arc::clone(&admission_state),
     ));
     let durable_space_transition =

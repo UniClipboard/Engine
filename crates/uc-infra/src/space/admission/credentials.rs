@@ -6,7 +6,8 @@ use diesel::sql_query;
 use diesel::sql_types::Binary;
 use serde::{Deserialize, Serialize};
 use uc_application::deps::{
-    PrepareSpaceAdmissionCredentialsPort, SpaceAdmissionCredentialPreparationError,
+    LoadMembershipLedgerPort, PrepareSpaceAdmissionCredentialsPort,
+    SpaceAdmissionCredentialPreparationError,
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::membership::{
@@ -70,7 +71,15 @@ pub struct SqliteSpaceAdmissionCredentials<E> {
     executor: E,
     keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
+    membership_ledger: Arc<dyn LoadMembershipLedgerPort>,
     admissions: Arc<SqliteSpaceAdmissionState<E>>,
+}
+
+struct CredentialScope {
+    space_id: String,
+    keyslot_generation: [u8; 16],
+    database_generation: [u8; 16],
+    security_generation: [u8; 16],
 }
 
 impl<E> SqliteSpaceAdmissionCredentials<E> {
@@ -78,27 +87,29 @@ impl<E> SqliteSpaceAdmissionCredentials<E> {
         executor: E,
         keys: Arc<AdmissionKeyManager>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
+        membership_ledger: Arc<dyn LoadMembershipLedgerPort>,
         admissions: Arc<SqliteSpaceAdmissionState<E>>,
     ) -> Self {
         Self {
             executor,
             keys,
             manifests,
+            membership_ledger,
             admissions,
         }
     }
 }
 
 impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
-    pub fn ensure_registration(
+    pub async fn ensure_registration(
         &self,
         passphrase: &Passphrase,
     ) -> Result<(), SpaceAdmissionCredentialStoreError> {
+        let scope = self.active_scope().await.map_err(map_store_error)?;
         self.executor
             .run(|conn| {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    let manifest = self.active_manifest()?;
-                    if self.load_on(conn, &manifest)?.is_some() {
+                    if self.load_on(conn, &scope)?.is_some() {
                         return Ok(());
                     }
                     let server_setup = SpaceAdmissionAuth::generate_server_setup();
@@ -109,10 +120,10 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
                     let plaintext = Zeroizing::new(postcard::to_stdvec(&PersistedCredentialsV1 {
                         format_version: CREDENTIAL_FORMAT_V1,
                         profile_generation: self.keys.profile_generation(),
-                        space_id: manifest.space_id.clone(),
-                        keyslot_generation: manifest.keyslot_generation,
-                        database_generation: manifest.database_generation,
-                        security_generation: manifest.security_generation,
+                        space_id: scope.space_id.clone(),
+                        keyslot_generation: scope.keyslot_generation,
+                        database_generation: scope.database_generation,
+                        security_generation: scope.security_generation,
                         server_setup: setup.as_bytes().to_vec(),
                         registration: registration.as_bytes().to_vec(),
                     })?);
@@ -127,7 +138,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
                     )
                     .bind::<Binary, _>(encrypted)
                     .execute(conn)?;
-                    self.load_on(conn, &manifest)?
+                    self.load_on(conn, &scope)?
                         .ok_or_else(|| anyhow::anyhow!("credential write was not durable"))?;
                     Ok(())
                 })
@@ -138,7 +149,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
     fn load_on(
         &self,
         conn: &mut SqliteConnection,
-        manifest: &ActiveSpaceGenerationManifestV2,
+        scope: &CredentialScope,
     ) -> anyhow::Result<Option<SponsorOpaqueMaterial>> {
         let row = sql_query(
             "SELECT encrypted_payload FROM space_admission_credentials WHERE singleton_id = 1",
@@ -159,10 +170,10 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
         {
             return Err(anyhow::anyhow!("credential generation is inconsistent"));
         }
-        if persisted.space_id != manifest.space_id
-            || persisted.keyslot_generation != manifest.keyslot_generation
-            || persisted.database_generation != manifest.database_generation
-            || persisted.security_generation != manifest.security_generation
+        if persisted.space_id != scope.space_id
+            || persisted.keyslot_generation != scope.keyslot_generation
+            || persisted.database_generation != scope.database_generation
+            || persisted.security_generation != scope.security_generation
         {
             return Ok(None);
         }
@@ -175,21 +186,48 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
         Ok(Some(SponsorOpaqueMaterial::new(server_setup, registration)))
     }
 
-    fn load_initial(&self) -> Result<SponsorOpaqueMaterial, SpaceAdmissionCredentialStoreError> {
-        let manifest = self.active_manifest().map_err(map_store_error)?;
+    async fn load_initial(
+        &self,
+    ) -> Result<SponsorOpaqueMaterial, SpaceAdmissionCredentialStoreError> {
+        let scope = self.active_scope().await.map_err(map_store_error)?;
         self.executor
             .run(|conn| {
-                self.load_on(conn, &manifest)?
+                self.load_on(conn, &scope)?
                     .ok_or_else(|| anyhow::anyhow!("space admission registration is missing"))
             })
             .map_err(map_store_error)
     }
 
-    fn active_manifest(&self) -> anyhow::Result<ActiveSpaceGenerationManifestV2> {
-        self.manifests
-            .load_sync()
-            .map_err(anyhow::Error::new)?
-            .ok_or_else(|| anyhow::anyhow!("active Space generation is missing"))
+    async fn active_scope(&self) -> anyhow::Result<CredentialScope> {
+        if let Some(manifest) = self.manifests.load().await.map_err(anyhow::Error::new)? {
+            return Ok(CredentialScope::from(manifest));
+        }
+        let ledger = self
+            .membership_ledger
+            .load()
+            .await
+            .map_err(anyhow::Error::new)?;
+        let space_id = ledger
+            .lineage_id
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("current legacy Space identity is missing"))?;
+        Ok(CredentialScope {
+            space_id,
+            keyslot_generation: [0; 16],
+            database_generation: [0; 16],
+            security_generation: [0; 16],
+        })
+    }
+}
+
+impl From<ActiveSpaceGenerationManifestV2> for CredentialScope {
+    fn from(manifest: ActiveSpaceGenerationManifestV2) -> Self {
+        Self {
+            space_id: manifest.space_id,
+            keyslot_generation: manifest.keyslot_generation,
+            database_generation: manifest.database_generation,
+            security_generation: manifest.security_generation,
+        }
     }
 }
 
@@ -202,7 +240,7 @@ impl<E: DbExecutor + Send + Sync> SpaceAdmissionChannelCredentialPort
         _invitation_id: InvitationId,
         _admission_id: SpaceAdmissionId,
     ) -> Result<SponsorOpaqueMaterial, SpaceAdmissionChannelCredentialError> {
-        self.load_initial().map_err(map_channel_error)
+        self.load_initial().await.map_err(map_channel_error)
     }
 
     async fn load_continuation(
@@ -224,6 +262,7 @@ impl<E: DbExecutor + Send + Sync> PrepareSpaceAdmissionCredentialsPort
         passphrase: &Passphrase,
     ) -> Result<(), SpaceAdmissionCredentialPreparationError> {
         self.ensure_registration(passphrase)
+            .await
             .map_err(|error| match error {
                 SpaceAdmissionCredentialStoreError::Locked { source } => {
                     SpaceAdmissionCredentialPreparationError::Locked { source }
@@ -333,6 +372,57 @@ mod tests {
         }
     }
 
+    struct LegacyLedger;
+
+    #[async_trait::async_trait]
+    impl LoadMembershipLedgerPort for LegacyLedger {
+        async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+            let mut ledger = LoadedMembershipLedger::no_current_space();
+            ledger.lineage_id = Some("legacy-space".to_owned());
+            Ok(ledger)
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_layout_binds_registration_to_membership_lineage() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("credentials.sqlite");
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x71; 16]));
+        let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+            temp.path().join("vault"),
+            Arc::clone(&keys),
+        ));
+        let executor = Arc::new(DieselSqliteExecutor::new(
+            init_db_pool(db_path.to_str().unwrap()).unwrap(),
+        ));
+        let admissions = Arc::new(SqliteSpaceAdmissionState::new(
+            Arc::clone(&executor),
+            Arc::clone(&keys),
+            Arc::clone(&manifests),
+            Arc::new(LegacyLedger),
+        ));
+        let credentials = SqliteSpaceAdmissionCredentials::new(
+            executor,
+            keys,
+            manifests,
+            Arc::new(LegacyLedger),
+            admissions,
+        );
+
+        credentials
+            .ensure_registration(&Passphrase::new("legacy passphrase"))
+            .await
+            .unwrap();
+        credentials
+            .resolve_initial(
+                InvitationId::from_bytes([0x72; 32]).unwrap(),
+                SpaceAdmissionId::from_bytes([0x73; 32]).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn encrypted_registration_reopens_and_authenticates_the_space_passphrase() {
         let temp = tempfile::tempdir().unwrap();
@@ -366,10 +456,16 @@ mod tests {
                 manifests.clone(),
                 Arc::new(EmptyLedger),
             ));
-            SqliteSpaceAdmissionCredentials::new(executor, keys, manifests.clone(), admissions)
+            SqliteSpaceAdmissionCredentials::new(
+                executor,
+                keys,
+                manifests.clone(),
+                Arc::new(EmptyLedger),
+                admissions,
+            )
         };
         let passphrase = Passphrase::new("correct horse battery staple");
-        open().ensure_registration(&passphrase).unwrap();
+        open().ensure_registration(&passphrase).await.unwrap();
 
         let invitation_id = InvitationId::from_bytes([0x82; 32]).unwrap();
         let admission_id = SpaceAdmissionId::from_bytes([0x83; 32]).unwrap();
@@ -407,11 +503,9 @@ mod tests {
                 .encrypted_payload)
             })
             .unwrap();
-        assert!(
-            !encrypted
-                .windows(passphrase.expose().len())
-                .any(|window| window == passphrase.expose().as_bytes())
-        );
+        assert!(!encrypted
+            .windows(passphrase.expose().len())
+            .any(|window| window == passphrase.expose().as_bytes()));
 
         manifests
             .promote(
@@ -425,13 +519,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            open()
-                .resolve_initial(invitation_id, admission_id)
-                .await
-                .is_err()
-        );
-        open().ensure_registration(&passphrase).unwrap();
+        assert!(open()
+            .resolve_initial(invitation_id, admission_id)
+            .await
+            .is_err());
+        open().ensure_registration(&passphrase).await.unwrap();
         let replacement = executor
             .run(|conn| {
                 Ok(sql_query(
