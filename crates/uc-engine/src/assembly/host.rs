@@ -781,21 +781,12 @@ mod tests {
             Err(CurrentMemberSignatureError::Unavailable)
         );
         assert!(!wiring.wired.sync_engine.membership_session.is_ready());
-        assert_eq!(
-            wiring
-                .wired
-                .sync_engine
-                .workspace_convergence_repository
-                .load_state()
-                .await,
-            Err(uc_application::deps::SpaceMembershipStateRepositoryError::Locked)
-        );
     }
 
     // 流程：启动真实生产组装，确认 1.1 成员核对与旧空间升级入口同时存在，
     // 再确认已经废弃的成员移除入口没有被重新带回。
     #[tokio::test]
-    async fn production_engine_assembly_registers_membership_attestation_protocol() {
+    async fn production_engine_assembly_registers_new_space_protocols() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("private")).unwrap();
         let host = HostCapabilities::new(
@@ -827,17 +818,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let reachable = lifecycle
-            .sync_engine_assembly
-            .membership_attestation_is_reachable_for_test()
-            .await;
         let membership_history_reachable = lifecycle
             .sync_engine_assembly
             .membership_history_exchange_is_reachable_for_test()
             .await;
-        let admission_completion_recovery_reachable = lifecycle
+        let space_admission_reachable = lifecycle
             .sync_engine_assembly
-            .admission_completion_recovery_is_reachable_for_test()
+            .space_admission_is_reachable_for_test()
             .await;
         let deprecated_removal_protocols_reachable = lifecycle
             .sync_engine_assembly
@@ -849,16 +836,12 @@ mod tests {
             .await;
 
         assert!(
-            reachable,
-            "membership attestation protocol was not installed"
-        );
-        assert!(
             membership_history_reachable,
             "membership history exchange was not installed"
         );
         assert!(
-            admission_completion_recovery_reachable,
-            "admission completion recovery was not installed"
+            space_admission_reachable,
+            "Space admission protocol was not installed"
         );
         assert!(
             !deprecated_removal_protocols_reachable,

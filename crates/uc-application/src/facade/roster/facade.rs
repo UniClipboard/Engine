@@ -25,7 +25,7 @@ use uc_core::membership::{
     SpaceProtectionStatusPort,
 };
 use uc_core::ports::{
-    ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort, PeerReachabilityChanged,
+    ConnectionChannelPort, LocalIdentityPort, PeerReachabilityChanged, PeerReachabilityPort,
 };
 use uc_core::DeviceId;
 
@@ -33,7 +33,7 @@ use crate::deps::CurrentSpaceMemberScopePort;
 use crate::facade::roster::commands::{
     apply_member_sync_preferences_patch, MemberProtectionStatusView, MemberProtectionView,
     MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
-    RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
+    PresenceRefreshReport, RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
 };
 use crate::facade::roster::errors::RosterError;
 
@@ -61,6 +61,28 @@ pub(crate) struct MemberRosterFacade {
 }
 
 impl MemberRosterFacade {
+    pub async fn refresh_presence(&self) -> Result<PresenceRefreshReport, RosterError> {
+        let scope = self
+            .peer_scope
+            .snapshot()
+            .await
+            .map_err(|_| RosterError::MembershipReconciliationUnavailable)?;
+        let mut report = PresenceRefreshReport {
+            total: scope.usable_peer_device_ids.len(),
+            online: 0,
+            offline: 0,
+            errors: 0,
+        };
+        for device_id in scope.usable_peer_device_ids {
+            match self.presence.verify_reachable(&device_id).await {
+                Ok(uc_core::ports::ReachabilityState::Online) => report.online += 1,
+                Ok(uc_core::ports::ReachabilityState::Offline) => report.offline += 1,
+                Ok(uc_core::ports::ReachabilityState::Unknown) | Err(_) => report.errors += 1,
+            }
+        }
+        Ok(report)
+    }
+
     pub fn new(deps: MemberRosterDeps) -> Self {
         Self {
             member_repo: deps.member_repo,

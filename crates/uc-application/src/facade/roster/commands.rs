@@ -16,6 +16,14 @@ use uc_core::membership::MemberSyncPreferences;
 use uc_core::ports::{ConnectionChannel, ReachabilityState};
 use uc_core::settings::model::ContentTypes;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceRefreshReport {
+    pub total: usize,
+    pub online: usize,
+    pub offline: usize,
+    pub errors: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpaceProtectionModeView {
     Legacy,

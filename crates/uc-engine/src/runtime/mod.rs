@@ -19,8 +19,9 @@ use tracing::{error, warn};
 use uc_application::deps::{ProfileFactoryResetCapabilityError, StopProfileRuntimePort};
 use uc_application::facade::clipboard_write::LocalActiveRegisterAdvancer;
 use uc_application::facade::{
-    AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent, ProfileFactoryResetOutcome,
-    ProfileFactoryResetRequest, ProfileFactoryResetUseCase,
+    build_space_session_activity, AppFacade, HistoryMaintenanceRuntime, NetworkRecoveryEvent,
+    ProfileFactoryResetOutcome, ProfileFactoryResetRequest, ProfileFactoryResetUseCase,
+    SpaceSessionActivityDeps, SpaceSessionActivityPort,
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
@@ -52,8 +53,6 @@ const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 pub(crate) struct ProductionRuntime {
     app_version: String,
     session_supervisor: Arc<SessionSupervisor>,
-    space_join: Arc<uc_application::facade::SpaceJoinFacade>,
-    space_membership: Arc<uc_application::facade::SpaceMembershipFacade>,
     profile_reset: Arc<ProfileFactoryResetUseCase>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     task_registry: Arc<TaskRegistry>,
@@ -78,8 +77,6 @@ struct SessionFactory {
     iroh_bind_port_override: Option<u16>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     recovery_generation: Arc<AtomicU64>,
-    space_join: Arc<uc_application::facade::SpaceJoinFacade>,
-    space_membership: Arc<uc_application::facade::SpaceMembershipFacade>,
 }
 
 struct ProductionSession {
@@ -298,14 +295,6 @@ impl ProductionRuntime {
             .map_err(|error| startup_error("dependency wiring", error))?;
 
         let session = Arc::new(Mutex::new(None));
-        let space_join = uc_application::facade::SpaceJoinFacade::new(Arc::clone(
-            &wired.sync_engine.admission_attempt_repository,
-        ));
-        let space_membership = uc_application::facade::SpaceMembershipFacade::new(
-            Arc::clone(&wired.sync_engine.admission_attempt_repository),
-            wired.deps.device.device_identity.current_device_id(),
-            Arc::clone(&wired.deps.system.clock),
-        );
         let session_supervisor = Arc::new(SessionSupervisor::new(
             Arc::clone(&session),
             Arc::clone(&wired.shared.file_transfer_facade),
@@ -350,27 +339,11 @@ impl ProductionRuntime {
             iroh_bind_port_override,
             network_recovery: Arc::clone(&network_recovery),
             recovery_generation: Arc::new(AtomicU64::new(0)),
-            space_join: Arc::clone(&space_join),
-            space_membership: Arc::clone(&space_membership),
         });
         session_supervisor.configure_factory(Arc::clone(&session_factory));
         session_supervisor.resume().await?;
         spawn_network_recovery_events(network_recovery.subscribe(), &task_registry, events.clone())
             .await;
-        spawn_space_events(
-            "space_join_events",
-            space_join.subscribe(),
-            &task_registry,
-            events.clone(),
-        )
-        .await;
-        spawn_space_events(
-            "space_membership_events",
-            space_membership.subscribe(),
-            &task_registry,
-            events.clone(),
-        )
-        .await;
         let blob_ports = BlobProcessingPorts::from_app_deps(&wired.deps);
         spawn_blob_processing_tasks(background, blob_ports, &task_registry).await;
         let clipboard_change_runtime = HostClipboardChangeRuntime {
@@ -403,8 +376,6 @@ impl ProductionRuntime {
         Ok(Self {
             app_version,
             session_supervisor,
-            space_join,
-            space_membership,
             profile_reset,
             network_recovery,
             task_registry,
@@ -441,6 +412,21 @@ impl ProductionRuntime {
         let (restore_tx, restore_rx) = tokio::sync::mpsc::unbounded_channel();
         sync_engine.attach_restore_broadcast(restore_rx);
         let search_runtime = build_search_runtime(&wired.deps);
+        let session_activity = build_space_session_activity(
+            search_runtime.facade(),
+            SpaceSessionActivityDeps {
+                receive: Arc::clone(&wired.shared.file_transfer_facade)
+                    as Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
+            },
+        );
+        if !sync_engine
+            .bind_space_session_activity(session_activity as Arc<dyn SpaceSessionActivityPort>)
+        {
+            return Err(startup_error(
+                "Space session activity",
+                "Space session activity was already bound",
+            ));
+        }
         let clipboard = build_clipboard_runtime(wired, &sync_engine, events.clone());
         #[cfg(feature = "lan-compat")]
         let mobile_sync = build_mobile_sync_facade(
@@ -480,10 +466,6 @@ impl ProductionRuntime {
             paths,
             RuntimeAppFacadeAssembly {
                 space: Arc::clone(&sync_engine.facade),
-                space_application: sync_engine.space_application_handle(),
-                space_receive_activity: Arc::clone(&wired.shared.file_transfer_facade)
-                    as Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
-                member_roster: Arc::clone(&sync_engine.roster),
                 clipboard_sync: Arc::clone(&sync_engine.clipboard_sync),
                 blob_transfer: Arc::clone(&sync_engine.blob),
                 blob_transfer_port: Arc::clone(&sync_engine.blob_transfer),
@@ -526,11 +508,6 @@ impl ProductionRuntime {
                     handle.abort();
                 }
             })
-            .await;
-
-        factory
-            .space_membership
-            .attach_active(Some(sync_engine.space_modules()))
             .await;
 
         Ok(ProductionSession {

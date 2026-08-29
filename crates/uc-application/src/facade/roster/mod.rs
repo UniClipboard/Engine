@@ -26,7 +26,7 @@ mod facade;
 pub use commands::{
     ContentTypesPatch, ContentTypesView, MemberProtectionStatusView, MemberProtectionView,
     MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
-    RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
+    PresenceRefreshReport, RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use errors::RosterError;
 pub(crate) use facade::{MemberRosterDeps, MemberRosterFacade};

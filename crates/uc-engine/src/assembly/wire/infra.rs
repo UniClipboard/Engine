@@ -82,7 +82,6 @@ pub(super) fn build_space_access_ports(
         prepare_admission_offer: space_access_adapter.clone(),
         derive_admission_proof_key: space_access_adapter.clone(),
         prepare_admission_target_access: space_access_adapter.clone(),
-        group_admission: space_access_adapter.clone(),
         prepare_sponsor_admission_security: space_access_adapter.clone(),
         activate_sponsor_admission_security: space_access_adapter.clone(),
         activate_completion_helper_admission_security: space_access_adapter.clone(),

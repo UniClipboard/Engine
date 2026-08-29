@@ -4,12 +4,13 @@
 //! consumers keep using this stable facade namespace.
 
 pub use crate::space::{
-    CancelInvitationError, CompletePendingSpaceTransitionError, CurrentInvitation,
-    InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, InvitationAvailability,
-    IssuePairingInvitationError, IssuePairingInvitationResult, PairingInvitationAddressCandidate,
-    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
-    RedeemPairingInvitationError, ResetSpaceError, SetupStateView, SpaceActivityError,
-    SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionActivityPort, SpaceSessionDeps,
+    build_space_session_activity, CancelInvitationError, CompletePendingSpaceTransitionError,
+    CurrentInvitation, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
+    InvitationAvailability, IssuePairingInvitationError, IssuePairingInvitationResult,
+    PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
+    QueryPendingSpaceTransitionError, QuerySetupStateError, RedeemPairingInvitationError,
+    ResetSpaceError, SetupStateView, SpaceActivityError, SpaceAdmissionDeps, SpaceFacade,
+    SpaceFacadeDeps, SpaceSessionActivityDeps, SpaceSessionActivityPort, SpaceSessionDeps,
     SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use uc_observability_contract::analytics::PairingFailureReason;

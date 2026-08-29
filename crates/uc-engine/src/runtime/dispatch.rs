@@ -80,14 +80,21 @@ impl EngineRuntime for ProductionRuntime {
     ) -> Result<OperationResult, EngineError> {
         match operation {
             Operation::QueryDeviceTrust => {
-                return execute_query_space_membership_status(self.space_membership.as_ref()).await;
+                return execute_query_space_membership_status(
+                    self.current_facade().await?.as_ref(),
+                )
+                .await;
             }
             Operation::DecideDeviceTrustChange(input) => {
-                return execute_decide_device_trust_change(self.space_membership.as_ref(), input)
-                    .await;
+                return execute_decide_device_trust_change(
+                    self.current_facade().await?.as_ref(),
+                    input,
+                )
+                .await;
             }
             Operation::CancelJoinSpace(input) => {
-                return execute_cancel_join_space(self.space_join.as_ref(), input).await;
+                return execute_cancel_join_space(self.current_facade().await?.as_ref(), input)
+                    .await;
             }
             Operation::FactoryResetSpace => {
                 return execute_factory_reset_space(self.profile_reset.as_ref()).await;
@@ -351,7 +358,7 @@ impl EngineRuntime for ProductionRuntime {
                     .await
                 }
                 Operation::RemoveMember(input) => {
-                    execute_remove_member(self.space_membership.as_ref(), input).await
+                    execute_remove_member(self.current_facade().await?.as_ref(), input).await
                 }
                 #[cfg(feature = "dev-tools")]
                 Operation::DecideMembershipRemoval(input) => {

@@ -250,18 +250,6 @@ impl SessionSupervisor {
                 ));
             }
         }
-        if let Some(pending) = factory
-            .space_join
-            .recover_completion()
-            .await
-            .map_err(|error| {
-                operation_error_with_code(1103, "rebuild join completion acknowledgment", error)
-            })?
-        {
-            if let Err(error) = session.facade.deliver_join_completion_ack(pending).await {
-                warn!(error = %error, "join completion acknowledgment delivery deferred");
-            }
-        }
         *self.session.lock().await = Some(session);
         self.operations.reopen();
         Ok(())

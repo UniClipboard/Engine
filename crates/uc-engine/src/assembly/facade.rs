@@ -14,18 +14,16 @@ use uc_application::facade::settings::{
 use uc_application::facade::space_setup::SpaceFacade;
 #[cfg(feature = "lan-compat")]
 use uc_application::facade::ApplyInboundClipboardUseCase;
-use uc_application::facade::{
-    build_space_session_activity, AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade,
-    ClipboardCaptureFacade, ClipboardHistoryFacade, ClipboardHistoryFacadeDeps,
-    ClipboardOutboundFacade, ClipboardRestoreFacade, ClipboardRestoreFacadeDeps,
-    ClipboardSyncFacade, DiagnosticsFacade, DiagnosticsFacadeDeps, LockSpaceSessionUseCase,
-    MemberRosterFacade, ProbeProfileKeyAccessUseCase, QueryLocalDeviceUseCase,
-    QuerySpaceAccessStateUseCase, RecoverSpaceSessionUseCase, ResourceFacade, ResourceFacadeDeps,
-    SearchFacade, SettingsFacade, SpaceSessionActivityDeps, StorageFacade, StorageFacadeDeps,
-    UpgradeFacade, UpgradeFacadeDeps,
-};
 #[cfg(feature = "lan-compat")]
 use uc_application::facade::{ActiveClipboardFacade, FileTransferFacade};
+use uc_application::facade::{
+    AppFacade, AppFacadeParts, AppPaths, BlobTransferFacade, ClipboardCaptureFacade,
+    ClipboardHistoryFacade, ClipboardHistoryFacadeDeps, ClipboardOutboundFacade,
+    ClipboardRestoreFacade, ClipboardRestoreFacadeDeps, ClipboardSyncFacade, DiagnosticsFacade,
+    DiagnosticsFacadeDeps, ProbeProfileKeyAccessUseCase, QueryLocalDeviceUseCase, ResourceFacade,
+    ResourceFacadeDeps, SearchFacade, SettingsFacade, StorageFacade, StorageFacadeDeps,
+    UpgradeFacade, UpgradeFacadeDeps,
+};
 use uc_core::clipboard::ClipboardIntegrationMode;
 #[cfg(feature = "lan-compat")]
 use uc_infra::fs::FsInboundFileTarget;
@@ -208,9 +206,6 @@ pub fn build_mobile_sync_facade(
 /// 生产运行期构造完整 [`AppFacade`] 所需的全部能力。
 pub struct RuntimeAppFacadeAssembly {
     pub space: Arc<SpaceFacade>,
-    pub space_application: uc_application::facade::SpaceApplicationHandle,
-    pub space_receive_activity: Arc<dyn uc_application::facade::EnsureReceiveReadyPort>,
-    pub member_roster: Arc<MemberRosterFacade>,
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
     pub blob_transfer: Arc<BlobTransferFacade>,
     pub file_transfer: Arc<uc_application::facade::FileTransferFacade>,
@@ -252,35 +247,8 @@ pub fn build_app_facade_from_deps(
         integration_mode: runtime.clipboard_restore.integration_mode,
     }));
 
-    let space_session_activity = build_space_session_activity(
-        Arc::clone(&runtime.search),
-        SpaceSessionActivityDeps {
-            membership: runtime.space_application.membership_activity(),
-            receive: runtime.space_receive_activity,
-        },
-    );
-    let lock_space_session = Arc::new(LockSpaceSessionUseCase::new(
-        Arc::clone(&deps.current_space_identity),
-        Arc::clone(&deps.security.space_access_ports.lock),
-        Arc::clone(&space_session_activity),
-    ));
-    let recover_space_session = Arc::new(RecoverSpaceSessionUseCase::new(
-        Arc::clone(&deps.current_space_identity),
-        Arc::clone(&deps.security.space_access_ports.resume_session),
-        runtime.space.session_readiness(),
-        Arc::clone(&space_session_activity),
-    ));
-
     Arc::new(AppFacade::new(AppFacadeParts {
         space: runtime.space,
-        space_session_activity,
-        lock_space_session,
-        recover_space_session,
-        member_roster: runtime.member_roster,
-        query_space_access_state: Arc::new(QuerySpaceAccessStateUseCase::new(
-            deps.current_space_identity.clone(),
-            deps.security.space_access_ports.is_unlocked.clone(),
-        )),
         probe_profile_key_access: Arc::new(ProbeProfileKeyAccessUseCase::new(
             deps.security.profile_key_access_probe.clone(),
         )),

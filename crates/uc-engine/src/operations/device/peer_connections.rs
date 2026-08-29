@@ -48,7 +48,7 @@ pub(crate) async fn execute_refresh_peer_connections(
             total: report.total as u32,
             online: report.online as u32,
             offline: report.offline as u32,
-            errors: report.errors.len() as u32,
+            errors: report.errors as u32,
         },
     ))
 }

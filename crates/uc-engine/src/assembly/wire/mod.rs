@@ -59,9 +59,8 @@ use uc_infra::db::repositories::{
     DieselClipboardEventRepository, DieselClipboardRepresentationRepository,
     DieselClipboardSelectionRepository, DieselEntryAvailabilityRepository,
     DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
-    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceJoinRecordStore,
-    DieselSpaceMemberRepository, DieselSpaceSecurityStore, DieselThumbnailRepository,
-    DieselTrustedPeerRepository, DieselWorkspaceConvergenceStore,
+    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository,
+    DieselSpaceSecurityStore, DieselThumbnailRepository, DieselTrustedPeerRepository,
     EncryptedMembershipAnnouncementRepository, EncryptedMembershipAppliedSecurityUpdateRepository,
     EncryptedMembershipCandidateRepository, EncryptedMembershipOutboxRepository,
     EncryptedRelationshipStore,
@@ -77,7 +76,10 @@ use uc_infra::security::{
     Sha256IdentityFingerprintFactory, Sha256ShortCodeGenerator,
 };
 use uc_infra::settings::repository::FileSettingsRepository;
-use uc_infra::space::{InMemorySession, KeyMaterialStore};
+use uc_infra::space::{
+    InMemorySession, KeyMaterialStore, SqliteMembershipLedger, SqliteSpaceAdmissionCredentials,
+    SqliteSpaceAdmissionState,
+};
 use uc_infra::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
 use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 
@@ -320,21 +322,22 @@ pub fn wire_dependencies_from_inputs(
         );
     let profile_key_access_probe = space_access_adapter.clone();
     let membership_session = Arc::clone(&platform.session);
-    let workspace_convergence_repository: Arc<
-        dyn uc_application::deps::SpaceMembershipStateRepositoryPort,
-    > = Arc::new(DieselWorkspaceConvergenceStore::new(
+    let membership_ledger = Arc::new(SqliteMembershipLedger::new(
         Arc::clone(&infra.db_executor),
-        platform.session.as_ref().clone(),
+        Arc::clone(&admission_keys),
     ));
-    let admission_store = Arc::new(DieselSpaceJoinRecordStore::new(
+    let admission_state = Arc::new(SqliteSpaceAdmissionState::new(
         Arc::clone(&infra.db_executor),
-        admission_keys.as_ref().clone(),
+        Arc::clone(&admission_keys),
+        Arc::clone(&active_generation_manifest_store),
+        Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
     ));
-    let admission_attempt_repository: Arc<dyn uc_application::deps::SpaceJoinRecordStorePort> =
-        admission_store.clone();
-    let membership_history_repository: Arc<
-        dyn uc_application::deps::MembershipHistoryRepositoryPort,
-    > = admission_store;
+    let admission_credentials = Arc::new(SqliteSpaceAdmissionCredentials::new(
+        Arc::clone(&infra.db_executor),
+        Arc::clone(&admission_keys),
+        Arc::clone(&active_generation_manifest_store),
+        Arc::clone(&admission_state),
+    ));
     let durable_space_transition =
         Arc::new(uc_infra::security::DurableAdmissionSpaceTransition::new(
             db_pool_for_space_transition,
@@ -763,9 +766,9 @@ pub fn wire_dependencies_from_inputs(
             membership_applied_security_update_repo,
             current_member_signatures,
             membership_session,
-            workspace_convergence_repository,
-            admission_attempt_repository,
-            membership_history_repository,
+            membership_ledger,
+            admission_state,
+            admission_credentials,
             admission_space_transition,
             device_management_reset_data,
             legacy_migration_recovery,

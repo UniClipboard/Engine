@@ -36,7 +36,8 @@ use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_application::deps::{
-    HandleAuthenticatedSpaceAdmissionMessagePort, SpaceAdmissionTransportPort,
+    HandleAuthenticatedSpaceAdmissionMessagePort, ResolveJoinerInvitationPort,
+    SpaceAdmissionTransportPort,
 };
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
@@ -106,6 +107,7 @@ use super::transfer_progress_adapter::{
 /// concern, not a runtime cost).
 pub struct PairingHandlers {
     pub session: Arc<dyn PairingSessionPort>,
+    pub joiner_invitation_resolver: Arc<dyn ResolveJoinerInvitationPort>,
     pub events: Arc<dyn PairingEventPort>,
     pub invitation: Arc<dyn PairingInvitationPort>,
     pub invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
@@ -871,6 +873,7 @@ impl IrohNodeBuilder {
 
         PairingHandlers {
             session: adapter.clone(),
+            joiner_invitation_resolver: adapter.clone(),
             events: adapter,
             invitation,
             invitation_addresses,

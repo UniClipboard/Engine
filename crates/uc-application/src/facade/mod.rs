@@ -138,8 +138,8 @@ pub use crate::clipboard::resource::{
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
     MemberProtectionStatusView, MemberProtectionView, MemberSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, PeerReachabilityChanged, PeerSnapshotView, RosterEntry, RosterError,
-    SpaceProtectionModeView, SpaceProtectionView,
+    MemberSyncPreferencesView, PeerReachabilityChanged, PeerSnapshotView, PresenceRefreshReport,
+    RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{
     map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,
@@ -162,13 +162,14 @@ pub use settings::{
 };
 
 pub use space_setup::{
-    CancelInvitationError, CompletePendingSpaceTransitionError, CurrentInvitation,
-    InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
-    IssuePairingInvitationResult, PairingInvitationAddressCandidate,
+    build_space_session_activity, CancelInvitationError, CompletePendingSpaceTransitionError,
+    CurrentInvitation, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
+    IssuePairingInvitationError, IssuePairingInvitationResult, PairingInvitationAddressCandidate,
     QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
     RedeemPairingInvitationError, ResetSpaceError, SetupStateView, SpaceActivityError,
-    SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionActivityPort, SpaceSessionDeps,
-    SpaceTransitionDeps, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    SpaceAdmissionDeps, SpaceFacade, SpaceFacadeDeps, SpaceSessionActivityDeps,
+    SpaceSessionActivityPort, SpaceSessionDeps, SpaceTransitionDeps, UnlockSpaceError,
+    UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use storage::{
     ClearCacheResultView, StorageFacade, StorageFacadeDeps, StorageFacadeError, StorageStatsView,

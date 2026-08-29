@@ -564,6 +564,12 @@ impl SpaceFacade {
         self.member_roster.list_members().await
     }
 
+    pub async fn refresh_presence(
+        &self,
+    ) -> Result<crate::facade::roster::PresenceRefreshReport, crate::facade::RosterError> {
+        self.member_roster.refresh_presence().await
+    }
+
     pub async fn list_roster_entries(
         &self,
     ) -> Result<Vec<crate::facade::roster::RosterEntry>, crate::facade::roster::RosterError> {

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
 use uc_application::deps::{
-    AppDeps, ClearProfileStatePort, CurrentMemberSignaturePort, MembershipHistoryRepositoryPort,
-    ProfileLifecycleRepositoryPort, SpaceMembershipStateRepositoryPort, WipeProfileKeysPort,
+    AppDeps, ClearProfileStatePort, CurrentMemberSignaturePort, ProfileLifecycleRepositoryPort,
+    WipeProfileKeysPort,
 };
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::RepresentationId;
@@ -89,11 +89,22 @@ pub struct SyncEngineDeps {
     pub current_member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     /// The same unlocked session used by space access and encrypted storage.
     pub membership_session: Arc<uc_infra::space::InMemorySession>,
-    /// Encrypted persistence for the unified workspace convergence state.
-    pub workspace_convergence_repository: Arc<dyn SpaceMembershipStateRepositoryPort>,
-    /// Profile-scoped encrypted persistence for durable admission attempts.
-    pub admission_attempt_repository: Arc<dyn uc_application::deps::SpaceJoinRecordStorePort>,
-    pub membership_history_repository: Arc<dyn MembershipHistoryRepositoryPort>,
+    /// MasterKey-encrypted single membership ledger used by the new Space application.
+    pub membership_ledger: Arc<
+        uc_infra::space::SqliteMembershipLedger<Arc<uc_infra::db::executor::DieselSqliteExecutor>>,
+    >,
+    /// MasterKey-encrypted aggregate repository shared by all admission roles.
+    pub admission_state: Arc<
+        uc_infra::space::SqliteSpaceAdmissionState<
+            Arc<uc_infra::db::executor::DieselSqliteExecutor>,
+        >,
+    >,
+    /// Space-generation-bound OPAQUE setup and registration lifecycle.
+    pub admission_credentials: Arc<
+        uc_infra::space::SqliteSpaceAdmissionCredentials<
+            Arc<uc_infra::db::executor::DieselSqliteExecutor>,
+        >,
+    >,
     pub admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort>,
     pub device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort>,
     pub legacy_migration_recovery: Arc<dyn uc_core::ports::setup::LegacyMigrationRecoveryPort>,

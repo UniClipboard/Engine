@@ -5,15 +5,15 @@ use crate::operations::device::member::join_space_status;
 use crate::{CancelJoinSpaceInput, EngineError, EngineErrorCategory, OperationResult};
 
 pub async fn execute_cancel_join_space(
-    space_join: &uc_application::facade::SpaceJoinFacade,
+    facade: &uc_application::facade::AppFacade,
     input: CancelJoinSpaceInput,
 ) -> Result<OperationResult, EngineError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(input.join_id)
         .map_err(|_| not_found())?;
     let join_id: [u8; 16] = bytes.try_into().map_err(|_| not_found())?;
-    space_join
-        .cancel(join_id)
+    facade
+        .cancel_space_join(join_id)
         .await
         .map(|status| OperationResult::JoinSpace(join_space_status(status)))
         .map_err(|error| match error {

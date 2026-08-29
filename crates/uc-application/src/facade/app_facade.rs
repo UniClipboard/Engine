@@ -290,6 +290,12 @@ impl AppFacade {
         self.space.query_device_trust().await
     }
 
+    pub async fn refresh_presence(
+        &self,
+    ) -> Result<crate::facade::roster::PresenceRefreshReport, crate::facade::RosterError> {
+        self.space.refresh_presence().await
+    }
+
     pub async fn remove_space_member(
         &self,
         target: &DeviceId,
