@@ -206,6 +206,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reopened, prepared.public_commitment);
+        let mut mismatched_input = input.clone();
+        mismatched_input.admission_bundle_digest[0] ^= 0xff;
+        let mismatch = AdmissionSecurityTransitionAdapter::activate(
+            staged.staged_state.clone(),
+            &prepared.commit,
+            &prepared.public_commitment,
+            &mismatched_input,
+        );
+        assert_eq!(
+            mismatch,
+            Err(AdmissionSecurityTransitionError::CommitmentMismatch)
+        );
         let active = AdmissionSecurityTransitionAdapter::activate(
             staged.staged_state,
             &prepared.commit,

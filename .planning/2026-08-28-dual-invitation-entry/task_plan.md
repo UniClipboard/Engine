@@ -46,13 +46,13 @@ Support both a self-contained long invitation and a human-entered short code, wi
   - [x] Correct/wrong passphrase, identity binding, registration restoration, and corrupt-record rejection
   - [x] ServerSetup restoration and mismatched-setup rejection
   - [x] RFC 9807 vector evidence and secret/debug lifecycle checks
-- [ ] Validate existing OpenMLS Add/Commit/Welcome, staged restore, and public commitment at the admission seam
+- [x] Validate existing OpenMLS Add/Commit/Welcome, staged restore, and public commitment at the admission seam
 - [ ] Generate complete JoinRequest identity, OpenMLS, recovery, and password material
 - [ ] Implement production `JoinerStartMaterialPort`
 - [ ] Keep Candidate, transport, and Engine final wiring outside this phase
 - **Status:** in_progress
 
-**Next Step:** Validate the existing OpenMLS admission transition seam and its restart-safe staged state.
+**Next Step:** Generate the complete JoinRequest and implement the production Joiner start-material adapter.
 
 ## Decisions
 - A short code and a full invitation are two entry forms for one invitation, not two protocols.

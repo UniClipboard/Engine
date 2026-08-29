@@ -1521,6 +1521,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | OPAQUE registration 加密前编码 | Infra 为 Sponsor registration 增加固定 marker、版本和严格长度的可恢复编码，只通过 `encode_for_encryption` 与 `decode_registration_after_decryption` 暴露安全意图；临时字节自动清零且不实现 Debug，截断或损坏数据以保留 source 的稳定分类拒绝。该能力尚未写入数据库；后续持久化必须复用 MasterKey AEAD，不得明文落库。 |
 | 2026-08-29 | OPAQUE Sponsor setup 重启恢复 | Infra 为固定 ciphersuite 的 `ServerSetup` 增加独立版本化加密前编码；原 setup 恢复后可继续认证既有 registration，重新生成或损坏的 setup 不能接管已有口令记录。临时序列化数组和编码均自动清零，错误使用独立稳定分类并保留 source；真实持久化仍须进入 MasterKey AEAD。 |
 | 2026-08-29 | OPAQUE 标准向量与秘密边界 | 使用 RFC 9807 Appendix C 的 Ristretto255/SHA-512 固定向量验证锁定密码库的 registration 请求及 registration、KE1、KE2、KE3 严格编码；产品 Argon2id 交换继续由独立端到端测试覆盖。编译期断言固定公开 OPAQUE 状态、消息和凭证不实现 `Debug` 或 `Clone`，不改变生产架构。 |
+| 2026-08-29 | OpenMLS 准入转换验证 | 既有 Infra 准入安全转换 seam 通过真实 Add、Commit 和 Welcome 验证 Sponsor 与 Joiner 得到相同公开承诺；序列化 staged state 可重新打开并激活，输入摘要变化稳定拒绝，丢弃路径清零临时状态。生产架构和公开入口不变。 |
 
 ## 相关文档
 
