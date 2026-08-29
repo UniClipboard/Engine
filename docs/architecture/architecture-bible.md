@@ -772,6 +772,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 旧收敛依赖删除 | Engine 不再构造或携带 candidate、announcement、outbox、applied-security-update 与 legacy migration recovery 等旧 convergence 运行期依赖。 |
 | 2026-08-30 | OPAQUE 存储作用域 | OPAQUE credential 不再要求首次建 Space 预先存在 generation manifest；新布局绑定完整 generation，legacy 布局绑定成员账本 lineage。 |
 | 2026-08-30 | 旧事件接线删除 | 删除只服务旧 workspace convergence 广播的 Engine 事件转发器及测试，设备信任变化由新 Space application 出口负责。 |
+| 2026-08-30 | 旧准入恢复类型删除 | 删除无生产调用者的 completion-recovery wire 类型和未持久化的 completed join 投影；认证准入恢复只保留新 aggregate 协议。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |

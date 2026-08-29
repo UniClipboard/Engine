@@ -116,19 +116,14 @@ pub use space_admission::{
 };
 #[allow(deprecated)]
 pub use space_join_record::{
-    AdmissionCompletionRecoveryBundleV1, AdmissionCompletionRecoveryChallenge,
-    AdmissionCompletionRecoveryHello, AdmissionCompletionRecoveryPeerV1,
-    AdmissionCompletionRecoveryResponseV1, AdmissionCompletionRecoveryTransportBinding,
-    AdmissionCompletionRecoveryValidationError, AdmissionIdentityBindingError,
-    AdmissionIdentityBindingV1, AdmissionInboxRecord, AdmissionOutboxMessage,
-    AdmissionOutboxPurpose, AdmissionProfileMetadata, AdmissionRejectionReason,
-    AdmissionTerminalResult, CancelSpaceJoinRecordError, CompletedSpaceJoinRecord,
+    AdmissionIdentityBindingError, AdmissionIdentityBindingV1, AdmissionInboxRecord,
+    AdmissionOutboxMessage, AdmissionOutboxPurpose, AdmissionProfileMetadata,
+    AdmissionRejectionReason, AdmissionTerminalResult, CancelSpaceJoinRecordError,
     CompletionHelperAdmissionStage, CompletionHelperAdmissionState, JoinerAdmissionStage,
     JoinerAdmissionState, SpaceJoinRecord, SpaceJoinRecordId, SpaceJoinRoleState,
     SpaceJoinTransitionError, SponsorAdmissionSecurityDelivery, SponsorAdmissionStage,
-    SponsorAdmissionState, SupersedeSpaceJoinError, ADMISSION_COMPLETION_RECOVERY_FORMAT_V1,
-    ADMISSION_IDENTITY_BINDING_FORMAT_V1, ADMISSION_PROFILE_METADATA_FORMAT_V1,
-    COMPLETED_SPACE_JOIN_RECORD_FORMAT_V1, SPACE_JOIN_RECORD_FORMAT_V1,
+    SponsorAdmissionState, SupersedeSpaceJoinError, ADMISSION_IDENTITY_BINDING_FORMAT_V1,
+    ADMISSION_PROFILE_METADATA_FORMAT_V1, SPACE_JOIN_RECORD_FORMAT_V1,
 };
 pub use versioned_membership_history::{
     AdmissionActivationReceipt, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,
