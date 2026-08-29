@@ -13,8 +13,8 @@ pub(crate) use full_invitation::{
     FullInvitationCodecError,
 };
 pub use joiner::{
-    DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
-    DefaultJoinerStartMaterial,
+    DefaultJoinerAppliedPreparation, DefaultJoinerCandidatePreparation,
+    DefaultJoinerInvitationPreparation, DefaultJoinerStartMaterial,
 };
 pub use repository::SqliteSpaceAdmissionState;
 pub use security::AdmissionSecurityTransitionAdapter;

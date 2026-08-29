@@ -25,7 +25,7 @@ impl PreparedJoinerCandidateMaterial {
         }
     }
 
-    pub(crate) fn into_parts(
+    pub fn into_parts(
         self,
     ) -> (
         AdmissionStagedTargetInput,

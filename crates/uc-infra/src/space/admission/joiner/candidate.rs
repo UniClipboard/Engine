@@ -236,20 +236,23 @@ fn candidate_digest(candidate: &uc_core::membership::AdmissionCandidateV1) -> [u
 
 #[cfg(test)]
 mod tests {
+    use uc_application::deps::PrepareJoinerAppliedPort;
     use uc_core::ids::DeviceId;
     use uc_core::membership::{
-        AdmissionCandidateV1, AdmissionChangeFacts, AdmissionContinuationCredential,
-        AdmissionContinuationRoute, AdmissionEncryptedPasswordEquivalent,
-        AdmissionIdentitySignature, AdmissionJoinRequestV1, AdmissionJoinerPrivateState,
-        AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome,
-        AdmissionPeerBinding, AdmissionRecoveryPublicKey, AdmissionRole, AdmissionSourceSnapshot,
-        BaseMembershipHistoryPosition, InvitationId, JoinId, JoinerAdmission, MembershipCredential,
-        PendingAdmissionExchange, SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
+        AdmissionCandidateV1, AdmissionChangeFacts, AdmissionCommitV1,
+        AdmissionContinuationCredential, AdmissionContinuationRoute,
+        AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionJoinRequestV1,
+        AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit,
+        AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionRecoveryPublicKey, AdmissionRole,
+        AdmissionSealedRecoveryMaterial, AdmissionSourceSnapshot, BaseMembershipHistoryPosition,
+        InvitationId, JoinId, JoinerAdmission, MembershipCredential, PendingAdmissionExchange,
+        SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
         ED25519_SIGNATURE_ALGORITHM_V1,
     };
     use uc_core::security::IdentityFingerprint;
 
     use super::*;
+    use crate::space::admission::joiner::DefaultJoinerAppliedPreparation;
     use crate::space::security::mls_group::MlsGroupEngine;
     use crate::space::OpenMlsHistoricalSignatureVerifier;
 
@@ -402,16 +405,102 @@ mod tests {
         let adapter =
             DefaultJoinerCandidatePreparation::new(Arc::new(OpenMlsHistoricalSignatureVerifier));
 
-        let result = adapter
+        let prepared_material = adapter
             .prepare(
                 joiner
                     .joiner_candidate_preparation()
                     .expect("authenticated Joiner preparation"),
                 &candidate_envelope,
             )
-            .await;
+            .await
+            .expect("production Joiner prepares Candidate");
+        let (staged_input, verified_history, staged_target, prepared_exchange) =
+            prepared_material.into_parts();
+        let prepared_message_id = prepared_exchange.request_envelope().header().message_id();
+        let exact_candidate = copy_candidate(match candidate_envelope.body() {
+            SpaceAdmissionBodyV1::Candidate(candidate) => candidate,
+            _ => panic!("fixture must be Candidate"),
+        });
+        let mut target_history = VersionedMembershipHistory::decode_persisted_v2(
+            exact_candidate.base_membership_history().as_bytes(),
+            &OpenMlsHistoricalSignatureVerifier,
+        )
+        .expect("base history verifies");
+        target_history
+            .verify_and_receive_event(
+                exact_candidate.candidate_event().clone(),
+                &OpenMlsHistoricalSignatureVerifier,
+            )
+            .expect("Candidate event extends history");
+        let commit = SpaceAdmissionEnvelopeV1::new(
+            admission_id,
+            AdmissionRole::Sponsor,
+            1,
+            AdmissionMessageId::from_bytes([0x54; 32]).expect("Commit message id"),
+            Some(prepared_message_id),
+            SpaceAdmissionBodyV1::Commit(AdmissionCommitV1::new(
+                exact_candidate,
+                AdmissionSignedMembershipHistory::from_bytes(
+                    target_history
+                        .encode_persisted_v2()
+                        .expect("history encodes"),
+                )
+                .expect("target history artifact"),
+                AdmissionSealedRecoveryMaterial::from_bytes(vec![0x55; 64])
+                    .expect("sealed recovery fixture"),
+            )),
+        )
+        .expect("valid Commit");
+        let prepared_joiner = joiner
+            .accept_candidate(candidate_envelope, [0x56; 32], staged_input)
+            .expect("Joiner accepts Candidate")
+            .into_replacement()
+            .prepare_candidate(verified_history, staged_target, prepared_exchange)
+            .expect("Joiner saves Prepared")
+            .into_replacement();
+        let committed_joiner = prepared_joiner
+            .accept_commit(commit, [0x57; 32])
+            .expect("Joiner accepts Commit")
+            .into_replacement();
+        let applied =
+            DefaultJoinerAppliedPreparation::new(Arc::new(OpenMlsHistoricalSignatureVerifier))
+                .prepare(
+                    admission_id,
+                    committed_joiner
+                        .joiner_applied_preparation()
+                        .expect("Committed Joiner exposes Applied preparation"),
+                )
+                .await
+                .expect("production Joiner prepares Applied")
+                .into_pending_exchange();
+        assert_eq!(
+            applied.request_envelope().kind(),
+            SpaceAdmissionMessageKind::Applied
+        );
+        assert_eq!(
+            applied.exact_expected_reply_kind(),
+            SpaceAdmissionMessageKind::Complete
+        );
+    }
 
-        assert!(result.is_ok());
+    fn copy_candidate(candidate: &AdmissionCandidateV1) -> AdmissionCandidateV1 {
+        AdmissionCandidateV1::new(
+            AdmissionSignedMembershipHistory::from_bytes(
+                candidate.base_membership_history().as_bytes().to_vec(),
+            )
+            .expect("base history copy"),
+            candidate.candidate_event().clone(),
+            candidate.security_commitment().clone(),
+            AdmissionMlsCommit::from_bytes(candidate.mls_commit().as_bytes().to_vec())
+                .expect("MLS commit copy"),
+            AdmissionMlsWelcome::from_bytes(candidate.mls_welcome().as_bytes().to_vec())
+                .expect("MLS welcome copy"),
+            AdmissionContinuationRoute::from_bytes(
+                candidate.continuation_route().as_bytes().to_vec(),
+            )
+            .expect("continuation route copy"),
+        )
+        .expect("Candidate copy")
     }
 
     #[allow(clippy::too_many_arguments)]

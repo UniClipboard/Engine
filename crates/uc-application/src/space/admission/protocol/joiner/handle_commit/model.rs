@@ -9,7 +9,7 @@ impl PreparedJoinerAppliedMaterial {
         Self { pending_exchange }
     }
 
-    pub(crate) fn into_pending_exchange(self) -> PendingAdmissionExchange {
+    pub fn into_pending_exchange(self) -> PendingAdmissionExchange {
         self.pending_exchange
     }
 }
