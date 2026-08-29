@@ -610,6 +610,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
 
     let _ = application.membership_history_endpoint();
     let _ = application.space_admission_endpoint();
+    let _ = application.current_scope();
 
     let joined = application
         .space_admission()

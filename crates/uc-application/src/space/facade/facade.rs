@@ -22,8 +22,8 @@ use crate::space::admission::{
     QueryPendingSpaceTransitionError, QueryPendingSpaceTransitionUseCase,
 };
 use crate::space::application::SpaceApplication;
-use crate::space::lifecycle::UpgradeSpaceUseCase;
 use crate::space::lifecycle::combine_space_session_activity;
+use crate::space::lifecycle::UpgradeSpaceUseCase;
 use crate::space::lifecycle::{
     InitializeSpaceError, InitializeSpaceRequest, InitializeSpaceResult, InitializeSpaceUseCase,
 };
@@ -64,6 +64,7 @@ pub struct SpaceFacade {
     recover_space_session: Arc<RecoverSpaceSessionUseCase>,
     query_space_access_state: Arc<QuerySpaceAccessStateUseCase>,
     query_space_setup_state: Arc<QuerySpaceSetupStateUseCase>,
+    current_member_scope: Arc<dyn crate::space::membership::CurrentSpaceMemberScopePort>,
     member_roster: MemberRosterFacade,
     reset_space: Arc<ResetSpaceUseCase>,
     query_committed_device_management_reset: Arc<QueryCommittedDeviceManagementResetUseCase>,
@@ -283,6 +284,7 @@ impl SpaceFacade {
             recover_space_session,
             query_space_access_state,
             query_space_setup_state,
+            current_member_scope: peer_scope,
             member_roster,
             reset_space,
             query_committed_device_management_reset,
@@ -302,6 +304,15 @@ impl SpaceFacade {
         &self,
     ) -> Arc<dyn crate::deps::HandleAuthenticatedSpaceAdmissionMessagePort> {
         Arc::clone(&self.space_admission_endpoint)
+    }
+
+    /// 返回成员账本推导出的当前可通信成员范围。
+    ///
+    /// 调用方只能读取最终授权结果，不需要了解账本验证和维护流程。
+    pub fn current_member_scope(
+        &self,
+    ) -> Arc<dyn crate::space::membership::CurrentSpaceMemberScopePort> {
+        Arc::clone(&self.current_member_scope)
     }
 
     /// 在网络 handler 已绑定且 Router ready 后启动 Space 后台恢复。
