@@ -517,7 +517,7 @@ function checkApplicationMembershipCutover() {
     'crates/uc-application/src/space/facade/mod.rs',
     'crates/uc-application/src/facade/space_setup/mod.rs',
     'crates/uc-application/src/space/admission/mod.rs',
-    'crates/uc-application/src/space/admission/handle_space_admission_message/mod.rs',
+    'crates/uc-application/src/space/admission/protocol/mod.rs',
     'crates/uc-application/src/space/lifecycle/mod.rs',
     'crates/uc-application/src/space/lifecycle/session/mod.rs',
     'crates/uc-application/src/space/membership/mod.rs',
@@ -575,6 +575,13 @@ function checkApplicationMembershipCutover() {
     'crates/uc-application/src/space/synchronize_membership_history',
     'crates/uc-application/src/space/unlock_space',
     'crates/uc-application/src/space/upgrade_space',
+    'crates/uc-application/src/space/admission/handle_space_admission_message',
+    'crates/uc-application/src/space/admission/outbox.rs',
+    'crates/uc-application/src/space/admission/cancel_space_join/use_case.rs',
+    'crates/uc-application/src/space/admission/complete_pending_space_transition/use_case.rs',
+    'crates/uc-application/src/space/admission/query_pending_space_transition/use_case.rs',
+    'crates/uc-application/src/space/membership/ledger/join_record.rs',
+    'crates/uc-core/src/membership/space_join_record.rs',
   ]
   for (const path of retiredPaths) {
     if (existsSync(join(REPOSITORY_ROOT, path))) {
@@ -592,6 +599,8 @@ function checkApplicationMembershipCutover() {
     'ContentExchangeGatePort',
     'CurrentWorkspacePeerScopePort',
     'SpaceJoinRecordStorePort',
+    'SpaceJoinRecord',
+    'AdmissionOutboxDeliveryPort',
     'LegacySynchronizeMembershipHistoryUseCase',
   ]
   for (const marker of forbiddenMarkers) {
