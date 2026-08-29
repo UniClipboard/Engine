@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rand::RngCore;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use uc_application::deps::{
     AdmissionSpaceTransitionPort, AdmissionSpaceTransitionPreparationV2,
     AdmissionSpaceTransitionStepV2, CompletedJoinerActivation, ExecuteJoinerActivationError,
@@ -19,9 +18,10 @@ use uc_core::membership::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::space::admission::digest::completion_digest;
 use crate::space::admission::recovery_material::open_recovery_material;
 
-use super::super::sponsor::{activation_receipt_digest, SponsorCandidateStagedV1};
+use super::super::sponsor::{SponsorCandidateStagedV1, activation_receipt_digest};
 
 const JOINER_STAGED_TARGET_FORMAT_V2: u16 = 2;
 const MAX_TRANSITION_ADVANCES: usize = 16;
@@ -303,15 +303,6 @@ fn validate_completion(
         ));
     }
     Ok(())
-}
-
-fn completion_digest(completion: &AdmissionCompletionV1) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"uniclipboard/admission-completion-digest/v1\0");
-    hasher.update(completion.signing_payload());
-    hasher.update((completion.signature.len() as u64).to_be_bytes());
-    hasher.update(&completion.signature);
-    hasher.finalize().into()
 }
 
 fn invalid_plan(message: &'static str) -> PrepareJoinerActivationError {

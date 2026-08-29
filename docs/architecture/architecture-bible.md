@@ -1549,6 +1549,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | Sponsor S3 Complete 生产材料 | 新增 `DefaultSponsorCompletePreparation`：严格验证 Applied receipt 并写入目标历史，以当前 Sponsor credential 签署 exact Complete，同时生成可恢复 security activation plan。preparation 不提前激活 MLS；真实激活留给 Aggregate 与 pending effect 原子保存后的执行器。集成测试贯通 Sponsor Candidate→Commit→Applied→Complete preparation。 |
 | 2026-08-29 | Joiner J1 target access | Joiner private-state format 推进到 V2，在加密且自动清零的 J0 状态内暂存正确口令；生产 Candidate preparation 一次性生成 Candidate lineage 的 target access material，并以 V2 staged target 替代口令与 password-equivalent。真实 OpenMLS 测试证明后续 Commit/Applied 继续使用同一 staged target。 |
 | 2026-08-29 | Joiner J3 可恢复激活 | 新增 `DefaultJoinerActivationPreparation` 与 `DefaultJoinerActivationExecutor`：Joiner 验证 exact Complete、激活回执和 Sponsor 历史签名，使用 J0 恢复密钥解封 Sponsor 安全材料，并把目标访问、MLS 状态、成员历史、内容密钥目录及成员更新一次交给唯一 Space transition 负责人。Aggregate 先持久化不透明激活计划，后台才按有界步骤恢复执行，完成后生成只等待 Settled 的 CompleteAck；transition admission identity 同步改用新 `SpaceAdmissionId`，不再把新流程桥接到旧记录标识。 |
+| 2026-08-29 | Sponsor S4 Settled 生产材料 | 新增 `DefaultSponsorSettledPreparation`：只接受与已保存 exact Complete 前驱及内容摘要一致的 CompleteAck，并生成带独立域摘要、精确前驱和固定 Sponsor 序号的 Settled。完成摘要与 acknowledgment 摘要由准入公共私有模块唯一维护，Joiner 与 Sponsor 不再各自复制摘要规则。Aggregate 继续负责先原子保存终态和固定回复，再由 Application 向网络发送。 |
 | 2026-08-29 | 代码注释语言约定 | 仓库维护规则改为项目文档和代码注释均使用中文，代码标识符和提交信息继续使用英文；运行架构和产品行为不变。 |
 | 2026-08-29 | Sponsor Candidate 中文代码说明 | 为 Sponsor Candidate 生产准备流程补充中文注释，说明历史与身份验证、两阶段事件构造、MLS 材料绑定、恢复密封以及公开回复与本地暂存状态的边界；运行架构和产品行为不变。 |
 
