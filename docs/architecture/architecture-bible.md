@@ -1524,6 +1524,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | OpenMLS 准入转换验证 | 既有 Infra 准入安全转换 seam 通过真实 Add、Commit 和 Welcome 验证 Sponsor 与 Joiner 得到相同公开承诺；序列化 staged state 可重新打开并激活，输入摘要变化稳定拒绝，丢弃路径清零临时状态。生产架构和公开入口不变。 |
 | 2026-08-29 | Joiner 起始安全材料 | 新增生产 `DefaultJoinerStartMaterial`，由 Infra 一次解码完整邀请并生成 admission/join/message 标识、OpenMLS KeyPackage 与可恢复私密状态、fresh X25519 恢复密钥、绑定请求事实的 MLS 身份签名及邀请域隔离的 OPAQUE 口令等价材料。Application 调用方仍只执行一个材料入口；依赖失败保留 source，口令等价材料和私密状态自动清零，后续 Candidate、transport 与 Engine 接线不在本阶段。 |
 | 2026-08-29 | JoinRequest 完整身份事实 | Phase 5 Candidate 生产接入前补齐 typed JoinRequest：设备名、身份指纹、传输公钥、传输地址和成员实例连同身份签名作为一个 `AdmissionChangeFacts` 保存并往返；Core 拒绝与 DeviceId、MembershipCredential 或签名字节不一致的请求。Joiner 材料改为对这份完整事实签名，Sponsor 不再需要补造 AddDevice 身份字段。 |
+| 2026-08-29 | Candidate 两阶段事件构造 | `VersionedMembershipHistory` 新增唯一的本机 AddDevice Candidate 草案与安全承诺绑定入口：先固定成员事实、凭据、恢复公钥摘要和结果成员摘要，供 OpenMLS 计算公开承诺；再核对同一历史位置和 candidate core digest 后写入承诺标识。避免 Infra 手工拼成员历史事件或形成摘要循环。 |
 
 ## 相关文档
 

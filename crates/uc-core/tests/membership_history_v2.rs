@@ -94,6 +94,68 @@ fn single_member_root_round_trips_without_legacy_history() {
     );
 }
 
+#[test]
+fn admission_candidate_draft_binds_the_later_security_commitment() {
+    let verifier = DeterministicSignatureVerifier;
+    let mut local = admission("device-a", credential(1));
+    local.facts.identity_signature =
+        verifier.sign(&local.membership_credential, &local.facts.signing_payload());
+    let history = VersionedMembershipHistory::new_single_member_root(
+        LINEAGE.to_owned(),
+        local.facts.clone(),
+        local.membership_credential.clone(),
+    )
+    .expect("valid root");
+    let candidate = admission("device-b", credential(2));
+    let key_package = vec![0x31; 48];
+    let draft = history
+        .create_unsigned_local_admission_event(
+            local.facts.member_instance,
+            &local.membership_credential,
+            candidate.facts,
+            candidate.membership_credential,
+            [0x32; 32],
+            [0x33; 16],
+        )
+        .expect("valid candidate draft");
+    let attempt_id = [0x34; 32];
+    let candidate_core_digest = draft
+        .admission_candidate_core_digest(attempt_id, &key_package)
+        .expect("candidate digest");
+    let commitment = AdmissionSecurityCommitmentV1::new(
+        ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+        LINEAGE.to_owned(),
+        b"group".to_vec(),
+        attempt_id,
+        history.current_position().expect("current position"),
+        candidate_core_digest,
+        1,
+        0,
+        1,
+        [0x35; 32],
+        [0x36; 32],
+        [0x37; 32],
+        [0x38; 32],
+        [0x39; 32],
+    )
+    .expect("valid commitment");
+
+    let event = history
+        .finalize_unsigned_local_admission_event(draft, &key_package, &commitment)
+        .expect("commitment binds to draft");
+    let MembershipOperationV2::AddDevice { admission } = event.operation else {
+        panic!("candidate remains AddDevice");
+    };
+    assert_eq!(
+        admission.security_commitment_id,
+        commitment.security_commitment_id
+    );
+    assert_eq!(
+        event.security_state_digest,
+        commitment.security_commitment_id
+    );
+}
+
 fn event(
     history: &VersionedMembershipHistory,
     parent_event_id: Option<MembershipEventId>,

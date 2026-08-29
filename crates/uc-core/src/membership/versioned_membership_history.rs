@@ -1647,6 +1647,82 @@ impl VersionedMembershipHistory {
         ))
     }
 
+    /// Builds the stable AddDevice portion used as input to admission security preparation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_unsigned_local_admission_event(
+        &self,
+        author: MemberInstanceId,
+        author_credential: &MembershipCredential,
+        facts: AdmissionChangeFacts,
+        candidate_credential: MembershipCredential,
+        resume_public_key_digest: [u8; 32],
+        operation_id: [u8; 16],
+    ) -> Result<MembershipEventV2, MembershipHistoryV2Error> {
+        if self.credentials.get(&author) != Some(author_credential)
+            || !self.active_members().contains(&author)
+        {
+            return Err(MembershipHistoryV2Error::UnauthorizedAuthor);
+        }
+        candidate_credential.validate()?;
+        if facts.member_instance != candidate_credential.member_instance_id(&facts.device_id)
+            || self.effective_members().contains(&facts.member_instance)
+        {
+            return Err(MembershipHistoryV2Error::InvalidOperation);
+        }
+        let position = self.current_position()?;
+        let operation = MembershipOperationV2::AddDevice {
+            admission: MembershipAdmissionV2 {
+                facts,
+                membership_credential: candidate_credential,
+                resume_public_key_digest,
+                security_commitment_id: [0; 32],
+            },
+        };
+        let resulting_members_digest =
+            self.expected_resulting_members_digest(position.event_id, &operation)?;
+        Ok(MembershipEventV2::new(
+            MEMBERSHIP_EVENT_FORMAT_V2,
+            self.lineage_id.clone(),
+            position.event_id,
+            position.depth.saturating_add(1),
+            operation_id,
+            author,
+            author_credential.credential_id,
+            author_credential.signature_algorithm_version,
+            operation,
+            resulting_members_digest,
+            [0; 32],
+            Vec::new(),
+            None,
+            Vec::new(),
+        ))
+    }
+
+    /// Binds an OpenMLS result to a previously created AddDevice draft.
+    pub fn finalize_unsigned_local_admission_event(
+        &self,
+        mut event: MembershipEventV2,
+        candidate_key_package: &[u8],
+        commitment: &AdmissionSecurityCommitmentV1,
+    ) -> Result<MembershipEventV2, MembershipHistoryV2Error> {
+        if event.lineage_id != self.lineage_id
+            || event.parent_event_id != self.current_head()
+            || commitment.base_history_position != self.current_position()?
+            || commitment.candidate_core_digest
+                != event
+                    .admission_candidate_core_digest(commitment.attempt_id, candidate_key_package)?
+        {
+            return Err(MembershipHistoryV2Error::InvalidSecurityCommitment);
+        }
+        let MembershipOperationV2::AddDevice { admission } = &mut event.operation else {
+            return Err(MembershipHistoryV2Error::InvalidOperation);
+        };
+        admission.security_commitment_id = commitment.security_commitment_id;
+        event.security_state_digest = commitment.security_commitment_id;
+        event.admission_bundle_digest = Some(commitment.admission_bundle_digest);
+        Ok(event)
+    }
+
     /// Builds a rule-complete local decision for the current pending removal.
     /// The caller must sign its payload before applying it to the history.
     pub fn create_unsigned_local_removal_decision(
