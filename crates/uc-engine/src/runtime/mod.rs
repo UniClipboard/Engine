@@ -142,42 +142,12 @@ fn engine_event_for_active_clipboard(
     })
 }
 
-fn engine_event_for_workspace_convergence(revision: u64) -> crate::EngineEvent {
-    crate::EngineEvent::DeviceTrustChanged { revision }
-}
-
 fn re_pairing_scope_for_setup_state(
     state: &uc_application::facade::SetupStateView,
 ) -> Option<crate::RePairingScope> {
     state
         .re_pairing_required
         .then_some(crate::RePairingScope::AllDevices)
-}
-
-async fn spawn_space_events(
-    task_name: &'static str,
-    mut changes: tokio::sync::broadcast::Receiver<u64>,
-    tasks: &Arc<TaskRegistry>,
-    events: EventSender,
-) {
-    tasks
-        .spawn(task_name, move |cancel| async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    change = changes.recv() => match change {
-                        Ok(revision) => events.send(engine_event_for_workspace_convergence(revision)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            events.send(crate::EngineEvent::RefreshRequired {
-                                reason: crate::RefreshReason::ConsumerLagged,
-                            });
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                }
-            }
-        })
-        .await;
 }
 
 fn network_recovery_summary(event: NetworkRecoveryEvent) -> crate::NetworkRecoveryStatusSummary {
@@ -663,41 +633,6 @@ mod tests {
             re_pairing_scope_for_setup_state(&state),
             Some(crate::RePairingScope::AllDevices)
         );
-    }
-
-    #[tokio::test]
-    async fn device_trust_changes_are_published_on_the_engine_event_stream() {
-        let (changes, change_stream) = tokio::sync::broadcast::channel(8);
-        let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
-        let tasks = Arc::new(TaskRegistry::new());
-        spawn_space_events("test_space_events", change_stream, &tasks, events).await;
-        changes.send(1).unwrap();
-
-        assert_eq!(
-            event_stream.next().await,
-            Some(crate::EngineEvent::DeviceTrustChanged { revision: 1 })
-        );
-
-        tasks.shutdown(Duration::from_secs(1)).await;
-    }
-
-    #[tokio::test]
-    async fn workspace_convergence_lag_requests_a_snapshot_refresh() {
-        let (changes, change_stream) = tokio::sync::broadcast::channel(1);
-        let (events, mut event_stream) = crate::engine::event_stream::event_channel(8);
-        let tasks = Arc::new(TaskRegistry::new());
-        spawn_space_events("test_space_events", change_stream, &tasks, events).await;
-        changes.send(1).unwrap();
-        changes.send(2).unwrap();
-
-        assert_eq!(
-            event_stream.next().await,
-            Some(crate::EngineEvent::RefreshRequired {
-                reason: crate::RefreshReason::ConsumerLagged,
-            })
-        );
-
-        tasks.shutdown(Duration::from_secs(1)).await;
     }
 
     #[cfg(feature = "lan-compat")]

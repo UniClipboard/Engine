@@ -14,27 +14,29 @@ use uc_application::facade::{
     SpaceProtectionView,
 };
 #[cfg(any(test, feature = "dev-tools"))]
-use uc_core::membership::{RemovalDecision, WorkspaceSnapshot};
+use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ReachabilityState;
 
 use crate::{
     ContentTypesPatch, ContentTypesSummary, DecideDeviceTrustChangeInput,
     DeviceCompatibilitySummary, DeviceGroupRelationshipSummary, DeviceMembershipSummary,
     DeviceReachabilitySummary, DeviceSummary, DeviceSyncRelationshipSummary,
-    DeviceTrustActionSummary, DeviceTrustChangeSummary, DeviceTrustChoiceSummary,
-    DeviceTrustDecisionSummary, DeviceTrustImpactSummary, DeviceTrustRecoverySummary,
-    DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary,
-    DeviceTrustUnavailableReasonSummary, EngineError, EngineErrorCategory,
-    JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary, JoinedSpaceSummary,
-    MemberProtectionStatusSummary, MemberProtectionSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesSummary, OperationResult, PendingInboundMemberSummary,
-    QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
-    SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
-    WorkspaceConvergenceFailureCategorySummary, WorkspaceConvergencePhaseSummary,
-    WorkspaceConvergenceSummary,
+    DeviceTrustChangeSummary, DeviceTrustChoiceSummary, DeviceTrustDecisionSummary,
+    DeviceTrustImpactSummary, DeviceTrustRecoverySummary, DeviceTrustRelationshipSummary,
+    DeviceTrustSnapshotSummary, EngineError, EngineErrorCategory, JoinSpaceRejectionReasonSummary,
+    JoinSpaceStatusSummary, JoinedSpaceSummary, MemberProtectionStatusSummary,
+    MemberProtectionSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
+    OperationResult, PendingInboundMemberSummary, QueryMemberSyncPreferencesInput,
+    RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
+    UpdateMemberSyncPreferencesInput,
 };
 #[cfg(feature = "dev-tools")]
 use crate::{DecideMembershipRemovalInput, MembershipRemovalDecision};
+#[cfg(any(test, feature = "dev-tools"))]
+use crate::{
+    WorkspaceConvergenceFailureCategorySummary, WorkspaceConvergencePhaseSummary,
+    WorkspaceConvergenceSummary,
+};
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     let encryption = facade.encryption_state().await.map_err(|_| {

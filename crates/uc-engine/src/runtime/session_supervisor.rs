@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 
 use super::{operation_error_with_code, ProductionRuntime, ProductionSession, SessionFactory};
 use crate::{EngineError, OperationResult};

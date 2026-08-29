@@ -54,14 +54,13 @@ use uc_infra::db::pool::{init_db_pool, DbPool};
 #[cfg(feature = "lan-compat")]
 use uc_infra::db::repositories::DieselMobileDeviceRepository;
 use uc_infra::db::repositories::{
-    DieselBlobMigrationRepository, DieselBlobReferenceRepository, DieselBlobRepository,
-    DieselClipboardEntryReplaceRepository, DieselClipboardEntryRepository,
-    DieselClipboardEventRepository, DieselClipboardRepresentationRepository,
-    DieselClipboardSelectionRepository, DieselEntryAvailabilityRepository,
-    DieselFileTransferRepository, DieselInboundReceiveCommitRepository,
-    DieselPeerAddressRepository, DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository,
-    DieselSpaceSecurityStore, DieselThumbnailRepository, DieselTrustedPeerRepository,
-    EncryptedRelationshipStore,
+    DieselBlobReferenceRepository, DieselBlobRepository, DieselClipboardEntryReplaceRepository,
+    DieselClipboardEntryRepository, DieselClipboardEventRepository,
+    DieselClipboardRepresentationRepository, DieselClipboardSelectionRepository,
+    DieselEntryAvailabilityRepository, DieselFileTransferRepository,
+    DieselInboundReceiveCommitRepository, DieselPeerAddressRepository,
+    DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository, DieselSpaceSecurityStore,
+    DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::fs::VaultLayout;
@@ -111,8 +110,6 @@ struct InfraLayer {
 
     // Slice 3 Phase 1:明文 hash → 密文 digest 去重缓存。
     blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,
-
-    blob_migration_repo: Arc<dyn uc_core::ports::clipboard::BlobMigrationRepoPort>,
 
     // Blob storage
     blob_repository: Arc<dyn BlobRepositoryPort>,
@@ -288,7 +285,7 @@ pub fn wire_dependencies_from_inputs(
     // off its own pooled connection; clone before infra consumes the pool.
     let db_pool_for_config_migration = db_pool.clone();
 
-    let mut infra = create_infra_layer(
+    let infra = create_infra_layer(
         db_pool,
         &vault_path,
         &settings_path,
