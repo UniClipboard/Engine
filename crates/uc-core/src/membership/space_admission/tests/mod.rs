@@ -16,28 +16,45 @@ use super::{
     AdmissionContinuationCredential, AdmissionContinuationRoute, AdmissionEffect,
     AdmissionEncryptedPasswordEquivalent, AdmissionErrorCategory, AdmissionEvidenceRelation,
     AdmissionIdentitySignature, AdmissionInboundDecision, AdmissionInboundExpectation,
-    AdmissionInvitationClaim, AdmissionJoinRequestV1, AdmissionJoinerPrivateState,
-    AdmissionKeyPackage, AdmissionMessageEvidence, AdmissionMessageHeaderError, AdmissionMessageId,
-    AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPendingExchangeError,
-    AdmissionPendingRecovery, AdmissionPreparedV1, AdmissionProtocolMessageError,
-    AdmissionRecoveryCategory, AdmissionRecoveryPublicKey, AdmissionReplayDecision,
-    AdmissionReplayError, AdmissionRetryState, AdmissionRole, AdmissionSealedRecoveryMaterial,
-    AdmissionSettledV1, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
-    AdmissionStagedSecurityState, AdmissionStagedTargetInput, InvitationId, JoinId,
-    PendingAdmissionExchange, SavedAdmissionReply, SpaceAdmissionActiveState,
-    SpaceAdmissionAggregate, SpaceAdmissionAggregateError, SpaceAdmissionBodyV1,
-    SpaceAdmissionCompletionHelperState, SpaceAdmissionEnvelopeHeaderV1, SpaceAdmissionEnvelopeV1,
-    SpaceAdmissionId, SpaceAdmissionJoinerChannelState, SpaceAdmissionJoinerState,
-    SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion, SpaceAdmissionRecordState,
-    SpaceAdmissionRejectedState, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
-    SpaceAdmissionSponsorState, SpaceAdmissionTerminalState, SponsorAdmission,
-    UnreadableHistoryPolicy,
+    AdmissionInvitationClaim, AdmissionJoinRequestError, AdmissionJoinRequestV1,
+    AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageEvidence,
+    AdmissionMessageHeaderError, AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome,
+    AdmissionPeerBinding, AdmissionPendingExchangeError, AdmissionPendingRecovery,
+    AdmissionPreparedV1, AdmissionProtocolMessageError, AdmissionRecoveryCategory,
+    AdmissionRecoveryPublicKey, AdmissionReplayDecision, AdmissionReplayError, AdmissionRetryState,
+    AdmissionRole, AdmissionSealedRecoveryMaterial, AdmissionSettledV1,
+    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionStagedSecurityState,
+    AdmissionStagedTargetInput, InvitationId, JoinId, PendingAdmissionExchange,
+    SavedAdmissionReply, SpaceAdmissionActiveState, SpaceAdmissionAggregate,
+    SpaceAdmissionAggregateError, SpaceAdmissionBodyV1, SpaceAdmissionCompletionHelperState,
+    SpaceAdmissionEnvelopeHeaderV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionJoinerChannelState, SpaceAdmissionJoinerState, SpaceAdmissionMessageKind,
+    SpaceAdmissionProtocolVersion, SpaceAdmissionRecordState, SpaceAdmissionRejectedState,
+    SpaceAdmissionRejectionReason, SpaceAdmissionRoute, SpaceAdmissionSponsorState,
+    SpaceAdmissionTerminalState, SponsorAdmission, UnreadableHistoryPolicy,
 };
 
 mod exchange;
 mod id;
 mod message;
 mod state;
+
+fn join_request_identity_facts(
+    device_id: DeviceId,
+    credential: &MembershipCredential,
+    signature: Vec<u8>,
+) -> AdmissionChangeFacts {
+    AdmissionChangeFacts {
+        member_instance: credential.member_instance_id(&device_id),
+        device_id,
+        device_name: "Joining device".to_owned(),
+        identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+            .expect("valid fingerprint fixture"),
+        transport_public_key: vec![0xa1; 32],
+        transport_address_blob: vec![0xa2; 32],
+        identity_signature: signature,
+    }
+}
 
 fn candidate_body_fixture() -> AdmissionCandidateV1 {
     let sponsor_credential =

@@ -42,7 +42,7 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - **Status:** complete
 
 ### Phase 4: Standard authentication and Joiner start material
-- [ ] Integrate fixed-version OPAQUE per Spec 028 and validate it
+- [x] Integrate fixed-version OPAQUE per Spec 028 and validate it
   - [x] Correct/wrong passphrase, identity binding, registration restoration, and corrupt-record rejection
   - [x] ServerSetup restoration and mismatched-setup rejection
   - [x] RFC 9807 vector evidence and secret/debug lifecycle checks
@@ -53,6 +53,20 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - **Status:** complete
 
 **Next Step:** Begin Phase 5 Candidate preparation, authenticated transport, and Engine production wiring.
+
+### Phase 5: Candidate preparation, authenticated transport, and production wiring
+- [ ] Implement the production Sponsor Candidate adapter behind `PrepareSponsorCandidatePort`
+- [ ] Implement the production Joiner Candidate adapter behind `PrepareJoinerCandidatePort`
+- [ ] Add the bounded Iroh admission wire and single authenticated ALPN handler/connector
+- [ ] Prove initial OPAQUE JoinRequest/Candidate and continuation Prepared/Commit loopback exchanges
+- [ ] Wire the new admission repository, material, Candidate, and transport capabilities in `uc-engine`
+- [ ] Remove the remaining obsolete Engine admission assembly references instead of restoring aliases
+- [ ] Run scoped suites, workspace checks, architecture checks, review, and update the architecture bible
+- **Status:** in_progress
+
+**Phase 5 seams:** Application Candidate ports, Application `SpaceAdmissionTransportPort`, the typed authenticated-message endpoint, and the stable Engine JoinSpace entry. Tests do not call internal OpenMLS or Iroh helpers directly.
+
+**Phase 5 exit gate:** A real local two-endpoint run persists Sponsor Candidate before replying and Joiner Prepared before sending; retries replay exact messages, authentication/identity/frame failures close deterministically, and Engine assembles only the new protocol path.
 
 ## Decisions
 - A short code and a full invitation are two entry forms for one invitation, not two protocols.

@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::DeviceId;
 use crate::membership::{
-    AdmissionCompletionV1, AdmissionSecurityCommitmentV1, MembershipCredential, MembershipEventV2,
-    PreparedAdmissionProofV1, ADMISSION_COMPLETION_FORMAT_V1, PREPARED_ADMISSION_PROOF_FORMAT_V1,
+    AdmissionChangeFacts, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,
+    MembershipCredential, MembershipEventV2, PreparedAdmissionProofV1,
+    ADMISSION_COMPLETION_FORMAT_V1, PREPARED_ADMISSION_PROOF_FORMAT_V1,
 };
 
 use super::super::artifact::{
@@ -245,6 +246,7 @@ struct PersistedPreparedEnvelopeV1 {
 struct PersistedJoinRequestV1 {
     invitation_id: [u8; 32],
     device_id: String,
+    identity_facts: AdmissionChangeFacts,
     credential_format_version: u16,
     credential_signature_algorithm_version: u16,
     credential_public_key: Vec<u8>,

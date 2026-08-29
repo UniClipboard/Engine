@@ -23,6 +23,23 @@ use uc_core::membership::{
 };
 use uc_core::ports::SettingsPort;
 use uc_core::security::IdentityFingerprint;
+
+fn join_request_identity_facts(
+    device_id: DeviceId,
+    credential: &MembershipCredential,
+    signature: Vec<u8>,
+) -> AdmissionChangeFacts {
+    AdmissionChangeFacts {
+        member_instance: credential.member_instance_id(&device_id),
+        device_id,
+        device_name: "Joining device".to_owned(),
+        identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+            .expect("valid fingerprint fixture"),
+        transport_public_key: vec![0x53; 32],
+        transport_address_blob: vec![0x54; 32],
+        identity_signature: signature,
+    }
+}
 use uc_core::DeviceId;
 
 use super::{
@@ -1475,13 +1492,17 @@ fn join_request_envelope(
     admission_id: SpaceAdmissionId,
     message_id: [u8; 32],
 ) -> SpaceAdmissionEnvelopeV1 {
+    let device_id = DeviceId::new("joining-device");
+    let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x58; 32]);
+    let signature = vec![0x5b; 64];
     let request = AdmissionJoinRequestV1::new(
         InvitationId::from_bytes([0x57; 32]).expect("valid invitation id"),
-        DeviceId::new("joining-device"),
-        MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x58; 32]),
+        device_id.clone(),
+        join_request_identity_facts(device_id, &credential, signature.clone()),
+        credential,
         AdmissionKeyPackage::from_bytes(vec![0x59; 48]).expect("valid key package"),
         AdmissionRecoveryPublicKey::from_bytes([0x5a; 32]).expect("valid recovery public key"),
-        AdmissionIdentitySignature::from_bytes(vec![0x5b; 64]).expect("valid identity signature"),
+        AdmissionIdentitySignature::from_bytes(signature).expect("valid identity signature"),
         UnreadableHistoryPolicy::Discard,
     )
     .expect("valid join request");
@@ -1576,15 +1597,18 @@ impl JoinerStartMaterialPort for FixedJoinerStartMaterial {
     ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
         let admission_id = SpaceAdmissionId::from_bytes([0x11; 32]).expect("valid admission id");
         let join_id = JoinId::from_bytes([0x12; 16]).expect("valid join id");
+        let device_id = DeviceId::new("joining-device");
+        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x14; 32]);
+        let signature = vec![0x17; 64];
 
         let request = AdmissionJoinRequestV1::new(
             InvitationId::from_bytes([0x13; 32]).expect("valid invitation id"),
-            DeviceId::new("joining-device"),
-            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x14; 32]),
+            device_id.clone(),
+            join_request_identity_facts(device_id, &credential, signature.clone()),
+            credential,
             AdmissionKeyPackage::from_bytes(vec![0x15; 48]).expect("valid key package"),
             AdmissionRecoveryPublicKey::from_bytes([0x16; 32]).expect("valid recovery public key"),
-            AdmissionIdentitySignature::from_bytes(vec![0x17; 64])
-                .expect("valid identity signature"),
+            AdmissionIdentitySignature::from_bytes(signature).expect("valid identity signature"),
             if input.preserve_unreadable_history {
                 UnreadableHistoryPolicy::Preserve
             } else {

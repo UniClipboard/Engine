@@ -124,6 +124,7 @@
 | Phase 4 final metadata / architecture / diff checks | passed |
 | Phase 4 final workspace check | existing Engine assembly failures remain (27 lib, 29 test) |
 | Phase 4 final workspace format check | existing differences remain in two unrelated files |
+| Phase 5 JoinRequest identity-facts red/green | Core mismatch test failed before implementation, then passed with persistence and scoped crate checks |
 
 ## Errors
 

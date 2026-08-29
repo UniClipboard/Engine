@@ -1,8 +1,9 @@
 use crate::ids::DeviceId;
 
 use super::super::{
-    AdmissionActivationReceipt, AdmissionCompletionV1, AdmissionSecurityCommitmentV1,
-    MembershipCredential, MembershipEventV2, MembershipOperationV2, PreparedAdmissionProofV1,
+    AdmissionActivationReceipt, AdmissionChangeFacts, AdmissionCompletionV1,
+    AdmissionSecurityCommitmentV1, MembershipCredential, MembershipEventV2, MembershipOperationV2,
+    PreparedAdmissionProofV1,
 };
 use super::artifact::{
     AdmissionContinuationRoute, AdmissionIdentitySignature, AdmissionKeyPackage,
@@ -207,12 +208,15 @@ pub enum UnreadableHistoryPolicy {
 pub enum AdmissionJoinRequestError {
     #[error("the membership credential is invalid")]
     InvalidMembershipCredential,
+    #[error("the signed identity facts do not match the joining device")]
+    IdentityMismatch,
 }
 
 #[derive(PartialEq, Eq)]
 pub struct AdmissionJoinRequestV1 {
     invitation_id: InvitationId,
     device_id: DeviceId,
+    identity_facts: AdmissionChangeFacts,
     membership_credential: MembershipCredential,
     key_package: AdmissionKeyPackage,
     recovery_public_key: AdmissionRecoveryPublicKey,
@@ -225,6 +229,7 @@ impl AdmissionJoinRequestV1 {
     pub fn new(
         invitation_id: InvitationId,
         device_id: DeviceId,
+        identity_facts: AdmissionChangeFacts,
         membership_credential: MembershipCredential,
         key_package: AdmissionKeyPackage,
         recovery_public_key: AdmissionRecoveryPublicKey,
@@ -234,9 +239,20 @@ impl AdmissionJoinRequestV1 {
         membership_credential
             .validate()
             .map_err(|_| AdmissionJoinRequestError::InvalidMembershipCredential)?;
+        if identity_facts.device_id != device_id
+            || identity_facts.member_instance
+                != membership_credential.member_instance_id(&device_id)
+            || identity_facts.device_name.trim().is_empty()
+            || identity_facts.transport_public_key.is_empty()
+            || identity_facts.transport_address_blob.is_empty()
+            || identity_facts.identity_signature.as_slice() != identity_signature.as_bytes()
+        {
+            return Err(AdmissionJoinRequestError::IdentityMismatch);
+        }
         Ok(Self {
             invitation_id,
             device_id,
+            identity_facts,
             membership_credential,
             key_package,
             recovery_public_key,
@@ -255,6 +271,10 @@ impl AdmissionJoinRequestV1 {
 
     pub const fn membership_credential(&self) -> &MembershipCredential {
         &self.membership_credential
+    }
+
+    pub const fn identity_facts(&self) -> &AdmissionChangeFacts {
+        &self.identity_facts
     }
 
     pub const fn key_package(&self) -> &AdmissionKeyPackage {

@@ -322,15 +322,19 @@ fn fixed_size_recovery_and_completion_values_reject_zero() {
 
 #[test]
 fn join_request_body_requires_complete_typed_material() {
+    let device_id = DeviceId::new("joining-device");
+    let credential = MembershipCredential::new(1, vec![0x84; 32]);
+    let signature = vec![0x87; 64];
     let request = AdmissionJoinRequestV1::new(
         InvitationId::from_bytes([0x83; 32]).expect("non-zero invitation id fixture"),
-        DeviceId::new("joining-device"),
-        MembershipCredential::new(1, vec![0x84; 32]),
+        device_id.clone(),
+        join_request_identity_facts(device_id, &credential, signature.clone()),
+        credential,
         AdmissionKeyPackage::from_bytes(vec![0x85; 48])
             .expect("bounded non-empty key package fixture"),
         AdmissionRecoveryPublicKey::from_bytes([0x86; 32])
             .expect("non-zero recovery public key fixture"),
-        AdmissionIdentitySignature::from_bytes(vec![0x87; 64])
+        AdmissionIdentitySignature::from_bytes(signature)
             .expect("bounded non-empty signature fixture"),
         UnreadableHistoryPolicy::Preserve,
     )
@@ -340,6 +344,37 @@ fn join_request_body_requires_complete_typed_material() {
     assert_eq!(body.kind(), SpaceAdmissionMessageKind::JoinRequest);
     assert!(!format!("{body:?}").contains("joining-device"));
     assert!(!format!("{body:?}").contains("8787"));
+}
+
+#[test]
+fn join_request_rejects_identity_facts_for_another_device() {
+    let credential = MembershipCredential::new(1, vec![0x91; 32]);
+    let facts_device = DeviceId::new("facts-device");
+    let facts = AdmissionChangeFacts {
+        member_instance: credential.member_instance_id(&facts_device),
+        device_id: facts_device,
+        device_name: "Joining device".to_owned(),
+        identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+            .expect("valid fingerprint fixture"),
+        transport_public_key: vec![0x92; 32],
+        transport_address_blob: vec![0x93; 32],
+        identity_signature: vec![0x94; 64],
+    };
+
+    let result = AdmissionJoinRequestV1::new(
+        InvitationId::from_bytes([0x95; 32]).expect("valid invitation id fixture"),
+        DeviceId::new("other-device"),
+        facts,
+        credential,
+        AdmissionKeyPackage::from_bytes(vec![0x96; 48]).expect("valid key package fixture"),
+        AdmissionRecoveryPublicKey::from_bytes([0x97; 32])
+            .expect("valid recovery public key fixture"),
+        AdmissionIdentitySignature::from_bytes(vec![0x94; 64])
+            .expect("valid identity signature fixture"),
+        UnreadableHistoryPolicy::Discard,
+    );
+
+    assert_eq!(result, Err(AdmissionJoinRequestError::IdentityMismatch));
 }
 
 #[test]

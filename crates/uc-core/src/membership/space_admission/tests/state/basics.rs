@@ -2,14 +2,18 @@ fn join_request_envelope_fixture(
     admission_id: SpaceAdmissionId,
     message_id: AdmissionMessageId,
 ) -> SpaceAdmissionEnvelopeV1 {
+    let device_id = DeviceId::new("joining-device");
+    let credential = MembershipCredential::new(1, vec![0xe3; 32]);
+    let signature = vec![0xe6; 64];
     let request = AdmissionJoinRequestV1::new(
         InvitationId::from_bytes([0xe2; 32]).expect("non-zero invitation id fixture"),
-        DeviceId::new("joining-device"),
-        MembershipCredential::new(1, vec![0xe3; 32]),
+        device_id.clone(),
+        join_request_identity_facts(device_id, &credential, signature.clone()),
+        credential,
         AdmissionKeyPackage::from_bytes(vec![0xe4; 48]).expect("bounded key package fixture"),
         AdmissionRecoveryPublicKey::from_bytes([0xe5; 32])
             .expect("non-zero recovery public key fixture"),
-        AdmissionIdentitySignature::from_bytes(vec![0xe6; 64]).expect("bounded signature fixture"),
+        AdmissionIdentitySignature::from_bytes(signature).expect("bounded signature fixture"),
         UnreadableHistoryPolicy::Discard,
     )
     .expect("complete JoinRequest fixture");

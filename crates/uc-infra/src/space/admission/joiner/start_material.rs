@@ -7,12 +7,13 @@ use uc_application::deps::{
 use uc_application::facade::JoinSpaceInput;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionJoinRequestV1,
-    AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId,
+    AdmissionChangeFacts, AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature,
+    AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId,
     AdmissionRecoveryPublicKey, AdmissionRole, JoinId, MembershipCredential, SpaceAdmissionBodyV1,
     SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
     ED25519_SIGNATURE_ALGORITHM_V1,
 };
+use uc_core::security::IdentityFingerprint;
 use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecret};
 use zeroize::Zeroizing;
 
@@ -21,16 +22,31 @@ use crate::space::decode_invitation_entry;
 use crate::space::security::mls_group::MlsGroupEngine;
 
 const JOINER_PRIVATE_STATE_FORMAT_V1: u16 = 1;
-const IDENTITY_SIGNATURE_CONTEXT_V1: &[u8] = b"uc-space-admission-join-request-v1";
 
 /// Infra owns the complete, one-shot construction of a Joiner's initial admission material.
 pub struct DefaultJoinerStartMaterial {
     device_id: DeviceId,
+    device_name: String,
+    identity_fingerprint: IdentityFingerprint,
+    transport_public_key: Vec<u8>,
+    transport_address_blob: Vec<u8>,
 }
 
 impl DefaultJoinerStartMaterial {
-    pub fn new(device_id: DeviceId) -> Self {
-        Self { device_id }
+    pub fn new(
+        device_id: DeviceId,
+        device_name: String,
+        identity_fingerprint: IdentityFingerprint,
+        transport_public_key: Vec<u8>,
+        transport_address_blob: Vec<u8>,
+    ) -> Self {
+        Self {
+            device_id,
+            device_name,
+            identity_fingerprint,
+            transport_public_key,
+            transport_address_blob,
+        }
     }
 }
 
@@ -39,17 +55,6 @@ struct JoinerPrivateStateV1<'a> {
     format_version: u16,
     mls_state: &'a [u8],
     recovery_secret: &'a [u8; 32],
-}
-
-#[derive(Serialize)]
-struct IdentitySignaturePayloadV1<'a> {
-    context: &'static [u8],
-    admission_id: &'a [u8; 32],
-    invitation_id: &'a [u8; 32],
-    device_id: &'a str,
-    key_package: &'a [u8],
-    recovery_public_key: &'a [u8; 32],
-    preserve_unreadable_history: bool,
 }
 
 #[async_trait]
@@ -88,26 +93,29 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
         } else {
             UnreadableHistoryPolicy::Discard
         };
-        let signature_payload = postcard::to_stdvec(&IdentitySignaturePayloadV1 {
-            context: IDENTITY_SIGNATURE_CONTEXT_V1,
-            admission_id: admission_id.as_bytes(),
-            invitation_id: decoded.invitation_id().as_bytes(),
-            device_id: self.device_id.as_str(),
-            key_package: &pending.key_package,
-            recovery_public_key: &recovery_public_bytes,
-            preserve_unreadable_history: input.preserve_unreadable_history,
-        })
+        let credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, signing_public_key);
+        let mut identity_facts = AdmissionChangeFacts {
+            member_instance: credential.member_instance_id(&self.device_id),
+            device_id: self.device_id.clone(),
+            device_name: self.device_name.clone(),
+            identity_fingerprint: self.identity_fingerprint.clone(),
+            transport_public_key: self.transport_public_key.clone(),
+            transport_address_blob: self.transport_address_blob.clone(),
+            identity_signature: Vec::new(),
+        };
+        let identity_signature = MlsGroupEngine::sign_pending_member_payload(
+            &pending.client_state,
+            &identity_facts.signing_payload(),
+        )
         .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-        let identity_signature =
-            MlsGroupEngine::sign_pending_member_payload(&pending.client_state, &signature_payload)
-                .map_err(|error| {
-                    JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
-                })?;
+        identity_facts.identity_signature = identity_signature.clone();
 
         let request = AdmissionJoinRequestV1::new(
             decoded.invitation_id(),
             self.device_id.clone(),
-            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, signing_public_key),
+            identity_facts,
+            credential,
             AdmissionKeyPackage::from_bytes(pending.key_package.clone()).map_err(|error| {
                 JoinerStartMaterialError::unavailable(anyhow::Error::new(error))
             })?,
@@ -207,7 +215,7 @@ mod tests {
         let invitation =
             encode_full_invitation(invitation_id, b"opaque-sponsor-route", 1_900_000_000_000)
                 .expect("valid full invitation fixture");
-        let adapter = DefaultJoinerStartMaterial::new(DeviceId::new("joining-device"));
+        let adapter = adapter();
 
         let material = adapter
             .create(&JoinSpaceInput {
@@ -223,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_full_invitation_is_rejected_without_a_dependency_error() {
-        let adapter = DefaultJoinerStartMaterial::new(DeviceId::new("joining-device"));
+        let adapter = adapter();
         let error = adapter
             .create(&JoinSpaceInput {
                 invitation_code: InvitationCode::new("ucspace1_invalid"),
@@ -237,5 +245,16 @@ mod tests {
 
         assert!(matches!(error, JoinerStartMaterialError::InvalidInvitation));
         assert!(error.source().is_none());
+    }
+
+    fn adapter() -> DefaultJoinerStartMaterial {
+        DefaultJoinerStartMaterial::new(
+            DeviceId::new("joining-device"),
+            "Joining device".to_owned(),
+            IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+                .expect("valid fingerprint fixture"),
+            vec![0x71; 32],
+            vec![0x72; 32],
+        )
     }
 }

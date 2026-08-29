@@ -557,6 +557,7 @@ impl From<&AdmissionJoinRequestV1> for PersistedJoinRequestV1 {
         Self {
             invitation_id: *request.invitation_id().as_bytes(),
             device_id: request.device_id().as_str().to_owned(),
+            identity_facts: request.identity_facts().clone(),
             credential_format_version: credential.credential_format_version,
             credential_signature_algorithm_version: credential.signature_algorithm_version,
             credential_public_key: credential.public_key.clone(),
@@ -589,6 +590,7 @@ impl PersistedJoinRequestV1 {
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             DeviceId::try_new(self.device_id)
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
+            self.identity_facts,
             credential,
             AdmissionKeyPackage::from_bytes(self.key_package)
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,

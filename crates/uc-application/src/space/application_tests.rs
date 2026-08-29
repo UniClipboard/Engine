@@ -4,12 +4,30 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::*;
+use uc_core::security::IdentityFingerprint;
 
 use super::admission::*;
 use super::application::{SpaceApplication, SpaceApplicationDeps};
 use super::membership::*;
 
 struct MemoryLedger(Mutex<LoadedMembershipLedger>);
+
+fn join_request_identity_facts(
+    device_id: DeviceId,
+    credential: &MembershipCredential,
+    signature: Vec<u8>,
+) -> AdmissionChangeFacts {
+    AdmissionChangeFacts {
+        member_instance: credential.member_instance_id(&device_id),
+        device_id,
+        device_name: "Joining device".to_owned(),
+        identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+            .expect("valid fingerprint fixture"),
+        transport_public_key: vec![0x88; 32],
+        transport_address_blob: vec![0x89; 32],
+        identity_signature: signature,
+    }
+}
 
 #[async_trait]
 impl LoadMembershipLedgerPort for MemoryLedger {
@@ -177,14 +195,17 @@ impl JoinerStartMaterialPort for PassivePorts {
     ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
         let admission_id = SpaceAdmissionId::from_bytes([0x81; 32]).expect("valid admission id");
         let join_id = JoinId::from_bytes([0x82; 16]).expect("valid join id");
+        let device_id = DeviceId::new("joining-device");
+        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x84; 32]);
+        let signature = vec![0x87; 64];
         let request = AdmissionJoinRequestV1::new(
             InvitationId::from_bytes([0x83; 32]).expect("valid invitation id"),
-            DeviceId::new("joining-device"),
-            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x84; 32]),
+            device_id.clone(),
+            join_request_identity_facts(device_id, &credential, signature.clone()),
+            credential,
             AdmissionKeyPackage::from_bytes(vec![0x85; 48]).expect("valid key package"),
             AdmissionRecoveryPublicKey::from_bytes([0x86; 32]).expect("valid recovery public key"),
-            AdmissionIdentitySignature::from_bytes(vec![0x87; 64])
-                .expect("valid identity signature"),
+            AdmissionIdentitySignature::from_bytes(signature).expect("valid identity signature"),
             if input.preserve_unreadable_history {
                 UnreadableHistoryPolicy::Preserve
             } else {

@@ -13,17 +13,19 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    ActiveSpaceGenerationManifestV2, AdmissionChannelPeerId, AdmissionContinuationCredential,
-    AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionJoinRequestV1,
-    AdmissionJoinerPrivateState, AdmissionJoinerStartContext, AdmissionKeyPackage,
-    AdmissionPeerBinding, AdmissionRecordPersistence, AdmissionRecoveryPublicKey,
-    AdmissionRetryState, AdmissionRole, AdmissionShortInvitationCode, AdmissionSourceSnapshot,
-    InvitationId, JoinId, JoinerAdmission, JoinerAdmissionTransition, JoinerInvitationResolution,
-    MembershipCredential, PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
-    SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionRoute, SponsorAdmission,
-    SponsorAdmissionTransition, UnreadableHistoryPolicy,
+    ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, AdmissionChannelPeerId,
+    AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
+    AdmissionIdentitySignature, AdmissionJoinRequestV1, AdmissionJoinerPrivateState,
+    AdmissionJoinerStartContext, AdmissionKeyPackage, AdmissionPeerBinding,
+    AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
+    AdmissionShortInvitationCode, AdmissionSourceSnapshot, InvitationId, JoinId, JoinerAdmission,
+    JoinerAdmissionTransition, JoinerInvitationResolution, MembershipCredential,
+    PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionMessageKind, SpaceAdmissionRoute, SponsorAdmission, SponsorAdmissionTransition,
+    UnreadableHistoryPolicy,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
+use uc_core::security::IdentityFingerprint;
 use uc_infra::db::executor::DieselSqliteExecutor;
 use uc_infra::db::pool::init_db_pool;
 use uc_infra::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
@@ -465,6 +467,23 @@ fn continuation() -> AdmissionContinuationCredential {
     AdmissionContinuationCredential::from_bytes(vec![0xd3; 64]).unwrap()
 }
 
+fn join_request_identity_facts(
+    device_id: DeviceId,
+    credential: &MembershipCredential,
+    signature: Vec<u8>,
+) -> AdmissionChangeFacts {
+    AdmissionChangeFacts {
+        member_instance: credential.member_instance_id(&device_id),
+        device_id,
+        device_name: "Joining device".to_owned(),
+        identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+            .unwrap(),
+        transport_public_key: vec![0xd4; 32],
+        transport_address_blob: vec![0xd5; 32],
+        identity_signature: signature,
+    }
+}
+
 fn start_join_transition(
     admission_byte: u8,
     join_byte: u8,
@@ -472,6 +491,9 @@ fn start_join_transition(
     source_snapshot: AdmissionSourceSnapshot,
 ) -> JoinerAdmissionTransition {
     let admission_id = SpaceAdmissionId::from_bytes([admission_byte; 32]).unwrap();
+    let device_id = DeviceId::new("joining-device");
+    let credential = MembershipCredential::new(1, vec![admission_byte + 3; 32]);
+    let signature = vec![admission_byte + 6; 64];
     let request = SpaceAdmissionEnvelopeV1::new(
         admission_id,
         AdmissionRole::Joiner,
@@ -481,11 +503,12 @@ fn start_join_transition(
         SpaceAdmissionBodyV1::JoinRequest(
             AdmissionJoinRequestV1::new(
                 InvitationId::from_bytes([admission_byte + 2; 32]).unwrap(),
-                DeviceId::new("joining-device"),
-                MembershipCredential::new(1, vec![admission_byte + 3; 32]),
+                device_id.clone(),
+                join_request_identity_facts(device_id, &credential, signature.clone()),
+                credential,
                 AdmissionKeyPackage::from_bytes(vec![admission_byte + 4; 48]).unwrap(),
                 AdmissionRecoveryPublicKey::from_bytes([admission_byte + 5; 32]).unwrap(),
-                AdmissionIdentitySignature::from_bytes(vec![admission_byte + 6; 64]).unwrap(),
+                AdmissionIdentitySignature::from_bytes(signature).unwrap(),
                 UnreadableHistoryPolicy::Discard,
             )
             .unwrap(),

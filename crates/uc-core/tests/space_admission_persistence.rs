@@ -309,14 +309,28 @@ fn sponsor_candidate_fixture() -> SponsorAdmission {
 }
 
 fn join_request_envelope(admission_id: SpaceAdmissionId) -> SpaceAdmissionEnvelopeV1 {
+    let device_id = DeviceId::new("persisted-joining-device");
+    let credential = MembershipCredential::new(1, vec![0x87; 32]);
+    let signature = vec![0x8a; 64];
+    let identity_facts = AdmissionChangeFacts {
+        member_instance: credential.member_instance_id(&device_id),
+        device_id: device_id.clone(),
+        device_name: "Persisted joining device".to_owned(),
+        identity_fingerprint: IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+            .expect("valid fingerprint fixture"),
+        transport_public_key: vec![0x8b; 32],
+        transport_address_blob: vec![0x8c; 32],
+        identity_signature: signature.clone(),
+    };
     let request = AdmissionJoinRequestV1::new(
         InvitationId::from_bytes([0x86; 32]).expect("non-zero invitation id fixture"),
-        DeviceId::new("persisted-joining-device"),
-        MembershipCredential::new(1, vec![0x87; 32]),
+        device_id,
+        identity_facts,
+        credential,
         AdmissionKeyPackage::from_bytes(vec![0x88; 48]).expect("bounded key package fixture"),
         AdmissionRecoveryPublicKey::from_bytes([0x89; 32])
             .expect("non-zero recovery public key fixture"),
-        AdmissionIdentitySignature::from_bytes(vec![0x8a; 64])
+        AdmissionIdentitySignature::from_bytes(signature)
             .expect("bounded identity signature fixture"),
         UnreadableHistoryPolicy::Preserve,
     )

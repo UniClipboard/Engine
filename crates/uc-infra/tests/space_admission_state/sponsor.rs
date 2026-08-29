@@ -194,6 +194,9 @@ fn authenticated_join_request(
     invitation_byte: u8,
 ) -> AuthenticatedSpaceAdmissionMessage {
     let admission_id = SpaceAdmissionId::from_bytes([admission_byte; 32]).unwrap();
+    let device_id = DeviceId::new("joining-device");
+    let credential = MembershipCredential::new(1, vec![admission_byte + 2; 32]);
+    let signature = vec![admission_byte + 5; 64];
     let envelope = SpaceAdmissionEnvelopeV1::new(
         admission_id,
         AdmissionRole::Joiner,
@@ -203,11 +206,12 @@ fn authenticated_join_request(
         SpaceAdmissionBodyV1::JoinRequest(
             AdmissionJoinRequestV1::new(
                 InvitationId::from_bytes([invitation_byte; 32]).unwrap(),
-                DeviceId::new("joining-device"),
-                MembershipCredential::new(1, vec![admission_byte + 2; 32]),
+                device_id.clone(),
+                join_request_identity_facts(device_id, &credential, signature.clone()),
+                credential,
                 AdmissionKeyPackage::from_bytes(vec![admission_byte + 3; 48]).unwrap(),
                 AdmissionRecoveryPublicKey::from_bytes([admission_byte + 4; 32]).unwrap(),
-                AdmissionIdentitySignature::from_bytes(vec![admission_byte + 5; 64]).unwrap(),
+                AdmissionIdentitySignature::from_bytes(signature).unwrap(),
                 UnreadableHistoryPolicy::Discard,
             )
             .unwrap(),
