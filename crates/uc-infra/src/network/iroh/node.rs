@@ -27,7 +27,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::protocol::{Router, RouterBuilder};
-use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::{debug, info, instrument, warn};
@@ -645,6 +645,11 @@ pub struct IrohNodeBuilder {
 }
 
 impl IrohNodeBuilder {
+    /// 返回当前节点将写入准入候选资料的认证传输身份与地址。
+    pub fn local_endpoint_addr(&self) -> EndpointAddr {
+        self.endpoint.addr()
+    }
+
     fn take_router_builder(&mut self) -> Result<RouterBuilder, IrohNodeError> {
         self.router_builder
             .take()

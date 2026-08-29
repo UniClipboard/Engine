@@ -761,6 +761,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | 受限成员投递 | 同一认证成员历史通道可只携带一个签名事件或决定；接收端验证传输身份与历史作者一致后才合并，不向受限对端发送完整历史。 |
 | 2026-08-29 | 移除投影清理 | 被移除成员的 roster 和地址只保留到受限交付计划清空；维护流程随后幂等删除，不能作为普通成员授权来源。 |
 | 2026-08-29 | 成员维护网络门禁 | Space 锁定或切换时先阻止新的准入恢复、历史同步和受限投递，再等待当前维护轮次结束；恢复后才允许新请求。 |
+| 2026-08-30 | 新准入恢复收口 | `SpaceApplication` 只使用类型化准入 aggregate 与认证 transport 恢复，不再依赖旧 admission outbox delivery。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |

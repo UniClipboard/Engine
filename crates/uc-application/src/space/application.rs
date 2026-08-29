@@ -103,7 +103,6 @@ pub struct SpaceApplicationDeps {
     pub execute_joiner_activation: Arc<dyn ExecuteJoinerActivationPort>,
     pub device_trust_observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     pub membership_history_transport: Arc<dyn MembershipHistoryExchangePort>,
-    pub admission_outbox_delivery: Arc<dyn crate::deps::AdmissionOutboxDeliveryPort>,
     pub admission_space_transition: Arc<dyn crate::deps::AdmissionSpaceTransitionPort>,
     pub apply_membership_member_facts: Arc<dyn ApplyMembershipMemberFactsPort>,
     pub apply_membership_security: Arc<dyn ApplyMembershipSecurityPort>,

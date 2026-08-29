@@ -596,7 +596,6 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             execute_joiner_activation: passive.clone(),
             device_trust_observations: passive.clone(),
             membership_history_transport: passive.clone(),
-            admission_outbox_delivery: passive.clone(),
             admission_space_transition: passive.clone(),
             apply_membership_member_facts: passive.clone(),
             apply_membership_security: passive.clone(),
