@@ -5,7 +5,8 @@ mod security;
 
 pub use adapters::{
     CurrentSpaceResolver, DeviceTrustObservationsAdapter, EncryptedRePairingStateStore,
-    FileSpaceRebuildProgress, MembershipActivationAdapter, MembershipMemberFactsAdapter,
+    FileSpaceRebuildProgress, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
+    MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
     MembershipProjectionCleanupAdapter,
 };
 pub(crate) use admission::{
