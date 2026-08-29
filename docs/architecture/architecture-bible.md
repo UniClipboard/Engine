@@ -1549,6 +1549,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | Sponsor S3 Complete 生产材料 | 新增 `DefaultSponsorCompletePreparation`：严格验证 Applied receipt 并写入目标历史，以当前 Sponsor credential 签署 exact Complete，同时生成可恢复 security activation plan。preparation 不提前激活 MLS；真实激活留给 Aggregate 与 pending effect 原子保存后的执行器。集成测试贯通 Sponsor Candidate→Commit→Applied→Complete preparation。 |
 | 2026-08-29 | Joiner J1 target access | Joiner private-state format 推进到 V2，在加密且自动清零的 J0 状态内暂存正确口令；生产 Candidate preparation 一次性生成 Candidate lineage 的 target access material，并以 V2 staged target 替代口令与 password-equivalent。真实 OpenMLS 测试证明后续 Commit/Applied 继续使用同一 staged target。 |
 | 2026-08-29 | 代码注释语言约定 | 仓库维护规则改为项目文档和代码注释均使用中文，代码标识符和提交信息继续使用英文；运行架构和产品行为不变。 |
+| 2026-08-29 | Sponsor Candidate 中文代码说明 | 为 Sponsor Candidate 生产准备流程补充中文注释，说明历史与身份验证、两阶段事件构造、MLS 材料绑定、恢复密封以及公开回复与本地暂存状态的边界；运行架构和产品行为不变。 |
 
 ## 相关文档
 

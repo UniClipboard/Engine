@@ -65,6 +65,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
         admission_id: SpaceAdmissionId,
         preparation: SponsorCandidatePreparation<'_>,
     ) -> Result<PreparedSponsorCandidate, PrepareSponsorCandidateError> {
+        // 基础快照既提供成员历史，也声明这段历史所属的谱系。两者必须一起验证，
+        // 防止把另一个 Space 或另一条历史分支的成员状态用于本次准入。
         let snapshot = decode_sponsor_base_snapshot(preparation.base_snapshot())
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
         let history = VersionedMembershipHistory::decode_persisted_v2(
@@ -85,6 +87,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                 )))
             }
         };
+        // JoinRequest 中的身份事实由申请者自己的成员凭据签名。这里先证明申请者
+        // 确实持有对应私钥，再允许这些身份事实进入候选成员事件。
         let identity_is_valid = self
             .history_verifier
             .verify(
@@ -100,6 +104,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
             )));
         }
 
+        // 候选事件代表当前成员授权新增设备，因此作者实例、成员凭据和最终签名
+        // 都必须来自 Sponsor 本机当前有效的成员身份。
         let author = self
             .signatures
             .current_member_instance(&self.local_device_id)
@@ -116,6 +122,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
             })?;
         let mut operation_id = [0u8; 16];
         rand::rng().fill_bytes(&mut operation_id);
+        // 先固定 AddDevice 的业务事实和结果成员集合，暂不写入 MLS 承诺；这样安全层
+        // 可以基于稳定的候选摘要生成材料，又不会形成“事件摘要依赖自身承诺”的循环。
         let draft = history
             .create_unsigned_local_admission_event(
                 author,
@@ -132,6 +140,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                 request.key_package().as_bytes(),
             )
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
+        // 安全层需要为每个现有活跃成员生成密钥投递材料。收件人只能从已验证的
+        // 成员历史派生，不能由调用方另行提供或拼装。
         let mut existing_recipients = Vec::new();
         for member in history.active_members() {
             let facts = history.admission_facts_for(member).ok_or_else(|| {
@@ -149,6 +159,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                 credential_id: credential.credential_id,
             });
         }
+        // 一次生成公开承诺、MLS Commit/Welcome、尚未激活的本地状态，以及现有
+        // 成员的内容密钥投递；candidate_core_digest 将这些结果绑定到本次准入事实。
         let security = self
             .security
             .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
@@ -164,6 +176,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
             })
             .await
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
+        // 把安全层的公开承诺写回先前的草案并由 Sponsor 签名。至此业务成员变更
+        // 与 MLS 群组变更成为同一个可验证事件。
         let mut event = history
             .finalize_unsigned_local_admission_event(
                 draft,
@@ -178,6 +192,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
             .map_err(|error| {
                 PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error))
             })?;
+        // Candidate 是发给 Joiner 的公开协议材料：基础历史、已签名事件、MLS
+        // Commit/Welcome 和后续路由。它不包含 Sponsor 尚未提交的私有 MLS 状态。
         let candidate = AdmissionCandidateV1::new(
             uc_core::membership::AdmissionSignedMembershipHistory::from_bytes(
                 snapshot.membership_history,
@@ -205,6 +221,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
             SpaceAdmissionBodyV1::Candidate(candidate),
         )
         .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
+        // 恢复明文先把 sealed_recovery_material 留空，避免数据结构递归包含“密封后的
+        // 自己”；随后用 Joiner 的恢复公钥密封，并用 admission_id 做事务域隔离。
         let recovery_plaintext = postcard::to_stdvec(&SponsorCandidateStagedV1 {
             format_version: SPONSOR_CANDIDATE_STAGED_FORMAT_V1,
             staged_state: security.staged_state.clone(),
@@ -220,6 +238,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
             &recovery_plaintext,
         )
         .map_err(|error| PrepareSponsorCandidateError::unavailable(anyhow::Error::new(error)))?;
+        // Sponsor 本地暂存完整状态，供后续 Prepared -> Commit 阶段验证并正式提交。
+        // 对外 Candidate 与本地 staged state 一次返回，Application 无需编排内部步骤。
         let staged = postcard::to_stdvec(&SponsorCandidateStagedV1 {
             format_version: SPONSOR_CANDIDATE_STAGED_FORMAT_V1,
             staged_state: security.staged_state,
