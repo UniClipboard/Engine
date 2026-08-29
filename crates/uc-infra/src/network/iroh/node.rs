@@ -650,6 +650,15 @@ impl IrohNodeBuilder {
         self.endpoint.addr()
     }
 
+    /// 返回成员投影可直接保存的认证传输地址编码。
+    pub fn local_endpoint_addr_blob(&self) -> Result<Vec<u8>, IrohNodeError> {
+        postcard::to_stdvec(&self.endpoint.addr()).map_err(|source| {
+            IrohNodeError::AdmissionInstall {
+                source: anyhow::Error::new(source),
+            }
+        })
+    }
+
     fn take_router_builder(&mut self) -> Result<RouterBuilder, IrohNodeError> {
         self.router_builder
             .take()
