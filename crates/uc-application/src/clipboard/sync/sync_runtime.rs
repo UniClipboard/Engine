@@ -484,7 +484,7 @@ mod tests {
 
     use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError};
     use uc_core::ids::{EntryId, EventId};
-    use uc_core::ports::presence::{PresenceError, PeerReachabilityChanged};
+    use uc_core::ports::presence::{PeerReachabilityChanged, PresenceError};
     use uc_core::settings::model::Settings;
 
     struct FixedSettings {

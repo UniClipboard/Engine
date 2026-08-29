@@ -54,7 +54,7 @@ pub trait PeerReachabilityPort: Send + Sync {
     /// on dial failure. A `NoAddress` error surfaces when the peer address
     /// repository has no record for this device.
     async fn ensure_reachable(&self, device: &DeviceId)
-    -> Result<ReachabilityState, PresenceError>;
+        -> Result<ReachabilityState, PresenceError>;
 
     /// Force-revalidate reachability, bypassing any cached "alive connection"
     /// fast-path inside the implementation.

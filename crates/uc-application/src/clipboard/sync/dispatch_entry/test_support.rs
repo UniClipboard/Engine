@@ -20,7 +20,7 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ClipboardDispatchPort, ClipboardHeader, ClockPort, DispatchReport, FirstSyncStateError,
     FirstSyncStatePort, LocalIdentityError, LocalIdentityPort, PeerAddressError, PeerAddressRecord,
-    PeerAddressRepositoryPort, PeerReachabilityPort, PresenceError, PeerReachabilityChanged,
+    PeerAddressRepositoryPort, PeerReachabilityChanged, PeerReachabilityPort, PresenceError,
     ReachabilityState, SettingsPort, SyncPayload,
 };
 use uc_core::security::IdentityFingerprint;

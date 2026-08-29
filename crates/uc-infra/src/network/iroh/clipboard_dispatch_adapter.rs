@@ -413,7 +413,8 @@ mod tests {
     use tokio::sync::broadcast;
 
     use uc_core::ports::{
-        PeerAddressError, PeerAddressRecord, PresenceError, PeerReachabilityChanged, ReachabilityState,
+        PeerAddressError, PeerAddressRecord, PeerReachabilityChanged, PresenceError,
+        ReachabilityState,
     };
 
     // PresencePort mock for the dispatch tests. None of the four tests in
