@@ -757,6 +757,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-29 | 设备信任观察适配 | 增加只读 Infra 适配器，为 Application 已验证的设备范围补充成员名称和可达性；依赖失败保留 source chain，不改变成员资格来源。 |
 | 2026-08-29 | 成员事实效果 | 成员账本先持久化待执行效果，Infra 再幂等更新 roster、可信身份和传输地址投影；失败保留 source 并由维护运行期重试。 |
 | 2026-08-29 | 成员安全效果 | Infra 只应用已绑定到签名成员事件的非空安全更新；决定负载不伪造安全更新，依赖失败保留 source 并等待恢复。 |
+| 2026-08-29 | 成员效果激活 | Application 仅在事实和安全阶段完成后开放最终成员 scope；Infra 在移除激活前清除旧可达性连接与缓存。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |
