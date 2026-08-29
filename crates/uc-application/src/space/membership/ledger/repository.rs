@@ -184,10 +184,6 @@ impl MembershipLedger {
             if record.lineage_id.is_some() || record.membership_history.is_some() {
                 return Err(MembershipLedgerError::Conflict);
             }
-            let next_revision = record
-                .revision
-                .checked_add(1)
-                .ok_or(MembershipLedgerError::Corrupt)?;
             record.lineage_id = Some(lineage_id);
             record.membership_history = Some(history);
             record.local_device_id = Some(local_device_id);
@@ -197,9 +193,6 @@ impl MembershipLedger {
             record.inbound_transfers.clear();
             record.completed_inbound_transfers.clear();
             record.pending_effects.clear();
-            if let Some(metadata) = record.admission_profile.as_mut() {
-                metadata.device_trust_revision = next_revision;
-            }
             Ok(())
         })
         .await?;
@@ -208,10 +201,6 @@ impl MembershipLedger {
 
     pub(crate) async fn reset_for_space_rebuild(&self) -> Result<(), MembershipLedgerError> {
         self.compare_and_commit(|record| {
-            let next_revision = record
-                .revision
-                .checked_add(1)
-                .ok_or(MembershipLedgerError::Corrupt)?;
             record.lineage_id = None;
             record.membership_history = None;
             record.local_device_id = None;
@@ -221,13 +210,6 @@ impl MembershipLedger {
             record.inbound_transfers.clear();
             record.completed_inbound_transfers.clear();
             record.pending_effects.clear();
-            record.admission_records.clear();
-            if let Some(metadata) = record.admission_profile.as_mut() {
-                let profile_generation = metadata.profile_generation;
-                *metadata =
-                    uc_core::membership::AdmissionProfileMetadata::fresh(profile_generation);
-                metadata.device_trust_revision = next_revision;
-            }
             Ok(())
         })
         .await?;

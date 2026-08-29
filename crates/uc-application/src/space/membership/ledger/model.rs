@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionProfileMetadata, BaseMembershipHistoryPosition, MemberInstanceId,
-    MembershipDecisionV2, MembershipHistoryPageV2, MembershipHistoryRelationship, SpaceJoinRecord,
+    BaseMembershipHistoryPosition, MemberInstanceId, MembershipDecisionV2, MembershipHistoryPageV2,
+    MembershipHistoryRelationship,
 };
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,8 +68,6 @@ pub struct LoadedMembershipLedger {
     pub completed_inbound_transfers:
         BTreeMap<(DeviceId, [u8; 32]), uc_core::membership::MembershipHistoryV2Ack>,
     pub pending_effects: BTreeMap<[u8; 32], PendingMembershipEffect>,
-    pub admission_records: BTreeMap<[u8; 32], SpaceJoinRecord>,
-    pub admission_profile: Option<AdmissionProfileMetadata>,
 }
 
 impl LoadedMembershipLedger {
@@ -85,8 +83,6 @@ impl LoadedMembershipLedger {
             inbound_transfers: BTreeMap::new(),
             completed_inbound_transfers: BTreeMap::new(),
             pending_effects: BTreeMap::new(),
-            admission_records: BTreeMap::new(),
-            admission_profile: None,
         }
     }
 }
@@ -159,7 +155,6 @@ impl std::fmt::Debug for LoadedMembershipLedger {
             .field("peer_count", &self.peer_reconciliation.len())
             .field("inbound_transfer_count", &self.inbound_transfers.len())
             .field("pending_effect_count", &self.pending_effects.len())
-            .field("admission_record_count", &self.admission_records.len())
             .finish()
     }
 }
