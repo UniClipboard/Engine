@@ -7303,6 +7303,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "static_assertions",
  "subtle",
  "swarm-discovery",
  "tar",

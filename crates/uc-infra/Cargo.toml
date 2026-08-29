@@ -175,6 +175,7 @@ tempfile = "3"
 mockall = "0.13"
 wiremock = "0.6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+static_assertions = "1"
 
 [lints]
 workspace = true

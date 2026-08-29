@@ -45,14 +45,14 @@ Support both a self-contained long invitation and a human-entered short code, wi
 - [ ] Integrate fixed-version OPAQUE per Spec 028 and validate it
   - [x] Correct/wrong passphrase, identity binding, registration restoration, and corrupt-record rejection
   - [x] ServerSetup restoration and mismatched-setup rejection
-  - [ ] RFC 9807 vector evidence and secret/debug lifecycle checks (in progress)
+  - [x] RFC 9807 vector evidence and secret/debug lifecycle checks
 - [ ] Validate existing OpenMLS Add/Commit/Welcome, staged restore, and public commitment at the admission seam
 - [ ] Generate complete JoinRequest identity, OpenMLS, recovery, and password material
 - [ ] Implement production `JoinerStartMaterialPort`
 - [ ] Keep Candidate, transport, and Engine final wiring outside this phase
 - **Status:** in_progress
 
-**Next Step:** Import the applicable RFC 9807 vector evidence at the Infra seam without exposing third-party protocol types.
+**Next Step:** Validate the existing OpenMLS admission transition seam and its restart-safe staged state.
 
 ## Decisions
 - A short code and a full invitation are two entry forms for one invitation, not two protocols.
@@ -73,3 +73,5 @@ Support both a self-contained long invitation and a human-entered short code, wi
 | Architecture maintenance-record patch anchor did not match | Retried against the stable `## 相关文档` heading; no partial file changes occurred. |
 | Initial OPAQUE implementation patch no longer matched the paired skeleton | Re-read the complete module and applied the implementation against its current structure. |
 | Argon2 and HKDF dependency error types lacked `std::error::Error` support | Enabled Argon2 `std`; wrapped HKDF's preserved fixed-length error value in a concrete internal error before adding safe context. |
+| Initial RFC vector RNG repeated bytes into the whole destination and produced the wrong registration request | Matched the pinned library's official `CycleRng`: copy at most the source length, leave the remaining initialized bytes unchanged, then rotate the source. |
+| Downstream RFC KE1 generation differed even with the official RNG bytes | Confirmed the pinned crate gates direct deterministic blind injection behind its own `cfg(test)`; downstream validation now computes the official registration request and strictly round-trips the official registration upload and KE1/KE2/KE3 frames, while production Argon2 tests retain end-to-end coverage. |
