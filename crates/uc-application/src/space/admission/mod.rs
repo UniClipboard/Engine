@@ -15,7 +15,6 @@
 
 mod cancel_space_join;
 mod complete_pending_space_transition;
-mod handle_space_admission_message;
 mod invitation;
 mod join_space;
 mod model;
@@ -27,10 +26,6 @@ mod space_transition;
 
 pub use cancel_space_join::CancelSpaceJoinError;
 pub use complete_pending_space_transition::CompletePendingSpaceTransitionError;
-pub(crate) use handle_space_admission_message::{
-    AcceptAdmissionError, ConsumedInvitation, InboundAdmissionStatePort, LoadMemberAdmissionError,
-    LoadedMemberAdmissionActivation, MemberAdmissionCommitToken, PreparedMemberAdmissionActivation,
-};
 pub use invitation::{
     CancelInvitationError, PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
 };
