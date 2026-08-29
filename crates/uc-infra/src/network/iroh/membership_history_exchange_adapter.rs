@@ -7,10 +7,15 @@ use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
+use uc_application::deps::{
+    RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    RestrictedMembershipDeliveryPort,
+};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     MemberRepositoryPort, MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
-    MembershipHistoryExchangePort, MembershipHistoryMessage, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, MembershipHistoryV2Ack,
+    MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
@@ -99,6 +104,45 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
         }
         let response = read_message(&mut receive).await?;
         decode_message(&response)
+    }
+}
+
+#[async_trait]
+impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
+    async fn deliver_restricted_membership(
+        &self,
+        peer: &DeviceId,
+        delivery: &RestrictedMembershipDelivery,
+    ) -> Result<(), RestrictedMembershipDeliveryError> {
+        let message = match delivery {
+            RestrictedMembershipDelivery::Event(event) => {
+                MembershipHistoryMessage::RestrictedEventV2(event.clone())
+            }
+            RestrictedMembershipDelivery::Decision(decision) => {
+                MembershipHistoryMessage::RestrictedDecisionV2(decision.clone())
+            }
+        };
+        match self.exchange_membership_history(peer, message).await {
+            Ok(MembershipHistoryMessage::AckV2(
+                MembershipHistoryV2Ack::Consistent | MembershipHistoryV2Ack::UpdatesApplied,
+            )) => Ok(()),
+            Ok(MembershipHistoryMessage::AckV2(
+                MembershipHistoryV2Ack::Invalid | MembershipHistoryV2Ack::Diverged,
+            ))
+            | Ok(MembershipHistoryMessage::HistoryPageV2(_))
+            | Ok(MembershipHistoryMessage::RestrictedEventV2(_))
+            | Ok(MembershipHistoryMessage::RestrictedDecisionV2(_)) => {
+                Err(RestrictedMembershipDeliveryError::Rejected)
+            }
+            Ok(MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Continue { .. }))
+            | Err(MembershipHistoryExchangeError::Offline)
+            | Err(MembershipHistoryExchangeError::Transport) => {
+                Err(RestrictedMembershipDeliveryError::Deferred)
+            }
+            Err(MembershipHistoryExchangeError::Rejected) => {
+                Err(RestrictedMembershipDeliveryError::Rejected)
+            }
+        }
     }
 }
 
@@ -198,7 +242,10 @@ fn decode_message(
         postcard::from_bytes(body).map_err(|_| MembershipHistoryExchangeError::Transport)?;
     if matches!(
         message,
-        MembershipHistoryMessage::HistoryPageV2(_) | MembershipHistoryMessage::AckV2(_)
+        MembershipHistoryMessage::HistoryPageV2(_)
+            | MembershipHistoryMessage::AckV2(_)
+            | MembershipHistoryMessage::RestrictedEventV2(_)
+            | MembershipHistoryMessage::RestrictedDecisionV2(_)
     ) {
         Ok(message)
     } else {
@@ -248,11 +295,15 @@ fn introduced_device(
     message: &MembershipHistoryMessage,
     fingerprint: &uc_core::security::IdentityFingerprint,
 ) -> Option<DeviceId> {
-    let MembershipHistoryMessage::HistoryPageV2(page) = message else {
-        return None;
-    };
-    (page.sender_admission().identity_fingerprint == *fingerprint)
-        .then(|| page.sender_admission().device_id.clone())
+    match message {
+        MembershipHistoryMessage::HistoryPageV2(page) => {
+            (page.sender_admission().identity_fingerprint == *fingerprint)
+                .then(|| page.sender_admission().device_id.clone())
+        }
+        MembershipHistoryMessage::AckV2(_)
+        | MembershipHistoryMessage::RestrictedEventV2(_)
+        | MembershipHistoryMessage::RestrictedDecisionV2(_) => None,
+    }
 }
 
 async fn write_message(

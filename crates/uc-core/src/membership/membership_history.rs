@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::DeviceId;
 
-use super::versioned_membership_history::{MembershipHistoryPageV2, MembershipHistoryV2Ack};
+use super::versioned_membership_history::{
+    MembershipDecisionV2, MembershipEventV2, MembershipHistoryPageV2, MembershipHistoryV2Ack,
+};
 use super::MemberInstanceId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -113,4 +115,8 @@ impl PendingRemovalFacts {
 pub enum MembershipHistoryMessage {
     HistoryPageV2(MembershipHistoryPageV2),
     AckV2(MembershipHistoryV2Ack),
+    /// 仅向被普通成员 scope 排除的对端交付指定成员事件。
+    RestrictedEventV2(MembershipEventV2),
+    /// 仅向被普通成员 scope 排除的对端交付指定成员决定。
+    RestrictedDecisionV2(MembershipDecisionV2),
 }

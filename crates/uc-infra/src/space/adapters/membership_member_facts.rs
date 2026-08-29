@@ -106,12 +106,7 @@ impl MembershipMemberFactsAdapter {
             return Err(MembershipEffectExecutionError::Corrupt);
         }
         for device_id in &effect.affected_device_ids {
-            self.members.remove(device_id).await.map_err(dependency)?;
             self.trusted_peers
-                .remove(device_id)
-                .await
-                .map_err(dependency)?;
-            self.peer_addresses
                 .remove(device_id)
                 .await
                 .map_err(dependency)?;
@@ -152,10 +147,10 @@ mod tests {
 
     use super::*;
 
-    struct FailingMembers;
+    struct PassiveMembers;
 
     #[async_trait]
-    impl MemberRepositoryPort for FailingMembers {
+    impl MemberRepositoryPort for PassiveMembers {
         async fn get(&self, _device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
             Ok(None)
         }
@@ -169,14 +164,14 @@ mod tests {
         }
 
         async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
-            Err(MembershipError::Repository("test failure".to_owned()))
+            Ok(false)
         }
     }
 
-    struct PassiveTrustedPeers;
+    struct FailingTrustedPeers;
 
     #[async_trait]
-    impl TrustedPeerRepositoryPort for PassiveTrustedPeers {
+    impl TrustedPeerRepositoryPort for FailingTrustedPeers {
         async fn get(
             &self,
             _peer_device_id: &DeviceId,
@@ -193,7 +188,7 @@ mod tests {
         }
 
         async fn remove(&self, _peer_device_id: &DeviceId) -> Result<bool, TrustedPeerError> {
-            Ok(false)
+            Err(TrustedPeerError::Repository("test failure".to_owned()))
         }
     }
 
@@ -240,8 +235,8 @@ mod tests {
     #[tokio::test]
     async fn repository_failure_keeps_classification_and_source() {
         let adapter = MembershipMemberFactsAdapter::new(
-            Arc::new(FailingMembers),
-            Arc::new(PassiveTrustedPeers),
+            Arc::new(PassiveMembers),
+            Arc::new(FailingTrustedPeers),
             Arc::new(PassivePeerAddresses),
             Arc::new(FixedDeviceIdentity),
             Arc::new(FixedClock),

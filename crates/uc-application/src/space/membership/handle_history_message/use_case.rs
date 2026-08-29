@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    MembershipHistoryMessage, MembershipHistoryRelationship, MembershipHistoryV2Ack,
-    MembershipOperationV2, VersionedMembershipHistory, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+    MembershipDecisionV2, MembershipEventV2, MembershipHistoryMessage,
+    MembershipHistoryRelationship, MembershipHistoryV2Ack, MembershipOperationV2,
+    VersionedMembershipHistory, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 
 use crate::space::membership::{
@@ -33,8 +34,17 @@ impl HandleMembershipHistoryMessageUseCase {
         source: &AuthenticatedMember,
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, HandleMembershipHistoryMessageError> {
-        let MembershipHistoryMessage::HistoryPageV2(page) = message else {
-            return Err(HandleMembershipHistoryMessageError::Rejected);
+        let page = match message {
+            MembershipHistoryMessage::HistoryPageV2(page) => page,
+            MembershipHistoryMessage::RestrictedEventV2(event) => {
+                return self.receive_restricted_event(source, event).await;
+            }
+            MembershipHistoryMessage::RestrictedDecisionV2(decision) => {
+                return self.receive_restricted_decision(source, decision).await;
+            }
+            MembershipHistoryMessage::AckV2(_) => {
+                return Err(HandleMembershipHistoryMessageError::Rejected);
+            }
         };
         if page.validate_envelope().is_err()
             || postcard::to_stdvec(&page)
@@ -245,6 +255,100 @@ impl HandleMembershipHistoryMessageUseCase {
         Ok(MembershipHistoryMessage::AckV2(ack))
     }
 
+    async fn receive_restricted_event(
+        &self,
+        source: &AuthenticatedMember,
+        event: MembershipEventV2,
+    ) -> Result<MembershipHistoryMessage, HandleMembershipHistoryMessageError> {
+        let _guard = self.execution_lock.lock().await;
+        let snapshot = self
+            .ledger
+            .load_verified()
+            .await
+            .map_err(map_ledger_error)?;
+        let source_device_id = source.device_id().clone();
+        let source_member = snapshot
+            .history()
+            .and_then(|history| history.effective_member_for_device(&source_device_id));
+        if source_member != Some(event.author_member_instance_id) {
+            return Ok(MembershipHistoryMessage::AckV2(
+                MembershipHistoryV2Ack::Invalid,
+            ));
+        }
+        let expected_revision = snapshot.record().revision;
+        let expected_history_digest = snapshot.history_digest();
+        let (_, ack) = self
+            .ledger
+            .compare_and_commit_history(
+                expected_revision,
+                expected_history_digest,
+                move |record, history, verifier| {
+                    let members_before = history.effective_members();
+                    let ack = match history.verify_and_receive_event(event, verifier) {
+                        Ok(uc_core::membership::MembershipHistoryV2ReceiveOutcome::Applied) => {
+                            record_new_membership_effects(record, history, &members_before)?;
+                            MembershipHistoryV2Ack::UpdatesApplied
+                        }
+                        Ok(
+                            uc_core::membership::MembershipHistoryV2ReceiveOutcome::AlreadyKnown,
+                        ) => MembershipHistoryV2Ack::Consistent,
+                        Ok(uc_core::membership::MembershipHistoryV2ReceiveOutcome::Diverged)
+                        | Err(_) => MembershipHistoryV2Ack::Invalid,
+                    };
+                    update_restricted_relationship(record, &source_device_id, history, ack);
+                    Ok(ack)
+                },
+            )
+            .await
+            .map_err(map_ledger_error)?;
+        Ok(MembershipHistoryMessage::AckV2(ack))
+    }
+
+    async fn receive_restricted_decision(
+        &self,
+        source: &AuthenticatedMember,
+        decision: MembershipDecisionV2,
+    ) -> Result<MembershipHistoryMessage, HandleMembershipHistoryMessageError> {
+        let _guard = self.execution_lock.lock().await;
+        let snapshot = self
+            .ledger
+            .load_verified()
+            .await
+            .map_err(map_ledger_error)?;
+        let source_device_id = source.device_id().clone();
+        let source_member = snapshot.history().and_then(|history| {
+            history.member_for_device(&source_device_id, std::slice::from_ref(&source_device_id))
+        });
+        if source_member != Some(decision.decided_by_member_instance_id) {
+            return Ok(MembershipHistoryMessage::AckV2(
+                MembershipHistoryV2Ack::Invalid,
+            ));
+        }
+        let expected_revision = snapshot.record().revision;
+        let expected_history_digest = snapshot.history_digest();
+        let (_, ack) = self
+            .ledger
+            .compare_and_commit_history(
+                expected_revision,
+                expected_history_digest,
+                move |record, history, verifier| {
+                    let members_before = history.effective_members();
+                    let ack = match history.verify_and_record_peer_decision(decision, verifier) {
+                        Ok(_) => {
+                            record_new_membership_effects(record, history, &members_before)?;
+                            MembershipHistoryV2Ack::UpdatesApplied
+                        }
+                        Err(_) => MembershipHistoryV2Ack::Invalid,
+                    };
+                    update_restricted_relationship(record, &source_device_id, history, ack);
+                    Ok(ack)
+                },
+            )
+            .await
+            .map_err(map_ledger_error)?;
+        Ok(MembershipHistoryMessage::AckV2(ack))
+    }
+
     async fn commit_invalid_transfer(
         &self,
         snapshot: &crate::space::membership::VerifiedMembershipLedger,
@@ -265,6 +369,26 @@ impl HandleMembershipHistoryMessageUseCase {
             .await
             .map_err(map_ledger_error)?;
         Ok(())
+    }
+}
+
+fn update_restricted_relationship(
+    record: &mut LoadedMembershipLedger,
+    source_device_id: &uc_core::ids::DeviceId,
+    history: &VersionedMembershipHistory,
+    ack: MembershipHistoryV2Ack,
+) {
+    if let Some(peer) = record.peer_reconciliation.get_mut(source_device_id) {
+        peer.relationship = match ack {
+            MembershipHistoryV2Ack::Consistent | MembershipHistoryV2Ack::UpdatesApplied => {
+                MembershipHistoryRelationship::Consistent
+            }
+            MembershipHistoryV2Ack::Diverged => MembershipHistoryRelationship::Diverged,
+            MembershipHistoryV2Ack::Invalid | MembershipHistoryV2Ack::Continue { .. } => {
+                MembershipHistoryRelationship::Invalid
+            }
+        };
+        peer.confirmed_position = history.current_position().ok();
     }
 }
 
