@@ -9,10 +9,11 @@ pub(crate) use admission::{
     FullInvitationCodecError,
 };
 pub use admission::{
-    AdmissionSecurityTransitionAdapter, DefaultJoinerCandidatePreparation,
-    DefaultJoinerInvitationPreparation, DefaultJoinerStartMaterial,
-    DefaultSponsorCandidatePreparation, SpaceAdmissionCredentialStoreError,
-    SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
+    AdmissionSecurityTransitionAdapter, DefaultJoinerAppliedPreparation,
+    DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
+    DefaultJoinerStartMaterial, DefaultSponsorCandidatePreparation,
+    DefaultSponsorCommitPreparation, DefaultSponsorCompletePreparation,
+    SpaceAdmissionCredentialStoreError, SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
 pub use membership_ledger::SqliteMembershipLedger;
 pub use security::{
