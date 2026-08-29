@@ -9,11 +9,25 @@ use super::super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissi
 const SPONSOR_BASE_SNAPSHOT_FORMAT_V1: u16 = 1;
 
 #[derive(Serialize, Deserialize)]
-struct PersistedSponsorBaseSnapshotV1 {
-    format_version: u16,
-    ledger_revision: u64,
-    lineage_id: String,
-    membership_history: Vec<u8>,
+pub(super) struct PersistedSponsorBaseSnapshotV1 {
+    pub(super) format_version: u16,
+    pub(super) ledger_revision: u64,
+    pub(super) lineage_id: String,
+    pub(super) membership_history: Vec<u8>,
+}
+
+pub(super) fn decode_sponsor_base_snapshot(
+    snapshot: &AdmissionBaseSnapshot,
+) -> Result<PersistedSponsorBaseSnapshotV1, SpaceAdmissionStateStoreError> {
+    let decoded: PersistedSponsorBaseSnapshotV1 = postcard::from_bytes(snapshot.as_bytes())
+        .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+    if decoded.format_version != SPONSOR_BASE_SNAPSHOT_FORMAT_V1
+        || decoded.lineage_id.is_empty()
+        || decoded.membership_history.is_empty()
+    {
+        return Err(SpaceAdmissionStateStoreError::Corrupt);
+    }
+    Ok(decoded)
 }
 
 impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {

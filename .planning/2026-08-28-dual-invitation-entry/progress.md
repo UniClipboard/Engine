@@ -126,6 +126,7 @@
 | Phase 4 final workspace format check | existing differences remain in two unrelated files |
 | Phase 5 JoinRequest identity-facts red/green | Core mismatch test failed before implementation, then passed with persistence and scoped crate checks |
 | Phase 5 Candidate event two-stage binding | passed, focused Core test |
+| Phase 5 production Sponsor Candidate adapter | passed, focused end-to-end adapter test and Infra all-target check |
 
 ## Errors
 

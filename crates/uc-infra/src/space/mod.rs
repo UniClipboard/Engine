@@ -9,7 +9,7 @@ pub(crate) use admission::{
 };
 pub use admission::{
     AdmissionSecurityTransitionAdapter, DefaultJoinerInvitationPreparation,
-    DefaultJoinerStartMaterial, SqliteSpaceAdmissionState,
+    DefaultJoinerStartMaterial, DefaultSponsorCandidatePreparation, SqliteSpaceAdmissionState,
 };
 pub use security::{
     DefaultMembershipSecurityUpdateAdapter, DefaultSpaceAccessAdapter, InMemorySession,

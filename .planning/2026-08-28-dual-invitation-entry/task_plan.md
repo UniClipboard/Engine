@@ -55,7 +55,7 @@ Support both a self-contained long invitation and a human-entered short code, wi
 **Next Step:** Begin Phase 5 Candidate preparation, authenticated transport, and Engine production wiring.
 
 ### Phase 5: Candidate preparation, authenticated transport, and production wiring
-- [ ] Implement the production Sponsor Candidate adapter behind `PrepareSponsorCandidatePort`
+- [x] Implement the production Sponsor Candidate adapter behind `PrepareSponsorCandidatePort`
 - [ ] Implement the production Joiner Candidate adapter behind `PrepareJoinerCandidatePort`
 - [ ] Add the bounded Iroh admission wire and single authenticated ALPN handler/connector
 - [ ] Prove initial OPAQUE JoinRequest/Candidate and continuation Prepared/Commit loopback exchanges

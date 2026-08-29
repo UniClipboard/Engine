@@ -12,3 +12,4 @@ pub(crate) use full_invitation::{
 pub use joiner::{DefaultJoinerInvitationPreparation, DefaultJoinerStartMaterial};
 pub use repository::SqliteSpaceAdmissionState;
 pub use security::AdmissionSecurityTransitionAdapter;
+pub use sponsor::DefaultSponsorCandidatePreparation;
