@@ -330,6 +330,7 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 ### Space 成员状态产品边界
 
 `QueryDeviceTrustUseCase` 从一次已验证 ledger 读取生成完整设备信任结果。没有当前 Space 时返回明确空状态；
+Application 先确定可展示的设备范围，Infra 只为该范围补充成员投影中的显示名称和可达性缓存；这些观察资料不能反向授予成员资格。
 Space 已锁定、V2 历史缺失、身份映射矛盾或观察资料不完整时失败关闭，不读取旧成员表补造结果。在线状态
 只是显示观察，不参与成员资格或决定。
 
@@ -753,6 +754,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | --- | --- | --- |
 | 2026-08-29 | 文档压缩 | 圣经只保留当前架构事实、稳定边界和维护规则；移除逐切片流水账与已经失效的实现细节。 |
 | 2026-08-29 | Space 成员关系与准入 | Application 是成员关系、设备信任和单一 Space 准入完整流程的唯一负责人；Infra 提供加密存储、密码能力和 Iroh 认证传输，Engine 只组装并控制生命周期。 |
+| 2026-08-29 | 设备信任观察适配 | 增加只读 Infra 适配器，为 Application 已验证的设备范围补充成员名称和可达性；依赖失败保留 source chain，不改变成员资格来源。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |

@@ -1,6 +1,6 @@
 use crate::space::membership::MembershipLedgerError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum QueryDeviceTrustError {
     #[error("space is locked")]
     Locked,
@@ -8,6 +8,11 @@ pub enum QueryDeviceTrustError {
     RecoveryRequired,
     #[error("device trust state is unavailable")]
     Unavailable,
+    #[error("device trust dependency failed")]
+    Dependency {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 impl From<MembershipLedgerError> for QueryDeviceTrustError {
