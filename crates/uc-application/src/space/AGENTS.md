@@ -86,8 +86,8 @@ flowchart LR
 | 对端历史关系 | `PeerReconciliationRecord` | 查询、scope、历史同步、受限投递 | `Consistent` 也不能在无 AddDevice 时授予资格 |
 | 入站历史分页 | `InboundMembershipTransfer` | 历史接收 case | 未完整验证前不能替换正式历史 |
 | 成员效果进度 | `PendingMembershipEffect` | 效果恢复和 scope | 不能失败后回滚正式历史 |
-| 加入记录和 outbox | Core `SpaceJoinRecord` 定义合法状态变化，ledger 负责版本和原子保存 | 准入 cases、查询和恢复 | 网络恢复不能创建第二次用户加入；case 不能逐字段拼装终态 |
-| 设备信任 revision | ledger 顶层 `revision` 与 profile metadata 同事务推进 | 查询和产品失效通知 | 不能取多份 revision 的最大值 |
+| 准入协议状态 | Core `SpaceAdmissionAggregate` 定义合法状态变化，独立准入仓库负责密文原子保存 | `SpaceAdmissionProtocol` 的命令、查询和恢复 | membership ledger 不得保存准入状态或 outbox |
+| 设备信任 revision | membership ledger 顶层 `revision` | 查询和产品失效通知 | 不能与准入状态拼成第二份 revision |
 | 在线状态 | reachability/presence adapter | 查询展示、拨号筛选 | 不能授予成员资格或历史接收权 |
 | 重新配对提示 | `RePairingState` | setup query、rebuild、AddDevice 最终激活 | 不能在安全效果完成前清除 |
 
@@ -332,47 +332,12 @@ flowchart TD
 - **关系**：操作 `InMemoryPairingInvitationHolder`；reset 也复用 holder 的清理 port。
 - **重点关注**：不通知 rendezvous、不修改持久成员状态；竞态加入会在准入 endpoint 中因 invitation miss 被拒绝。
 
-#### `JoinSpaceUseCase`
+#### `SpaceAdmissionProtocol`
 
-- **入口**：`JoinSpaceInput -> JoinSpaceResult`。
-- **职责/作用**：串行保存设备名，调用无副作用 preparation 生成协议材料，原子创建 `SpaceJoinRecord`，唤醒恢复，再从 ledger 投影当前加入状态。
-- **关系**：`PrepareJoinSpacePort` 只准备密码学/协议资料；实际发送由 `RecoverSpaceAdmissionsUseCase` 完成。
-- **重点关注**：用户动作才可创建新尝试；后台恢复绝不能创建尝试；必须先保存后发送。
-
-#### `CancelSpaceJoinUseCase`
-
-- **入口**：`join_id -> CurrentJoinStatus`。
-- **职责/作用**：提交边界前把活动 outbox 置为 superseded，生成 CancelRequested，保存 Rejected(Cancelled) 并唤醒恢复。
-- **关系**：使用同一 ledger 和 outbox 编码规则。
-- **重点关注**：Committed 及以后不回滚，只返回既有状态；重复调用保持幂等；record version 用 checked_add。
-
-#### `HandleSpaceAdmissionMessageUseCase`
-
-- **入口**：`AuthenticatedSpaceAdmissionMessage -> reply bytes`，网络 adapter 通过 `HandleSpaceAdmissionMessagePort` 调用。
-- **职责/作用**：串行读取 ledger；新尝试先验证本机邀请、过期时间和 generation；调用无副作用 preparation；核对 attempt/source/effect 绑定；原子保存 record、history、relationship、effect 和邀请摘要；成功后消费内存邀请并返回 reply。
-- **关系**：`PrepareSpaceAdmissionMessagePort` 只验证和准备；ledger 决定提交，runtime 决定恢复。
-- **重点关注**：无效邀请必须在 preparation 前拒绝；reply 只能在提交后返回；adapter 不得持久化或发送前推进阶段。
-
-#### `RecoverSpaceAdmissionsUseCase`
-
-- **入口**：维护步骤，返回 `MembershipMaintenanceReport`。
-- **职责/作用**：按稳定顺序扫描有恢复工作的加入记录，逐条发送未结清 outbox；每次发送前重载最新 record version；验证 ACK/拒绝/邀请消费结果并原子结清。
-- **关系**：由 `MaintainSpaceMembershipUseCase` 调用，使用 `AdmissionOutboxDeliveryPort`。
-- **重点关注**：稳定结果必须结清，不能永久重发；保存冲突才 deferred；网络失败不修改正式历史。
-
-#### `QueryPendingSpaceTransitionUseCase`
-
-- **入口**：无输入，返回 `bool`。
-- **职责/作用**：检查是否存在 joiner completion 已保存、transition 未完成的记录。
-- **关系**：只读 ledger recoverable records。
-- **重点关注**：纯查询，不主动推进 transition。
-
-#### `CompletePendingSpaceTransitionUseCase`
-
-- **入口**：无输入，返回 Active `CurrentJoinStatus`。
-- **职责/作用**：逐步 advance 同一持久 transition，每步保存 record version；Finished 时原子切换目标 history、lineage、本机成员实例、关系基线和活动门禁。
-- **关系**：facade 成功后唤醒成员维护。
-- **重点关注**：阶段不可跳跃或替换；跨 Space 完成不能只换历史字节；目标未完整可读前不能报告 Active。
+- **入口**：用户 Join/Cancel、认证入站消息、当前状态查询、待完成激活和后台恢复。
+- **职责/作用**：在 profile 级串行边界内驱动 Core aggregate，原子保存加密状态，并通过认证 transport 继续可恢复交换。
+- **关系**：facade 只调用协议动作；Infra 只提供密码材料、密文仓库、认证传输和最终激活能力。
+- **重点关注**：用户动作才可创建新尝试；恢复只能推进已保存状态；membership ledger 不参与准入协议状态推进。
 
 ### 成员与历史 Cases
 
@@ -472,8 +437,6 @@ flowchart TD
 | `inbound_transfers` | 未完成历史分页 | 每来源最多一个活动 transfer |
 | `completed_inbound_transfers` | 幂等最终 ACK | 重放返回同一结果 |
 | `pending_effects` | Add/Remove 后续效果阶段 | 正式历史提交时创建 Prepared |
-| `admission_records` | 加入阶段、outbox、transition、终态 | 后台只继续，不创建新用户动作 |
-| `admission_profile` | ordinal、projection floor、revision、邀请摘要 | 与业务事实同事务推进 |
 
 ### 原子提交
 
@@ -524,13 +487,11 @@ flowchart TD
 
 ### 修改 admission
 
-- invitation、attempt、source device、generation 和 predecessor message 必须绑定。
-- preparation port 保持无副作用；持久化和 reply 顺序由 case 掌握。
-- 用户 Join 才能新建记录；recovery 只扫描并推进已有记录。
+- invitation、admission id、传输身份、generation 和前驱证据必须绑定。
+- 用户 Join 才能新建 aggregate；recovery 只扫描并推进已保存状态。
 - Commit 后不回滚；Cancel 只在提交边界前生效。
-- outbox 的成功、稳定拒绝和稳定邀请消费结果都要结清，避免永久重发。
-- 用户取消、Space transition 推进和完成终态由 `SpaceJoinRecord` 生成；case 不得逐字段修改 role、terminal result 或 transition result。
-- `record_version` 由 `MembershipLedger` 在提交时推进；case 和 preparation 不得计算下一版本。
+- 状态推进由 Core aggregate 生成；Application 不得逐字段拼装协议终态。
+- 准入状态只写独立加密仓库，不得重新放入 membership ledger。
 
 ### 修改 runtime
 

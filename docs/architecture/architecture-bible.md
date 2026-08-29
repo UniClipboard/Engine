@@ -776,6 +776,10 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 旧 outbox 恢复用例删除 | 删除未被 `SpaceApplication` 构造的 legacy admission outbox recovery；成员维护只调用新 aggregate recovery service。 |
 | 2026-08-30 | 旧入站 handler 删除 | 删除未装配的 legacy admission message handler 及其 ledger commit seam；认证 Iroh handler 只进入新 aggregate endpoint。 |
 | 2026-08-30 | 准入取消构造 | Joiner aggregate 根据当前阶段、已保存前驱证据和 continuation route 构造取消交换；Application 不拼装协议序号或 route。 |
+| 2026-08-30 | 准入取消入口收口 | `SpaceAdmissionProtocol` 在 profile 级串行约束内完成当前 JoinId 读取、领域取消、条件提交和维护唤醒；Facade 不再调用 legacy ledger 取消用例，Infra 只提供密文状态原子提交和随机消息材料。 |
+| 2026-08-30 | 准入状态与激活收口 | 当前加入状态、待完成查询和最终激活统一由 `SpaceAdmissionProtocol` 读取类型化准入状态并推进；Facade 不再编排 legacy transition 用例。 |
+| 2026-08-30 | 成员账本去除准入状态 | membership ledger 只保存成员事实与效果，删除 `admission_records`、`admission_profile` 和旧 admission outbox；准入状态只由独立 MasterKey AEAD 仓库保存。 |
+| 2026-08-30 | 旧准入领域模型删除 | 删除 Core `space_join_record`；准入拒绝使用新协议枚举，待投递成员安全更新由 Application 的类型化 preparation 结果表达。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |
