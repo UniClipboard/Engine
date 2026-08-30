@@ -43,30 +43,31 @@ fn join_request_identity_facts(
 use uc_core::DeviceId;
 
 use super::{
-    AdmissionRecoveryCommitToken, AdmissionRecoveryService, AdmissionRecoveryTrigger,
-    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
-    AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission, CompletedJoinerActivation,
-    CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
-    JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationOutcome,
-    JoinerActivationStateError, JoinerActivationStatePort, JoinerAdmissionService,
-    JoinerCancellationCommitToken, JoinerCancellationMaterial, JoinerCancellationMaterialError,
-    JoinerCancellationMutation, JoinerCancellationStateError, JoinerStartMaterial,
-    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
-    JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState,
-    LoadedPendingAdmission, LoadedSponsorAdmission, PendingAdmissionRecoveryStateError,
-    PendingAdmissionRecoveryStatePort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
-    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
-    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
-    PrepareJoinerInvitationPort, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
-    PrepareSponsorCommitError, PrepareSponsorCommitPort, PrepareSponsorCompleteError,
-    PrepareSponsorCompletePort, PrepareSponsorSettledError, PrepareSponsorSettledPort,
-    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
-    PreparedJoinerInvitation, PreparedSponsorCandidate, PreparedSponsorCommit,
-    PreparedSponsorComplete, PreparedSponsorSettled, ResolveJoinerInvitationError,
-    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken, SpaceAdmissionProtocol,
-    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionCommitToken,
-    SponsorAdmissionMutation, SponsorAdmissionService, SponsorAdmissionState,
-    SponsorAdmissionStateError, SponsorAdmissionStatePort,
+    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, AdmissionRecoveryCommitToken,
+    AdmissionRecoveryService, AdmissionRecoveryTrigger, AuthenticatedAdmissionExchangePort,
+    AuthenticatedAdmissionReply, AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
+    CompletedJoinerActivation, CurrentJoinAdmissionStatePort, ExecuteJoinerActivationError,
+    ExecuteJoinerActivationPort, JoinerActivationCommitToken, JoinerActivationMutation,
+    JoinerActivationOutcome, JoinerActivationStateError, JoinerActivationStatePort,
+    JoinerAdmissionService, JoinerCancellationCommitToken, JoinerCancellationMaterial,
+    JoinerCancellationMaterialError, JoinerCancellationMutation, JoinerCancellationStateError,
+    JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
+    JoinerStartStateError, JoinerStartStatePort, LoadedCurrentJoin, LoadedJoinerActivation,
+    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAdmission,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
+    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
+    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
+    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
+    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
+    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
+    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedJoinerInvitation,
+    PreparedSponsorCandidate, PreparedSponsorCommit, PreparedSponsorComplete,
+    PreparedSponsorSettled, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
+    SpaceAdmissionCommitToken, SpaceAdmissionProtocol, SpaceAdmissionTransportError,
+    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
+    SponsorAdmissionService, SponsorAdmissionState, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +249,26 @@ impl PrepareSponsorCompletePort for UnusedSponsorPorts {
         _applied: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedSponsorComplete, PrepareSponsorCompleteError> {
         unreachable!()
+    }
+}
+
+#[async_trait]
+impl ActivateSponsorAdmissionPort for UnusedSponsorPorts {
+    async fn activate(
+        &self,
+        _activated_security: &AdmissionActivatedSecurityState,
+    ) -> Result<(), ActivateSponsorAdmissionError> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl ActivateSponsorAdmissionPort for FixedSponsorComplete {
+    async fn activate(
+        &self,
+        _activated_security: &AdmissionActivatedSecurityState,
+    ) -> Result<(), ActivateSponsorAdmissionError> {
+        Ok(())
     }
 }
 
@@ -1268,6 +1289,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
+                    Arc::new(UnusedSponsorPorts),
                 ),
                 AdmissionRecoveryService::new(
                     state.clone(),
@@ -1304,6 +1326,7 @@ impl SpaceAdmissionProtocolTestPair {
                     sponsor_state.clone(),
                     Arc::new(FixedSponsorCandidate),
                     Arc::new(FixedSponsorCommit),
+                    Arc::new(FixedSponsorComplete),
                     Arc::new(FixedSponsorComplete),
                     Arc::new(FixedSponsorSettled),
                 ),

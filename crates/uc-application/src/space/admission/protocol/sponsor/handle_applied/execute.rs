@@ -54,6 +54,9 @@ impl SponsorAdmissionService {
             .prepare(aggregate.admission_id(), preparation, &applied)
             .await?;
         let (activated_security, complete_reply) = material.into_parts();
+        self.activate_admission
+            .activate(&activated_security)
+            .await?;
         let transition = aggregate.complete_applied(
             applied,
             canonical_digest,

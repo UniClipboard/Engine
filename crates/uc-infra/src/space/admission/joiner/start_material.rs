@@ -170,15 +170,7 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
             input.passphrase.expose().as_bytes().to_vec(),
         )
         .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
-        let route = crate::network::iroh::space_admission::encode_space_admission_route_bytes(
-            decoded.route(),
-            Some(decoded.invitation_id()),
-        )
-        .and_then(|route| {
-            SpaceAdmissionRoute::from_bytes(route)
-                .map_err(|_| uc_application::deps::SpaceAdmissionTransportError::Unavailable)
-        })
-        .map_err(|_| JoinerStartMaterialError::InvalidInvitation)?;
+        let route = preserve_admission_route(decoded.route())?;
 
         Ok(JoinerStartMaterial::new(
             admission_id,
@@ -189,6 +181,13 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
             password_equivalent,
         ))
     }
+}
+
+fn preserve_admission_route(
+    encoded_route: &[u8],
+) -> Result<SpaceAdmissionRoute, JoinerStartMaterialError> {
+    SpaceAdmissionRoute::from_bytes(encoded_route.to_vec())
+        .map_err(|_| JoinerStartMaterialError::InvalidInvitation)
 }
 
 fn mint_admission_id() -> SpaceAdmissionId {
@@ -237,9 +236,9 @@ mod tests {
     async fn complete_joiner_start_material_is_created_from_a_full_invitation() {
         let invitation_id = uc_core::membership::InvitationId::from_bytes([0x61; 32])
             .expect("valid invitation id fixture");
-        let invitation =
-            encode_full_invitation(invitation_id, b"opaque-sponsor-route", 1_900_000_000_000)
-                .expect("valid full invitation fixture");
+        let encoded_route = b"opaque-sponsor-route";
+        let invitation = encode_full_invitation(invitation_id, encoded_route, 1_900_000_000_000)
+            .expect("valid full invitation fixture");
         let adapter = adapter();
 
         let material = adapter
@@ -252,6 +251,8 @@ mod tests {
             .await;
 
         assert!(material.is_ok());
+        let preserved = preserve_admission_route(encoded_route).expect("preserve admission route");
+        assert_eq!(preserved.as_bytes(), encoded_route);
     }
 
     #[tokio::test]

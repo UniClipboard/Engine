@@ -345,6 +345,7 @@ pub fn wire_dependencies_from_inputs(
             space_access_adapter,
             Arc::clone(&platform.session),
             Arc::clone(&platform.current_profile),
+            Arc::clone(&admission_keys),
         ));
     let admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort> =
         durable_space_transition.clone();

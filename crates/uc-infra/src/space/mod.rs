@@ -18,9 +18,10 @@ pub use admission::{
     DefaultJoinerActivationPreparation, DefaultJoinerAppliedPreparation,
     DefaultJoinerCancellationPreparation, DefaultJoinerCandidatePreparation,
     DefaultJoinerInvitationPreparation, DefaultJoinerStartMaterial,
-    DefaultSponsorCandidatePreparation, DefaultSponsorCommitPreparation,
-    DefaultSponsorCompletePreparation, DefaultSponsorSettledPreparation,
-    SpaceAdmissionCredentialStoreError, SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
+    DefaultSponsorAdmissionActivation, DefaultSponsorCandidatePreparation,
+    DefaultSponsorCommitPreparation, DefaultSponsorCompletePreparation,
+    DefaultSponsorSettledPreparation, SpaceAdmissionCredentialStoreError,
+    SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
 pub use membership_ledger::SqliteMembershipLedger;
 pub use security::{

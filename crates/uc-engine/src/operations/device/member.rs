@@ -30,8 +30,6 @@ use crate::{
     RemoveMemberInput, SpaceProtectionModeSummary, SpaceProtectionSummary,
     UpdateMemberSyncPreferencesInput,
 };
-#[cfg(feature = "dev-tools")]
-use crate::{DecideMembershipRemovalInput, MembershipRemovalDecision};
 #[cfg(any(test, feature = "dev-tools"))]
 use crate::{
     WorkspaceConvergenceFailureCategorySummary, WorkspaceConvergencePhaseSummary,
@@ -83,19 +81,6 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
         "device list query completed"
     );
     Ok(OperationResult::Devices(devices))
-}
-
-#[cfg(feature = "dev-tools")]
-pub async fn execute_query_workspace_convergence(
-    facade: &AppFacade,
-) -> Result<OperationResult, EngineError> {
-    let snapshot = facade
-        .workspace_convergence()
-        .await
-        .map_err(map_roster_error)?;
-    Ok(OperationResult::WorkspaceMembership(
-        workspace_convergence_summary(snapshot),
-    ))
 }
 
 pub async fn execute_query_space_membership_status(
@@ -216,34 +201,6 @@ pub async fn execute_remove_member(
     Ok(OperationResult::DeviceTrust(device_trust_snapshot(
         result.status,
     )))
-}
-
-#[cfg(feature = "dev-tools")]
-pub async fn execute_decide_membership_removal(
-    facade: &AppFacade,
-    input: DecideMembershipRemovalInput,
-) -> Result<OperationResult, EngineError> {
-    let removal_event_id = uc_core::membership::MembershipEventId::from_hex(
-        &input.removal_event_id,
-    )
-    .ok_or_else(|| {
-        EngineError::new(
-            MEMBER_INVALID_INPUT_CODE,
-            EngineErrorCategory::InvalidInput,
-            false,
-        )
-    })?;
-    let decision = match input.decision {
-        MembershipRemovalDecision::Accept => uc_core::membership::RemovalDecision::Accept,
-        MembershipRemovalDecision::Reject => uc_core::membership::RemovalDecision::Reject,
-    };
-    let snapshot = facade
-        .decide_membership_removal(removal_event_id, decision)
-        .await
-        .map_err(map_roster_error)?;
-    Ok(OperationResult::WorkspaceMembership(
-        workspace_convergence_summary(snapshot),
-    ))
 }
 
 pub async fn execute_query_space_protection(

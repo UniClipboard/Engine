@@ -22,6 +22,7 @@ pub use joiner::{
 pub use repository::SqliteSpaceAdmissionState;
 pub use security::AdmissionSecurityTransitionAdapter;
 pub use sponsor::{
-    DefaultSponsorCandidatePreparation, DefaultSponsorCommitPreparation,
-    DefaultSponsorCompletePreparation, DefaultSponsorSettledPreparation,
+    DefaultSponsorAdmissionActivation, DefaultSponsorCandidatePreparation,
+    DefaultSponsorCommitPreparation, DefaultSponsorCompletePreparation,
+    DefaultSponsorSettledPreparation,
 };

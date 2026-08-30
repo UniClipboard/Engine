@@ -33,6 +33,7 @@ pub use recovery::{
 };
 pub(crate) use sponsor::SponsorAdmissionService;
 pub use sponsor::{
+    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort,
     AuthenticatedSpaceAdmissionMessage, CommittedSponsorAdmission,
     HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
     LoadedSponsorAdmission, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,

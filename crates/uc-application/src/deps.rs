@@ -67,6 +67,7 @@ pub use crate::space::{
 pub use crate::space::{
     ActivateCompletionHelperAdmissionSecurityPort,
     ActivateCompletionHelperAdmissionSecurityRequest, ActivateMembershipEffectPort,
+    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort,
     ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
     AdmissionSecurityTransitionError, AdmissionSecurityTransitionInput,

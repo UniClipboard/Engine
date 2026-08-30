@@ -13,10 +13,6 @@ use crate::operations::device::member::{
     execute_query_member_sync_preferences, execute_query_space_membership_status,
     execute_query_space_protection, execute_remove_member, execute_update_member_sync_preferences,
 };
-#[cfg(feature = "dev-tools")]
-use crate::operations::device::member::{
-    execute_decide_membership_removal, execute_query_workspace_convergence,
-};
 use crate::operations::device::peer_connections::{
     execute_query_peer_connections, execute_refresh_peer_connections,
 };
@@ -62,7 +58,7 @@ use crate::operations::space::cancel_join_space::execute_cancel_join_space;
 use crate::operations::space::create_space::execute_create_space;
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
-use crate::operations::space::join_space::{execute_join_space, join_status_result};
+use crate::operations::space::join_space::execute_join_space;
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
@@ -149,7 +145,6 @@ impl EngineRuntime for ProductionRuntime {
             .as_ref()
             .ok_or_else(super::operation_unavailable_error)?
             .cancellation();
-        let mut join_requires_session_transition = false;
         let operation_kind = operation.kind();
         let operation = async {
             match operation {
@@ -163,10 +158,7 @@ impl EngineRuntime for ProductionRuntime {
                     execute_recover_session(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::JoinSpace(input) => {
-                    let joined =
-                        execute_join_space(self.current_facade().await?.as_ref(), input).await?;
-                    join_requires_session_transition = joined.requires_session_transition;
-                    Ok(joined.result)
+                    execute_join_space(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::IssueInvitation => {
                     execute_issue_invitation(self.current_facade().await?.as_ref()).await
@@ -335,10 +327,6 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::ListDevices => {
                     execute_list_devices(self.current_facade().await?.as_ref()).await
                 }
-                #[cfg(feature = "dev-tools")]
-                Operation::QueryWorkspaceConvergence => {
-                    execute_query_workspace_convergence(self.current_facade().await?.as_ref()).await
-                }
                 Operation::QueryDeviceTrust
                 | Operation::CancelJoinSpace(_)
                 | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
@@ -359,11 +347,6 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::RemoveMember(input) => {
                     execute_remove_member(self.current_facade().await?.as_ref(), input).await
-                }
-                #[cfg(feature = "dev-tools")]
-                Operation::DecideMembershipRemoval(input) => {
-                    execute_decide_membership_removal(self.current_facade().await?.as_ref(), input)
-                        .await
                 }
                 Operation::QuerySpaceProtection => {
                     execute_query_space_protection(self.current_facade().await?.as_ref()).await
@@ -515,17 +498,6 @@ impl EngineRuntime for ProductionRuntime {
                     });
                 }
             }
-        }
-        if join_requires_session_transition && result.is_ok() {
-            let status = self
-                .session_supervisor
-                .transition_session(
-                    session_lease
-                        .take()
-                        .ok_or_else(super::operation_unavailable_error)?,
-                )
-                .await?;
-            return Ok(join_status_result(status));
         }
         drop(session_lease);
         result

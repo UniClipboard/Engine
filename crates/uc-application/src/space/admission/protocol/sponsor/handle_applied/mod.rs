@@ -5,4 +5,6 @@ mod ports;
 
 pub use error::PrepareSponsorCompleteError;
 pub use model::PreparedSponsorComplete;
-pub use ports::PrepareSponsorCompletePort;
+pub use ports::{
+    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, PrepareSponsorCompletePort,
+};

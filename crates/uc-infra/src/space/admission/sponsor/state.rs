@@ -33,8 +33,6 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
         message: &AuthenticatedSpaceAdmissionMessage,
     ) -> Result<LoadedSponsorAdmission, SponsorAdmissionStateError> {
         let admission_id = *message.envelope().header().admission_id().as_bytes();
-        let invitation_id =
-            join_request_invitation_id(message.envelope()).map_err(map_sponsor_error)?;
 
         let existing = self
             .executor
@@ -89,6 +87,8 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                         token,
                     ));
                 }
+                let invitation_id =
+                    join_request_invitation_id(message.envelope()).map_err(into_anyhow)?;
                 if state.claimed_invitations.contains_key(&invitation_id) {
                     return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict));
                 }

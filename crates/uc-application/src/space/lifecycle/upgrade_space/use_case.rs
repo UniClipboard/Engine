@@ -75,13 +75,15 @@ impl UpgradeSpaceUseCase {
 
         let legacy_profile_isolation_version =
             semver::Version::parse("1.1.0-rc.5").map_err(UpgradeSpaceError::InvalidVersion)?;
-        let current_space_id = self
+        let requires_legacy_profile_isolation = self
             .current_space_identity
-            .current_space_id()
+            .requires_legacy_profile_isolation()
             .await
             .map_err(|error| UpgradeSpaceError::ReadSetupState(error.to_string()))?;
 
-        if current_space_id.is_some() && transition.crosses(&legacy_profile_isolation_version) {
+        if requires_legacy_profile_isolation
+            && transition.crosses(&legacy_profile_isolation_version)
+        {
             self.rebuild_space
                 .execute()
                 .await

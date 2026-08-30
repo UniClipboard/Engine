@@ -8,7 +8,8 @@ mod handle_prepared;
 mod state;
 
 pub use handle_applied::{
-    PrepareSponsorCompleteError, PrepareSponsorCompletePort, PreparedSponsorComplete,
+    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, PrepareSponsorCompleteError,
+    PrepareSponsorCompletePort, PreparedSponsorComplete,
 };
 pub use handle_authenticated_message::{
     HandleAuthenticatedSpaceAdmissionMessageError, HandleAuthenticatedSpaceAdmissionMessagePort,
@@ -34,6 +35,7 @@ pub(crate) struct SponsorAdmissionService {
     pub(super) prepare_candidate: Arc<dyn PrepareSponsorCandidatePort>,
     pub(super) prepare_commit: Arc<dyn PrepareSponsorCommitPort>,
     pub(super) prepare_complete: Arc<dyn PrepareSponsorCompletePort>,
+    pub(super) activate_admission: Arc<dyn ActivateSponsorAdmissionPort>,
     pub(super) prepare_settled: Arc<dyn PrepareSponsorSettledPort>,
 }
 
@@ -43,6 +45,7 @@ impl SponsorAdmissionService {
         prepare_candidate: Arc<dyn PrepareSponsorCandidatePort>,
         prepare_commit: Arc<dyn PrepareSponsorCommitPort>,
         prepare_complete: Arc<dyn PrepareSponsorCompletePort>,
+        activate_admission: Arc<dyn ActivateSponsorAdmissionPort>,
         prepare_settled: Arc<dyn PrepareSponsorSettledPort>,
     ) -> Self {
         Self {
@@ -50,6 +53,7 @@ impl SponsorAdmissionService {
             prepare_candidate,
             prepare_commit,
             prepare_complete,
+            activate_admission,
             prepare_settled,
         }
     }

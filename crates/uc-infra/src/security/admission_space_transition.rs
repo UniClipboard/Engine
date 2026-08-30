@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use uc_application::deps::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
-    DeviceManagementResetDataPort,
+    CommitMembershipLedgerPort, DeviceManagementResetDataPort, LoadMembershipLedgerPort,
+    LoadedMembershipLedger, MembershipLedgerMutation, PeerReconciliationRecord,
 };
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::crypto::aad;
@@ -46,9 +47,9 @@ use crate::search::render_payload::RenderPayloadCodec;
 
 use super::{
     active_space_generation_manifest_store::DeviceManagementResetJournalV1,
-    ActiveSpaceGenerationManifestStore, BlobCipherAdapter, EncryptedBlobStore,
+    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, BlobCipherAdapter, EncryptedBlobStore,
 };
-use crate::space::{DefaultSpaceAccessAdapter, InMemorySession};
+use crate::space::{DefaultSpaceAccessAdapter, InMemorySession, SqliteMembershipLedger};
 
 struct TargetSessionSubkeyDeriver(InMemorySession);
 
@@ -86,6 +87,7 @@ pub struct DurableAdmissionSpaceTransition {
     space_access: Arc<DefaultSpaceAccessAdapter>,
     session: Arc<InMemorySession>,
     current_profile: Arc<dyn CurrentProfilePort>,
+    admission_keys: Arc<AdmissionKeyManager>,
     device_reset_source: tokio::sync::Mutex<Option<DeviceResetSource>>,
 }
 
@@ -159,6 +161,7 @@ impl DurableAdmissionSpaceTransition {
         space_access: Arc<DefaultSpaceAccessAdapter>,
         session: Arc<InMemorySession>,
         current_profile: Arc<dyn CurrentProfilePort>,
+        admission_keys: Arc<AdmissionKeyManager>,
     ) -> Self {
         Self {
             generations: SqliteSpaceGenerationStore::new(
@@ -173,6 +176,7 @@ impl DurableAdmissionSpaceTransition {
             space_access,
             session,
             current_profile,
+            admission_keys,
             device_reset_source: tokio::sync::Mutex::new(None),
         }
     }
@@ -465,6 +469,8 @@ impl DurableAdmissionSpaceTransition {
                     target_session.as_ref(),
                 )
                 .await?;
+                self.install_target_membership_ledger(&target_database, &target_workspace)
+                    .await?;
                 copy_profile_recovery_state(&self.source_pool, &target_database)?;
                 self.generation_manifest_store
                     .promote(&self.active_generation_manifest_for(
@@ -632,6 +638,79 @@ impl DurableAdmissionSpaceTransition {
         let material = Self::target_space_material(target_workspace)?;
         self.install_and_reopen_security_material(target_database, &material, target_session)
             .await
+    }
+
+    async fn install_target_membership_ledger(
+        &self,
+        target_database: &Path,
+        target_workspace: &TargetWorkspaceGenerationV1,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        let local_member_instance = target_workspace
+            .relationships
+            .iter()
+            .filter(|facts| facts.device_id == target_workspace.local_device_id)
+            .map(|facts| facts.member_instance)
+            .next()
+            .ok_or(AdmissionSpaceTransitionError::Inconsistent)?;
+        let peer_reconciliation = target_workspace
+            .relationships
+            .iter()
+            .filter(|facts| facts.device_id != target_workspace.local_device_id)
+            .map(|facts| {
+                (
+                    facts.device_id.clone(),
+                    PeerReconciliationRecord {
+                        peer_device_id: facts.device_id.clone(),
+                        relationship:
+                            uc_core::membership::MembershipHistoryRelationship::Consistent,
+                        confirmed_position: None,
+                        restricted_delivery: Vec::new(),
+                        updated_at_ms: 0,
+                    },
+                )
+            })
+            .collect();
+        let target_pool = init_db_pool(
+            target_database
+                .to_str()
+                .ok_or(AdmissionSpaceTransitionError::Storage)?,
+        )
+        .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let ledger = SqliteMembershipLedger::new(
+            Arc::new(DieselSqliteExecutor::new(target_pool)),
+            Arc::clone(&self.admission_keys),
+        );
+        let current = ledger
+            .load()
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        let expected_revision = current.revision;
+        let expected_history_digest = current
+            .membership_history
+            .as_deref()
+            .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
+        ledger
+            .compare_and_commit(MembershipLedgerMutation {
+                expected_revision,
+                expected_history_digest,
+                replacement: LoadedMembershipLedger {
+                    revision: expected_revision
+                        .checked_add(1)
+                        .ok_or(AdmissionSpaceTransitionError::Inconsistent)?,
+                    lineage_id: Some(target_workspace.target_space_id.clone()),
+                    membership_history: Some(target_workspace.membership_history.clone()),
+                    local_device_id: Some(target_workspace.local_device_id.clone()),
+                    local_member_instance: Some(local_member_instance),
+                    local_join_active: true,
+                    peer_reconciliation,
+                    inbound_transfers: Default::default(),
+                    completed_inbound_transfers: Default::default(),
+                    pending_effects: Default::default(),
+                },
+            })
+            .await
+            .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        Ok(())
     }
 
     async fn install_and_reopen_security_material(
@@ -1414,6 +1493,8 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                     target_session.as_ref(),
                 )
                 .await?;
+                self.install_target_membership_ledger(&target_database, &target_workspace)
+                    .await?;
                 copy_profile_recovery_state(&self.source_pool, &target_database)?;
                 let manifest = self.active_generation_manifest(transition)?;
                 self.generation_manifest_store
@@ -2978,6 +3059,10 @@ mod tests {
             Arc::clone(&access),
             Arc::clone(&session),
             Arc::new(DefaultCurrentProfile::new()),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::clone(&secure_storage),
+                [0x41; 16],
+            )),
         );
         let target = SpaceId::from_str("reset-target");
 
@@ -3019,6 +3104,7 @@ mod tests {
             access,
             session,
             Arc::new(DefaultCurrentProfile::new()),
+            Arc::new(AdmissionKeyManager::new(secure_storage, [0x41; 16])),
         );
         retried
             .prepare_device_management_reset(&target)
@@ -3119,6 +3205,10 @@ mod tests {
             Arc::clone(&access),
             Arc::clone(&session),
             Arc::new(DefaultCurrentProfile::new()),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::clone(&secure_storage),
+                [0x71; 16],
+            )),
         );
         let relayed_update = PendingGroupUpdate::persistent(
             DeviceId::new("target-peer"),
@@ -3335,6 +3425,10 @@ mod tests {
             Arc::clone(&access),
             Arc::clone(&session),
             Arc::clone(&current_profile),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::clone(&secure_storage),
+                [0x91; 16],
+            )),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
             attempt_id: SpaceAdmissionId::from_bytes([0x92; 32]).expect("valid admission id"),
@@ -3497,6 +3591,10 @@ mod tests {
             Arc::clone(&access),
             Arc::clone(&session),
             Arc::new(DefaultCurrentProfile::new()),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::clone(&secure_storage),
+                [0xa1; 16],
+            )),
         );
         let input = AdmissionSpaceTransitionPreparationV2 {
             attempt_id: SpaceAdmissionId::from_bytes([0xa2; 32]).expect("valid admission id"),

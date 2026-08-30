@@ -7,9 +7,7 @@ use std::sync::Arc;
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_application::deps::LoadMembershipLedgerPort;
-use uc_core::membership::{
-    AdmissionContinuationCredential, AdmissionPendingRecovery, SpaceAdmissionId,
-};
+use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
 
 pub struct SqliteSpaceAdmissionState<E> {
     pub(super) executor: E,
@@ -61,16 +59,13 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 let aggregate = self
                     .open_record(*admission_id.as_bytes(), stored)
                     .map_err(codec::into_anyhow)?;
-                let credential = match aggregate.pending_recovery() {
-                    Some(AdmissionPendingRecovery::Continuation {
-                        continuation_credential,
-                        ..
-                    }) => AdmissionContinuationCredential::from_bytes(
-                        continuation_credential.as_bytes().to_vec(),
-                    )
-                    .map_err(|_| codec::into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?,
-                    _ => return Err(codec::into_anyhow(SpaceAdmissionStateStoreError::Conflict)),
-                };
+                let continuation_credential = aggregate
+                    .sponsor_continuation_credential()
+                    .ok_or_else(|| codec::into_anyhow(SpaceAdmissionStateStoreError::Conflict))?;
+                let credential = AdmissionContinuationCredential::from_bytes(
+                    continuation_credential.as_bytes().to_vec(),
+                )
+                .map_err(|_| codec::into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
                 Ok(credential)
             })
             .map_err(codec::map_executor_error)

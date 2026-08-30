@@ -12,14 +12,15 @@ use uc_core::membership::{
 use uc_core::ports::PeerReachabilityChanged;
 
 use crate::space::admission::{
-    AdmissionRecoveryService, CurrentJoinAdmissionStatePort, ExecuteJoinerActivationPort,
-    HandleAuthenticatedSpaceAdmissionMessagePort, JoinerActivationStatePort,
-    JoinerAdmissionService, JoinerStartMaterialPort, JoinerStartStatePort,
-    PendingAdmissionRecoveryStatePort, PrepareJoinerActivationPort, PrepareJoinerAppliedPort,
-    PrepareJoinerCancellationPort, PrepareJoinerCandidatePort, PrepareJoinerInvitationPort,
-    PrepareSponsorCandidatePort, PrepareSponsorCommitPort, PrepareSponsorCompletePort,
-    PrepareSponsorSettledPort, ResolveJoinerInvitationPort, SpaceAdmissionProtocol,
-    SpaceAdmissionTransportPort, SponsorAdmissionService, SponsorAdmissionStatePort,
+    ActivateSponsorAdmissionPort, AdmissionRecoveryService, CurrentJoinAdmissionStatePort,
+    ExecuteJoinerActivationPort, HandleAuthenticatedSpaceAdmissionMessagePort,
+    JoinerActivationStatePort, JoinerAdmissionService, JoinerStartMaterialPort,
+    JoinerStartStatePort, PendingAdmissionRecoveryStatePort, PrepareJoinerActivationPort,
+    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidatePort,
+    PrepareJoinerInvitationPort, PrepareSponsorCandidatePort, PrepareSponsorCommitPort,
+    PrepareSponsorCompletePort, PrepareSponsorSettledPort, ResolveJoinerInvitationPort,
+    SpaceAdmissionProtocol, SpaceAdmissionTransportPort, SponsorAdmissionService,
+    SponsorAdmissionStatePort,
 };
 use crate::space::membership::CurrentMemberSignaturePort;
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
@@ -98,6 +99,7 @@ pub struct SpaceApplicationDeps {
     pub prepare_sponsor_candidate: Arc<dyn PrepareSponsorCandidatePort>,
     pub prepare_sponsor_commit: Arc<dyn PrepareSponsorCommitPort>,
     pub prepare_sponsor_complete: Arc<dyn PrepareSponsorCompletePort>,
+    pub activate_sponsor_admission: Arc<dyn ActivateSponsorAdmissionPort>,
     pub prepare_sponsor_settled: Arc<dyn PrepareSponsorSettledPort>,
     pub prepare_joiner_candidate: Arc<dyn PrepareJoinerCandidatePort>,
     pub prepare_joiner_applied: Arc<dyn PrepareJoinerAppliedPort>,
@@ -184,6 +186,7 @@ impl SpaceApplication {
             deps.prepare_sponsor_candidate,
             deps.prepare_sponsor_commit,
             deps.prepare_sponsor_complete,
+            deps.activate_sponsor_admission,
             deps.prepare_sponsor_settled,
         );
         let admission_recovery = AdmissionRecoveryService::new(

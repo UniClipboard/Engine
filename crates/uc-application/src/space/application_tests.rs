@@ -576,6 +576,16 @@ impl MembershipNetworkActivityPort for PassivePorts {
 }
 
 #[async_trait]
+impl ActivateSponsorAdmissionPort for PassivePorts {
+    async fn activate(
+        &self,
+        _activated_security: &uc_core::membership::AdmissionActivatedSecurityState,
+    ) -> Result<(), ActivateSponsorAdmissionError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl ResolveRePairingPort for PassivePorts {
     async fn resolve_after_successful_pairing(&self) -> Result<(), RePairingStateError> {
         Ok(())
@@ -613,6 +623,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             prepare_sponsor_candidate: passive.clone(),
             prepare_sponsor_commit: passive.clone(),
             prepare_sponsor_complete: passive.clone(),
+            activate_sponsor_admission: passive.clone(),
             prepare_sponsor_settled: passive.clone(),
             prepare_joiner_candidate: passive.clone(),
             prepare_joiner_applied: passive.clone(),

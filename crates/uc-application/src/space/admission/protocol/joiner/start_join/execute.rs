@@ -27,7 +27,6 @@ impl JoinerAdmissionService {
             requires_session_transition,
             commit_token,
         ) = loaded.into_parts();
-
         let superseded = current_join
             .map(JoinerAdmission::supersede)
             .transpose()

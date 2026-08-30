@@ -87,11 +87,12 @@ use uc_infra::space::{
     DefaultJoinerAppliedPreparation, DefaultJoinerCancellationPreparation,
     DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
     DefaultJoinerStartMaterial, DefaultMembershipSecurityUpdateAdapter,
-    DefaultSponsorCandidatePreparation, DefaultSponsorCommitPreparation,
-    DefaultSponsorCompletePreparation, DefaultSponsorSettledPreparation,
-    DeviceTrustObservationsAdapter, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
-    MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
-    MembershipProjectionCleanupAdapter, OpenMlsHistoricalSignatureVerifier,
+    DefaultSponsorAdmissionActivation, DefaultSponsorCandidatePreparation,
+    DefaultSponsorCommitPreparation, DefaultSponsorCompletePreparation,
+    DefaultSponsorSettledPreparation, DeviceTrustObservationsAdapter,
+    GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport, MembershipActivationAdapter,
+    MembershipMemberFactsAdapter, MembershipNetworkGate, MembershipProjectionCleanupAdapter,
+    OpenMlsHistoricalSignatureVerifier,
 };
 
 #[derive(Default)]
@@ -854,9 +855,29 @@ pub async fn build_sync_engine_assembly(
                 historical_signatures.clone(),
             )),
             prepare_sponsor_complete: Arc::new(DefaultSponsorCompletePreparation::new(
-                local_device_id,
+                local_device_id.clone(),
                 Arc::clone(&space_setup.current_member_signatures),
                 historical_signatures.clone(),
+            )),
+            activate_sponsor_admission: Arc::new(DefaultSponsorAdmissionActivation::new(
+                Arc::clone(
+                    &deps
+                        .security
+                        .space_access_ports
+                        .activate_sponsor_admission_security,
+                ),
+                space_setup.membership_ledger.clone()
+                    as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
+                space_setup.membership_ledger.clone()
+                    as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
+                historical_signatures.clone(),
+                Arc::new(MembershipMemberFactsAdapter::new(
+                    Arc::clone(&deps.device.member_repo),
+                    Arc::clone(&shared.trusted_peer_repo),
+                    Arc::clone(&space_setup.peer_addr_repo),
+                    Arc::clone(&deps.device.device_identity),
+                    Arc::clone(&deps.system.clock),
+                )),
             )),
             prepare_sponsor_settled: Arc::new(DefaultSponsorSettledPreparation),
             prepare_joiner_candidate: Arc::new(DefaultJoinerCandidatePreparation::new(

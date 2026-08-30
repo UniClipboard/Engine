@@ -336,6 +336,27 @@ impl SpaceAdmissionAggregate {
         }
     }
 
+    pub fn sponsor_continuation_credential(&self) -> Option<&AdmissionContinuationCredential> {
+        match &self.state {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Candidate(state)) => {
+                Some(&state.continuation_credential)
+            }
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Committed(state)) => {
+                Some(&state.continuation_credential)
+            }
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state)) => {
+                Some(&state.continuation_credential)
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(state)) => {
+                Some(&state.continuation_credential)
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
+                SpaceAdmissionRejectedState::Sponsor(state),
+            )) => Some(&state.continuation_credential),
+            _ => None,
+        }
+    }
+
     pub fn sponsor_commit_preparation(&self) -> Option<SponsorCommitPreparation<'_>> {
         let SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Candidate(state)) =
             &self.state

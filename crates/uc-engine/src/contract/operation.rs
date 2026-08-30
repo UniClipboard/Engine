@@ -72,10 +72,6 @@ pub enum OperationKind {
     QueryMemberSyncPreferences,
     UpdateMemberSyncPreferences,
     RemoveMember,
-    #[cfg(feature = "dev-tools")]
-    DecideMembershipRemoval,
-    #[cfg(feature = "dev-tools")]
-    QueryWorkspaceConvergence,
     QueryDeviceTrust,
     DecideDeviceTrustChange,
     QuerySpaceProtection,
@@ -169,10 +165,6 @@ impl fmt::Display for OperationKind {
             Self::QueryMemberSyncPreferences => "query_member_sync_preferences",
             Self::UpdateMemberSyncPreferences => "update_member_sync_preferences",
             Self::RemoveMember => "remove_member",
-            #[cfg(feature = "dev-tools")]
-            Self::DecideMembershipRemoval => "decide_membership_removal",
-            #[cfg(feature = "dev-tools")]
-            Self::QueryWorkspaceConvergence => "query_workspace_convergence",
             Self::QueryDeviceTrust => "query_device_trust",
             Self::DecideDeviceTrustChange => "decide_device_trust_change",
             Self::QuerySpaceProtection => "query_space_protection",
@@ -299,10 +291,6 @@ pub enum Operation {
     QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput),
     UpdateMemberSyncPreferences(UpdateMemberSyncPreferencesInput),
     RemoveMember(RemoveMemberInput),
-    #[cfg(feature = "dev-tools")]
-    DecideMembershipRemoval(DecideMembershipRemovalInput),
-    #[cfg(feature = "dev-tools")]
-    QueryWorkspaceConvergence,
     QueryDeviceTrust,
     DecideDeviceTrustChange(DecideDeviceTrustChangeInput),
     QuerySpaceProtection,
@@ -396,10 +384,6 @@ impl Operation {
             Self::QueryMemberSyncPreferences(_) => OperationKind::QueryMemberSyncPreferences,
             Self::UpdateMemberSyncPreferences(_) => OperationKind::UpdateMemberSyncPreferences,
             Self::RemoveMember(_) => OperationKind::RemoveMember,
-            #[cfg(feature = "dev-tools")]
-            Self::DecideMembershipRemoval(_) => OperationKind::DecideMembershipRemoval,
-            #[cfg(feature = "dev-tools")]
-            Self::QueryWorkspaceConvergence => OperationKind::QueryWorkspaceConvergence,
             Self::QueryDeviceTrust => OperationKind::QueryDeviceTrust,
             Self::DecideDeviceTrustChange(_) => OperationKind::DecideDeviceTrustChange,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
@@ -524,19 +508,6 @@ pub struct UpdateMemberSyncPreferencesInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveMemberInput {
     pub device_id: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MembershipRemovalDecision {
-    Accept,
-    Reject,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecideMembershipRemovalInput {
-    pub removal_event_id: String,
-    pub decision: MembershipRemovalDecision,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

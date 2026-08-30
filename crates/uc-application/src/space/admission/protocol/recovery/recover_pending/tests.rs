@@ -302,7 +302,7 @@ async fn complete_is_saved_as_an_activation_plan_before_local_activation() {
 }
 
 #[tokio::test]
-async fn saved_activation_is_executed_before_complete_ack_is_woken() {
+async fn saved_activation_waits_for_the_explicit_lifecycle_transition() {
     let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
     pair.joiner()
         .start_join(join_input("activate-complete"))
@@ -319,13 +319,16 @@ async fn saved_activation_is_executed_before_complete_ack_is_woken() {
         .recover_pending(AdmissionRecoveryTrigger::StateChanged)
         .await;
 
-    assert_eq!(report.advanced_count, 1);
+    assert_eq!(report.advanced_count, 0);
     assert_eq!(report.deferred_count, 0);
-    assert!(pair.events().ends_with(&[
-        ProtocolEvent::JoinerActivationExecuted,
-        ProtocolEvent::JoinerSavedActivePendingSettlement,
-        ProtocolEvent::AdmissionRecoveryWoken,
-    ]));
+    assert!(!pair
+        .events()
+        .contains(&ProtocolEvent::JoinerActivationExecuted));
+    assert!(pair
+        .joiner()
+        .has_pending_space_transition()
+        .await
+        .expect("the lifecycle transition should remain pending"));
 }
 
 #[tokio::test]
@@ -342,18 +345,11 @@ async fn activation_is_retried_from_the_saved_plan_after_commit_conflict() {
     }
     pair.fail_next_activation_commit();
 
-    let conflicted = pair
-        .joiner()
-        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
-        .await;
-    let recovered = pair
-        .joiner()
-        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
-        .await;
+    let conflicted = pair.joiner().complete_pending_space_transition().await;
+    let recovered = pair.joiner().complete_pending_space_transition().await;
 
-    assert_eq!(conflicted.deferred_count, 1);
-    assert_eq!(conflicted.advanced_count, 0);
-    assert_eq!(recovered.advanced_count, 1);
+    assert!(conflicted.is_err());
+    assert!(recovered.is_ok());
     assert!(pair.events().ends_with(&[
         ProtocolEvent::JoinerActivationExecuted,
         ProtocolEvent::JoinerActivationExecuted,
@@ -374,6 +370,11 @@ async fn settled_is_saved_and_finishes_joiner_recovery() {
             .recover_pending(AdmissionRecoveryTrigger::StateChanged)
             .await;
     }
+
+    pair.joiner()
+        .complete_pending_space_transition()
+        .await
+        .expect("the Engine lifecycle should complete the saved transition");
 
     let report = pair
         .joiner()

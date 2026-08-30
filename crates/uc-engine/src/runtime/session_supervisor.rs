@@ -83,30 +83,62 @@ impl SessionSupervisor {
         self.install_new_session(false).await
     }
 
-    pub(super) async fn transition_session(
-        &self,
-        current_operation: SessionOperationLease,
-    ) -> Result<uc_application::facade::CurrentJoinStatus, EngineError> {
+    pub(super) async fn transition_pending_session(&self) -> Result<bool, EngineError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.operations
-            .close_and_wait(Some(current_operation))
-            .await?;
+        let facade = match self.session.lock().await.as_ref() {
+            Some(session) => Arc::clone(&session.facade),
+            None => return Ok(false),
+        };
+        if !facade
+            .has_pending_space_transition()
+            .await
+            .map_err(|error| {
+                operation_error_with_code(1103, "inspect runtime space transition", error)
+            })?
+        {
+            return Ok(false);
+        }
+        self.operations.close_and_wait(None).await?;
+        match facade.has_pending_space_transition().await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.operations.reopen();
+                return Ok(false);
+            }
+            Err(error) => {
+                self.operations.reopen();
+                return Err(operation_error_with_code(
+                    1103,
+                    "confirm runtime space transition",
+                    error,
+                ));
+            }
+        }
+
         let session = self
             .session
             .lock()
             .await
             .take()
             .ok_or_else(super::operation_unavailable_error)?;
-        let facade = Arc::clone(&session.facade);
         session
             .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
             .await;
-        let status = facade
-            .complete_pending_space_transition()
-            .await
-            .map_err(|error| operation_error_with_code(1103, "recover space transition", error))?;
-        self.install_new_session(true).await?;
-        Ok(status)
+        let completed = facade.complete_pending_space_transition().await;
+        match completed {
+            Ok(_) => {
+                self.install_new_session(true).await?;
+                Ok(true)
+            }
+            Err(error) => {
+                let original =
+                    operation_error_with_code(1103, "complete runtime space transition", error);
+                match self.install_new_session(false).await {
+                    Ok(()) => Err(original),
+                    Err(restore_error) => Err(restore_error),
+                }
+            }
+        }
     }
 
     pub(super) async fn reset_space(
@@ -233,14 +265,11 @@ impl SessionSupervisor {
             session = ProductionRuntime::build_session(&factory).await?;
             resume_space_activities = true;
         }
+        let recovered = session.facade.recover_space_session().await;
         if resume_space_activities {
-            let recovered = session
-                .facade
-                .recover_space_session()
-                .await
-                .map_err(|error| {
-                    operation_error_with_code(1103, "activate transitioned space session", error)
-                })?;
+            let recovered = recovered.map_err(|error| {
+                operation_error_with_code(1103, "activate transitioned space session", error)
+            })?;
             if !recovered.unlocked {
                 return Err(operation_error_with_code(
                     1103,

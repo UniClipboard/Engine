@@ -2,17 +2,21 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uc_application::deps::{
-    CurrentMemberSignaturePort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
-    PreparedSponsorComplete,
+    ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort,
+    ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
+    ApplyMembershipMemberFactsPort, CommitMembershipLedgerPort, CurrentMemberSignaturePort,
+    LoadMembershipLedgerPort, MembershipEffectKind, MembershipEffectPhase,
+    MembershipLedgerMutation, PeerReconciliationRecord, PendingMembershipEffect,
+    PrepareSponsorCompleteError, PrepareSponsorCompletePort, PreparedSponsorComplete,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionActivatedSecurityState, AdmissionActivationReceipt, AdmissionCompleteV1,
-    AdmissionCompletionV1, HistoricalMembershipSignatureVerifier, SpaceAdmissionBodyV1,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCompletePreparation,
+    AdmissionCompletionV1, HistoricalMembershipSignatureVerifier, MembershipHistoryRelationship,
+    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCompletePreparation,
     VersionedMembershipHistory,
 };
 
@@ -49,6 +53,163 @@ struct SponsorActivatedSecurityV1<'a> {
     expected_commitment: &'a uc_core::membership::AdmissionSecurityCommitmentV1,
     committed_history: &'a [u8],
     security_commitment_id: [u8; 32],
+}
+
+#[derive(Deserialize)]
+struct OwnedSponsorActivatedSecurityV1 {
+    format_version: u16,
+    space_id: String,
+    staged_state: Vec<u8>,
+    commit: Vec<u8>,
+    expected_commitment: uc_core::membership::AdmissionSecurityCommitmentV1,
+    committed_history: Vec<u8>,
+    security_commitment_id: [u8; 32],
+}
+
+pub struct DefaultSponsorAdmissionActivation {
+    security: Arc<dyn ActivateSponsorAdmissionSecurityPort>,
+    loader: Arc<dyn LoadMembershipLedgerPort>,
+    committer: Arc<dyn CommitMembershipLedgerPort>,
+    verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
+    member_facts: Arc<dyn ApplyMembershipMemberFactsPort>,
+}
+
+impl DefaultSponsorAdmissionActivation {
+    pub fn new(
+        security: Arc<dyn ActivateSponsorAdmissionSecurityPort>,
+        loader: Arc<dyn LoadMembershipLedgerPort>,
+        committer: Arc<dyn CommitMembershipLedgerPort>,
+        verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
+        member_facts: Arc<dyn ApplyMembershipMemberFactsPort>,
+    ) -> Self {
+        Self {
+            security,
+            loader,
+            committer,
+            verifier,
+            member_facts,
+        }
+    }
+}
+
+#[async_trait]
+impl ActivateSponsorAdmissionPort for DefaultSponsorAdmissionActivation {
+    async fn activate(
+        &self,
+        activated_security: &AdmissionActivatedSecurityState,
+    ) -> Result<(), ActivateSponsorAdmissionError> {
+        self.activate_inner(activated_security)
+            .await
+            .map_err(ActivateSponsorAdmissionError::new)
+    }
+}
+
+impl DefaultSponsorAdmissionActivation {
+    async fn activate_inner(
+        &self,
+        activated_security: &AdmissionActivatedSecurityState,
+    ) -> anyhow::Result<()> {
+        let activated: OwnedSponsorActivatedSecurityV1 =
+            postcard::from_bytes(activated_security.as_bytes())?;
+        if activated.format_version != SPONSOR_ACTIVATED_SECURITY_FORMAT_V1
+            || activated.expected_commitment.security_commitment_id
+                != activated.security_commitment_id
+        {
+            anyhow::bail!("the Sponsor activation material is inconsistent");
+        }
+        let space_id = uc_core::ids::SpaceId::from_str(&activated.space_id);
+        let history = VersionedMembershipHistory::decode_persisted_v2(
+            &activated.committed_history,
+            self.verifier.as_ref(),
+        )?;
+        if history.lineage_id() != activated.space_id {
+            anyhow::bail!("the Sponsor activation history has a different lineage");
+        }
+        self.security
+            .activate_sponsor_admission_security(ActivateSponsorAdmissionSecurityRequest {
+                space_id,
+                staged_state: activated.staged_state,
+                commit: activated.commit,
+                expected_commitment: activated.expected_commitment,
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
+
+        let event_id = history
+            .current_position()?
+            .event_id
+            .ok_or_else(|| anyhow::anyhow!("the Sponsor activation history has no head"))?;
+        let event = history
+            .event(event_id)
+            .ok_or_else(|| anyhow::anyhow!("the Sponsor activation event is unavailable"))?;
+        let affected_device_ids = match &event.operation {
+            uc_core::membership::MembershipOperationV2::AddDevice { admission } => {
+                vec![admission.facts.device_id.clone()]
+            }
+            uc_core::membership::MembershipOperationV2::RemoveDevice { .. } => {
+                anyhow::bail!("the Sponsor activation event is not an admission")
+            }
+        };
+        self.member_facts
+            .apply_member_facts(&PendingMembershipEffect {
+                event_id: *event_id.as_bytes(),
+                kind: MembershipEffectKind::AddDevice,
+                phase: MembershipEffectPhase::Prepared,
+                affected_device_ids,
+                payload: postcard::to_stdvec(event)?,
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
+
+        let mut ledger = self.loader.load().await.map_err(anyhow::Error::new)?;
+        if ledger.membership_history.as_deref() == Some(activated.committed_history.as_slice()) {
+            return Ok(());
+        }
+        if ledger.lineage_id.as_deref() != Some(activated.space_id.as_str()) {
+            anyhow::bail!("the Sponsor membership ledger has a different lineage");
+        }
+        let position = history.current_position()?;
+        let local_device_id = ledger
+            .local_device_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("the Sponsor membership ledger has no local device"))?;
+        ledger.peer_reconciliation = history
+            .active_members()
+            .into_iter()
+            .filter_map(|member| history.admission_facts_for(member))
+            .filter(|facts| facts.device_id != local_device_id)
+            .map(|facts| {
+                (
+                    facts.device_id.clone(),
+                    PeerReconciliationRecord {
+                        peer_device_id: facts.device_id.clone(),
+                        relationship: MembershipHistoryRelationship::Consistent,
+                        confirmed_position: Some(position.clone()),
+                        restricted_delivery: Vec::new(),
+                        updated_at_ms: 0,
+                    },
+                )
+            })
+            .collect();
+        let expected_revision = ledger.revision;
+        let expected_history_digest = ledger
+            .membership_history
+            .as_deref()
+            .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
+        ledger.revision = expected_revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("the Sponsor membership revision overflowed"))?;
+        ledger.membership_history = Some(activated.committed_history);
+        self.committer
+            .compare_and_commit(MembershipLedgerMutation {
+                expected_revision,
+                expected_history_digest,
+                replacement: ledger,
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
+        Ok(())
+    }
 }
 
 #[async_trait]

@@ -312,6 +312,12 @@ impl ProductionRuntime {
         });
         session_supervisor.configure_factory(Arc::clone(&session_factory));
         session_supervisor.resume().await?;
+        spawn_space_transition_watcher(
+            Arc::clone(&session_supervisor),
+            &task_registry,
+            events.clone(),
+        )
+        .await;
         spawn_network_recovery_events(network_recovery.subscribe(), &task_registry, events.clone())
             .await;
         let blob_ports = BlobProcessingPorts::from_app_deps(&wired.deps);
@@ -532,6 +538,37 @@ impl ProductionRuntime {
         self.current_session_field(|session| Arc::clone(&session.mobile_sync))
             .await
     }
+}
+
+async fn spawn_space_transition_watcher(
+    supervisor: Arc<SessionSupervisor>,
+    tasks: &Arc<TaskRegistry>,
+    events: EventSender,
+) {
+    tasks
+        .spawn("space_transition_watcher", move |cancel| async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = interval.tick() => match supervisor.transition_pending_session().await {
+                        Ok(true) => {
+                            events.send(crate::EngineEvent::RefreshRequired {
+                                reason: crate::RefreshReason::StateInvalidated,
+                            });
+                        }
+                        Ok(false) => {}
+                        Err(error) => warn!(
+                            error_code = error.code(),
+                            retryable = error.is_retryable(),
+                            "runtime Space transition attempt failed"
+                        ),
+                    }
+                }
+            }
+        })
+        .await;
 }
 
 fn startup_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {

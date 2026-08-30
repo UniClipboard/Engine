@@ -155,6 +155,19 @@ impl CurrentSpaceIdentityPort for CurrentSpaceResolver {
             None => self.legacy_id.load().await,
         }
     }
+
+    async fn requires_legacy_profile_isolation(&self) -> Result<bool, CurrentSpaceIdentityError> {
+        if self
+            .generation_manifest
+            .load()
+            .await
+            .map_err(map_generation_manifest_error)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        Ok(self.legacy_id.load().await?.is_some())
+    }
 }
 
 #[async_trait]

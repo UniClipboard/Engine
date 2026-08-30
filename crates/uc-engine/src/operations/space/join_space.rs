@@ -13,15 +13,10 @@ use crate::operations::device::member::join_space_status;
 
 use crate::{EngineError, EngineErrorCategory, JoinSpaceInput, OperationResult};
 
-pub(crate) struct JoinSpaceExecution {
-    pub(crate) result: OperationResult,
-    pub(crate) requires_session_transition: bool,
-}
-
 pub async fn execute_join_space(
     facade: &AppFacade,
     input: JoinSpaceInput,
-) -> Result<JoinSpaceExecution, EngineError> {
+) -> Result<OperationResult, EngineError> {
     let joined = facade
         .join_space(AppJoinSpaceInput {
             invitation_code: InvitationCode::new(input.invitation_code),
@@ -31,10 +26,7 @@ pub async fn execute_join_space(
         })
         .await
         .map_err(map_join_space_error)?;
-    Ok(JoinSpaceExecution {
-        result: join_status_result(joined.status),
-        requires_session_transition: joined.requires_session_transition,
-    })
+    Ok(join_status_result(joined.status))
 }
 
 pub(crate) fn join_status_result(

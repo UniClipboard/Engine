@@ -6,6 +6,10 @@ use super::CurrentSpaceIdentityError;
 #[async_trait]
 pub trait CurrentSpaceIdentityPort: Send + Sync {
     async fn current_space_id(&self) -> Result<Option<SpaceId>, CurrentSpaceIdentityError>;
+
+    async fn requires_legacy_profile_isolation(&self) -> Result<bool, CurrentSpaceIdentityError> {
+        Ok(self.current_space_id().await?.is_some())
+    }
 }
 
 #[async_trait]

@@ -2,8 +2,8 @@ use crate::error::anyhow_error_constructor;
 use uc_core::membership::{AdmissionReplayError, SpaceAdmissionAggregateError};
 
 use super::super::{
-    PrepareSponsorCandidateError, PrepareSponsorCommitError, PrepareSponsorCompleteError,
-    PrepareSponsorSettledError, SponsorAdmissionStateError,
+    ActivateSponsorAdmissionError, PrepareSponsorCandidateError, PrepareSponsorCommitError,
+    PrepareSponsorCompleteError, PrepareSponsorSettledError, SponsorAdmissionStateError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +43,12 @@ pub enum HandleAuthenticatedSpaceAdmissionMessageError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+impl From<ActivateSponsorAdmissionError> for HandleAuthenticatedSpaceAdmissionMessageError {
+    fn from(error: ActivateSponsorAdmissionError) -> Self {
+        Self::recovery_required(error)
+    }
 }
 
 impl HandleAuthenticatedSpaceAdmissionMessageError {
