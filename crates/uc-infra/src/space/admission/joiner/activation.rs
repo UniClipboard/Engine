@@ -66,6 +66,7 @@ struct OwnedJoinerStagedTargetV2 {
     mls_state: Vec<u8>,
     recovery_secret: [u8; 32],
     target_access: Vec<u8>,
+    target_admission_credentials: Vec<u8>,
     preserve_unreadable_history: bool,
 }
 
@@ -196,6 +197,9 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                 target_relationships,
                 relayed_group_updates,
                 target_access_state: std::mem::take(&mut staged.target_access),
+                target_admission_credentials: std::mem::take(
+                    &mut staged.target_admission_credentials,
+                ),
                 preserve_unreadable_history: staged.preserve_unreadable_history,
             })
             .await

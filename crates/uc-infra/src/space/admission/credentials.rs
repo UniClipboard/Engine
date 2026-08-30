@@ -14,8 +14,9 @@ use uc_core::membership::{
     ActiveSpaceGenerationManifestV2, AdmissionContinuationCredential, InvitationId,
     SpaceAdmissionId,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use crate::db::pool::DbPool;
 use crate::db::ports::DbExecutor;
 use crate::network::iroh::{
     SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
@@ -29,6 +30,14 @@ use super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState
 
 const CREDENTIAL_FORMAT_V1: u16 = 1;
 const CREDENTIAL_PURPOSE: &[u8] = b"space-admission-credentials-v1";
+const PREPARED_CREDENTIAL_FORMAT_V1: u16 = 1;
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+struct PreparedCredentialsV1 {
+    format_version: u16,
+    server_setup: Vec<u8>,
+    registration: Vec<u8>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceAdmissionCredentialStoreError {
@@ -80,6 +89,61 @@ struct CredentialScope {
     keyslot_generation: [u8; 16],
     database_generation: [u8; 16],
     security_generation: [u8; 16],
+}
+
+pub(crate) fn prepare_registration(passphrase: &Passphrase) -> anyhow::Result<Vec<u8>> {
+    let server_setup = SpaceAdmissionAuth::generate_server_setup();
+    let registration =
+        SpaceAdmissionAuth::register(&server_setup, passphrase).map_err(anyhow::Error::new)?;
+    let setup = server_setup.encode_for_encryption();
+    let registration = registration.encode_for_encryption();
+    postcard::to_stdvec(&PreparedCredentialsV1 {
+        format_version: PREPARED_CREDENTIAL_FORMAT_V1,
+        server_setup: setup.as_bytes().to_vec(),
+        registration: registration.as_bytes().to_vec(),
+    })
+    .map_err(anyhow::Error::new)
+}
+
+pub(crate) fn install_prepared_registration(
+    pool: &DbPool,
+    keys: &AdmissionKeyManager,
+    manifest: &ActiveSpaceGenerationManifestV2,
+    prepared: &[u8],
+) -> anyhow::Result<()> {
+    let prepared = Zeroizing::new(postcard::from_bytes::<PreparedCredentialsV1>(prepared)?);
+    if prepared.format_version != PREPARED_CREDENTIAL_FORMAT_V1 {
+        anyhow::bail!("prepared credential format is unsupported");
+    }
+    // 提升目标 generation 前先解码校验，避免把损坏的 OPAQUE 材料写入新空间。
+    SpaceAdmissionAuth::decode_server_setup_after_decryption(&prepared.server_setup)
+        .map_err(anyhow::Error::new)?;
+    SpaceAdmissionAuth::decode_registration_after_decryption(&prepared.registration)
+        .map_err(anyhow::Error::new)?;
+    let plaintext = Zeroizing::new(postcard::to_stdvec(&PersistedCredentialsV1 {
+        format_version: CREDENTIAL_FORMAT_V1,
+        profile_generation: keys.profile_generation(),
+        space_id: manifest.space_id.clone(),
+        keyslot_generation: manifest.keyslot_generation,
+        database_generation: manifest.database_generation,
+        security_generation: manifest.security_generation,
+        server_setup: prepared.server_setup.clone(),
+        registration: prepared.registration.clone(),
+    })?);
+    let encrypted = keys
+        .seal_profile_payload(CREDENTIAL_PURPOSE, &plaintext)
+        .map_err(anyhow::Error::new)?;
+    let mut conn = pool.get()?;
+    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+        sql_query(
+            "INSERT INTO space_admission_credentials (singleton_id, encrypted_payload) \
+             VALUES (1, ?) ON CONFLICT(singleton_id) DO UPDATE SET \
+             encrypted_payload = excluded.encrypted_payload",
+        )
+        .bind::<Binary, _>(encrypted)
+        .execute(conn)?;
+        Ok(())
+    })
 }
 
 impl<E> SqliteSpaceAdmissionCredentials<E> {

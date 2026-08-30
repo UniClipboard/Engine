@@ -49,7 +49,10 @@ use super::{
     active_space_generation_manifest_store::DeviceManagementResetJournalV1,
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, BlobCipherAdapter, EncryptedBlobStore,
 };
-use crate::space::{DefaultSpaceAccessAdapter, InMemorySession, SqliteMembershipLedger};
+use crate::space::{
+    install_prepared_registration, DefaultSpaceAccessAdapter, InMemorySession,
+    SqliteMembershipLedger,
+};
 
 struct TargetSessionSubkeyDeriver(InMemorySession);
 
@@ -113,6 +116,7 @@ struct TargetWorkspaceGenerationV1 {
     local_device_id: DeviceId,
     relationships: Vec<uc_core::membership::AdmissionChangeFacts>,
     relayed_group_updates: Vec<uc_core::membership::PendingGroupUpdate>,
+    target_admission_credentials: Vec<u8>,
 }
 
 #[derive(serde::Serialize)]
@@ -264,6 +268,7 @@ impl DurableAdmissionSpaceTransition {
             || input.target_security_commitment.lineage_id != input.target_space_id
             || input.target_membership_history.is_empty()
             || input.target_security_state.is_empty()
+            || input.target_admission_credentials.is_empty()
             || input.target_protection_group_id.is_empty()
             || input.target_protection_group_id.len() > 128
             || !input.target_protection_group_id.is_ascii()
@@ -299,6 +304,7 @@ impl DurableAdmissionSpaceTransition {
             local_device_id: input.local_device_id.clone(),
             relationships: input.target_relationships.clone(),
             relayed_group_updates: input.relayed_group_updates.clone(),
+            target_admission_credentials: input.target_admission_credentials.clone(),
         };
         let plaintext =
             postcard::to_stdvec(&state).map_err(|_| AdmissionSpaceTransitionError::Inconsistent)?;
@@ -353,6 +359,7 @@ impl DurableAdmissionSpaceTransition {
             || state.target_space_id != target_space_id
             || state.membership_history.is_empty()
             || state.security_state.is_empty()
+            || state.target_admission_credentials.is_empty()
             || state.protection_group_id.is_empty()
             || state.protection_group_id.len() > 128
             || !state.protection_group_id.is_ascii()
@@ -469,15 +476,20 @@ impl DurableAdmissionSpaceTransition {
                     target_session.as_ref(),
                 )
                 .await?;
-                self.install_target_membership_ledger(&target_database, &target_workspace)
-                    .await?;
+                let manifest = self.active_generation_manifest_for(
+                    transition.attempt_id,
+                    &transition.target_space_id,
+                    transition.target_generation,
+                )?;
+                self.install_target_membership_ledger(
+                    &target_database,
+                    &target_workspace,
+                    &manifest,
+                )
+                .await?;
                 copy_profile_recovery_state(&self.source_pool, &target_database)?;
                 self.generation_manifest_store
-                    .promote(&self.active_generation_manifest_for(
-                        transition.attempt_id,
-                        &transition.target_space_id,
-                        transition.target_generation,
-                    )?)
+                    .promote(&manifest)
                     .await
                     .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
                 self.source_pool
@@ -644,6 +656,7 @@ impl DurableAdmissionSpaceTransition {
         &self,
         target_database: &Path,
         target_workspace: &TargetWorkspaceGenerationV1,
+        manifest: &ActiveSpaceGenerationManifestV2,
     ) -> Result<(), AdmissionSpaceTransitionError> {
         let local_member_instance = target_workspace
             .relationships
@@ -675,6 +688,13 @@ impl DurableAdmissionSpaceTransition {
             target_database
                 .to_str()
                 .ok_or(AdmissionSpaceTransitionError::Storage)?,
+        )
+        .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
+        install_prepared_registration(
+            &target_pool,
+            self.admission_keys.as_ref(),
+            manifest,
+            &target_workspace.target_admission_credentials,
         )
         .map_err(|_| AdmissionSpaceTransitionError::Storage)?;
         let ledger = SqliteMembershipLedger::new(
@@ -1495,10 +1515,14 @@ impl AdmissionSpaceTransitionPort for DurableAdmissionSpaceTransition {
                     target_session.as_ref(),
                 )
                 .await?;
-                self.install_target_membership_ledger(&target_database, &target_workspace)
-                    .await?;
-                copy_profile_recovery_state(&self.source_pool, &target_database)?;
                 let manifest = self.active_generation_manifest(transition)?;
+                self.install_target_membership_ledger(
+                    &target_database,
+                    &target_workspace,
+                    &manifest,
+                )
+                .await?;
+                copy_profile_recovery_state(&self.source_pool, &target_database)?;
                 self.generation_manifest_store
                     .promote(&manifest)
                     .await
@@ -2835,11 +2859,19 @@ mod tests {
         ActiveSpaceGenerationManifestStore, AdmissionKeyManager, BlobCipherAdapter,
         DefaultCurrentProfile, EncryptedBlobStore, MasterKey,
     };
-    use crate::space::{DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore};
+    use crate::space::{
+        prepare_registration, DefaultSpaceAccessAdapter, InMemorySession, KeyMaterialStore,
+    };
 
     use super::{
         ensure_reset_capacity, DurableAdmissionSpaceTransition, SqliteSpaceGenerationStore,
     };
+
+    #[derive(diesel::QueryableByName)]
+    struct CountRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
 
     #[test]
     fn reset_capacity_fails_closed_before_writes_when_space_is_insufficient() {
@@ -3228,6 +3260,10 @@ mod tests {
             target_relationships: test_relationships(),
             relayed_group_updates: vec![relayed_update.clone()],
             target_access_state: target_access.into_bytes(),
+            target_admission_credentials: prepare_registration(&Passphrase::new(
+                "fresh target passphrase",
+            ))
+            .unwrap(),
             preserve_unreadable_history: false,
         };
         let mut transition = transitioner.prepare_if_needed(&input).await.unwrap();
@@ -3337,6 +3373,13 @@ mod tests {
         );
         let manifest = generation_manifest_store.load().await.unwrap().unwrap();
         assert_eq!(manifest.space_id, target_space.as_ref());
+        let credential_count = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM space_admission_credentials WHERE singleton_id = 1",
+        )
+        .get_result::<CountRow>(&mut pool.get().unwrap())
+        .unwrap()
+        .count;
+        assert_eq!(credential_count, 1);
         assert_eq!(
             blob_store.current_root(),
             super::space_generation_directory(
@@ -3444,6 +3487,10 @@ mod tests {
             target_relationships: test_relationships(),
             relayed_group_updates: Vec::new(),
             target_access_state: target_access.into_bytes(),
+            target_admission_credentials: prepare_registration(&Passphrase::new(
+                "fresh target passphrase",
+            ))
+            .unwrap(),
             preserve_unreadable_history: false,
         };
 
@@ -3614,6 +3661,10 @@ mod tests {
             target_relationships: test_relationships(),
             relayed_group_updates: Vec::new(),
             target_access_state: target_access.into_bytes(),
+            target_admission_credentials: prepare_registration(&Passphrase::new(
+                "target passphrase",
+            ))
+            .unwrap(),
             preserve_unreadable_history: false,
         };
 

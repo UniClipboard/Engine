@@ -37,6 +37,8 @@ pub struct AdmissionSpaceTransitionPreparationV2 {
     pub target_relationships: Vec<AdmissionChangeFacts>,
     pub relayed_group_updates: Vec<PendingGroupUpdate>,
     pub target_access_state: Vec<u8>,
+    /// 已用本次加入口令派生、等待写入目标 generation 的 OPAQUE 服务端凭据。
+    pub target_admission_credentials: Vec<u8>,
     pub preserve_unreadable_history: bool,
 }
 

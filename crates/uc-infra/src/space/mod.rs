@@ -13,6 +13,7 @@ pub(crate) use admission::{
     decode_full_invitation, decode_invitation_entry, encode_full_invitation, DecodedFullInvitation,
     FullInvitationCodecError,
 };
+pub(crate) use admission::{install_prepared_registration, prepare_registration};
 pub use admission::{
     AdmissionSecurityTransitionAdapter, DefaultJoinerActivationExecutor,
     DefaultJoinerActivationPreparation, DefaultJoinerAppliedPreparation,

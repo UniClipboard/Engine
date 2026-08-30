@@ -37,6 +37,7 @@ struct OwnedJoinerStagedTargetV1 {
     mls_state: Vec<u8>,
     recovery_secret: [u8; 32],
     target_access: Vec<u8>,
+    target_admission_credentials: Vec<u8>,
     preserve_unreadable_history: bool,
 }
 
@@ -61,6 +62,9 @@ impl PrepareJoinerAppliedPort for DefaultJoinerAppliedPreparation {
                 .map_err(|error| PrepareJoinerAppliedError::invalid(anyhow::Error::new(error)))?;
         if staged.format_version != JOINER_STAGED_TARGET_FORMAT_V2 {
             return Err(invalid("the staged Joiner target format is unsupported"));
+        }
+        if staged.target_admission_credentials.is_empty() {
+            return Err(invalid("the staged admission credentials are missing"));
         }
         let transition_input = AdmissionSecurityTransitionInput {
             attempt_id: commitment.attempt_id,

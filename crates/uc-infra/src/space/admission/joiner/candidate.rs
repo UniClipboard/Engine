@@ -56,6 +56,7 @@ struct JoinerStagedTargetV1<'a> {
     mls_state: &'a [u8],
     recovery_secret: &'a [u8; 32],
     target_access: &'a [u8],
+    target_admission_credentials: &'a [u8],
     preserve_unreadable_history: bool,
 }
 
@@ -167,6 +168,11 @@ impl PrepareJoinerCandidatePort for DefaultJoinerCandidatePreparation {
             )
             .await
             .map_err(PrepareJoinerCandidateError::unavailable)?;
+        let target_admission_credentials =
+            crate::space::admission::credentials::prepare_registration(&Passphrase::new(
+                passphrase,
+            ))
+            .map_err(PrepareJoinerCandidateError::unavailable)?;
 
         let mut proof = PreparedAdmissionProofV1::new(
             commitment.attempt_id,
@@ -218,6 +224,7 @@ impl PrepareJoinerCandidatePort for DefaultJoinerCandidatePreparation {
                 mls_state: &staged.staged_state,
                 recovery_secret: &private.recovery_secret,
                 target_access: target_access.as_bytes(),
+                target_admission_credentials: &target_admission_credentials,
                 preserve_unreadable_history: matches!(
                     original_request.unreadable_history_policy(),
                     uc_core::membership::UnreadableHistoryPolicy::Preserve
