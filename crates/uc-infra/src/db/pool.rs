@@ -327,6 +327,8 @@ mod switch_tests {
         let pool = init_db_pool(database.to_str().unwrap()).unwrap();
         let mut connection = pool.get().unwrap();
 
+        // 先越过准入表与旧准入记录清理，再回滚数据库 revision migration。
+        connection.revert_last_migration(MIGRATIONS).unwrap();
         connection.revert_last_migration(MIGRATIONS).unwrap();
         connection.revert_last_migration(MIGRATIONS).unwrap();
 
@@ -349,6 +351,8 @@ mod switch_tests {
         let pool = init_db_pool(database.to_str().unwrap()).unwrap();
         let mut connection = pool.get().unwrap();
 
+        // 先越过准入表，再回滚到旧准入记录清理 migration 之前。
+        connection.revert_last_migration(MIGRATIONS).unwrap();
         connection.revert_last_migration(MIGRATIONS).unwrap();
         diesel::sql_query(
             "INSERT INTO legacy_upgrade_pending_join \
