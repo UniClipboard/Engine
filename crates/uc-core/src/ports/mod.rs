@@ -42,7 +42,6 @@ pub mod inbound_receive_commit;
 pub mod local_identity;
 pub mod mobile_sync;
 pub mod observability;
-pub mod pairing;
 pub mod pairing_invitation;
 pub mod peer_address;
 pub mod presence;
@@ -117,10 +116,6 @@ pub use mobile_sync::{
     PasswordHasherError, PasswordHasherPort, SaveMobileDevicePort, UpdateMobileDevicePort,
 };
 pub use observability::{extract_trace, OptionalTrace, TraceMetadata, TraceParseError};
-pub use pairing::{
-    DialError, DialOutcome, DiscoveryChannel, PairingEventPort, PairingSessionEvent,
-    PairingSessionId, PairingSessionPort, SessionError,
-};
 pub use pairing_invitation::{
     CodeOrigin, ConsumeInvitationError, InvitationCode, InvitationError, IssuedInvitation,
     PairingInvitationAddressCandidate, PairingInvitationAddressQueryPort,

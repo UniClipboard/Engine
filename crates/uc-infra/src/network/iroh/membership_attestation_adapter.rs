@@ -22,7 +22,6 @@ use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{DeviceIdentityPort, PeerAddressRepositoryPort, SettingsPort};
 use uc_core::security::IdentityFingerprint;
 
-use crate::pairing::session::legacy_pairing_protocol_is_reachable;
 use crate::space::InMemorySession;
 
 use super::connect_with_staggered_retry;
@@ -268,17 +267,7 @@ impl MembershipGossipTransportPort for IrohMembershipGossipTransportAdapter {
             "membership-gossip",
         )
         .await;
-        let connection = match connection {
-            Ok(connection) => connection,
-            Err(_) => {
-                if legacy_pairing_protocol_is_reachable(Arc::clone(&self.endpoint), remote_addr)
-                    .await
-                {
-                    return Err(MembershipGossipTransportError::VersionIncompatible);
-                }
-                return Err(MembershipGossipTransportError::Offline);
-            }
-        };
+        let connection = connection.map_err(|_| MembershipGossipTransportError::Offline)?;
         let (mut send, mut recv) = tokio::time::timeout(IO_TIMEOUT, connection.open_bi())
             .await
             .map_err(|_| MembershipGossipTransportError::Transport)?
@@ -399,17 +388,7 @@ impl MembershipAttestationPort for IrohMembershipAttestationAdapter {
             "membership-attestation",
         )
         .await;
-        let connection = match connection {
-            Ok(connection) => connection,
-            Err(_) => {
-                if legacy_pairing_protocol_is_reachable(Arc::clone(&self.endpoint), remote_addr)
-                    .await
-                {
-                    return Err(MembershipAttestationError::VersionIncompatible);
-                }
-                return Err(MembershipAttestationError::Offline);
-            }
-        };
+        let connection = connection.map_err(|_| MembershipAttestationError::Offline)?;
         let remote_key = *connection.remote_id().as_bytes();
         let local = self
             .identity
@@ -1031,11 +1010,10 @@ mod tests {
         MemberRepositoryPort, MembershipAttestationEndpointError,
         MembershipAttestationEndpointPort, MembershipAttestationError, MembershipAttestationPort,
         MembershipError, MembershipEventBatch, MembershipGossipEndpointError,
-        MembershipGossipEndpointPort, MembershipGossipMessage, MembershipGossipTransportError,
-        MembershipGossipTransportPort, MembershipSharedDevicePage,
-        MembershipSharedDevicePageRequest, PeerAdmissionError, PeerAdmissionPort,
-        RelayedSecurityUpdate, SpaceMember, SpaceMembershipCandidate, SponsorCandidateSeed,
-        VerifiedMembershipPeer,
+        MembershipGossipEndpointPort, MembershipGossipMessage, MembershipGossipTransportPort,
+        MembershipSharedDevicePage, MembershipSharedDevicePageRequest, PeerAdmissionError,
+        PeerAdmissionPort, RelayedSecurityUpdate, SpaceMember, SpaceMembershipCandidate,
+        SponsorCandidateSeed, VerifiedMembershipPeer,
     };
     use uc_core::ports::security::IdentityFingerprintFactoryPort;
     use uc_core::ports::{
@@ -1051,7 +1029,6 @@ mod tests {
         IrohMembershipIdentityAdapter, WireChallenge, WireEnvelope, WireGossipRequest, WireHello,
         WireMessage, WireReject, MAX_MESSAGE_SIZE, MEMBERSHIP_ATTESTATION_ALPN, WIRE_VERSION,
     };
-    use crate::pairing::session::LEGACY_PAIRING_ALPN;
     use crate::security::{MasterKey, Sha256IdentityFingerprintFactory};
     use crate::space::InMemorySession;
 
@@ -1185,63 +1162,6 @@ mod tests {
                 .await
                 .unwrap(),
         )
-    }
-
-    async fn legacy_pairing_only_endpoint(
-        seed: [u8; 32],
-    ) -> (
-        Arc<Endpoint>,
-        Arc<AtomicU64>,
-        Arc<AtomicBool>,
-        Arc<AtomicU64>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let endpoint = Arc::new(
-            Endpoint::builder(iroh::endpoint::presets::N0)
-                .secret_key(SecretKey::from_bytes(&seed))
-                .alpns(vec![LEGACY_PAIRING_ALPN.to_vec()])
-                .relay_mode(RelayMode::Disabled)
-                .bind()
-                .await
-                .unwrap(),
-        );
-        wait_for_direct_addrs(&endpoint).await;
-        let accepted = Arc::new(AtomicU64::new(0));
-        let stream_opened = Arc::new(AtomicBool::new(false));
-        let completed = Arc::new(AtomicU64::new(0));
-        let task = {
-            let endpoint = Arc::clone(&endpoint);
-            let accepted = Arc::clone(&accepted);
-            let stream_opened = Arc::clone(&stream_opened);
-            let completed = Arc::clone(&completed);
-            tokio::spawn(async move {
-                while let Some(incoming) = endpoint.accept().await {
-                    let Ok(connection) = incoming.await else {
-                        continue;
-                    };
-                    accepted.fetch_add(1, Ordering::SeqCst);
-                    if matches!(
-                        tokio::time::timeout(Duration::from_millis(250), connection.accept_bi())
-                            .await,
-                        Ok(Ok(_))
-                    ) {
-                        stream_opened.store(true, Ordering::SeqCst);
-                    }
-                    completed.fetch_add(1, Ordering::SeqCst);
-                }
-            })
-        };
-        (endpoint, accepted, stream_opened, completed, task)
-    }
-
-    async fn wait_for_counter(counter: &AtomicU64, expected: u64) {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while counter.load(Ordering::SeqCst) != expected {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
     }
 
     fn membership_identity_adapter(
@@ -1642,91 +1562,6 @@ mod tests {
         let mut changed = transcript();
         changed.space_id = "space-b".to_owned();
         assert_ne!(original, attestation_transcript(&changed));
-    }
-
-    #[tokio::test]
-    async fn attestation_identifies_a_peer_that_only_supports_legacy_pairing() {
-        let local_seed = [0x41; 32];
-        let legacy_seed = [0x43; 32];
-        let local_endpoint = endpoint(local_seed).await;
-        wait_for_direct_addrs(&local_endpoint).await;
-        let (legacy_endpoint, accepted, stream_opened, completed, legacy_task) =
-            legacy_pairing_only_endpoint(legacy_seed).await;
-        let local_identity = identity(local_seed, "device-a");
-        let legacy_identity = identity(legacy_seed, "device-c");
-        let signatures = Arc::new(HashMap::from([(local_identity.device_id, [0xa1; 32])]));
-        let adapter = IrohMembershipAttestationAdapter::new(
-            Arc::clone(&local_endpoint),
-            Arc::new(FixedIdentity(local_identity)),
-            self::signatures("device-a", signatures),
-            Arc::new(Sha256IdentityFingerprintFactory),
-        );
-
-        let result = adapter
-            .attest_candidate(&candidate(
-                &legacy_identity,
-                postcard::to_stdvec(&legacy_endpoint.addr()).unwrap(),
-            ))
-            .await;
-
-        assert_eq!(result, Err(MembershipAttestationError::VersionIncompatible));
-        wait_for_counter(&completed, 1).await;
-        assert_eq!(accepted.load(Ordering::SeqCst), 1);
-        assert!(!stream_opened.load(Ordering::SeqCst));
-        legacy_task.abort();
-        legacy_endpoint.close().await;
-        local_endpoint.close().await;
-    }
-
-    #[tokio::test]
-    async fn gossip_identifies_a_recipient_that_only_supports_legacy_pairing() {
-        let local_seed = [0x42; 32];
-        let legacy_seed = [0x41; 32];
-        let local_endpoint = endpoint(local_seed).await;
-        wait_for_direct_addrs(&local_endpoint).await;
-        let (legacy_endpoint, accepted, stream_opened, completed, legacy_task) =
-            legacy_pairing_only_endpoint(legacy_seed).await;
-        let local_identity = identity(local_seed, "device-b");
-        let legacy_identity = identity(legacy_seed, "device-a");
-        let addresses = Arc::new(StaticPeerAddressRepository(Mutex::new(HashMap::from([(
-            legacy_identity.device_id,
-            PeerAddressRecord {
-                device_id: legacy_identity.device_id,
-                addr_blob: postcard::to_stdvec(&legacy_endpoint.addr()).unwrap(),
-                observed_at: chrono::Utc::now(),
-            },
-        )]))));
-        let transport = IrohMembershipGossipTransportAdapter::new(
-            Arc::clone(&local_endpoint),
-            ready_session(),
-            Arc::new(FixedIdentity(local_identity)),
-            addresses,
-            Arc::new(StaticMemberRepository(Vec::new())),
-            Arc::new(AdmitAll),
-            Arc::new(Sha256IdentityFingerprintFactory),
-        );
-
-        let result = transport
-            .exchange(
-                &legacy_identity.device_id,
-                MembershipGossipMessage::EventBatch(MembershipEventBatch {
-                    space_id: SpaceId::from("space-a"),
-                    batch_id: [8; 32],
-                    events: Vec::new(),
-                }),
-            )
-            .await;
-
-        assert_eq!(
-            result,
-            Err(MembershipGossipTransportError::VersionIncompatible)
-        );
-        wait_for_counter(&completed, 1).await;
-        assert_eq!(accepted.load(Ordering::SeqCst), 1);
-        assert!(!stream_opened.load(Ordering::SeqCst));
-        legacy_task.abort();
-        legacy_endpoint.close().await;
-        local_endpoint.close().await;
     }
 
     #[tokio::test]

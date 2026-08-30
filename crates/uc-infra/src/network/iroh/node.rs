@@ -2,18 +2,17 @@
 //!
 //! A single [`iroh::Endpoint`] per process owns the Ed25519 identity, the
 //! UDP socket, and the NAT-traversal / relay state. Every business
-//! transport (pairing, clipboard sync, blob transfer) registers its own
+//! transport (Space admission, clipboard sync, blob transfer) registers its own
 //! ALPN on the same [`iroh::protocol::Router`] instead of binding a new
 //! endpoint — see `uc-infra/AGENTS.md` §4.2 (technical detail stays
 //! contained) and the Slice 1 decision log on shared endpoint ownership.
 //!
 //! The builder pattern is deliberate: each `install_*` method is where a
-//! new transport slices in. Slice 1 ships [`install_pairing`]; Slice 2
+//! new transport slices in. Invitation discovery does not register an ALPN; Slice 2
 //! Phase 1 adds [`install_presence`]; Slice 2 Phase 2 adds
 //! [`install_clipboard`]; Slice 3 will add `install_blobs` on the same
 //! builder.
 //!
-//! [`install_pairing`]: IrohNodeBuilder::install_pairing
 //! [`install_presence`]: IrohNodeBuilder::install_presence
 //! [`install_clipboard`]: IrohNodeBuilder::install_clipboard
 
@@ -47,7 +46,6 @@ use uc_core::membership::{
     MembershipAttestationEndpointPort, MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
-use uc_core::ports::pairing::{PairingEventPort, PairingSessionPort};
 use uc_core::ports::pairing_invitation::{
     PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
 };
@@ -59,7 +57,7 @@ use uc_core::ports::{
     PeerReachabilityPort, SettingsPort,
 };
 
-use crate::pairing::{IrohPairingSessionAdapter, PAIRING_ALPN};
+use crate::pairing::PairingInvitationResolverAdapter;
 use crate::rendezvous::{RendezvousClient, RendezvousPairingInvitationAdapter};
 use crate::space::InMemorySession;
 
@@ -95,20 +93,13 @@ use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
 };
 
-/// The pairing ports produced by [`IrohNodeBuilder::install_pairing`].
+/// 邀请发布与解析端口，由 [`IrohNodeBuilder::install_pairing_invitation`] 构造。
 ///
-/// `session` and `events` share the same underlying
-/// [`IrohPairingSessionAdapter`] — both trait objects point at one Arc so
-/// sponsor-side inbound events and the outbound dial/send path use the same
-/// session map. `invitation`, `invitation_addresses`, and
-/// `invitation_by_address` are three trait-object views over a single
-/// rendezvous HTTP adapter (they read the same endpoint's
-/// [`iroh::EndpointAddr`] — the split is purely a port-surface CQS
-/// concern, not a runtime cost).
-pub struct PairingHandlers {
-    pub session: Arc<dyn PairingSessionPort>,
+/// resolver 只解析短码或完整邀请；`invitation`、`invitation_addresses` 和
+/// `invitation_by_address` 是同一个 rendezvous HTTP adapter 的三个端口视图。
+/// 它们共享 endpoint，但不会创建 session 或注册 Router handler。
+pub struct PairingInvitationHandlers {
     pub joiner_invitation_resolver: Arc<dyn ResolveJoinerInvitationPort>,
-    pub events: Arc<dyn PairingEventPort>,
     pub invitation: Arc<dyn PairingInvitationPort>,
     pub invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
     /// Dev-only: issue an invitation pinned to a single local IP. Not
@@ -495,7 +486,7 @@ fn build_transport_config(cc: CongestionController) -> QuicTransportConfig {
         //    candidate (Tailscale + LAN + vmnet etc) and one of those
         //    candidates gets abandoned during handshake. The race
         //    manifests as: incoming connection arrives at the iroh
-        //    endpoint, ALPN routes to `/uniclipboard/pairing/1`,
+        //    endpoint, ALPN routes to the selected business protocol,
         //    `noq_proto::connection` silently swallows the PTO timer,
         //    handshake never makes progress, and `iroh::protocol`
         //    eventually 60s-timeouts at the router.accept ALPN deadline.
@@ -691,9 +682,7 @@ impl IrohNodeBuilder {
     /// [`IrohIdentityStore`] so the endpoint's on-wire identity matches the
     /// fingerprint `LocalIdentityPort` hands out to domain code.
     ///
-    /// Registers [`PAIRING_ALPN`] up front — Slice 1 always has pairing. A
-    /// future slice that wants to opt out would add a separate `bind_bare`
-    /// constructor; there's no Slice 1 use case for that.
+    /// 创建共享 Iroh endpoint；业务 ALPN 仅由后续 `install_*` 明确注册。
     #[instrument(skip_all)]
     pub async fn bind(
         identity_store: &IrohIdentityStore,
@@ -713,11 +702,6 @@ impl IrohNodeBuilder {
         );
         let mut endpoint_builder = Endpoint::builder(presets::N0)
             .secret_key(secret)
-            // Only PAIRING is declared at bind time; additional ALPNs are
-            // added to the endpoint via `RouterBuilder::spawn`, which
-            // rebuilds the ALPN set from every `accept()` handler. See
-            // `install_presence` / `install_clipboard`.
-            .alpns(vec![PAIRING_ALPN.to_vec()])
             .relay_mode(relay_mode)
             .transport_config(build_transport_config(config.congestion_controller))
             // UniClipboard#486: drop Clash TUN / link-local IPs from every
@@ -822,43 +806,27 @@ impl IrohNodeBuilder {
         })
     }
 
-    /// Install the pairing transport:
-    ///
-    /// * Registers [`IrohPairingSessionAdapter`] as the [`PAIRING_ALPN`]
-    ///   [`iroh::protocol::ProtocolHandler`] so sponsor-side incoming
-    ///   connections are accepted.
-    /// * Returns the pairing session / event / invitation ports. The first
-    ///   two are the same `Arc` cast to two trait objects.
+    /// 构造邀请发布、地址查询与短码解析能力，不注册业务 ALPN。
     ///
     /// A single [`RendezvousClient`] is built here and shared between the
-    /// session adapter (joiner `dial_by_invitation` → `/resolve`) and the
-    /// invitation adapter (sponsor `/pairings` + `/consume`) so the
+    /// invitation resolver (joiner `/resolve`) and invitation adapter
+    /// (sponsor `/pairings` + `/consume`) so the
     /// whole process uses one reqwest connection pool, one timeout, and
     /// one user-agent.
-    pub fn install_pairing(
+    pub fn install_pairing_invitation(
         &mut self,
         device_identity: Arc<dyn DeviceIdentityPort>,
         settings: Arc<dyn SettingsPort>,
-    ) -> PairingHandlers {
+    ) -> PairingInvitationHandlers {
         let rendezvous = Arc::new(match &self.config.rendezvous_base_url {
             Some(url) => RendezvousClient::with_base_url(url.clone()),
             None => RendezvousClient::new(),
         });
 
-        let adapter = Arc::new(IrohPairingSessionAdapter::new(
+        let resolver = Arc::new(PairingInvitationResolverAdapter::new(
             Arc::clone(&self.endpoint),
             Arc::clone(&rendezvous),
         ));
-
-        // `RouterBuilder::accept` consumes `self`; take + reassign so the
-        // builder can be called again for a Slice 2 handler in the same
-        // chain.
-        let builder = self
-            .router_builder
-            .take()
-            .expect("router_builder missing — install_* called after spawn");
-        let builder = adapter.install_handler(builder);
-        self.router_builder = Some(builder);
 
         let invitation_adapter = Arc::new(RendezvousPairingInvitationAdapter::new(
             Arc::clone(&self.endpoint),
@@ -871,10 +839,8 @@ impl IrohNodeBuilder {
             invitation_adapter.clone();
         let invitation_by_address: Arc<dyn PairingInvitationByAddressPort> = invitation_adapter;
 
-        PairingHandlers {
-            session: adapter.clone(),
-            joiner_invitation_resolver: adapter.clone(),
-            events: adapter,
+        PairingInvitationHandlers {
+            joiner_invitation_resolver: resolver,
             invitation,
             invitation_addresses,
             invitation_by_address,
@@ -893,7 +859,7 @@ impl IrohNodeBuilder {
     ///   concrete adapter (`uc-infra/AGENTS.md` §4.3).
     ///
     /// Must be called before [`spawn`](Self::spawn). Safe to call alongside
-    /// [`install_pairing`] — the two ALPNs are disjoint so both handlers
+    /// 邀请 discovery 不注册 ALPN；成员与准入 handler 使用互不重叠的 ALPN
     /// coexist on the same router.
     pub fn install_presence(
         &mut self,
@@ -963,7 +929,7 @@ impl IrohNodeBuilder {
     ///   watchdog already established.
     ///
     /// Must be called before [`spawn`](Self::spawn). Coexists with
-    /// [`install_pairing`] / [`install_presence`] — all three ALPNs share
+    /// invitation discovery / [`install_presence`] — all transports share
     /// a single router.
     ///
     /// [`IrohClipboardReceiverHandler`]: super::clipboard_receiver_adapter::IrohClipboardReceiverHandler
@@ -1634,12 +1600,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_install_pairing_spawn_and_shutdown_cleanly() {
+    async fn bind_install_invitation_discovery_spawn_and_shutdown_cleanly() {
         let store = identity_store();
         let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("bind");
-        let handlers = builder.install_pairing(
+        let handlers = builder.install_pairing_invitation(
             Arc::new(FixedDeviceIdentity(DeviceId::new("device-1"))),
             Arc::new(InMemorySettings(StdMutex::new(Settings::default()))),
         );
@@ -1803,15 +1769,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_pairing_and_install_presence_coexist_on_same_router() {
-        // Two ALPNs on one router — proves Slice 2 Phase 1's presence
-        // transport slices in without disturbing Slice 1's pairing wiring.
+    async fn invitation_discovery_and_presence_coexist_on_same_node() {
         let store = identity_store();
         let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("bind");
 
-        let _pairing = builder.install_pairing(
+        let _invitation = builder.install_pairing_invitation(
             Arc::new(FixedDeviceIdentity(DeviceId::new("device-coexist"))),
             Arc::new(InMemorySettings(StdMutex::new(Settings::default()))),
         );
@@ -1867,9 +1831,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_pairing_presence_and_clipboard_coexist_on_same_router() {
-        // Three ALPNs on one router — Slice 2 Phase 2 (clipboard) slices
-        // in alongside pairing + presence. Verifies both clipboard ports
+    async fn invitation_presence_and_clipboard_coexist_on_same_router() {
+        // Presence 与 clipboard 共享 Router，invitation discovery 只共享 endpoint。
         // survive the trait-object round trip and the router spawns /
         // shuts down cleanly when all three transports are installed.
         let store = identity_store();
@@ -1877,7 +1840,7 @@ mod tests {
             .await
             .expect("bind");
 
-        let _pairing = builder.install_pairing(
+        let _invitation = builder.install_pairing_invitation(
             Arc::new(FixedDeviceIdentity(DeviceId::new("device-triple"))),
             Arc::new(InMemorySettings(StdMutex::new(Settings::default()))),
         );
@@ -1934,13 +1897,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_pairing_presence_clipboard_and_blobs_coexist_on_same_router() {
+    async fn invitation_presence_clipboard_and_blobs_coexist_on_same_router() {
         let store = identity_store();
         let mut builder = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
             .await
             .expect("bind");
 
-        let _pairing = builder.install_pairing(
+        let _invitation = builder.install_pairing_invitation(
             Arc::new(FixedDeviceIdentity(DeviceId::new("device-quad"))),
             Arc::new(InMemorySettings(StdMutex::new(Settings::default()))),
         );

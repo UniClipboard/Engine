@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：主体实现与自动化验收完成；clean-cutover 未完成，实体设备和 Release bundle 本次跳过
+- **状态**：实现、clean-cutover 与自动化验收完成；实体设备和 Release bundle 本次跳过
 - **日期**：2026-08-26
 - **实施方式**：Core、Application、Infra、Engine、数据库、绑定与验收一次性切换；中间状态不得发布
 - **取代范围**：取代规格 017、023、025、027 中关于 pairing wire、准入消息、准入仓储、准入 runtime 和外层接入的实现设计；成员历史、AddDevice、激活回执、取消、用户新加入取代旧加入、Space transition、ResetSpace 和 FactoryResetSpace 的业务不变条件继续有效
@@ -1241,15 +1241,14 @@ Engine 双实例、重启传输、绑定 contract、明文探针和完整 worksp
 三平台设备矩阵使用 `scripts/release/device-matrix.skipped.json` 明确记录为“跳过”，
 不得据此宣称实体设备或发布产物通过。
 
-清单标记只代表已有仓库证据支持。当前仍有三类缺口：生产装配仍注册
-`/uniclipboard/pairing/2`，且保留 `PairingSessionPort`、`PairingEventPort` 和旧 ALPN
-兼容探测；三设备与实体设备矩阵未执行；被本规格取代的关联规格状态尚未全部同步。
-因此本规格是“主体实现完成”，尚未达到 clean-cutover 和实体交付全部完成。
+清单标记只代表已有仓库证据支持。生产装配只保留 invitation discovery，并由
+`/uniclipboard/space-admission/1` 承载准入消息；旧 pairing ALPN、session/event port、
+wire 与兼容探测均已删除并由架构脚本禁止回归。当前剩余缺口只有三设备和实体设备矩阵。
 
-* [ ] 只有 `/uniclipboard/space-admission/1` 一个生产 Space 准入 ALPN。
+* [x] 只有 `/uniclipboard/space-admission/1` 一个生产 Space 准入 ALPN。
 * [x] Router spawn 前 endpoint 已一次绑定；缺失/重复绑定构造失败。
 * [x] Infra handler 对每条认证完成的业务消息只调用一次 Application typed message endpoint。
-* [ ] 不存在 PairingEventPort/PairingSessionPort/subscriber/recv pump 准入路径。
+* [x] 不存在 PairingEventPort/PairingSessionPort/subscriber/recv pump 准入路径。
 * [x] `SpaceAdmissionProtocol` 是 start/cancel/handle/recover/complete 的唯一完整负责人。
 * [x] Facade、Engine、binding 不读取或判断协议 stage。
 * [x] Core 只有一套 typed envelope/body/evidence/state aggregate。
@@ -1279,9 +1278,9 @@ Engine 双实例、重启传输、绑定 contract、明文探针和完整 worksp
 * [x] admission lookup key 是 HMAC，不保存 id 明文。
 * [x] cutover 强制单设备 Space rebuild 和重新配对，不导入旧 admission/branch。
 * [x] 旧 ledger admission records 与旧独立准入 store 已删除；当前 `admission_repository_state` 只保存新 aggregate。
-* [ ] 旧 pairing ALPN/wire/session/event/outbox/preparation/completion-recovery 全部删除。
-* [ ] 无 translator、fallback、dual write、feature flag、compat alias 或 no-op production adapter。
-* [ ] architecture script 对 Mandatory Deletion Checklist 的旧符号零容忍。
+* [x] 旧 pairing ALPN/wire/session/event/outbox/preparation/completion-recovery 全部删除。
+* [x] 无 translator、fallback、dual write、feature flag、compat alias 或 no-op production adapter。
+* [x] architecture script 对 Mandatory Deletion Checklist 的旧符号零容忍。
 * [x] 稳定 Engine/UniFFI/N-API 产品操作和结果通过 contract tests。
 * [x] 异步远端失败通过 Rejected projection，不保留第二同步握手错误路径。
 * [x] Core/Application/Infra focused tests 均先确认非零再通过。
@@ -1292,7 +1291,7 @@ Engine 双实例、重启传输、绑定 contract、明文探针和完整 worksp
 * [ ] Android/iOS 实体双向角色矩阵通过（跳过：当前无实体设备；HarmonyOS 同样跳过）。
 * [x] 日志和持久文件明文探针无敏感命中。
 * [x] metadata、workspace check、format、architecture、diff checks 全部通过。
-* [ ] `docs/architecture/architecture-bible.md` 和规格 017/023/025/027 状态同步更新。
+* [x] `docs/architecture/architecture-bible.md` 和规格 017/023/025/027 状态同步更新。
 
 # 10. Risks and Trade-offs
 

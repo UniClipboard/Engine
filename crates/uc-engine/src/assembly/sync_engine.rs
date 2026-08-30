@@ -624,12 +624,12 @@ pub async fn build_sync_engine_assembly(
         Arc::new(Sha256IdentityFingerprintFactory),
     ));
 
-    // Bind the shared iroh node + install the pairing transport. The
-    // returned PairingHandlers carry the trait objects SpaceFacadeDeps
+    // Bind the shared iroh node + install invitation discovery. The
+    // returned handlers carry the trait objects SpaceFacadeDeps
     // wants; the iroh Router stays inside `IrohNode` so iroh types don't
     // leak out of this module.
     let mut builder = IrohNodeBuilder::bind(&identity_store, iroh_config).await?;
-    let handlers = builder.install_pairing(
+    let handlers = builder.install_pairing_invitation(
         Arc::clone(&deps.device.device_identity),
         Arc::clone(&deps.settings),
     );

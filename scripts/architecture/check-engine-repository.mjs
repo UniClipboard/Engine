@@ -510,6 +510,37 @@ function checkRetiredLegacyPairingRecovery() {
   return problems
 }
 
+function checkRetiredPairingTransport(sources) {
+  const problems = []
+  const retiredPaths = [
+    'crates/uc-core/src/pairing/session_message.rs',
+    'crates/uc-core/src/ports/pairing/mod.rs',
+    'crates/uc-core/src/ports/pairing/events.rs',
+    'crates/uc-core/src/ports/pairing/session.rs',
+    'crates/uc-infra/src/pairing/session.rs',
+    'crates/uc-infra/src/pairing/wire.rs',
+  ]
+  for (const path of retiredPaths) {
+    if (existsSync(join(REPOSITORY_ROOT, path))) {
+      addProblem(problems, 'retired pairing transport', `retired path remains: ${path}`)
+    }
+  }
+
+  for (const marker of [
+    'PairingSessionPort',
+    'PairingEventPort',
+    'PairingSessionMessage',
+    'PAIRING_ALPN',
+    '/uniclipboard/pairing/1',
+    '/uniclipboard/pairing/2',
+  ]) {
+    if (sources.runtime.includes(marker)) {
+      addProblem(problems, 'retired pairing transport', `retired runtime marker remains: ${marker}`)
+    }
+  }
+  return problems
+}
+
 function checkApplicationMembershipCutover() {
   const problems = []
   const requiredEntries = [
@@ -1110,7 +1141,7 @@ function checkDualInvitationEntry() {
 
   for (const path of [
     'crates/uc-infra/src/rendezvous/invitation_adapter.rs',
-    'crates/uc-infra/src/pairing/session.rs',
+    'crates/uc-infra/src/pairing/invitation_resolver.rs',
   ]) {
     if (/code\s*=\s*%code\.as_str\(\)/.test(read(path))) {
       addProblem(problems, 'dual invitation entry', `${path} logs a full invitation code`)
@@ -1257,6 +1288,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkDualInvitationEntry(),
     ...checkSpaceMembershipMaintenanceOwnership(),
     ...checkRetiredLegacyPairingRecovery(),
+    ...checkRetiredPairingTransport(sources),
     ...(includePlaintext ? checkPlaintextScanner() : []),
   ]
 }
@@ -1289,6 +1321,9 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('automatic LAN fallback', (_changed, changedSources) => {
     changedSources.runtime += '\nfn fallback_to_lan() {}\n'
+  }, metadata, sources)
+  expectRejected('retired pairing transport', (_changed, changedSources) => {
+    changedSources.runtime += '\nconst PAIRING_ALPN: &[u8] = b"/uniclipboard/pairing/2";\n'
   }, metadata, sources)
   expectRejected('missing OpenMLS validation target', changed => {
     const validation = packageByName(changed, 'openmls-validation')

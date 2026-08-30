@@ -15,7 +15,7 @@
 //! is the post-handshake bookkeeping call that marks the code consumed on
 //! every discovery channel that holds a record, so other joiners can't race
 //! on it. Joiner-side dial lives on
-//! [`PairingSessionPort`](crate::ports::pairing::PairingSessionPort).
+//! 新准入 transport 与 invitation discovery 分离，解析结果直接交给 Application。
 
 use std::net::IpAddr;
 

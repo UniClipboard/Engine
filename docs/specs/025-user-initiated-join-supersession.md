@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：仓库内实现与自动化验证完成；Android 双端实体设备验收待补
+- **状态**：安全取代语义与自动化验证完成；准入 wire/runtime 已由规格 028 取代，实体设备验收待补
 - **日期**：2026-08-18
 - **决策依据**：`docs/adr/022-user-initiated-join-supersession.md`
 - **相关文档**：`docs/adr/017-pairing-as-workspace-admission.md`、

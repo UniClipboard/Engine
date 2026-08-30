@@ -784,7 +784,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 准入 Engine 生命周期验收 | Engine E2E 已改用正式邀请与加入入口；`SessionSupervisor` 已唯一负责后台准入完成后的 session transition。新设备加入和已有设备换 Space 已贯通，Sponsor/Joiner 成员账本最终激活与重启传输仍在收口，尚不可交付。 |
 | 2026-08-30 | 准入成员激活持久化 | Sponsor Complete 在提交协议回复前通过单一激活端口幂等安装安全状态、成员事实与正式成员历史；Joiner 目标 generation 在提升前写入加密 membership ledger。Engine 每次安装 session 都尝试静默恢复，普通冷启动允许保持锁定，准入切换后要求恢复成功。新设备加入、已有设备切换和重启传输 E2E 均已通过。 |
 | 2026-08-30 | 准入激活分层 | Application/Core 负责验证成员历史并产出类型化激活计划；Infra 只按已验证计划安装目标安全状态、关系投影和加密成员账本，不重复解释或验证协议历史。 |
-| 2026-08-30 | 准入规格验收状态 | Spec 028 主体实现和仓库自动化验收已完成；旧 pairing ALPN/port 生产装配、关联规格状态同步与实体设备矩阵仍未完成，不得将当前状态表述为完整 clean-cutover。 |
+| 2026-08-30 | 准入 clean-cutover | 生产运行期只保留 invitation discovery；准入消息只使用 `/uniclipboard/space-admission/1`。旧 pairing ALPN、session/event port、wire 与兼容探测已删除并由架构检查禁止回归；实体设备矩阵仍明确跳过。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |

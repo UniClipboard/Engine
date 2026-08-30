@@ -5,7 +5,7 @@
 
 ## 状态
 
-已完成 application 范围的一次性实施。Core、Infra、Engine、绑定、数据库和真实网络适配仍按本规格边界另行接入。决策依据为 `docs/adr/025-application-space-membership-one-shot-rewrite.md`。
+一次性重写及 Core、Infra、Engine、绑定、数据库和真实网络接入均已完成；准入 wire/runtime 的最终实现与 clean-cutover 以规格 028 为准。决策依据为 `docs/adr/025-application-space-membership-one-shot-rewrite.md`。
 
 # 1. Overview
 

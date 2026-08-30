@@ -64,7 +64,7 @@ pub use net_recovery::NetworkRecoveryObservation;
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     GroupUpdateHandlers, IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError,
-    IrohRelayAccessToken, PairingHandlers, TransferProgressHandlers,
+    IrohRelayAccessToken, PairingInvitationHandlers, TransferProgressHandlers,
 };
 pub use presence_adapter::{IrohPresenceAdapter, IrohPresenceHandler, PRESENCE_ALPN};
 pub use relay_probe::{
