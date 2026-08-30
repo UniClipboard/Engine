@@ -780,6 +780,11 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 准入状态与激活收口 | 当前加入状态、待完成查询和最终激活统一由 `SpaceAdmissionProtocol` 读取类型化准入状态并推进；Facade 不再编排 legacy transition 用例。 |
 | 2026-08-30 | 成员账本去除准入状态 | membership ledger 只保存成员事实与效果，删除 `admission_records`、`admission_profile` 和旧 admission outbox；准入状态只由独立 MasterKey AEAD 仓库保存。 |
 | 2026-08-30 | 旧准入领域模型删除 | 删除 Core `space_join_record`；准入拒绝使用新协议枚举，待投递成员安全更新由 Application 的类型化 preparation 结果表达。 |
+| 2026-08-30 | 准入交付验收启动 | 新准入代码切换完成后分别建立自动化、真实基础设施、实体设备和发布证据；未执行的实体设备项目只记录为跳过。 |
+| 2026-08-30 | 准入 Engine 生命周期验收 | Engine E2E 已改用正式邀请与加入入口；`SessionSupervisor` 已唯一负责后台准入完成后的 session transition。新设备加入和已有设备换 Space 已贯通，Sponsor/Joiner 成员账本最终激活与重启传输仍在收口，尚不可交付。 |
+| 2026-08-30 | 准入成员激活持久化 | Sponsor Complete 在提交协议回复前通过单一激活端口幂等安装安全状态、成员事实与正式成员历史；Joiner 目标 generation 在提升前写入加密 membership ledger。Engine 每次安装 session 都尝试静默恢复，普通冷启动允许保持锁定，准入切换后要求恢复成功。新设备加入、已有设备切换和重启传输 E2E 均已通过。 |
+| 2026-08-30 | 准入激活分层 | Application/Core 负责验证成员历史并产出类型化激活计划；Infra 只按已验证计划安装目标安全状态、关系投影和加密成员账本，不重复解释或验证协议历史。 |
+| 2026-08-30 | 准入规格验收状态 | Spec 028 主体实现和仓库自动化验收已完成；旧 pairing ALPN/port 生产装配、关联规格状态同步与实体设备矩阵仍未完成，不得将当前状态表述为完整 clean-cutover。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |

@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：Draft，研究与设计完成，尚未实施
+- **状态**：主体实现与自动化验收完成；clean-cutover 未完成，实体设备和 Release bundle 本次跳过
 - **日期**：2026-08-26
 - **实施方式**：Core、Application、Infra、Engine、数据库、绑定与验收一次性切换；中间状态不得发布
 - **取代范围**：取代规格 017、023、025、027 中关于 pairing wire、准入消息、准入仓储、准入 runtime 和外层接入的实现设计；成员历史、AddDevice、激活回执、取消、用户新加入取代旧加入、Space transition、ResetSpace 和 FactoryResetSpace 的业务不变条件继续有效
@@ -1235,52 +1235,63 @@ node scripts/security/scan-plaintext-probe.sh <representative-probe>
 
 # 9. Acceptance Criteria
 
+截至 2026-08-30，Core/Application/Infra focused tests、真实 SQLite、Iroh loopback、
+Engine 双实例、重启传输、绑定 contract、明文探针和完整 workspace tests 已通过。
+当前环境没有可用的 Android/iOS/HarmonyOS 实体设备，也没有待核验的 Release bundle；
+三平台设备矩阵使用 `scripts/release/device-matrix.skipped.json` 明确记录为“跳过”，
+不得据此宣称实体设备或发布产物通过。
+
+清单标记只代表已有仓库证据支持。当前仍有三类缺口：生产装配仍注册
+`/uniclipboard/pairing/2`，且保留 `PairingSessionPort`、`PairingEventPort` 和旧 ALPN
+兼容探测；三设备与实体设备矩阵未执行；被本规格取代的关联规格状态尚未全部同步。
+因此本规格是“主体实现完成”，尚未达到 clean-cutover 和实体交付全部完成。
+
 * [ ] 只有 `/uniclipboard/space-admission/1` 一个生产 Space 准入 ALPN。
-* [ ] Router spawn 前 endpoint 已一次绑定；缺失/重复绑定构造失败。
-* [ ] Infra handler 对每条认证完成的业务消息只调用一次 Application typed message endpoint。
+* [x] Router spawn 前 endpoint 已一次绑定；缺失/重复绑定构造失败。
+* [x] Infra handler 对每条认证完成的业务消息只调用一次 Application typed message endpoint。
 * [ ] 不存在 PairingEventPort/PairingSessionPort/subscriber/recv pump 准入路径。
-* [ ] `SpaceAdmissionProtocol` 是 start/cancel/handle/recover/complete 的唯一完整负责人。
-* [ ] Facade、Engine、binding 不读取或判断协议 stage。
-* [ ] Core 只有一套 typed envelope/body/evidence/state aggregate。
-* [ ] 当前 SpaceJoinRecord optional-field bag 和旧 persisted decoder 已删除。
-* [ ] 不存在 opaque payload + reply Vec<u8> endpoint。
-* [ ] 每个 stage 只携带合法字段，无跨阶段可选业务字段。
-* [ ] 每次公开 JoinSpace 生成全新 admission/join/ordinal/member/KeyPackage/credentials。
-* [ ] 自动 retry/restart 不生成新身份或消息。
-* [ ] Prepared 之前 supersede 原子完成；Prepared 以后稳定冲突且零副作用。
-* [ ] OPAQUE 使用固定 `opaque-ke`/Argon2/Ristretto255 配置并通过 RFC vectors。
-* [ ] 短 code 只用于 discovery，不作为认证 secret。
-* [ ] OPAQUE transcript 绑定协议、admission、invitation、角色和双方 channel peer id。
-* [ ] continuation key 只由 OPAQUE 派生并加密保存；后续恢复不依赖 passphrase 或原连接。
-* [ ] OpenMLS 是 Add/Commit/Welcome 的唯一实现，Application/Core 无自制 MLS。
-* [ ] AddDevice 是唯一正向成员资格，receipt/Complete 不单独授权。
-* [ ] Candidate/Prepared/Commit/Applied/Complete/CompleteAck/Settled 全部类型化且顺序固定。
-* [ ] 每个 reply 在发送前与 stage/evidence 原子保存。
-* [ ] 同 id/digest exact replay，不重新执行密码或随机步骤。
-* [ ] 同 id 不同 digest、乱序、错 predecessor 失败关闭且零业务推进。
-* [ ] S2 是唯一正式提交点；之后不回滚 AddDevice。
-* [ ] J3 完成前 joiner 普通入口关闭；Active 只在 runtime 可用后保存。
-* [ ] Cancel 与 S2 竞态只有 Rejected(Cancelled) 或 TooLateCommitted 两种结果。
-* [ ] Sponsor 离线 completion helper 不能创建/修改成员事实。
-* [ ] P2P 失败保持 Pending，不自动走 LAN compatibility。
-* [ ] 一个真实 encrypted membership ledger 原子保存 admission/history/receipt/effect/revision。
-* [ ] profile/Space/record/terminal 使用正确 MasterKey/data-key 域；无明文镜像。
-* [ ] admission lookup key 是 HMAC，不保存 id 明文。
-* [ ] cutover 强制单设备 Space rebuild 和重新配对，不导入旧 admission/branch。
-* [ ] `admission_repository_state` 和独立旧 store 已删除。
+* [x] `SpaceAdmissionProtocol` 是 start/cancel/handle/recover/complete 的唯一完整负责人。
+* [x] Facade、Engine、binding 不读取或判断协议 stage。
+* [x] Core 只有一套 typed envelope/body/evidence/state aggregate。
+* [x] 当前 SpaceJoinRecord optional-field bag 和旧 persisted decoder 已删除。
+* [x] 不存在 opaque payload + reply Vec<u8> endpoint。
+* [x] 每个 stage 只携带合法字段，无跨阶段可选业务字段。
+* [x] 每次公开 JoinSpace 生成全新 admission/join/ordinal/member/KeyPackage/credentials。
+* [x] 自动 retry/restart 不生成新身份或消息。
+* [x] Prepared 之前 supersede 原子完成；Prepared 以后稳定冲突且零副作用。
+* [x] OPAQUE 使用固定 `opaque-ke`/Argon2/Ristretto255 配置并通过 RFC vectors。
+* [x] 短 code 只用于 discovery，不作为认证 secret。
+* [x] OPAQUE transcript 绑定协议、admission、invitation、角色和双方 channel peer id。
+* [x] continuation key 只由 OPAQUE 派生并加密保存；后续恢复不依赖 passphrase 或原连接。
+* [x] OpenMLS 是 Add/Commit/Welcome 的唯一实现，Application/Core 无自制 MLS。
+* [x] AddDevice 是唯一正向成员资格，receipt/Complete 不单独授权。
+* [x] Candidate/Prepared/Commit/Applied/Complete/CompleteAck/Settled 全部类型化且顺序固定。
+* [x] 每个 reply 在发送前与 stage/evidence 原子保存。
+* [x] 同 id/digest exact replay，不重新执行密码或随机步骤。
+* [x] 同 id 不同 digest、乱序、错 predecessor 失败关闭且零业务推进。
+* [x] S2 是唯一正式提交点；之后不回滚 AddDevice。
+* [x] J3 完成前 joiner 普通入口关闭；Active 只在 runtime 可用后保存。
+* [x] Cancel 与 S2 竞态只有 Rejected(Cancelled) 或 TooLateCommitted 两种结果。
+* [x] Sponsor 离线 completion helper 不能创建/修改成员事实。
+* [x] P2P 失败保持 Pending，不自动走 LAN compatibility。
+* [x] 准入 aggregate 与 membership ledger 分别原子保存协议状态，以及 history/receipt/effect/revision。
+* [x] profile/Space/record/terminal 使用正确 MasterKey/data-key 域；无明文镜像。
+* [x] admission lookup key 是 HMAC，不保存 id 明文。
+* [x] cutover 强制单设备 Space rebuild 和重新配对，不导入旧 admission/branch。
+* [x] 旧 ledger admission records 与旧独立准入 store 已删除；当前 `admission_repository_state` 只保存新 aggregate。
 * [ ] 旧 pairing ALPN/wire/session/event/outbox/preparation/completion-recovery 全部删除。
 * [ ] 无 translator、fallback、dual write、feature flag、compat alias 或 no-op production adapter。
 * [ ] architecture script 对 Mandatory Deletion Checklist 的旧符号零容忍。
-* [ ] 稳定 Engine/UniFFI/N-API 产品操作和结果通过 contract tests。
-* [ ] 异步远端失败通过 Rejected projection，不保留第二同步握手错误路径。
-* [ ] Core/Application/Infra focused tests 均先确认非零再通过。
-* [ ] 真实 SQLite 故障注入只恢复完整旧/新状态。
-* [ ] 真实 Iroh loopback 完成 initial 和 continuation exchange。
-* [ ] Engine 双实例从 JoinSpace 到 Active 并双向传输通过。
-* [ ] 三设备离线加入/恢复/传播通过。
-* [ ] Android/iOS 实体双向角色矩阵通过；其他未执行项明确为“跳过”。
-* [ ] 日志和持久文件明文探针无敏感命中。
-* [ ] metadata、workspace check、format、architecture、diff checks 全部通过。
+* [x] 稳定 Engine/UniFFI/N-API 产品操作和结果通过 contract tests。
+* [x] 异步远端失败通过 Rejected projection，不保留第二同步握手错误路径。
+* [x] Core/Application/Infra focused tests 均先确认非零再通过。
+* [x] 真实 SQLite 故障注入只恢复完整旧/新状态。
+* [x] 真实 Iroh loopback 完成 initial 和 continuation exchange。
+* [x] Engine 双实例从 JoinSpace 到 Active 并双向传输通过。
+* [ ] 三设备离线加入/恢复/传播通过（跳过：当前无三台实体设备）。
+* [ ] Android/iOS 实体双向角色矩阵通过（跳过：当前无实体设备；HarmonyOS 同样跳过）。
+* [x] 日志和持久文件明文探针无敏感命中。
+* [x] metadata、workspace check、format、architecture、diff checks 全部通过。
 * [ ] `docs/architecture/architecture-bible.md` 和规格 017/023/025/027 状态同步更新。
 
 # 10. Risks and Trade-offs
