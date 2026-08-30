@@ -38,7 +38,8 @@ use uc_core::membership::{
 };
 use uc_core::ports::space::SpaceAccessError;
 use uc_core::ports::{
-    ClockPort, DeviceIdentityPort, LocalIdentityError, LocalIdentityPort, SettingsPort,
+    ClockPort, DeviceIdentityPort, EngineVersionStatePort, LocalIdentityError, LocalIdentityPort,
+    SettingsPort,
 };
 use uc_observability_contract::analytics::{
     AnalyticsFacade, Event, NameLengthBucket, SelfMintedAdoptRequest, SetupEntry,
@@ -60,6 +61,8 @@ pub(crate) struct InitializeSpaceUseCase {
     membership_initializer: Arc<dyn SpaceMembershipInitializerPort>,
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
+    engine_version_state: Arc<dyn EngineVersionStatePort>,
+    current_engine_version: String,
     admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
     settings: Arc<dyn SettingsPort>,
     clock: Arc<dyn ClockPort>,
@@ -75,6 +78,8 @@ impl InitializeSpaceUseCase {
         membership_initializer: Arc<dyn SpaceMembershipInitializerPort>,
         current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
         initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
+        engine_version_state: Arc<dyn EngineVersionStatePort>,
+        current_engine_version: String,
         admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
         settings: Arc<dyn SettingsPort>,
         clock: Arc<dyn ClockPort>,
@@ -88,6 +93,8 @@ impl InitializeSpaceUseCase {
             membership_initializer,
             current_space_identity,
             initial_space_activation,
+            engine_version_state,
+            current_engine_version,
             admission_credentials,
             settings,
             clock,
@@ -190,6 +197,10 @@ impl InitializeSpaceUseCase {
         // 8. Atomically expose the completed initial Space to all readers.
         self.initial_space_activation
             .activate_initial_space(&space_id)
+            .await
+            .map_err(InitializeSpaceError::storage)?;
+        self.engine_version_state
+            .write(&self.current_engine_version)
             .await
             .map_err(InitializeSpaceError::storage)?;
         self.admission_credentials
@@ -519,6 +530,26 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct InMemoryEngineVersionState {
+        version: Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl EngineVersionStatePort for InMemoryEngineVersionState {
+        async fn read(&self) -> Result<Option<String>, uc_core::ports::EngineVersionStateError> {
+            Ok(self.version.lock().unwrap().clone())
+        }
+
+        async fn write(
+            &self,
+            version: &str,
+        ) -> Result<(), uc_core::ports::EngineVersionStateError> {
+            *self.version.lock().unwrap() = Some(version.to_owned());
+            Ok(())
+        }
+    }
+
     // ---------- Harness ----------
 
     /// Test-only `AnalyticsPort` that records every captured event for
@@ -733,6 +764,8 @@ mod tests {
             membership_initializer.clone(),
             profile_readiness.clone(),
             initial_space_activation.clone(),
+            Arc::new(InMemoryEngineVersionState::default()),
+            "1.1.0-rc.5".to_owned(),
             admission_credentials.clone(),
             settings.clone(),
             clock,

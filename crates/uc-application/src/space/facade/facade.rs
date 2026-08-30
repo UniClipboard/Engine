@@ -201,9 +201,9 @@ impl SpaceFacade {
                 Arc::clone(&current_space_identity),
             ));
         let upgrade_space = Arc::new(UpgradeSpaceUseCase::new(
-            current_engine_version,
+            current_engine_version.clone(),
             rebuild_space,
-            engine_version_state,
+            Arc::clone(&engine_version_state),
             Arc::clone(&current_space_identity),
         ));
 
@@ -215,6 +215,8 @@ impl SpaceFacade {
             membership_initializer,
             Arc::clone(&current_space_identity),
             initial_space_activation,
+            engine_version_state,
+            current_engine_version,
             Arc::clone(&admission_credentials),
             Arc::clone(&settings),
             Arc::clone(&clock),

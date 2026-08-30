@@ -8,8 +8,9 @@ use sha2::{Digest, Sha256};
 use uc_application::deps::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
-    CommitMembershipLedgerPort, DeviceManagementResetDataPort, LoadMembershipLedgerPort,
-    LoadedMembershipLedger, MembershipLedgerMutation, PeerReconciliationRecord,
+    CommitMembershipLedgerPort, CurrentSpaceIdentityError, DeviceManagementResetDataPort,
+    InitialSpaceActivationPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
+    MembershipLedgerMutation, PeerReconciliationRecord,
 };
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::crypto::aad;
@@ -1270,6 +1271,37 @@ impl DeviceManagementResetDataPort for DurableAdmissionSpaceTransition {
             .clear_device_reset_journal()
             .await
             .map_err(|_| AdmissionSpaceTransitionError::Storage)
+    }
+}
+
+#[async_trait]
+impl InitialSpaceActivationPort for DurableAdmissionSpaceTransition {
+    async fn activate_initial_space(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<(), CurrentSpaceIdentityError> {
+        // 新安装也必须从第一天使用 generation 布局。这里复用同一个持久化
+        // 提升事务，但不执行成员重置：初始化流程刚刚写入的本机成员、安全
+        // 状态和 ledger 会整体迁移，active manifest 最后才对读者可见。
+        self.prepare_device_management_reset(space_id)
+            .await
+            .map_err(map_initial_activation_error)?;
+        self.stage_device_management_reset_mutations(space_id)
+            .await
+            .map_err(map_initial_activation_error)?;
+        self.promote_device_management_reset(space_id)
+            .await
+            .map_err(map_initial_activation_error)?;
+        self.finalize_device_management_reset(space_id)
+            .await
+            .map_err(map_initial_activation_error)
+    }
+}
+
+fn map_initial_activation_error(error: AdmissionSpaceTransitionError) -> CurrentSpaceIdentityError {
+    match error {
+        AdmissionSpaceTransitionError::Inconsistent => CurrentSpaceIdentityError::Inconsistent,
+        _ => CurrentSpaceIdentityError::Unavailable,
     }
 }
 

@@ -242,8 +242,6 @@ pub fn wire_dependencies_from_inputs(
         Arc::clone(&admission_keys),
     ));
     let current_space_identity: Arc<dyn CurrentSpaceIdentityPort> = current_space_resolver.clone();
-    let initial_space_activation: Arc<dyn InitialSpaceActivationPort> =
-        current_space_resolver.clone();
     let portable_current_space_identity: Arc<dyn PortableCurrentSpaceIdentityPort> =
         current_space_resolver.clone();
     let re_pairing_state_store: Arc<dyn RePairingStateStorePort> =
@@ -350,7 +348,8 @@ pub fn wire_dependencies_from_inputs(
     let admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort> =
         durable_space_transition.clone();
     let device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort> =
-        durable_space_transition;
+        durable_space_transition.clone();
+    let initial_space_activation: Arc<dyn InitialSpaceActivationPort> = durable_space_transition;
     let peer_admission =
         build_peer_admission_port(Arc::clone(&membership_ledger)
             as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>);
