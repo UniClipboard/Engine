@@ -86,6 +86,10 @@ impl HandleMembershipHistoryMessageUseCase {
                     &summary.current_position,
                     history.contains_strict_ancestor_position(&summary.current_position),
                 );
+                tracing::debug!(
+                    plan = reconciliation_plan_kind(plan),
+                    "成员历史摘要完成关系规划"
+                );
                 return match plan {
                     MembershipHistoryReconciliationPlan::Noop
                     | MembershipHistoryReconciliationPlan::OfferSuffix => {
@@ -153,6 +157,10 @@ impl HandleMembershipHistoryMessageUseCase {
             .completed_inbound_transfers
             .get(&(source_device_id.clone(), transfer_id))
         {
+            tracing::debug!(
+                ack_kind = history_ack_kind(ack),
+                "成员历史入站传输命中幂等 ACK"
+            );
             return Ok(MembershipHistoryMessage::AckV3(ack.clone()));
         }
         let page_index = page.page_index();
@@ -230,6 +238,11 @@ impl HandleMembershipHistoryMessageUseCase {
                 })
                 .await
                 .map_err(map_ledger_error)?;
+            tracing::debug!(
+                received_page_count = next_page_index,
+                page_count,
+                "成员历史入站后缀已持久等待后续页"
+            );
             return Ok(MembershipHistoryMessage::AckV3(
                 MembershipHistoryAckV3::Continue {
                     transfer_id,
@@ -245,13 +258,14 @@ impl HandleMembershipHistoryMessageUseCase {
             .record()
             .local_member_instance
             .ok_or(HandleMembershipHistoryMessageError::RecoveryRequired)?;
-        let (_, ack) = self
+        let (_, (ack, new_effect_count, pending_peer_count, sender_is_bound)) = self
             .ledger
             .compare_and_commit_history(
                 expected_revision,
                 expected_history_digest,
                 move |record, current, verifier| {
                     let members_before_merge = current.effective_members();
+                    let effects_before = record.pending_effects.len();
                     let sender_is_bound = pages.first().is_some_and(|page| {
                         page.sender_admission().device_id == source_device_id
                             && current.admission_facts_for(page.sender_admission().member_instance)
@@ -298,11 +312,29 @@ impl HandleMembershipHistoryMessageUseCase {
                     if matches!(ack, MembershipHistoryAckV3::Confirmed { .. }) {
                         peer.confirmed_position = current.current_position().ok();
                     }
-                    Ok(ack)
+                    let new_effect_count =
+                        record.pending_effects.len().saturating_sub(effects_before);
+                    let current_position = current.current_position().ok();
+                    let pending_peer_count = record
+                        .peer_reconciliation
+                        .values()
+                        .filter(|peer| {
+                            peer.confirmed_position.as_ref() != current_position.as_ref()
+                        })
+                        .count();
+                    Ok((ack, new_effect_count, pending_peer_count, sender_is_bound))
                 },
             )
             .await
             .map_err(map_ledger_error)?;
+        tracing::debug!(
+            ack_kind = history_ack_kind(&ack),
+            sender_is_bound,
+            page_count,
+            new_effect_count,
+            pending_peer_count,
+            "成员历史入站后缀完成原子处理"
+        );
         self.wake_after_history_change(matches!(ack, MembershipHistoryAckV3::Confirmed { .. }));
         Ok(MembershipHistoryMessage::AckV3(ack))
     }
@@ -423,6 +455,27 @@ impl HandleMembershipHistoryMessageUseCase {
             .await
             .map_err(map_ledger_error)?;
         Ok(())
+    }
+}
+
+fn reconciliation_plan_kind(plan: MembershipHistoryReconciliationPlan) -> &'static str {
+    match plan {
+        MembershipHistoryReconciliationPlan::Noop => "noop",
+        MembershipHistoryReconciliationPlan::OfferSuffix => "offer_suffix",
+        MembershipHistoryReconciliationPlan::RequestSuffix => "request_suffix",
+        MembershipHistoryReconciliationPlan::Diverged => "diverged",
+        MembershipHistoryReconciliationPlan::Invalid => "invalid",
+    }
+}
+
+fn history_ack_kind(ack: &MembershipHistoryAckV3) -> &'static str {
+    match ack {
+        MembershipHistoryAckV3::Continue { .. } => "continue",
+        MembershipHistoryAckV3::Confirmed { .. } => "confirmed",
+        MembershipHistoryAckV3::RestrictedApplied => "restricted_applied",
+        MembershipHistoryAckV3::RestrictedConsistent => "restricted_consistent",
+        MembershipHistoryAckV3::Diverged => "diverged",
+        MembershipHistoryAckV3::Invalid => "invalid",
     }
 }
 

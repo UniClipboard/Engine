@@ -347,6 +347,10 @@ impl SynchronizeMembershipHistoryUseCase {
             )
             .await
             .map_err(map_exchange_error)?;
+        tracing::debug!(
+            reply_kind = membership_message_kind(&reply),
+            "成员历史摘要收到回复"
+        );
         match reply {
             MembershipHistoryMessage::AckV3(ack)
                 if ack_confirms_membership_history_target(summary_transfer_id, &position, &ack) =>
@@ -366,9 +370,13 @@ impl SynchronizeMembershipHistoryUseCase {
                 let pages = history
                     .export_suffix_pages_v3((*sender).clone(), known_position)
                     .map_err(|_| PeerSyncError::Stable)?;
+                tracing::debug!(page_count = pages.len(), "成员历史后缀已导出");
                 return self.send_suffix_pages(peer, pages, position).await;
             }
-            _ => return Err(PeerSyncError::Stable),
+            _ => {
+                tracing::debug!("成员历史摘要收到不匹配的稳定回复");
+                return Err(PeerSyncError::Stable);
+            }
         }
     }
 
@@ -394,8 +402,15 @@ impl SynchronizeMembershipHistoryUseCase {
                 .await
                 .map_err(map_exchange_error)?;
             let MembershipHistoryMessage::AckV3(ack) = reply else {
+                tracing::debug!("成员历史后缀页收到非 ACK 回复");
                 return Err(PeerSyncError::Stable);
             };
+            tracing::debug!(
+                page_number = next_page_index.saturating_add(1),
+                page_count = pages.len(),
+                ack_kind = membership_ack_kind(&ack),
+                "成员历史后缀页收到 ACK"
+            );
             match ack {
                 uc_core::membership::MembershipHistoryAckV3::Continue {
                     transfer_id: acknowledged_transfer,
@@ -495,6 +510,30 @@ impl SynchronizeMembershipHistoryUseCase {
                     PeerSyncError::Stable
                 }
             })
+    }
+}
+
+fn membership_message_kind(message: &MembershipHistoryMessage) -> &'static str {
+    match message {
+        MembershipHistoryMessage::SummaryV3(_) => "summary",
+        MembershipHistoryMessage::RequestSuffixV3(_) => "request_suffix",
+        MembershipHistoryMessage::SuffixPageV3(_) => "suffix_page",
+        MembershipHistoryMessage::AckV3(ack) => membership_ack_kind(ack),
+        MembershipHistoryMessage::RestrictedEventV3(_) => "restricted_event",
+        MembershipHistoryMessage::RestrictedDecisionV3(_) => "restricted_decision",
+    }
+}
+
+fn membership_ack_kind(ack: &uc_core::membership::MembershipHistoryAckV3) -> &'static str {
+    match ack {
+        uc_core::membership::MembershipHistoryAckV3::Continue { .. } => "ack_continue",
+        uc_core::membership::MembershipHistoryAckV3::Confirmed { .. } => "ack_confirmed",
+        uc_core::membership::MembershipHistoryAckV3::RestrictedApplied => "ack_restricted_applied",
+        uc_core::membership::MembershipHistoryAckV3::RestrictedConsistent => {
+            "ack_restricted_consistent"
+        }
+        uc_core::membership::MembershipHistoryAckV3::Diverged => "ack_diverged",
+        uc_core::membership::MembershipHistoryAckV3::Invalid => "ack_invalid",
     }
 }
 

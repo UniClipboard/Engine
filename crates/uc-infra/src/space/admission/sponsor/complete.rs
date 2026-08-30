@@ -164,6 +164,7 @@ impl DefaultSponsorAdmissionActivation {
 
         let mut ledger = self.loader.load().await.map_err(anyhow::Error::new)?;
         if ledger.membership_history.as_deref() == Some(activated.committed_history.as_slice()) {
+            tracing::debug!("Sponsor 成员历史激活命中幂等提交");
             return Ok(());
         }
         if ledger.lineage_id.as_deref() != Some(activated.space_id.as_str()) {
@@ -174,6 +175,7 @@ impl DefaultSponsorAdmissionActivation {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("the Sponsor membership ledger has no local device"))?;
         let mut previous_reconciliation = std::mem::take(&mut ledger.peer_reconciliation);
+        let previous_peer_count = previous_reconciliation.len();
         ledger.peer_reconciliation = history
             .active_members()
             .into_iter()
@@ -217,6 +219,11 @@ impl DefaultSponsorAdmissionActivation {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("the Sponsor membership revision overflowed"))?;
         ledger.membership_history = Some(activated.committed_history);
+        tracing::debug!(
+            previous_peer_count,
+            active_peer_count = ledger.peer_reconciliation.len(),
+            "Sponsor 新历史已建立逐 peer 传播欠账"
+        );
         self.committer
             .compare_and_commit(MembershipLedgerMutation {
                 expected_revision,
