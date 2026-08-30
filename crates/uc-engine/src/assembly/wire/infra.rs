@@ -97,15 +97,10 @@ pub(super) fn build_space_access_ports(
     )
 }
 pub(super) fn build_peer_admission_port(
-    session: &Arc<InMemorySession>,
-    db_executor: &Arc<DieselSqliteExecutor>,
+    membership_ledger: Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
 ) -> Arc<dyn uc_core::membership::PeerAdmissionPort> {
-    let repository: Arc<dyn uc_core::membership::RevocationRepositoryPort> = Arc::new(
-        DieselSpaceSecurityStore::new(db_executor.clone(), session.as_ref().clone()),
-    );
     Arc::new(uc_infra::space::MlsPeerAdmissionAdapter::new(
-        session.clone(),
-        repository,
+        membership_ledger,
     ))
 }
 

@@ -351,7 +351,9 @@ pub fn wire_dependencies_from_inputs(
         durable_space_transition.clone();
     let device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort> =
         durable_space_transition;
-    let peer_admission = build_peer_admission_port(&platform.session, &infra.db_executor);
+    let peer_admission =
+        build_peer_admission_port(Arc::clone(&membership_ledger)
+            as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>);
 
     let relationship_store = Arc::new(EncryptedRelationshipStore::new(
         Arc::clone(&infra.db_executor),
