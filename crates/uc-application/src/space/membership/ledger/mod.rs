@@ -19,7 +19,8 @@ pub use effect_executor::{
 pub use error::MembershipLedgerError;
 pub(crate) use initializer::InitializeSpaceMembershipUseCase;
 pub use model::{
-    InboundMembershipTransfer, LoadedMembershipLedger, MembershipEffectKind, MembershipEffectPhase,
+    InboundMembershipTransfer, LoadedMembershipLedger, MembershipConflictRecord,
+    MembershipConflictStatus, MembershipEffectKind, MembershipEffectPhase,
     MembershipLedgerMutation, PeerHistorySyncOutcome, PeerHistorySyncState,
     PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
 };

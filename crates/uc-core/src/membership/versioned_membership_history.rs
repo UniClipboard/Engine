@@ -996,6 +996,33 @@ impl VersionedMembershipHistory {
         &self.lineage_id
     }
 
+    pub(crate) fn has_same_activation_baseline(&self, other: &Self) -> bool {
+        self.activation_baseline == other.activation_baseline
+    }
+
+    pub(crate) fn closest_common_ancestor(&self, other: &Self) -> Option<MembershipEventId> {
+        let mut local_ancestors = BTreeSet::new();
+        let mut cursor = self.known_head;
+        while let Some(event_id) = cursor {
+            local_ancestors.insert(event_id);
+            cursor = self
+                .events
+                .get(&event_id)
+                .and_then(|event| event.parent_event_id);
+        }
+        let mut cursor = other.known_head;
+        while let Some(event_id) = cursor {
+            if local_ancestors.contains(&event_id) {
+                return Some(event_id);
+            }
+            cursor = other
+                .events
+                .get(&event_id)
+                .and_then(|event| event.parent_event_id);
+        }
+        None
+    }
+
     pub fn encode_persisted_v2(&self) -> Result<Vec<u8>, MembershipHistoryV2Error> {
         let persisted = PersistedMembershipHistoryV2 {
             format_version: PERSISTED_MEMBERSHIP_HISTORY_FORMAT_V2,

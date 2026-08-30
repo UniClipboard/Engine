@@ -29,6 +29,7 @@ use crate::space::membership::MembershipHistoryAntiEntropy;
 use crate::space::membership::PreparedSpaceMembershipMaintenanceRuntime;
 use crate::space::membership::QueryMembershipAdmissionUseCase;
 use crate::space::membership::RemoveSpaceMemberUseCase;
+use crate::space::membership::ResolveMembershipConflictUseCase;
 use crate::space::membership::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScopePort, DeliverRestrictedMembershipUseCase,
@@ -126,6 +127,7 @@ pub(crate) struct SpaceApplication {
     query_membership_admission: Arc<QueryMembershipAdmissionUseCase>,
     remove_space_member: Arc<RemoveSpaceMemberUseCase>,
     decide_device_trust_change: Arc<DecideDeviceTrustChangeUseCase>,
+    resolve_membership_conflict: Arc<ResolveMembershipConflictUseCase>,
     space_admission: Arc<SpaceAdmissionProtocol>,
     membership_history_endpoint: Arc<MembershipHistoryAntiEntropy>,
     initialize_membership: Arc<InitializeSpaceMembershipUseCase>,
@@ -255,6 +257,11 @@ impl SpaceApplication {
             recover_membership_effects,
             activity,
         ));
+        let resolve_membership_conflict = Arc::new(ResolveMembershipConflictUseCase::new(
+            Arc::clone(&ledger),
+            Arc::clone(&query_device_trust)
+                as Arc<dyn crate::space::membership::resolve_conflict::QueryMembershipConflictStatusPort>,
+        ));
         Self {
             ledger,
             current_scope,
@@ -262,6 +269,7 @@ impl SpaceApplication {
             query_membership_admission,
             remove_space_member,
             decide_device_trust_change,
+            resolve_membership_conflict,
             space_admission,
             membership_history_endpoint,
             initialize_membership,
@@ -309,6 +317,10 @@ impl SpaceApplication {
 
     pub(crate) fn decide_device_trust_change(&self) -> Arc<DecideDeviceTrustChangeUseCase> {
         Arc::clone(&self.decide_device_trust_change)
+    }
+
+    pub(crate) fn resolve_membership_conflict(&self) -> Arc<ResolveMembershipConflictUseCase> {
+        Arc::clone(&self.resolve_membership_conflict)
     }
 
     pub(crate) fn space_admission_for_cancel(&self) -> Arc<SpaceAdmissionProtocol> {

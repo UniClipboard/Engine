@@ -52,6 +52,9 @@ pub use membership::{
     DeviceTrustStatus, DeviceTrustSyncState, PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 pub use membership::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
+pub use membership::{
+    ResolveMembershipConflictError, ResolveMembershipConflictInput, ResolveMembershipConflictResult,
+};
 
 // Assembly contract re-exported by `crate::deps`.
 pub use admission::{

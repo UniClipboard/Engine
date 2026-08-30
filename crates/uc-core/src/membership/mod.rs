@@ -7,6 +7,7 @@ mod error;
 mod gossip;
 mod member;
 mod member_instance;
+mod membership_conflict_policy;
 mod membership_history;
 mod ports;
 mod preferences;
@@ -55,6 +56,10 @@ pub use gossip::{
 };
 pub use member::SpaceMember;
 pub use member_instance::MemberInstanceId;
+pub use membership_conflict_policy::{
+    MembershipBranchId, MembershipConflictChoice, MembershipConflictDescription,
+    MembershipConflictId, MembershipConflictPolicy, MembershipConflictPolicyError,
+};
 pub use membership_history::{
     ack_confirms_membership_history_target, plan_membership_history_reconciliation,
     MembershipDecisionId, MembershipEventId, MembershipHistoryAckV3, MembershipHistoryMessage,

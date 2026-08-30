@@ -478,6 +478,27 @@ impl SpaceFacade {
         decide.execute(input).await
     }
 
+    pub async fn resolve_membership_conflict(
+        &self,
+        input: crate::space::membership::ResolveMembershipConflictInput,
+    ) -> Result<
+        crate::space::membership::ResolveMembershipConflictResult,
+        crate::space::membership::ResolveMembershipConflictError,
+    > {
+        let resolve = self
+            .application
+            .lock()
+            .await
+            .as_ref()
+            .map(SpaceApplication::resolve_membership_conflict)
+            .ok_or_else(|| {
+                crate::space::membership::ResolveMembershipConflictError::TargetUnavailable {
+                    source: anyhow::anyhow!("space application is closed"),
+                }
+            })?;
+        resolve.execute(input).await
+    }
+
     pub async fn cancel_space_join(
         &self,
         join_id: [u8; 16],

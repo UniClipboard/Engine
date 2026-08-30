@@ -4,11 +4,12 @@ use uc_core::membership::{
     AdmissionActivationReceipt, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
     AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition,
     HistoricalMembershipSignatureError, HistoricalMembershipSignatureVerifier,
-    MembershipActivationBaselineV2, MembershipAdmissionV2, MembershipCredential,
-    MembershipDecisionV2, MembershipEventId, MembershipEventV2, MembershipHistoryMessage,
-    MembershipOperationV2, RemovalDecision, VersionedMembershipHistory,
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
-    MAX_MEMBERSHIP_HISTORY_FRAME_SIZE, MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
+    MembershipActivationBaselineV2, MembershipAdmissionV2, MembershipConflictChoice,
+    MembershipConflictPolicy, MembershipCredential, MembershipDecisionV2, MembershipEventId,
+    MembershipEventV2, MembershipHistoryMessage, MembershipOperationV2, RemovalDecision,
+    VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+    MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 
 const LINEAGE: &str = "space-lineage";
@@ -301,6 +302,139 @@ fn history_with_a_and_b(
             .expect("B activation receipt verifies");
     }
     (history, a, b, genesis, add_b)
+}
+
+#[test]
+fn sibling_histories_produce_order_independent_conflict_and_branch_ids() {
+    let verifier = DeterministicSignatureVerifier;
+    let (base, a, _, _, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let d = admission("device-d", credential(4));
+    let mut left = base.clone();
+    let mut right = base;
+    let left_event = event(
+        &left,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: c },
+        3,
+        &verifier,
+    );
+    let right_event = event(
+        &right,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: d },
+        4,
+        &verifier,
+    );
+    left.verify_and_receive_event(left_event, &verifier)
+        .expect("left sibling verifies");
+    right
+        .verify_and_receive_event(right_event, &verifier)
+        .expect("right sibling verifies");
+
+    let observed_left_first =
+        MembershipConflictPolicy::describe(&left, &right, a.facts.member_instance)
+            .expect("siblings form a conflict");
+    let observed_right_first =
+        MembershipConflictPolicy::describe(&right, &left, a.facts.member_instance)
+            .expect("arrival order does not matter");
+
+    assert_eq!(
+        observed_left_first.conflict_id,
+        observed_right_first.conflict_id
+    );
+    assert_eq!(
+        observed_left_first.branch_ids(),
+        observed_right_first.branch_ids()
+    );
+    assert_eq!(
+        observed_left_first.choice_for(observed_left_first.local_branch_id),
+        Some(MembershipConflictChoice::ActiveMemberRecovery)
+    );
+}
+
+#[test]
+fn conflict_choice_distinguishes_active_removed_and_absent_member_instances() {
+    let verifier = DeterministicSignatureVerifier;
+    let (base, a, b, _, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let mut removed_branch = base.clone();
+    let mut active_branch = base;
+    let removal = event(
+        &removed_branch,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: b.facts.member_instance,
+        },
+        3,
+        &verifier,
+    );
+    let addition = event(
+        &active_branch,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: c },
+        4,
+        &verifier,
+    );
+    removed_branch
+        .verify_and_receive_event(removal, &verifier)
+        .expect("removal sibling verifies");
+    active_branch
+        .verify_and_receive_event(addition, &verifier)
+        .expect("addition sibling verifies");
+
+    let conflict = MembershipConflictPolicy::describe(
+        &active_branch,
+        &removed_branch,
+        b.facts.member_instance,
+    )
+    .expect("the removed member can inspect both choices");
+    assert_eq!(
+        conflict.choice_for(conflict.local_branch_id),
+        Some(MembershipConflictChoice::ActiveMemberRecovery)
+    );
+    assert_eq!(
+        conflict.choice_for(conflict.remote_branch_id),
+        Some(MembershipConflictChoice::RePairingRequired)
+    );
+
+    let absent = credential(9).member_instance_id(&DeviceId::new("absent"));
+    assert_eq!(
+        MembershipConflictPolicy::describe(&active_branch, &removed_branch, absent),
+        Err(uc_core::membership::MembershipConflictPolicyError::InvalidConflict)
+    );
+}
+
+#[test]
+fn same_or_ancestor_history_is_not_a_selectable_conflict() {
+    let verifier = DeterministicSignatureVerifier;
+    let (base, a, _, _, add_b) = history_with_a_and_b(true);
+    assert_eq!(
+        MembershipConflictPolicy::describe(&base, &base, a.facts.member_instance),
+        Err(uc_core::membership::MembershipConflictPolicyError::InvalidConflict)
+    );
+
+    let c = admission("device-c", credential(3));
+    let mut descendant = base.clone();
+    let addition = event(
+        &descendant,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice { admission: c },
+        3,
+        &verifier,
+    );
+    descendant
+        .verify_and_receive_event(addition, &verifier)
+        .expect("descendant verifies");
+    assert_eq!(
+        MembershipConflictPolicy::describe(&base, &descendant, a.facts.member_instance),
+        Err(uc_core::membership::MembershipConflictPolicyError::InvalidConflict)
+    );
 }
 
 #[test]

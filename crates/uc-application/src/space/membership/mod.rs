@@ -7,6 +7,7 @@ mod query_admission;
 mod query_device_trust;
 mod re_pairing;
 mod remove_space_member;
+pub(crate) mod resolve_conflict;
 mod signing;
 mod synchronize_history;
 
@@ -18,10 +19,11 @@ pub use ledger::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
     CurrentSpaceMemberScopePort, InboundMembershipTransfer, LoadMembershipLedgerPort,
-    LoadedMembershipLedger, MembershipEffectExecutionError, MembershipEffectKind,
-    MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    PeerHistorySyncOutcome, PeerHistorySyncState, PeerReconciliationRecord,
-    PendingMembershipEffect, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    LoadedMembershipLedger, MembershipConflictRecord, MembershipConflictStatus,
+    MembershipEffectExecutionError, MembershipEffectKind, MembershipEffectPhase,
+    MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember, PeerHistorySyncOutcome,
+    PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
+    RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
@@ -38,6 +40,9 @@ pub use query_device_trust::{
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
 pub use remove_space_member::{
     MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
+};
+pub use resolve_conflict::{
+    ResolveMembershipConflictError, ResolveMembershipConflictInput, ResolveMembershipConflictResult,
 };
 pub use signing::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 
@@ -62,5 +67,6 @@ pub(super) use query_admission::{QueryMembershipAdmissionPort, QueryMembershipAd
 pub(super) use query_device_trust::QueryDeviceTrustUseCase;
 pub(super) use re_pairing::{RePairingState, ResolveRePairingPort};
 pub(super) use remove_space_member::RemoveSpaceMemberUseCase;
+pub(super) use resolve_conflict::ResolveMembershipConflictUseCase;
 pub(super) use synchronize_history::SynchronizeMembershipHistoryUseCase;
 mod anti_entropy;

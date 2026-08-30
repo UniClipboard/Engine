@@ -4,9 +4,49 @@ use serde::{Deserialize, Serialize};
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    BaseMembershipHistoryPosition, MemberInstanceId, MembershipDecisionV2, MembershipHistoryAckV3,
+    BaseMembershipHistoryPosition, MemberInstanceId, MembershipBranchId, MembershipConflictChoice,
+    MembershipConflictId, MembershipDecisionV2, MembershipHistoryAckV3,
     MembershipHistoryRelationship, MembershipHistorySuffixPageV3,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipConflictStatus {
+    Unresolved,
+    Selected,
+    Transitioning,
+    Completed,
+    RePairingRequired,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipConflictRecord {
+    pub conflict_id: MembershipConflictId,
+    pub local_branch_id: MembershipBranchId,
+    pub remote_branch_id: MembershipBranchId,
+    pub local_choice: MembershipConflictChoice,
+    pub remote_choice: MembershipConflictChoice,
+    pub evidence_peer_device_ids: std::collections::BTreeSet<DeviceId>,
+    pub detected_at_revision: u64,
+    pub status: MembershipConflictStatus,
+    pub selected_branch_id: Option<MembershipBranchId>,
+    pub transition_id: Option<[u8; 32]>,
+}
+
+impl MembershipConflictRecord {
+    pub(crate) fn choice_for(
+        &self,
+        branch_id: MembershipBranchId,
+    ) -> Option<MembershipConflictChoice> {
+        if branch_id == self.local_branch_id {
+            Some(self.local_choice)
+        } else if branch_id == self.remote_branch_id {
+            Some(self.remote_choice)
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerReconciliationRecord {
@@ -90,6 +130,9 @@ pub struct LoadedMembershipLedger {
     pub inbound_transfers: BTreeMap<DeviceId, InboundMembershipTransfer>,
     pub completed_inbound_transfers: BTreeMap<(DeviceId, [u8; 32]), MembershipHistoryAckV3>,
     pub pending_effects: BTreeMap<[u8; 32], PendingMembershipEffect>,
+    /// 冲突、证据来源和用户选择随 ledger 整体加密，并与关系状态共用 CAS revision。
+    #[serde(default)]
+    pub membership_conflicts: BTreeMap<MembershipConflictId, MembershipConflictRecord>,
 }
 
 impl LoadedMembershipLedger {
@@ -106,6 +149,7 @@ impl LoadedMembershipLedger {
             inbound_transfers: BTreeMap::new(),
             completed_inbound_transfers: BTreeMap::new(),
             pending_effects: BTreeMap::new(),
+            membership_conflicts: BTreeMap::new(),
         }
     }
 }
@@ -126,6 +170,23 @@ impl std::fmt::Debug for PeerReconciliationRecord {
             .field("restricted_delivery_count", &self.restricted_delivery.len())
             .field("sync_state", &self.sync_state)
             .field("updated_at_ms", &self.updated_at_ms)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for MembershipConflictRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MembershipConflictRecord")
+            .field("conflict_id", &"[REDACTED]")
+            .field("branch_ids", &"[REDACTED]")
+            .field("local_choice", &self.local_choice)
+            .field("remote_choice", &self.remote_choice)
+            .field("evidence_peer_count", &self.evidence_peer_device_ids.len())
+            .field("detected_at_revision", &self.detected_at_revision)
+            .field("status", &self.status)
+            .field("has_selected_branch", &self.selected_branch_id.is_some())
+            .field("has_transition", &self.transition_id.is_some())
             .finish()
     }
 }
@@ -177,6 +238,10 @@ impl std::fmt::Debug for LoadedMembershipLedger {
             )
             .field("local_join_active", &self.local_join_active)
             .field("peer_count", &self.peer_reconciliation.len())
+            .field(
+                "membership_conflict_count",
+                &self.membership_conflicts.len(),
+            )
             .field("inbound_transfer_count", &self.inbound_transfers.len())
             .field("pending_effect_count", &self.pending_effects.len())
             .finish()

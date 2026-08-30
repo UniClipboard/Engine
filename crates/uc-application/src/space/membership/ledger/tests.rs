@@ -367,6 +367,66 @@ async fn memory_adapter_rejects_a_stale_history_digest() {
     assert_eq!(repository.load().await.unwrap(), loaded);
 }
 
+#[tokio::test]
+async fn diverged_relationship_and_conflict_record_share_one_ledger_commit() {
+    let loaded = active_two_member_ledger();
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+    let peer_id = DeviceId::new("device-b");
+    let conflict_id = uc_core::membership::MembershipConflictId::from_bytes([0x81; 32]);
+    let local_branch_id = uc_core::membership::MembershipBranchId::from_bytes([0x82; 32]);
+    let remote_branch_id = uc_core::membership::MembershipBranchId::from_bytes([0x83; 32]);
+
+    let committed = ledger
+        .compare_and_commit(|record| {
+            record
+                .peer_reconciliation
+                .get_mut(&peer_id)
+                .ok_or(MembershipLedgerError::Corrupt)?
+                .relationship = MembershipHistoryRelationship::Diverged;
+            record.membership_conflicts.insert(
+                conflict_id,
+                MembershipConflictRecord {
+                    conflict_id,
+                    local_branch_id,
+                    remote_branch_id,
+                    local_choice:
+                        uc_core::membership::MembershipConflictChoice::ActiveMemberRecovery,
+                    remote_choice: uc_core::membership::MembershipConflictChoice::RePairingRequired,
+                    evidence_peer_device_ids: [peer_id.clone()].into(),
+                    detected_at_revision: record.revision,
+                    status: MembershipConflictStatus::Unresolved,
+                    selected_branch_id: None,
+                    transition_id: None,
+                },
+            );
+            Ok(())
+        })
+        .await
+        .expect("the relationship and conflict commit atomically");
+
+    assert_eq!(committed.revision, 9);
+    assert_eq!(
+        committed
+            .peer_reconciliation
+            .get(&peer_id)
+            .map(|peer| peer.relationship),
+        Some(MembershipHistoryRelationship::Diverged)
+    );
+    assert_eq!(
+        committed
+            .membership_conflicts
+            .get(&conflict_id)
+            .map(|conflict| conflict.status),
+        Some(MembershipConflictStatus::Unresolved)
+    );
+    assert_eq!(repository.commit_calls.load(Ordering::SeqCst), 1);
+}
+
 #[derive(Default)]
 struct RecordingEffectPorts {
     calls: Mutex<Vec<&'static str>>,
