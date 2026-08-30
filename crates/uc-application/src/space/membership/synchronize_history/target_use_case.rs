@@ -343,6 +343,7 @@ impl SynchronizeMembershipHistoryUseCase {
                     lineage_id: (*lineage_id).clone(),
                     current_position: position.clone(),
                     transfer_id: summary_transfer_id,
+                    sender_admission: (*sender).clone(),
                 }),
             )
             .await

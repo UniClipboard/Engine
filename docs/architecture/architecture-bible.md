@@ -210,6 +210,8 @@ Space
 
 已认证设备上线后，Application 进行有界成员历史核对：历史一致时只确认摘要，存在差异时补齐可验证事件。连续新增可以自动应用；待决定移除阻塞其后继事件。
 
+本机投影尚未知的设备可以提交带准入声明的摘要和有界后缀。Infra 只把 Iroh 远端公钥指纹绑定到声明设备；Application/Core 在原子提交前验证完整签名单父历史、发送者准入事实、当前资格和身份签名。未知声明不得直接取得成员权限，一致摘要和反向历史投递仍只接受本机当前成员。
+
 用户接受移除后双方继续收敛；用户拒绝时保留本机分支并把相关关系标为分叉。分叉、无效资料和版本不兼容是不同状态，均不能伪装成离线或自动选择赢家。
 
 可达性、当前分支成员资格和双方历史关系是独立事实。成员核对、决定、关系门禁、加密保存和重启恢复全部由 Application 负责；产品只提交一次决定并读取完整结果。
@@ -297,7 +299,7 @@ Core 保存完整 admission aggregate 和状态转换规则。Application 内部
 | 大内容与文件 | Iroh blobs |
 | 活动剪贴板与按需拉取 | `active-clipboard` 系列 |
 | 可达性 | `uniclipboard/presence/1` |
-| 成员历史 | `uniclipboard/membership-history/2` |
+| 成员历史 | `uniclipboard/membership-history/3` |
 | 成员安全更新 | `uniclipboard/group-update/1` |
 | 传输进度 | `uniclipboard/transfer-progress/0` |
 
@@ -790,6 +792,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 成员历史反熵规格 | 新增规格 029，确认成员传播必须由 Application 单一反熵负责人基于逐 peer 认证水位和加密持久欠账完成；易失 wake、固定单轮预算和关系状态不能代替 ACK、重试、公平调度及多跳 fan-out。当前为待实施设计，生产语义尚未切换。 |
 | 2026-08-30 | 成员历史反熵主路径 | Core 提供摘要关系规划、连续后缀和精确 ACK 规则；Application `MembershipHistoryAntiEntropy` 统一负责入站、出站、持久水位、退避、公平游标和有界并发；Iroh 只传输 V3 typed message。旧 V2 全量历史不再进入运行时 wire。Desktop C1 三节点历史收敛和双向正文传输已通过。 |
 | 2026-08-30 | 成员历史反熵诊断 | 反熵关键路径新增仅含阶段、稳定分类和计数的 debug 观测，不记录设备、lineage、transfer、digest、地址或错误文本。Desktop C1 证据显示第二代 Sponsor 的成员投影包含新成员，但正式 membership ledger 未提交相应历史，因此反熵摘要仍判定 `noop`；后续修复归 Sponsor Complete/Settled 激活边界。 |
+| 2026-08-30 | 未知成员历史证明 | V3 摘要携带发送者准入声明，Iroh 连接只绑定公钥指纹；本机尚未知的发送者只能提交有界后缀，完整签名历史验证通过后才成为当前成员。该边界消除“必须先认识新成员才能接收其准入历史”的循环依赖，Desktop C2 在 Sponsor 离线及双方重启后通过三成员收敛和双向正文传输。 |
 | 2026-08-30 | Group Epoch 持久投递 | Application `DeliverPendingGroupUpdatesUseCase` 唯一负责扫描加密安全材料中的欠账、有界调用 Iroh dispatch，并且只在认证 Accepted ACK 后确认删除；失败欠账持久轮转以防多设备饿饿。Engine 只安装 ALPN handler 和注入 port，临时根因日志已删除。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |

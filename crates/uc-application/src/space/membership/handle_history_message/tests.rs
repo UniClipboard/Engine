@@ -397,9 +397,8 @@ async fn out_of_order_page_requests_the_missing_page_without_persisting() {
 }
 
 #[tokio::test]
-async fn authenticated_removed_device_is_rejected_before_a_page_is_saved() {
+async fn unknown_sender_can_stage_a_bounded_page_but_cannot_commit_unrelated_history() {
     let (mut loaded, peer_device_id, pages) = two_page_extension();
-    let message = pages[0].clone();
     let (local, local_credential) = member_facts("device-a", 0x41);
     loaded.membership_history = Some(
         VersionedMembershipHistory::new_single_member_root(
@@ -425,20 +424,24 @@ async fn authenticated_removed_device_is_rejected_before_a_page_is_saved() {
     ));
     let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
 
-    let response = handler
-        .execute(&AuthenticatedMember::new(peer_device_id), message)
-        .await
-        .unwrap();
+    let source = AuthenticatedMember::new(peer_device_id.clone());
+    let first = handler.execute(&source, pages[0].clone()).await.unwrap();
 
+    assert!(matches!(
+        first,
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Continue { .. })
+    ));
+    let final_ack = handler.execute(&source, pages[1].clone()).await.unwrap();
     assert_eq!(
-        response,
+        final_ack,
         MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid)
     );
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 0);
-    assert!(repository
-        .load()
-        .await
-        .unwrap()
-        .inbound_transfers
-        .is_empty());
+    let persisted = repository.load().await.unwrap();
+    assert!(persisted.inbound_transfers.is_empty());
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        persisted.membership_history.as_deref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    assert_eq!(history.effective_members().len(), 1);
 }

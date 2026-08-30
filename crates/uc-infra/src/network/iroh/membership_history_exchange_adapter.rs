@@ -290,24 +290,23 @@ impl IrohMembershipHistoryExchangeHandler {
             return known;
         }
 
-        // V3 只接受已有成员通道；新成员历史必须由接收方已认识的成员传播。
-        let _ = message;
-        None
+        introduced_device(message, &fingerprint)
     }
 }
 
 fn introduced_device(
     message: &MembershipHistoryMessage,
-    _fingerprint: &uc_core::security::IdentityFingerprint,
+    fingerprint: &uc_core::security::IdentityFingerprint,
 ) -> Option<DeviceId> {
-    match message {
-        MembershipHistoryMessage::SuffixPageV3(_) => None,
-        MembershipHistoryMessage::SummaryV3(_)
-        | MembershipHistoryMessage::RequestSuffixV3(_)
+    let admission = match message {
+        MembershipHistoryMessage::SummaryV3(summary) => &summary.sender_admission,
+        MembershipHistoryMessage::SuffixPageV3(page) => page.sender_admission(),
+        MembershipHistoryMessage::RequestSuffixV3(_)
         | MembershipHistoryMessage::AckV3(_)
         | MembershipHistoryMessage::RestrictedEventV3(_)
-        | MembershipHistoryMessage::RestrictedDecisionV3(_) => None,
-    }
+        | MembershipHistoryMessage::RestrictedDecisionV3(_) => return None,
+    };
+    (&admission.identity_fingerprint == fingerprint).then(|| admission.device_id.clone())
 }
 
 async fn write_message(
@@ -368,15 +367,11 @@ async fn reject(send: &mut iroh::endpoint::SendStream) {
 
 #[cfg(test)]
 mod tests {
-    use sha2::{Digest, Sha256};
     use uc_core::ids::DeviceId;
     use uc_core::membership::{
-        AdmissionChangeFacts, HistoricalMembershipSignatureError,
-        HistoricalMembershipSignatureVerifier, MembershipAdmissionV2, MembershipCredential,
-        MembershipEventV2, MembershipHistoryAckV3, MembershipHistoryMessage,
-        MembershipHistoryV2Ack, MembershipOperationV2, VersionedMembershipHistory,
-        ED25519_SIGNATURE_ALGORITHM_V1, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
-        MEMBERSHIP_EVENT_FORMAT_V2,
+        AdmissionChangeFacts, MembershipCredential, MembershipHistoryAckV3,
+        MembershipHistoryMessage, ED25519_SIGNATURE_ALGORITHM_V1,
+        MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
     };
     use uc_core::security::IdentityFingerprint;
 
@@ -423,6 +418,7 @@ mod tests {
                     history_digest: [7; 32],
                 },
                 transfer_id: [8; 32],
+                sender_admission: admission_facts("device-a", fingerprint()),
             });
 
         let encoded = encode_message(&message).unwrap();
@@ -435,32 +431,20 @@ mod tests {
             .unwrap_or_else(|_| panic!("test fingerprint must be valid"))
     }
 
-    struct TestVerifier;
-
-    impl TestVerifier {
-        fn sign(&self, credential: &MembershipCredential, payload: &[u8]) -> Vec<u8> {
-            let mut hasher = Sha256::new();
-            hasher.update(b"membership-history-v2-infra-test\0");
-            hasher.update(&credential.public_key);
-            hasher.update(payload);
-            hasher.finalize().to_vec()
-        }
-    }
-
-    impl HistoricalMembershipSignatureVerifier for TestVerifier {
-        fn verify(
-            &self,
-            signature_algorithm_version: u16,
-            public_key: &[u8],
-            payload: &[u8],
-            signature: &[u8],
-        ) -> Result<bool, HistoricalMembershipSignatureError> {
-            if signature_algorithm_version != ED25519_SIGNATURE_ALGORITHM_V1 {
-                return Err(HistoricalMembershipSignatureError::UnsupportedAlgorithm);
-            }
-            let credential =
-                MembershipCredential::new(signature_algorithm_version, public_key.to_vec());
-            Ok(self.sign(&credential, payload) == signature)
+    fn admission_facts(
+        device: &str,
+        identity_fingerprint: IdentityFingerprint,
+    ) -> AdmissionChangeFacts {
+        let device_id = DeviceId::new(device);
+        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x41; 32]);
+        AdmissionChangeFacts {
+            member_instance: credential.member_instance_id(&device_id),
+            device_id,
+            device_name: device.to_owned(),
+            identity_fingerprint,
+            transport_public_key: vec![1],
+            transport_address_blob: vec![2],
+            identity_signature: vec![3],
         }
     }
 
@@ -469,5 +453,44 @@ mod tests {
         let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
 
         assert_eq!(introduced_device(&message, &fingerprint()), None);
+    }
+
+    #[test]
+    fn unknown_member_is_identified_from_a_fingerprint_bound_summary() {
+        let facts = admission_facts("device-c", fingerprint());
+        let expected = facts.device_id.clone();
+        let message =
+            MembershipHistoryMessage::SummaryV3(uc_core::membership::MembershipHistorySummaryV3 {
+                lineage_id: "space-a".to_owned(),
+                current_position: uc_core::membership::BaseMembershipHistoryPosition {
+                    event_id: None,
+                    depth: 2,
+                    history_digest: [7; 32],
+                },
+                transfer_id: [7; 32],
+                sender_admission: facts,
+            });
+
+        assert_eq!(introduced_device(&message, &fingerprint()), Some(expected));
+    }
+
+    #[test]
+    fn unknown_member_claim_is_rejected_when_connection_fingerprint_differs() {
+        let facts = admission_facts("device-c", fingerprint());
+        let message =
+            MembershipHistoryMessage::SummaryV3(uc_core::membership::MembershipHistorySummaryV3 {
+                lineage_id: "space-a".to_owned(),
+                current_position: uc_core::membership::BaseMembershipHistoryPosition {
+                    event_id: None,
+                    depth: 2,
+                    history_digest: [7; 32],
+                },
+                transfer_id: [7; 32],
+                sender_admission: facts,
+            });
+        let other = IdentityFingerprint::from_display_string("QRST-UVWX-YZAB-CDEF")
+            .unwrap_or_else(|_| panic!("test fingerprint must be valid"));
+
+        assert_eq!(introduced_device(&message, &other), None);
     }
 }

@@ -161,9 +161,9 @@ B admits C
 
 - **Path:** `crates/uc-infra/src/network/iroh/membership_history_exchange_adapter.rs`
 - **职责:** 编解码固定版本有界消息、认证来源、执行单请求 deadline。
-- **输入:** typed summary/request/page/ack。
+- **输入:** typed summary/request/page/ack；summary 和 page 携带发送者准入声明。
 - **输出:** typed reply或 Offline/Transport/Rejected。
-- **关系:** 不保存 retry、不选择 peer、不更新水位；ALPN 不承担业务状态。
+- **关系:** 连接层只核对远端公钥指纹与准入声明一致；未知发送者仅可进入有界后缀验证，成员资格必须由 Application/Core 对完整签名历史确认。Infra 不保存 retry、不选择 peer、不更新水位。
 
 ## Data Model
 
@@ -443,7 +443,7 @@ Implementation: migration 清空旧确认水位并保存 pending revision。
 * [ ] 分叉只隔离相关 peer，各分支内部继续传播。
 * [ ] 未确认移除不被反熵自动应用。
 * [ ] SQLite fault injection 证明无“历史已提交但传播责任丢失”窗口。
-* [x] Desktop 三节点加入、重启、A↔C exact transfer 通过。
+* [x] Desktop 三节点加入、重启、Sponsor 离线恢复和 A↔C exact transfer 通过。
 * [ ] Desktop 四节点离线链和五节点树型通过。
 * [ ] Engine workspace tests、真实 Iroh、真实 SQLite、fmt、architecture 和 diff gates 通过。
 * [ ] 实体设备未执行项目明确为“跳过”。

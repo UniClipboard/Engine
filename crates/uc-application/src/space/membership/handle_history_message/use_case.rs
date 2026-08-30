@@ -10,7 +10,7 @@ use uc_core::membership::{
 use crate::space::membership::{
     InboundMembershipTransfer as LedgerInboundTransfer, LoadedMembershipLedger,
     MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    PendingMembershipEffect, WakeSpaceMembershipMaintenancePort,
+    PeerReconciliationRecord, PendingMembershipEffect, WakeSpaceMembershipMaintenancePort,
 };
 
 use super::{AuthenticatedMember, HandleMembershipHistoryMessageError};
@@ -67,11 +67,13 @@ impl HandleMembershipHistoryMessageUseCase {
                 let history = snapshot
                     .history()
                     .ok_or(HandleMembershipHistoryMessageError::RecoveryRequired)?;
-                if history
+                let sender_claim_matches_connection =
+                    &summary.sender_admission.device_id == source.device_id();
+                let sender_is_current = history
                     .effective_member_for_device(source.device_id())
-                    .is_none()
-                    || summary.lineage_id != history.lineage_id()
-                {
+                    .and_then(|member| history.admission_facts_for(member))
+                    == Some(&summary.sender_admission);
+                if !sender_claim_matches_connection || summary.lineage_id != history.lineage_id() {
                     return Ok(MembershipHistoryMessage::AckV3(
                         MembershipHistoryAckV3::Invalid,
                     ));
@@ -93,6 +95,11 @@ impl HandleMembershipHistoryMessageUseCase {
                 return match plan {
                     MembershipHistoryReconciliationPlan::Noop
                     | MembershipHistoryReconciliationPlan::OfferSuffix => {
+                        if !sender_is_current {
+                            return Ok(MembershipHistoryMessage::AckV3(
+                                MembershipHistoryAckV3::Invalid,
+                            ));
+                        }
                         // OfferSuffix 先确认远端真实祖先；本机持久欠账会驱动反向发送。
                         Ok(MembershipHistoryMessage::AckV3(
                             MembershipHistoryAckV3::Confirmed {
@@ -142,11 +149,14 @@ impl HandleMembershipHistoryMessageUseCase {
             .await
             .map_err(map_ledger_error)?;
         let source_device_id = source.device_id().clone();
-        if snapshot
-            .history()
-            .and_then(|history| history.effective_member_for_device(&source_device_id))
-            .is_none()
-        {
+        let sender_was_removed = snapshot.history().is_some_and(|history| {
+            history.admission_facts_for(page.sender_admission().member_instance)
+                == Some(page.sender_admission())
+                && history
+                    .effective_member_for_device(&source_device_id)
+                    .is_none()
+        });
+        if page.sender_admission().device_id != source_device_id || sender_was_removed {
             return Ok(MembershipHistoryMessage::AckV3(
                 MembershipHistoryAckV3::Invalid,
             ));
@@ -266,11 +276,9 @@ impl HandleMembershipHistoryMessageUseCase {
                 move |record, current, verifier| {
                     let members_before_merge = current.effective_members();
                     let effects_before = record.pending_effects.len();
-                    let sender_is_bound = pages.first().is_some_and(|page| {
-                        page.sender_admission().device_id == source_device_id
-                            && current.admission_facts_for(page.sender_admission().member_instance)
-                                == Some(page.sender_admission())
-                    });
+                    let sender_is_bound = pages
+                        .first()
+                        .is_some_and(|page| page.sender_admission().device_id == source_device_id);
                     // 不可信后缀先在副本上完整验证；失败时绝不能把部分事件写入账本。
                     let mut candidate = current.clone();
                     let ack = match sender_is_bound
@@ -306,8 +314,15 @@ impl HandleMembershipHistoryMessageUseCase {
                         .insert((source_device_id.clone(), transfer_id), ack.clone());
                     let peer = record
                         .peer_reconciliation
-                        .get_mut(&source_device_id)
-                        .ok_or(MembershipLedgerError::Corrupt)?;
+                        .entry(source_device_id.clone())
+                        .or_insert_with(|| PeerReconciliationRecord {
+                            peer_device_id: source_device_id.clone(),
+                            relationship: MembershipHistoryRelationship::Unknown,
+                            confirmed_position: None,
+                            sync_state: Default::default(),
+                            restricted_delivery: Vec::new(),
+                            updated_at_ms: 0,
+                        });
                     peer.relationship = relationship;
                     if matches!(ack, MembershipHistoryAckV3::Confirmed { .. }) {
                         peer.confirmed_position = current.current_position().ok();

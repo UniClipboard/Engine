@@ -1192,6 +1192,17 @@ impl VersionedMembershipHistory {
         {
             return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
         }
+        // 发送者可以由本批后缀首次引入；必须在完整历史验证后再确认其当前资格和身份签名。
+        self.validate_exchange_sender(&first.sender_admission)?;
+        let sender_credential = self
+            .credential_for(first.sender_admission.member_instance)
+            .ok_or(MembershipHistoryV2Error::InvalidCredential)?;
+        verify_signature(
+            verifier,
+            sender_credential,
+            &first.sender_admission.signing_payload(),
+            &first.sender_admission.identity_signature,
+        )?;
         Ok(true)
     }
 

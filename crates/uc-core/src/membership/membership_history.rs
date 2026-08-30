@@ -11,7 +11,7 @@ use super::versioned_membership_history::{
     BaseMembershipHistoryPosition, MembershipDecisionV2, MembershipEventV2,
     MembershipHistorySuffixPageV3,
 };
-use super::MemberInstanceId;
+use super::{AdmissionChangeFacts, MemberInstanceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MembershipEventId([u8; 32]);
@@ -129,6 +129,8 @@ pub struct MembershipHistorySummaryV3 {
     pub lineage_id: String,
     pub current_position: BaseMembershipHistoryPosition,
     pub transfer_id: [u8; 32],
+    /// 连接层只用它把远端公钥绑定到声明设备；成员资格仍由完整签名历史验证。
+    pub sender_admission: AdmissionChangeFacts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
