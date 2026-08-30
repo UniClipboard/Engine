@@ -6,9 +6,10 @@ use sha2::{Digest, Sha256};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, HistoricalMembershipSignatureError,
-    HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipCredential,
-    MembershipEventId, MembershipHistoryRelationship, VersionedMembershipHistory,
-    ED25519_SIGNATURE_ALGORITHM_V1,
+    HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipAdmissionV2,
+    MembershipCredential, MembershipEventId, MembershipEventV2, MembershipHistoryRelationship,
+    MembershipOperationV2, VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
+    MEMBERSHIP_EVENT_FORMAT_V2,
 };
 
 use super::*;
@@ -407,14 +408,16 @@ impl ActivateMembershipEffectPort for RecordingEffectPorts {
 #[tokio::test]
 async fn prepared_effect_resumes_each_persisted_phase_in_order() {
     let mut loaded = active_two_member_ledger();
+    let event = unordered_effect_event("device-b", 1, 0x82);
+    let event_id = *event.event_id().as_bytes();
     loaded.pending_effects.insert(
-        [0x81; 32],
+        event_id,
         PendingMembershipEffect {
-            event_id: [0x81; 32],
+            event_id,
             kind: MembershipEffectKind::AddDevice,
             phase: MembershipEffectPhase::Prepared,
             affected_device_ids: vec![DeviceId::new("device-b")],
-            payload: vec![0x82],
+            payload: postcard::to_stdvec(&event).unwrap(),
         },
     );
     let repository = Arc::new(MemoryLedgerRepository::new(loaded));
@@ -440,10 +443,119 @@ async fn prepared_effect_resumes_each_persisted_phase_in_order() {
             .await
             .unwrap()
             .pending_effects
-            .get(&[0x81; 32])
+            .get(&event_id)
             .unwrap()
             .phase,
         MembershipEffectPhase::Activated
+    );
+}
+
+#[derive(Default)]
+struct RecordingEffectDevices {
+    devices: Mutex<Vec<DeviceId>>,
+}
+
+#[async_trait]
+impl ApplyMembershipMemberFactsPort for RecordingEffectDevices {
+    async fn apply_member_facts(
+        &self,
+        effect: &PendingMembershipEffect,
+    ) -> Result<(), MembershipEffectExecutionError> {
+        self.devices
+            .lock()
+            .unwrap()
+            .push(effect.affected_device_ids[0].clone());
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ApplyMembershipSecurityPort for RecordingEffectDevices {
+    async fn apply_membership_security(
+        &self,
+        _effect: &PendingMembershipEffect,
+    ) -> Result<(), MembershipEffectExecutionError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ActivateMembershipEffectPort for RecordingEffectDevices {
+    async fn activate_membership_effect(
+        &self,
+        _effect: &PendingMembershipEffect,
+    ) -> Result<(), MembershipEffectExecutionError> {
+        Ok(())
+    }
+}
+
+fn unordered_effect_event(device: &str, depth: u64, marker: u8) -> MembershipEventV2 {
+    let (facts, credential) = member_facts(device, marker);
+    MembershipEventV2::new(
+        MEMBERSHIP_EVENT_FORMAT_V2,
+        "space-a".to_owned(),
+        None,
+        depth,
+        [marker; 16],
+        facts.member_instance,
+        credential.credential_id,
+        credential.signature_algorithm_version,
+        MembershipOperationV2::AddDevice {
+            admission: MembershipAdmissionV2 {
+                facts,
+                membership_credential: credential,
+                resume_public_key_digest: [marker; 32],
+                security_commitment_id: [marker; 32],
+            },
+        },
+        [marker; 32],
+        [marker; 32],
+        vec![marker],
+        Some([marker; 32]),
+        vec![marker],
+    )
+}
+
+#[tokio::test]
+async fn membership_effects_follow_history_depth_instead_of_event_id_order() {
+    let parent = unordered_effect_event("device-c", 1, 0x31);
+    let child = (0x32..=0xff)
+        .map(|marker| unordered_effect_event("device-d", 2, marker))
+        .find(|event| event.event_id().as_bytes() < parent.event_id().as_bytes())
+        .expect("test must find a child id ordered before its parent");
+    let mut loaded = active_two_member_ledger();
+    for (event, device) in [
+        (parent, DeviceId::new("device-c")),
+        (child, DeviceId::new("device-d")),
+    ] {
+        let event_id = *event.event_id().as_bytes();
+        loaded.pending_effects.insert(
+            event_id,
+            PendingMembershipEffect {
+                event_id,
+                kind: MembershipEffectKind::AddDevice,
+                phase: MembershipEffectPhase::Prepared,
+                affected_device_ids: vec![device],
+                payload: postcard::to_stdvec(&event).unwrap(),
+            },
+        );
+    }
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let ports = Arc::new(RecordingEffectDevices::default());
+    let recover =
+        RecoverMembershipEffectsUseCase::new(ledger, ports.clone(), ports.clone(), ports.clone());
+
+    let report = recover.execute().await;
+
+    assert_eq!(report.completed_count, 2);
+    assert_eq!(
+        ports.devices.lock().unwrap().as_slice(),
+        &[DeviceId::new("device-c"), DeviceId::new("device-d")]
     );
 }
 

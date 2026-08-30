@@ -425,6 +425,10 @@ LAN HTTP 位于 `compatibility/`，使用独立的 `uc-mobile-v*` 版本和发�
 重新验签且确认是当前历史的合法延续后，才能一次替换正式成员历史并回复成功；未完成页面永远不能改
 变当前成员资格。
 
+新增成员事件同时签名绑定面向既有成员的群组 epoch 更新。离线旧成员合并多代历史后，Application 的
+effect executor 按历史因果深度依次恢复成员事实与安全状态，不能使用事件哈希顺序。历史中仍有效但尚
+未直接完成关系确认的成员可出现在 roster 中，通信、拨号和内容发送仍只允许 `usable` peer。
+
 ### 成员移除
 
 成员移除作为签名成员历史的一个条目保存。发起设备立即应用自己的条目并停止向目标发送；其他设备上线后先验证和保存该条目，只有本机用户接受才应用。重新准入同一设备会产生新成员实例，不受旧实例移除结果影响。
@@ -794,6 +798,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 成员历史反熵诊断 | 反熵关键路径新增仅含阶段、稳定分类和计数的 debug 观测，不记录设备、lineage、transfer、digest、地址或错误文本。Desktop C1 证据显示第二代 Sponsor 的成员投影包含新成员，但正式 membership ledger 未提交相应历史，因此反熵摘要仍判定 `noop`；后续修复归 Sponsor Complete/Settled 激活边界。 |
 | 2026-08-30 | 未知成员历史证明 | V3 摘要携带发送者准入声明，Iroh 连接只绑定公钥指纹；本机尚未知的发送者只能提交有界后缀，完整签名历史验证通过后才成为当前成员。该边界消除“必须先认识新成员才能接收其准入历史”的循环依赖，Desktop C2 在 Sponsor 离线及双方重启后通过三成员收敛和双向正文传输。 |
 | 2026-08-30 | Group Epoch 持久投递 | Application `DeliverPendingGroupUpdatesUseCase` 唯一负责扫描加密安全材料中的欠账、有界调用 Iroh dispatch，并且只在认证 Accepted ACK 后确认删除；失败欠账持久轮转以防多设备饿饿。Engine 只安装 ALPN handler 和注入 port，临时根因日志已删除。 |
+| 2026-08-30 | 四节点离线历史收敛 | Sponsor 把既有成员群组更新绑定进签名新增事件；effect executor 按历史因果深度恢复成员事实与安全状态。Roster 展示有效但关系待确认的成员，通信门仍失败关闭。Desktop A-B-C-D 中间节点离线场景已通过成员名单、重启和 A/D 双向正文验证。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

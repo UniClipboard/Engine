@@ -1552,6 +1552,21 @@ impl VersionedMembershipHistory {
             })
     }
 
+    /// 按持久化标识查询事件的因果深度，供不持有领域标识类型的恢复流程排序。
+    pub fn depth_by_bytes(&self, event_id: &[u8; 32]) -> Option<u64> {
+        self.events
+            .iter()
+            .find_map(|(candidate_id, event)| {
+                (candidate_id.as_bytes() == event_id).then_some(event.parent_depth)
+            })
+            .or_else(|| {
+                self.activation_baseline.as_ref().and_then(|baseline| {
+                    let (head, depth) = baseline.head_and_depth();
+                    (head.as_bytes() == event_id).then_some(depth)
+                })
+            })
+    }
+
     pub fn credential_for(&self, member: MemberInstanceId) -> Option<&MembershipCredential> {
         self.credentials.get(&member)
     }

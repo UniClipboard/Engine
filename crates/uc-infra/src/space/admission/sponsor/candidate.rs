@@ -186,6 +186,28 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                 &security.public_commitment,
             )
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
+        // 逐成员 delivery 使用同一份 MLS 群组更新。将它绑定进签名历史事件，
+        // 使准入时离线的旧成员之后仅凭历史也能按因果顺序恢复安全状态。
+        let history_security_update = security
+            .existing_member_deliveries
+            .first()
+            .map(|delivery| delivery.payload.clone())
+            .ok_or_else(|| {
+                PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
+                    "Sponsor admission security produced no existing-member update"
+                ))
+            })?;
+        if history_security_update.is_empty()
+            || security
+                .existing_member_deliveries
+                .iter()
+                .any(|delivery| delivery.payload != history_security_update)
+        {
+            return Err(PrepareSponsorCandidateError::invalid(anyhow::anyhow!(
+                "Sponsor admission security updates are inconsistent"
+            )));
+        }
+        event.security_update_payload = history_security_update;
         event.signature = self
             .signatures
             .sign_current_member_payload(&event.signing_payload())
@@ -373,6 +395,11 @@ mod tests {
             &self,
             request: SponsorAdmissionSecurityRequest,
         ) -> Result<SponsorPreparedAdmissionSecurity, AdmissionSecurityTransitionError> {
+            let recipient = request
+                .existing_recipients
+                .first()
+                .cloned()
+                .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
             let commitment = uc_core::membership::AdmissionSecurityCommitmentV1::new(
                 ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
                 request.space_id.as_ref().to_owned(),
@@ -408,7 +435,11 @@ mod tests {
                 public_commitment: commitment,
                 target_protection_group_id: "group".to_owned(),
                 target_key_catalog: catalog,
-                existing_member_deliveries: Vec::new(),
+                existing_member_deliveries: vec![PreparedMemberSecurityDelivery {
+                    recipient: recipient.device_id,
+                    credential_id: recipient.credential_id,
+                    payload: vec![0x90; 64],
+                }],
             })
         }
     }
@@ -488,6 +519,10 @@ mod tests {
         else {
             panic!("Candidate must add one member");
         };
+        assert_eq!(
+            candidate.candidate_event().security_update_payload,
+            vec![0x90; 64]
+        );
         let commitment = candidate.security_commitment();
         let mut proof = PreparedAdmissionProofV1::new(
             *admission_id.as_bytes(),

@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：实施中（Core/Application/Infra 主路径已切换，Desktop C1 已通过；四/五节点与实体设备矩阵待验收）
+- **状态**：实施中（Core/Application/Infra 主路径已切换，Desktop 三节点与四节点离线链已通过；五节点与实体设备矩阵待验收）
 - **日期**：2026-08-30
 - **实施方式**：Core、Application、Infra、Engine 与 Desktop E2E 一次性切换；不得长期保留旧调度语义
 - **修正范围**：修正规格 020、021、023、027、028 中“成员上线后核对即可最终传播”的不完整实现；成员历史、移除决定、分叉隔离和准入完成边界保持不变
@@ -423,7 +423,7 @@ Implementation: migration 清空旧确认水位并保存 pending revision。
 ## Desktop CLI E2E
 
 - 三节点在线链：A 邀请 B，B 邀请 C；A/B/C 均达到三成员，daemon 重启后保持，A↔C exact text transfer。
-- 四节点离线链：A-B-C-D 分步加入，中间节点轮流离线；全部恢复后四节点收敛。
+- 四节点离线链：A-B-C-D 分步加入，中间节点轮流离线；A/D 先恢复即可合并完整成员与安全历史并双向传输，B/C 恢复后四端名单一致。已通过 Desktop CLI E2E。
 - 五节点树型：不同 sponsor 分支加入但历史保持单父合法延伸；所有在线节点最终一致。
 - 超预算场景：注入慢/离线 peer，确认排序靠后的在线 peer 在后续轮次完成。
 - 设备矩阵未执行项明确记录“跳过”，不得用同机多进程冒充实体设备。
@@ -438,13 +438,14 @@ Implementation: migration 清空旧确认水位并保存 pending revision。
 * [ ] 网络失败、预算耗尽和重启后欠账仍存在并最终重试。
 * [ ] 有界并发与持久公平 cursor 在 200-peer 确定测试中无饥饿。
 * [ ] 摘要相同时零历史页；落后时只发送缺失 suffix；所有 frame/page/transfer 有固定上限。
-* [ ] 链式 A-B-C-D 不要求 A/D 同时在线即可逐跳收敛。
+* [x] 链式 A-B-C-D 的中间 Sponsor 无需在线；A/D 恢复后通过签名历史直接收敛。
 * [ ] 五节点树型和交错上线集成测试最终收敛。
 * [ ] 分叉只隔离相关 peer，各分支内部继续传播。
 * [ ] 未确认移除不被反熵自动应用。
 * [ ] SQLite fault injection 证明无“历史已提交但传播责任丢失”窗口。
 * [x] Desktop 三节点加入、重启、Sponsor 离线恢复和 A↔C exact transfer 通过。
-* [ ] Desktop 四节点离线链和五节点树型通过。
+* [x] Desktop 四节点离线链通过。
+* [ ] Desktop 五节点树型通过。
 * [ ] Engine workspace tests、真实 Iroh、真实 SQLite、fmt、architecture 和 diff gates 通过。
 * [ ] 实体设备未执行项目明确为“跳过”。
 * [ ] `docs/architecture/architecture-bible.md` 与相关规格状态同步。

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use uc_core::membership::{MembershipDecisionV2, MembershipEventV2, VersionedMembershipHistory};
 
 use crate::space::membership::{
     MembershipMaintenanceReport, MembershipMaintenanceStepOutcome, RecoverMembershipEffectsPort,
@@ -103,14 +104,31 @@ impl RecoverMembershipEffectsUseCase {
     pub(crate) async fn execute(&self) -> MembershipMaintenanceReport {
         let mut report = MembershipMaintenanceReport::default();
         let event_ids = match self.ledger.load_verified().await {
-            Ok(snapshot) => snapshot
-                .record()
-                .pending_effects
-                .keys()
-                .copied()
-                .collect::<Vec<_>>(),
+            Ok(snapshot) => {
+                let Some(history) = snapshot.history() else {
+                    report.corrupt_count = 1;
+                    tracing::warn!("成员 effect 恢复缺少已验证历史");
+                    return report;
+                };
+                let mut ordered = Vec::with_capacity(snapshot.record().pending_effects.len());
+                for (event_id, effect) in &snapshot.record().pending_effects {
+                    let Some(depth) = effect_history_depth(effect, history) else {
+                        report.corrupt_count = 1;
+                        tracing::warn!("成员 effect 无法关联到有效历史负载");
+                        return report;
+                    };
+                    ordered.push((depth, *event_id));
+                }
+                ordered.sort_unstable();
+                tracing::debug!(effect_count = ordered.len(), "成员 effect 已按因果深度排序");
+                ordered
+                    .into_iter()
+                    .map(|(_, event_id)| event_id)
+                    .collect::<Vec<_>>()
+            }
             Err(_) => {
                 report.corrupt_count = 1;
+                tracing::warn!("成员 effect 恢复无法读取已验证 ledger");
                 return report;
             }
         };
@@ -125,8 +143,15 @@ impl RecoverMembershipEffectsUseCase {
                 };
                 let Some(effect) = effect else {
                     report.corrupt_count += 1;
+                    tracing::warn!("成员 effect 在恢复期间消失");
                     break;
                 };
+                tracing::debug!(
+                    kind = ?effect.kind,
+                    phase = ?effect.phase,
+                    affected_device_count = effect.affected_device_ids.len(),
+                    "开始执行成员 effect 阶段"
+                );
                 let (next_phase, result) = match effect.phase {
                     MembershipEffectPhase::Prepared => (
                         MembershipEffectPhase::MemberFactsApplied,
@@ -142,6 +167,7 @@ impl RecoverMembershipEffectsUseCase {
                     ),
                     MembershipEffectPhase::Activated => {
                         report.completed_count += 1;
+                        tracing::debug!(kind = ?effect.kind, "成员 effect 已完成");
                         break;
                     }
                 };
@@ -154,26 +180,52 @@ impl RecoverMembershipEffectsUseCase {
                             .is_err()
                         {
                             report.deferred_count += 1;
+                            tracing::debug!("成员 effect 阶段提交延后");
                             break;
                         }
+                        tracing::debug!(next_phase = ?next_phase, "成员 effect 阶段已提交");
                     }
                     Err(MembershipEffectExecutionError::Deferred) => {
                         report.deferred_count += 1;
+                        tracing::debug!("成员 effect 执行延后");
                         break;
                     }
                     Err(MembershipEffectExecutionError::Corrupt) => {
                         report.corrupt_count += 1;
+                        tracing::warn!("成员 effect 内容损坏");
                         break;
                     }
                     Err(MembershipEffectExecutionError::Dependency { .. }) => {
                         report.deferred_count += 1;
+                        tracing::debug!("成员 effect 依赖暂不可用");
                         break;
                     }
                 }
             }
         }
+        tracing::debug!(
+            completed_count = report.completed_count,
+            deferred_count = report.deferred_count,
+            corrupt_count = report.corrupt_count,
+            "成员 effect 恢复轮次结束"
+        );
         report
     }
+}
+
+/// effect 负载在写入 ledger 前已随历史完成验签；恢复时再次绑定标识与因果深度，
+/// 避免持久化 Map 的哈希顺序泄漏到安全组和成员事实的执行顺序。
+fn effect_history_depth(
+    effect: &PendingMembershipEffect,
+    history: &VersionedMembershipHistory,
+) -> Option<u64> {
+    if let Ok(event) = postcard::from_bytes::<MembershipEventV2>(&effect.payload) {
+        return (event.event_id().as_bytes() == &effect.event_id).then_some(event.parent_depth);
+    }
+    let decision = postcard::from_bytes::<MembershipDecisionV2>(&effect.payload).ok()?;
+    (decision.removal_event_id.as_bytes() == &effect.event_id)
+        .then(|| history.depth(decision.removal_event_id))
+        .flatten()
 }
 
 #[async_trait]

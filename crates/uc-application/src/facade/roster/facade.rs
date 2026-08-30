@@ -141,7 +141,12 @@ impl MemberRosterFacade {
             let is_local = local_fp
                 .as_ref()
                 .is_some_and(|fp| fp == &member.identity_fingerprint);
-            if !is_local && !scope.usable_peer_device_ids.contains(&member.device_id) {
+            let is_current_peer = scope.usable_peer_device_ids.contains(&member.device_id)
+                || scope
+                    .paused_peer_devices
+                    .iter()
+                    .any(|peer| peer.device_id == member.device_id);
+            if !is_local && !is_current_peer {
                 continue;
             }
             let state = self.presence.current_state(&member.device_id).await;
@@ -158,13 +163,39 @@ impl MemberRosterFacade {
     /// 列出成员摘要。该方法面向 daemon/http 等外部入口,只返回应用层值对象。
     #[instrument(skip_all)]
     pub async fn list_members(&self) -> Result<Vec<MemberSummary>, RosterError> {
-        Ok(self
-            .list_with_presence()
-            .await?
+        let members = self
+            .member_repo
+            .list()
+            .await
+            .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
+        let scope = self
+            .peer_scope
+            .snapshot()
+            .await
+            .map_err(|_| RosterError::MembershipReconciliationUnavailable)?;
+        let local_fp = self
+            .local_identity
+            .get_current_fingerprint()
+            .await
+            .map_err(|err| RosterError::LocalIdentity(err.to_string()))?;
+
+        // roster 展示已验证历史中的全部当前成员；paused 只限制通信资格，
+        // 不能让离线拓扑中由历史引入的合法成员从名单中消失。
+        Ok(members
             .into_iter()
-            .map(|entry| MemberSummary {
-                device_id: entry.device_id.as_str().to_string(),
-                device_name: entry.device_name,
+            .filter(|member| {
+                local_fp
+                    .as_ref()
+                    .is_some_and(|fingerprint| fingerprint == &member.identity_fingerprint)
+                    || scope.usable_peer_device_ids.contains(&member.device_id)
+                    || scope
+                        .paused_peer_devices
+                        .iter()
+                        .any(|peer| peer.device_id == member.device_id)
+            })
+            .map(|member| MemberSummary {
+                device_id: member.device_id.as_str().to_string(),
+                device_name: member.device_name,
             })
             .collect())
     }
@@ -406,6 +437,26 @@ mod tests {
         }
     }
 
+    struct PausedPeerScope(DeviceId);
+
+    #[async_trait]
+    impl CurrentSpaceMemberScopePort for PausedPeerScope {
+        async fn snapshot(
+            &self,
+        ) -> Result<crate::deps::CurrentSpaceMemberScope, crate::deps::CurrentSpaceMemberScopeError>
+        {
+            Ok(crate::deps::CurrentSpaceMemberScope {
+                revision: 1,
+                local_member_active: true,
+                usable_peer_device_ids: Vec::new(),
+                paused_peer_devices: vec![crate::deps::PausedSpaceMember {
+                    device_id: self.0.clone(),
+                    reason: crate::deps::SpaceMemberPauseReason::RelationshipUnconfirmed,
+                }],
+            })
+        }
+    }
+
     fn fingerprint(value: &str) -> IdentityFingerprint {
         IdentityFingerprint::from_raw_string(value).unwrap()
     }
@@ -452,6 +503,41 @@ mod tests {
                 .map(|member| member.device_id)
                 .collect::<Vec<_>>(),
             vec!["alice", "charlie"]
+        );
+    }
+
+    #[tokio::test]
+    async fn member_roster_includes_a_history_member_while_reconciliation_is_paused() {
+        let local = fingerprint("AAAAAAAAAAAAAAAA");
+        let roster = MemberRosterFacade::new(MemberRosterDeps {
+            member_repo: Arc::new(Members(vec![
+                member("alice", "A", local.clone()),
+                member("charlie", "C", fingerprint("CCCCCCCCCCCCCCCC")),
+            ])),
+            local_identity: Arc::new(LocalIdentity(local)),
+            presence: Arc::new(StaticPresence),
+            connection_channel: None,
+            peer_scope: Arc::new(PausedPeerScope(DeviceId::new("charlie"))),
+        });
+
+        let members = roster.list_members().await.unwrap();
+
+        assert_eq!(
+            members
+                .into_iter()
+                .map(|member| member.device_id)
+                .collect::<Vec<_>>(),
+            vec!["alice", "charlie"]
+        );
+        assert_eq!(
+            roster
+                .list_peer_snapshots()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|snapshot| snapshot.peer_id)
+                .collect::<Vec<_>>(),
+            vec!["charlie"]
         );
     }
 }
