@@ -76,15 +76,17 @@ async fn short_code_resolution_is_marked_started_once_and_saves_the_full_invitat
             ProtocolEvent::JoinerInvitationResolutionStarted,
             ProtocolEvent::JoinerInvitationResolutionRequested,
             ProtocolEvent::JoinerSavedResolvedInvitation,
+            ProtocolEvent::AdmissionRecoveryWoken,
         ]
     );
-    assert!(matches!(
-        pair.take_created_join().invitation_resolution(),
-        Some(uc_core::membership::JoinerInvitationResolution::Resolved {
-            full_invitation,
-            ..
-        }) if full_invitation.as_str() == "ucspace1_resolved-short-once"
-    ));
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.advanced_count, 1, "report: {report:?}");
+    assert_eq!(report.deferred_count, 0);
+    assert!(pair.take_created_join().invitation_resolution().is_none());
 }
 
 #[tokio::test]

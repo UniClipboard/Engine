@@ -664,6 +664,7 @@ impl DurableAdmissionSpaceTransition {
                         relationship:
                             uc_core::membership::MembershipHistoryRelationship::Consistent,
                         confirmed_position: None,
+                        sync_state: Default::default(),
                         restricted_delivery: Vec::new(),
                         updated_at_ms: 0,
                     },
@@ -703,6 +704,7 @@ impl DurableAdmissionSpaceTransition {
                     local_member_instance: Some(local_member_instance),
                     local_join_active: true,
                     peer_reconciliation,
+                    history_sync_cursor: None,
                     inbound_transfers: Default::default(),
                     completed_inbound_transfers: Default::default(),
                     pending_effects: Default::default(),

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use async_trait::async_trait;
-use iroh::{Endpoint, EndpointAddr};
+use iroh::Endpoint;
 use tracing::debug;
 use uc_application::deps::{ResolveJoinerInvitationError, ResolveJoinerInvitationPort};
 use uc_core::membership::AdmissionShortInvitationCode;
@@ -106,13 +106,15 @@ impl ResolveJoinerInvitationPort for PairingInvitationResolverAdapter {
     }
 }
 
-fn validate_invitation_route(invitation: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_invitation_route(invitation: &str) -> anyhow::Result<()> {
     let decoded =
         crate::space::decode_invitation_entry(invitation, chrono::Utc::now().timestamp_millis())
             .map_err(anyhow::Error::new)
             .context("验证 Space 邀请失败")?
             .ok_or_else(|| anyhow::anyhow!("Space 邀请不可用"))?;
-    serde_json::from_slice::<EndpointAddr>(decoded.route()).context("解析 Space 准入路由失败")?;
+    crate::network::iroh::space_admission::decode_space_admission_route(decoded.route())
+        .map_err(anyhow::Error::new)
+        .context("解析 Space 准入路由失败")?;
     Ok(())
 }
 

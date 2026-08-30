@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uc_application::deps::{
     JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort,
 };
 use uc_application::facade::JoinSpaceInput;
+use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature,
@@ -15,6 +16,7 @@ use uc_core::membership::{
     SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute, UnreadableHistoryPolicy,
     ED25519_SIGNATURE_ALGORITHM_V1,
 };
+use uc_core::pairing::InvitationCode;
 use uc_core::ports::SettingsPort;
 use uc_core::security::IdentityFingerprint;
 use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecret};
@@ -60,11 +62,12 @@ pub(super) struct JoinerPrivateStateV1<'a> {
     pub(super) passphrase: &'a [u8],
 }
 
-#[async_trait]
-impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
-    async fn create(
+impl DefaultJoinerStartMaterial {
+    async fn create_with_ids(
         &self,
         input: &JoinSpaceInput,
+        admission_id: SpaceAdmissionId,
+        join_id: JoinId,
     ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
         let decoded = decode_invitation_entry(
             input.invitation_code.as_str(),
@@ -73,8 +76,6 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
         .map_err(|_| JoinerStartMaterialError::InvalidInvitation)?
         .ok_or(JoinerStartMaterialError::InvalidInvitation)?;
 
-        let admission_id = mint_admission_id();
-        let join_id = mint_join_id();
         let settings = self.settings.load().await.map_err(|error| {
             JoinerStartMaterialError::unavailable(
                 error.context("load the local device name for Space admission"),
@@ -180,6 +181,47 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
             private_state,
             password_equivalent,
         ))
+    }
+}
+
+#[derive(Deserialize)]
+struct OwnedJoinerStartContextV1 {
+    format_version: u16,
+    passphrase: Vec<u8>,
+    preserve_unreadable_history: bool,
+}
+
+#[async_trait]
+impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
+    async fn create(
+        &self,
+        input: &JoinSpaceInput,
+    ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
+        self.create_with_ids(input, mint_admission_id(), mint_join_id())
+            .await
+    }
+
+    async fn create_resolved(
+        &self,
+        admission_id: SpaceAdmissionId,
+        join_id: JoinId,
+        invitation: &uc_core::pairing::invitation::FullInvitation,
+        start_context: &uc_core::membership::AdmissionJoinerStartContext,
+    ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
+        let context: OwnedJoinerStartContextV1 = postcard::from_bytes(start_context.as_bytes())
+            .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
+        if context.format_version != 1 {
+            return Err(JoinerStartMaterialError::InvalidInvitation);
+        }
+        let passphrase = String::from_utf8(context.passphrase)
+            .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
+        let input = JoinSpaceInput {
+            invitation_code: InvitationCode::new(invitation.as_str()),
+            device_name: None,
+            passphrase: Passphrase::new(passphrase),
+            preserve_unreadable_history: context.preserve_unreadable_history,
+        };
+        self.create_with_ids(&input, admission_id, join_id).await
     }
 }
 

@@ -829,10 +829,12 @@ mod tests {
         )
         .expect("issued full invitation should decode");
         let (decoded_route, route_invitation_id) =
-            crate::network::iroh::space_admission::decode_space_admission_route_for_test(
-                decoded.route(),
-            )
-            .expect("decode Sponsor admission route");
+            crate::network::iroh::space_admission::decode_space_admission_route(decoded.route())
+                .expect("decode Sponsor admission route");
+        crate::pairing::invitation_resolver::validate_invitation_route(
+            issued.full_invitation.as_str(),
+        )
+        .expect("the joiner resolver should accept the issued route");
         assert_eq!(decoded.invitation_id(), issued.invitation_id);
         assert_eq!(route_invitation_id, Some(issued.invitation_id));
         assert_eq!(decoded_route.id, expected_sponsor_id);

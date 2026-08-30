@@ -7,20 +7,22 @@ use uc_core::membership::{
     AdmissionCommitV1, AdmissionCompleteAckV1, AdmissionCompleteV1, AdmissionCompletionV1,
     AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
     AdmissionIdentitySignature, AdmissionInvitationClaim, AdmissionJoinRequestV1,
-    AdmissionJoinerPrivateState, AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit,
-    AdmissionMlsWelcome, AdmissionPeerBinding, AdmissionPreparedV1, AdmissionRecordPersistence,
-    AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
-    AdmissionSealedRecoveryMaterial, AdmissionSealedSecurityState, AdmissionSecurityCommitmentV1,
-    AdmissionSettledV1, AdmissionSignedMembershipHistory, AdmissionSourceSnapshot,
-    AdmissionSpaceTransitionResult, AdmissionStagedSecurityState, AdmissionStagedTarget,
-    AdmissionStagedTargetInput, BaseMembershipHistoryPosition, InvitationId, JoinId,
-    JoinerAdmission, JoinerAdmissionTransition, MemberInstanceId, MembershipAdmissionV2,
-    MembershipCredential, MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange,
-    PreparedAdmissionProofV1, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionRoute, SponsorAdmission, UnreadableHistoryPolicy,
+    AdmissionJoinerPrivateState, AdmissionJoinerStartContext, AdmissionKeyPackage,
+    AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionPeerBinding,
+    AdmissionPreparedV1, AdmissionRecordPersistence, AdmissionRecoveryPublicKey,
+    AdmissionRetryState, AdmissionRole, AdmissionSealedRecoveryMaterial,
+    AdmissionSealedSecurityState, AdmissionSecurityCommitmentV1, AdmissionSettledV1,
+    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionSpaceTransitionResult,
+    AdmissionStagedSecurityState, AdmissionStagedTarget, AdmissionStagedTargetInput,
+    BaseMembershipHistoryPosition, InvitationId, JoinId, JoinerAdmission,
+    JoinerAdmissionTransition, MemberInstanceId, MembershipAdmissionV2, MembershipCredential,
+    MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange, PreparedAdmissionProofV1,
+    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind,
+    SpaceAdmissionRoute, SponsorAdmission, UnreadableHistoryPolicy,
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
     MEMBERSHIP_EVENT_FORMAT_V2,
 };
+use uc_core::pairing::invitation::FullInvitation;
 use uc_core::ports::SettingsPort;
 use uc_core::security::IdentityFingerprint;
 
@@ -1697,44 +1699,62 @@ impl JoinerStartMaterialPort for FixedJoinerStartMaterial {
     ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
         let admission_id = SpaceAdmissionId::from_bytes([0x11; 32]).expect("valid admission id");
         let join_id = JoinId::from_bytes([0x12; 16]).expect("valid join id");
-        let device_id = DeviceId::new("joining-device");
-        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x14; 32]);
-        let signature = vec![0x17; 64];
-
-        let request = AdmissionJoinRequestV1::new(
-            InvitationId::from_bytes([0x13; 32]).expect("valid invitation id"),
-            device_id.clone(),
-            join_request_identity_facts(device_id, &credential, signature.clone()),
-            credential,
-            AdmissionKeyPackage::from_bytes(vec![0x15; 48]).expect("valid key package"),
-            AdmissionRecoveryPublicKey::from_bytes([0x16; 32]).expect("valid recovery public key"),
-            AdmissionIdentitySignature::from_bytes(signature).expect("valid identity signature"),
-            if input.preserve_unreadable_history {
-                UnreadableHistoryPolicy::Preserve
-            } else {
-                UnreadableHistoryPolicy::Discard
-            },
-        )
-        .expect("valid join request");
-        let join_request = SpaceAdmissionEnvelopeV1::new(
-            admission_id,
-            AdmissionRole::Joiner,
-            0,
-            AdmissionMessageId::from_bytes([0x18; 32]).expect("valid message id"),
-            None,
-            SpaceAdmissionBodyV1::JoinRequest(request),
-        )
-        .expect("valid join request envelope");
-
-        Ok(JoinerStartMaterial::new(
-            admission_id,
-            join_id,
-            SpaceAdmissionRoute::from_bytes(vec![0x19; 32]).expect("valid route"),
-            join_request,
-            AdmissionJoinerPrivateState::from_bytes(vec![0x1b; 64])
-                .expect("valid Joiner private state"),
-            AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0x1a; 64])
-                .expect("valid password material"),
-        ))
+        fixed_joiner_start_material(admission_id, join_id, input.preserve_unreadable_history)
     }
+
+    async fn create_resolved(
+        &self,
+        admission_id: SpaceAdmissionId,
+        join_id: JoinId,
+        _invitation: &FullInvitation,
+        _start_context: &AdmissionJoinerStartContext,
+    ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
+        fixed_joiner_start_material(admission_id, join_id, false)
+    }
+}
+
+fn fixed_joiner_start_material(
+    admission_id: SpaceAdmissionId,
+    join_id: JoinId,
+    preserve_unreadable_history: bool,
+) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
+    let device_id = DeviceId::new("joining-device");
+    let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x14; 32]);
+    let signature = vec![0x17; 64];
+
+    let request = AdmissionJoinRequestV1::new(
+        InvitationId::from_bytes([0x13; 32]).expect("valid invitation id"),
+        device_id.clone(),
+        join_request_identity_facts(device_id, &credential, signature.clone()),
+        credential,
+        AdmissionKeyPackage::from_bytes(vec![0x15; 48]).expect("valid key package"),
+        AdmissionRecoveryPublicKey::from_bytes([0x16; 32]).expect("valid recovery public key"),
+        AdmissionIdentitySignature::from_bytes(signature).expect("valid identity signature"),
+        if preserve_unreadable_history {
+            UnreadableHistoryPolicy::Preserve
+        } else {
+            UnreadableHistoryPolicy::Discard
+        },
+    )
+    .expect("valid join request");
+    let join_request = SpaceAdmissionEnvelopeV1::new(
+        admission_id,
+        AdmissionRole::Joiner,
+        0,
+        AdmissionMessageId::from_bytes([0x18; 32]).expect("valid message id"),
+        None,
+        SpaceAdmissionBodyV1::JoinRequest(request),
+    )
+    .expect("valid join request envelope");
+
+    Ok(JoinerStartMaterial::new(
+        admission_id,
+        join_id,
+        SpaceAdmissionRoute::from_bytes(vec![0x19; 32]).expect("valid route"),
+        join_request,
+        AdmissionJoinerPrivateState::from_bytes(vec![0x1b; 64])
+            .expect("valid Joiner private state"),
+        AdmissionEncryptedPasswordEquivalent::from_bytes(vec![0x1a; 64])
+            .expect("valid password material"),
+    ))
 }

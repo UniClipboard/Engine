@@ -1243,7 +1243,9 @@ Engine 双实例、重启传输、绑定 contract、明文探针和完整 worksp
 
 清单标记只代表已有仓库证据支持。生产装配只保留 invitation discovery，并由
 `/uniclipboard/space-admission/1` 承载准入消息；旧 pairing ALPN、session/event port、
-wire 与兼容探测均已删除并由架构脚本禁止回归。当前剩余缺口只有三设备和实体设备矩阵。
+wire 与兼容探测均已删除并由架构脚本禁止回归。Engine 仓库内的剩余缺口只有三设备和
+实体设备矩阵。额外执行 Desktop 真实 `uniclip`/`uniclipd` 多 profile 验收后，发现 Joiner
+完成准入及 daemon 冷重启后仍保持 session locked；因此 Desktop 宿主接入尚不可交付。
 
 * [x] 只有 `/uniclipboard/space-admission/1` 一个生产 Space 准入 ALPN。
 * [x] Router spawn 前 endpoint 已一次绑定；缺失/重复绑定构造失败。
@@ -1287,6 +1289,7 @@ wire 与兼容探测均已删除并由架构脚本禁止回归。当前剩余缺
 * [x] 真实 SQLite 故障注入只恢复完整旧/新状态。
 * [x] 真实 Iroh loopback 完成 initial 和 continuation exchange。
 * [x] Engine 双实例从 JoinSpace 到 Active 并双向传输通过。
+* [ ] Desktop 真实 CLI/daemon 从 JoinSpace 到 Active、重启和双向传输通过（失败：Joiner session locked）。
 * [ ] 三设备离线加入/恢复/传播通过（跳过：当前无三台实体设备）。
 * [ ] Android/iOS 实体双向角色矩阵通过（跳过：当前无实体设备；HarmonyOS 同样跳过）。
 * [x] 日志和持久文件明文探针无敏感命中。

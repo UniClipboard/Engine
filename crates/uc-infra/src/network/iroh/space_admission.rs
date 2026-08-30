@@ -591,8 +591,7 @@ fn decode_route(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn decode_space_admission_route_for_test(
+pub(crate) fn decode_space_admission_route(
     route: &[u8],
 ) -> Result<(EndpointAddr, Option<InvitationId>), SpaceAdmissionTransportError> {
     let route = SpaceAdmissionRoute::from_bytes(route.to_vec())

@@ -1,8 +1,11 @@
+use uc_core::membership::{
+    AdmissionRetryState, PendingAdmissionExchange, SpaceAdmissionMessageKind,
+};
 use uc_core::membership::{JoinerAdmission, JoinerInvitationResolution};
 
 use crate::space::admission::protocol::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryService,
-    JoinerAdmissionService,
+    JoinerAdmissionService, JoinerStartMaterialError,
 };
 
 impl JoinerAdmissionService {
@@ -60,6 +63,7 @@ impl JoinerAdmissionService {
                     Ok(_) if resolution_succeeded => {
                         report.advanced_count += 1;
                         report.deferred_count += 1;
+                        self.maintenance_wake.wake();
                     }
                     Ok(_) => report.rejected_count += 1,
                     Err(error) => recovery.record_state_error(report, error),
@@ -78,7 +82,84 @@ impl JoinerAdmissionService {
                     Err(error) => recovery.record_state_error(report, error),
                 }
             }
-            ResolutionState::Resolved => report.deferred_count += 1,
+            ResolutionState::Resolved => {
+                let Some(JoinerInvitationResolution::Resolved {
+                    full_invitation,
+                    start_context,
+                }) = aggregate.invitation_resolution()
+                else {
+                    report.recovery_required_count += 1;
+                    return;
+                };
+                let material = self
+                    .start_material
+                    .create_resolved(
+                        aggregate.admission_id(),
+                        aggregate.join_id(),
+                        full_invitation,
+                        start_context,
+                    )
+                    .await;
+                let material = match material {
+                    Ok(material) => material,
+                    Err(JoinerStartMaterialError::Unavailable { .. }) => {
+                        report.deferred_count += 1;
+                        return;
+                    }
+                    Err(JoinerStartMaterialError::InvalidInvitation) => {
+                        report.recovery_required_count += 1;
+                        return;
+                    }
+                };
+                let (
+                    admission_id,
+                    join_id,
+                    route,
+                    join_request,
+                    private_state,
+                    encrypted_password_equivalent,
+                ) = material.into_parts();
+                if admission_id != aggregate.admission_id() || join_id != aggregate.join_id() {
+                    report.recovery_required_count += 1;
+                    return;
+                }
+                let pending_exchange = match PendingAdmissionExchange::new(
+                    route,
+                    join_request,
+                    SpaceAdmissionMessageKind::Candidate,
+                    match AdmissionRetryState::new(0, 0) {
+                        Ok(retry) => retry,
+                        Err(_) => {
+                            report.recovery_required_count += 1;
+                            return;
+                        }
+                    },
+                ) {
+                    Ok(pending) => pending,
+                    Err(_) => {
+                        report.recovery_required_count += 1;
+                        return;
+                    }
+                };
+                let transition = match aggregate.start_resolved_join(
+                    private_state,
+                    encrypted_password_equivalent,
+                    pending_exchange,
+                ) {
+                    Ok(transition) => transition,
+                    Err(_) => {
+                        report.recovery_required_count += 1;
+                        return;
+                    }
+                };
+                match recovery.commit_recovery(token, transition).await {
+                    Ok(_) => {
+                        report.advanced_count += 1;
+                        self.maintenance_wake.wake();
+                    }
+                    Err(error) => recovery.record_state_error(report, error),
+                }
+            }
         }
     }
 }

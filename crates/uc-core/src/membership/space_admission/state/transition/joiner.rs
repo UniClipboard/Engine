@@ -1,6 +1,42 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
+    pub(crate) fn start_resolved_join(
+        mut self,
+        private_state: AdmissionJoinerPrivateState,
+        encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent,
+        pending_exchange: PendingAdmissionExchange,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        if pending_exchange.request_envelope().header().admission_id() != self.admission_id
+            || pending_exchange.request_envelope().kind() != SpaceAdmissionMessageKind::JoinRequest
+            || pending_exchange.exact_expected_reply_kind() != SpaceAdmissionMessageKind::Candidate
+        {
+            return Err(SpaceAdmissionAggregateError::InvalidInitialExchange);
+        }
+        let SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(state)) =
+            self.state
+        else {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        };
+        self.record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        self.state = SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(
+            SpaceAdmissionJoinerInitiated {
+                join_id: state.join_id,
+                local_join_ordinal: state.local_join_ordinal,
+                source_snapshot: state.source_snapshot,
+                private_state,
+                channel_state: SpaceAdmissionJoinerChannelState::AwaitingAuthentication {
+                    encrypted_password_equivalent,
+                },
+                pending_exchange,
+            },
+        ));
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub(crate) fn mark_invitation_resolution_started(
         mut self,
     ) -> Result<(AdmissionTransition, AdmissionShortInvitationCode), SpaceAdmissionAggregateError>

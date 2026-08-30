@@ -271,6 +271,21 @@ impl JoinerAdmission {
             .map(JoinerAdmissionTransition::from_transition)
     }
 
+    pub fn start_resolved_join(
+        self,
+        private_state: AdmissionJoinerPrivateState,
+        encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent,
+        pending_exchange: PendingAdmissionExchange,
+    ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
+        self.record
+            .start_resolved_join(
+                private_state,
+                encrypted_password_equivalent,
+                pending_exchange,
+            )
+            .map(JoinerAdmissionTransition::from_transition)
+    }
+
     pub fn reject_started_invitation_resolution(
         self,
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {

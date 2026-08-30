@@ -785,6 +785,9 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 准入成员激活持久化 | Sponsor Complete 在提交协议回复前通过单一激活端口幂等安装安全状态、成员事实与正式成员历史；Joiner 目标 generation 在提升前写入加密 membership ledger。Engine 每次安装 session 都尝试静默恢复，普通冷启动允许保持锁定，准入切换后要求恢复成功。新设备加入、已有设备切换和重启传输 E2E 均已通过。 |
 | 2026-08-30 | 准入激活分层 | Application/Core 负责验证成员历史并产出类型化激活计划；Infra 只按已验证计划安装目标安全状态、关系投影和加密成员账本，不重复解释或验证协议历史。 |
 | 2026-08-30 | 准入 clean-cutover | 生产运行期只保留 invitation discovery；准入消息只使用 `/uniclipboard/space-admission/1`。旧 pairing ALPN、session/event port、wire 与兼容探测已删除并由架构检查禁止回归；实体设备矩阵仍明确跳过。 |
+| 2026-08-30 | Desktop CLI 准入验收 | Desktop 通过本地 `uc-engine` 启动真实 `uniclip`/`uniclipd` 多 profile 后，Joiner 完成准入及冷重启仍保持 session locked；Engine 内存宿主通过不能替代 Desktop secure-storage 与 generation 切换证据，Desktop 接入暂不可交付。 |
+| 2026-08-30 | 短码准入恢复闭环 | Application 持久化短码解析结果后立即唤醒维护轮次，再以加密保存的启动上下文和完整邀请重建初始交换，并保留原 AdmissionId/JoinId 推进至 `Initiated`；Iroh transport 统一负责准入路由解码。Desktop 在 generation 切换删除旧准入记录后，以本机成员已激活作为等待命令的成功依据。 |
+| 2026-08-30 | 成员历史反熵规格 | 新增规格 029，确认成员传播必须由 Application 单一反熵负责人基于逐 peer 认证水位和加密持久欠账完成；易失 wake、固定单轮预算和关系状态不能代替 ACK、重试、公平调度及多跳 fan-out。当前为待实施设计，生产语义尚未切换。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |
@@ -821,3 +824,4 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 - `docs/specs/026-legacy-profile-isolation-and-re-pairing.md`：旧资料独立化、关系清理和产品提醒的实施规格。
 - `docs/specs/027-application-space-membership-one-shot-rewrite.md`：Application Space 成员关系目标对象、接口、流程、删除清单和验收标准。
 - `docs/specs/028-single-space-admission-protocol.md`：全新单一 Space 准入协议、跨层接入、删除清单和完整验收标准。
+- `docs/specs/029-durable-membership-history-anti-entropy.md`：逐 peer 确认水位、持久传播欠账、公平重试和复杂拓扑验收。

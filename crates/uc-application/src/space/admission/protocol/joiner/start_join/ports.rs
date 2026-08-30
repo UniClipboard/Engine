@@ -40,6 +40,8 @@ pub trait PrepareJoinerInvitationPort: Send + Sync {
 }
 use crate::space::admission::{JoinSpaceError, JoinSpaceInput};
 use async_trait::async_trait;
+use uc_core::membership::{AdmissionJoinerStartContext, JoinId, SpaceAdmissionId};
+use uc_core::pairing::invitation::FullInvitation;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JoinerStartMaterialError {
@@ -102,6 +104,16 @@ pub trait JoinerStartMaterialPort: Send + Sync {
         &self,
         input: &JoinSpaceInput,
     ) -> Result<JoinerStartMaterial, JoinerStartMaterialError>;
+
+    async fn create_resolved(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _join_id: JoinId,
+        _invitation: &FullInvitation,
+        _start_context: &AdmissionJoinerStartContext,
+    ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
+        Err(JoinerStartMaterialError::InvalidInvitation)
+    }
 }
 
 #[async_trait]
