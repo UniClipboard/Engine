@@ -788,8 +788,10 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | Desktop CLI 准入验收 | Desktop 通过本地 `uc-engine` 启动真实 `uniclip`/`uniclipd` 多 profile 后，Joiner 完成准入及冷重启仍保持 session locked；Engine 内存宿主通过不能替代 Desktop secure-storage 与 generation 切换证据，Desktop 接入暂不可交付。 |
 | 2026-08-30 | 短码准入恢复闭环 | Application 持久化短码解析结果后立即唤醒维护轮次，再以加密保存的启动上下文和完整邀请重建初始交换，并保留原 AdmissionId/JoinId 推进至 `Initiated`；Iroh transport 统一负责准入路由解码。Desktop 在 generation 切换删除旧准入记录后，以本机成员已激活作为等待命令的成功依据。 |
 | 2026-08-30 | 成员历史反熵规格 | 新增规格 029，确认成员传播必须由 Application 单一反熵负责人基于逐 peer 认证水位和加密持久欠账完成；易失 wake、固定单轮预算和关系状态不能代替 ACK、重试、公平调度及多跳 fan-out。当前为待实施设计，生产语义尚未切换。 |
-| 2026-08-30 | 成员历史反熵主路径 | Core 提供摘要关系规划、连续后缀和精确 ACK 规则；Application `MembershipHistoryAntiEntropy` 统一负责入站、出站、持久水位、退避、公平游标和有界并发；Iroh 只传输 V3 typed message。旧 V2 全量历史不再进入运行时 wire。Desktop C1 仍暴露确认水位提前推进问题，因此规格保持实施中。 |
+| 2026-08-30 | 成员历史反熵主路径 | Core 提供摘要关系规划、连续后缀和精确 ACK 规则；Application `MembershipHistoryAntiEntropy` 统一负责入站、出站、持久水位、退避、公平游标和有界并发；Iroh 只传输 V3 typed message。旧 V2 全量历史不再进入运行时 wire。Desktop C1 三节点历史收敛和双向正文传输已通过。 |
 | 2026-08-30 | 成员历史反熵诊断 | 反熵关键路径新增仅含阶段、稳定分类和计数的 debug 观测，不记录设备、lineage、transfer、digest、地址或错误文本。Desktop C1 证据显示第二代 Sponsor 的成员投影包含新成员，但正式 membership ledger 未提交相应历史，因此反熵摘要仍判定 `noop`；后续修复归 Sponsor Complete/Settled 激活边界。 |
+| 2026-08-30 | Group Epoch 持久投递 | Application `DeliverPendingGroupUpdatesUseCase` 唯一负责扫描加密安全材料中的欠账、有界调用 Iroh dispatch，并且只在认证 Accepted ACK 后确认删除；失败欠账持久轮转以防多设备饿饿。Engine 只安装 ALPN handler 和注入 port，临时根因日志已删除。 |
+| 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
 | 2026-08-29 | 网络与运行期 | P2P 使用共享 Iroh node；Space application 先以 dormant 状态构造，认证 handler 和 Router ready 后才启动后台恢复。 |
 | 2026-08-29 | 双邀请入口 | 短码和完整邀请指向同一随机邀请身份；完整邀请携带 Space admission 路由，不携带旧配对会话协议。 |

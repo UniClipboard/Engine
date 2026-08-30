@@ -1,21 +1,19 @@
-# Spec 028 Legacy Admission Cleanup
+# Spec 029 Durable Membership History Anti-Entropy
 
 ## Goal
 
-按既定顺序把 Space admission 的剩余生产入口迁移到
-`SpaceAdmissionProtocol` / `SpaceAdmissionAggregate`，随后删除旧 ledger 状态、
-`SponsorAdmissionSecurityDelivery` 和整个 `space_join_record` 模型。
-
-在实现切换完成后，继续建立 Spec 028 的自动化、真实基础设施、设备和发布交付证据；
-未执行的设备项目必须明确记录为“跳过”。
+按 `docs/specs/029-durable-membership-history-anti-entropy.md` 一次性实现逐 peer 认证水位、
+MasterKey AEAD 持久欠账、摘要/suffix 交换、有界公平重试和入站多跳 fan-out，并恢复
+Desktop 多节点复杂拓扑收敛。
 
 ## Completion Criteria
 
-- cancel、current status、pending transition 均由 `SpaceAdmissionProtocol` 完整负责。
-- 生产代码不再读写 legacy `admission_records`。
-- `SponsorAdmissionSecurityDelivery` 被类型化新协议结果替代。
-- `space_join_record` 及其旧 codec、错误和 re-export 删除。
-- 架构圣经同步更新；workspace、格式、架构和 diff 检查通过。
+- `MembershipHistoryAntiEntropy` 是 Application 唯一完整负责人。
+- 历史、effects、peer 水位与 fan-out 欠账通过同一 ledger CAS 原子提交。
+- 只有认证 ACK 推进对应 peer 水位；失败、预算耗尽和重启不丢欠账。
+- 链式、树型、离线恢复和公平调度测试通过。
+- Desktop 三节点及复杂拓扑 E2E 通过；未执行实体设备项目明确标为跳过。
+- Spec、架构圣经、workspace、格式、架构和 diff 门禁全部通过。
 
 ## Phases
 
@@ -32,15 +30,24 @@
 - [x] 删除旧 pairing ALPN、session/event port 与 production Router 装配，同时保留邀请 discovery。
 - [x] 扩展架构检查并更新 Spec 028、架构圣经与验收状态。
 - [x] 运行定向测试、完整 workspace 测试和最终门禁并提交清理切片。
+- [x] 使用本地 Desktop 的公开 CLI/daemon 跑通 fresh join、状态查询与 daemon 重启恢复 E2E。
+- [x] 跑通三 profile Active 收敛及双向 exact transfer，并同步最终交付结论。
+- [x] 完成 Spec 029，固定复杂拓扑下的持久成员历史反熵设计与验收矩阵。
+- [ ] Core 摘要、历史关系和 ACK 水位规则。
+- [ ] Ledger 持久同步状态、原子 mutation 与迁移。
+- [ ] Application 单一反熵负责人、重试和公平调度。
+- [ ] Infra typed summary/suffix wire clean cutover。
+- [ ] 所有历史写入点与入站 fan-out 闭环。
+- [ ] 多节点拓扑、真实 SQLite/Iroh/Desktop E2E。
+- [ ] 审查、全量门禁和原子提交。
 
 ## Current Slice
 
-执行 Spec 028 clean-cutover：把邀请 discovery 从旧 pairing session adapter 中拆出，删除
-`/uniclipboard/pairing/2`、旧 session/event port、wire 和生产 Router handler。
+Group Epoch 持久投递负责人、Desktop C1 验收、最终审查、全量门禁与 Engine 原子提交已完成。
 
 ## Next Step
 
-- clean-cutover 清理已完成；下一项仅剩实体设备/三设备验收，需在具备设备的环境执行。
+- Engine 切片已完成并原子提交；下一步仅处理 Desktop 独立仓库的 CLI/E2E 变更分割与提交。
 
 ## Errors Encountered
 

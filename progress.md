@@ -1,5 +1,17 @@
 # Progress Log
 
+## 2026-08-30 — Spec 029 durable anti-entropy
+
+- 新增 `DeliverPendingGroupUpdatesUseCase`：每轮最多处理 8 条持久密钥欠账，只在 Iroh 认证 Accepted ACK 后删除；临时失败保留并持久轮转，避免多设备时队尾饿饿。
+- Engine 已在 Router spawn 前安装 group-update ALPN，并将 dispatch/store 注入同一成员维护 runtime。
+- Desktop C1 真实三进程验收通过：A/B/C 收敛三成员，A→C 与 C→A exact transfer 均通过（65.71s）。所有 `[DEBUG-029-*]` 临时根因日志已删除。
+- 复盘 C1 密钥失败后确认：B 已持久生成面向 A 的 epoch 3 group update，但生产没有 Application 消费者，Engine 也未安装已存在的 Iroh group-update handler。
+- Sponsor 激活保留认证 ACK 水位，不再为旧成员伪造新 head 确认。
+- 周期维护改由逐 peer 水位欠账驱动；加密 ledger 保存 retry、退避和公平游标。
+- 出站单轮限制八个 peer，游标在网络调用前持久化；入站合并同事务建立 fan-out 并在提交后唤醒维护。
+- 成员历史传输切换到 v3 summary/request/ACK 握手与 v3 Iroh ALPN。
+- Core、Application receiver 与 scheduler 定向测试正在通过；workspace 和 Desktop 验收待执行。
+
 ## 2026-08-30
 
 - 已删除无生产调用者的旧 Core 恢复模型、旧 outbox recovery use case 和旧 admission message handler。
@@ -19,6 +31,8 @@
 
 ## Verification
 
+- 本切片最终 `cargo metadata`、workspace all-target check、fmt、架构检查、diff check 和完整 workspace tests 全部通过；Infra 718 passed/4 ignored，Application 688 passed，Engine 118 passed。
+- 清理诊断后重新构建 Desktop CLI/daemon，C1 再次通过（66.15s）。
 - 最近 Core admission tests：77 passed。
 - 最近 Application library tests：685 passed（删除旧 handler 后）。
 - Application 取消测试：2 passed。
@@ -81,6 +95,25 @@
 - 架构检查新增 retired pairing transport 负向夹具并通过；Spec 028 clean-cutover 条目与关联规格状态已同步。
 - 完整 `cargo test --workspace --all-targets --locked` 通过；删除旧 Core/Infra pairing transport 后 Infra tests 从 753 项收敛为 721 项，删除的是旧协议专属测试。
 - metadata、workspace all-target check、fmt、架构与 diff 门禁全部通过；clean-cutover 以 `08db918` 提交。
+
+## 2026-08-30 Desktop CLI E2E
+
+- 修复短码路由格式校验、`ResolvedInvitation → Initiated` 持久化恢复与维护唤醒；Application 回归测试覆盖跨维护轮次推进。
+- Desktop Tokio E2E 改为多线程 runtime，避免同步 CLI 子进程阻塞本地 rendezvous mock；daemon 使用 `e2e-rendezvous` feature 构建。
+- 真实 Desktop `fresh_join_recovers_the_desktop_session` 与 `join_commands_report_none_then_real_active_join` 已通过；Engine metadata、workspace all-target check、fmt、架构检查和 diff 门禁通过。
+- 三节点 `c1_online_sponsor_chain_converges_and_syncs_directly` 仍失败：A 只保留 A/B 两名成员，未收敛 C，因而尚未执行 exact transfer；这属于下一处成员历史传播缺口，不能把当前切片标记为完整 Desktop 交付。
+- Desktop workspace all-target check 跳过：Tauri 构建要求缺失的 `binaries/uniclipd-aarch64-unknown-linux-gnu` sidecar；CLI/daemon 两个目标已单独成功构建。
+
+## 2026-08-30 Spec 029
+
+- 完成 `docs/specs/029-durable-membership-history-anti-entropy.md`，固定逐 peer ACK 水位、加密持久欠账、摘要与缺失 suffix、入站 fan-out 和有界公平调度。
+- 验收覆盖链式、树型、交错在线、预算耗尽、ACK 丢失、重启和合法分叉；本轮仅完成设计，生产语义尚未切换。
+- 开始按 Spec 029 实施；确认 TDD seam 为 Core planner、Application 反熵入口、Infra typed transport 和 Desktop E2E。
+
+- 已确认 `desktop` 仓库通过 Cargo patch 使用当前本地 Engine，而非固定远端 revision。
+- 已找到真实 CLI/daemon E2E harness；下一步构建二进制并执行新准入、重启与互传场景。
+- 修复 Desktop 嵌套 checkout 下 E2E crate 错认 Engine workspace 的边界，并将旧 unpair 返回值迁移到 `DeviceTrust`；Desktop CLI/daemon 构建通过。
+- `cli_engine_workflows` 5 项真实进程测试均运行但失败；三 profile exact-transfer 场景在第二节点 session locked 超时，冷重启仍为 423，尚未进入正文互传。
 
 - 复核 Core 终态与 view：当前诊断输出对应 `RecoveryRequired`，纠正了此前对 Active 终态的怀疑。
 - 保留 focused E2E 红测作为复现入口，下一步定位 recovery category 与触发分支。

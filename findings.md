@@ -1,5 +1,15 @@
 # Spec 028 Cleanup Findings
 
+## Spec 029 implementation findings (2026-08-30)
+
+- `IrohGroupUpdateAdapter` 和 `install_group_updates` 已实现，但 Engine 没有调用安装入口，`SpaceApplicationDeps` 也没有接收 dispatch/store；缺口是 Application 唯一负责人与 composition wiring，不是重写 transport。
+- `PendingGroupUpdate` 已在 Space 安全材料中持久化；`dispatch_group_update` 只有收到认证对端 `ACK_ACCEPTED` 才返回 `Ok(())`，因此 Application 可以将 `Ok` 作为唯一删除条件，其他分类全部保留等待周期/上线触发重试。
+- `Consistent` 是分支关系而不是投递证明；只有认证 ACK 可以推进 `confirmed_position`。
+- 现有加密 ledger 已是正确原子边界；欠账由 head/水位差与加密 retry 元数据表达，不另建 outbox。
+- 公平游标必须在网络工作前提交，避免崩溃或慢 peer 使排序永久从头开始。
+- 入站 merge 原本已原子保存 history/effects；同事务创建新成员 reconciliation 后，fan-out 可跨崩溃恢复。
+- summary 相同可以零页面完成；水位不同时沿唯一分页协议路径继续。
+
 ## Current State
 
 - `SpaceAdmissionAggregate` 已拥有类型化 admission 状态和取消转换。
@@ -73,3 +83,18 @@
 - `IrohPairingSessionAdapter` 同时承担邀请发布/短码解析与旧 session transport；新准入仍需要前者，不能整模块直接删除。
 - 新 `/uniclipboard/space-admission/1` transport 已独立安装；清理应把 invitation issuer/address/resolver 提取为 discovery adapter，不为旧业务 handler 保留 ALPN。
 - `/uniclipboard/pairing/1` compatibility probe 仍会主动探测旧协议，违反 Spec 028 的 no-old-ALPN 决定，应随 session transport 删除。
+
+## 2026-08-30 Desktop CLI E2E 审计
+
+- 短码解析后的 aggregate 曾停在 `ResolvedInvitation`：Application 没有用完整邀请与加密启动上下文重建初始交换，也没有在保存解析结果后唤醒下一维护轮次。
+- rendezvous 返回的新准入 route 是 postcard 编码的 `AdmissionDialRouteV1`，旧校验却按 JSON `EndpointAddr` 解析；校验现复用 Iroh transport 的唯一解码器。
+- target generation 激活后旧 admission 记录按设计不再保留；CLI 等待应以本机 `DeviceTrust=Active` 确认成功，不能把记录缺失误报为 `join_status_missing`。
+
+- `desktop` 是独立 Git 仓库，当前补丁提交通过 Cargo patch 将 `uc-engine` 与
+  `uc-observability-contract` 指向相邻的 Engine workspace，因此运行结果能覆盖当前本地 Engine。
+- Desktop 已有独立 `tests/e2e` crate，使用唯一 `UC_PROFILE` 隔离 daemon 数据，并以本地
+  rendezvous mock 驱动真实 `uniclip`/`uniclipd` 进程；这比库内双实例测试更接近交付入口。
+- Desktop 证据仍是同一台 Linux 主机上的多进程测试，不能替代 Android/iOS 或三台实体设备矩阵。
+- Desktop 首次构建暴露 `uc-webserver` 仍匹配已删除的 `OperationResult::WorkspaceConvergence`；迁移为 `DeviceTrust` 后真实二进制可以成功链接。
+- 真实 CLI redeem 能返回 Pending，协议随后清除 current join，但 CLI 的同步轮询仍把该竞态报告为 `join_status_missing`。
+- 使用 `--no-wait` 后 Joiner 只显示本机成员，聚合 status 因 session locked 返回 423；daemon 冷重启仍不能恢复。缺口位于 Desktop secure-storage / target generation session 恢复边界。

@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：实施中（Core/Application/Infra 主路径已切换，Desktop C1 尚未收敛）
+- **状态**：实施中（Core/Application/Infra 主路径已切换，Desktop C1 已通过；四/五节点与实体设备矩阵待验收）
 - **日期**：2026-08-30
 - **实施方式**：Core、Application、Infra、Engine 与 Desktop E2E 一次性切换；不得长期保留旧调度语义
 - **修正范围**：修正规格 020、021、023、027、028 中“成员上线后核对即可最终传播”的不完整实现；成员历史、移除决定、分叉隔离和准入完成边界保持不变
@@ -443,7 +443,7 @@ Implementation: migration 清空旧确认水位并保存 pending revision。
 * [ ] 分叉只隔离相关 peer，各分支内部继续传播。
 * [ ] 未确认移除不被反熵自动应用。
 * [ ] SQLite fault injection 证明无“历史已提交但传播责任丢失”窗口。
-* [ ] Desktop 三节点加入、重启、A↔C exact transfer 通过。
+* [x] Desktop 三节点加入、重启、A↔C exact transfer 通过。
 * [ ] Desktop 四节点离线链和五节点树型通过。
 * [ ] Engine workspace tests、真实 Iroh、真实 SQLite、fmt、architecture 和 diff gates 通过。
 * [ ] 实体设备未执行项目明确为“跳过”。
