@@ -7,6 +7,7 @@ mod error;
 mod gossip;
 mod member;
 mod member_instance;
+mod membership_branch_recovery;
 mod membership_branch_transition;
 mod membership_conflict_policy;
 mod membership_history;
@@ -57,6 +58,10 @@ pub use gossip::{
 };
 pub use member::SpaceMember;
 pub use member_instance::MemberInstanceId;
+pub use membership_branch_recovery::{
+    MembershipBranchRecoveryError, MembershipBranchRecoveryPackageV1,
+    MEMBERSHIP_BRANCH_RECOVERY_PACKAGE_FORMAT_V1,
+};
 pub use membership_branch_transition::{
     MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1,
     MEMBERSHIP_BRANCH_TRANSITION_FORMAT_V1,

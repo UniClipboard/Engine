@@ -5,6 +5,7 @@ use uc_core::membership::{
     AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition,
     HistoricalMembershipSignatureError, HistoricalMembershipSignatureVerifier,
     MembershipActivationBaselineV2, MembershipAdmissionV2, MembershipBranchId,
+    MembershipBranchRecoveryError, MembershipBranchRecoveryPackageV1,
     MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, MembershipConflictChoice,
     MembershipConflictId, MembershipConflictPolicy, MembershipCredential, MembershipDecisionV2,
     MembershipEventId, MembershipEventV2, MembershipHistoryMessage, MembershipOperationV2,
@@ -478,6 +479,72 @@ fn membership_branch_transition_advances_one_phase_and_never_retargets() {
     assert!(current
         .advance(MembershipBranchTransitionPhaseV1::Prepared)
         .is_none());
+}
+
+#[test]
+fn branch_recovery_package_binds_recipient_branch_expiry_and_authorization() {
+    let verifier = DeterministicSignatureVerifier;
+    let (history, author, recipient, _, _) = history_with_a_and_b(true);
+    let conflict_id = MembershipConflictId::from_bytes([0xa1; 32]);
+    let branch_id = MembershipConflictPolicy::branch_id(&history).expect("branch id");
+    let unsigned = MembershipBranchRecoveryPackageV1::new_unsigned(
+        conflict_id,
+        branch_id,
+        recipient.facts.member_instance,
+        author.facts.member_instance,
+        2_000,
+        [0xa2; 32],
+        history.encode_persisted_v2().unwrap(),
+        vec![0xa3],
+        vec![0xa4],
+    )
+    .expect("package shape is valid");
+    let signature = verifier.sign(
+        &author.membership_credential,
+        &unsigned.authorization_signing_payload(),
+    );
+    let package = unsigned.with_authorization_signature(signature);
+
+    assert!(package
+        .validate(
+            conflict_id,
+            branch_id,
+            recipient.facts.member_instance,
+            1_000,
+            &verifier,
+        )
+        .is_ok());
+    assert_eq!(
+        package.validate(
+            conflict_id,
+            branch_id,
+            author.facts.member_instance,
+            1_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::WrongRecipient)
+    );
+    assert_eq!(
+        package.validate(
+            conflict_id,
+            branch_id,
+            recipient.facts.member_instance,
+            2_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::Expired)
+    );
+    let damaged = package.clone().with_authorization_signature(vec![0xff]);
+    assert_eq!(
+        damaged.validate(
+            conflict_id,
+            branch_id,
+            recipient.facts.member_instance,
+            1_000,
+            &verifier,
+        ),
+        Err(MembershipBranchRecoveryError::Unauthorized)
+    );
 }
 
 #[test]

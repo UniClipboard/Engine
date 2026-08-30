@@ -93,6 +93,12 @@ impl MembershipConflictDescription {
 pub struct MembershipConflictPolicy;
 
 impl MembershipConflictPolicy {
+    pub fn branch_id(
+        history: &VersionedMembershipHistory,
+    ) -> Result<MembershipBranchId, MembershipConflictPolicyError> {
+        branch_id(history)
+    }
+
     pub fn describe(
         local: &VersionedMembershipHistory,
         remote: &VersionedMembershipHistory,

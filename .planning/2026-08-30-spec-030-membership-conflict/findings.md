@@ -30,3 +30,6 @@
 
 - 远端 Active 选择的 transition id 可由 conflict id 与 target branch id 领域分隔摘要稳定产生；不依赖随机数即可跨 CAS 重试和重启保持唯一。
 - branch transition 使用独立七阶段 Core 状态机，source/target generation 必须不同，且只能推进到直接 successor；阶段对象随 ledger 整体加密。
+- 恢复包不能信任 transport 提供的 branch 声明：验证入口必须重新解码完整目标历史、验证全部历史签名并重算 branch id。
+- recipient 与授权签发成员都必须位于目标 `active_members`；只保留历史 credential 的 Removed 实例不能签发或接收恢复。
+- nonce 是否已使用依赖持久状态，归 Application ledger CAS；Core 只拒绝零 nonce 并把 nonce 纳入授权签名载荷。

@@ -13,6 +13,8 @@
 - 远端 Active 选择当前只保存 `Selected/Pending`；恢复包、transition id 和维护续跑仍属于下一工作切片，Phase 3 尚未完成。
 - 增加 Core branch transition 七阶段单调状态机；稳定 transition id 与 transition map 已进入加密 ledger。
 - 远端 Active 重复选择测试确认 transition intent 和 ledger revision 均保持不变。
+- 新增 `MembershipBranchRecoveryPackageV1`：绑定 conflict/branch/recipient/author/expiry/nonce、目标历史、MLS 恢复密文和内容密钥目录密文。
+- Core 验证覆盖目标历史重验、branch 重算、双方 Active 资格、过期、错误 recipient 和损坏授权签名。
 
 ## Verification
 
@@ -28,3 +30,4 @@
 - `cargo test -p uc-core --test membership_history_v2 membership_branch_transition_advances_one_phase_and_never_retargets --locked`：1 passed。
 - `cargo test -p uc-application resolve_conflict --locked`：3 passed。
 - `cargo check -p uc-infra --all-targets --locked`：通过（仅既有 warning）。
+- `cargo test -p uc-core --test membership_history_v2 branch_recovery_package_binds_recipient_branch_expiry_and_authorization --locked`：1 passed。

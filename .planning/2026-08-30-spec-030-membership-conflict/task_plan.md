@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 3：选择 CAS、稳定 transition id 与 Application facade 已完成；下一切片补恢复端口和维护重启续跑后才可结束本阶段。
+Phase 3：选择 CAS、稳定 transition id 与 Application facade 已完成；Core 恢复包验证已完成，下一切片补恢复 coordinator 和维护重启续跑。
 
 ## Next Step
 
-实现恢复包的 recipient/conflict/head/nonce/expiry/签名验证，再定义 recovery/transition ports。
+定义 recovery/transition ports，并让 Application coordinator 在同一 ledger CAS 消费 nonce、保存 Prepared transition。
 
 ## Constraints
 
