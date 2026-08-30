@@ -800,6 +800,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | Group Epoch 持久投递 | Application `DeliverPendingGroupUpdatesUseCase` 唯一负责扫描加密安全材料中的欠账、有界调用 Iroh dispatch，并且只在认证 Accepted ACK 后确认删除；失败欠账持久轮转以防多设备饿饿。Engine 只安装 ALPN handler 和注入 port，临时根因日志已删除。 |
 | 2026-08-30 | 四节点离线历史收敛 | Sponsor 把既有成员群组更新绑定进签名新增事件；effect executor 按历史因果深度恢复成员事实与安全状态。Roster 展示有效但关系待确认的成员，通信门仍失败关闭。Desktop A-B-C-D 中间节点离线场景已通过成员名单、重启和 A/D 双向正文验证。 |
 | 2026-08-30 | 五节点树型历史收敛 | Desktop A→B、A→C、B→D、C→E 验证不同 Sponsor 支路保持同一单父历史；中间节点离线时 D/E 可先收敛五成员与安全状态并双向传输，全部恢复后五端名单一致。 |
+| 2026-08-30 | 成员分叉选择规格 | 新增规格 030：分叉历史禁止直接合并或自动选主；用户选择一个完整目标分支，Application 通过可恢复 generation transition 切换本机。目标分支已移除本机时必须重新配对。复杂拓扑采用确定性通信矩阵、阶段故障与可重放 chaos seed 验收。当前仅完成设计，生产入口尚未实现。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
