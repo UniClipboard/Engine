@@ -37,3 +37,15 @@
 - coordinator 验证 conflict、branch、recipient、expiry、完整历史与授权签名。
 - 单次 membership ledger CAS 原子消费 nonce、保存 `Prepared` transition 并推进为 `Transitioning`。
 - 新增成功、提交后重试幂等、跨 conflict nonce 重放零账本副作用测试。
+
+## 2026-08-30 · Maintenance recovery wiring
+
+- `RecoverMembershipConflictUseCase` 实现统一 maintenance step port。
+- startup/resume/state-changed/periodic 在 effects 后执行 conflict recovery；peer-online 同样执行。
+- `SpaceApplication` 装配 coordinator，Engine 当前显式注入 deferred adapters，使选择保持 Pending 且不发生协议降级。
+- maintenance 固定顺序 8 项测试通过，`uc-engine` all-target check 通过。
+- `cargo test -p uc-application space::application_tests --locked`：1 passed。
+- `cargo test -p uc-application space::membership --locked`：59 passed。
+- `cargo metadata --locked --format-version 1`、workspace all-target check、fmt、架构检查和 `git diff --check`：通过（仅既有 warning）。
+- `cargo test --workspace --all-targets --locked`：成员相关套件通过；`uc-engine` 115 passed / 3 failed，失败集中于既有 clipboard/search host-adapter 路径。
+- 单独重跑 `host_clipboard_change_is_processed_by_the_engine_and_stops_on_shutdown` 仍以既有 QueryHistory unavailable code 1243 失败；失败发生在本切片未修改的 history search 路径。

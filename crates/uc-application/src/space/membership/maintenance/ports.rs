@@ -26,6 +26,11 @@ pub trait RecoverMembershipEffectsPort: Send + Sync {
 }
 
 #[async_trait]
+pub trait RecoverMembershipConflictsPort: Send + Sync {
+    async fn recover_membership_conflicts(&self) -> MembershipMaintenanceStepOutcome;
+}
+
+#[async_trait]
 pub trait DeliverRestrictedMembershipPort: Send + Sync {
     async fn deliver_restricted_membership(&self) -> MembershipMaintenanceStepOutcome;
 }

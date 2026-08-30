@@ -37,6 +37,13 @@ impl RecoverMembershipEffectsPort for RecordingStep {
 }
 
 #[async_trait]
+impl RecoverMembershipConflictsPort for RecordingStep {
+    async fn recover_membership_conflicts(&self) -> MembershipMaintenanceStepOutcome {
+        self.record()
+    }
+}
+
+#[async_trait]
 impl DeliverRestrictedMembershipPort for RecordingStep {
     async fn deliver_restricted_membership(&self) -> MembershipMaintenanceStepOutcome {
         self.record()
@@ -139,6 +146,7 @@ async fn startup_runs_the_fixed_sequence_and_continues_after_deferred_work() {
     let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
         admissions: step("admissions", MembershipMaintenanceStepOutcome::Completed),
         effects: step("effects", MembershipMaintenanceStepOutcome::Deferred),
+        conflicts: step("conflicts", MembershipMaintenanceStepOutcome::Completed),
         group_update_delivery: step("group_updates", MembershipMaintenanceStepOutcome::Completed),
         restricted_delivery: step("restricted", MembershipMaintenanceStepOutcome::Completed),
         synchronization: step("synchronize", MembershipMaintenanceStepOutcome::Completed),
@@ -154,13 +162,14 @@ async fn startup_runs_the_fixed_sequence_and_continues_after_deferred_work() {
         &[
             "admissions",
             "effects",
+            "conflicts",
             "group_updates",
             "restricted",
             "synchronize",
             "cleanup"
         ]
     );
-    assert_eq!(report.completed_count, 5);
+    assert_eq!(report.completed_count, 6);
     assert_eq!(report.deferred_count, 1);
     assert_eq!(report.stable_failure_count, 0);
 }
@@ -178,6 +187,7 @@ async fn corrupt_step_stops_later_permission_expanding_work() {
     let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
         admissions: step("admissions", MembershipMaintenanceStepOutcome::Completed),
         effects: step("effects", MembershipMaintenanceStepOutcome::Corrupt),
+        conflicts: step("conflicts", MembershipMaintenanceStepOutcome::Completed),
         group_update_delivery: step("group_updates", MembershipMaintenanceStepOutcome::Completed),
         restricted_delivery: step("restricted", MembershipMaintenanceStepOutcome::Completed),
         synchronization: step("synchronize", MembershipMaintenanceStepOutcome::Completed),
@@ -206,6 +216,7 @@ async fn peer_online_runs_only_exact_peer_capabilities() {
     let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
         admissions: step("admissions"),
         effects: step("effects"),
+        conflicts: step("conflicts"),
         group_update_delivery: step("group_updates"),
         restricted_delivery: step("restricted"),
         synchronization: step("synchronize"),
@@ -220,9 +231,9 @@ async fn peer_online_runs_only_exact_peer_capabilities() {
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        &["group_updates", "restricted", "synchronize"]
+        &["conflicts", "group_updates", "restricted", "synchronize"]
     );
-    assert_eq!(report.completed_count, 3);
+    assert_eq!(report.completed_count, 4);
 }
 
 #[tokio::test]
@@ -238,6 +249,7 @@ async fn periodic_retries_history_when_synchronization_is_still_required() {
     let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
         admissions: step("admissions"),
         effects: step("effects"),
+        conflicts: step("conflicts"),
         group_update_delivery: step("group_updates"),
         restricted_delivery: step("restricted"),
         synchronization: step("synchronize"),
@@ -253,12 +265,13 @@ async fn periodic_retries_history_when_synchronization_is_still_required() {
         &[
             "admissions",
             "effects",
+            "conflicts",
             "group_updates",
             "restricted",
             "synchronize"
         ]
     );
-    assert_eq!(report.completed_count, 5);
+    assert_eq!(report.completed_count, 6);
 }
 
 async fn wait_for_call_count(calls: &Arc<Mutex<Vec<&'static str>>>, expected: usize) {
@@ -285,6 +298,7 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
         MaintainSpaceMembershipDeps {
             admissions: step("admissions"),
             effects: step("effects"),
+            conflicts: step("conflicts"),
             group_update_delivery: step("group_updates"),
             restricted_delivery: step("restricted"),
             synchronization: step("synchronize"),
@@ -299,7 +313,7 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
         Arc::new(NoopNetworkActivity),
     );
     let activity = runtime.activity();
-    wait_for_call_count(&calls, 6).await;
+    wait_for_call_count(&calls, 7).await;
 
     activity.pause().await.unwrap();
     let _ = presence_tx.send(uc_core::ports::PeerReachabilityChanged {
@@ -308,16 +322,16 @@ async fn runtime_pause_resume_presence_and_shutdown_share_one_lifecycle() {
         at: chrono::Utc::now(),
     });
     tokio::task::yield_now().await;
-    assert_eq!(calls.lock().unwrap().len(), 6);
+    assert_eq!(calls.lock().unwrap().len(), 7);
 
     activity.resume().await.unwrap();
-    wait_for_call_count(&calls, 12).await;
+    wait_for_call_count(&calls, 14).await;
     let _ = presence_tx.send(uc_core::ports::PeerReachabilityChanged {
         device_id: uc_core::ids::DeviceId::new("device-b"),
         state: uc_core::ports::ReachabilityState::Online,
         at: chrono::Utc::now(),
     });
-    wait_for_call_count(&calls, 15).await;
+    wait_for_call_count(&calls, 18).await;
 
     runtime.shutdown().await;
 }
@@ -341,6 +355,7 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
                 release: Arc::clone(&release),
             }),
             effects: step("effects"),
+            conflicts: step("conflicts"),
             group_update_delivery: step("group_updates"),
             restricted_delivery: step("restricted"),
             synchronization: step("synchronize"),
@@ -373,6 +388,7 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
         calls.lock().unwrap().as_slice(),
         &[
             "effects",
+            "conflicts",
             "group_updates",
             "restricted",
             "synchronize",
@@ -399,6 +415,7 @@ async fn shutdown_uses_one_five_second_budget_without_aborting_the_active_round(
                 started: Arc::clone(&started),
             }),
             effects: step("effects"),
+            conflicts: step("conflicts"),
             group_update_delivery: step("group_updates"),
             restricted_delivery: step("restricted"),
             synchronization: step("synchronize"),
@@ -443,6 +460,7 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
                 release: Arc::clone(&release),
             }),
             effects: step("effects"),
+            conflicts: step("conflicts"),
             group_update_delivery: step("group_updates"),
             restricted_delivery: step("restricted"),
             synchronization: step("synchronize"),
@@ -466,19 +484,22 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
     }
     release.notify_one();
 
-    wait_for_call_count(&calls, 11).await;
+    wait_for_call_count(&calls, 14).await;
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         &[
             "effects",
+            "conflicts",
             "group_updates",
             "restricted",
             "synchronize",
             "cleanup",
+            "conflicts",
             "group_updates",
             "restricted",
             "synchronize",
+            "conflicts",
             "group_updates",
             "restricted",
             "synchronize",

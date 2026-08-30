@@ -6,7 +6,9 @@ pub use ports::{
     FetchMembershipBranchRecoveryPort, PrepareMembershipBranchTransitionError,
     PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
 };
-pub(crate) use use_case::{RecoverMembershipConflictOutcome, RecoverMembershipConflictUseCase};
+#[cfg(test)]
+pub(crate) use use_case::RecoverMembershipConflictOutcome;
+pub(crate) use use_case::RecoverMembershipConflictUseCase;
 
 #[cfg(test)]
 mod tests;

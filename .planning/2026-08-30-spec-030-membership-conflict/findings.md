@@ -35,3 +35,5 @@
 - nonce 是否已使用依赖持久状态，归 Application ledger CAS；Core 只拒绝零 nonce 并把 nonce 纳入授权签名载荷。
 - 恢复包 nonce 必须绑定首次消费它的 conflict，而不能只保存一个无归属集合；这样才能区分同一流程重试与跨 conflict 重放。
 - transition preparation port 只允许返回无外部副作用的 `Prepared` 计划，generation 文件写入必须留给 CAS 成功后的后续阶段。
+- conflict recovery 必须位于 membership effects 之后、group update 与受限交付之前；这样先恢复已有本地安全欠账，再决定是否具备切换准备条件，且损坏状态能阻断后续权限扩展。
+- peer-online 是恢复包重新获取的直接触发条件，不能像 admissions/effects 一样跳过。

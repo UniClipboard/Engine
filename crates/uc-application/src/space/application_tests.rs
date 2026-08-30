@@ -633,6 +633,36 @@ impl MembershipNetworkActivityPort for PassivePorts {
 }
 
 #[async_trait]
+impl FetchMembershipBranchRecoveryPort for PassivePorts {
+    async fn fetch_membership_branch_recovery(
+        &self,
+        _input: FetchMembershipBranchRecoveryInput,
+    ) -> Result<
+        uc_core::membership::MembershipBranchRecoveryPackageV1,
+        FetchMembershipBranchRecoveryError,
+    > {
+        Err(FetchMembershipBranchRecoveryError::Unavailable {
+            source: anyhow::anyhow!("passive recovery source"),
+        })
+    }
+}
+
+#[async_trait]
+impl PrepareMembershipBranchTransitionPort for PassivePorts {
+    async fn prepare_membership_branch_transition(
+        &self,
+        _input: PrepareMembershipBranchTransitionInput,
+    ) -> Result<
+        uc_core::membership::MembershipBranchTransitionV1,
+        PrepareMembershipBranchTransitionError,
+    > {
+        Err(PrepareMembershipBranchTransitionError::Unavailable {
+            source: anyhow::anyhow!("passive transition preparation"),
+        })
+    }
+}
+
+#[async_trait]
 impl ActivateSponsorAdmissionPort for PassivePorts {
     async fn activate(
         &self,
@@ -690,6 +720,8 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             device_trust_observations: passive.clone(),
             current_join_status: passive.clone(),
             membership_history_transport: passive.clone(),
+            membership_branch_recovery: passive.clone(),
+            membership_branch_transition: passive.clone(),
             apply_membership_member_facts: passive.clone(),
             apply_membership_security: passive.clone(),
             activate_membership_effect: passive.clone(),

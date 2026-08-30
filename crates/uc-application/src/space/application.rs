@@ -29,6 +29,7 @@ use crate::space::membership::MembershipHistoryAntiEntropy;
 use crate::space::membership::PreparedSpaceMembershipMaintenanceRuntime;
 use crate::space::membership::QueryMembershipAdmissionUseCase;
 use crate::space::membership::QueryMembershipConflictStatusPort;
+use crate::space::membership::RecoverMembershipConflictUseCase;
 use crate::space::membership::RemoveSpaceMemberUseCase;
 use crate::space::membership::ResolveMembershipConflictUseCase;
 use crate::space::membership::{
@@ -111,6 +112,10 @@ pub struct SpaceApplicationDeps {
     pub device_trust_observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     pub current_join_status: Arc<dyn LoadCurrentJoinStatusPort>,
     pub membership_history_transport: Arc<dyn MembershipHistoryExchangePort>,
+    pub membership_branch_recovery:
+        Arc<dyn crate::space::membership::FetchMembershipBranchRecoveryPort>,
+    pub membership_branch_transition:
+        Arc<dyn crate::space::membership::PrepareMembershipBranchTransitionPort>,
     pub apply_membership_member_facts: Arc<dyn ApplyMembershipMemberFactsPort>,
     pub apply_membership_security: Arc<dyn ApplyMembershipSecurityPort>,
     pub activate_membership_effect: Arc<dyn ActivateMembershipEffectPort>,
@@ -143,6 +148,7 @@ impl SpaceApplication {
         peer_reachability_changed_events: broadcast::Receiver<PeerReachabilityChanged>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     ) -> Self {
+        let historical_membership_signatures = Arc::clone(&deps.historical_membership_signatures);
         let ledger = Arc::new(MembershipLedger::new(
             deps.load_membership_ledger,
             deps.commit_membership_ledger,
@@ -224,11 +230,19 @@ impl SpaceApplication {
             deps.group_update_dispatch,
             Arc::clone(&deps.clock),
         ));
+        let recover_membership_conflicts = Arc::new(RecoverMembershipConflictUseCase::new(
+            Arc::clone(&ledger),
+            deps.membership_branch_recovery,
+            deps.membership_branch_transition,
+            historical_membership_signatures,
+            Arc::clone(&deps.clock),
+        ));
         let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
             MaintainSpaceMembershipDeps {
                 admissions: space_admission.clone(),
                 effects: Arc::clone(&recover_membership_effects)
                     as Arc<dyn crate::space::membership::RecoverMembershipEffectsPort>,
+                conflicts: recover_membership_conflicts,
                 group_update_delivery: deliver_group_updates,
                 restricted_delivery: deliver_restricted_membership,
                 synchronization: membership_history_endpoint.clone(),

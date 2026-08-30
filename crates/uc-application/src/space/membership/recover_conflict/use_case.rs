@@ -5,7 +5,10 @@ use uc_core::membership::{
 };
 use uc_core::ports::ClockPort;
 
-use crate::space::membership::{MembershipConflictStatus, MembershipLedger, MembershipLedgerError};
+use crate::space::membership::{
+    MembershipConflictStatus, MembershipLedger, MembershipLedgerError,
+    MembershipMaintenanceStepOutcome, RecoverMembershipConflictsPort,
+};
 
 use super::{
     FetchMembershipBranchRecoveryError, FetchMembershipBranchRecoveryInput,
@@ -28,6 +31,24 @@ pub(crate) struct RecoverMembershipConflictUseCase {
     verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     clock: Arc<dyn ClockPort>,
     execution_lock: tokio::sync::Mutex<()>,
+}
+
+#[async_trait::async_trait]
+impl RecoverMembershipConflictsPort for RecoverMembershipConflictUseCase {
+    async fn recover_membership_conflicts(&self) -> MembershipMaintenanceStepOutcome {
+        match self.execute().await {
+            RecoverMembershipConflictOutcome::Completed => {
+                MembershipMaintenanceStepOutcome::Completed
+            }
+            RecoverMembershipConflictOutcome::Deferred => {
+                MembershipMaintenanceStepOutcome::Deferred
+            }
+            RecoverMembershipConflictOutcome::StableFailure => {
+                MembershipMaintenanceStepOutcome::StableFailure
+            }
+            RecoverMembershipConflictOutcome::Corrupt => MembershipMaintenanceStepOutcome::Corrupt,
+        }
+    }
 }
 
 impl RecoverMembershipConflictUseCase {

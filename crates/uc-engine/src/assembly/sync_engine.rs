@@ -149,6 +149,48 @@ impl ContentExchangeGatePort for CurrentMemberContentGate {
     }
 }
 
+/// 分支恢复 transport 将在 Spec 030 后续切片安装。
+/// 在此之前，已选择冲突保持持久 Pending，不回退其他 transport，也不修改 generation。
+struct DeferredMembershipBranchRecovery;
+
+#[async_trait::async_trait]
+impl uc_application::deps::FetchMembershipBranchRecoveryPort for DeferredMembershipBranchRecovery {
+    async fn fetch_membership_branch_recovery(
+        &self,
+        _input: uc_application::deps::FetchMembershipBranchRecoveryInput,
+    ) -> Result<
+        uc_core::membership::MembershipBranchRecoveryPackageV1,
+        uc_application::deps::FetchMembershipBranchRecoveryError,
+    > {
+        Err(
+            uc_application::deps::FetchMembershipBranchRecoveryError::Unavailable {
+                source: anyhow::anyhow!("membership branch recovery transport is unavailable"),
+            },
+        )
+    }
+}
+
+struct DeferredMembershipBranchTransition;
+
+#[async_trait::async_trait]
+impl uc_application::deps::PrepareMembershipBranchTransitionPort
+    for DeferredMembershipBranchTransition
+{
+    async fn prepare_membership_branch_transition(
+        &self,
+        _input: uc_application::deps::PrepareMembershipBranchTransitionInput,
+    ) -> Result<
+        uc_core::membership::MembershipBranchTransitionV1,
+        uc_application::deps::PrepareMembershipBranchTransitionError,
+    > {
+        Err(
+            uc_application::deps::PrepareMembershipBranchTransitionError::Unavailable {
+                source: anyhow::anyhow!("membership branch transition is unavailable"),
+            },
+        )
+    }
+}
+
 #[cfg(not(feature = "lan-compat"))]
 struct UnavailableMobileDeviceLookup;
 
@@ -915,6 +957,8 @@ pub async fn build_sync_engine_assembly(
             current_join_status: space_setup.admission_state.clone()
                 as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
             membership_history_transport: membership_history_transport.clone(),
+            membership_branch_recovery: Arc::new(DeferredMembershipBranchRecovery),
+            membership_branch_transition: Arc::new(DeferredMembershipBranchTransition),
             apply_membership_member_facts: Arc::new(MembershipMemberFactsAdapter::new(
                 Arc::clone(&deps.device.member_repo),
                 Arc::clone(&shared.trusted_peer_repo),

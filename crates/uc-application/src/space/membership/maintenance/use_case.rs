@@ -3,13 +3,14 @@ use std::sync::Arc;
 use super::{
     CleanupLegacyMembershipDataPort, DeliverPendingGroupUpdatesPort,
     DeliverRestrictedMembershipPort, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
-    MembershipMaintenanceTrigger, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
-    SynchronizeMembershipMaintenancePort,
+    MembershipMaintenanceTrigger, RecoverMembershipConflictsPort, RecoverMembershipEffectsPort,
+    RecoverSpaceAdmissionsPort, SynchronizeMembershipMaintenancePort,
 };
 
 pub(crate) struct MaintainSpaceMembershipDeps {
     pub admissions: Arc<dyn RecoverSpaceAdmissionsPort>,
     pub effects: Arc<dyn RecoverMembershipEffectsPort>,
+    pub conflicts: Arc<dyn RecoverMembershipConflictsPort>,
     pub group_update_delivery: Arc<dyn DeliverPendingGroupUpdatesPort>,
     pub restricted_delivery: Arc<dyn DeliverRestrictedMembershipPort>,
     pub synchronization: Arc<dyn SynchronizeMembershipMaintenancePort>,
@@ -61,6 +62,12 @@ impl MaintainSpaceMembershipUseCase {
                 self.deps.effects.recover_membership_effects().await,
             )
         {
+            return report;
+        }
+        if !record(
+            &mut report,
+            self.deps.conflicts.recover_membership_conflicts().await,
+        ) {
             return report;
         }
         if !record(

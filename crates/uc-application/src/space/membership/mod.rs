@@ -30,8 +30,8 @@ pub use ledger::{
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
     CleanupLegacyMembershipDataPort, DeliverPendingGroupUpdatesPort,
-    DeliverRestrictedMembershipPort, MembershipNetworkActivityPort, RecoverMembershipEffectsPort,
-    RecoverSpaceAdmissionsPort,
+    DeliverRestrictedMembershipPort, MembershipNetworkActivityPort, RecoverMembershipConflictsPort,
+    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
 };
 pub use query_device_trust::{
     DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
@@ -72,9 +72,7 @@ pub(super) use query_admission::{MembershipAdmissionSnapshot, QueryMembershipAdm
 pub(super) use query_admission::{QueryMembershipAdmissionPort, QueryMembershipAdmissionUseCase};
 pub(super) use query_device_trust::QueryDeviceTrustUseCase;
 pub(super) use re_pairing::{RePairingState, ResolveRePairingPort};
-pub(super) use recover_conflict::{
-    RecoverMembershipConflictOutcome, RecoverMembershipConflictUseCase,
-};
+pub(super) use recover_conflict::RecoverMembershipConflictUseCase;
 pub(super) use remove_space_member::RemoveSpaceMemberUseCase;
 pub(crate) use resolve_conflict::QueryMembershipConflictStatusPort;
 pub(super) use resolve_conflict::ResolveMembershipConflictUseCase;
