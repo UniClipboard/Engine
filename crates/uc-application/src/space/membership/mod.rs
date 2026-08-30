@@ -1,4 +1,5 @@
 mod decide_device_trust_change;
+mod group_update_delivery;
 mod handle_history_message;
 mod ledger;
 mod maintenance;
@@ -25,8 +26,9 @@ pub use ledger::{
 };
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
-    CleanupLegacyMembershipDataPort, DeliverRestrictedMembershipPort,
-    MembershipNetworkActivityPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    CleanupLegacyMembershipDataPort, DeliverPendingGroupUpdatesPort,
+    DeliverRestrictedMembershipPort, MembershipNetworkActivityPort, RecoverMembershipEffectsPort,
+    RecoverSpaceAdmissionsPort,
 };
 pub use query_device_trust::{
     DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
@@ -41,6 +43,7 @@ pub use signing::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 
 pub(super) use anti_entropy::MembershipHistoryAntiEntropy;
 pub(super) use decide_device_trust_change::DecideDeviceTrustChangeUseCase;
+pub(super) use group_update_delivery::DeliverPendingGroupUpdatesUseCase;
 pub(super) use handle_history_message::HandleMembershipHistoryMessageUseCase;
 pub(super) use ledger::{
     DeliverRestrictedMembershipUseCase, InitializeSpaceMembershipUseCase, MembershipLedger,

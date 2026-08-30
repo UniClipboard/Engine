@@ -401,6 +401,14 @@ pub trait GroupRevocationPort: Send + Sync {
         update_id: &str,
         now_ms: i64,
     ) -> Result<bool, KeyEpochError>;
+
+    async fn defer_space_group_update(
+        &self,
+        _update_id: &str,
+        _now_ms: i64,
+    ) -> Result<bool, KeyEpochError> {
+        Ok(false)
+    }
 }
 
 #[async_trait]

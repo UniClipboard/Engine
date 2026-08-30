@@ -168,10 +168,7 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
             return Ok(());
         };
         if !self.state.may_deliver_recovery(&peer_device_id).await {
-            warn!(
-                peer = %peer_device_id.as_str(),
-                "group update: peer is not admitted by current space protection"
-            );
+            warn!("group update: peer is not admitted by current space protection");
             emit_ack(&mut send, ACK_REJECTED).await;
             let _ = connection.closed().await;
             return Ok(());
@@ -237,7 +234,7 @@ impl HandlerState {
         match self.peer_admission.is_admitted(device_id).await {
             Ok(admitted) => admitted,
             Err(error) => {
-                warn!(error = %error, peer = %device_id.as_str(), "group update: peer admission check failed");
+                warn!(error = %error, "group update: peer admission check failed");
                 false
             }
         }

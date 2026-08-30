@@ -6,8 +6,8 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use uc_core::membership::{
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentityPort, GroupBootstrapPort,
-    HistoricalMembershipSignatureVerifier, MembershipHistoryExchangeEndpointPort,
-    MembershipHistoryExchangePort,
+    GroupRevocationPort, GroupUpdateDispatchPort, HistoricalMembershipSignatureVerifier,
+    MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangePort,
 };
 use uc_core::ports::PeerReachabilityChanged;
 
@@ -24,6 +24,7 @@ use crate::space::admission::{
 };
 use crate::space::membership::CurrentMemberSignaturePort;
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
+use crate::space::membership::DeliverPendingGroupUpdatesUseCase;
 use crate::space::membership::MembershipHistoryAntiEntropy;
 use crate::space::membership::PreparedSpaceMembershipMaintenanceRuntime;
 use crate::space::membership::QueryMembershipAdmissionUseCase;
@@ -112,6 +113,8 @@ pub struct SpaceApplicationDeps {
     pub apply_membership_security: Arc<dyn ApplyMembershipSecurityPort>,
     pub activate_membership_effect: Arc<dyn ActivateMembershipEffectPort>,
     pub restricted_membership_delivery: Arc<dyn RestrictedMembershipDeliveryPort>,
+    pub group_update_store: Arc<dyn GroupRevocationPort>,
+    pub group_update_dispatch: Arc<dyn GroupUpdateDispatchPort>,
     pub cleanup_legacy_membership_data: Arc<dyn CleanupLegacyMembershipDataPort>,
     pub membership_network_activity: Arc<dyn MembershipNetworkActivityPort>,
 }
@@ -213,11 +216,17 @@ impl SpaceApplication {
             Arc::clone(&ledger),
             deps.restricted_membership_delivery,
         ));
+        let deliver_group_updates = Arc::new(DeliverPendingGroupUpdatesUseCase::new(
+            deps.group_update_store,
+            deps.group_update_dispatch,
+            Arc::clone(&deps.clock),
+        ));
         let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
             MaintainSpaceMembershipDeps {
                 admissions: space_admission.clone(),
                 effects: Arc::clone(&recover_membership_effects)
                     as Arc<dyn crate::space::membership::RecoverMembershipEffectsPort>,
+                group_update_delivery: deliver_group_updates,
                 restricted_delivery: deliver_restricted_membership,
                 synchronization: membership_history_endpoint.clone(),
                 cleanup: deps.cleanup_legacy_membership_data,

@@ -388,9 +388,16 @@ flowchart TD
 #### `MaintainSpaceMembershipUseCase`
 
 - **入口**：`MembershipMaintenanceTrigger -> MembershipMaintenanceReport`。
-- **职责/作用**：隐藏完整恢复顺序：admission -> effects -> restricted delivery -> conditional history sync -> cleanup。
+- **职责/作用**：隐藏完整恢复顺序：admission -> effects -> pending group update delivery -> restricted delivery -> conditional history sync -> cleanup。
 - **关系**：唯一由 `SpaceMembershipMaintenanceRuntime` 调度；各步骤只通过窄 maintenance port 暴露。
-- **重点关注**：Deferred/StableFailure 按依赖关系继续；Corrupt 立即停止会扩大权限的后续步骤；PeerOnline 只运行该 peer 所需的受限投递和同步。
+- **重点关注**：Deferred/StableFailure 按依赖关系继续；Corrupt 立即停止会扩大权限的后续步骤；PeerOnline 也要驱动持久密钥欠账。
+
+#### `DeliverPendingGroupUpdatesUseCase`
+
+- **入口**：单次成员维护步骤，返回稳定 outcome。
+- **职责/作用**：唯一负责读取加密持久的 Group Epoch 欠账、有界投递，且只在认证对端接受后删除欠账。
+- **关系**：Infra dispatch 只完成 Iroh request/ACK；Engine 只安装 handler 并注入 port；Runtime 不理解投递内部步骤。
+- **重点关注**：Offline/Transport/Rejected 均保留欠账并持久轮转到队尾；单轮上限不能使排序靠后的设备饿饿。
 
 #### `RecoverMembershipEffectsUseCase`
 

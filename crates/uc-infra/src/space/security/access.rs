@@ -1440,6 +1440,29 @@ impl DefaultSpaceAccessAdapter {
         Ok(true)
     }
 
+    async fn defer_space_group_update(
+        &self,
+        update_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, KeyEpochError> {
+        let repository = self
+            .key_epoch_repository
+            .as_ref()
+            .ok_or_else(|| KeyEpochError::Repository("key epoch repository unavailable".into()))?;
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|error| KeyEpochError::Repository(error.to_string()))?;
+        let Some(mut material) = repository.load_space_material(&space_id).await? else {
+            return Ok(false);
+        };
+        if !material.defer_group_update(update_id, now_ms) {
+            return Ok(false);
+        }
+        repository.save_space_material(&material).await?;
+        Ok(true)
+    }
+
     async fn group_revocation_result(
         repository: &dyn RevocationRepositoryPort,
         record: &RevocationRecord,
@@ -2274,6 +2297,14 @@ impl GroupRevocationPort for DefaultSpaceAccessAdapter {
         now_ms: i64,
     ) -> Result<bool, KeyEpochError> {
         DefaultSpaceAccessAdapter::acknowledge_space_group_update(self, update_id, now_ms).await
+    }
+
+    async fn defer_space_group_update(
+        &self,
+        update_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, KeyEpochError> {
+        DefaultSpaceAccessAdapter::defer_space_group_update(self, update_id, now_ms).await
     }
 }
 

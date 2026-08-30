@@ -7,9 +7,9 @@ pub use model::{
     MembershipMaintenanceReport, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
 };
 pub use ports::{
-    CleanupLegacyMembershipDataPort, DeliverRestrictedMembershipPort, RecoverMembershipEffectsPort,
-    RecoverSpaceAdmissionsPort, SynchronizeMembershipMaintenancePort,
-    WakeSpaceMembershipMaintenancePort,
+    CleanupLegacyMembershipDataPort, DeliverPendingGroupUpdatesPort,
+    DeliverRestrictedMembershipPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    SynchronizeMembershipMaintenancePort, WakeSpaceMembershipMaintenancePort,
 };
 pub use runtime::MembershipNetworkActivityPort;
 pub(crate) use runtime::{

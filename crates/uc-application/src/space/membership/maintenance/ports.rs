@@ -31,6 +31,11 @@ pub trait DeliverRestrictedMembershipPort: Send + Sync {
 }
 
 #[async_trait]
+pub trait DeliverPendingGroupUpdatesPort: Send + Sync {
+    async fn deliver_pending_group_updates(&self) -> MembershipMaintenanceStepOutcome;
+}
+
+#[async_trait]
 pub trait SynchronizeMembershipMaintenancePort: Send + Sync {
     async fn periodic_synchronization_required(
         &self,

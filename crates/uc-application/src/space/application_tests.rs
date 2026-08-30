@@ -69,6 +69,63 @@ impl HistoricalMembershipSignatureVerifier for PassivePorts {
 }
 
 #[async_trait]
+impl GroupUpdateDispatchPort for PassivePorts {
+    async fn dispatch_group_update(
+        &self,
+        _update: &PendingGroupUpdate,
+    ) -> Result<(), GroupUpdateDispatchError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl GroupRevocationPort for PassivePorts {
+    async fn revoke_group_member(
+        &self,
+        _: &DeviceId,
+        _: &[DeviceId],
+        _: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        unreachable!()
+    }
+    async fn acknowledge_group_update(
+        &self,
+        _: &RevocationId,
+        _: &DeviceId,
+        _: i64,
+    ) -> Result<GroupRevocationResult, KeyEpochError> {
+        unreachable!()
+    }
+    async fn apply_group_epoch_update(&self, _: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
+        unreachable!()
+    }
+    async fn pending_group_updates(
+        &self,
+        _: &RevocationId,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        unreachable!()
+    }
+    async fn query_group_revocation(
+        &self,
+        _: &RevocationId,
+    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
+        unreachable!()
+    }
+    async fn resume_group_revocations(
+        &self,
+        _: i64,
+    ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
+        Ok(Vec::new())
+    }
+    async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+        Ok(Vec::new())
+    }
+    async fn acknowledge_space_group_update(&self, _: &str, _: i64) -> Result<bool, KeyEpochError> {
+        Ok(false)
+    }
+}
+
+#[async_trait]
 impl CurrentMemberSignaturePort for PassivePorts {
     async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
         unreachable!()
@@ -637,6 +694,8 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             apply_membership_security: passive.clone(),
             activate_membership_effect: passive.clone(),
             restricted_membership_delivery: passive.clone(),
+            group_update_store: passive.clone(),
+            group_update_dispatch: passive.clone(),
             cleanup_legacy_membership_data: passive.clone(),
             membership_network_activity: passive.clone(),
         },
