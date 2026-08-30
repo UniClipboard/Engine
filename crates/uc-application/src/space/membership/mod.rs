@@ -6,8 +6,9 @@ mod maintenance;
 mod query_admission;
 mod query_device_trust;
 mod re_pairing;
+mod recover_conflict;
 mod remove_space_member;
-pub(crate) mod resolve_conflict;
+mod resolve_conflict;
 mod signing;
 mod synchronize_history;
 
@@ -38,6 +39,11 @@ pub use query_device_trust::{
     LoadDeviceTrustObservationsPort, PendingDeviceTrustChange, QueryDeviceTrustError,
 };
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
+pub use recover_conflict::{
+    FetchMembershipBranchRecoveryError, FetchMembershipBranchRecoveryInput,
+    FetchMembershipBranchRecoveryPort, PrepareMembershipBranchTransitionError,
+    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
+};
 pub use remove_space_member::{
     MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
 };
@@ -66,7 +72,11 @@ pub(super) use query_admission::{MembershipAdmissionSnapshot, QueryMembershipAdm
 pub(super) use query_admission::{QueryMembershipAdmissionPort, QueryMembershipAdmissionUseCase};
 pub(super) use query_device_trust::QueryDeviceTrustUseCase;
 pub(super) use re_pairing::{RePairingState, ResolveRePairingPort};
+pub(super) use recover_conflict::{
+    RecoverMembershipConflictOutcome, RecoverMembershipConflictUseCase,
+};
 pub(super) use remove_space_member::RemoveSpaceMemberUseCase;
+pub(crate) use resolve_conflict::QueryMembershipConflictStatusPort;
 pub(super) use resolve_conflict::ResolveMembershipConflictUseCase;
 pub(super) use synchronize_history::SynchronizeMembershipHistoryUseCase;
 mod anti_entropy;

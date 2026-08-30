@@ -33,3 +33,5 @@
 - 恢复包不能信任 transport 提供的 branch 声明：验证入口必须重新解码完整目标历史、验证全部历史签名并重算 branch id。
 - recipient 与授权签发成员都必须位于目标 `active_members`；只保留历史 credential 的 Removed 实例不能签发或接收恢复。
 - nonce 是否已使用依赖持久状态，归 Application ledger CAS；Core 只拒绝零 nonce 并把 nonce 纳入授权签名载荷。
+- 恢复包 nonce 必须绑定首次消费它的 conflict，而不能只保存一个无归属集合；这样才能区分同一流程重试与跨 conflict 重放。
+- transition preparation port 只允许返回无外部副作用的 `Prepared` 计划，generation 文件写入必须留给 CAS 成功后的后续阶段。

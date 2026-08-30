@@ -28,6 +28,7 @@ use crate::space::membership::DeliverPendingGroupUpdatesUseCase;
 use crate::space::membership::MembershipHistoryAntiEntropy;
 use crate::space::membership::PreparedSpaceMembershipMaintenanceRuntime;
 use crate::space::membership::QueryMembershipAdmissionUseCase;
+use crate::space::membership::QueryMembershipConflictStatusPort;
 use crate::space::membership::RemoveSpaceMemberUseCase;
 use crate::space::membership::ResolveMembershipConflictUseCase;
 use crate::space::membership::{
@@ -259,8 +260,7 @@ impl SpaceApplication {
         ));
         let resolve_membership_conflict = Arc::new(ResolveMembershipConflictUseCase::new(
             Arc::clone(&ledger),
-            Arc::clone(&query_device_trust)
-                as Arc<dyn crate::space::membership::resolve_conflict::QueryMembershipConflictStatusPort>,
+            Arc::clone(&query_device_trust) as Arc<dyn QueryMembershipConflictStatusPort>,
         ));
         Self {
             ledger,

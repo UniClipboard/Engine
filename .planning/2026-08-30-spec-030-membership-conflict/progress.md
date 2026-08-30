@@ -31,3 +31,9 @@
 - `cargo test -p uc-application resolve_conflict --locked`：3 passed。
 - `cargo check -p uc-infra --all-targets --locked`：通过（仅既有 warning）。
 - `cargo test -p uc-core --test membership_history_v2 branch_recovery_package_binds_recipient_branch_expiry_and_authorization --locked`：1 passed。
+## 2026-08-30 · Application recovery coordinator
+
+- 新增恢复包获取与无副作用 transition preparation ports。
+- coordinator 验证 conflict、branch、recipient、expiry、完整历史与授权签名。
+- 单次 membership ledger CAS 原子消费 nonce、保存 `Prepared` transition 并推进为 `Transitioning`。
+- 新增成功、提交后重试幂等、跨 conflict nonce 重放零账本副作用测试。

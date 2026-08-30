@@ -102,6 +102,18 @@ impl MembershipBranchRecoveryPackageV1 {
         self
     }
 
+    pub const fn nonce(&self) -> &[u8; 32] {
+        &self.nonce
+    }
+
+    pub const fn conflict_id(&self) -> MembershipConflictId {
+        self.conflict_id
+    }
+
+    pub const fn target_branch_id(&self) -> MembershipBranchId {
+        self.target_branch_id
+    }
+
     pub fn validate(
         &self,
         expected_conflict_id: MembershipConflictId,

@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 3：选择 CAS、稳定 transition id 与 Application facade 已完成；Core 恢复包验证已完成，下一切片补恢复 coordinator 和维护重启续跑。
+Phase 3：选择 CAS、稳定 transition id、Application facade 与恢复 coordinator 已完成；下一切片把 coordinator 接入维护运行期并开始真实 generation adapter。
 
 ## Next Step
 
-定义 recovery/transition ports，并让 Application coordinator 在同一 ledger CAS 消费 nonce、保存 Prepared transition。
+为 Engine/Infra 装配 recovery/transition ports，把 coordinator 接入维护触发顺序，并实现 `SourceBackedUp` 之后的真实 generation transition 阶段。
 
 ## Constraints
 

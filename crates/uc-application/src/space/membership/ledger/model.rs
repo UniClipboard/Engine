@@ -137,6 +137,9 @@ pub struct LoadedMembershipLedger {
     #[serde(default)]
     pub membership_branch_transitions:
         BTreeMap<[u8; 32], uc_core::membership::MembershipBranchTransitionV1>,
+    /// 已接受恢复包的 nonce 随 ledger 整体加密；value 绑定首次消费它的 conflict。
+    #[serde(default)]
+    pub consumed_membership_recovery_nonces: BTreeMap<[u8; 32], MembershipConflictId>,
 }
 
 impl LoadedMembershipLedger {
@@ -155,6 +158,7 @@ impl LoadedMembershipLedger {
             pending_effects: BTreeMap::new(),
             membership_conflicts: BTreeMap::new(),
             membership_branch_transitions: BTreeMap::new(),
+            consumed_membership_recovery_nonces: BTreeMap::new(),
         }
     }
 }
@@ -250,6 +254,10 @@ impl std::fmt::Debug for LoadedMembershipLedger {
             .field(
                 "membership_branch_transition_count",
                 &self.membership_branch_transitions.len(),
+            )
+            .field(
+                "consumed_membership_recovery_nonce_count",
+                &self.consumed_membership_recovery_nonces.len(),
             )
             .field("inbound_transfer_count", &self.inbound_transfers.len())
             .field("pending_effect_count", &self.pending_effects.len())

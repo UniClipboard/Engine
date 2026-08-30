@@ -193,6 +193,9 @@ impl MembershipLedger {
             record.inbound_transfers.clear();
             record.completed_inbound_transfers.clear();
             record.pending_effects.clear();
+            record.membership_conflicts.clear();
+            record.membership_branch_transitions.clear();
+            record.consumed_membership_recovery_nonces.clear();
             Ok(())
         })
         .await?;
@@ -210,6 +213,9 @@ impl MembershipLedger {
             record.inbound_transfers.clear();
             record.completed_inbound_transfers.clear();
             record.pending_effects.clear();
+            record.membership_conflicts.clear();
+            record.membership_branch_transitions.clear();
+            record.consumed_membership_recovery_nonces.clear();
             Ok(())
         })
         .await?;
