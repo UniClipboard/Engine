@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    BaseMembershipHistoryPosition, MemberInstanceId, MembershipDecisionV2, MembershipHistoryPageV2,
-    MembershipHistoryRelationship,
+    BaseMembershipHistoryPosition, MemberInstanceId, MembershipDecisionV2, MembershipHistoryAckV3,
+    MembershipHistoryRelationship, MembershipHistorySuffixPageV3,
 };
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,8 +13,28 @@ pub struct PeerReconciliationRecord {
     pub peer_device_id: DeviceId,
     pub relationship: MembershipHistoryRelationship,
     pub confirmed_position: Option<BaseMembershipHistoryPosition>,
+    #[serde(default)]
+    pub sync_state: PeerHistorySyncState,
     pub restricted_delivery: Vec<RestrictedMembershipDelivery>,
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PeerHistorySyncOutcome {
+    #[default]
+    Never,
+    Deferred,
+    Acked,
+    StableRejected,
+}
+
+/// 对端历史确认后的持久化调度状态；它与关系判断正交，并随 ledger 整体加密。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PeerHistorySyncState {
+    pub pending_since_revision: Option<u64>,
+    pub retry_attempt: u32,
+    pub next_attempt_at_ms: i64,
+    pub last_attempt_outcome: PeerHistorySyncOutcome,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,7 +48,7 @@ pub struct InboundMembershipTransfer {
     pub source_device_id: DeviceId,
     pub transfer_id: [u8; 32],
     pub page_count: u32,
-    pub pages: BTreeMap<u32, MembershipHistoryPageV2>,
+    pub pages: BTreeMap<u32, MembershipHistorySuffixPageV3>,
     pub total_bytes: usize,
 }
 
@@ -64,9 +84,11 @@ pub struct LoadedMembershipLedger {
     pub local_member_instance: Option<MemberInstanceId>,
     pub local_join_active: bool,
     pub peer_reconciliation: BTreeMap<DeviceId, PeerReconciliationRecord>,
+    /// 公平游标只保存最后选中的 peer；下一轮从其后继续，避免排序尾部饥饿。
+    #[serde(default)]
+    pub history_sync_cursor: Option<DeviceId>,
     pub inbound_transfers: BTreeMap<DeviceId, InboundMembershipTransfer>,
-    pub completed_inbound_transfers:
-        BTreeMap<(DeviceId, [u8; 32]), uc_core::membership::MembershipHistoryV2Ack>,
+    pub completed_inbound_transfers: BTreeMap<(DeviceId, [u8; 32]), MembershipHistoryAckV3>,
     pub pending_effects: BTreeMap<[u8; 32], PendingMembershipEffect>,
 }
 
@@ -80,6 +102,7 @@ impl LoadedMembershipLedger {
             local_member_instance: None,
             local_join_active: false,
             peer_reconciliation: BTreeMap::new(),
+            history_sync_cursor: None,
             inbound_transfers: BTreeMap::new(),
             completed_inbound_transfers: BTreeMap::new(),
             pending_effects: BTreeMap::new(),
@@ -101,6 +124,7 @@ impl std::fmt::Debug for PeerReconciliationRecord {
             .field("peer_device_id", &"[REDACTED]")
             .field("relationship", &self.relationship)
             .field("restricted_delivery_count", &self.restricted_delivery.len())
+            .field("sync_state", &self.sync_state)
             .field("updated_at_ms", &self.updated_at_ms)
             .finish()
     }

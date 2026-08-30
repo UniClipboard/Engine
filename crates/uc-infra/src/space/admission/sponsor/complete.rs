@@ -9,8 +9,9 @@ use uc_application::deps::{
     ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
     ApplyMembershipMemberFactsPort, CommitMembershipLedgerPort, CurrentMemberSignaturePort,
     LoadMembershipLedgerPort, MembershipEffectKind, MembershipEffectPhase,
-    MembershipLedgerMutation, PeerReconciliationRecord, PendingMembershipEffect,
-    PrepareSponsorCompleteError, PrepareSponsorCompletePort, PreparedSponsorComplete,
+    MembershipLedgerMutation, PeerHistorySyncState, PeerReconciliationRecord,
+    PendingMembershipEffect, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
+    PreparedSponsorComplete,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -168,25 +169,41 @@ impl DefaultSponsorAdmissionActivation {
         if ledger.lineage_id.as_deref() != Some(activated.space_id.as_str()) {
             anyhow::bail!("the Sponsor membership ledger has a different lineage");
         }
-        let position = history.current_position()?;
         let local_device_id = ledger
             .local_device_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("the Sponsor membership ledger has no local device"))?;
+        let mut previous_reconciliation = std::mem::take(&mut ledger.peer_reconciliation);
         ledger.peer_reconciliation = history
             .active_members()
             .into_iter()
             .filter_map(|member| history.admission_facts_for(member))
             .filter(|facts| facts.device_id != local_device_id)
             .map(|facts| {
+                let previous = previous_reconciliation.remove(&facts.device_id);
                 (
                     facts.device_id.clone(),
                     PeerReconciliationRecord {
                         peer_device_id: facts.device_id.clone(),
-                        relationship: MembershipHistoryRelationship::Consistent,
-                        confirmed_position: Some(position.clone()),
-                        restricted_delivery: Vec::new(),
-                        updated_at_ms: 0,
+                        relationship: previous
+                            .as_ref()
+                            .map_or(MembershipHistoryRelationship::Consistent, |record| {
+                                record.relationship
+                            }),
+                        // 本次提交产生了新的正式 head；旧 ACK 只证明旧目标，不能证明
+                        // 对端已经拥有新成员。清空后由认证 ACK 重新推进水位。
+                        confirmed_position: None,
+                        sync_state: previous.as_ref().map_or_else(
+                            || PeerHistorySyncState {
+                                pending_since_revision: Some(ledger.revision.saturating_add(1)),
+                                ..Default::default()
+                            },
+                            |record| record.sync_state.clone(),
+                        ),
+                        restricted_delivery: previous
+                            .as_ref()
+                            .map_or_else(Vec::new, |record| record.restricted_delivery.clone()),
+                        updated_at_ms: previous.map_or(0, |record| record.updated_at_ms),
                     },
                 )
             })

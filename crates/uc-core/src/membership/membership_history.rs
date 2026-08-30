@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::ids::DeviceId;
 
 use super::versioned_membership_history::{
-    MembershipDecisionV2, MembershipEventV2, MembershipHistoryPageV2, MembershipHistoryV2Ack,
+    BaseMembershipHistoryPosition, MembershipDecisionV2, MembershipEventV2,
+    MembershipHistorySuffixPageV3,
 };
 use super::MemberInstanceId;
 
@@ -113,10 +114,156 @@ impl PendingRemovalFacts {
 /// Versioned reconciliation messages carried on the authenticated member channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MembershipHistoryMessage {
-    HistoryPageV2(MembershipHistoryPageV2),
-    AckV2(MembershipHistoryV2Ack),
+    SummaryV3(MembershipHistorySummaryV3),
+    RequestSuffixV3(MembershipHistorySuffixRequestV3),
+    SuffixPageV3(MembershipHistorySuffixPageV3),
+    AckV3(MembershipHistoryAckV3),
     /// 仅向被普通成员 scope 排除的对端交付指定成员事件。
-    RestrictedEventV2(MembershipEventV2),
+    RestrictedEventV3(MembershipEventV2),
     /// 仅向被普通成员 scope 排除的对端交付指定成员决定。
-    RestrictedDecisionV2(MembershipDecisionV2),
+    RestrictedDecisionV3(MembershipDecisionV2),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipHistorySummaryV3 {
+    pub lineage_id: String,
+    pub current_position: BaseMembershipHistoryPosition,
+    pub transfer_id: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipHistorySuffixRequestV3 {
+    pub transfer_id: [u8; 32],
+    pub known_position: BaseMembershipHistoryPosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MembershipHistoryAckV3 {
+    Continue {
+        transfer_id: [u8; 32],
+        next_page_index: u32,
+    },
+    Confirmed {
+        transfer_id: [u8; 32],
+        confirmed_position: BaseMembershipHistoryPosition,
+    },
+    RestrictedApplied,
+    RestrictedConsistent,
+    Diverged,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipHistoryReconciliationPlan {
+    Noop,
+    OfferSuffix,
+    RequestSuffix,
+    Diverged,
+    Invalid,
+}
+
+pub fn plan_membership_history_reconciliation(
+    local_lineage: &str,
+    local: &BaseMembershipHistoryPosition,
+    remote_lineage: &str,
+    remote: &BaseMembershipHistoryPosition,
+    remote_position_known_locally: bool,
+) -> MembershipHistoryReconciliationPlan {
+    if local_lineage.is_empty() || remote_lineage != local_lineage {
+        return MembershipHistoryReconciliationPlan::Invalid;
+    }
+    if local == remote {
+        return MembershipHistoryReconciliationPlan::Noop;
+    }
+    if remote.depth < local.depth {
+        return if remote_position_known_locally {
+            MembershipHistoryReconciliationPlan::OfferSuffix
+        } else {
+            MembershipHistoryReconciliationPlan::Diverged
+        };
+    }
+    if remote.depth > local.depth {
+        return MembershipHistoryReconciliationPlan::RequestSuffix;
+    }
+    MembershipHistoryReconciliationPlan::Diverged
+}
+
+pub fn ack_confirms_membership_history_target(
+    expected_transfer_id: [u8; 32],
+    expected_position: &BaseMembershipHistoryPosition,
+    ack: &MembershipHistoryAckV3,
+) -> bool {
+    matches!(
+        ack,
+        MembershipHistoryAckV3::Confirmed {
+            transfer_id,
+            confirmed_position,
+        } if *transfer_id == expected_transfer_id && confirmed_position == expected_position
+    )
+}
+
+#[cfg(test)]
+mod anti_entropy_tests {
+    use super::*;
+
+    fn position(depth: u64, digest: u8) -> BaseMembershipHistoryPosition {
+        BaseMembershipHistoryPosition {
+            event_id: None,
+            depth,
+            history_digest: [digest; 32],
+        }
+    }
+
+    #[test]
+    fn planner_keeps_relationship_and_delivery_direction_separate() {
+        let local = position(3, 3);
+        assert_eq!(
+            plan_membership_history_reconciliation("space", &local, "space", &local, true),
+            MembershipHistoryReconciliationPlan::Noop
+        );
+        assert_eq!(
+            plan_membership_history_reconciliation("space", &local, "space", &position(2, 2), true,),
+            MembershipHistoryReconciliationPlan::OfferSuffix
+        );
+        assert_eq!(
+            plan_membership_history_reconciliation(
+                "space",
+                &local,
+                "space",
+                &position(4, 4),
+                false,
+            ),
+            MembershipHistoryReconciliationPlan::RequestSuffix
+        );
+        assert_eq!(
+            plan_membership_history_reconciliation(
+                "space",
+                &local,
+                "space",
+                &position(2, 9),
+                false,
+            ),
+            MembershipHistoryReconciliationPlan::Diverged
+        );
+    }
+
+    #[test]
+    fn ack_must_bind_the_exact_transfer_and_target() {
+        let target = position(3, 3);
+        let ack = MembershipHistoryAckV3::Confirmed {
+            transfer_id: [7; 32],
+            confirmed_position: target.clone(),
+        };
+        assert!(ack_confirms_membership_history_target(
+            [7; 32], &target, &ack
+        ));
+        assert!(!ack_confirms_membership_history_target(
+            [8; 32], &target, &ack
+        ));
+        assert!(!ack_confirms_membership_history_target(
+            [7; 32],
+            &position(4, 4),
+            &ack
+        ));
+    }
 }

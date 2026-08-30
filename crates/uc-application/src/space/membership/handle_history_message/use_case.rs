@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    MembershipDecisionV2, MembershipEventV2, MembershipHistoryMessage,
-    MembershipHistoryRelationship, MembershipHistoryV2Ack, MembershipOperationV2,
+    plan_membership_history_reconciliation, MembershipDecisionV2, MembershipEventV2,
+    MembershipHistoryAckV3, MembershipHistoryMessage, MembershipHistoryReconciliationPlan,
+    MembershipHistoryRelationship, MembershipHistorySuffixRequestV3, MembershipOperationV2,
     VersionedMembershipHistory, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 
 use crate::space::membership::{
     InboundMembershipTransfer as LedgerInboundTransfer, LoadedMembershipLedger,
     MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    PendingMembershipEffect,
+    PendingMembershipEffect, WakeSpaceMembershipMaintenancePort,
 };
 
 use super::{AuthenticatedMember, HandleMembershipHistoryMessageError};
@@ -19,6 +20,7 @@ const MAX_MEMBERSHIP_TRANSFER_SIZE: usize = MAX_MEMBERSHIP_HISTORY_FRAME_SIZE * 
 pub(crate) struct HandleMembershipHistoryMessageUseCase {
     ledger: Arc<MembershipLedger>,
     execution_lock: tokio::sync::Mutex<()>,
+    maintenance_wake: Option<Arc<dyn WakeSpaceMembershipMaintenancePort>>,
 }
 
 impl HandleMembershipHistoryMessageUseCase {
@@ -26,6 +28,27 @@ impl HandleMembershipHistoryMessageUseCase {
         Self {
             ledger,
             execution_lock: tokio::sync::Mutex::new(()),
+            maintenance_wake: None,
+        }
+    }
+
+    pub(crate) fn new_with_wake(
+        ledger: Arc<MembershipLedger>,
+        maintenance_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
+    ) -> Self {
+        Self {
+            ledger,
+            execution_lock: tokio::sync::Mutex::new(()),
+            maintenance_wake: Some(maintenance_wake),
+        }
+    }
+
+    fn wake_after_history_change(&self, changed: bool) {
+        if changed {
+            if let Some(wake) = self.maintenance_wake.as_ref() {
+                // 历史、effects 与 fan-out 欠账已经原子提交；wake 只负责降低恢复延迟。
+                wake.wake();
+            }
         }
     }
 
@@ -35,14 +58,67 @@ impl HandleMembershipHistoryMessageUseCase {
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, HandleMembershipHistoryMessageError> {
         let page = match message {
-            MembershipHistoryMessage::HistoryPageV2(page) => page,
-            MembershipHistoryMessage::RestrictedEventV2(event) => {
+            MembershipHistoryMessage::SummaryV3(summary) => {
+                let snapshot = self
+                    .ledger
+                    .load_verified()
+                    .await
+                    .map_err(map_ledger_error)?;
+                let history = snapshot
+                    .history()
+                    .ok_or(HandleMembershipHistoryMessageError::RecoveryRequired)?;
+                if history
+                    .effective_member_for_device(source.device_id())
+                    .is_none()
+                    || summary.lineage_id != history.lineage_id()
+                {
+                    return Ok(MembershipHistoryMessage::AckV3(
+                        MembershipHistoryAckV3::Invalid,
+                    ));
+                }
+                let current_position = history
+                    .current_position()
+                    .map_err(|_| HandleMembershipHistoryMessageError::RecoveryRequired)?;
+                let plan = plan_membership_history_reconciliation(
+                    history.lineage_id(),
+                    &current_position,
+                    &summary.lineage_id,
+                    &summary.current_position,
+                    history.contains_strict_ancestor_position(&summary.current_position),
+                );
+                return match plan {
+                    MembershipHistoryReconciliationPlan::Noop
+                    | MembershipHistoryReconciliationPlan::OfferSuffix => {
+                        // OfferSuffix 先确认远端真实祖先；本机持久欠账会驱动反向发送。
+                        Ok(MembershipHistoryMessage::AckV3(
+                            MembershipHistoryAckV3::Confirmed {
+                                transfer_id: summary.transfer_id,
+                                confirmed_position: summary.current_position,
+                            },
+                        ))
+                    }
+                    MembershipHistoryReconciliationPlan::RequestSuffix => {
+                        Ok(MembershipHistoryMessage::RequestSuffixV3(
+                            MembershipHistorySuffixRequestV3 {
+                                transfer_id: summary.transfer_id,
+                                known_position: current_position,
+                            },
+                        ))
+                    }
+                    MembershipHistoryReconciliationPlan::Diverged
+                    | MembershipHistoryReconciliationPlan::Invalid => Ok(
+                        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid),
+                    ),
+                };
+            }
+            MembershipHistoryMessage::SuffixPageV3(page) => page,
+            MembershipHistoryMessage::RestrictedEventV3(event) => {
                 return self.receive_restricted_event(source, event).await;
             }
-            MembershipHistoryMessage::RestrictedDecisionV2(decision) => {
+            MembershipHistoryMessage::RestrictedDecisionV3(decision) => {
                 return self.receive_restricted_decision(source, decision).await;
             }
-            MembershipHistoryMessage::AckV2(_) => {
+            MembershipHistoryMessage::RequestSuffixV3(_) | MembershipHistoryMessage::AckV3(_) => {
                 return Err(HandleMembershipHistoryMessageError::Rejected);
             }
         };
@@ -51,8 +127,8 @@ impl HandleMembershipHistoryMessageUseCase {
                 .map(|bytes| bytes.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE)
                 .unwrap_or(true)
         {
-            return Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Invalid,
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
             ));
         }
         let _guard = self.execution_lock.lock().await;
@@ -67,8 +143,8 @@ impl HandleMembershipHistoryMessageUseCase {
             .and_then(|history| history.effective_member_for_device(&source_device_id))
             .is_none()
         {
-            return Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Invalid,
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
             ));
         }
         let transfer_id = page.transfer_id();
@@ -77,7 +153,7 @@ impl HandleMembershipHistoryMessageUseCase {
             .completed_inbound_transfers
             .get(&(source_device_id.clone(), transfer_id))
         {
-            return Ok(MembershipHistoryMessage::AckV2(*ack));
+            return Ok(MembershipHistoryMessage::AckV3(ack.clone()));
         }
         let page_index = page.page_index();
         let page_count = page.page_count();
@@ -96,16 +172,16 @@ impl HandleMembershipHistoryMessageUseCase {
         if transfer.transfer_id != transfer_id || transfer.page_count != page_count {
             self.commit_invalid_transfer(&snapshot, source_device_id, transfer_id)
                 .await?;
-            return Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Invalid,
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
             ));
         }
         let expected_index = u32::try_from(transfer.pages.len())
             .map_err(|_| HandleMembershipHistoryMessageError::RecoveryRequired)?;
         if page_index < expected_index {
             if transfer.pages.get(&page_index) == Some(&page) {
-                return Ok(MembershipHistoryMessage::AckV2(
-                    MembershipHistoryV2Ack::Continue {
+                return Ok(MembershipHistoryMessage::AckV3(
+                    MembershipHistoryAckV3::Continue {
                         transfer_id,
                         next_page_index: expected_index,
                     },
@@ -113,13 +189,13 @@ impl HandleMembershipHistoryMessageUseCase {
             }
             self.commit_invalid_transfer(&snapshot, source_device_id, transfer_id)
                 .await?;
-            return Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Invalid,
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
             ));
         }
         if page_index > expected_index {
-            return Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Continue {
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Continue {
                     transfer_id,
                     next_page_index: expected_index,
                 },
@@ -136,8 +212,8 @@ impl HandleMembershipHistoryMessageUseCase {
         if transfer.total_bytes > MAX_MEMBERSHIP_TRANSFER_SIZE {
             self.commit_invalid_transfer(&snapshot, source_device_id, transfer_id)
                 .await?;
-            return Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Invalid,
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
             ));
         }
         transfer.pages.insert(page_index, page);
@@ -154,8 +230,8 @@ impl HandleMembershipHistoryMessageUseCase {
                 })
                 .await
                 .map_err(map_ledger_error)?;
-            return Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Continue {
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Continue {
                     transfer_id,
                     next_page_index,
                 },
@@ -175,84 +251,60 @@ impl HandleMembershipHistoryMessageUseCase {
                 expected_revision,
                 expected_history_digest,
                 move |record, current, verifier| {
-                    let incoming = match VersionedMembershipHistory::import_exchange_pages_v2(
-                        &pages, verifier,
-                    ) {
-                        Ok(incoming) if incoming.lineage_id() == current.lineage_id() => incoming,
-                        _ => {
-                            mark_invalid(record, &source_device_id, transfer_id);
-                            return Ok(MembershipHistoryV2Ack::Invalid);
-                        }
-                    };
-                    let candidates = [source_device_id.clone()];
-                    let Some(source_member) =
-                        incoming.member_for_device(&source_device_id, &candidates)
-                    else {
-                        mark_invalid(record, &source_device_id, transfer_id);
-                        return Ok(MembershipHistoryV2Ack::Invalid);
-                    };
-                    let incoming_bytes = incoming
-                        .encode_persisted_v2()
-                        .map_err(|_| MembershipLedgerError::Corrupt)?;
-                    let current_bytes = current
-                        .encode_persisted_v2()
-                        .map_err(|_| MembershipLedgerError::Corrupt)?;
                     let members_before_merge = current.effective_members();
-                    let ack = if incoming_bytes == current_bytes {
-                        MembershipHistoryV2Ack::Consistent
-                    } else if incoming.active_members().contains(&source_member)
-                        && (incoming
-                            .is_authorized_active_member_extension_of(current, source_member)
-                            || incoming.is_authorized_decision_delivery_of(current, source_member))
+                    let sender_is_bound = pages.first().is_some_and(|page| {
+                        page.sender_admission().device_id == source_device_id
+                            && current.admission_facts_for(page.sender_admission().member_instance)
+                                == Some(page.sender_admission())
+                    });
+                    // 不可信后缀先在副本上完整验证；失败时绝不能把部分事件写入账本。
+                    let mut candidate = current.clone();
+                    let ack = match sender_is_bound
+                        .then(|| candidate.apply_suffix_pages_v3(&pages, verifier))
                     {
-                        match current.merge_remote_history(&incoming, local_member, verifier) {
-                            Ok(true) => {
-                                record_new_membership_effects(
-                                    record,
-                                    current,
-                                    &members_before_merge,
-                                )?;
-                                MembershipHistoryV2Ack::UpdatesApplied
+                        Some(Ok(true)) => {
+                            *current = candidate;
+                            record_new_membership_effects(record, current, &members_before_merge)?;
+                            let confirmed_position = current
+                                .current_position()
+                                .map_err(|_| MembershipLedgerError::Corrupt)?;
+                            MembershipHistoryAckV3::Confirmed {
+                                transfer_id,
+                                confirmed_position,
                             }
-                            Ok(false) => MembershipHistoryV2Ack::Consistent,
-                            Err(_) => MembershipHistoryV2Ack::Invalid,
                         }
-                    } else {
-                        MembershipHistoryV2Ack::Invalid
+                        Some(Ok(false)) | Some(Err(_)) | None => MembershipHistoryAckV3::Invalid,
                     };
-                    let relationship = match ack {
-                        MembershipHistoryV2Ack::Consistent
-                        | MembershipHistoryV2Ack::UpdatesApplied => {
+                    let relationship = match &ack {
+                        MembershipHistoryAckV3::Confirmed { .. } => {
                             if current.pending_removal_decision(local_member).is_some() {
                                 MembershipHistoryRelationship::PendingRemovalDecision
-                            } else if current.removal_choices_diverge(local_member, source_member) {
-                                MembershipHistoryRelationship::Diverged
                             } else {
                                 MembershipHistoryRelationship::Consistent
                             }
                         }
-                        MembershipHistoryV2Ack::Diverged => MembershipHistoryRelationship::Diverged,
-                        MembershipHistoryV2Ack::Invalid
-                        | MembershipHistoryV2Ack::Continue { .. } => {
-                            MembershipHistoryRelationship::Invalid
-                        }
+                        MembershipHistoryAckV3::Diverged => MembershipHistoryRelationship::Diverged,
+                        _ => MembershipHistoryRelationship::Invalid,
                     };
                     record.inbound_transfers.remove(&source_device_id);
                     record
                         .completed_inbound_transfers
-                        .insert((source_device_id.clone(), transfer_id), ack);
+                        .insert((source_device_id.clone(), transfer_id), ack.clone());
                     let peer = record
                         .peer_reconciliation
                         .get_mut(&source_device_id)
                         .ok_or(MembershipLedgerError::Corrupt)?;
                     peer.relationship = relationship;
-                    peer.confirmed_position = current.current_position().ok();
+                    if matches!(ack, MembershipHistoryAckV3::Confirmed { .. }) {
+                        peer.confirmed_position = current.current_position().ok();
+                    }
                     Ok(ack)
                 },
             )
             .await
             .map_err(map_ledger_error)?;
-        Ok(MembershipHistoryMessage::AckV2(ack))
+        self.wake_after_history_change(matches!(ack, MembershipHistoryAckV3::Confirmed { .. }));
+        Ok(MembershipHistoryMessage::AckV3(ack))
     }
 
     async fn receive_restricted_event(
@@ -271,8 +323,8 @@ impl HandleMembershipHistoryMessageUseCase {
             .history()
             .and_then(|history| history.effective_member_for_device(&source_device_id));
         if source_member != Some(event.author_member_instance_id) {
-            return Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Invalid,
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
             ));
         }
         let expected_revision = snapshot.record().revision;
@@ -287,21 +339,22 @@ impl HandleMembershipHistoryMessageUseCase {
                     let ack = match history.verify_and_receive_event(event, verifier) {
                         Ok(uc_core::membership::MembershipHistoryV2ReceiveOutcome::Applied) => {
                             record_new_membership_effects(record, history, &members_before)?;
-                            MembershipHistoryV2Ack::UpdatesApplied
+                            MembershipHistoryAckV3::RestrictedApplied
                         }
                         Ok(
                             uc_core::membership::MembershipHistoryV2ReceiveOutcome::AlreadyKnown,
-                        ) => MembershipHistoryV2Ack::Consistent,
+                        ) => MembershipHistoryAckV3::RestrictedConsistent,
                         Ok(uc_core::membership::MembershipHistoryV2ReceiveOutcome::Diverged)
-                        | Err(_) => MembershipHistoryV2Ack::Invalid,
+                        | Err(_) => MembershipHistoryAckV3::Invalid,
                     };
-                    update_restricted_relationship(record, &source_device_id, history, ack);
+                    update_restricted_relationship(record, &source_device_id, history, &ack);
                     Ok(ack)
                 },
             )
             .await
             .map_err(map_ledger_error)?;
-        Ok(MembershipHistoryMessage::AckV2(ack))
+        self.wake_after_history_change(matches!(ack, MembershipHistoryAckV3::RestrictedApplied));
+        Ok(MembershipHistoryMessage::AckV3(ack))
     }
 
     async fn receive_restricted_decision(
@@ -320,8 +373,8 @@ impl HandleMembershipHistoryMessageUseCase {
             history.member_for_device(&source_device_id, std::slice::from_ref(&source_device_id))
         });
         if source_member != Some(decision.decided_by_member_instance_id) {
-            return Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Invalid,
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
             ));
         }
         let expected_revision = snapshot.record().revision;
@@ -336,17 +389,18 @@ impl HandleMembershipHistoryMessageUseCase {
                     let ack = match history.verify_and_record_peer_decision(decision, verifier) {
                         Ok(_) => {
                             record_new_membership_effects(record, history, &members_before)?;
-                            MembershipHistoryV2Ack::UpdatesApplied
+                            MembershipHistoryAckV3::RestrictedApplied
                         }
-                        Err(_) => MembershipHistoryV2Ack::Invalid,
+                        Err(_) => MembershipHistoryAckV3::Invalid,
                     };
-                    update_restricted_relationship(record, &source_device_id, history, ack);
+                    update_restricted_relationship(record, &source_device_id, history, &ack);
                     Ok(ack)
                 },
             )
             .await
             .map_err(map_ledger_error)?;
-        Ok(MembershipHistoryMessage::AckV2(ack))
+        self.wake_after_history_change(matches!(ack, MembershipHistoryAckV3::RestrictedApplied));
+        Ok(MembershipHistoryMessage::AckV3(ack))
     }
 
     async fn commit_invalid_transfer(
@@ -376,19 +430,19 @@ fn update_restricted_relationship(
     record: &mut LoadedMembershipLedger,
     source_device_id: &uc_core::ids::DeviceId,
     history: &VersionedMembershipHistory,
-    ack: MembershipHistoryV2Ack,
+    ack: &MembershipHistoryAckV3,
 ) {
     if let Some(peer) = record.peer_reconciliation.get_mut(source_device_id) {
         peer.relationship = match ack {
-            MembershipHistoryV2Ack::Consistent | MembershipHistoryV2Ack::UpdatesApplied => {
+            MembershipHistoryAckV3::RestrictedConsistent
+            | MembershipHistoryAckV3::RestrictedApplied => {
                 MembershipHistoryRelationship::Consistent
             }
-            MembershipHistoryV2Ack::Diverged => MembershipHistoryRelationship::Diverged,
-            MembershipHistoryV2Ack::Invalid | MembershipHistoryV2Ack::Continue { .. } => {
-                MembershipHistoryRelationship::Invalid
-            }
+            MembershipHistoryAckV3::Diverged => MembershipHistoryRelationship::Diverged,
+            _ => MembershipHistoryRelationship::Invalid,
         };
-        peer.confirmed_position = history.current_position().ok();
+        // 受限事件 ACK 只确认该事件，不能证明来源端拥有本机完整历史位置。
+        let _ = history;
     }
 }
 
@@ -400,7 +454,7 @@ fn mark_invalid(
     record.inbound_transfers.remove(source_device_id);
     record.completed_inbound_transfers.insert(
         (source_device_id.clone(), transfer_id),
-        MembershipHistoryV2Ack::Invalid,
+        MembershipHistoryAckV3::Invalid,
     );
     if let Some(peer) = record.peer_reconciliation.get_mut(source_device_id) {
         peer.relationship = MembershipHistoryRelationship::Invalid;
@@ -421,6 +475,28 @@ fn record_new_membership_effects(
         .difference(&members_after_merge)
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
+    for member in &members_after_merge {
+        let Some(facts) = history.admission_facts_for(*member) else {
+            return Err(MembershipLedgerError::Corrupt);
+        };
+        if record.local_device_id.as_ref() == Some(&facts.device_id) {
+            continue;
+        }
+        record
+            .peer_reconciliation
+            .entry(facts.device_id.clone())
+            .or_insert_with(|| crate::space::membership::PeerReconciliationRecord {
+                peer_device_id: facts.device_id.clone(),
+                relationship: MembershipHistoryRelationship::Unknown,
+                confirmed_position: None,
+                sync_state: crate::space::membership::PeerHistorySyncState {
+                    pending_since_revision: Some(record.revision.saturating_add(1)),
+                    ..Default::default()
+                },
+                restricted_delivery: Vec::new(),
+                updated_at_ms: 0,
+            });
+    }
     let mut event_id = history.current_head();
     while let Some(current_event_id) = event_id {
         let Some(event) = history.event(current_event_id) else {

@@ -228,6 +228,7 @@ impl DecideDeviceTrustChangeUseCase {
                             peer_device_id: proposed_by_device_id,
                             relationship: next_relationship,
                             confirmed_position: None,
+                            sync_state: Default::default(),
                             restricted_delivery: vec![RestrictedMembershipDelivery::Decision(
                                 decision_for_commit,
                             )],

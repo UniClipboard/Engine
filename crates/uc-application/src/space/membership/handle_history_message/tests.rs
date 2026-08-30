@@ -7,8 +7,8 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, HistoricalMembershipSignatureError,
     HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipAdmissionV2,
-    MembershipCredential, MembershipEventId, MembershipEventV2, MembershipHistoryMessage,
-    MembershipHistoryRelationship, MembershipHistoryV2Ack, MembershipOperationV2,
+    MembershipCredential, MembershipEventId, MembershipEventV2, MembershipHistoryAckV3,
+    MembershipHistoryMessage, MembershipHistoryRelationship, MembershipOperationV2,
     VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 
@@ -86,59 +86,6 @@ fn member_facts(device: &str, credential_byte: u8) -> (AdmissionChangeFacts, Mem
             identity_signature: vec![3],
         },
         credential,
-    )
-}
-
-fn consistent_transfer() -> (
-    LoadedMembershipLedger,
-    DeviceId,
-    MembershipHistoryMessage,
-    [u8; 32],
-) {
-    let (local, local_credential) = member_facts("device-a", 0x41);
-    let (peer, peer_credential) = member_facts("device-b", 0x42);
-    let history = VersionedMembershipHistory::from_activation_baseline(
-        MembershipActivationBaselineV2::Established {
-            lineage_id: "space-a".to_owned(),
-            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
-            head_depth: 0,
-            current_members: vec![
-                (local.clone(), local_credential),
-                (peer.clone(), peer_credential),
-            ],
-        },
-    )
-    .unwrap();
-    let page = history
-        .export_reconciliation_pages_v2(peer.clone())
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    let transfer_id = page.transfer_id();
-    let peer_device_id = peer.device_id.clone();
-    let mut loaded = LoadedMembershipLedger::no_current_space();
-    loaded.revision = 5;
-    loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
-    loaded.local_device_id = Some(local.device_id);
-    loaded.local_member_instance = Some(local.member_instance);
-    loaded.local_join_active = true;
-    loaded.peer_reconciliation.insert(
-        peer_device_id.clone(),
-        PeerReconciliationRecord {
-            peer_device_id: peer_device_id.clone(),
-            relationship: MembershipHistoryRelationship::Unknown,
-            confirmed_position: None,
-            restricted_delivery: Vec::new(),
-            updated_at_ms: 1,
-        },
-    );
-    (
-        loaded,
-        peer_device_id,
-        MembershipHistoryMessage::HistoryPageV2(page),
-        transfer_id,
     )
 }
 
@@ -237,7 +184,7 @@ fn two_page_extension() -> (
         .verify_and_receive_event(add_d, &AcceptingVerifier)
         .unwrap();
     let pages = incoming
-        .export_reconciliation_pages_v2(peer.clone())
+        .export_suffix_pages_v3(peer.clone(), base.current_position().unwrap())
         .unwrap();
     assert_eq!(pages.len(), 2);
     let peer_device_id = peer.device_id.clone();
@@ -254,6 +201,7 @@ fn two_page_extension() -> (
             peer_device_id: peer_device_id.clone(),
             relationship: MembershipHistoryRelationship::Consistent,
             confirmed_position: None,
+            sync_state: Default::default(),
             restricted_delivery: Vec::new(),
             updated_at_ms: 1,
         },
@@ -263,51 +211,9 @@ fn two_page_extension() -> (
         peer_device_id,
         pages
             .into_iter()
-            .map(MembershipHistoryMessage::HistoryPageV2)
+            .map(MembershipHistoryMessage::SuffixPageV3)
             .collect(),
     )
-}
-
-#[tokio::test]
-async fn complete_page_is_persisted_before_ack_and_replays_idempotently() {
-    let (loaded, peer_device_id, message, transfer_id) = consistent_transfer();
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
-    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
-    let source = AuthenticatedMember::new(peer_device_id.clone());
-
-    let first = handler.execute(&source, message.clone()).await.unwrap();
-    let replay = handler.execute(&source, message).await.unwrap();
-
-    assert_eq!(
-        first,
-        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Consistent)
-    );
-    assert_eq!(replay, first);
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
-    let persisted = repository.load().await.unwrap();
-    assert!(persisted.inbound_transfers.is_empty());
-    assert_eq!(
-        persisted
-            .completed_inbound_transfers
-            .get(&(peer_device_id.clone(), transfer_id)),
-        Some(&MembershipHistoryV2Ack::Consistent)
-    );
-    assert_eq!(
-        persisted
-            .peer_reconciliation
-            .get(&peer_device_id)
-            .unwrap()
-            .relationship,
-        MembershipHistoryRelationship::Consistent
-    );
 }
 
 #[tokio::test]
@@ -355,6 +261,7 @@ async fn restricted_event_applies_only_the_authenticated_signed_event() {
             peer_device_id: peer.device_id.clone(),
             relationship: MembershipHistoryRelationship::Consistent,
             confirmed_position: None,
+            sync_state: Default::default(),
             restricted_delivery: Vec::new(),
             updated_at_ms: 1,
         },
@@ -372,18 +279,26 @@ async fn restricted_event_applies_only_the_authenticated_signed_event() {
 
     let response = handler
         .execute(
-            &AuthenticatedMember::new(peer.device_id),
-            MembershipHistoryMessage::RestrictedEventV2(event),
+            &AuthenticatedMember::new(peer.device_id.clone()),
+            MembershipHistoryMessage::RestrictedEventV3(event),
         )
         .await
         .unwrap();
 
     assert_eq!(
         response,
-        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::UpdatesApplied)
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::RestrictedApplied)
     );
     let persisted = repository.load().await.unwrap();
     assert!(persisted.pending_effects.contains_key(&event_id));
+    assert_eq!(
+        persisted
+            .peer_reconciliation
+            .get(&peer.device_id)
+            .and_then(|record| record.confirmed_position.as_ref()),
+        None,
+        "受限事件 ACK 不能伪造完整历史确认水位"
+    );
 }
 
 #[tokio::test]
@@ -407,7 +322,7 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
 
     assert!(matches!(
         first,
-        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Continue {
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Continue {
             next_page_index: 1,
             ..
         })
@@ -427,10 +342,10 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
 
     let final_ack = handler.execute(&source, pages[1].clone()).await.unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         final_ack,
-        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::UpdatesApplied)
-    );
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Confirmed { .. })
+    ));
     assert_eq!(repository.commits.load(Ordering::SeqCst), 2);
     let persisted = repository.load().await.unwrap();
     assert!(persisted.inbound_transfers.is_empty());
@@ -467,7 +382,7 @@ async fn out_of_order_page_requests_the_missing_page_without_persisting() {
 
     assert!(matches!(
         response,
-        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Continue {
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Continue {
             next_page_index: 0,
             ..
         })
@@ -482,52 +397,9 @@ async fn out_of_order_page_requests_the_missing_page_without_persisting() {
 }
 
 #[tokio::test]
-async fn replacing_an_active_transfer_is_persistently_invalid() {
-    let (loaded, peer_device_id, pages) = two_page_extension();
-    let (_, _, replacement, replacement_transfer_id) = consistent_transfer();
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
-    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
-    let source = AuthenticatedMember::new(peer_device_id.clone());
-    handler.execute(&source, pages[0].clone()).await.unwrap();
-
-    let invalid = handler.execute(&source, replacement.clone()).await.unwrap();
-    let replay = handler.execute(&source, replacement).await.unwrap();
-
-    assert_eq!(
-        invalid,
-        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Invalid)
-    );
-    assert_eq!(replay, invalid);
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 2);
-    let persisted = repository.load().await.unwrap();
-    assert!(persisted.inbound_transfers.is_empty());
-    assert_eq!(
-        persisted
-            .completed_inbound_transfers
-            .get(&(peer_device_id.clone(), replacement_transfer_id)),
-        Some(&MembershipHistoryV2Ack::Invalid)
-    );
-    assert_eq!(
-        persisted
-            .peer_reconciliation
-            .get(&peer_device_id)
-            .unwrap()
-            .relationship,
-        MembershipHistoryRelationship::Invalid
-    );
-}
-
-#[tokio::test]
 async fn authenticated_removed_device_is_rejected_before_a_page_is_saved() {
-    let (mut loaded, peer_device_id, message, _) = consistent_transfer();
+    let (mut loaded, peer_device_id, pages) = two_page_extension();
+    let message = pages[0].clone();
     let (local, local_credential) = member_facts("device-a", 0x41);
     loaded.membership_history = Some(
         VersionedMembershipHistory::new_single_member_root(
@@ -560,7 +432,7 @@ async fn authenticated_removed_device_is_rejected_before_a_page_is_saved() {
 
     assert_eq!(
         response,
-        MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Invalid)
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid)
     );
     assert_eq!(repository.commits.load(Ordering::SeqCst), 0);
     assert!(repository

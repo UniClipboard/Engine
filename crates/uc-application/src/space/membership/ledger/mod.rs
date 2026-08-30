@@ -20,8 +20,8 @@ pub use error::MembershipLedgerError;
 pub(crate) use initializer::InitializeSpaceMembershipUseCase;
 pub use model::{
     InboundMembershipTransfer, LoadedMembershipLedger, MembershipEffectKind, MembershipEffectPhase,
-    MembershipLedgerMutation, PeerReconciliationRecord, PendingMembershipEffect,
-    RestrictedMembershipDelivery,
+    MembershipLedgerMutation, PeerHistorySyncOutcome, PeerHistorySyncState,
+    PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
 };
 pub use repository::{CommitMembershipLedgerPort, LoadMembershipLedgerPort};
 pub(crate) use repository::{MembershipLedger, VerifiedMembershipLedger};

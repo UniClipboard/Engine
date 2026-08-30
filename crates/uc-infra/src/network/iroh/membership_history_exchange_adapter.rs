@@ -13,8 +13,8 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    MemberRepositoryPort, MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
-    MembershipHistoryExchangePort, MembershipHistoryMessage, MembershipHistoryV2Ack,
+    MemberRepositoryPort, MembershipHistoryAckV3, MembershipHistoryExchangeEndpointPort,
+    MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
     MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
@@ -22,9 +22,9 @@ use uc_core::ports::PeerAddressRepositoryPort;
 
 use super::connect_with_staggered_retry;
 
-pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/2";
+pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/3";
 
-const WIRE_VERSION: u8 = 2;
+const WIRE_VERSION: u8 = 3;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 2;
@@ -116,26 +116,31 @@ impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
     ) -> Result<(), RestrictedMembershipDeliveryError> {
         let message = match delivery {
             RestrictedMembershipDelivery::Event(event) => {
-                MembershipHistoryMessage::RestrictedEventV2(event.clone())
+                MembershipHistoryMessage::RestrictedEventV3(event.clone())
             }
             RestrictedMembershipDelivery::Decision(decision) => {
-                MembershipHistoryMessage::RestrictedDecisionV2(decision.clone())
+                MembershipHistoryMessage::RestrictedDecisionV3(decision.clone())
             }
         };
         match self.exchange_membership_history(peer, message).await {
-            Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Consistent | MembershipHistoryV2Ack::UpdatesApplied,
+            Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::RestrictedConsistent
+                | MembershipHistoryAckV3::RestrictedApplied,
             )) => Ok(()),
-            Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Invalid | MembershipHistoryV2Ack::Diverged,
+            Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid | MembershipHistoryAckV3::Diverged,
             ))
-            | Ok(MembershipHistoryMessage::HistoryPageV2(_))
-            | Ok(MembershipHistoryMessage::RestrictedEventV2(_))
-            | Ok(MembershipHistoryMessage::RestrictedDecisionV2(_)) => {
+            | Ok(MembershipHistoryMessage::SuffixPageV3(_))
+            | Ok(MembershipHistoryMessage::SummaryV3(_))
+            | Ok(MembershipHistoryMessage::RequestSuffixV3(_))
+            | Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Continue { .. } | MembershipHistoryAckV3::Confirmed { .. },
+            ))
+            | Ok(MembershipHistoryMessage::RestrictedEventV3(_))
+            | Ok(MembershipHistoryMessage::RestrictedDecisionV3(_)) => {
                 Err(RestrictedMembershipDeliveryError::Rejected)
             }
-            Ok(MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Continue { .. }))
-            | Err(MembershipHistoryExchangeError::Offline)
+            Err(MembershipHistoryExchangeError::Offline)
             | Err(MembershipHistoryExchangeError::Transport) => {
                 Err(RestrictedMembershipDeliveryError::Deferred)
             }
@@ -242,10 +247,12 @@ fn decode_message(
         postcard::from_bytes(body).map_err(|_| MembershipHistoryExchangeError::Transport)?;
     if matches!(
         message,
-        MembershipHistoryMessage::HistoryPageV2(_)
-            | MembershipHistoryMessage::AckV2(_)
-            | MembershipHistoryMessage::RestrictedEventV2(_)
-            | MembershipHistoryMessage::RestrictedDecisionV2(_)
+        MembershipHistoryMessage::SummaryV3(_)
+            | MembershipHistoryMessage::RequestSuffixV3(_)
+            | MembershipHistoryMessage::AckV3(_)
+            | MembershipHistoryMessage::SuffixPageV3(_)
+            | MembershipHistoryMessage::RestrictedEventV3(_)
+            | MembershipHistoryMessage::RestrictedDecisionV3(_)
     ) {
         Ok(message)
     } else {
@@ -283,26 +290,23 @@ impl IrohMembershipHistoryExchangeHandler {
             return known;
         }
 
-        // A device admitted while this peer was offline can introduce itself
-        // only through the signed admission record that binds its transport
-        // identity. The application verifies and persists that record before
-        // the device is treated as a normal member on later exchanges.
-        introduced_device(message, &fingerprint)
+        // V3 只接受已有成员通道；新成员历史必须由接收方已认识的成员传播。
+        let _ = message;
+        None
     }
 }
 
 fn introduced_device(
     message: &MembershipHistoryMessage,
-    fingerprint: &uc_core::security::IdentityFingerprint,
+    _fingerprint: &uc_core::security::IdentityFingerprint,
 ) -> Option<DeviceId> {
     match message {
-        MembershipHistoryMessage::HistoryPageV2(page) => {
-            (page.sender_admission().identity_fingerprint == *fingerprint)
-                .then(|| page.sender_admission().device_id.clone())
-        }
-        MembershipHistoryMessage::AckV2(_)
-        | MembershipHistoryMessage::RestrictedEventV2(_)
-        | MembershipHistoryMessage::RestrictedDecisionV2(_) => None,
+        MembershipHistoryMessage::SuffixPageV3(_) => None,
+        MembershipHistoryMessage::SummaryV3(_)
+        | MembershipHistoryMessage::RequestSuffixV3(_)
+        | MembershipHistoryMessage::AckV3(_)
+        | MembershipHistoryMessage::RestrictedEventV3(_)
+        | MembershipHistoryMessage::RestrictedDecisionV3(_) => None,
     }
 }
 
@@ -369,9 +373,10 @@ mod tests {
     use uc_core::membership::{
         AdmissionChangeFacts, HistoricalMembershipSignatureError,
         HistoricalMembershipSignatureVerifier, MembershipAdmissionV2, MembershipCredential,
-        MembershipEventV2, MembershipHistoryMessage, MembershipHistoryV2Ack, MembershipOperationV2,
-        VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
-        MAX_MEMBERSHIP_HISTORY_FRAME_SIZE, MEMBERSHIP_EVENT_FORMAT_V2,
+        MembershipEventV2, MembershipHistoryAckV3, MembershipHistoryMessage,
+        MembershipHistoryV2Ack, MembershipOperationV2, VersionedMembershipHistory,
+        ED25519_SIGNATURE_ALGORITHM_V1, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+        MEMBERSHIP_EVENT_FORMAT_V2,
     };
     use uc_core::security::IdentityFingerprint;
 
@@ -392,19 +397,37 @@ mod tests {
     }
 
     #[test]
-    fn history_v2_wire_checks_version_before_decoding_the_body() {
+    fn history_v3_wire_checks_version_before_decoding_the_body() {
         assert_eq!(
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
-            b"uniclipboard/membership-history/2"
+            b"uniclipboard/membership-history/3"
         );
-        let message = MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Consistent);
+        let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
         let encoded = encode_message(&message).unwrap();
-        assert_eq!(encoded[0], 2);
+        assert_eq!(encoded[0], 3);
         assert_eq!(decode_message(&encoded).unwrap(), message);
 
         let mut old_version_with_invalid_body = vec![1];
         old_version_with_invalid_body.extend([0xff; 32]);
         assert!(decode_message(&old_version_with_invalid_body).is_err());
+    }
+
+    #[test]
+    fn history_v3_summary_is_accepted_by_the_decode_allowlist() {
+        let message =
+            MembershipHistoryMessage::SummaryV3(uc_core::membership::MembershipHistorySummaryV3 {
+                lineage_id: "space-a".to_owned(),
+                current_position: uc_core::membership::BaseMembershipHistoryPosition {
+                    event_id: None,
+                    depth: 0,
+                    history_digest: [7; 32],
+                },
+                transfer_id: [8; 32],
+            });
+
+        let encoded = encode_message(&message).unwrap();
+
+        assert_eq!(decode_message(&encoded).unwrap(), message);
     }
 
     fn fingerprint() -> IdentityFingerprint {
@@ -441,79 +464,9 @@ mod tests {
         }
     }
 
-    fn introduction(
-        device_id: &str,
-        identity_fingerprint: IdentityFingerprint,
-    ) -> MembershipHistoryMessage {
-        let verifier = TestVerifier;
-        let device_id = DeviceId::new(device_id);
-        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![7; 32]);
-        let instance = credential.member_instance_id(&device_id);
-        let admission = MembershipAdmissionV2 {
-            facts: AdmissionChangeFacts {
-                member_instance: instance,
-                device_id,
-                device_name: "device".to_owned(),
-                identity_fingerprint,
-                transport_public_key: vec![1; 32],
-                transport_address_blob: vec![2],
-                identity_signature: vec![3],
-            },
-            membership_credential: credential.clone(),
-            resume_public_key_digest: [8; 32],
-            security_commitment_id: [9; 32],
-        };
-        let mut history = VersionedMembershipHistory::new("space-a".to_owned());
-        let operation = MembershipOperationV2::AddDevice {
-            admission: admission.clone(),
-        };
-        let mut event = MembershipEventV2::new(
-            MEMBERSHIP_EVENT_FORMAT_V2,
-            "space-a".to_owned(),
-            None,
-            0,
-            [1; 16],
-            instance,
-            credential.credential_id,
-            credential.signature_algorithm_version,
-            operation.clone(),
-            history
-                .expected_resulting_members_digest(None, &operation)
-                .expect("genesis digest"),
-            [5; 32],
-            vec![6],
-            Some([7; 32]),
-            Vec::new(),
-        );
-        event.signature = verifier.sign(&credential, &event.signing_payload());
-        history
-            .verify_and_receive_event(event, &verifier)
-            .expect("genesis verifies");
-        MembershipHistoryMessage::HistoryPageV2(
-            history
-                .export_reconciliation_pages_v2(admission.facts)
-                .expect("history exports")
-                .remove(0),
-        )
-    }
-
-    #[test]
-    fn unknown_member_introduction_must_bind_to_the_connection_identity() {
-        let connected = fingerprint();
-        let message = introduction("device-c", connected.clone());
-
-        assert_eq!(
-            introduced_device(&message, &connected),
-            Some(DeviceId::new("device-c"))
-        );
-        let other = IdentityFingerprint::from_display_string("QRST-UVWX-YZ23-4567")
-            .unwrap_or_else(|_| panic!("test fingerprint must be valid"));
-        assert_eq!(introduced_device(&message, &other), None);
-    }
-
     #[test]
     fn unknown_member_cannot_introduce_itself_with_a_regular_history_message() {
-        let message = MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Consistent);
+        let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
 
         assert_eq!(introduced_device(&message, &fingerprint()), None);
     }

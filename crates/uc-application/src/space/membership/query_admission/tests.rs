@@ -114,6 +114,7 @@ async fn relationship_for_a_non_member_does_not_block_a_new_invitation() {
             peer_device_id: former_peer,
             relationship: MembershipHistoryRelationship::Diverged,
             confirmed_position: None,
+            sync_state: Default::default(),
             restricted_delivery: Vec::new(),
             updated_at_ms: 1,
         },

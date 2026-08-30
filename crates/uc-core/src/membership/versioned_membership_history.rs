@@ -719,6 +719,68 @@ pub struct MembershipHistoryPageV2 {
     known_head: Option<MembershipEventId>,
 }
 
+const MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V3: u16 = 3;
+pub const MAX_MEMBERSHIP_HISTORY_SUFFIX_PAGES: usize = 64;
+
+/// V3 只携带 `base_position` 之后的连续记录；接收方必须从完全匹配的 base 原子应用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipHistorySuffixPageV3 {
+    format_version: u16,
+    transfer_id: [u8; 32],
+    page_index: u32,
+    page_count: u32,
+    lineage_id: String,
+    base_position: BaseMembershipHistoryPosition,
+    target_position: BaseMembershipHistoryPosition,
+    sender_admission: AdmissionChangeFacts,
+    events: Vec<MembershipEventV2>,
+    activation_receipts: Vec<AdmissionActivationReceipt>,
+    decisions: Vec<MembershipDecisionV2>,
+}
+
+impl MembershipHistorySuffixPageV3 {
+    pub fn transfer_id(&self) -> [u8; 32] {
+        self.transfer_id
+    }
+
+    pub fn page_index(&self) -> u32 {
+        self.page_index
+    }
+
+    pub fn page_count(&self) -> u32 {
+        self.page_count
+    }
+
+    pub fn base_position(&self) -> &BaseMembershipHistoryPosition {
+        &self.base_position
+    }
+
+    pub fn target_position(&self) -> &BaseMembershipHistoryPosition {
+        &self.target_position
+    }
+
+    pub fn sender_admission(&self) -> &AdmissionChangeFacts {
+        &self.sender_admission
+    }
+
+    pub fn validate_envelope(&self) -> Result<(), MembershipHistoryV2Error> {
+        let record_count =
+            self.events.len() + self.activation_receipts.len() + self.decisions.len();
+        if self.format_version != MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V3
+            || self.page_count == 0
+            || self.page_index >= self.page_count
+            || record_count != 1
+            || postcard::to_stdvec(self)
+                .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?
+                .len()
+                > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
+        {
+            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        }
+        Ok(())
+    }
+}
+
 impl MembershipHistoryPageV2 {
     pub fn validate_envelope(&self) -> Result<(), MembershipHistoryV2Error> {
         let counts = self.record_counts();
@@ -979,6 +1041,158 @@ impl VersionedMembershipHistory {
             .peer_decisions
             .retain(|_, decision| decision.decided_by_member_instance_id == sender_member);
         exchange_history.export_pages_v2(sender_admission)
+    }
+
+    pub fn export_suffix_pages_v3(
+        &self,
+        sender_admission: AdmissionChangeFacts,
+        base_position: BaseMembershipHistoryPosition,
+    ) -> Result<Vec<MembershipHistorySuffixPageV3>, MembershipHistoryV2Error> {
+        let target_position = self.validate_exchange_sender(&sender_admission)?;
+        if base_position == target_position {
+            return Ok(Vec::new());
+        }
+        let base_event = base_position
+            .event_id
+            .ok_or(MembershipHistoryV2Error::UnknownParent)?;
+        if self.depth(base_event) != Some(base_position.depth) {
+            return Err(MembershipHistoryV2Error::UnknownParent);
+        }
+        let mut suffix_events = Vec::new();
+        let mut cursor = self.known_head;
+        while cursor != Some(base_event) {
+            let event_id = cursor.ok_or(MembershipHistoryV2Error::UnknownParent)?;
+            let event = self
+                .events
+                .get(&event_id)
+                .cloned()
+                .ok_or(MembershipHistoryV2Error::UnknownParent)?;
+            cursor = event.parent_event_id;
+            suffix_events.push(event);
+        }
+        suffix_events.reverse();
+
+        let mut records = Vec::new();
+        for event in suffix_events {
+            let event_id = event.event_id();
+            records.push(MembershipHistorySuffixRecordV3::Event(event));
+            if let Some(receipt) = self.activation_receipts.get(&event_id) {
+                records.push(MembershipHistorySuffixRecordV3::ActivationReceipt(
+                    receipt.activation_receipt.clone(),
+                ));
+            }
+        }
+        records.extend(
+            self.peer_decisions
+                .values()
+                .filter(|decision| {
+                    decision.decided_by_member_instance_id == sender_admission.member_instance
+                })
+                .cloned()
+                .map(MembershipHistorySuffixRecordV3::Decision),
+        );
+        if records.is_empty() || records.len() > MAX_MEMBERSHIP_HISTORY_SUFFIX_PAGES {
+            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        }
+        let transfer_id = suffix_transfer_id_v3(
+            &self.lineage_id,
+            &base_position,
+            &target_position,
+            &sender_admission,
+            &records,
+        )?;
+        let page_count = u32::try_from(records.len())
+            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        records
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let (events, activation_receipts, decisions) = match record {
+                    MembershipHistorySuffixRecordV3::Event(event) => {
+                        (vec![event], Vec::new(), Vec::new())
+                    }
+                    MembershipHistorySuffixRecordV3::ActivationReceipt(receipt) => {
+                        (Vec::new(), vec![receipt], Vec::new())
+                    }
+                    MembershipHistorySuffixRecordV3::Decision(decision) => {
+                        (Vec::new(), Vec::new(), vec![decision])
+                    }
+                };
+                let page = MembershipHistorySuffixPageV3 {
+                    format_version: MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V3,
+                    transfer_id,
+                    page_index: u32::try_from(index)
+                        .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?,
+                    page_count,
+                    lineage_id: self.lineage_id.clone(),
+                    base_position: base_position.clone(),
+                    target_position: target_position.clone(),
+                    sender_admission: sender_admission.clone(),
+                    events,
+                    activation_receipts,
+                    decisions,
+                };
+                page.validate_envelope()?;
+                Ok(page)
+            })
+            .collect()
+    }
+
+    pub fn apply_suffix_pages_v3(
+        &mut self,
+        pages: &[MembershipHistorySuffixPageV3],
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
+    ) -> Result<bool, MembershipHistoryV2Error> {
+        let first = pages
+            .first()
+            .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        if pages.len() != first.page_count as usize
+            || pages.len() > MAX_MEMBERSHIP_HISTORY_SUFFIX_PAGES
+            || self.lineage_id != first.lineage_id
+            || self.current_position()? != first.base_position
+        {
+            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        }
+        let mut ordered = pages.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|page| page.page_index);
+        let mut records = Vec::with_capacity(ordered.len());
+        for (index, page) in ordered.iter().enumerate() {
+            page.validate_envelope()?;
+            if page.page_index as usize != index
+                || page.page_count != first.page_count
+                || page.transfer_id != first.transfer_id
+                || page.lineage_id != first.lineage_id
+                || page.base_position != first.base_position
+                || page.target_position != first.target_position
+                || page.sender_admission != first.sender_admission
+            {
+                return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            }
+            if let Some(event) = page.events.first() {
+                records.push(MembershipHistorySuffixRecordV3::Event(event.clone()));
+                self.verify_and_receive_event(event.clone(), verifier)?;
+            } else if let Some(receipt) = page.activation_receipts.first() {
+                records.push(MembershipHistorySuffixRecordV3::ActivationReceipt(
+                    receipt.clone(),
+                ));
+                self.verify_and_record_activation_receipt(receipt.clone(), verifier)?;
+            } else if let Some(decision) = page.decisions.first() {
+                records.push(MembershipHistorySuffixRecordV3::Decision(decision.clone()));
+                self.verify_and_record_peer_decision(decision.clone(), verifier)?;
+            }
+        }
+        if suffix_transfer_id_v3(
+            &first.lineage_id,
+            &first.base_position,
+            &first.target_position,
+            &first.sender_admission,
+            &records,
+        )? != first.transfer_id
+            || self.current_position()? != first.target_position
+        {
+            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        }
+        Ok(true)
     }
 
     fn export_pages_v2(
@@ -1369,6 +1583,20 @@ impl VersionedMembershipHistory {
             depth,
             history_digest: hasher.finalize().into(),
         })
+    }
+
+    /// 判断远端位置是否是本机已验证分支中的严格祖先。
+    /// 摘要规划只用它阻止“新节点向旧节点索取旧历史”的反向覆盖。
+    pub fn contains_strict_ancestor_position(
+        &self,
+        position: &BaseMembershipHistoryPosition,
+    ) -> bool {
+        self.known_head
+            .and_then(|head| self.depth(head))
+            .is_some_and(|local_depth| position.depth < local_depth)
+            && position
+                .event_id
+                .is_some_and(|event_id| self.events.contains_key(&event_id))
     }
 
     pub fn effective_members(&self) -> BTreeSet<MemberInstanceId> {
@@ -2375,6 +2603,36 @@ fn append_history_page_record(
         return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+enum MembershipHistorySuffixRecordV3 {
+    Event(MembershipEventV2),
+    ActivationReceipt(AdmissionActivationReceipt),
+    Decision(MembershipDecisionV2),
+}
+
+fn suffix_transfer_id_v3(
+    lineage_id: &str,
+    base_position: &BaseMembershipHistoryPosition,
+    target_position: &BaseMembershipHistoryPosition,
+    sender_admission: &AdmissionChangeFacts,
+    records: &[MembershipHistorySuffixRecordV3],
+) -> Result<[u8; 32], MembershipHistoryV2Error> {
+    let encoded = postcard::to_stdvec(&(
+        MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V3,
+        lineage_id,
+        base_position,
+        target_position,
+        sender_admission,
+        records,
+    ))
+    .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"uniclipboard/membership-history-suffix/v3\0");
+    hasher.update((encoded.len() as u64).to_be_bytes());
+    hasher.update(encoded);
+    Ok(hasher.finalize().into())
 }
 
 fn history_transfer_id(encoded_history: &[u8]) -> [u8; 32] {

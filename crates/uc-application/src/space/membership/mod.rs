@@ -19,8 +19,9 @@ pub use ledger::{
     CurrentSpaceMemberScopePort, InboundMembershipTransfer, LoadMembershipLedgerPort,
     LoadedMembershipLedger, MembershipEffectExecutionError, MembershipEffectKind,
     MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
-    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
+    PeerHistorySyncOutcome, PeerHistorySyncState, PeerReconciliationRecord,
+    PendingMembershipEffect, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
@@ -38,6 +39,7 @@ pub use remove_space_member::{
 };
 pub use signing::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 
+pub(super) use anti_entropy::MembershipHistoryAntiEntropy;
 pub(super) use decide_device_trust_change::DecideDeviceTrustChangeUseCase;
 pub(super) use handle_history_message::HandleMembershipHistoryMessageUseCase;
 pub(super) use ledger::{
@@ -58,3 +60,4 @@ pub(super) use query_device_trust::QueryDeviceTrustUseCase;
 pub(super) use re_pairing::{RePairingState, ResolveRePairingPort};
 pub(super) use remove_space_member::RemoveSpaceMemberUseCase;
 pub(super) use synchronize_history::SynchronizeMembershipHistoryUseCase;
+mod anti_entropy;

@@ -159,6 +159,7 @@ fn active_two_member_ledger() -> LoadedMembershipLedger {
             peer_device_id,
             relationship: MembershipHistoryRelationship::Consistent,
             confirmed_position: None,
+            sync_state: Default::default(),
             restricted_delivery: Vec::new(),
             updated_at_ms: 1,
         },

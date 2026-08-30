@@ -153,6 +153,7 @@ impl RemoveSpaceMemberUseCase {
                             peer_device_id: target_for_commit,
                             relationship: MembershipHistoryRelationship::PendingRemovalDecision,
                             confirmed_position: None,
+                            sync_state: Default::default(),
                             restricted_delivery: vec![RestrictedMembershipDelivery::Event(
                                 event_for_commit,
                             )],

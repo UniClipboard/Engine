@@ -26,6 +26,7 @@
 - [旧资料独立化与重新配对](specs/026-legacy-profile-isolation-and-re-pairing.md)
 - [Application Space 成员关系一次性重写](specs/027-application-space-membership-one-shot-rewrite.md)
 - [单一 Space 准入协议](specs/028-single-space-admission-protocol.md)
+- [持久化成员历史反熵](specs/029-durable-membership-history-anti-entropy.md)
 - [Engine 仓库检查](specs/engine-repository-checks.md)
 - [Port 定义](specs/ports.md)
 - [uc-engine 跨平台核心接口](specs/uc-engine-interface.md)

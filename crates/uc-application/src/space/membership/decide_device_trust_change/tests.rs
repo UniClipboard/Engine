@@ -271,6 +271,7 @@ fn pending_local_removal_ledger() -> (LoadedMembershipLedger, TestSigner, Member
             peer_device_id,
             relationship: MembershipHistoryRelationship::PendingRemovalDecision,
             confirmed_position: None,
+            sync_state: Default::default(),
             restricted_delivery: Vec::new(),
             updated_at_ms: 1,
         },

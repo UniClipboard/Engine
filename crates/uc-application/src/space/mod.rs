@@ -120,8 +120,9 @@ pub use membership::{
     CurrentSpaceMemberScopePort, InboundMembershipTransfer, LoadMembershipLedgerPort,
     LoadedMembershipLedger, MembershipEffectExecutionError, MembershipEffectKind,
     MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
-    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
+    PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
+    RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
 pub use membership::{
     CleanupLegacyMembershipDataPort, DeliverRestrictedMembershipPort,

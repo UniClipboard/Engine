@@ -6,8 +6,8 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, HistoricalMembershipSignatureError,
     HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipCredential,
-    MembershipEventId, MembershipHistoryExchangeError, MembershipHistoryExchangePort,
-    MembershipHistoryMessage, MembershipHistoryRelationship, MembershipHistoryV2Ack,
+    MembershipEventId, MembershipHistoryAckV3, MembershipHistoryExchangeError,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, MembershipHistoryRelationship,
     VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 
@@ -16,7 +16,7 @@ use crate::space::membership::{
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
     CurrentSpaceMemberScopePort, LoadMembershipLedgerPort, LoadedMembershipLedger,
     MembershipLedger, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    PeerReconciliationRecord, SpaceMemberPauseReason,
+    PeerReconciliationRecord, SpaceMemberPauseReason, SynchronizeMembershipMaintenancePort,
 };
 
 struct MemoryLedgerRepository(Mutex<LoadedMembershipLedger>);
@@ -68,6 +68,14 @@ struct UnsortedScope;
 struct PausedUnknownScope;
 
 struct EmptyScope;
+
+struct FixedClock;
+
+impl uc_core::ports::ClockPort for FixedClock {
+    fn now_ms(&self) -> i64 {
+        10_000
+    }
+}
 
 #[async_trait]
 impl CurrentSpaceMemberScopePort for UnsortedScope {
@@ -121,14 +129,24 @@ impl MembershipHistoryExchangePort for RecordingTransport {
     async fn exchange_membership_history(
         &self,
         recipient: &DeviceId,
-        _message: MembershipHistoryMessage,
+        message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
-        self.recipients.lock().unwrap().push(recipient.clone());
+        if matches!(&message, MembershipHistoryMessage::SummaryV3(_)) {
+            self.recipients.lock().unwrap().push(recipient.clone());
+        }
         if recipient == &DeviceId::new("device-c") {
             return Err(MembershipHistoryExchangeError::Offline);
         }
-        Ok(MembershipHistoryMessage::AckV2(
-            MembershipHistoryV2Ack::Consistent,
+        if let MembershipHistoryMessage::SummaryV3(summary) = message {
+            return Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Confirmed {
+                    transfer_id: summary.transfer_id,
+                    confirmed_position: summary.current_position,
+                },
+            ));
+        }
+        Ok(MembershipHistoryMessage::AckV3(
+            MembershipHistoryAckV3::Invalid,
         ))
     }
 }
@@ -186,6 +204,7 @@ fn active_ledger() -> LoadedMembershipLedger {
                 peer_device_id: peer,
                 relationship: MembershipHistoryRelationship::Consistent,
                 confirmed_position: None,
+                sync_state: Default::default(),
                 restricted_delivery: Vec::new(),
                 updated_at_ms: 1,
             },
@@ -209,6 +228,7 @@ async fn all_current_peers_are_sorted_deduplicated_and_independently_deferred() 
         ledger,
         Arc::new(UnsortedScope),
         transport.clone(),
+        Arc::new(FixedClock),
     );
 
     let report = synchronize
@@ -244,6 +264,7 @@ async fn unconfirmed_current_member_is_included_in_membership_history_sync() {
         ledger,
         Arc::new(PausedUnknownScope),
         transport.clone(),
+        Arc::new(FixedClock),
     );
 
     let report = synchronize
@@ -280,8 +301,12 @@ async fn authenticated_non_member_cannot_receive_full_membership_history() {
     let transport = Arc::new(RecordingTransport {
         recipients: Mutex::new(Vec::new()),
     });
-    let synchronize =
-        SynchronizeMembershipHistoryUseCase::new(ledger, Arc::new(EmptyScope), transport.clone());
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(EmptyScope),
+        transport.clone(),
+        Arc::new(FixedClock),
+    );
 
     let error = synchronize
         .execute(MembershipSyncTarget::AuthenticatedPeer(DeviceId::new(
@@ -295,4 +320,69 @@ async fn authenticated_non_member_cannot_receive_full_membership_history() {
         SynchronizeMembershipHistoryError::CurrentScopeUnavailable
     ));
     assert!(transport.recipients.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn periodic_round_is_required_until_every_peer_confirms_the_current_position() {
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(active_ledger())));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(UnsortedScope),
+        Arc::new(RecordingTransport {
+            recipients: Mutex::new(Vec::new()),
+        }),
+        Arc::new(FixedClock),
+    );
+
+    assert!(synchronize
+        .periodic_synchronization_required()
+        .await
+        .expect("周期反熵判断应可用"));
+}
+
+#[tokio::test]
+async fn persistent_cursor_eventually_selects_two_hundred_pending_peers() {
+    let mut loaded = active_ledger();
+    let peers = (0..200)
+        .map(|index| DeviceId::new(format!("peer-{index:03}")))
+        .collect::<Vec<_>>();
+    for peer in &peers {
+        loaded.peer_reconciliation.insert(
+            peer.clone(),
+            PeerReconciliationRecord {
+                peer_device_id: peer.clone(),
+                relationship: MembershipHistoryRelationship::Consistent,
+                confirmed_position: None,
+                sync_state: Default::default(),
+                restricted_delivery: Vec::new(),
+                updated_at_ms: 0,
+            },
+        );
+    }
+    let repository = Arc::new(MemoryLedgerRepository(Mutex::new(loaded)));
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository,
+        Arc::new(AcceptingVerifier),
+    ));
+    let synchronize = SynchronizeMembershipHistoryUseCase::new(
+        ledger,
+        Arc::new(EmptyScope),
+        Arc::new(RecordingTransport {
+            recipients: Mutex::new(Vec::new()),
+        }),
+        Arc::new(FixedClock),
+    );
+    let mut selected = std::collections::BTreeSet::new();
+
+    for _ in 0..25 {
+        selected.extend(synchronize.select_due_peers(peers.clone()).await.unwrap());
+    }
+
+    assert_eq!(selected.len(), 200);
 }

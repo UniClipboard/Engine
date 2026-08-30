@@ -304,6 +304,40 @@ fn history_with_a_and_b(
 }
 
 #[test]
+fn v3_suffix_exports_only_records_after_the_receiver_position() {
+    let verifier = DeterministicSignatureVerifier;
+    let (target, a, b, genesis, add_b) = history_with_a_and_b(true);
+    let mut receiver = VersionedMembershipHistory::new(LINEAGE.to_owned());
+    receiver
+        .verify_and_receive_event(genesis, &verifier)
+        .expect("receiver accepts the shared ancestor");
+    let base = receiver.current_position().expect("base position");
+    let mut sender_facts = a.facts.clone();
+    sender_facts.identity_signature =
+        verifier.sign(&a.membership_credential, &sender_facts.signing_payload());
+
+    let pages = target
+        .export_suffix_pages_v3(sender_facts, base.clone())
+        .expect("sender exports a bounded suffix");
+
+    assert_eq!(pages.len(), 2, "suffix contains AddDevice and its receipt");
+    assert!(pages.iter().all(|page| page.base_position() == &base));
+    assert_eq!(
+        pages[0].target_position(),
+        &target.current_position().unwrap()
+    );
+    assert!(receiver
+        .apply_suffix_pages_v3(&pages, &verifier)
+        .expect("receiver applies the verified suffix"));
+    assert_eq!(receiver.current_position(), target.current_position());
+    assert!(receiver.active_members().contains(&b.facts.member_instance));
+    assert_eq!(pages[0].page_index(), 0);
+    assert_eq!(pages[0].page_count(), 2);
+    assert_eq!(pages[0].transfer_id(), pages[1].transfer_id());
+    assert_eq!(add_b.parent_event_id, base.event_id);
+}
+
+#[test]
 fn local_removal_event_is_bound_to_the_current_history_and_author() {
     let (history, a, b, _, add_b) = history_with_a_and_b(true);
 
@@ -900,8 +934,7 @@ fn history_exchange_splits_pages_before_the_encoded_frame_limit() {
 
     assert_eq!(pages.len(), 2);
     assert!(pages.iter().all(|page| {
-        let frame = postcard::to_stdvec(&MembershipHistoryMessage::HistoryPageV2(page.clone()))
-            .expect("history frame encodes");
+        let frame = postcard::to_stdvec(page).expect("history frame encodes");
         frame.len() + 1 <= MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
     }));
     assert_eq!(

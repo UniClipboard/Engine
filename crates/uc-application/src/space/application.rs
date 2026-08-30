@@ -24,11 +24,10 @@ use crate::space::admission::{
 };
 use crate::space::membership::CurrentMemberSignaturePort;
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
-use crate::space::membership::HandleMembershipHistoryMessageUseCase;
+use crate::space::membership::MembershipHistoryAntiEntropy;
 use crate::space::membership::PreparedSpaceMembershipMaintenanceRuntime;
 use crate::space::membership::QueryMembershipAdmissionUseCase;
 use crate::space::membership::RemoveSpaceMemberUseCase;
-use crate::space::membership::SynchronizeMembershipHistoryUseCase;
 use crate::space::membership::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScopePort, DeliverRestrictedMembershipUseCase,
@@ -125,7 +124,7 @@ pub(crate) struct SpaceApplication {
     remove_space_member: Arc<RemoveSpaceMemberUseCase>,
     decide_device_trust_change: Arc<DecideDeviceTrustChangeUseCase>,
     space_admission: Arc<SpaceAdmissionProtocol>,
-    membership_history_endpoint: Arc<HandleMembershipHistoryMessageUseCase>,
+    membership_history_endpoint: Arc<MembershipHistoryAntiEntropy>,
     initialize_membership: Arc<InitializeSpaceMembershipUseCase>,
     membership_activity: crate::space::membership::SpaceMembershipMaintenanceActivity,
     prepared_runtime: Option<PreparedSpaceMembershipMaintenanceRuntime>,
@@ -160,12 +159,14 @@ impl SpaceApplication {
         let query_membership_admission =
             Arc::new(QueryMembershipAdmissionUseCase::new(Arc::clone(&ledger)));
         let current_scope: Arc<dyn CurrentSpaceMemberScopePort> = ledger.clone();
-        let synchronize_membership = Arc::new(SynchronizeMembershipHistoryUseCase::new(
+        let deferred_maintenance_wake = Arc::new(DeferredMaintenanceWake::new());
+        let membership_history_endpoint = Arc::new(MembershipHistoryAntiEntropy::new(
             Arc::clone(&ledger),
             Arc::clone(&current_scope),
             deps.membership_history_transport,
+            Arc::clone(&deps.clock),
+            deferred_maintenance_wake.clone(),
         ));
-        let deferred_maintenance_wake = Arc::new(DeferredMaintenanceWake::new());
         let joiner_admission = JoinerAdmissionService::new(
             deps.settings,
             deps.prepare_joiner_invitation,
@@ -218,7 +219,7 @@ impl SpaceApplication {
                 effects: Arc::clone(&recover_membership_effects)
                     as Arc<dyn crate::space::membership::RecoverMembershipEffectsPort>,
                 restricted_delivery: deliver_restricted_membership,
-                synchronization: synchronize_membership,
+                synchronization: membership_history_endpoint.clone(),
                 cleanup: deps.cleanup_legacy_membership_data,
             },
         ));
@@ -244,9 +245,6 @@ impl SpaceApplication {
             Arc::clone(&query_device_trust),
             recover_membership_effects,
             activity,
-        ));
-        let membership_history_endpoint = Arc::new(HandleMembershipHistoryMessageUseCase::new(
-            Arc::clone(&ledger),
         ));
         Self {
             ledger,

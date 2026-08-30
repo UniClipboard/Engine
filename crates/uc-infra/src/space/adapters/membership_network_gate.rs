@@ -142,7 +142,7 @@ impl RestrictedMembershipDeliveryPort for GatedMembershipHistoryExchange {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use uc_core::membership::MembershipHistoryV2Ack;
+    use uc_core::membership::MembershipHistoryAckV3;
 
     use super::*;
 
@@ -159,8 +159,8 @@ mod tests {
             _message: MembershipHistoryMessage,
         ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(MembershipHistoryMessage::AckV2(
-                MembershipHistoryV2Ack::Consistent,
+            Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
             ))
         }
     }
@@ -183,7 +183,7 @@ mod tests {
         let inner = Arc::new(RecordingHistoryExchange::default());
         let transport = GatedMembershipHistoryExchange::new(gate.clone(), inner.clone());
         let peer = DeviceId::new("peer");
-        let message = MembershipHistoryMessage::AckV2(MembershipHistoryV2Ack::Consistent);
+        let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
 
         gate.pause_network_work();
         assert_eq!(

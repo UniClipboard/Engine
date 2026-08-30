@@ -56,8 +56,11 @@ pub use gossip::{
 pub use member::SpaceMember;
 pub use member_instance::MemberInstanceId;
 pub use membership_history::{
-    MembershipDecisionId, MembershipEventId, MembershipHistoryMessage,
-    MembershipHistoryRelationship, PendingRemovalFacts, RemovalDecision,
+    ack_confirms_membership_history_target, plan_membership_history_reconciliation,
+    MembershipDecisionId, MembershipEventId, MembershipHistoryAckV3, MembershipHistoryMessage,
+    MembershipHistoryReconciliationPlan, MembershipHistoryRelationship,
+    MembershipHistorySuffixRequestV3, MembershipHistorySummaryV3, PendingRemovalFacts,
+    RemovalDecision,
 };
 pub use ports::{
     BeginRevocationOutcome, ContentExchangeGatePort, CurrentMembershipAnnouncementMaterial,
@@ -120,11 +123,12 @@ pub use versioned_membership_history::{
     MembershipActivationReceiptRecord, MembershipActivationReceiptStoreOutcome,
     MembershipAdmissionV2, MembershipCredential, MembershipCredentialId,
     MembershipDecisionStoreOutcome, MembershipDecisionV2, MembershipEventV2,
-    MembershipHistoryPageRecordCountsV2, MembershipHistoryPageV2, MembershipHistoryV2Ack,
-    MembershipHistoryV2Error, MembershipHistoryV2ReceiveOutcome, MembershipOperationV2,
-    PreparedAdmissionProofV1, VersionedMembershipHistory, ADMISSION_COMPLETION_FORMAT_V1,
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
-    MAX_MEMBERSHIP_HISTORY_FRAME_SIZE, MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE,
+    MembershipHistoryPageRecordCountsV2, MembershipHistoryPageV2, MembershipHistorySuffixPageV3,
+    MembershipHistoryV2Ack, MembershipHistoryV2Error, MembershipHistoryV2ReceiveOutcome,
+    MembershipOperationV2, PreparedAdmissionProofV1, VersionedMembershipHistory,
+    ADMISSION_COMPLETION_FORMAT_V1, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+    MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE, MAX_MEMBERSHIP_HISTORY_SUFFIX_PAGES,
     MEMBERSHIP_CREDENTIAL_FORMAT_V1, MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
     MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2, PREPARED_ADMISSION_PROOF_FORMAT_V1,
 };
