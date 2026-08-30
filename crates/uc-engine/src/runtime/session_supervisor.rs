@@ -89,6 +89,7 @@ impl SessionSupervisor {
             Some(session) => Arc::clone(&session.facade),
             None => return Ok(false),
         };
+        tracing::debug!("运行时 Space transition 检查开始");
         if !facade
             .has_pending_space_transition()
             .await
@@ -98,10 +99,13 @@ impl SessionSupervisor {
         {
             return Ok(false);
         }
+        tracing::info!("运行时发现待完成 Space transition");
         self.operations.close_and_wait(None).await?;
+        tracing::info!("运行时 Space transition 已关闭新操作并等待在途操作");
         match facade.has_pending_space_transition().await {
             Ok(true) => {}
             Ok(false) => {
+                tracing::info!("运行时 Space transition 二次确认已无待处理状态");
                 self.operations.reopen();
                 return Ok(false);
             }
@@ -124,13 +128,17 @@ impl SessionSupervisor {
         session
             .shutdown(uc_core::FileTransferCancellationReason::ConnectivityRecovery)
             .await;
+        tracing::info!("运行时 Space transition 已关闭旧 session");
         let completed = facade.complete_pending_space_transition().await;
         match completed {
             Ok(_) => {
+                tracing::info!("运行时 Space transition 持久步骤已完成");
                 self.install_new_session(true).await?;
+                tracing::info!("运行时 Space transition 新 session 已安装");
                 Ok(true)
             }
             Err(error) => {
+                tracing::warn!("运行时 Space transition 持久步骤失败，开始恢复 session");
                 let original =
                     operation_error_with_code(1103, "complete runtime space transition", error);
                 match self.install_new_session(false).await {

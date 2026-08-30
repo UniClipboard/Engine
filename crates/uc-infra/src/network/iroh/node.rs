@@ -41,9 +41,9 @@ use uc_application::deps::{
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    ContentExchangeGatePort, CurrentMembershipIdentityPort, CurrentWorkspacePeerScopePort,
-    GroupRevocationPort, GroupUpdateDispatchPort, MemberRepositoryPort,
-    MembershipAttestationEndpointPort, MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
+    ContentExchangeGatePort, CurrentMembershipIdentityPort, GroupRevocationPort,
+    GroupUpdateDispatchPort, MemberRepositoryPort, MembershipAttestationEndpointPort,
+    MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing_invitation::{
@@ -975,19 +975,11 @@ impl IrohNodeBuilder {
     pub fn install_group_updates(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        current_peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         group_revocation: Arc<dyn GroupRevocationPort>,
     ) -> Result<GroupUpdateHandlers, IrohNodeError> {
         let adapter = Arc::new(IrohGroupUpdateAdapter::new(
             Arc::clone(&self.endpoint),
             peer_addr_repo,
-            member_repo,
-            peer_admission,
-            current_peer_scope,
-            fingerprint_factory,
             group_revocation,
         ));
         let builder = self.take_router_builder()?;

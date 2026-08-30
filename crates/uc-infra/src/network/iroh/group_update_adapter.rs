@@ -8,11 +8,8 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
 use tracing::{debug, warn};
 use uc_core::membership::{
-    CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopePort, GroupRevocationPort,
-    GroupUpdateDispatchError, GroupUpdateDispatchPort, MemberRepositoryPort, PeerAdmissionPort,
-    PendingGroupUpdate,
+    GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, PendingGroupUpdate,
 };
-use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 
 use super::connect_with_staggered_retry;
@@ -40,10 +37,6 @@ pub struct IrohGroupUpdateAdapter {
 }
 
 struct HandlerState {
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-    current_peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     group_revocation: Arc<dyn GroupRevocationPort>,
 }
 
@@ -51,22 +44,12 @@ impl IrohGroupUpdateAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        current_peer_scope: Arc<dyn CurrentWorkspacePeerScopePort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         group_revocation: Arc<dyn GroupRevocationPort>,
     ) -> Self {
         Self {
             endpoint,
             peer_addr_repo,
-            handler_state: Arc::new(HandlerState {
-                member_repo,
-                peer_admission,
-                current_peer_scope,
-                fingerprint_factory,
-                group_revocation,
-            }),
+            handler_state: Arc::new(HandlerState { group_revocation }),
         }
     }
 
@@ -146,10 +129,6 @@ impl std::fmt::Debug for IrohGroupUpdateHandler {
 
 impl ProtocolHandler for IrohGroupUpdateHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let peer_device_id = self
-            .state
-            .resolve_device(connection.remote_id().as_bytes())
-            .await;
         let (mut send, mut recv) =
             match tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, connection.accept_bi()).await {
                 Ok(Ok(streams)) => streams,
@@ -162,17 +141,6 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
                     return Ok(());
                 }
             };
-        let Some(peer_device_id) = peer_device_id else {
-            emit_ack(&mut send, ACK_REJECTED).await;
-            let _ = connection.closed().await;
-            return Ok(());
-        };
-        if !self.state.may_deliver_recovery(&peer_device_id).await {
-            warn!("group update: peer is not admitted by current space protection");
-            emit_ack(&mut send, ACK_REJECTED).await;
-            let _ = connection.closed().await;
-            return Ok(());
-        }
         let mut length = [0u8; 4];
         if !matches!(
             tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut length)).await,
@@ -214,45 +182,6 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
     }
 }
 
-impl HandlerState {
-    async fn resolve_device(&self, public_key: &[u8; 32]) -> Option<uc_core::ids::DeviceId> {
-        let fingerprint = self.fingerprint_factory.from_public_key(public_key).ok()?;
-        let members = match self.member_repo.list().await {
-            Ok(members) => members,
-            Err(error) => {
-                warn!(error = %error, "group update member lookup failed");
-                return None;
-            }
-        };
-        members
-            .into_iter()
-            .find(|member| member.identity_fingerprint == fingerprint)
-            .map(|member| member.device_id)
-    }
-
-    async fn is_admitted(&self, device_id: &uc_core::ids::DeviceId) -> bool {
-        match self.peer_admission.is_admitted(device_id).await {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                warn!(error = %error, "group update: peer admission check failed");
-                false
-            }
-        }
-    }
-
-    async fn may_deliver_recovery(&self, device_id: &uc_core::ids::DeviceId) -> bool {
-        if self.is_admitted(device_id).await {
-            return true;
-        }
-        matches!(
-            self.current_peer_scope.snapshot().await,
-            Ok(snapshot)
-                if snapshot.local_membership == CurrentWorkspaceLocalMembership::Active
-                    && snapshot.peer_device_ids.contains(device_id)
-        )
-    }
-}
-
 async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: u8) {
     if matches!(
         tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, send.write_all(&[ack])).await,
@@ -268,21 +197,13 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use chrono::Utc;
     use iroh::{RelayMode, SecretKey};
     use mockall::mock;
     use uc_core::ids::DeviceId;
-    use uc_core::membership::{
-        CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
-        CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource,
-        CurrentWorkspacePeerSnapshot, GroupEpoch, GroupRevocationResult, KeyEpochError,
-        MemberRepositoryPort, MembershipError, RevocationId, SpaceMember,
-    };
+    use uc_core::membership::{GroupEpoch, GroupRevocationResult, KeyEpochError, RevocationId};
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
-    use uc_core::MemberSyncPreferences;
 
     use super::*;
-    use crate::security::Sha256IdentityFingerprintFactory;
 
     mock! {
         GroupRevocation {}
@@ -302,22 +223,6 @@ mod tests {
 
     struct NoPeerAddresses;
 
-    struct FixedPeerScope(Vec<DeviceId>);
-
-    #[async_trait]
-    impl CurrentWorkspacePeerScopePort for FixedPeerScope {
-        async fn snapshot(
-            &self,
-        ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
-            Ok(CurrentWorkspacePeerSnapshot {
-                revision: 1,
-                source: CurrentWorkspacePeerScopeSource::CurrentHistory,
-                local_membership: CurrentWorkspaceLocalMembership::Active,
-                peer_device_ids: self.0.clone(),
-            })
-        }
-    }
-
     #[async_trait]
     impl PeerAddressRepositoryPort for NoPeerAddresses {
         async fn get(
@@ -334,18 +239,6 @@ mod tests {
         }
         async fn remove(&self, _device: &DeviceId) -> Result<(), PeerAddressError> {
             Ok(())
-        }
-    }
-
-    mock! {
-        Members {}
-
-        #[async_trait]
-        impl MemberRepositoryPort for Members {
-            async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError>;
-            async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError>;
-            async fn save(&self, member: &SpaceMember) -> Result<(), MembershipError>;
-            async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError>;
         }
     }
 
@@ -371,20 +264,6 @@ mod tests {
         panic!("endpoint never published direct addresses");
     }
 
-    fn member_for(seed: [u8; 32], device_id: &str) -> SpaceMember {
-        let key = SecretKey::from_bytes(&seed);
-        let identity_fingerprint = Sha256IdentityFingerprintFactory
-            .from_public_key(key.public().as_bytes())
-            .expect("derive fingerprint");
-        SpaceMember {
-            device_id: DeviceId::new(device_id),
-            device_name: "Test Device".to_owned(),
-            identity_fingerprint,
-            joined_at: Utc::now(),
-            sync_preferences: MemberSyncPreferences::default(),
-        }
-    }
-
     #[tokio::test]
     async fn outbound_io_timeout_maps_to_transport_failure() {
         let error = run_outbound_io_phase(
@@ -398,7 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn known_but_unadmitted_peer_is_rejected_before_epoch_update() {
+    async fn cryptographically_invalid_recovery_update_is_rejected() {
         let sender_seed = [0x45u8; 32];
         let receiver_seed = [0x46u8; 32];
         let receiver = endpoint(receiver_seed).await;
@@ -406,20 +285,15 @@ mod tests {
         let sender = endpoint(sender_seed).await;
         wait_for_direct_addrs(&sender).await;
 
-        let mut members = MockMembers::new();
-        members
-            .expect_list()
-            .times(1)
-            .return_once(move || Ok(vec![member_for(sender_seed, "revoked-member")]));
         let mut group_revocation = MockGroupRevocation::new();
-        group_revocation.expect_apply_group_epoch_update().times(0);
+        group_revocation
+            .expect_apply_group_epoch_update()
+            .times(1)
+            .withf(|payload| payload == b"MLS")
+            .returning(|_| Err(KeyEpochError::Repository("invalid update".to_owned())));
         let adapter = IrohGroupUpdateAdapter::new(
             Arc::clone(&receiver),
             Arc::new(NoPeerAddresses),
-            Arc::new(members),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(false)),
-            Arc::new(FixedPeerScope(Vec::new())),
-            Arc::new(Sha256IdentityFingerprintFactory),
             Arc::new(group_revocation),
         );
         let router = iroh::protocol::Router::builder((*receiver).clone())
@@ -453,11 +327,6 @@ mod tests {
         let sender = endpoint(sender_seed).await;
         wait_for_direct_addrs(&sender).await;
 
-        let mut members = MockMembers::new();
-        members
-            .expect_list()
-            .times(1)
-            .return_once(move || Ok(vec![member_for(sender_seed, "relay-member")]));
         let mut group_revocation = MockGroupRevocation::new();
         group_revocation
             .expect_apply_group_epoch_update()
@@ -467,10 +336,48 @@ mod tests {
         let adapter = IrohGroupUpdateAdapter::new(
             Arc::clone(&receiver),
             Arc::new(NoPeerAddresses),
-            Arc::new(members),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(false)),
-            Arc::new(FixedPeerScope(vec![DeviceId::new("relay-member")])),
-            Arc::new(Sha256IdentityFingerprintFactory),
+            Arc::new(group_revocation),
+        );
+        let router = iroh::protocol::Router::builder((*receiver).clone())
+            .accept(GROUP_UPDATE_ALPN, adapter.handler())
+            .spawn();
+
+        let connection = sender
+            .connect(receiver.addr(), GROUP_UPDATE_ALPN)
+            .await
+            .expect("dial receiver");
+        let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
+        send.write_all(&(3u32).to_be_bytes())
+            .await
+            .expect("write length");
+        send.write_all(b"MLS").await.expect("write payload");
+        send.finish().expect("finish request");
+        let mut ack = [0u8; 1];
+        recv.read_exact(&mut ack).await.expect("read accepted ack");
+        assert_eq!(ack[0], ACK_ACCEPTED);
+
+        router.shutdown().await.ok();
+        sender.close().await;
+    }
+
+    #[tokio::test]
+    async fn unknown_relay_may_deliver_a_cryptographically_valid_recovery_update() {
+        let sender_seed = [0x49u8; 32];
+        let receiver_seed = [0x4au8; 32];
+        let receiver = endpoint(receiver_seed).await;
+        wait_for_direct_addrs(&receiver).await;
+        let sender = endpoint(sender_seed).await;
+        wait_for_direct_addrs(&sender).await;
+
+        let mut group_revocation = MockGroupRevocation::new();
+        group_revocation
+            .expect_apply_group_epoch_update()
+            .times(1)
+            .withf(|payload| payload == b"MLS")
+            .returning(|_| Ok(GroupEpoch::new(2)));
+        let adapter = IrohGroupUpdateAdapter::new(
+            Arc::clone(&receiver),
+            Arc::new(NoPeerAddresses),
             Arc::new(group_revocation),
         );
         let router = iroh::protocol::Router::builder((*receiver).clone())

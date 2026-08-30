@@ -43,9 +43,7 @@ use tracing::debug;
 /// 最终状态,不会因为正好落在 cooldown 窗口里被丢掉。
 const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
-use uc_application::deps::{
-    CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort, SpaceApplicationDeps,
-};
+use uc_application::deps::{CurrentSpaceMemberScopePort, SpaceApplicationDeps};
 use uc_application::facade::clipboard_capture::CaptureClipboardUseCase;
 use uc_application::facade::{
     build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
@@ -63,10 +61,7 @@ use uc_application::facade::{SpaceActivityError, SpaceSessionActivityPort};
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferDirection, OutboundProgressStatus,
 };
-use uc_core::membership::{
-    ContentExchangeGatePort, CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError,
-    CurrentWorkspacePeerScopePort, CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot,
-};
+use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
@@ -103,50 +98,6 @@ use uc_infra::space::{
 #[derive(Default)]
 struct DeferredSpaceSessionActivity {
     delegate: OnceLock<Arc<dyn SpaceSessionActivityPort>>,
-}
-
-#[derive(Default)]
-struct GroupUpdatePeerScopeBridge {
-    delegate: OnceLock<Arc<dyn CurrentSpaceMemberScopePort>>,
-}
-
-impl GroupUpdatePeerScopeBridge {
-    fn bind(&self, delegate: Arc<dyn CurrentSpaceMemberScopePort>) -> bool {
-        self.delegate.set(delegate).is_ok()
-    }
-}
-
-#[async_trait::async_trait]
-impl CurrentWorkspacePeerScopePort for GroupUpdatePeerScopeBridge {
-    async fn snapshot(
-        &self,
-    ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError> {
-        let delegate = self
-            .delegate
-            .get()
-            .ok_or(CurrentWorkspacePeerScopeError::Unavailable)?;
-        let scope = delegate.snapshot().await.map_err(|error| match error {
-            CurrentSpaceMemberScopeError::Locked | CurrentSpaceMemberScopeError::NoCurrentSpace => {
-                CurrentWorkspacePeerScopeError::Locked
-            }
-            CurrentSpaceMemberScopeError::RecoveryRequired => {
-                CurrentWorkspacePeerScopeError::Corrupt
-            }
-            CurrentSpaceMemberScopeError::Unavailable => {
-                CurrentWorkspacePeerScopeError::Unavailable
-            }
-        })?;
-        Ok(CurrentWorkspacePeerSnapshot {
-            revision: scope.revision,
-            source: CurrentWorkspacePeerScopeSource::CurrentHistory,
-            local_membership: if scope.local_member_active {
-                CurrentWorkspaceLocalMembership::Active
-            } else {
-                CurrentWorkspaceLocalMembership::Removed
-            },
-            peer_device_ids: scope.usable_peer_device_ids,
-        })
-    }
 }
 
 impl DeferredSpaceSessionActivity {
@@ -713,15 +664,10 @@ pub async fn build_sync_engine_assembly(
     // peer_addr_repo,纯读 adapter 不装 ALPN handler。
     let connection_channel: Arc<dyn ConnectionChannelPort> =
         builder.install_connection_channel(Arc::clone(&space_setup.peer_addr_repo));
-    let group_update_peer_scope = Arc::new(GroupUpdatePeerScopeBridge::default());
     let GroupUpdateHandlers {
         dispatch: group_update_dispatch,
     } = builder.install_group_updates(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&deps.device.member_repo),
-        Arc::clone(&space_setup.peer_admission),
-        group_update_peer_scope.clone(),
-        Arc::clone(&deps.security.fingerprint),
         Arc::clone(&deps.security.space_access_ports.group_revocation),
     )?;
     // Slice 2 Phase 2 · T10:同一节点装第三个 ALPN(剪切板同步)。dispatch
@@ -993,7 +939,6 @@ pub async fn build_sync_engine_assembly(
         },
         peer_reachability_changed_events: presence.subscribe(),
     }));
-    let _ = group_update_peer_scope.bind(facade.current_member_scope());
     builder.install_space_admission(
         facade.space_admission_endpoint(),
         space_setup.admission_credentials.clone()

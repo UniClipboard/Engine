@@ -798,6 +798,8 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 成员历史反熵诊断 | 反熵关键路径新增仅含阶段、稳定分类和计数的 debug 观测，不记录设备、lineage、transfer、digest、地址或错误文本。Desktop C1 证据显示第二代 Sponsor 的成员投影包含新成员，但正式 membership ledger 未提交相应历史，因此反熵摘要仍判定 `noop`；后续修复归 Sponsor Complete/Settled 激活边界。 |
 | 2026-08-30 | 未知成员历史证明 | V3 摘要携带发送者准入声明，Iroh 连接只绑定公钥指纹；本机尚未知的发送者只能提交有界后缀，完整签名历史验证通过后才成为当前成员。该边界消除“必须先认识新成员才能接收其准入历史”的循环依赖，Desktop C2 在 Sponsor 离线及双方重启后通过三成员收敛和双向正文传输。 |
 | 2026-08-30 | Group Epoch 持久投递 | Application `DeliverPendingGroupUpdatesUseCase` 唯一负责扫描加密安全材料中的欠账、有界调用 Iroh dispatch，并且只在认证 Accepted ACK 后确认删除；失败欠账持久轮转以防多设备饿饿。Engine 只安装 ALPN handler 和注入 port，临时根因日志已删除。 |
+| 2026-08-30 | Group Epoch 多跳恢复验证 | 增加旧成员视图尚不认识转运节点时的真实 Iroh 回归边界，验证恢复更新的授权必须来自更新自身的密码学连续性，不能依赖接收端已经拥有待恢复后的成员视图。 |
+| 2026-08-30 | Admission 重启诊断覆盖 | 为存储 generation 选择、会话安全材料恢复、Sponsor 安全与成员 ledger 提交、runtime Space transition 重装增加长期结构化 tracing；仅记录阶段、epoch、revision 和数量，不记录身份、路径或业务负载。 |
 | 2026-08-30 | 四节点离线历史收敛 | Sponsor 把既有成员群组更新绑定进签名新增事件；effect executor 按历史因果深度恢复成员事实与安全状态。Roster 展示有效但关系待确认的成员，通信门仍失败关闭。Desktop A-B-C-D 中间节点离线场景已通过成员名单、重启和 A/D 双向正文验证。 |
 | 2026-08-30 | 五节点树型历史收敛 | Desktop A→B、A→C、B→D、C→E 验证不同 Sponsor 支路保持同一单父历史；中间节点离线时 D/E 可先收敛五成员与安全状态并双向传输，全部恢复后五端名单一致。 |
 | 2026-08-30 | 成员分叉选择规格 | 新增规格 030：分叉历史禁止直接合并或自动选主；用户选择一个完整目标分支，Application 通过可恢复 generation transition 切换本机。目标分支已移除本机时必须重新配对。复杂拓扑采用确定性通信矩阵、阶段故障与可重放 chaos seed 验收。当前仅完成设计，生产入口尚未实现。 |

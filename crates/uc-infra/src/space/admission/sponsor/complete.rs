@@ -126,6 +126,11 @@ impl DefaultSponsorAdmissionActivation {
         if history.lineage_id() != activated.space_id {
             anyhow::bail!("the Sponsor activation history has a different lineage");
         }
+        tracing::info!(
+            target_epoch = activated.expected_commitment.target_epoch,
+            active_member_count = history.active_members().len(),
+            "Sponsor admission 激活开始"
+        );
         self.security
             .activate_sponsor_admission_security(ActivateSponsorAdmissionSecurityRequest {
                 space_id,
@@ -135,6 +140,7 @@ impl DefaultSponsorAdmissionActivation {
             })
             .await
             .map_err(anyhow::Error::new)?;
+        tracing::info!("Sponsor admission 安全状态激活完成");
 
         let event_id = history
             .current_position()?
@@ -161,10 +167,15 @@ impl DefaultSponsorAdmissionActivation {
             })
             .await
             .map_err(anyhow::Error::new)?;
+        tracing::info!("Sponsor admission 成员事实投影完成");
 
         let mut ledger = self.loader.load().await.map_err(anyhow::Error::new)?;
         if ledger.membership_history.as_deref() == Some(activated.committed_history.as_slice()) {
-            tracing::debug!("Sponsor 成员历史激活命中幂等提交");
+            tracing::info!(
+                ledger_revision = ledger.revision,
+                peer_count = ledger.peer_reconciliation.len(),
+                "Sponsor 成员历史激活命中幂等提交"
+            );
             return Ok(());
         }
         if ledger.lineage_id.as_deref() != Some(activated.space_id.as_str()) {
@@ -224,6 +235,13 @@ impl DefaultSponsorAdmissionActivation {
             active_peer_count = ledger.peer_reconciliation.len(),
             "Sponsor 新历史已建立逐 peer 传播欠账"
         );
+        tracing::info!(
+            expected_revision,
+            replacement_revision = ledger.revision,
+            previous_peer_count,
+            active_peer_count = ledger.peer_reconciliation.len(),
+            "Sponsor 成员 ledger 提交开始"
+        );
         self.committer
             .compare_and_commit(MembershipLedgerMutation {
                 expected_revision,
@@ -232,6 +250,10 @@ impl DefaultSponsorAdmissionActivation {
             })
             .await
             .map_err(anyhow::Error::new)?;
+        tracing::info!(
+            committed_revision = expected_revision.saturating_add(1),
+            "Sponsor 成员 ledger 提交完成"
+        );
         Ok(())
     }
 }

@@ -256,6 +256,11 @@ pub fn wire_dependencies_from_inputs(
     } else {
         None
     };
+    tracing::info!(
+        profile_ready = profile_lifecycle.state() == ProfileLifecycleState::Ready,
+        active_generation_present = active_generation_manifest.is_some(),
+        "空间存储启动选择已解析"
+    );
     let (db_path, blob_store_dir) = match active_generation_manifest.as_ref() {
         Some(manifest) => {
             let directory = space_generation_directory(
@@ -269,9 +274,13 @@ pub fn wire_dependencies_from_inputs(
                     "Active space database generation is unavailable".to_owned(),
                 ));
             }
+            tracing::info!(storage_generation = "active", "空间活动 generation 已选择");
             (database, directory.join("blobs"))
         }
-        None => (legacy_db_path, vault_path.join("blobs")),
+        None => {
+            tracing::info!(storage_generation = "legacy", "空间 legacy 存储已选择");
+            (legacy_db_path, vault_path.join("blobs"))
+        }
     };
 
     let db_pool = create_db_pool(&db_path)?;

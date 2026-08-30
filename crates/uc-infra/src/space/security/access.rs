@@ -1528,10 +1528,20 @@ impl DefaultSpaceAccessAdapter {
         };
 
         let material = match repository.load_space_material(space_id).await {
-            Ok(Some(material)) => material,
+            Ok(Some(material)) => {
+                info!(
+                    group_epoch = material.state().epoch().value(),
+                    pending_group_update_count = material.pending_group_updates().len(),
+                    "空间会话恢复已读取安全材料"
+                );
+                material
+            }
             // A missing record is an existing Legacy space, not evidence that
             // a group and new content key catalog have been safely created.
-            Ok(None) => return Ok(()),
+            Ok(None) => {
+                info!("空间会话恢复未发现群组安全材料");
+                return Ok(());
+            }
             Err(error) => {
                 self.session.clear();
                 return Err(SpaceAccessError::Internal(error.to_string()));
@@ -1541,6 +1551,10 @@ impl DefaultSpaceAccessAdapter {
             self.session.clear();
             return Err(map_encryption_error(error));
         }
+        info!(
+            group_epoch = material.state().epoch().value(),
+            "空间会话安全材料已安装"
+        );
         Ok(())
     }
 
@@ -2835,6 +2849,11 @@ impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
             .as_ref()
             .is_some_and(|current| current == &staged)
         {
+            info!(
+                group_epoch = staged.state().epoch().value(),
+                pending_group_update_count = staged.pending_group_updates().len(),
+                "Sponsor 安全状态激活命中幂等持久状态"
+            );
             self.session
                 .install_space_material(&staged)
                 .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
@@ -2844,9 +2863,19 @@ impl ActivateSponsorAdmissionSecurityPort for DefaultSpaceAccessAdapter {
             .save_space_material(&staged)
             .await
             .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        info!(
+            group_epoch = staged.state().epoch().value(),
+            pending_group_update_count = staged.pending_group_updates().len(),
+            "Sponsor 安全状态已持久化"
+        );
         self.session
             .install_space_material(&staged)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)
+            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        info!(
+            group_epoch = staged.state().epoch().value(),
+            "Sponsor 安全状态已安装到活动会话"
+        );
+        Ok(())
     }
 }
 
