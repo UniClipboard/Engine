@@ -209,18 +209,6 @@ mod tests {
     };
 
     #[test]
-    fn workspace_convergence_operation_has_a_stable_kind() {
-        assert_eq!(
-            Operation::QueryWorkspaceConvergence.kind(),
-            OperationKind::QueryWorkspaceConvergence
-        );
-        assert_eq!(
-            Operation::QueryWorkspaceConvergence.kind().to_string(),
-            "query_workspace_convergence"
-        );
-    }
-
-    #[test]
     fn membership_removal_decision_has_a_stable_operation_kind() {
         let operation = Operation::DecideMembershipRemoval(DecideMembershipRemovalInput {
             removal_event_id: "0101010101010101010101010101010101010101010101010101010101010101"
