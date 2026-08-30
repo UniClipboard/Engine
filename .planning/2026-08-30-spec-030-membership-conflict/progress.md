@@ -11,6 +11,8 @@
 - 新增关系与 conflict record 单次 CAS 提交测试；Infra ledger migration 定向测试通过。
 - Phase 3 已建立并接入 Application facade 的单一 resolve action；本机分支完成、Removed 重新配对、重复幂等和相反选择均由同一 ledger CAS 隐藏。
 - 远端 Active 选择当前只保存 `Selected/Pending`；恢复包、transition id 和维护续跑仍属于下一工作切片，Phase 3 尚未完成。
+- 增加 Core branch transition 七阶段单调状态机；稳定 transition id 与 transition map 已进入加密 ledger。
+- 远端 Active 重复选择测试确认 transition intent 和 ledger revision 均保持不变。
 
 ## Verification
 
@@ -23,3 +25,6 @@
 - `cargo test -p uc-application resolve_conflict --locked`：2 passed。
 - `cargo check -p uc-core -p uc-application -p uc-infra --all-targets --locked`：通过（仅既有 warning 及尚未接入 Engine 的公开 re-export warning）。
 - `git diff --check`：通过。
+- `cargo test -p uc-core --test membership_history_v2 membership_branch_transition_advances_one_phase_and_never_retargets --locked`：1 passed。
+- `cargo test -p uc-application resolve_conflict --locked`：3 passed。
+- `cargo check -p uc-infra --all-targets --locked`：通过（仅既有 warning）。

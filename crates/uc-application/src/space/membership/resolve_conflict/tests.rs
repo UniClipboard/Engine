@@ -229,3 +229,32 @@ async fn removed_target_requires_re_pairing_and_rejects_a_later_opposite_choice(
         MembershipConflictStatus::RePairingRequired
     );
 }
+
+#[tokio::test]
+async fn recoverable_remote_choice_persists_one_stable_transition_intent() {
+    let (repository, use_case, conflict_id, _, remote_branch_id) =
+        fixture(MembershipConflictChoice::ActiveMemberRecovery);
+    let input = ResolveMembershipConflictInput {
+        conflict_id,
+        target_branch_id: remote_branch_id,
+    };
+
+    assert_eq!(
+        use_case.execute(input).await.unwrap(),
+        ResolveMembershipConflictResult::Pending { conflict_id }
+    );
+    let first = repository.load().await.unwrap();
+    let first_transition_id = first.membership_conflicts[&conflict_id]
+        .transition_id
+        .expect("remote recovery gets a durable transition id");
+    assert_eq!(
+        use_case.execute(input).await.unwrap(),
+        ResolveMembershipConflictResult::Pending { conflict_id }
+    );
+    let repeated = repository.load().await.unwrap();
+    assert_eq!(
+        repeated.membership_conflicts[&conflict_id].transition_id,
+        Some(first_transition_id)
+    );
+    assert_eq!(repeated.revision, first.revision);
+}

@@ -4,10 +4,11 @@ use uc_core::membership::{
     AdmissionActivationReceipt, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
     AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition,
     HistoricalMembershipSignatureError, HistoricalMembershipSignatureVerifier,
-    MembershipActivationBaselineV2, MembershipAdmissionV2, MembershipConflictChoice,
-    MembershipConflictPolicy, MembershipCredential, MembershipDecisionV2, MembershipEventId,
-    MembershipEventV2, MembershipHistoryMessage, MembershipOperationV2, RemovalDecision,
-    VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    MembershipActivationBaselineV2, MembershipAdmissionV2, MembershipBranchId,
+    MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, MembershipConflictChoice,
+    MembershipConflictId, MembershipConflictPolicy, MembershipCredential, MembershipDecisionV2,
+    MembershipEventId, MembershipEventV2, MembershipHistoryMessage, MembershipOperationV2,
+    RemovalDecision, VersionedMembershipHistory, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
     ED25519_SIGNATURE_ALGORITHM_V1, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
     MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
 };
@@ -435,6 +436,48 @@ fn same_or_ancestor_history_is_not_a_selectable_conflict() {
         MembershipConflictPolicy::describe(&base, &descendant, a.facts.member_instance),
         Err(uc_core::membership::MembershipConflictPolicyError::InvalidConflict)
     );
+}
+
+#[test]
+fn membership_branch_transition_advances_one_phase_and_never_retargets() {
+    let transition = MembershipBranchTransitionV1::new(
+        [0x91; 32],
+        MembershipConflictId::from_bytes([0x81; 32]),
+        MembershipBranchId::from_bytes([0x82; 32]),
+        [0x11; 16],
+        [0x12; 16],
+    )
+    .expect("different generations form a valid transition");
+    let backed_up = transition
+        .advance(MembershipBranchTransitionPhaseV1::SourceBackedUp)
+        .expect("the immediate successor is valid");
+
+    assert_eq!(
+        backed_up.phase(),
+        MembershipBranchTransitionPhaseV1::SourceBackedUp
+    );
+    assert!(backed_up
+        .advance(MembershipBranchTransitionPhaseV1::TargetStaged)
+        .is_none());
+    assert!(transition
+        .advance(MembershipBranchTransitionPhaseV1::Completed)
+        .is_none());
+
+    let mut current = backed_up;
+    for phase in [
+        MembershipBranchTransitionPhaseV1::TargetVerified,
+        MembershipBranchTransitionPhaseV1::TargetStaged,
+        MembershipBranchTransitionPhaseV1::Promoted,
+        MembershipBranchTransitionPhaseV1::RuntimeRestored,
+        MembershipBranchTransitionPhaseV1::Completed,
+    ] {
+        current = current
+            .advance(phase)
+            .expect("each persisted phase advances");
+    }
+    assert!(current
+        .advance(MembershipBranchTransitionPhaseV1::Prepared)
+        .is_none());
 }
 
 #[test]

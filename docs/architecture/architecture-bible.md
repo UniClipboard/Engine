@@ -806,6 +806,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-30 | 成员分叉稳定标识规则 | Core `MembershipConflictPolicy` 从两条已验证且共享激活基线的 sibling 历史生成与到达顺序、transport peer 无关的 conflict/branch id，并只按目标完整历史中的同一成员实例状态返回可恢复或需要重新配对；Same、ancestor 与缺席实例均不可选择。 |
 | 2026-08-30 | 成员冲突加密账本 | 冲突记录、多个证据来源、不可变用户选择和 transition id 进入现有 MembershipLedger 整体 MasterKey AEAD 载荷，与 peer `Diverged` 关系共用同一 revision/CAS 提交；诊断只暴露阶段和计数。 |
 | 2026-08-30 | 成员冲突选择入口 | Application `ResolveMembershipConflictUseCase` 串行并以 ledger CAS 保存一次用户选择；保留本机分支直接完成，目标已移除本机时只返回重新配对，远端可恢复分支保存 Pending 等待后台 transition。重复相同选择幂等，相反或竞争选择返回 `StateChanged`。 |
+| 2026-08-30 | 成员分支切换状态机 | Core `MembershipBranchTransitionV1` 固定七个只前进的持久阶段并绑定 conflict、目标分支及不同 source/target generation；远端 Active 选择以 conflict/target 摘要产生唯一 transition id，随加密 ledger 保存，重复调用不创建第二个 intent。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

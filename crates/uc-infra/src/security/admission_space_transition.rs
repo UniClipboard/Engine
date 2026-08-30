@@ -730,6 +730,7 @@ impl DurableAdmissionSpaceTransition {
                     completed_inbound_transfers: Default::default(),
                     pending_effects: Default::default(),
                     membership_conflicts: Default::default(),
+                    membership_branch_transitions: Default::default(),
                 },
             })
             .await

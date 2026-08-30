@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 3：选择 CAS 与 Application facade 已完成；下一切片补 transition id、后台恢复端口和重启续跑后才可结束本阶段。
+Phase 3：选择 CAS、稳定 transition id 与 Application facade 已完成；下一切片补恢复端口和维护重启续跑后才可结束本阶段。
 
 ## Next Step
 
-为远端 Active 选择定义稳定 transition id、恢复包/branch transition 端口，并把 Pending 纳入 maintenance runtime。
+实现恢复包的 recipient/conflict/head/nonce/expiry/签名验证，再定义 recovery/transition ports。
 
 ## Constraints
 

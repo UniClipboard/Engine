@@ -133,6 +133,10 @@ pub struct LoadedMembershipLedger {
     /// 冲突、证据来源和用户选择随 ledger 整体加密，并与关系状态共用 CAS revision。
     #[serde(default)]
     pub membership_conflicts: BTreeMap<MembershipConflictId, MembershipConflictRecord>,
+    /// 同 lineage 分支切换状态随 ledger 加密；每一步只能由 Core 状态机向前推进。
+    #[serde(default)]
+    pub membership_branch_transitions:
+        BTreeMap<[u8; 32], uc_core::membership::MembershipBranchTransitionV1>,
 }
 
 impl LoadedMembershipLedger {
@@ -150,6 +154,7 @@ impl LoadedMembershipLedger {
             completed_inbound_transfers: BTreeMap::new(),
             pending_effects: BTreeMap::new(),
             membership_conflicts: BTreeMap::new(),
+            membership_branch_transitions: BTreeMap::new(),
         }
     }
 }
@@ -241,6 +246,10 @@ impl std::fmt::Debug for LoadedMembershipLedger {
             .field(
                 "membership_conflict_count",
                 &self.membership_conflicts.len(),
+            )
+            .field(
+                "membership_branch_transition_count",
+                &self.membership_branch_transitions.len(),
             )
             .field("inbound_transfer_count", &self.inbound_transfers.len())
             .field("pending_effect_count", &self.pending_effects.len())

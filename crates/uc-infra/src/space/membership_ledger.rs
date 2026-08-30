@@ -183,6 +183,7 @@ fn migrate_v1_ledger(legacy: LegacyLoadedMembershipLedgerV1) -> LoadedMembership
         completed_inbound_transfers: BTreeMap::new(),
         pending_effects: legacy.pending_effects,
         membership_conflicts: BTreeMap::new(),
+        membership_branch_transitions: BTreeMap::new(),
     }
 }
 

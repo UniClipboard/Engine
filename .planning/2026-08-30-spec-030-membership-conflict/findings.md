@@ -25,3 +25,8 @@
 - SQLite `membership_ledger_state.encrypted_payload` 已对整个 ledger 使用 profile MasterKey AEAD；conflict record 追加到 `LoadedMembershipLedger` 即进入既有密文与 transaction/CAS 边界。
 - conflict record 的 `Debug` 只输出选择分类、阶段、revision 和计数，conflict/branch/peer/transition 标识全部脱敏。
 - 多个 peer 的同一分支证据使用集合保存，不把 transport 来源纳入 conflict id。
+
+## Phase 3/4
+
+- 远端 Active 选择的 transition id 可由 conflict id 与 target branch id 领域分隔摘要稳定产生；不依赖随机数即可跨 CAS 重试和重启保持唯一。
+- branch transition 使用独立七阶段 Core 状态机，source/target generation 必须不同，且只能推进到直接 successor；阶段对象随 ledger 整体加密。
