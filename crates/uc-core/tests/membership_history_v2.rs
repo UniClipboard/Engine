@@ -588,7 +588,7 @@ fn v3_suffix_exports_only_records_after_the_receiver_position() {
         &target.current_position().unwrap()
     );
     assert!(receiver
-        .apply_suffix_pages_v3(&pages, &verifier)
+        .apply_suffix_pages_v3(&pages, a.facts.member_instance, &verifier)
         .expect("receiver applies the verified suffix"));
     assert_eq!(receiver.current_position(), target.current_position());
     assert!(receiver.active_members().contains(&b.facts.member_instance));
@@ -790,6 +790,67 @@ fn remote_v2_removal_waits_for_the_local_decision_and_preserves_each_branch() {
     assert!(
         rejecting_history.removal_choices_diverge(a.facts.member_instance, b.facts.member_instance)
     );
+}
+
+#[test]
+fn remote_removal_received_for_each_local_member_stays_pending_at_the_parent_head() {
+    let verifier = DeterministicSignatureVerifier;
+    let (mut base, a, b, _, add_b) = history_with_a_and_b(true);
+    let c = admission("device-c", credential(3));
+    let add_c = event(
+        &base,
+        Some(add_b.event_id()),
+        &a,
+        MembershipOperationV2::AddDevice {
+            admission: c.clone(),
+        },
+        3,
+        &verifier,
+    );
+    base.verify_and_receive_event(add_c.clone(), &verifier)
+        .expect("third member is active in the common history");
+    let common_head = base
+        .current_position()
+        .expect("common head exists")
+        .event_id;
+    let common_members = base.effective_members();
+    let removal = event(
+        &base,
+        Some(add_c.event_id()),
+        &a,
+        MembershipOperationV2::RemoveDevice {
+            member: c.facts.member_instance,
+        },
+        4,
+        &verifier,
+    );
+
+    for local_member in [b.facts.member_instance, c.facts.member_instance] {
+        let mut receiver = base.clone();
+
+        assert_eq!(
+            receiver
+                .verify_and_receive_remote_event_for_local_member(
+                    removal.clone(),
+                    local_member,
+                    &verifier,
+                )
+                .expect("remote removal verifies"),
+            uc_core::membership::MembershipHistoryV2ReceiveOutcome::Applied
+        );
+        assert_eq!(
+            receiver
+                .current_position()
+                .expect("head remains applied")
+                .event_id,
+            common_head
+        );
+        assert_eq!(receiver.effective_members(), common_members);
+        assert_eq!(
+            receiver.pending_removal_decision(local_member),
+            Some(removal.event_id())
+        );
+    }
 }
 
 #[test]

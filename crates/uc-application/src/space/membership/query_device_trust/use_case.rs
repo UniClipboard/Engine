@@ -8,6 +8,7 @@ use uc_core::membership::{
 use uc_core::ports::ReachabilityState;
 
 use crate::space::membership::MembershipLedger;
+use crate::space::membership::SpaceMemberPauseReason;
 
 use super::{
     DeviceTrustDevice, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
@@ -134,7 +135,9 @@ impl QueryDeviceTrustUseCase {
                     .map(|record| map_relationship(record.relationship))
                     .unwrap_or(DeviceTrustRelationship::Unknown)
             };
-            let sync_state = if is_local || scope.usable_peer_device_ids.contains(device_id) {
+            let sync_state = if membership == DeviceTrustMembership::Removed {
+                DeviceTrustSyncState::Paused(SpaceMemberPauseReason::LocalMemberInactive)
+            } else if is_local || scope.usable_peer_device_ids.contains(device_id) {
                 DeviceTrustSyncState::Usable
             } else {
                 DeviceTrustSyncState::Paused(

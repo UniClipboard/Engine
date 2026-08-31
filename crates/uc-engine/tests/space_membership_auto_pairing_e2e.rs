@@ -233,6 +233,13 @@ enum TopologyAction<'a> {
         sponsor: &'a str,
         target: &'a str,
     },
+    Restart {
+        node: &'a str,
+    },
+    Decide {
+        node: &'a str,
+        choice: PendingChangeChoice,
+    },
     AssertSnapshot {
         node: &'a str,
         active_members: usize,
@@ -255,6 +262,109 @@ enum TopologyAction<'a> {
         node: &'a str,
         branch_from: &'a str,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PendingChangeChoice {
+    Apply,
+    Keep,
+}
+
+// F3：同一远端移除被不同设备接受和拒绝后，决定必须跨重启持久并保持内容隔离。
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn f3_opposite_removal_decisions_persist_divergence_across_restart() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "C",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C"], 3)
+        .await;
+    let baseline_epoch = topology.diagnostics("A").await.group_epoch;
+    topology
+        .wait_for_group_epoch(&["B", "C"], baseline_epoch)
+        .await;
+    topology
+        .run(&[TopologyAction::Remove {
+            sponsor: "A",
+            target: "C",
+        }])
+        .await;
+    topology.wait_for_pending_change(&["B", "C"]).await;
+    topology
+        .run(&[
+            TopologyAction::Decide {
+                node: "B",
+                choice: PendingChangeChoice::Apply,
+            },
+            TopologyAction::Decide {
+                node: "C",
+                choice: PendingChangeChoice::Keep,
+            },
+        ])
+        .await;
+
+    topology.assert_snapshot("B", 2, 0).await;
+    topology.assert_snapshot("C", 3, 0).await;
+    let accepted_before = topology.diagnostics("B").await;
+    let rejected_before = topology.diagnostics("C").await;
+    assert_ne!(accepted_before.branch_id, rejected_before.branch_id);
+    assert_ne!(accepted_before.head_event_id, rejected_before.head_event_id);
+    topology
+        .wait_for_group_epoch(&["B"], topology.diagnostics("A").await.group_epoch)
+        .await;
+
+    let accepted_text = "F3 accepted branch transfer";
+    assert_eq!(
+        topology.send("A", "B", accepted_text).await.total_accepted,
+        1
+    );
+    wait_for_received_text(topology.engine("B"), accepted_text).await;
+    let rejected_text = "F3 rejected branch must stay isolated";
+    assert_eq!(
+        topology.send("B", "C", rejected_text).await.total_accepted,
+        0
+    );
+    assert!(!receiver_has_exact_text(topology.engine("C"), rejected_text).await);
+
+    topology
+        .run(&[
+            TopologyAction::Restart { node: "B" },
+            TopologyAction::Restart { node: "C" },
+        ])
+        .await;
+    let accepted_after = topology.diagnostics("B").await;
+    let rejected_after = topology.diagnostics("C").await;
+    assert_eq!(accepted_after.branch_id, accepted_before.branch_id);
+    assert_eq!(accepted_after.head_event_id, accepted_before.head_event_id);
+    assert!(accepted_after.revision >= accepted_before.revision);
+    assert_eq!(rejected_after.branch_id, rejected_before.branch_id);
+    assert_eq!(rejected_after.head_event_id, rejected_before.head_event_id);
+    assert!(rejected_after.revision >= rejected_before.revision);
+    topology.assert_snapshot("B", 2, 0).await;
+    topology.assert_snapshot("C", 3, 0).await;
+    let restarted_text = "F3 restart preserves divergence";
+    assert_eq!(
+        topology.send("C", "B", restarted_text).await.total_accepted,
+        0
+    );
+    assert!(!receiver_has_exact_text(topology.engine("B"), restarted_text).await);
+    topology.shutdown().await;
 }
 
 // F2：不同 Sponsor 从共同父 head 移除不同叶子，明确选择后必须精确切换到目标分支。
@@ -496,6 +606,10 @@ impl MembershipTopology {
                 TopologyAction::Create { node } => self.create(node).await,
                 TopologyAction::Join { sponsor, joiner } => self.join(sponsor, joiner).await,
                 TopologyAction::Remove { sponsor, target } => self.remove(sponsor, target).await,
+                TopologyAction::Restart { node } => self.restart(node).await,
+                TopologyAction::Decide { node, choice } => {
+                    self.decide_pending_change(node, choice).await
+                }
                 TopologyAction::AssertSnapshot {
                     node,
                     active_members,
@@ -536,6 +650,47 @@ impl MembershipTopology {
         let engine = harness.start().await;
         self.harnesses.insert(node.to_owned(), harness);
         self.engines.insert(node.to_owned(), engine);
+    }
+
+    async fn restart(&mut self, node: &str) {
+        let engine = self
+            .engines
+            .remove(node)
+            .unwrap_or_else(|| panic!("node {node} is not started"));
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .unwrap_or_else(|error| panic!("node {node} shutdown failed: {error}"));
+        let restarted = self
+            .harnesses
+            .get(node)
+            .unwrap_or_else(|| panic!("node {node} has no harness"))
+            .start()
+            .await;
+        self.engines.insert(node.to_owned(), restarted);
+        self.wait_for_membership_ready(node).await;
+    }
+
+    async fn wait_for_membership_ready(&self, node: &str) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            match self
+                .engine(node)
+                .execute(Operation::QueryDeviceGroupChoices)
+                .await
+            {
+                Ok(OperationResult::DeviceGroupChoices(_)) => return,
+                Ok(_) => panic!("node {node} returned an unexpected device group result"),
+                Err(error)
+                    if error.code() == 1211
+                        && error.is_retryable()
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => panic!("node {node} did not become membership-ready: {error}"),
+            }
+        }
     }
 
     async fn create(&mut self, node: &str) {
@@ -660,27 +815,39 @@ impl MembershipTopology {
     }
 
     async fn diagnostics(&self, node: &str) -> uc_engine::MembershipDiagnosticsSummary {
-        let result = self
-            .engine(node)
-            .execute(Operation::QueryMembershipDiagnostics)
-            .await
-            .unwrap_or_else(|error| panic!("node {node} diagnostics failed: {error}"));
-        let OperationResult::MembershipDiagnostics(summary) = result else {
-            panic!("node {node} returned an unexpected diagnostics result");
-        };
-        summary
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            match self
+                .engine(node)
+                .execute(Operation::QueryMembershipDiagnostics)
+                .await
+            {
+                Ok(OperationResult::MembershipDiagnostics(summary)) => return summary,
+                Ok(_) => panic!("node {node} returned an unexpected diagnostics result"),
+                Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => panic!("node {node} diagnostics failed: {error}"),
+            }
+        }
     }
 
     async fn device_group_choices(&self, node: &str) -> uc_engine::DeviceGroupChoicesSummary {
-        let result = self
-            .engine(node)
-            .execute(Operation::QueryDeviceGroupChoices)
-            .await
-            .unwrap_or_else(|error| panic!("node {node} device group query failed: {error}"));
-        let OperationResult::DeviceGroupChoices(summary) = result else {
-            panic!("node {node} returned an unexpected device group result");
-        };
-        summary
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            match self
+                .engine(node)
+                .execute(Operation::QueryDeviceGroupChoices)
+                .await
+            {
+                Ok(OperationResult::DeviceGroupChoices(summary)) => return summary,
+                Ok(_) => panic!("node {node} returned an unexpected device group result"),
+                Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => panic!("node {node} device group query failed: {error}"),
+            }
+        }
     }
 
     async fn resolve_conflict(&self, node: &str, branch_from: &str) {
@@ -722,6 +889,79 @@ impl MembershipTopology {
                     );
                 }
                 outcome => panic!("node {node} conflict selection returned {outcome:?}"),
+            }
+        }
+    }
+
+    async fn wait_for_pending_change(&self, nodes: &[&str]) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let mut ready = true;
+            for node in nodes {
+                if !self
+                    .device_group_choices(node)
+                    .await
+                    .issues
+                    .iter()
+                    .any(|issue| issue.issue_id.starts_with("p:"))
+                {
+                    ready = false;
+                }
+            }
+            if ready {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "pending removal did not reach every decision node"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn decide_pending_change(&self, node: &str, choice: PendingChangeChoice) {
+        let choice_id = match choice {
+            PendingChangeChoice::Apply => "apply",
+            PendingChangeChoice::Keep => "keep",
+        };
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let choices = self.device_group_choices(node).await;
+            let issue = choices
+                .issues
+                .iter()
+                .find(|issue| issue.issue_id.starts_with("p:"))
+                .unwrap_or_else(|| panic!("node {node} has no pending removal"));
+            let result = match self
+                .engine(node)
+                .execute(Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+                    issue_id: issue.issue_id.clone(),
+                    choice_id: choice_id.to_owned(),
+                    expected_revision: choices.revision,
+                    confirm_local_removal: false,
+                }))
+                .await
+            {
+                Ok(result) => result,
+                Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                Err(error) => panic!("node {node} decision failed: {error}"),
+            };
+            let OperationResult::DeviceGroupChosen(result) = result else {
+                panic!("node {node} returned an unexpected decision result");
+            };
+            match result.outcome {
+                uc_engine::DeviceGroupChoiceOutcomeSummary::Completed
+                | uc_engine::DeviceGroupChoiceOutcomeSummary::AlreadyCompleted => return,
+                uc_engine::DeviceGroupChoiceOutcomeSummary::StateChanged => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "node {node} pending decision revision did not stabilize"
+                    );
+                }
+                outcome => panic!("node {node} pending decision returned {outcome:?}"),
             }
         }
     }

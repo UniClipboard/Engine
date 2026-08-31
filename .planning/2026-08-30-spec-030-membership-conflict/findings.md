@@ -100,3 +100,12 @@
 - 仅在拓扑驱动器跳过动作或暂停 Engine 不能模拟 Partition：后台反熵、group update、recovery、presence 和正文各自持有 Iroh 通道，而且 F0 两侧必须能继续进行本地/分支内操作。
 - Iroh 1.0 `EndpointHooks` 同时提供出站 `before_connect` 和双向 `after_handshake` 拦截；hook 可保存 `WeakConnectionHandle`，分区建立时关闭已经存在的匹配连接，从而覆盖新连接和存量连接。
 - 最窄实现是在共享 Iroh endpoint 建立时注入一个按认证 EndpointId 阻断的可变 gate。Engine `dev-tools` 只负责查询本机 endpoint id 和设置阻断集合；所有业务 ALPN 自动共享该 gate，生产配置保持 `None`。
+
+# 2026-08-31 · F3 重启就绪边界
+
+- `Engine::start` 返回时，持久化 Space 的安全会话仍可能正在异步解锁；统一设备组查询会以可重试 `1211 unavailable` 明确表达该状态。
+- Desktop 重启动作必须仅通过公开查询轮询 membership-ready，再断言持久化决定；固定 sleep 会把启动时序误当成业务结果，直接读内部 session 则会破坏端到端接缝。
+- F3 分层 tracing 证明 restricted removal event 的地址解析、Iroh 连接、来源身份解析、Application 处理、`RestrictedApplied` ACK 与响应写回全部成功，排除网络链路根因。
+- 根因是 restricted-event handler 直接调用 `verify_and_receive_event`：它把 `known_head` 推进到远端 RemoveDevice 并立即投影两成员；普通 history merge 则会在同一场景恢复父 head 以等待本机决定。两个接收入口没有共用“面向本机成员接收远端事件”的 Core 规则。
+- F3 修复进一步发现分页 suffix 是第三条远端事件入口；它既要验证发送方声明的 target position，又不能强迫本机应用待决定移除。Core 因此用 sender projection 验证完整传输，再用唯一的 local-member 接收规则更新本机 projection。
+- Engine 的选择操作返回 `retryable unavailable` 时，Desktop 驱动必须在统一 deadline 内重试；短暂安全会话不可用不是选择失败，非重试错误与超时仍立即失败。

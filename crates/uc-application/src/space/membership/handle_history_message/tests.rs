@@ -463,6 +463,95 @@ async fn restricted_event_applies_only_the_authenticated_signed_event() {
 }
 
 #[tokio::test]
+async fn restricted_remote_removal_is_persisted_without_advancing_the_local_branch() {
+    let (local, local_credential) = member_facts("device-a", 0x41);
+    let (peer, peer_credential) = member_facts("device-b", 0x42);
+    let (removed, removed_credential) = member_facts("device-c", 0x43);
+    let base = VersionedMembershipHistory::from_activation_baseline(
+        MembershipActivationBaselineV2::Established {
+            lineage_id: "space-a".to_owned(),
+            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
+            head_depth: 0,
+            current_members: vec![
+                (local.clone(), local_credential),
+                (peer.clone(), peer_credential.clone()),
+                (removed.clone(), removed_credential),
+            ],
+        },
+    )
+    .unwrap();
+    let peer_author = MembershipAdmissionV2 {
+        facts: peer.clone(),
+        membership_credential: peer_credential,
+        resume_public_key_digest: [7; 32],
+        security_commitment_id: [8; 32],
+    };
+    let removal = remove_event(&base, &peer_author, removed.member_instance, 0x51);
+    let removal_id = removal.event_id();
+    let common_position = base.current_position().unwrap();
+    let mut loaded = LoadedMembershipLedger::no_current_space();
+    loaded.revision = 3;
+    loaded.lineage_id = Some("space-a".to_owned());
+    loaded.membership_history = Some(base.encode_persisted_v2().unwrap());
+    loaded.local_device_id = Some(local.device_id);
+    loaded.local_member_instance = Some(local.member_instance);
+    loaded.local_join_active = true;
+    loaded.peer_reconciliation.insert(
+        peer.device_id.clone(),
+        PeerReconciliationRecord {
+            peer_device_id: peer.device_id.clone(),
+            relationship: MembershipHistoryRelationship::Consistent,
+            confirmed_position: None,
+            sync_state: Default::default(),
+            restricted_delivery: Vec::new(),
+            updated_at_ms: 1,
+        },
+    );
+    let repository = Arc::new(MemoryLedgerRepository {
+        loaded: Mutex::new(loaded),
+        commits: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    ));
+    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
+
+    let response = handler
+        .execute(
+            &AuthenticatedMember::new(peer.device_id),
+            MembershipHistoryMessage::RestrictedEventV3(removal),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response,
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::RestrictedApplied)
+    );
+    let persisted = repository.load().await.unwrap();
+    let history = VersionedMembershipHistory::decode_persisted_v2(
+        persisted.membership_history.as_ref().unwrap(),
+        &AcceptingVerifier,
+    )
+    .unwrap();
+    let persisted_position = history.current_position().unwrap();
+    assert_eq!(persisted_position.event_id, common_position.event_id);
+    assert_eq!(persisted_position.depth, common_position.depth);
+    assert_ne!(
+        persisted_position.history_digest,
+        common_position.history_digest
+    );
+    assert_eq!(history.effective_members().len(), 3);
+    assert_eq!(
+        history.pending_removal_decision(local.member_instance),
+        Some(removal_id)
+    );
+    assert!(persisted.pending_effects.is_empty());
+}
+
+#[tokio::test]
 async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
     let (loaded, peer_device_id, pages) = two_page_extension();
     let repository = Arc::new(MemoryLedgerRepository {

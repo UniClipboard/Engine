@@ -274,6 +274,12 @@ impl SessionSupervisor {
             resume_space_activities = true;
         }
         let recovered = session.facade.recover_space_session().await;
+        if let Err(error) = &recovered {
+            tracing::warn!(
+                error_kind = recover_space_session_error_kind(error),
+                "space session recovery failed; runtime remains locked"
+            );
+        }
         if resume_space_activities {
             let recovered = recovered.map_err(|error| {
                 operation_error_with_code(1103, "activate transitioned space session", error)
@@ -289,6 +295,20 @@ impl SessionSupervisor {
         *self.session.lock().await = Some(session);
         self.operations.reopen();
         Ok(())
+    }
+}
+
+fn recover_space_session_error_kind(
+    error: &uc_application::facade::RecoverSpaceSessionError,
+) -> &'static str {
+    use uc_application::facade::RecoverSpaceSessionError;
+
+    match error {
+        RecoverSpaceSessionError::CurrentSpace(_) => "current_space",
+        RecoverSpaceSessionError::KeyringMiss => "keyring_miss",
+        RecoverSpaceSessionError::CorruptedKeyMaterial => "corrupted_key_material",
+        RecoverSpaceSessionError::Activity(_) => "activity",
+        RecoverSpaceSessionError::Internal(_) => "internal",
     }
 }
 

@@ -13,10 +13,13 @@ use crate::{
 pub async fn execute_query_device_group_choices(
     facade: &uc_application::facade::AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    let view = facade
-        .query_device_group_choices()
-        .await
-        .map_err(|_| unavailable())?;
+    let view = facade.query_device_group_choices().await.map_err(|error| {
+        tracing::debug!(
+            error_kind = query_error_kind(&error),
+            "device group choice query failed"
+        );
+        unavailable()
+    })?;
     let current_members = view
         .device_trust
         .devices
@@ -123,7 +126,13 @@ pub async fn execute_choose_device_group(
             confirm_local_removal: input.confirm_local_removal,
         })
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|error| {
+            tracing::debug!(
+                error_kind = choose_error_kind(&error),
+                "device group choice failed"
+            );
+            unavailable()
+        })?;
     let (outcome, current_revision) = outcome(result).ok_or_else(invalid_input)?;
     Ok(OperationResult::DeviceGroupChosen(
         DeviceGroupChoiceResultSummary {
@@ -213,4 +222,57 @@ fn invalid_input() -> EngineError {
 
 fn unavailable() -> EngineError {
     EngineError::new(1211, EngineErrorCategory::Unavailable, true)
+}
+
+fn query_error_kind(error: &uc_application::facade::QueryDeviceGroupChoicesError) -> &'static str {
+    use uc_application::facade::QueryDeviceGroupChoicesError;
+
+    match error {
+        QueryDeviceGroupChoicesError::DeviceTrust { source } => match source {
+            uc_application::facade::QueryDeviceTrustError::Locked => "device_trust_locked",
+            uc_application::facade::QueryDeviceTrustError::RecoveryRequired => {
+                "device_trust_recovery_required"
+            }
+            uc_application::facade::QueryDeviceTrustError::Unavailable => {
+                "device_trust_unavailable"
+            }
+            uc_application::facade::QueryDeviceTrustError::Dependency { .. } => {
+                "device_trust_dependency"
+            }
+        },
+        QueryDeviceGroupChoicesError::MembershipConflict { .. } => "membership_conflict",
+        QueryDeviceGroupChoicesError::StateChanged => "state_changed",
+    }
+}
+
+fn choose_error_kind(error: &uc_application::facade::ChooseDeviceGroupError) -> &'static str {
+    use uc_application::facade::{
+        ChooseDeviceGroupError, DecideDeviceTrustChangeError, ResolveMembershipConflictError,
+    };
+
+    match error {
+        ChooseDeviceGroupError::PendingChange { source } => match source {
+            DecideDeviceTrustChangeError::Locked => "pending_change_locked",
+            DecideDeviceTrustChangeError::RecoveryRequired => "pending_change_recovery_required",
+            DecideDeviceTrustChangeError::Unavailable => "pending_change_unavailable",
+            DecideDeviceTrustChangeError::StateChanged => "pending_change_state_changed",
+            DecideDeviceTrustChangeError::CommittedButPending => {
+                "pending_change_committed_but_pending"
+            }
+        },
+        ChooseDeviceGroupError::BranchConflict { source } => match source {
+            ResolveMembershipConflictError::Locked { .. } => "branch_conflict_locked",
+            ResolveMembershipConflictError::InvalidChoice => "branch_conflict_invalid_choice",
+            ResolveMembershipConflictError::TargetUnavailable { .. } => {
+                "branch_conflict_target_unavailable"
+            }
+            ResolveMembershipConflictError::RecoveryRequired { .. } => {
+                "branch_conflict_recovery_required"
+            }
+            ResolveMembershipConflictError::CommittedButPending { .. } => {
+                "branch_conflict_committed_but_pending"
+            }
+        },
+        ChooseDeviceGroupError::Query { source } => query_error_kind(source),
+    }
 }

@@ -59,6 +59,17 @@ impl MaintainSpaceMembershipUseCase {
         if !peer_online
             && !record(
                 &mut report,
+                self.deps
+                    .restricted_delivery
+                    .deliver_restricted_membership()
+                    .await,
+            )
+        {
+            return report;
+        }
+        if !peer_online
+            && !record(
+                &mut report,
                 self.deps.effects.recover_membership_effects().await,
             )
         {
@@ -79,13 +90,15 @@ impl MaintainSpaceMembershipUseCase {
         ) {
             return report;
         }
-        if !record(
-            &mut report,
-            self.deps
-                .restricted_delivery
-                .deliver_restricted_membership()
-                .await,
-        ) {
+        if peer_online
+            && !record(
+                &mut report,
+                self.deps
+                    .restricted_delivery
+                    .deliver_restricted_membership()
+                    .await,
+            )
+        {
             return report;
         }
         let should_synchronize = if periodic {

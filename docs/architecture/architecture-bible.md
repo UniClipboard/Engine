@@ -428,8 +428,9 @@ LAN HTTP 位于 `compatibility/`，使用独立的 `uc-mobile-v*` 版本和发�
 成员历史按确定顺序分页传输，每页每类记录最多 256 条。接收方按来源设备加密保存已收到的连续页面；
 断线或进程重启后，发送方可从第一页重新开始，接收方返回下一缺失页并幂等跳过相同页面。乱序页面只
 请求缺失位置，混入另一轮资料或同一位置内容冲突时清除该轮暂存并拒绝。只有全部页面到齐、完整历史
-重新验签且确认是当前历史的合法延续后，才能一次替换正式成员历史并回复成功；未完成页面永远不能改
-变当前成员资格。
+重新验签且确认是发送方历史的合法延续后，才能一次提交正式成员历史并回复成功；提交时必须经过 Core
+唯一的面向本机成员接收规则：普通新增推进本机 head，远端移除只保存已验证事件并保持父 head，等待本机
+Accept/Reject。未完成页面永远不能改变当前成员资格。
 
 新增成员事件同时签名绑定面向既有成员的群组 epoch 更新。离线旧成员合并多代历史后，Application 的
 effect executor 按历史因果深度依次恢复成员事实与安全状态，不能使用事件哈希顺序。历史中仍有效但尚
@@ -847,6 +848,11 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | F1 移除与新增 sibling | 本机移除通过可重启 membership effect 调用可靠 MLS revocation，保存保留接收者并推进安全 epoch；Removed 设备缺少当前 observation 时稳定投影为 Offline。Desktop 五节点验证移除/新增 sibling 各自成员语义、epoch、分支内通信和 Heal 后隔离。 |
 | 2026-08-31 | F2 双移除验收起点 | Desktop 声明式拓扑增加统一 `ResolveConflict` 动作，只调用 Engine 设备组选择入口；五节点红测从共同 head 并发移除不同叶子，并要求 chooser 的 branch、head、成员数与安全 epoch 精确切换到用户所选分支。 |
 | 2026-08-31 | F2 分支恢复闭环 | 修复恢复响应在 handler 结束时被截断，并由 Application 单轮连续推进逐阶段持久化的 generation transition；五节点双移除后明确选择目标分支，最终 branch、head、成员视图与 MLS epoch 精确一致。 |
+| 2026-08-31 | F3 相反移除决定验收起点 | Desktop 声明式拓扑新增统一 `Decide` 与复用同一宿主持久化状态的 `Restart`；红测只经 Engine contract 验证同一远端移除被接受/拒绝后的分支、epoch、重启持久性与 exact-text 隔离。 |
+| 2026-08-31 | F3 重启恢复诊断 | Session supervisor 在静默恢复失败并保留锁定运行时的决策点记录脱敏 `error_kind`；统一设备组查询以 debug 分类 device-trust 子状态、membership-conflict 与并发变化，使重启 unavailable 可诊断且避免可重试轮询刷屏。日志不包含 Space、设备、路径、正文或密钥。 |
+| 2026-08-31 | F3 相反决定传播与投影 | Membership maintenance 在非 PeerOnline 完整轮次先尝试 restricted event/decision，再推进成员 effect；Deferred 不阻塞离线移除，Corrupt 仍关闭式停止。设备信任投影将 Removed 设备映射为不可同步，不再要求其存在于 active peer scope。 |
+| 2026-08-31 | F3 restricted event 根因诊断 | 分层脱敏 tracing 排除地址、Iroh、身份、handler 与 ACK 链路，确认 restricted handler 绕过普通 merge 的本机待决定 head 规则；临时探针已清理，后续由 Core 单一远端事件接收入口统一该语义。 |
+| 2026-08-31 | F3 相反移除决定闭环 | Core 以唯一“面向本机成员接收远端事件”入口统一完整历史 merge、分页 suffix 与 restricted event：远端移除保存证据但保持父 head，新增正常推进，重复与 sibling 保持既有结果。分页同时使用 sender projection 验证远端目标位置，不能拿本机待决定位置冒充远端声明。Desktop F3 已通过 Accept/Reject、重启持久化和跨分支正文隔离。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

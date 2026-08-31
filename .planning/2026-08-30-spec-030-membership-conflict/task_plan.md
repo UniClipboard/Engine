@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-F0、F1 已完成并提交；F2 根因已修复，五节点测试、定向测试与交付门禁均通过，待提交后进入 F3。
+F0–F3 已完成；提交 F3 切片后进入 F4：两个三节点分区只经单 bridge 短暂相遇，验证不能拼接出六节点假历史。
 
 ## Constraints
 

@@ -1175,6 +1175,7 @@ impl VersionedMembershipHistory {
     pub fn apply_suffix_pages_v3(
         &mut self,
         pages: &[MembershipHistorySuffixPageV3],
+        local_member: MemberInstanceId,
         verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     ) -> Result<bool, MembershipHistoryV2Error> {
         let first = pages
@@ -1190,6 +1191,7 @@ impl VersionedMembershipHistory {
         let mut ordered = pages.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|page| page.page_index);
         let mut records = Vec::with_capacity(ordered.len());
+        let mut sender_projection = self.clone();
         for (index, page) in ordered.iter().enumerate() {
             page.validate_envelope()?;
             if page.page_index as usize != index
@@ -1204,14 +1206,22 @@ impl VersionedMembershipHistory {
             }
             if let Some(event) = page.events.first() {
                 records.push(MembershipHistorySuffixRecordV3::Event(event.clone()));
-                self.verify_and_receive_event(event.clone(), verifier)?;
+                sender_projection.verify_and_receive_event(event.clone(), verifier)?;
+                self.verify_and_receive_remote_event_for_local_member(
+                    event.clone(),
+                    local_member,
+                    verifier,
+                )?;
             } else if let Some(receipt) = page.activation_receipts.first() {
                 records.push(MembershipHistorySuffixRecordV3::ActivationReceipt(
                     receipt.clone(),
                 ));
+                sender_projection
+                    .verify_and_record_activation_receipt(receipt.clone(), verifier)?;
                 self.verify_and_record_activation_receipt(receipt.clone(), verifier)?;
             } else if let Some(decision) = page.decisions.first() {
                 records.push(MembershipHistorySuffixRecordV3::Decision(decision.clone()));
+                sender_projection.verify_and_record_peer_decision(decision.clone(), verifier)?;
                 self.verify_and_record_peer_decision(decision.clone(), verifier)?;
             }
         }
@@ -1222,13 +1232,13 @@ impl VersionedMembershipHistory {
             &first.sender_admission,
             &records,
         )? != first.transfer_id
-            || self.current_position()? != first.target_position
+            || sender_projection.current_position()? != first.target_position
         {
             return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
         }
         // 发送者可以由本批后缀首次引入；必须在完整历史验证后再确认其当前资格和身份签名。
-        self.validate_exchange_sender(&first.sender_admission)?;
-        let sender_credential = self
+        sender_projection.validate_exchange_sender(&first.sender_admission)?;
+        let sender_credential = sender_projection
             .credential_for(first.sender_admission.member_instance)
             .ok_or(MembershipHistoryV2Error::InvalidCredential)?;
         verify_signature(
@@ -2113,18 +2123,11 @@ impl VersionedMembershipHistory {
                     return Err(MembershipHistoryV2Error::InvalidSignature);
                 }
             } else {
-                let previous_head = self.known_head;
-                let waits_for_local_decision = event.parent_event_id == previous_head
-                    && event.author_member_instance_id != local_member
-                    && matches!(event.operation, MembershipOperationV2::RemoveDevice { .. })
-                    && previous_head
-                        .and_then(|head| self.snapshots.get(&head))
-                        .is_some_and(|snapshot| snapshot.members.contains(&local_member));
-                self.verify_and_receive_event(event, verifier)?;
-                if waits_for_local_decision {
-                    self.known_head = previous_head;
-                    self.rebuild_snapshots()?;
-                }
+                self.verify_and_receive_remote_event_for_local_member(
+                    event,
+                    local_member,
+                    verifier,
+                )?;
                 changed = true;
             }
             if let Some(record) = incoming.activation_receipts.get(&event_id) {
@@ -2150,6 +2153,27 @@ impl VersionedMembershipHistory {
             }
         }
         Ok(changed)
+    }
+
+    pub fn verify_and_receive_remote_event_for_local_member(
+        &mut self,
+        event: MembershipEventV2,
+        local_member: MemberInstanceId,
+        verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
+    ) -> Result<MembershipHistoryV2ReceiveOutcome, MembershipHistoryV2Error> {
+        let previous_head = self.known_head;
+        let waits_for_local_decision = event.parent_event_id == previous_head
+            && event.author_member_instance_id != local_member
+            && matches!(event.operation, MembershipOperationV2::RemoveDevice { .. })
+            && previous_head
+                .and_then(|head| self.snapshots.get(&head))
+                .is_some_and(|snapshot| snapshot.members.contains(&local_member));
+        let outcome = self.verify_and_receive_event(event, verifier)?;
+        if outcome == MembershipHistoryV2ReceiveOutcome::Applied && waits_for_local_decision {
+            self.known_head = previous_head;
+            self.rebuild_snapshots()?;
+        }
+        Ok(outcome)
     }
 
     pub fn expected_resulting_members_digest(

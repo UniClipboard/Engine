@@ -243,7 +243,7 @@ async fn profile_without_a_space_returns_an_explicit_empty_status() {
 }
 
 #[tokio::test]
-async fn removed_device_without_current_observation_is_reported_offline() {
+async fn removed_consistent_device_is_reported_offline_and_not_syncable() {
     let mut loaded = active_ledger();
     let mut history = VersionedMembershipHistory::decode_persisted_v2(
         loaded.membership_history.as_deref().unwrap(),
@@ -277,7 +277,7 @@ async fn removed_device_without_current_observation_is_reported_offline() {
         .peer_reconciliation
         .get_mut(&peer_device_id)
         .unwrap()
-        .relationship = MembershipHistoryRelationship::PendingRemovalDecision;
+        .relationship = MembershipHistoryRelationship::Consistent;
     let repository = Arc::new(MemoryLedgerRepository { loaded });
     let ledger = Arc::new(MembershipLedger::new(
         repository.clone(),
@@ -299,6 +299,12 @@ async fn removed_device_without_current_observation_is_reported_offline() {
         .unwrap();
     assert_eq!(removed.membership, DeviceTrustMembership::Removed);
     assert_eq!(removed.reachability, ReachabilityState::Offline);
+    assert_eq!(
+        removed.sync_state,
+        DeviceTrustSyncState::Paused(
+            crate::space::membership::SpaceMemberPauseReason::LocalMemberInactive
+        )
+    );
 }
 
 #[tokio::test]

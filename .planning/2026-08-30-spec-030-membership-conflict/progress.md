@@ -226,3 +226,19 @@
 - 脱敏阶段日志定位到 Iroh 服务端完成 `finish()` 后立即结束 handler，客户端在读取响应长度前收到 stream error；服务端现等待 `stopped()` 确认对端完整接收。
 - transition 原本每个固定维护周期只推进一个阶段；Application 完整流程负责人现于单轮内连续推进并逐阶段持久化，仅在真实依赖不可用时 Deferred。
 - F2 五节点测试已转绿：C 明确选择 B 的移除分支后，branch/head、四成员视图和 external commit 后的最终 MLS epoch 精确一致。
+
+## 2026-08-31 · F3 opposite removal decisions red test
+
+- Desktop seam 新增 `Decide` 与 `Restart` 声明式动作：前者仅调用统一 Engine 设备组选择，后者复用相同目录和安全存储重启 Engine。
+- 红测要求 A 移除 C 后 B Apply、C Keep，两个决定跨重启保持、分支内通信成功、跨分支 exact text 关闭式失败。
+- F3 已揭示并修复 Removed + Consistent 设备投影误报 `RecoveryRequired`：Removed 设备现在明确映射为不可同步，不再要求 active scope pause 条目；Application 回归已转绿。
+- maintenance 顺序红测已证明 restricted removal event 原先晚于 removal effect；现改为完整轮次先尝试 restricted delivery，Deferred 仍继续离线移除，顺序回归已转绿。
+- Desktop F3 tracing 已确认 restricted event 完整送达并收到 `RestrictedApplied`；两个决策端随后都错误投影为两成员且无 pending choice。根因是 restricted handler 绕过 Core 普通 merge 的本机待决定 head 规则。临时 `[DEBUG-F3-RD]` 探针已清理；下一步以 Core 单一接收入口红测锁定并修复。
+
+## 2026-08-31 · F3 opposite removal decisions complete
+
+- Core 红测覆盖 A 移除 C 后 B/C 各自保存同一远端事件、保持父 head 与三成员投影，并产生待决定项。
+- 新增唯一 local-member 远端事件接收入口；完整 history merge、分页 suffix 与 restricted handler 均复用，旧 merge 手工回退逻辑已删除。
+- suffix 使用独立 sender projection 校验传输 target position，本机 projection 可合法停在父 head。
+- Application restricted 回归确认 `RestrictedApplied`、事件落盘、零提前 effect；maintenance 与 Removed 投影套件通过。
+- Desktop F3 通过：B Accept、C Reject，分支内正文成功，跨分支正文关闭式失败，B/C 重启后各自 branch/head 保持。

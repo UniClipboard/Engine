@@ -294,7 +294,7 @@ impl HandleMembershipHistoryMessageUseCase {
                     // 不可信后缀先在副本上完整验证；失败时绝不能把部分事件写入账本。
                     let mut candidate = current.clone();
                     let ack = match sender_is_bound
-                        .then(|| candidate.apply_suffix_pages_v3(&pages, verifier))
+                        .then(|| candidate.apply_suffix_pages_v3(&pages, local_member, verifier))
                     {
                         Some(Ok(true)) => {
                             *current = candidate;
@@ -436,8 +436,15 @@ impl HandleMembershipHistoryMessageUseCase {
                 expected_revision,
                 expected_history_digest,
                 move |record, history, verifier| {
+                    let local_member = record
+                        .local_member_instance
+                        .ok_or(MembershipLedgerError::Corrupt)?;
                     let members_before = history.effective_members();
-                    let ack = match history.verify_and_receive_event(event, verifier) {
+                    let ack = match history.verify_and_receive_remote_event_for_local_member(
+                        event,
+                        local_member,
+                        verifier,
+                    ) {
                         Ok(uc_core::membership::MembershipHistoryV2ReceiveOutcome::Applied) => {
                             record_new_membership_effects(record, history, &members_before)?;
                             MembershipHistoryAckV3::RestrictedApplied

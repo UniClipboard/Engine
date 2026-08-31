@@ -161,10 +161,10 @@ async fn startup_runs_the_fixed_sequence_and_continues_after_deferred_work() {
         calls.lock().unwrap().as_slice(),
         &[
             "admissions",
+            "restricted",
             "effects",
             "conflicts",
             "group_updates",
-            "restricted",
             "synchronize",
             "cleanup"
         ]
@@ -198,8 +198,11 @@ async fn corrupt_step_stops_later_permission_expanding_work() {
         .execute(MembershipMaintenanceTrigger::StateChanged)
         .await;
 
-    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions", "effects"]);
-    assert_eq!(report.completed_count, 1);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &["admissions", "restricted", "effects"]
+    );
+    assert_eq!(report.completed_count, 2);
     assert_eq!(report.corrupt_count, 1);
 }
 
@@ -264,10 +267,10 @@ async fn periodic_retries_history_when_synchronization_is_still_required() {
         calls.lock().unwrap().as_slice(),
         &[
             "admissions",
+            "restricted",
             "effects",
             "conflicts",
             "group_updates",
-            "restricted",
             "synchronize"
         ]
     );
@@ -387,10 +390,10 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         &[
+            "restricted",
             "effects",
             "conflicts",
             "group_updates",
-            "restricted",
             "synchronize",
             "cleanup"
         ]
@@ -489,10 +492,10 @@ async fn online_events_for_different_peers_are_not_overwritten_during_a_round() 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         &[
+            "restricted",
             "effects",
             "conflicts",
             "group_updates",
-            "restricted",
             "synchronize",
             "cleanup",
             "conflicts",
