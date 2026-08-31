@@ -72,3 +72,10 @@
 - 首次编译发现 `VerifiableGroupInfo` 未由 prelude 导出，改为从 `openmls::messages::group_info` 显式导入。
 - `uc-infra` MLS 定向测试、workspace all-target check、fmt、架构检查与 `git diff --check` 通过。
 - 复审修正 external recovery 新增路径的错误吞噬：稳定分类改为携带 `anyhow::Error` source，脱敏 `Debug` 不输出底层细节；测试验证 InvalidMessage 分类、`source()` 非空和稳定显示文本。
+
+## 2026-08-31 · Two-phase recovery wire contract
+
+- Infra 定义专用 Iroh ALPN 和五类有界帧：GroupInfo 请求/响应、external commit 提交、最终恢复包和拒绝。
+- 两个请求阶段均显式绑定 conflict、target branch 与 recipient；所有 `Debug` 对绑定与密码学负载脱敏。
+- postcard 解码错误保留 source，空密码学载荷、错误版本和超过 4 MiB 的帧稳定拒绝。
+- 定向 wire round-trip 与损坏帧 source 测试通过。

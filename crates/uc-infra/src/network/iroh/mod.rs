@@ -16,6 +16,7 @@ pub mod connection_channel_adapter;
 pub mod group_update_adapter;
 pub mod identity_store;
 pub mod membership_attestation_adapter;
+pub(crate) mod membership_branch_recovery_wire;
 pub mod membership_history_exchange_adapter;
 mod net_recovery;
 pub mod node;

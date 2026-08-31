@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：MLS external recovery 原语已验证；下一切片把两阶段握手接入密封材料 adapter 和 Iroh exchange。
+Phase 4：MLS external recovery 原语和两阶段 Iroh wire contract 已完成；下一切片实现认证 handler、client 和 staged state 持久化。
 
 ## Next Step
 
-实现 GroupInfo → recipient external commit → target sealed catalog 的认证 Iroh 两阶段 exchange，并持久化 recipient/target staged state。
+实现两阶段 Iroh handler/client，调用 Application issuer 做每阶段资格复核，并把 recipient/target staged state 纳入 MasterKey AEAD 持久边界。
 
 ## Constraints
 
