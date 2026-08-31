@@ -41,3 +41,5 @@
 - recovery package 的安全签发能力尚不存在；在它能绑定当前有效成员签名、MLS 恢复密文和内容密钥目录前，不应只安装一个会稳定拒绝的 Iroh 协议外壳并宣称 transport 已完成。
 - Iroh endpoint 只负责把认证连接映射成 source device；recipient instance 与 source device 的对应关系必须由 Application 使用目标完整历史重新验证。
 - 恢复材料密封方式归 Infra capability，Application 只接受两个非空 opaque ciphertext，并负责 package 绑定、时效、nonce 与成员授权签名。
+- OpenMLS 0.8 external commit 会按相同签名公钥自动移除旧 leaf；因此 Active recipient 可使用 sibling 状态中自己的签名私钥重新加入目标 group，不需要也不得复制目标设备的 `MlsClientState`。
+- 内容密钥目录必须在 external commit 后使用新 epoch exporter wrapping key 密封：目标端先给签名 GroupInfo，recipient 返回 external commit，目标端应用到 detached state 后才得到与 recipient 相同的 wrapping key。因此真实恢复协议是两阶段握手，不是单次请求响应。

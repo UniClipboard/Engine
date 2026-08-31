@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：真实 transition preparation 与 Application recovery package issuer 已完成；下一切片实现密封材料 adapter 和 Iroh exchange。
+Phase 4：MLS external recovery 原语已验证；下一切片把两阶段握手接入密封材料 adapter 和 Iroh exchange。
 
 ## Next Step
 
-实现 recipient-bound MLS/content-key 恢复材料 adapter，再以认证 Iroh exchange 替换 recovery deferred adapter。
+实现 GroupInfo → recipient external commit → target sealed catalog 的认证 Iroh 两阶段 exchange，并持久化 recipient/target staged state。
 
 ## Constraints
 
@@ -47,3 +47,4 @@ Phase 4：真实 transition preparation 与 Application recovery package issuer 
 | resolve use case 无法从 membership 聚合导入 conflict status | 1 | 将 ledger conflict record/status 加入 membership 聚合公开导出。 |
 | 收窄 coordinator outcome re-export 后模块内测试找不到类型 | 1 | 仅在 `cfg(test)` 下重新导出 outcome，避免生产 unused import。 |
 | workspace 全量测试的 3 个既有 clipboard/search host-adapter 用例失败 | 1 | 成员套件与 all-target check 均通过；单独重跑首项仍返回 QueryHistory unavailable 1243，记录为本切片外既有失败，不误报全量通过。 |
+| `VerifiableGroupInfo` 无法从 OpenMLS prelude 解析 | 1 | 使用公开的 `openmls::messages::group_info::VerifiableGroupInfo` 显式导入。 |

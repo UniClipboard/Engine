@@ -63,3 +63,12 @@
 - issuer 从 ledger 验证本机目标 branch、认证 source device 与 Active recipient instance、Active 本机签发者。
 - 生成五分钟有效期与随机 nonce，绑定完整持久历史，并用当前成员签名能力授权。
 - 测试确认错误认证设备在材料 preparation 前被拒绝，合法请求产出的包可通过 Core 完整验证。
+
+## 2026-08-31 · MLS external recovery primitive
+
+- Infra 可从目标 MLS 状态导出带 ratchet tree 的签名 GroupInfo，且不导出成员私钥。
+- recipient 使用自身现有签名凭据创建 external commit；OpenMLS 原子替换目标树中相同凭据 leaf。
+- 定向测试确认目标端应用 commit 后双方 epoch 和 wrapping key 相同，而各自私有 MLS snapshot 不同。
+- 首次编译发现 `VerifiableGroupInfo` 未由 prelude 导出，改为从 `openmls::messages::group_info` 显式导入。
+- `uc-infra` MLS 定向测试、workspace all-target check、fmt、架构检查与 `git diff --check` 通过。
+- 复审修正 external recovery 新增路径的错误吞噬：稳定分类改为携带 `anyhow::Error` source，脱敏 `Debug` 不输出底层细节；测试验证 InvalidMessage 分类、`source()` 非空和稳定显示文本。

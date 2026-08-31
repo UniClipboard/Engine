@@ -1,5 +1,6 @@
 use openmls::{
     group::MlsGroup,
+    messages::group_info::VerifiableGroupInfo,
     prelude::{tls_codec::*, *},
     treesync::LeafNodeParameters,
 };
@@ -32,6 +33,35 @@ pub(crate) enum MlsGroupError {
     IdentityMismatch,
     #[error("MLS protocol operation failed")]
     Protocol,
+}
+
+#[derive(thiserror::Error)]
+pub(crate) enum MlsExternalRecoveryError {
+    #[error("invalid MLS recovery state")]
+    InvalidState {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("invalid MLS recovery message")]
+    InvalidMessage {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("MLS recovery protocol operation failed")]
+    Protocol {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl std::fmt::Debug for MlsExternalRecoveryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidState { .. } => "MlsExternalRecoveryError::InvalidState",
+            Self::InvalidMessage { .. } => "MlsExternalRecoveryError::InvalidMessage",
+            Self::Protocol { .. } => "MlsExternalRecoveryError::Protocol",
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -171,6 +201,13 @@ pub(crate) struct CompletedMlsJoin {
     pub(crate) wrapping_key: MasterKey,
 }
 
+pub(crate) struct PreparedMlsExternalRecovery {
+    pub(crate) recipient_state: MlsClientState,
+    pub(crate) commit: Vec<u8>,
+    pub(crate) epoch: u64,
+    pub(crate) wrapping_key: MasterKey,
+}
+
 pub(crate) struct MlsRemoval {
     pub(crate) sponsor_state: MlsClientState,
     pub(crate) commit: Vec<u8>,
@@ -204,6 +241,91 @@ impl std::fmt::Debug for CompletedMlsJoin {
 pub(crate) struct MlsGroupEngine;
 
 impl MlsGroupEngine {
+    /// 导出不含成员私钥的签名 GroupInfo，供已有成员从 sibling 状态发起
+    /// external commit。ratchet tree 作为 GroupInfo 扩展携带。
+    pub(crate) fn export_external_recovery_group_info(
+        client_state: &MlsClientState,
+    ) -> Result<Vec<u8>, MlsExternalRecoveryError> {
+        let (provider, stored) = restore_external_recovery_state(client_state)?;
+        let signer = restore_external_recovery_signer(&provider, &stored)?;
+        let group_id = stored
+            .group_id
+            .ok_or_else(|| recovery_state(anyhow::anyhow!("MLS recovery group is unavailable")))?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|source| recovery_protocol(anyhow::Error::new(source)))?
+            .ok_or_else(|| recovery_state(anyhow::anyhow!("MLS recovery group is missing")))?;
+        if !group.is_active() {
+            return Err(recovery_state(anyhow::anyhow!(
+                "MLS recovery group is inactive"
+            )));
+        }
+        let message = group
+            .export_group_info(provider.crypto(), &signer, true)
+            .map_err(|source| recovery_protocol(anyhow::Error::new(source)))?;
+        let MlsMessageBodyOut::GroupInfo(group_info) = message.body() else {
+            return Err(recovery_protocol(anyhow::anyhow!(
+                "MLS recovery export returned an unexpected message"
+            )));
+        };
+        group_info
+            .tls_serialize_detached()
+            .map_err(|source| recovery_protocol(anyhow::Error::new(source)))
+    }
+
+    /// 使用接收设备自己的 MLS 签名私钥创建 external commit。OpenMLS 会在
+    /// 目标树中发现相同签名公钥并把旧 leaf 与本次重新加入原子替换。
+    pub(crate) fn prepare_external_recovery(
+        recipient_state: &MlsClientState,
+        group_info: &[u8],
+    ) -> Result<PreparedMlsExternalRecovery, MlsExternalRecoveryError> {
+        let (provider, stored) = restore_external_recovery_state(recipient_state)?;
+        let signer = restore_external_recovery_signer(&provider, &stored)?;
+        let old_group_id = stored
+            .group_id
+            .ok_or_else(|| recovery_state(anyhow::anyhow!("MLS recipient group is unavailable")))?;
+        let old_group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&old_group_id))
+            .map_err(|source| recovery_protocol(anyhow::Error::new(source)))?
+            .ok_or_else(|| recovery_state(anyhow::anyhow!("MLS recipient group is missing")))?;
+        let own = old_group
+            .members()
+            .find(|member| member.signature_key == signer.to_public_vec())
+            .ok_or_else(|| recovery_state(anyhow::anyhow!("MLS recipient leaf is missing")))?;
+        let identity = own.credential.serialized_content().to_vec();
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(identity).into(),
+            signature_key: signer.to_public_vec().into(),
+        };
+        let verifiable = VerifiableGroupInfo::tls_deserialize_exact(group_info.to_vec())
+            .map_err(|source| recovery_message(anyhow::Error::new(source)))?;
+        let (group, bundle) = MlsGroup::external_commit_builder()
+            .with_config(
+                MlsGroupJoinConfig::builder()
+                    .use_ratchet_tree_extension(true)
+                    .build(),
+            )
+            .build_group(&provider, verifiable, credential)
+            .map_err(|source| recovery_message(anyhow::Error::new(source)))?
+            .load_psks(provider.storage())
+            .map_err(|source| recovery_protocol(anyhow::Error::new(source)))?
+            .build(provider.rand(), provider.crypto(), &signer, |_| true)
+            .map_err(|source| recovery_protocol(anyhow::Error::new(source)))?
+            .finalize(&provider)
+            .map_err(|source| recovery_protocol(anyhow::Error::new(source)))?;
+        let epoch = group.epoch().as_u64();
+        let wrapping_key = export_external_recovery_wrapping_key(&group, &provider)?;
+        let commit = bundle
+            .into_commit()
+            .tls_serialize_detached()
+            .map_err(|source| recovery_protocol(anyhow::Error::new(source)))?;
+        let recipient_state = snapshot(&provider, &signer, Some(group.group_id().as_slice()))
+            .map_err(recovery_state)?;
+        Ok(PreparedMlsExternalRecovery {
+            recipient_state,
+            commit,
+            epoch,
+            wrapping_key,
+        })
+    }
     pub(crate) fn validate_state(
         client_state: &MlsClientState,
         expected_space_id: &[u8],
@@ -685,6 +807,67 @@ impl MlsGroupEngine {
     }
 }
 
+fn recovery_state(source: impl Into<anyhow::Error>) -> MlsExternalRecoveryError {
+    MlsExternalRecoveryError::InvalidState {
+        source: source.into(),
+    }
+}
+
+fn recovery_message(source: impl Into<anyhow::Error>) -> MlsExternalRecoveryError {
+    MlsExternalRecoveryError::InvalidMessage {
+        source: source.into(),
+    }
+}
+
+fn recovery_protocol(source: impl Into<anyhow::Error>) -> MlsExternalRecoveryError {
+    MlsExternalRecoveryError::Protocol {
+        source: source.into(),
+    }
+}
+
+fn restore_external_recovery_state(
+    state: &MlsClientState,
+) -> Result<(SnapshotProvider, StoredClientState), MlsExternalRecoveryError> {
+    let stored: StoredClientState = serde_json::from_slice(state.as_bytes())
+        .map_err(|source| recovery_state(anyhow::Error::new(source)))?;
+    if stored.version != STATE_VERSION {
+        return Err(recovery_state(anyhow::anyhow!(
+            "MLS recovery state version is unsupported"
+        )));
+    }
+    let storage = MemoryStorage::deserialize(&mut stored.serialized_storage.as_slice())
+        .map_err(|source| recovery_state(anyhow::Error::new(source)))?;
+    Ok((
+        SnapshotProvider {
+            crypto: RustCrypto::default(),
+            storage,
+        },
+        stored,
+    ))
+}
+
+fn restore_external_recovery_signer(
+    provider: &SnapshotProvider,
+    stored: &StoredClientState,
+) -> Result<SignatureKeyPair, MlsExternalRecoveryError> {
+    SignatureKeyPair::read(
+        provider.storage(),
+        &stored.signer_public,
+        SignatureScheme::ED25519,
+    )
+    .ok_or_else(|| recovery_state(anyhow::anyhow!("MLS recovery signer is missing")))
+}
+
+fn export_external_recovery_wrapping_key(
+    group: &MlsGroup,
+    provider: &SnapshotProvider,
+) -> Result<MasterKey, MlsExternalRecoveryError> {
+    let bytes = group
+        .export_secret(provider.crypto(), EXPORT_LABEL, b"", 32)
+        .map_err(|source| recovery_protocol(anyhow::Error::new(source)))?;
+    MasterKey::from_bytes(&bytes).map_err(|source| recovery_protocol(anyhow::Error::new(source)))
+}
+
 fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain);
@@ -777,12 +960,64 @@ fn export_wrapping_key(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
     use crate::space::OpenMlsHistoricalSignatureVerifier;
     use uc_core::membership::{
         BaseMembershipHistoryPosition, HistoricalMembershipSignatureVerifier, MembershipEventId,
         ED25519_SIGNATURE_ALGORITHM_V1,
     };
+
+    #[test]
+    fn external_recovery_replaces_the_existing_leaf_without_sharing_private_state() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let admission =
+            MlsGroupEngine::admit_member(&sponsor, b"bob", &pending.key_package).unwrap();
+        let recipient =
+            MlsGroupEngine::complete_join(pending, b"space-a", &admission.welcome).unwrap();
+
+        let group_info =
+            MlsGroupEngine::export_external_recovery_group_info(&admission.sponsor_state).unwrap();
+        let recovered =
+            MlsGroupEngine::prepare_external_recovery(&recipient.client_state, &group_info)
+                .unwrap();
+        let sponsor_after =
+            MlsGroupEngine::apply_commit(&admission.sponsor_state, b"space-a", &recovered.commit)
+                .unwrap();
+
+        assert_eq!(recovered.epoch, sponsor_after.epoch);
+        assert_eq!(
+            recovered.wrapping_key.as_bytes(),
+            sponsor_after.wrapping_key.as_bytes()
+        );
+        assert_ne!(
+            recovered.recipient_state.as_bytes(),
+            sponsor_after.client_state.as_bytes()
+        );
+    }
+
+    #[test]
+    fn external_recovery_preserves_the_invalid_group_info_source() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let error = match MlsGroupEngine::prepare_external_recovery(&sponsor, b"invalid-group-info")
+        {
+            Ok(_) => panic!("invalid group info must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            &error,
+            MlsExternalRecoveryError::InvalidMessage { .. }
+        ));
+        assert!(error.source().is_some());
+        assert_eq!(error.to_string(), "invalid MLS recovery message");
+        assert_eq!(
+            format!("{error:?}"),
+            "MlsExternalRecoveryError::InvalidMessage"
+        );
+    }
 
     #[test]
     fn sponsor_and_joiner_export_the_same_epoch_wrapping_key_after_cold_restore() {
