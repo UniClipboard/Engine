@@ -129,3 +129,9 @@
 - F6 不应同时验收“所有中间成员离线时签发新邀请”；先形成两条合法 sibling 并让安全 epoch 收敛，再停 B/D，才能只检验 conflict 选择和恢复不依赖原 Sponsor。
 - Membership branch/head 和 MLS epoch 收敛仍不足以证明正文可发；target 侧的 peer reconciliation 若被旧 conflict evidence 回退为 Diverged，发送 scope 会把 Active recipient 排除为零目标。
 - 已提交的 target recovery session 是“该 recipient 已选择本分支并完成密码恢复”的唯一耐久证据；后续旧 sibling evidence 只能幂等应答，不能重新扩展冲突状态。
+
+## 2026-08-31 · F7 fair anti-entropy boundary
+
+- 公平性必须让合法 peer 真正落后：D 保持共同祖先，待 A↔B 形成 sibling 冲突边时才重连 A/G/H。若只在冲突前等待全员收敛，测试无法证明调度公平。
+- 三条 sibling 的创建邀请和 join 必须从同一稳定父历史并发开始；串行模型会把 Sponsor admission 状态传播引入分支构造。
+- branch/head 与 epoch 收敛之后还需完整有向正文矩阵；这同时验证 peer scope、地址候选、内容加密和跨分支隔离，不能用少数代表 hop 替代。

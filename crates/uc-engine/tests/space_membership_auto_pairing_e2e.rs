@@ -17,6 +17,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const PASSPHRASE: &str = "space-membership-e2e-passphrase";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const ADMISSION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const EXPIRES_AT_MS: i64 = 2_000_000_000_000;
 
@@ -258,6 +259,14 @@ enum TopologyAction<'a> {
         left: &'a [&'a str],
         right: &'a [&'a str],
     },
+    PartitionGroups {
+        groups: &'a [&'a [&'a str]],
+    },
+    GroupedBridge {
+        groups: &'a [&'a [&'a str]],
+        left: &'a str,
+        right: &'a str,
+    },
     Bridge {
         left: &'a str,
         right: &'a str,
@@ -285,6 +294,145 @@ enum TopologyAction<'a> {
 enum PendingChangeChoice {
     Apply,
     Keep,
+}
+
+// F7：十节点不平衡树形成三个 sibling 后，冲突 peer 不得饿死合法 peer 的反熵。
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn f7_three_sibling_branches_keep_fair_anti_entropy_for_legal_peers() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Start { node: "D" },
+            TopologyAction::Start { node: "E" },
+            TopologyAction::Start { node: "F" },
+            TopologyAction::Start { node: "G" },
+            TopologyAction::Start { node: "H" },
+            TopologyAction::Start { node: "I" },
+            TopologyAction::Start { node: "J" },
+            TopologyAction::Create { node: "A" },
+        ])
+        .await;
+    let mut baseline = vec!["A"];
+    for (sponsor, joiner) in [
+        ("A", "B"),
+        ("B", "C"),
+        ("C", "D"),
+        ("D", "E"),
+        ("E", "F"),
+        ("F", "G"),
+    ] {
+        topology.join(sponsor, joiner).await;
+        baseline.push(joiner);
+        topology
+            .wait_for_equivalent_branch_named(&baseline, baseline.len() as u32, "F7 baseline")
+            .await;
+        let epoch = topology.diagnostics("A").await.group_epoch;
+        topology
+            .wait_for_group_epoch_named(&baseline, epoch, "F7 baseline")
+            .await;
+    }
+    let (invitation_h, invitation_i, invitation_j) = tokio::join!(
+        issue_invitation(topology.engine("A")),
+        issue_invitation(topology.engine("B")),
+        issue_invitation(topology.engine("C")),
+    );
+
+    topology
+        .run(&[TopologyAction::PartitionGroups {
+            groups: &[
+                &["A", "G", "H"][..],
+                &["D"][..],
+                &["B", "E", "I"][..],
+                &["C", "F", "J"][..],
+            ],
+        }])
+        .await;
+    let space_id = topology
+        .space_ids
+        .get("A")
+        .unwrap_or_else(|| panic!("node A has no space"))
+        .clone();
+    let (joined_h, joined_i, joined_j) = tokio::join!(
+        join_with_invitation(topology.engine("H"), "H", &space_id, invitation_h,),
+        join_with_invitation(topology.engine("I"), "I", &space_id, invitation_i,),
+        join_with_invitation(topology.engine("J"), "J", &space_id, invitation_j,),
+    );
+    for (node, joined) in [("H", joined_h), ("I", joined_i), ("J", joined_j)] {
+        topology.space_ids.insert(node.to_owned(), space_id.clone());
+        topology
+            .device_ids
+            .insert(node.to_owned(), joined.self_device_id);
+    }
+    for (nodes, phase) in [
+        (&["A", "G", "H"][..], "F7 branch H"),
+        (&["B", "E", "I"][..], "F7 branch I"),
+        (&["C", "F", "J"][..], "F7 branch J"),
+    ] {
+        topology
+            .wait_for_equivalent_branch_named(nodes, 8, phase)
+            .await;
+        let epoch = topology.diagnostics(nodes[0]).await.group_epoch;
+        topology
+            .wait_for_group_epoch_named(nodes, epoch, phase)
+            .await;
+    }
+    let target = topology.diagnostics("A").await;
+    assert_eq!(topology.diagnostics("D").await.effective_member_count, 7);
+
+    topology
+        .run(&[TopologyAction::GroupedBridge {
+            groups: &[
+                &["A", "D", "G", "H"][..],
+                &["B", "E", "I"][..],
+                &["C", "F", "J"][..],
+            ],
+            left: "A",
+            right: "B",
+        }])
+        .await;
+    topology.wait_for_branch_conflict(&["A", "B"]).await;
+    topology
+        .wait_for_equivalent_branch_named(&["A", "D", "G", "H"], 8, "F7 fair legal peer")
+        .await;
+    topology
+        .wait_for_group_epoch_named(
+            &["A", "D", "G", "H"],
+            target.group_epoch,
+            "F7 fair legal peer",
+        )
+        .await;
+    assert_eq!(topology.diagnostics("D").await.pending_conflict_count, 0);
+
+    let branches: [&[&str]; 3] = [&["A", "D", "G", "H"], &["B", "E", "I"], &["C", "F", "J"]];
+    let all_nodes = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+    for sender in all_nodes {
+        for receiver in all_nodes {
+            if sender == receiver {
+                continue;
+            }
+            let same_branch = branches
+                .iter()
+                .any(|branch| branch.contains(&sender) && branch.contains(&receiver));
+            let text = format!("F7 matrix {sender}-{receiver}");
+            let report = topology.send(sender, receiver, &text).await;
+            assert_eq!(
+                report.total_accepted,
+                usize::from(same_branch),
+                "unexpected F7 transfer result for {sender}-{receiver}: {report:?}"
+            );
+            if same_branch {
+                wait_for_received_text(topology.engine(receiver), &text).await;
+            } else {
+                assert!(!receiver_has_exact_text(topology.engine(receiver), &text).await);
+            }
+        }
+    }
+    topology.shutdown().await;
 }
 
 // F6：深准入链的中间 Sponsor 离线后，叶子仍须经剩余相邻节点恢复到共同分支。
@@ -1021,6 +1169,14 @@ impl MembershipTopology {
                     .await
                 }
                 TopologyAction::Partition { left, right } => self.partition(left, right).await,
+                TopologyAction::PartitionGroups { groups } => {
+                    self.partition_groups(groups, None).await
+                }
+                TopologyAction::GroupedBridge {
+                    groups,
+                    left,
+                    right,
+                } => self.partition_groups(groups, Some((left, right))).await,
                 TopologyAction::Bridge {
                     left,
                     right,
@@ -1170,6 +1326,49 @@ impl MembershipTopology {
         }
         for node in right {
             self.set_partition(node, left_ids.clone()).await;
+        }
+    }
+
+    async fn partition_groups(&self, groups: &[&[&str]], bridge: Option<(&str, &str)>) {
+        let all = groups
+            .iter()
+            .flat_map(|group| group.iter().copied())
+            .collect::<Vec<_>>();
+        let unique = all
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(all.len(), unique.len(), "partition groups must be disjoint");
+        if let Some((left, right)) = bridge {
+            assert!(
+                groups.iter().any(|group| group.contains(&left))
+                    && groups.iter().any(|group| group.contains(&right)),
+                "grouped bridge endpoints must belong to partition groups"
+            );
+        }
+        for group in groups {
+            for node in *group {
+                let bridge_peer = bridge.and_then(|(left, right)| {
+                    if *node == left {
+                        Some(right)
+                    } else if *node == right {
+                        Some(left)
+                    } else {
+                        None
+                    }
+                });
+                let blocked = all
+                    .iter()
+                    .copied()
+                    .filter(|candidate| {
+                        candidate != node
+                            && !group.contains(candidate)
+                            && Some(*candidate) != bridge_peer
+                    })
+                    .collect::<Vec<_>>();
+                self.set_partition(node, self.endpoint_ids(&blocked).await)
+                    .await;
+            }
         }
     }
 
@@ -2031,15 +2230,16 @@ async fn join_with_invitation(
     else {
         panic!("unexpected join result");
     };
-    wait_for_completed_join(joiner, status, expected_space_id).await
+    wait_for_completed_join(joiner, device_name, status, expected_space_id).await
 }
 
 async fn wait_for_completed_join(
     engine: &Engine,
+    device_name: &str,
     mut status: JoinSpaceStatusSummary,
     expected_space_id: &str,
 ) -> JoinResult {
-    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + ADMISSION_WAIT_TIMEOUT;
     loop {
         match status {
             JoinSpaceStatusSummary::Active { joined_space, .. } => {
@@ -2055,7 +2255,7 @@ async fn wait_for_completed_join(
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "space admission timed out"
+            "space admission timed out for {device_name}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
         let snapshot = match engine.execute(Operation::QueryDeviceGroupChoices).await {

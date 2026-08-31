@@ -278,3 +278,16 @@
 - Target 恢复材料在 external commit 后为其他 Active 目标成员生成持久 group-update outbox，不再只更新 target 与 chooser。
 - TargetCommitted 作为唯一恢复事实：完成 target 侧 conflict，将 recipient 恢复为 Consistent，并阻止旧 sibling evidence 重新把它暂停。
 - F6 Desktop E2E 通过，耗时 402.19 秒；A/C/E/F 的 branch/head/epoch 一致，A→C、C→E、E→F 正文均精确接收，B/D 全程保持停机。
+
+## 2026-08-31 · F7 three-branch fairness red test
+
+- 十节点先形成 A–G 七成员共同历史，再由 A/B/C 使用预签发邀请分别准入 H/I/J，形成三条八成员 sibling。
+- D 暂停在共同祖先；打开 A↔B 冲突边的同时重连 D 与 A/G/H，要求 A/B 记录冲突而 D 仍能补齐 H 事件和 MLS epoch。
+- 最终遍历十节点完整有向正文矩阵：同分支精确接收，跨分支零 accepted 且无正文泄漏。
+
+## 2026-08-31 · F7 three-branch fairness complete
+
+- 公开 Engine 拓扑驱动新增任意分组分区和单跨组 bridge；每个节点只保留组内连接，bridge 端点额外保留彼此，所有业务 ALPN 共用同一认证 gate。
+- 共同基线改用 A→B→C→D→E→F→G 链式 Sponsor 来源；十 Engine 负载下只将 admission completion 的测试观察窗口放宽到 120 秒，公平性业务窗口仍为 60 秒。
+- A/B/C 并发准入 H/I/J 形成三条八成员 sibling；D 暂留七成员祖先，随后在 A↔B 冲突边存在时补齐 A 分支的 branch/head 和 MLS epoch。
+- F7 Desktop E2E 通过，耗时 462.19 秒；合法 peer D 未被冲突 peer B 饿死，十节点 90 条有向正文矩阵中同分支精确接收、跨分支全部关闭式拒绝。

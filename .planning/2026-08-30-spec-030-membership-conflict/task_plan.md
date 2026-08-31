@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-F0–F6 已完成；下一切片进入 F7：十节点不平衡树形成三个 sibling branches，验证分支内公平反熵且冲突 peer 不饿死合法 peer。
+F0–F7 已完成；下一切片进入 F8：选择目标后 Sponsor 离线、恢复包 ACK 丢失且 chooser 重启，验证 intent 持久、幂等重发与唯一 promoted generation。
 
 ## Constraints
 
@@ -74,3 +74,7 @@ F0–F6 已完成；下一切片进入 F7：十节点不平衡树形成三个 si
 | F6 安全状态收敛后首次正文发送未被接受 | 9 | MLS epoch 一致不代表 Heal 后的正文连接已刷新；与 F0/F1 一致，在正文矩阵前通过稳定 `RefreshPeerConnections` operation 刷新在线节点。 |
 | F6 Heal 后显式刷新仍有正文发送未接受 | 10 | 原断言未输出 hop 和发送报告；先增强红测诊断，获取精确 sender/receiver 与稳定拒绝分类后再修复。 |
 | F6 E→F 在 branch/epoch 收敛后仍为零目标 | 11 | 恢复 target 已接纳 recipient 的 external commit，但旧 sibling evidence 又把该 peer 标为 `Diverged`。TargetCommitted 现在同时完成 conflict/关系投影，ledger 证据入口以已提交 recovery session 作幂等屏障。 |
+| F7 三张邀请串行签发时后续 Sponsor 返回 1221 | 1 | 首张 invitation 的后台状态会让后续串行签发暂时不可用；三分支应从同一稳定基线并发签发，改用 `tokio::join!` 不把人为顺序混入验收。 |
+| F7 并发邀请后仍串行执行三次 join，其中一次超时 | 2 | 三 sibling 应同时从父 head 出发；改为三台 joiner 并发执行稳定 `JoinSpace` 流程，完成后再统一登记测试拓扑身份。 |
+| F7 带标签诊断确认共同基线 G 准入超过 60 秒 | 3 | 十 Engine 负载下普通准入观察偶发超过通用等待窗口；只将 E2E admission completion 窗口独立为 120 秒，branch/epoch/conflict 公平性断言继续使用 60 秒。 |
+| F7 共同基线连续使用 A 作 Sponsor 后签发返回 1221 | 4 | F7 不验收单 Sponsor 高频准入；改用已经 F6 验证的 A→B→C→D→E→F→G 链式来源，同时更符合不平衡树拓扑。 |

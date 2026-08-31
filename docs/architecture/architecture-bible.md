@@ -856,6 +856,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | F4 单 bridge sibling 隔离 | Desktop 声明式拓扑新增只开放两个认证端点、其余跨区链路保持阻断的 `Bridge` 动作。六节点共同基线分裂为两个各三成员的 sibling history 后，唯一 bridge 只交换冲突证据：两端各记录一个冲突，成员集合与 branch 不变，跨分支正文继续关闭式拒绝，不能联合成伪历史。 |
 | 2026-08-31 | F5 环形冲突幂等传播 | Application ledger 对已记录的同来源 conflict evidence 返回现有响应而不重复提交；Desktop 六节点从共同历史形成 E/F 两条 sibling 分支，再把共同成员 A-B-C-D 接成单环。冲突沿 B-C 与 D-A 两个方向传播后，每端只公开一个设备组选择，重复刷新不增加 membership effects。peer 重试账务 revision 可独立推进，不作为 conflict 消息环判据。 |
 | 2026-08-31 | F6 深链离线 Sponsor 恢复 | Desktop 从 A→B→C→D→E→F 深链形成两条七成员 sibling，真实停止 B/D 后由 F 选择 E 分支。Target 恢复 prepare 将 external commit 作为持久 group-update 欠账扇出给其他 Active 目标成员；TargetCommitted 在同一加密 ledger 流程中完成 conflict、恢复 recipient 关系，并使旧 sibling evidence 幂等。A/C/E/F 最终 branch、head、MLS epoch 与相邻正文均收敛，恢复不依赖原 Sponsor 在线。 |
+| 2026-08-31 | F7 三分支公平反熵 | Desktop 十节点从链式七成员基线并发形成三条八成员 sibling；分组分区只保留组内连接，并在 A–B 单冲突边存在时让落后合法 peer D 重连。D 仍在有界窗口内补齐 A/G/H 分支的 branch、head 与 MLS epoch，证明冲突 peer 不饿死合法反熵。十节点完整有向正文矩阵同时验证分支内通信与跨分支关闭式隔离。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |
