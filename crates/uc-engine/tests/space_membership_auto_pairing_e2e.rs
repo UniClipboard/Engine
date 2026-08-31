@@ -217,6 +217,162 @@ async fn mount_rendezvous() -> MockServer {
     server
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TopologyAction<'a> {
+    Start {
+        node: &'a str,
+    },
+    Create {
+        node: &'a str,
+    },
+    Join {
+        sponsor: &'a str,
+        joiner: &'a str,
+    },
+    AssertSnapshot {
+        node: &'a str,
+        active_members: usize,
+        pending_choices: usize,
+    },
+}
+
+struct MembershipTopology {
+    rendezvous_base_url: String,
+    harnesses: HashMap<String, DeviceHarness>,
+    engines: HashMap<String, Engine>,
+    space_ids: HashMap<String, String>,
+}
+
+impl MembershipTopology {
+    fn new(rendezvous_base_url: String) -> Self {
+        Self {
+            rendezvous_base_url,
+            harnesses: HashMap::new(),
+            engines: HashMap::new(),
+            space_ids: HashMap::new(),
+        }
+    }
+
+    async fn run(&mut self, actions: &[TopologyAction<'_>]) {
+        for action in actions {
+            match *action {
+                TopologyAction::Start { node } => self.start(node).await,
+                TopologyAction::Create { node } => self.create(node).await,
+                TopologyAction::Join { sponsor, joiner } => self.join(sponsor, joiner).await,
+                TopologyAction::AssertSnapshot {
+                    node,
+                    active_members,
+                    pending_choices,
+                } => {
+                    self.assert_snapshot(node, active_members, pending_choices)
+                        .await
+                }
+            }
+        }
+    }
+
+    async fn start(&mut self, node: &str) {
+        assert!(
+            !self.engines.contains_key(node),
+            "node {node} started twice"
+        );
+        let harness = DeviceHarness::new(self.rendezvous_base_url.clone());
+        let engine = harness.start().await;
+        self.harnesses.insert(node.to_owned(), harness);
+        self.engines.insert(node.to_owned(), engine);
+    }
+
+    async fn create(&mut self, node: &str) {
+        let engine = self.engine(node);
+        let (space_id, _) = create_space(engine, node).await;
+        self.space_ids.insert(node.to_owned(), space_id);
+    }
+
+    async fn join(&self, sponsor: &str, joiner: &str) {
+        let space_id = self
+            .space_ids
+            .get(sponsor)
+            .unwrap_or_else(|| panic!("sponsor {sponsor} has no space"));
+        join_through(self.engine(sponsor), self.engine(joiner), joiner, space_id).await;
+    }
+
+    async fn assert_snapshot(
+        &self,
+        node: &str,
+        expected_active_members: usize,
+        expected_pending_choices: usize,
+    ) {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            if let Ok(OperationResult::DeviceGroupChoices(summary)) = self
+                .engine(node)
+                .execute(Operation::QueryDeviceGroupChoices)
+                .await
+            {
+                let active_members = summary
+                    .device_trust
+                    .devices
+                    .iter()
+                    .filter(|device| {
+                        device.membership == uc_engine::DeviceMembershipSummary::Active
+                    })
+                    .count();
+                if active_members == expected_active_members
+                    && summary.issues.len() == expected_pending_choices
+                {
+                    return;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "node {node} did not reach the expected public snapshot"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn engine(&self, node: &str) -> &Engine {
+        self.engines
+            .get(node)
+            .unwrap_or_else(|| panic!("node {node} is not started"))
+    }
+
+    async fn shutdown(&self) {
+        for engine in self.engines.values() {
+            engine
+                .shutdown(SHUTDOWN_TIMEOUT)
+                .await
+                .expect("shut down topology node");
+        }
+    }
+}
+
+// 声明式拓扑脚本只能通过稳定 Engine operation 观察和推进节点。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn topology_script_builds_a_two_node_space_through_public_operations() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::AssertSnapshot {
+                node: "B",
+                active_members: 2,
+                pending_choices: 0,
+            },
+        ])
+        .await;
+    topology.shutdown().await;
+}
+
 // 新设备只经过稳定 JoinSpace 入口，并最终形成可查询的活动 Space。
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn fresh_device_join_completes_through_stable_operations() {

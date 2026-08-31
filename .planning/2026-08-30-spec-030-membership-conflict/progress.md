@@ -172,3 +172,14 @@
 - 新公开入口收敛为 `QueryDeviceGroupChoices` / `ChooseDeviceGroup`；Application facade 统一读取两类内部状态、校验一致 revision，并负责选择路由。
 - 查询保留完整 device-trust snapshot；候选分支成员未知时显式返回 `members_complete = false`。
 - UniFFI、HarmonyOS、移动 probe 与 Engine E2E 已替换为统一入口；旧 Engine operation mapping 文件已删除。
+
+## 2026-08-31 · Phase 6 topology driver discovery
+
+- 已核对规格 F0-F13、声明式动作集合、workspace 二进制和现有多节点测试。
+- 确认仓库内没有可直接扩展的 Desktop CLI/daemon；Phase 6 将以 `uc-engine` 公开 contract 的多实例验收驱动器作为本仓稳定接缝。
+
+## 2026-08-31 · Phase 6 declarative topology tracer bullet
+
+- 红测先引用不存在的 `MembershipTopology` / `TopologyAction`，编译失败固定了声明式驱动器接缝。
+- 绿色实现支持 `Start`、`Create`、`Join` 和 `AssertSnapshot`，所有推进和断言只调用公开 `Engine::execute(Operation)`。
+- 两节点脚本真实完成 Space 创建与准入，并从统一 `QueryDeviceGroupChoices` 快照观察两个 Active member、零待定选择。

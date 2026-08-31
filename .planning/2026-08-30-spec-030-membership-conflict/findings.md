@@ -87,3 +87,10 @@
 - 对产品而言，待定成员变更和 sibling branch 冲突都是“选择继续使用哪个设备组”；分别暴露会泄漏协议原因并要求调用方维护两套页面和并发处理。
 - 统一查询必须携带 revision，选择动作必须回传该 revision；Application 在执行前重新查询并拒绝过期选择。
 - 远端 branch 在恢复包验证前没有可信完整成员名单，契约必须表达未知，不能仅为 UI 对称而推测设备列表。
+
+# 2026-08-31 · Phase 6 Desktop 接缝盘点
+
+- 当前 engine 仓库没有 Desktop CLI 或 daemon crate；workspace 中唯一二进制属于独立 LAN compatibility client，不能作为 P2P 默认能力的验收入口。
+- 现有真实多节点公开接缝是 `uc-engine` integration test 中直接启动多个 `Engine` 实例；它支持真实建 Space、邀请、加入与查询，但没有 Partition、Heal、DropNextFrame 或 CrashAtPhase 驱动能力。
+- 因此 F0 不能直接写成“现有 CLI 脚本”：首个 Phase 6 切片必须先在 `uc-engine` dev/test 边界建立声明式拓扑驱动器，并让动作只调用公开 Engine contract；网络分区与故障注入需要后续补充受控测试 capability，不能读写内部 ledger 冒充端到端结果。
+- 当前公开快照能断言成员状态和待定选择，但不直接给出 branch/head 等价类、MLS group epoch、pending effect 数量；F0 前需要一个仅 `dev-tools` 可用、对敏感标识保持结构化且不写日志的诊断结果，否则无法满足规格的强断言。

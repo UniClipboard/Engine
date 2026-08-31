@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-盘点 Desktop E2E 现有拓扑驱动器和公开 CLI/daemon 接缝，先实现 F0 的确定性红测。
+先为 `dev-tools` 增加只读成员诊断 Operation（branch/head 等价、group epoch、pending conflict/effect），再扩展受控 Partition 能力并写 F0 红测。
 
 ## Constraints
 
