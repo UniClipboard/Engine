@@ -59,6 +59,9 @@ use crate::operations::space::create_space::execute_create_space;
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
 use crate::operations::space::join_space::execute_join_space;
+use crate::operations::space::membership_conflict::{
+    execute_query_membership_conflicts, execute_resolve_membership_conflict,
+};
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
@@ -83,6 +86,17 @@ impl EngineRuntime for ProductionRuntime {
             }
             Operation::DecideDeviceTrustChange(input) => {
                 return execute_decide_device_trust_change(
+                    self.current_facade().await?.as_ref(),
+                    input,
+                )
+                .await;
+            }
+            Operation::QueryMembershipConflicts => {
+                return execute_query_membership_conflicts(self.current_facade().await?.as_ref())
+                    .await;
+            }
+            Operation::ResolveMembershipConflict(input) => {
+                return execute_resolve_membership_conflict(
                     self.current_facade().await?.as_ref(),
                     input,
                 )
@@ -328,9 +342,12 @@ impl EngineRuntime for ProductionRuntime {
                     execute_list_devices(self.current_facade().await?.as_ref()).await
                 }
                 Operation::QueryDeviceTrust
+                | Operation::QueryMembershipConflicts
                 | Operation::CancelJoinSpace(_)
                 | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
-                Operation::DecideDeviceTrustChange(_) => Err(super::operation_unavailable_error()),
+                Operation::DecideDeviceTrustChange(_) | Operation::ResolveMembershipConflict(_) => {
+                    Err(super::operation_unavailable_error())
+                }
                 Operation::QueryMemberSyncPreferences(input) => {
                     execute_query_member_sync_preferences(
                         self.current_facade().await?.as_ref(),

@@ -3,8 +3,11 @@ mod model;
 mod ports;
 mod use_case;
 
-pub use error::ResolveMembershipConflictError;
-pub use model::{ResolveMembershipConflictInput, ResolveMembershipConflictResult};
+pub use error::{QueryMembershipConflictsError, ResolveMembershipConflictError};
+pub use model::{
+    MembershipConflictBranchView, MembershipConflictView, MembershipConflictsView,
+    ResolveMembershipConflictInput, ResolveMembershipConflictResult,
+};
 pub(crate) use ports::QueryMembershipConflictStatusPort;
 pub(crate) use use_case::ResolveMembershipConflictUseCase;
 

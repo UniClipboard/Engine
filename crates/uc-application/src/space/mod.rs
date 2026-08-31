@@ -54,7 +54,9 @@ pub use membership::{
 };
 pub use membership::{MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult};
 pub use membership::{
-    ResolveMembershipConflictError, ResolveMembershipConflictInput, ResolveMembershipConflictResult,
+    MembershipConflictBranchView, MembershipConflictStatus, MembershipConflictView,
+    MembershipConflictsView, QueryMembershipConflictsError, ResolveMembershipConflictError,
+    ResolveMembershipConflictInput, ResolveMembershipConflictResult,
 };
 
 // Assembly contract re-exported by `crate::deps`.

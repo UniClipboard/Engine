@@ -313,6 +313,23 @@ impl AppFacade {
         self.space.decide_device_trust_change(input).await
     }
 
+    pub async fn query_membership_conflicts(
+        &self,
+    ) -> Result<crate::facade::MembershipConflictsView, crate::facade::QueryMembershipConflictsError>
+    {
+        self.space.query_membership_conflicts().await
+    }
+
+    pub async fn resolve_membership_conflict(
+        &self,
+        input: crate::facade::ResolveMembershipConflictInput,
+    ) -> Result<
+        crate::facade::ResolveMembershipConflictResult,
+        crate::facade::ResolveMembershipConflictError,
+    > {
+        self.space.resolve_membership_conflict(input).await
+    }
+
     pub async fn cancel_space_join(
         &self,
         join_id: [u8; 16],

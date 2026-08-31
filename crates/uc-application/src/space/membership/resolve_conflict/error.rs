@@ -23,3 +23,22 @@ pub enum ResolveMembershipConflictError {
         source: anyhow::Error,
     },
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum QueryMembershipConflictsError {
+    #[error("space is locked")]
+    Locked {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership conflict state is unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership conflict recovery is required")]
+    RecoveryRequired {
+        #[source]
+        source: anyhow::Error,
+    },
+}

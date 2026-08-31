@@ -363,6 +363,14 @@ enum WorkerCommand {
     QueryDeviceTrust {
         response: mpsc::Sender<Result<String, BindingError>>,
     },
+    QueryMembershipConflicts {
+        response: mpsc::Sender<Result<String, BindingError>>,
+    },
+    ResolveMembershipConflict {
+        conflict_id: String,
+        target_branch_id: String,
+        response: mpsc::Sender<Result<String, BindingError>>,
+    },
     DecideDeviceTrustChange {
         change_id: String,
         choice: DeviceTrustChoice,
@@ -826,6 +834,22 @@ impl MobileEngine {
 
     pub fn query_device_trust(&self) -> Result<String, BindingError> {
         self.request(|response| WorkerCommand::QueryDeviceTrust { response })
+    }
+
+    pub fn query_membership_conflicts(&self) -> Result<String, BindingError> {
+        self.request(|response| WorkerCommand::QueryMembershipConflicts { response })
+    }
+
+    pub fn resolve_membership_conflict(
+        &self,
+        conflict_id: String,
+        target_branch_id: String,
+    ) -> Result<String, BindingError> {
+        self.request(|response| WorkerCommand::ResolveMembershipConflict {
+            conflict_id,
+            target_branch_id,
+            response,
+        })
     }
 
     pub fn decide_device_trust_change(
@@ -1434,6 +1458,31 @@ async fn run_worker_loop(
                     .and_then(map_device_trust);
                 let _ = response.send(result);
             }
+            WorkerCommand::QueryMembershipConflicts { response } => {
+                let result = engine
+                    .execute(Operation::QueryMembershipConflicts)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_membership_conflicts);
+                let _ = response.send(result);
+            }
+            WorkerCommand::ResolveMembershipConflict {
+                conflict_id,
+                target_branch_id,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::ResolveMembershipConflict(
+                        uc_engine::ResolveMembershipConflictInput {
+                            conflict_id,
+                            target_branch_id,
+                        },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_membership_conflict_resolution);
+                let _ = response.send(result);
+            }
             WorkerCommand::DecideDeviceTrustChange {
                 change_id,
                 choice,
@@ -1965,6 +2014,24 @@ fn map_device_trust_snapshot(
     snapshot: uc_engine::DeviceTrustSnapshotSummary,
 ) -> Result<String, BindingError> {
     serde_json::to_string(&snapshot).map_err(|_| BindingError::UnexpectedResult)
+}
+
+fn map_membership_conflicts(result: OperationResult) -> Result<String, BindingError> {
+    match result {
+        OperationResult::MembershipConflicts(summary) => {
+            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
+        }
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_membership_conflict_resolution(result: OperationResult) -> Result<String, BindingError> {
+    match result {
+        OperationResult::MembershipConflictResolved(summary) => {
+            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
+        }
+        _ => Err(BindingError::UnexpectedResult),
+    }
 }
 
 fn map_resend_outcome(result: OperationResult) -> Result<ResendEntryOutcome, BindingError> {
@@ -2560,6 +2627,21 @@ mod tests {
         assert!(json.contains("recovery"));
         assert!(json.contains("allowed_actions"));
         assert!(json.contains("blocked_reason"));
+    }
+
+    #[test]
+    fn membership_conflict_json_preserves_local_completion_semantics() {
+        let json = map_membership_conflict_resolution(OperationResult::MembershipConflictResolved(
+            uc_engine::MembershipConflictResolutionSummary {
+                outcome: uc_engine::MembershipConflictResolutionOutcomeSummary::Completed,
+                conflict_id: None,
+                local_resolution_completed: true,
+            },
+        ))
+        .expect("membership conflict result must map");
+
+        assert!(json.contains("local_resolution_completed"));
+        assert!(!json.contains("global"));
     }
 
     #[test]

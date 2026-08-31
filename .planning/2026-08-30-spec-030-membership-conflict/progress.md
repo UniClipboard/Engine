@@ -145,3 +145,23 @@
 - manifest 提升前活动数据库不变；提升后的 ledger 从目标数据库继续 CAS，最终把 conflict 标记 Completed 并删除 recovery session。
 - 新增真实 MLS + SQLite generation 全流程测试，以及 Application 六次重启式阶段续跑测试；错误转换验证稳定分类、source chain 与脱敏 Debug。
 - Phase 4 完成，下一阶段进入 Engine 与三端 contract。
+
+## 2026-08-31 · Phase 5 Engine and bindings contract
+
+- 已确认测试接缝：Engine 公开 `Operation -> OperationResult/EngineError`；UniFFI 与 HarmonyOS 只做同版本薄映射。
+- Application 已有单次 resolve facade，但尚无完整 conflict query；Engine 和绑定均未暴露两项能力。
+- Application 查询现在从加密 membership ledger 返回 revision、候选分支、逐分支选择资格、选择状态和 transition phase；依赖错误保留 source。
+- Engine 新增 `QueryMembershipConflicts` 与 `ResolveMembershipConflict`，稳定结果明确使用 `local_resolution_completed`，不宣称全局收敛。
+- iOS/Android 共享 UniFFI mapping，HarmonyOS 使用同版本 N-API mapping；两者均直接序列化 Engine 稳定结构，不编排恢复步骤。
+- iOS/Android/HarmonyOS 共用的移动 probe host 同步支持查询和单次选择，能通过真实宿主入口验收相同结果。
+- Phase 5 完成，下一阶段进入 Desktop 确定性拓扑与 chaos 验证。
+
+## Phase 5 Verification
+
+- `cargo test -p uc-application query_returns_complete_branch_choices_without_claiming_global_resolution --locked`：1 passed。
+- `cargo test -p uc-application query_error_preserves_stable_classification_and_source --locked`：1 passed。
+- `cargo test -p uc-engine membership_conflict --locked`：2 passed。
+- `cargo test -p uc-engine-uniffi membership_conflict_json_preserves_local_completion_semantics --locked`：1 passed。
+- `cargo test -p uc-ohos-napi --lib --locked`：10 passed。
+- `cargo check -p uc-engine-uniffi -p uc-ohos-napi --all-targets --locked`：通过（仅既有 warning）。
+- workspace all-target check、fmt、architecture preflight 与 `git diff --check`：通过（仅既有 warning）。

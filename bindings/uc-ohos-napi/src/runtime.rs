@@ -9,8 +9,9 @@ use uc_engine::{
     DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary, Engine, EngineConfig, EngineError,
     EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
     InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
-    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
+    RecoverSessionInput, RefreshReason, RemoveMemberInput, ResolveMembershipConflictInput,
+    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
+    SendTextInput,
 };
 use zeroize::Zeroizing;
 
@@ -147,6 +148,43 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceTrust(snapshot) => device_trust_json(snapshot),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_membership_conflicts(&self) -> napi::Result<String> {
+        match self
+            .engine
+            .execute(Operation::QueryMembershipConflicts)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::MembershipConflicts(summary) => membership_conflicts_json(summary),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn resolve_membership_conflict(
+        &self,
+        conflict_id: String,
+        target_branch_id: String,
+    ) -> napi::Result<String> {
+        match self
+            .engine
+            .execute(Operation::ResolveMembershipConflict(
+                ResolveMembershipConflictInput {
+                    conflict_id,
+                    target_branch_id,
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::MembershipConflictResolved(summary) => {
+                membership_conflict_resolution_json(summary)
+            }
             _ => Err(unexpected_result()),
         }
     }
@@ -494,6 +532,18 @@ fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Re
     serde_json::to_string(&summary).map_err(|_| unexpected_result())
 }
 
+fn membership_conflicts_json(
+    summary: uc_engine::MembershipConflictsSummary,
+) -> napi::Result<String> {
+    serde_json::to_string(&summary).map_err(|_| unexpected_result())
+}
+
+fn membership_conflict_resolution_json(
+    summary: uc_engine::MembershipConflictResolutionSummary,
+) -> napi::Result<String> {
+    serde_json::to_string(&summary).map_err(|_| unexpected_result())
+}
+
 fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus> {
     let OperationResult::JoinSpace(status) = result else {
         return Err(unexpected_result());
@@ -735,7 +785,10 @@ fn invalid_restore_mode() -> napi::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{count, device_trust_json, engine_error, map_event, workspace_convergence};
+    use super::{
+        count, device_trust_json, engine_error, map_event, membership_conflict_resolution_json,
+        workspace_convergence,
+    };
     use uc_engine::{
         EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
     };
@@ -831,6 +884,20 @@ mod tests {
     #[test]
     fn oversized_delivery_counts_are_rejected() {
         assert!(count(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn membership_conflict_json_preserves_local_completion_semantics() {
+        let json =
+            membership_conflict_resolution_json(uc_engine::MembershipConflictResolutionSummary {
+                outcome: uc_engine::MembershipConflictResolutionOutcomeSummary::Completed,
+                conflict_id: None,
+                local_resolution_completed: true,
+            })
+            .expect("membership conflict result must map");
+
+        assert!(json.contains("local_resolution_completed"));
+        assert!(!json.contains("global"));
     }
 
     #[test]

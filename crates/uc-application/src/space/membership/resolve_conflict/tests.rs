@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -194,6 +195,69 @@ async fn keeping_local_branch_completes_once_and_repeats_idempotently() {
     assert_eq!(conflict.status, MembershipConflictStatus::Completed);
     assert_eq!(conflict.selected_branch_id, Some(local_branch_id));
     assert_eq!(persisted.revision, 12, "the repeated call does not commit");
+}
+
+#[tokio::test]
+async fn query_returns_complete_branch_choices_without_claiming_global_resolution() {
+    let (_, use_case, conflict_id, local_branch_id, remote_branch_id) =
+        fixture(MembershipConflictChoice::RePairingRequired);
+
+    let view = use_case.query().await.unwrap();
+
+    assert_eq!(view.revision, 11);
+    assert_eq!(view.conflicts.len(), 1);
+    let conflict = &view.conflicts[0];
+    assert_eq!(conflict.conflict_id, conflict_id);
+    assert_eq!(conflict.status, MembershipConflictStatus::Unresolved);
+    assert!(!conflict.local_resolution_completed);
+    assert_eq!(conflict.evidence_peer_count, 1);
+    assert_eq!(conflict.branches[0].branch_id, local_branch_id);
+    assert!(conflict.branches[0].is_local);
+    assert_eq!(conflict.branches[1].branch_id, remote_branch_id);
+    assert_eq!(
+        conflict.branches[1].choice,
+        MembershipConflictChoice::RePairingRequired
+    );
+}
+
+struct LockedLedger;
+
+#[async_trait]
+impl LoadMembershipLedgerPort for LockedLedger {
+    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        Err(MembershipLedgerError::Locked)
+    }
+}
+
+#[async_trait]
+impl CommitMembershipLedgerPort for LockedLedger {
+    async fn compare_and_commit(
+        &self,
+        _mutation: MembershipLedgerMutation,
+    ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+        Err(MembershipLedgerError::Locked)
+    }
+}
+
+#[tokio::test]
+async fn query_error_preserves_stable_classification_and_source() {
+    let repository = Arc::new(LockedLedger);
+    let use_case = ResolveMembershipConflictUseCase::new(
+        Arc::new(MembershipLedger::new(
+            repository.clone(),
+            repository,
+            Arc::new(AcceptingVerifier),
+        )),
+        Arc::new(FixedQuery),
+    );
+
+    let error = use_case.query().await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        QueryMembershipConflictsError::Locked { .. }
+    ));
+    assert!(error.source().is_some());
 }
 
 #[tokio::test]

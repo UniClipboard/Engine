@@ -18,17 +18,17 @@
 - [x] Phase 2：Ledger 加密 conflict record 与 Diverged 同 commit。
 - [x] Phase 3：Application 唯一 resolve use case、幂等选择与恢复调度。
 - [x] Phase 4：同 lineage branch generation transition 与恢复包 adapter。
-- [ ] Phase 5：Engine、iOS、Android、HarmonyOS 同版本 contract。
+- [x] Phase 5：Engine、iOS、Android、HarmonyOS 同版本 contract。
 - [ ] Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归。
 - [ ] Phase 7：架构文档、代码审查、全量门禁与原子提交。
 
 ## Current Slice
 
-Phase 5：为 Engine、iOS、Android 与 HarmonyOS 增加同版本的冲突查询和选择 contract。
+Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归。
 
 ## Next Step
 
-先写 Engine 稳定 operation/result/error 的 contract 红测，再接入三个移动绑定的同版本薄映射。
+盘点 Desktop E2E 现有拓扑驱动器和公开 CLI/daemon 接缝，先实现 F0 的确定性红测。
 
 ## Constraints
 
@@ -50,3 +50,5 @@ Phase 5：为 Engine、iOS、Android 与 HarmonyOS 增加同版本的冲突查�
 | `VerifiableGroupInfo` 无法从 OpenMLS prelude 解析 | 1 | 使用公开的 `openmls::messages::group_info::VerifiableGroupInfo` 显式导入。 |
 | 新增两阶段端口后测试替身缺少 GroupInfo 方法和 external commit | 1 | 补齐显式 begin/complete 输入与所有 passive/test adapter，实现阶段边界。 |
 | generation executor 首次真实测试缺少 legacy bootstrap repository | 1 | 复用同一 SQLite security store 同时实现 revocation 与 legacy bootstrap repository，建立真实 sponsor MLS。 |
+| Engine contract 红测启用 `dev-tools` 时同时编译到既有退役 membership removal / SpaceJoined 测试 | 1 | 新 contract 后续使用默认 feature 定向测试；既有 dev-tools 漂移作为独立问题记录，不误归因于 Phase 5。 |
+| workspace check 发现移动 probe host 对新 `OperationResult` 未穷举 | 1 | probe host 同步增加查询/选择命令和完整结果映射，使真实移动验收入口覆盖 Phase 5 contract。 |

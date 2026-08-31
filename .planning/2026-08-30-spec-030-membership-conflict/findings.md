@@ -75,3 +75,9 @@
 - target database 必须在 manifest 提升前包含 target history、安全材料、成员投影以及当前 `TargetStaged` transition checkpoint；否则动态连接切到目标库后 Application 无法继续 CAS。
 - Infra 在提升并替换动态数据库后返回，Application 必须重新从当前数据库加载 ledger，再提交 `Promoted`；不能继续使用切换前的 history digest。
 - package 过期只约束首次接受。nonce 已消费并建立 transition 后，重启续跑只重新验签目标历史，不因长时间文件迁移导致已经接受的事务过期。
+
+# 2026-08-31 · Phase 5 public contract boundary
+
+- `SpaceFacade`/`AppFacade` 已经拥有唯一 `resolve_membership_conflict` 动作，但 Engine dispatch 尚未映射；不应在 Engine 重做选择规则。
+- 当前 `query_device_trust` 不包含 conflict 的候选 branch、选择资格、选择状态和 transition phase，不能作为规格要求的完整查询结果。
+- 公开结果必须表达 `local_resolution_completed`，不得用全局 `resolved` 命名暗示所有设备已经收敛。

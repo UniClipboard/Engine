@@ -56,7 +56,9 @@ pub use remove_space_member::{
     MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,
 };
 pub use resolve_conflict::{
-    ResolveMembershipConflictError, ResolveMembershipConflictInput, ResolveMembershipConflictResult,
+    MembershipConflictBranchView, MembershipConflictView, MembershipConflictsView,
+    QueryMembershipConflictsError, ResolveMembershipConflictError, ResolveMembershipConflictInput,
+    ResolveMembershipConflictResult,
 };
 pub use signing::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 

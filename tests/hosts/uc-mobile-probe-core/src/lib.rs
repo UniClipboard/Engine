@@ -55,6 +55,11 @@ enum ProbeCommand {
     IssueInvitation,
     ListDevices,
     QueryDeviceTrust,
+    QueryMembershipConflicts,
+    ResolveMembershipConflict {
+        conflict_id: String,
+        target_branch_id: String,
+    },
     DecideDeviceTrustChange {
         change_id: String,
         choice: uc_engine::DeviceTrustChoiceSummary,
@@ -434,6 +439,22 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         ProbeCommand::ListDevices => execute_operation(state, Operation::ListDevices).await,
         ProbeCommand::QueryDeviceTrust => {
             execute_operation(state, Operation::QueryDeviceTrust).await
+        }
+        ProbeCommand::QueryMembershipConflicts => {
+            execute_operation(state, Operation::QueryMembershipConflicts).await
+        }
+        ProbeCommand::ResolveMembershipConflict {
+            conflict_id,
+            target_branch_id,
+        } => {
+            execute_operation(
+                state,
+                Operation::ResolveMembershipConflict(uc_engine::ResolveMembershipConflictInput {
+                    conflict_id,
+                    target_branch_id,
+                }),
+            )
+            .await
         }
         ProbeCommand::DecideDeviceTrustChange {
             change_id,
@@ -1074,6 +1095,16 @@ fn operation_response(result: OperationResult) -> Value {
             "ok": true,
             "kind": "device_trust_decision",
             "result": result,
+        }),
+        OperationResult::MembershipConflicts(summary) => json!({
+            "ok": true,
+            "kind": "membership_conflicts",
+            "result": summary,
+        }),
+        OperationResult::MembershipConflictResolved(summary) => json!({
+            "ok": true,
+            "kind": "membership_conflict_resolved",
+            "result": summary,
         }),
         OperationResult::MemberSyncPreferences(preferences) => json!({
             "ok": true,

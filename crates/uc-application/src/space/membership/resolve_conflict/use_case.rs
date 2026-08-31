@@ -5,8 +5,10 @@ use uc_core::membership::{MembershipBranchTransitionV1, MembershipConflictChoice
 use crate::space::membership::{MembershipConflictStatus, MembershipLedger, MembershipLedgerError};
 
 use super::{
-    QueryMembershipConflictStatusPort, ResolveMembershipConflictError,
-    ResolveMembershipConflictInput, ResolveMembershipConflictResult,
+    MembershipConflictBranchView, MembershipConflictView, MembershipConflictsView,
+    QueryMembershipConflictStatusPort, QueryMembershipConflictsError,
+    ResolveMembershipConflictError, ResolveMembershipConflictInput,
+    ResolveMembershipConflictResult,
 };
 
 pub(crate) struct ResolveMembershipConflictUseCase {
@@ -107,6 +109,65 @@ impl ResolveMembershipConflictUseCase {
         } else {
             self.result_for_persisted_choice(next_status).await
         }
+    }
+
+    pub(crate) async fn query(
+        &self,
+    ) -> Result<MembershipConflictsView, QueryMembershipConflictsError> {
+        let snapshot = self
+            .ledger
+            .load_verified()
+            .await
+            .map_err(|error| match error {
+                MembershipLedgerError::Locked => QueryMembershipConflictsError::Locked {
+                    source: anyhow::Error::new(error),
+                },
+                MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+                    QueryMembershipConflictsError::RecoveryRequired {
+                        source: anyhow::Error::new(error),
+                    }
+                }
+                MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
+                    QueryMembershipConflictsError::Unavailable {
+                        source: anyhow::Error::new(error),
+                    }
+                }
+            })?;
+        let record = snapshot.record();
+        let conflicts = record
+            .membership_conflicts
+            .values()
+            .map(|conflict| MembershipConflictView {
+                conflict_id: conflict.conflict_id,
+                status: conflict.status,
+                selected_branch_id: conflict.selected_branch_id,
+                transition_phase: conflict
+                    .transition_id
+                    .and_then(|transition_id| {
+                        record.membership_branch_transitions.get(&transition_id)
+                    })
+                    .map(|transition| transition.phase()),
+                detected_at_revision: conflict.detected_at_revision,
+                evidence_peer_count: conflict.evidence_peer_device_ids.len(),
+                branches: [
+                    MembershipConflictBranchView {
+                        branch_id: conflict.local_branch_id,
+                        is_local: true,
+                        choice: conflict.local_choice,
+                    },
+                    MembershipConflictBranchView {
+                        branch_id: conflict.remote_branch_id,
+                        is_local: false,
+                        choice: conflict.remote_choice,
+                    },
+                ],
+                local_resolution_completed: conflict.status == MembershipConflictStatus::Completed,
+            })
+            .collect();
+        Ok(MembershipConflictsView {
+            revision: record.revision,
+            conflicts,
+        })
     }
 
     async fn result_for_persisted_choice(
