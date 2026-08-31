@@ -94,3 +94,10 @@
 - session 以 transition id 为稳定键，并绑定 conflict、target branch 与 recipient；ledger 提交前拒绝键错配、空载荷、超限载荷和恢复包绑定错配。
 - session 自身负责 recipient completion 与 target commit 的单调、幂等推进，调用方不能直接构造或改写内部状态。
 - Space rebuild/reset 原子清除未完成恢复事务；旧 ledger 反序列化时以空 session map 兼容。
+
+## 2026-08-31 · Narrow Iroh recovery client channel
+
+- Application 新增单 peer 两阶段 channel port，明确输入指定 peer 与不可变 conflict/branch/recipient 绑定。
+- Infra `IrohMembershipBranchRecoveryChannel` 只负责解析已保存 Iroh 地址、认证连接、有界请求响应和超时，不选择 peer、不运行 MLS、不接触 ledger。
+- GroupInfo 与 recovery package 响应方向严格校验；拒绝、不可用和畸形响应保留 source 并稳定分类，Debug 不输出底层详情。
+- 保留旧的一步 fetch adapter 作为尚未切换的 coordinator 接口；下一切片完成 Application 编排后删除该浅接口，避免长期双实现。

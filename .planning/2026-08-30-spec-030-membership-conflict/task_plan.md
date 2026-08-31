@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：MLS external recovery 原语、wire contract、认证服务端和加密恢复 session 已完成；下一切片实现 client 编排。
+Phase 4：MLS external recovery 原语、wire/server、加密 session 和窄 Iroh client channel 已完成；下一切片由 Application coordinator 编排两阶段流程。
 
 ## Next Step
 
-实现恢复 client：驱动两阶段 Iroh 交换，并通过加密 recovery session 在重启后安全续跑。
+扩展 Application coordinator：选择 evidence peer，调用 channel 与 MLS preparation，并在每个外部副作用前后提交 recovery session。
 
 ## Constraints
 

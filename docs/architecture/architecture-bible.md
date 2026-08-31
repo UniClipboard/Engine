@@ -816,6 +816,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | 分支恢复认证服务端 | recovery ALPN 复用进程唯一 Iroh endpoint，并把连接公钥映射为已知 source device；GroupInfo begin 与 external commit submit 都独立进入 Application issuer 重新验证目标分支和 Active recipient。未知连接、畸形帧、错误方向或资格失败统一拒绝，handler 不持有跨往返授权状态。 |
 | 2026-08-31 | 分支恢复 Iroh wire contract | 专用 P2P ALPN 使用有界两阶段帧交换 GroupInfo、recipient external commit 和最终恢复包；两个请求阶段都绑定 conflict、target branch 与 recipient，连接身份仍须由 Application 对目标历史复核。帧和错误 Debug 不输出绑定标识或密码学负载，解码失败保留 source；该协议不允许降级到 LAN 兼容线。 |
 | 2026-08-31 | 分支恢复事务持久化 | Application 将 recipient/target 两侧的 staged 密码学状态、external commit 摘要和幂等恢复包收进单一恢复 session 状态机，并随 membership ledger 整体 MasterKey AEAD 加密。session 以 transition id 建索引、绑定 conflict/branch/recipient，只允许单调且幂等推进；Space 重建原子清除未完成事务。 |
+| 2026-08-31 | 分支恢复客户端信道 | Infra `IrohMembershipBranchRecoveryChannel` 只向指定认证 peer 执行 GroupInfo 请求和 external commit 提交，负责地址解析、有界帧、超时及稳定错误分类；它不选择 peer、不解释 MLS、不读取恢复 ledger，也不推进 generation。完整两阶段流程及重启续跑仍唯一归 Application coordinator。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

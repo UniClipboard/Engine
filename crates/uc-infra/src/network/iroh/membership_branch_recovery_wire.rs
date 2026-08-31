@@ -56,6 +56,21 @@ impl MembershipBranchRecoveryWireMessage {
         }
     }
 
+    pub(crate) fn submit_external_commit(
+        conflict_id: MembershipConflictId,
+        target_branch_id: MembershipBranchId,
+        recipient_member: MemberInstanceId,
+        external_commit: Vec<u8>,
+    ) -> Self {
+        Self::SubmitExternalCommit {
+            version: WIRE_VERSION,
+            conflict_id,
+            target_branch_id,
+            recipient_member,
+            external_commit,
+        }
+    }
+
     pub(crate) fn recovery_package(package: MembershipBranchRecoveryPackageV1) -> Self {
         Self::RecoveryPackage {
             version: WIRE_VERSION,
@@ -189,5 +204,23 @@ mod tests {
             format!("{error:?}"),
             "MembershipBranchRecoveryWireError::Invalid"
         );
+    }
+
+    #[test]
+    fn external_commit_round_trip_keeps_two_phase_bindings_private() {
+        let message = MembershipBranchRecoveryWireMessage::submit_external_commit(
+            MembershipConflictId::from_bytes([0x21; 32]),
+            MembershipBranchId::from_bytes([0x22; 32]),
+            MemberInstanceId::from_bytes([0x23; 32]),
+            vec![0x24],
+        );
+
+        let decoded = decode(&encode(&message).unwrap()).unwrap();
+
+        assert!(matches!(
+            decoded,
+            MembershipBranchRecoveryWireMessage::SubmitExternalCommit { .. }
+        ));
+        assert_eq!(format!("{message:?}"), "SubmitExternalCommit([REDACTED])");
     }
 }

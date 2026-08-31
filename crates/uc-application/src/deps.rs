@@ -60,6 +60,8 @@ pub use crate::space::{
     IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
     JoinerStagedSecurityTransition, LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort,
     LoadMembershipLedgerPort, LoadedMembershipLedger, LockSpacePort,
+    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
+    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
     MembershipBranchRecoverySession, MembershipBranchRecoverySessionState,
     MembershipEffectExecutionError, MembershipEffectKind, MembershipEffectPhase,
     MembershipLedgerError, MembershipLedgerMutation, MembershipMaintenanceStepOutcome,

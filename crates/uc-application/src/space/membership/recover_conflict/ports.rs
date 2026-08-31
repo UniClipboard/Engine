@@ -38,6 +38,63 @@ pub trait FetchMembershipBranchRecoveryPort: Send + Sync {
 }
 
 #[derive(Clone)]
+pub struct MembershipBranchRecoveryRequest {
+    pub peer_device_id: DeviceId,
+    pub conflict_id: MembershipConflictId,
+    pub target_branch_id: MembershipBranchId,
+    pub recipient_member: MemberInstanceId,
+}
+
+#[derive(Clone)]
+pub struct MembershipBranchRecoveryCommit {
+    pub request: MembershipBranchRecoveryRequest,
+    pub external_commit: Vec<u8>,
+}
+
+#[derive(thiserror::Error)]
+pub enum MembershipBranchRecoveryChannelError {
+    #[error("membership branch recovery peer is unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership branch recovery peer rejected the request")]
+    Rejected {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("membership branch recovery response is invalid")]
+    Invalid {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl std::fmt::Debug for MembershipBranchRecoveryChannelError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unavailable { .. } => "MembershipBranchRecoveryChannelError::Unavailable",
+            Self::Rejected { .. } => "MembershipBranchRecoveryChannelError::Rejected",
+            Self::Invalid { .. } => "MembershipBranchRecoveryChannelError::Invalid",
+        })
+    }
+}
+
+/// 单个认证 peer 的两阶段恢复信道；不选择 peer、不解释 MLS，也不持久化流程状态。
+#[async_trait]
+pub trait MembershipBranchRecoveryChannelPort: Send + Sync {
+    async fn request_membership_branch_group_info(
+        &self,
+        request: MembershipBranchRecoveryRequest,
+    ) -> Result<Vec<u8>, MembershipBranchRecoveryChannelError>;
+
+    async fn submit_membership_branch_external_commit(
+        &self,
+        request: MembershipBranchRecoveryCommit,
+    ) -> Result<MembershipBranchRecoveryPackageV1, MembershipBranchRecoveryChannelError>;
+}
+
+#[derive(Clone)]
 pub struct PrepareMembershipBranchTransitionInput {
     pub transition_id: [u8; 32],
     pub conflict_id: MembershipConflictId,

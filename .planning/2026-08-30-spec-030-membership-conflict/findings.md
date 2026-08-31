@@ -51,3 +51,9 @@
 - transition id 是恢复事务的稳定索引；session 内再次保存并校验它，能在反序列化和提交前识别 map key 与载荷错配。
 - target 必须缓存签发后的 recovery package，才能在 external commit 已应用但响应丢失时返回同一结果；recipient 必须保留 staged MLS state，直到最终 generation 提升完成。
 - 状态推进由 session 对象隐藏，recipient 与 target 角色不能互相转换，重复完成操作只接受同一绑定结果。
+
+# 2026-08-31 · Recovery client 边界
+
+- 现有一步 `FetchMembershipBranchRecoveryPort` 无法表达 GroupInfo 与 external commit 之间必须持久化的 recipient staged state，不能直接由 Infra 实现而不破坏重启安全。
+- Iroh client 应是窄 channel：只对一个由 Application 指定的 peer 做一次认证请求。peer 选择、MLS preparation、ledger CAS 和重试属于 Application coordinator。
+- 下一切片完成 coordinator 切换后应删除旧 fetch port；否则两套抽象会让 Infra/Application 边界继续含混。
