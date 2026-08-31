@@ -129,3 +129,10 @@
 - 第二轮红测确认重复请求会重新 prepare 并因 session 冲突被拒绝；绿色实现改为在材料计算前读取 target session，并按 external commit digest 返回缓存 package。
 - 故障注入测试确认 material commit 首次中断后，重试从 TargetPrepared 续跑，prepare/签发只发生一次，commit 可安全重试。
 - Application port 已明确 prepare 返回 staged target material，commit 接受该 opaque payload；真实 Infra 实现属于下一切片。
+
+## 2026-08-31 · Real target recovery material adapter
+
+- 红测先固定 target prepare 无持久副作用、commit 后 epoch 前进、相同 staged material 重试幂等，以及无效 payload 保留稳定分类与 source。
+- `DefaultSpaceAccessAdapter` 在 MLS 快照上应用 recipient external commit，生成下一 epoch 内容密钥并使用双方共享 wrapping key 密封内容密钥目录和恢复确认。
+- staged `SpaceKeyMaterial` 只进入 Application 已有 MasterKey AEAD recovery session；commit 重新验证 space、MLS state、key catalog 与单步 epoch，再持久化和安装。
+- Engine 已直接注入真实 target material port，并删除 `DeferredMembershipBranchRecoveryMaterial`。

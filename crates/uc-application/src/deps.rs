@@ -239,6 +239,8 @@ pub struct SpaceAccessPorts {
         Arc<dyn ActivateCompletionHelperAdmissionSecurityPort>,
     pub prepare_membership_branch_recovery_recipient:
         Arc<dyn PrepareMembershipBranchRecoveryRecipientPort>,
+    pub prepare_membership_branch_recovery_material:
+        Arc<dyn PrepareMembershipBranchRecoveryMaterialPort>,
     pub group_revocation: Arc<dyn GroupRevocationPort>,
     pub group_bootstrap: Arc<dyn uc_core::membership::GroupBootstrapPort>,
     pub space_protection: Arc<dyn uc_core::membership::SpaceProtectionStatusPort>,

@@ -86,6 +86,7 @@ pub(super) fn build_space_access_ports(
         activate_sponsor_admission_security: space_access_adapter.clone(),
         activate_completion_helper_admission_security: space_access_adapter.clone(),
         prepare_membership_branch_recovery_recipient: space_access_adapter.clone(),
+        prepare_membership_branch_recovery_material: space_access_adapter.clone(),
         group_revocation: space_access_adapter.clone(),
         group_bootstrap: space_access_adapter.clone(),
         space_protection: space_access_adapter.clone(),

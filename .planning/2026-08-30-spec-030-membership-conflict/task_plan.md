@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：target Application prepare/commit 事务已由红绿测试建立；下一切片实现 Infra 的真实 staged material 计算、内容密钥密封和幂等安全提交。
+Phase 4：target Infra recovery material adapter 已替换 Engine deferred 实现；下一切片在 recipient 侧消费已验证恢复包和已加密保存的 staged MLS state，并接入 generation transition。
 
 ## Next Step
 
-实现 `DefaultSpaceAccessAdapter` 的 target prepare/commit：prepare 只计算 staged `SpaceKeyMaterial`，commit 才持久化并安装，重复提交相同 material 幂等。
+实现 recipient 恢复材料安装：解封目标内容密钥目录，安装 recipient 自己的 staged MLS snapshot，并把结果交给唯一 generation transition 流程推进。
 
 ## Constraints
 

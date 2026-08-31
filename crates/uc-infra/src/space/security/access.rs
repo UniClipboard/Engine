@@ -28,8 +28,10 @@ use uc_application::deps::{
     ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
     ActivateSponsorAdmissionSecurityRequest, AdmissionSecurityTransitionError,
     AdmissionSecurityTransitionInput, CurrentMemberSignatureError, CurrentMemberSignaturePort,
-    PrepareMembershipBranchRecoveryRecipientError, PrepareMembershipBranchRecoveryRecipientPort,
-    PrepareSponsorAdmissionSecurityPort, PreparedMemberSecurityDelivery,
+    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
+    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientError,
+    PrepareMembershipBranchRecoveryRecipientPort, PrepareSponsorAdmissionSecurityPort,
+    PreparedMemberSecurityDelivery, PreparedMembershipBranchRecoveryMaterial,
     PreparedMembershipBranchRecoveryRecipient, ProfileKeyAccessProbe,
     ProfileKeyAccessProbePortError, SponsorAdmissionSecurityRequest,
     SponsorPreparedAdmissionSecurity,
@@ -71,6 +73,13 @@ struct StagedMembershipBranchRecoveryRecipientV1 {
     mls_state: Vec<u8>,
     wrapping_key: Vec<u8>,
     epoch: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MembershipBranchRecoveryConfirmationV1 {
+    version: u8,
+    epoch: u64,
+    group_state_digest: [u8; 32],
 }
 
 /// `SpaceAccessStore` 默认实现(同时提供全部窄意图 port)。
@@ -261,6 +270,31 @@ fn group_catalog_aad(space_id: &SpaceId, epoch: u64) -> Vec<u8> {
         epoch
     )
     .into_bytes()
+}
+
+fn membership_branch_recovery_confirmation_aad(space_id: &SpaceId, epoch: u64) -> Vec<u8> {
+    format!(
+        "uniclipboard-membership-branch-recovery-confirmation/v1|{}|{}",
+        space_id.as_ref(),
+        epoch
+    )
+    .into_bytes()
+}
+
+fn seal_membership_branch_recovery_confirmation(
+    wrapping_key: &MasterKey,
+    space_id: &SpaceId,
+    confirmation: &MembershipBranchRecoveryConfirmationV1,
+) -> Result<Vec<u8>, EncryptionError> {
+    let plaintext =
+        postcard::to_stdvec(confirmation).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+    let encrypted = v1_aead::encrypt_blob_xchacha(
+        wrapping_key,
+        &plaintext,
+        &membership_branch_recovery_confirmation_aad(space_id, confirmation.epoch),
+    )
+    .map_err(map_group_aead_error)?;
+    postcard::to_stdvec(&encrypted).map_err(|_| EncryptionError::KeyMaterialCorrupt)
 }
 
 fn map_group_aead_error(error: v1_aead::AeadError) -> EncryptionError {
@@ -3092,6 +3126,189 @@ impl PrepareMembershipBranchRecoveryRecipientPort for DefaultSpaceAccessAdapter 
     }
 }
 
+#[async_trait]
+impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
+    async fn export_membership_branch_recovery_group_info(
+        &self,
+    ) -> Result<Vec<u8>, PrepareMembershipBranchRecoveryMaterialError> {
+        let (_, material) = self.load_membership_branch_recovery_material().await?;
+        MlsGroupEngine::export_external_recovery_group_info(&MlsClientState::from_bytes(
+            material.group_state().to_vec(),
+        ))
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))
+    }
+
+    async fn prepare_membership_branch_recovery_material(
+        &self,
+        input: PrepareMembershipBranchRecoveryMaterialInput,
+    ) -> Result<
+        PreparedMembershipBranchRecoveryMaterial,
+        PrepareMembershipBranchRecoveryMaterialError,
+    > {
+        let (space_id, material) = self.load_membership_branch_recovery_material().await?;
+        let completed = MlsGroupEngine::apply_commit(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            space_id.as_ref().as_bytes(),
+            &input.external_commit,
+        )
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let expected_epoch = material
+            .state()
+            .epoch()
+            .next()
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        if completed.epoch != expected_epoch.value() {
+            return Err(recovery_material_invalid(anyhow::anyhow!(
+                "MLS recovery epoch does not advance current space material"
+            )));
+        }
+        let next = self
+            .session
+            .rotate_space_material(
+                &material,
+                completed.client_state.into_bytes(),
+                expected_epoch,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let encrypted_content_key_catalog = seal_group_catalog(&completed.wrapping_key, &next)
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let confirmation = MembershipBranchRecoveryConfirmationV1 {
+            version: 1,
+            epoch: completed.epoch,
+            group_state_digest: Sha256::digest(next.group_state()).into(),
+        };
+        let sealed_mls_recovery_material = seal_membership_branch_recovery_confirmation(
+            &completed.wrapping_key,
+            &space_id,
+            &confirmation,
+        )
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let target_staged_space_material = postcard::to_stdvec(&next)
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+
+        Ok(PreparedMembershipBranchRecoveryMaterial {
+            target_staged_space_material,
+            sealed_mls_recovery_material,
+            encrypted_content_key_catalog,
+        })
+    }
+
+    async fn commit_membership_branch_recovery_material(
+        &self,
+        target_staged_space_material: Vec<u8>,
+    ) -> Result<(), PrepareMembershipBranchRecoveryMaterialError> {
+        let staged: SpaceKeyMaterial = postcard::from_bytes(&target_staged_space_material)
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        validate_membership_branch_recovery_material(&staged)?;
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?;
+        if staged.state().space_id() != &space_id {
+            return Err(recovery_material_invalid(anyhow::anyhow!(
+                "staged recovery material belongs to another space"
+            )));
+        }
+        let repository = self.key_epoch_repository.as_ref().ok_or_else(|| {
+            recovery_material_unavailable(anyhow::anyhow!("space security repository unavailable"))
+        })?;
+        let current = repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?
+            .ok_or_else(|| {
+                recovery_material_unavailable(anyhow::anyhow!("space security state unavailable"))
+            })?;
+        if current == staged {
+            self.session
+                .install_space_material(&staged)
+                .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+            return Ok(());
+        }
+        let expected_epoch = current
+            .state()
+            .epoch()
+            .next()
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        if staged.state().epoch() != expected_epoch {
+            return Err(recovery_material_invalid(anyhow::anyhow!(
+                "staged recovery material is stale or conflicts with current state"
+            )));
+        }
+        let validator = InMemorySession::new();
+        validator.set_master_key_for_space(
+            space_id,
+            self.session
+                .get_master_key()
+                .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?,
+        );
+        validator
+            .install_space_material(&staged)
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        repository
+            .save_space_material(&staged)
+            .await
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?;
+        self.session
+            .install_space_material(&staged)
+            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))
+    }
+}
+
+impl DefaultSpaceAccessAdapter {
+    async fn load_membership_branch_recovery_material(
+        &self,
+    ) -> Result<(SpaceId, SpaceKeyMaterial), PrepareMembershipBranchRecoveryMaterialError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?;
+        let repository = self.key_epoch_repository.as_ref().ok_or_else(|| {
+            recovery_material_unavailable(anyhow::anyhow!("space security repository unavailable"))
+        })?;
+        let material = repository
+            .load_space_material(&space_id)
+            .await
+            .map_err(|source| recovery_material_unavailable(anyhow::Error::new(source)))?
+            .ok_or_else(|| {
+                recovery_material_unavailable(anyhow::anyhow!("space security state unavailable"))
+            })?;
+        validate_membership_branch_recovery_material(&material)?;
+        Ok((space_id, material))
+    }
+}
+
+fn validate_membership_branch_recovery_material(
+    material: &SpaceKeyMaterial,
+) -> Result<(), PrepareMembershipBranchRecoveryMaterialError> {
+    if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty() {
+        return Err(recovery_material_invalid(anyhow::anyhow!(
+            "space security state is invalid"
+        )));
+    }
+    MlsGroupEngine::validate_state(
+        &MlsClientState::from_bytes(material.group_state().to_vec()),
+        material.state().space_id().as_ref().as_bytes(),
+    )
+    .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+    InMemorySession::export_admission_content_key_catalog(material)
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+    Ok(())
+}
+
+fn recovery_material_unavailable(
+    source: anyhow::Error,
+) -> PrepareMembershipBranchRecoveryMaterialError {
+    PrepareMembershipBranchRecoveryMaterialError::Unavailable { source }
+}
+
+fn recovery_material_invalid(
+    source: anyhow::Error,
+) -> PrepareMembershipBranchRecoveryMaterialError {
+    PrepareMembershipBranchRecoveryMaterialError::Invalid { source }
+}
+
 fn recovery_recipient_unavailable(
     source: anyhow::Error,
 ) -> PrepareMembershipBranchRecoveryRecipientError {
@@ -5369,5 +5586,204 @@ mod admission_tests {
             .verify_current_member_payload(&device_c_id, payload, &signature)
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn target_recovery_material_is_prepared_without_side_effects_and_committed_idempotently()
+    {
+        use std::error::Error as _;
+
+        let (sponsor, _sponsor_session, sponsor_repository, space_id, _sponsor_dir) =
+            sponsor_fixture();
+        let recipient_dir = tempdir().unwrap();
+        let recipient_session = Arc::new(InMemorySession::new());
+        let (recipient_repository, _) = memory_revocation_repository(None);
+        let recipient = adapter(
+            local_key_material(&recipient_dir, memory_secure_storage()),
+            recipient_session,
+            recipient_repository,
+        );
+        let recipient_device = DeviceId::new("recovery-recipient");
+        let pending = recipient
+            .prepare_group_join(&recipient_device)
+            .await
+            .unwrap();
+        let admission = sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &recipient_device,
+                &[],
+                &pending.key_package,
+            )
+            .await
+            .unwrap();
+        recipient
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("shared recovery passphrase"),
+                pending,
+                &admission.welcome,
+                &admission.encrypted_key_catalog,
+                admission.group_epoch,
+            )
+            .await
+            .unwrap();
+
+        let contender_dir = tempdir().unwrap();
+        let contender_session = Arc::new(InMemorySession::new());
+        let (contender_repository, _) = memory_revocation_repository(None);
+        let contender = adapter(
+            local_key_material(&contender_dir, memory_secure_storage()),
+            contender_session,
+            contender_repository,
+        );
+        let contender_device = DeviceId::new("recovery-contender");
+        let contender_pending = contender
+            .prepare_group_join(&contender_device)
+            .await
+            .unwrap();
+        let contender_admission = sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &contender_device,
+                std::slice::from_ref(&DeviceId::new("recovery-recipient")),
+                &contender_pending.key_package,
+            )
+            .await
+            .unwrap();
+        recipient
+            .apply_group_epoch_update(contender_admission.existing_member_updates[0].payload())
+            .await
+            .unwrap();
+        contender
+            .install_group_join(
+                &space_id,
+                &Passphrase::new("shared contender passphrase"),
+                contender_pending,
+                &contender_admission.welcome,
+                &contender_admission.encrypted_key_catalog,
+                contender_admission.group_epoch,
+            )
+            .await
+            .unwrap();
+
+        let before = sponsor_repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let group_info = sponsor
+            .export_membership_branch_recovery_group_info()
+            .await
+            .unwrap();
+        let recipient_recovery = recipient
+            .prepare_membership_branch_recovery_recipient(group_info.clone())
+            .await
+            .unwrap();
+        let contender_recovery = contender
+            .prepare_membership_branch_recovery_recipient(group_info)
+            .await
+            .unwrap();
+        let credential = MembershipCredential::new(
+            uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
+            vec![0x41; 32],
+        );
+        let recipient_member = credential.member_instance_id(&recipient_device);
+        let history = uc_core::membership::VersionedMembershipHistory::new_single_member_root(
+            space_id.as_ref().to_owned(),
+            uc_core::membership::AdmissionChangeFacts {
+                member_instance: recipient_member,
+                device_id: recipient_device,
+                device_name: "Recovery recipient".to_owned(),
+                identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
+                    "ABCD-EFGH-IJKL-MNOP",
+                )
+                .unwrap(),
+                transport_public_key: vec![1],
+                transport_address_blob: vec![2],
+                identity_signature: vec![3],
+            },
+            credential,
+        )
+        .unwrap();
+        let target_branch_id =
+            uc_core::membership::MembershipConflictPolicy::branch_id(&history).unwrap();
+        let prepared = sponsor
+            .prepare_membership_branch_recovery_material(
+                PrepareMembershipBranchRecoveryMaterialInput {
+                    conflict_id: uc_core::membership::MembershipConflictId::from_bytes([0x51; 32]),
+                    target_branch_id,
+                    recipient_member,
+                    target_history: history.clone(),
+                    external_commit: recipient_recovery.external_commit,
+                },
+            )
+            .await
+            .unwrap();
+        let conflicting = sponsor
+            .prepare_membership_branch_recovery_material(
+                PrepareMembershipBranchRecoveryMaterialInput {
+                    conflict_id: uc_core::membership::MembershipConflictId::from_bytes([0x51; 32]),
+                    target_branch_id,
+                    recipient_member,
+                    target_history: history,
+                    external_commit: contender_recovery.external_commit,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sponsor_repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert!(!prepared.sealed_mls_recovery_material.is_empty());
+        assert!(!prepared.encrypted_content_key_catalog.is_empty());
+
+        sponsor
+            .commit_membership_branch_recovery_material(
+                prepared.target_staged_space_material.clone(),
+            )
+            .await
+            .unwrap();
+        sponsor
+            .commit_membership_branch_recovery_material(prepared.target_staged_space_material)
+            .await
+            .unwrap();
+        let committed = sponsor_repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            committed.state().epoch(),
+            before.state().epoch().next().unwrap()
+        );
+
+        let conflict = sponsor
+            .commit_membership_branch_recovery_material(conflicting.target_staged_space_material)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            conflict,
+            PrepareMembershipBranchRecoveryMaterialError::Invalid { .. }
+        ));
+        assert!(conflict.source().is_some());
+
+        let error = sponsor
+            .commit_membership_branch_recovery_material(vec![0x00])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PrepareMembershipBranchRecoveryMaterialError::Invalid { .. }
+        ));
+        assert!(error.source().is_some());
     }
 }
