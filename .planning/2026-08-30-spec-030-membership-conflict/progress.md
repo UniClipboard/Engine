@@ -262,3 +262,19 @@
 - 第二轮红测确认同一 conflict evidence 会被无条件重复提交，四端 revision 随往返增长；Application 单测固定同一来源相同 evidence 只能提交一次，ledger 已增加幂等短路。
 - 全局 revision 同时包含隔离 E/F 的正常 peer 退避账务，不能作为 conflict 防环判据；最终 E2E 以唯一公开 conflict、同 evidence 单次 commit 和 effects 不增加组成强断言。
 - F5 Desktop E2E 通过，耗时 192.21 秒；A/B/C/D 各只公开一个 conflict，两个相反传播方向没有产生重复 effects。
+
+## 2026-08-31 · F6 deep-chain red test
+
+- 继续使用稳定 Engine operation 与认证 endpoint gate：A→B→C→D→E→F 逐级准入后停止中间 Sponsor B/D。
+- A/C/E 接受移除 B 的共同分支，F 建立移除 D 的 sibling；只开放 A-C-E-F 相邻链路，要求 F 从 E 恢复到共同 branch/head/epoch，并验证三段相邻正文通信。
+- 红测先引用尚不存在的 `Stop` 与 `Chain` 拓扑动作，固定离线生命周期与非全连接传播 seam。
+- 首轮运行定位到 A/C/E 分别接受同一移除后无法形成单一目标 branch；该构造混入了本机决定与 MLS 时序，不适合作为 F6 单变量验收。
+- 场景改为 B/D 停机后 A/F 分别准入 G/H 形成 sibling；A/C/E/G 与 F/H 各自通过普通新增收敛，再开放 A-C-E-F 链。
+
+## 2026-08-31 · F6 deep-chain complete
+
+- 共同基线时由 A/F 预签发邀请，分区后 G/H 分别形成两条七成员 sibling；待安全 epoch 收敛后再真实停止 B/D。
+- `Stop` 会关闭 Engine 并从拓扑移除节点；`Chain` 只开放 A-C-E-F 相邻连接，端点身份缓存保证停机后仍能建立精确分区。
+- Target 恢复材料在 external commit 后为其他 Active 目标成员生成持久 group-update outbox，不再只更新 target 与 chooser。
+- TargetCommitted 作为唯一恢复事实：完成 target 侧 conflict，将 recipient 恢复为 Consistent，并阻止旧 sibling evidence 重新把它暂停。
+- F6 Desktop E2E 通过，耗时 402.19 秒；A/C/E/F 的 branch/head/epoch 一致，A→C、C→E、E→F 正文均精确接收，B/D 全程保持停机。

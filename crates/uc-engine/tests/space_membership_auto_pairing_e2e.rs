@@ -236,6 +236,9 @@ enum TopologyAction<'a> {
     Restart {
         node: &'a str,
     },
+    Stop {
+        node: &'a str,
+    },
     Decide {
         node: &'a str,
         choice: PendingChangeChoice,
@@ -265,6 +268,10 @@ enum TopologyAction<'a> {
         nodes: &'a [&'a str],
         isolated: &'a [&'a str],
     },
+    Chain {
+        nodes: &'a [&'a str],
+        offline: &'a [&'a str],
+    },
     Heal {
         nodes: &'a [&'a str],
     },
@@ -278,6 +285,135 @@ enum TopologyAction<'a> {
 enum PendingChangeChoice {
     Apply,
     Keep,
+}
+
+// F6：深准入链的中间 Sponsor 离线后，叶子仍须经剩余相邻节点恢复到共同分支。
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+async fn f6_deep_chain_recovers_selected_branch_without_online_sponsors() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Start { node: "D" },
+            TopologyAction::Start { node: "E" },
+            TopologyAction::Start { node: "F" },
+            TopologyAction::Start { node: "G" },
+            TopologyAction::Start { node: "H" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Join {
+                sponsor: "B",
+                joiner: "C",
+            },
+            TopologyAction::Join {
+                sponsor: "C",
+                joiner: "D",
+            },
+            TopologyAction::Join {
+                sponsor: "D",
+                joiner: "E",
+            },
+            TopologyAction::Join {
+                sponsor: "E",
+                joiner: "F",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch_named(&["A", "B", "C", "D", "E", "F"], 6, "F6 common baseline")
+        .await;
+    let baseline_epoch = topology.diagnostics("A").await.group_epoch;
+    topology
+        .wait_for_group_epoch(&["B", "C", "D", "E", "F"], baseline_epoch)
+        .await;
+    let left_invitation = issue_invitation(topology.engine("A")).await;
+    let right_invitation = issue_invitation(topology.engine("F")).await;
+
+    topology
+        .run(&[TopologyAction::Partition {
+            left: &["A", "C", "E", "G"],
+            right: &["B", "D", "F", "H"],
+        }])
+        .await;
+    topology
+        .join_with_invitation("A", "G", left_invitation)
+        .await;
+    topology
+        .join_with_invitation("F", "H", right_invitation)
+        .await;
+    topology
+        .wait_for_equivalent_branch_named(&["A", "C", "E", "G"], 7, "F6 selected left branch")
+        .await;
+    topology
+        .wait_for_equivalent_branch_named(&["F", "H"], 7, "F6 sibling right branch")
+        .await;
+    let target_epoch = topology.diagnostics("A").await.group_epoch;
+    topology
+        .wait_for_group_epoch(&["C", "E", "G"], target_epoch)
+        .await;
+    let sibling_epoch = topology.diagnostics("F").await.group_epoch;
+    topology
+        .wait_for_group_epoch(&["B", "D", "H"], sibling_epoch)
+        .await;
+    let target = topology.diagnostics("E").await;
+
+    topology
+        .run(&[
+            TopologyAction::Stop { node: "B" },
+            TopologyAction::Stop { node: "D" },
+            TopologyAction::Chain {
+                nodes: &["A", "C", "E", "F"],
+                offline: &["B", "D", "G", "H"],
+            },
+        ])
+        .await;
+    topology.wait_for_branch_conflict(&["E", "F"]).await;
+    topology
+        .run(&[TopologyAction::ResolveConflict {
+            node: "F",
+            branch_from: "E",
+        }])
+        .await;
+    topology
+        .wait_for_equivalent_branch_named(&["A", "C", "E", "F"], 7, "F6 recovered online chain")
+        .await;
+    topology
+        .run(&[TopologyAction::Heal {
+            nodes: &["A", "C", "E", "F"],
+        }])
+        .await;
+    let recovered_epoch = topology.diagnostics("E").await.group_epoch;
+    topology
+        .wait_for_group_epoch_named(
+            &["A", "C", "E", "F"],
+            recovered_epoch,
+            "F6 recovered online chain",
+        )
+        .await;
+    for node in ["A", "C", "E", "F"] {
+        wait_for_peer_refresh(topology.engine(node), node).await;
+    }
+    let recovered = topology.diagnostics("F").await;
+    assert_eq!(recovered.branch_id, target.branch_id);
+    assert_eq!(recovered.head_event_id, target.head_event_id);
+
+    for (sender, receiver) in [("A", "C"), ("C", "E"), ("E", "F")] {
+        let text = format!("F6 converged hop {sender}-{receiver}");
+        let report = topology.send(sender, receiver, &text).await;
+        assert!(
+            report.total_accepted > 0,
+            "F6 converged hop {sender}-{receiver} was rejected: {report:?}"
+        );
+        assert!(receiver_has_exact_text(topology.engine(receiver), &text).await);
+    }
+    topology.shutdown().await;
 }
 
 // F5：同一 sibling conflict 沿四节点环的两个方向传播时，只能提示一次且不得形成消息环。
@@ -833,6 +969,7 @@ struct MembershipTopology {
     rendezvous_base_url: String,
     harnesses: HashMap<String, DeviceHarness>,
     engines: HashMap<String, Engine>,
+    endpoint_ids_by_node: HashMap<String, [u8; 32]>,
     space_ids: HashMap<String, String>,
     device_ids: HashMap<String, String>,
 }
@@ -843,6 +980,7 @@ impl MembershipTopology {
             rendezvous_base_url,
             harnesses: HashMap::new(),
             engines: HashMap::new(),
+            endpoint_ids_by_node: HashMap::new(),
             space_ids: HashMap::new(),
             device_ids: HashMap::new(),
         }
@@ -856,6 +994,7 @@ impl MembershipTopology {
                 TopologyAction::Join { sponsor, joiner } => self.join(sponsor, joiner).await,
                 TopologyAction::Remove { sponsor, target } => self.remove(sponsor, target).await,
                 TopologyAction::Restart { node } => self.restart(node).await,
+                TopologyAction::Stop { node } => self.stop(node).await,
                 TopologyAction::Decide { node, choice } => {
                     self.decide_pending_change(node, choice).await
                 }
@@ -891,6 +1030,7 @@ impl MembershipTopology {
                     self.bridge(left, right, left_group, right_group).await;
                 }
                 TopologyAction::Ring { nodes, isolated } => self.ring(nodes, isolated).await,
+                TopologyAction::Chain { nodes, offline } => self.chain(nodes, offline).await,
                 TopologyAction::Heal { nodes } => self.heal(nodes).await,
                 TopologyAction::ResolveConflict { node, branch_from } => {
                     self.resolve_conflict(node, branch_from).await
@@ -906,8 +1046,22 @@ impl MembershipTopology {
         );
         let harness = DeviceHarness::new(self.rendezvous_base_url.clone());
         let engine = harness.start().await;
+        let endpoint_id = query_endpoint_id(&engine, node).await;
         self.harnesses.insert(node.to_owned(), harness);
         self.engines.insert(node.to_owned(), engine);
+        self.endpoint_ids_by_node
+            .insert(node.to_owned(), endpoint_id);
+    }
+
+    async fn stop(&mut self, node: &str) {
+        let engine = self
+            .engines
+            .remove(node)
+            .unwrap_or_else(|| panic!("node {node} is not started"));
+        engine
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .await
+            .unwrap_or_else(|error| panic!("node {node} shutdown failed: {error}"));
     }
 
     async fn restart(&mut self, node: &str) {
@@ -959,13 +1113,18 @@ impl MembershipTopology {
     }
 
     async fn join(&mut self, sponsor: &str, joiner: &str) {
+        let invitation = issue_invitation(self.engine(sponsor)).await;
+        self.join_with_invitation(sponsor, joiner, invitation).await;
+    }
+
+    async fn join_with_invitation(&mut self, sponsor: &str, joiner: &str, full_invitation: String) {
         let space_id = self
             .space_ids
             .get(sponsor)
             .unwrap_or_else(|| panic!("sponsor {sponsor} has no space"))
             .clone();
         let joined =
-            join_through(self.engine(sponsor), self.engine(joiner), joiner, &space_id).await;
+            join_with_invitation(self.engine(joiner), joiner, &space_id, full_invitation).await;
         self.space_ids.insert(joiner.to_owned(), space_id);
         self.device_ids
             .insert(joiner.to_owned(), joined.self_device_id);
@@ -1064,6 +1223,28 @@ impl MembershipTopology {
         }
     }
 
+    async fn chain(&self, nodes: &[&str], offline: &[&str]) {
+        assert!(nodes.len() >= 2, "chain requires at least two online nodes");
+        let all = nodes
+            .iter()
+            .chain(offline.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        for (index, node) in nodes.iter().enumerate() {
+            let previous = index.checked_sub(1).map(|previous| nodes[previous]);
+            let next = nodes.get(index + 1).copied();
+            let blocked = all
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    candidate != node && Some(*candidate) != previous && Some(*candidate) != next
+                })
+                .collect::<Vec<_>>();
+            self.set_partition(node, self.endpoint_ids(&blocked).await)
+                .await;
+        }
+    }
+
     async fn heal(&self, nodes: &[&str]) {
         for node in nodes {
             self.set_partition(node, Vec::new()).await;
@@ -1071,19 +1252,15 @@ impl MembershipTopology {
     }
 
     async fn endpoint_ids(&self, nodes: &[&str]) -> Vec<[u8; 32]> {
-        let mut endpoint_ids = Vec::with_capacity(nodes.len());
-        for node in nodes {
-            let result = self
-                .engine(node)
-                .execute_dev(uc_engine::DevOperation::QueryNetworkEndpointId)
-                .await
-                .unwrap_or_else(|error| panic!("node {node} endpoint query failed: {error}"));
-            let uc_engine::DevOperationResult::NetworkEndpointId(endpoint_id) = result else {
-                panic!("node {node} returned an unexpected endpoint result");
-            };
-            endpoint_ids.push(endpoint_id);
-        }
-        endpoint_ids
+        nodes
+            .iter()
+            .map(|node| {
+                *self
+                    .endpoint_ids_by_node
+                    .get(*node)
+                    .unwrap_or_else(|| panic!("node {node} has no endpoint id"))
+            })
+            .collect()
     }
 
     async fn set_partition(&self, node: &str, blocked_endpoint_ids: Vec<[u8; 32]>) {
@@ -1173,7 +1350,7 @@ impl MembershipTopology {
                 .choices
                 .iter()
                 .any(|choice| choice.choice_id == choice_id));
-            let result = self
+            let result = match self
                 .engine(node)
                 .execute(Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
                     issue_id: issue.issue_id.clone(),
@@ -1182,7 +1359,14 @@ impl MembershipTopology {
                     confirm_local_removal: false,
                 }))
                 .await
-                .unwrap_or_else(|error| panic!("node {node} conflict resolution failed: {error}"));
+            {
+                Ok(result) => result,
+                Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                Err(error) => panic!("node {node} conflict resolution failed: {error}"),
+            };
             let OperationResult::DeviceGroupChosen(result) = result else {
                 panic!("node {node} returned an unexpected conflict resolution result");
             };
@@ -1328,6 +1512,16 @@ impl MembershipTopology {
     }
 
     async fn wait_for_equivalent_branch(&self, nodes: &[&str], effective_members: u32) {
+        self.wait_for_equivalent_branch_named(nodes, effective_members, "unnamed topology phase")
+            .await;
+    }
+
+    async fn wait_for_equivalent_branch_named(
+        &self,
+        nodes: &[&str],
+        effective_members: u32,
+        phase: &str,
+    ) {
         let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
         loop {
             let mut snapshots = Vec::with_capacity(nodes.len());
@@ -1346,18 +1540,27 @@ impl MembershipTopology {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "nodes did not converge to the expected branch"
+                "nodes did not converge to the expected branch during {phase}"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
     async fn wait_for_group_epoch(&self, nodes: &[&str], expected_epoch: u64) {
+        self.wait_for_group_epoch_named(nodes, expected_epoch, "unnamed topology phase")
+            .await;
+    }
+
+    async fn wait_for_group_epoch_named(&self, nodes: &[&str], expected_epoch: u64, phase: &str) {
         let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        let mut observed_epochs = Vec::new();
         loop {
             let mut all_match = true;
+            observed_epochs.clear();
             for node in nodes {
-                if self.diagnostics(node).await.group_epoch != expected_epoch {
+                let epoch = self.diagnostics(node).await.group_epoch;
+                observed_epochs.push(epoch);
+                if epoch != expected_epoch {
                     all_match = false;
                 }
             }
@@ -1366,7 +1569,7 @@ impl MembershipTopology {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "nodes did not reach the expected group epoch"
+                "nodes did not reach group epoch {expected_epoch} during {phase}; observed={observed_epochs:?}"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -1741,6 +1944,17 @@ async fn wait_for_peer_refresh(engine: &Engine, label: &str) {
     }
 }
 
+async fn query_endpoint_id(engine: &Engine, node: &str) -> [u8; 32] {
+    let result = engine
+        .execute_dev(uc_engine::DevOperation::QueryNetworkEndpointId)
+        .await
+        .unwrap_or_else(|error| panic!("node {node} endpoint query failed: {error}"));
+    let uc_engine::DevOperationResult::NetworkEndpointId(endpoint_id) = result else {
+        panic!("node {node} returned an unexpected endpoint result");
+    };
+    endpoint_id
+}
+
 async fn create_space(engine: &Engine, device_name: &str) -> (String, String) {
     let created = match engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
@@ -1779,15 +1993,32 @@ async fn join_through(
     device_name: &str,
     expected_space_id: &str,
 ) -> JoinResult {
-    let OperationResult::InvitationIssued {
-        full_invitation, ..
-    } = sponsor
-        .execute(Operation::IssueInvitation)
-        .await
-        .expect("issue admission invitation")
-    else {
-        panic!("unexpected invitation result");
-    };
+    let full_invitation = issue_invitation(sponsor).await;
+    join_with_invitation(joiner, device_name, expected_space_id, full_invitation).await
+}
+
+async fn issue_invitation(sponsor: &Engine) -> String {
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        match sponsor.execute(Operation::IssueInvitation).await {
+            Ok(OperationResult::InvitationIssued {
+                full_invitation, ..
+            }) => return full_invitation,
+            Ok(_) => panic!("unexpected invitation result"),
+            Err(error) if error.is_retryable() && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("issue admission invitation: {error}"),
+        }
+    }
+}
+
+async fn join_with_invitation(
+    joiner: &Engine,
+    device_name: &str,
+    expected_space_id: &str,
+    full_invitation: String,
+) -> JoinResult {
     let OperationResult::JoinSpace(status) = joiner
         .execute(Operation::JoinSpace(JoinSpaceInput {
             invitation_code: full_invitation,

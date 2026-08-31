@@ -121,3 +121,11 @@
 - `MembershipLedger::exchange_conflict_evidence` 原先即使 conflict 与 evidence peer 已存在也会无条件 CAS，导致同一证据每次往返都增加 revision；幂等短路必须同时确认 conflict 已包含该来源，且 peer 已是无确认位置的 `Diverged`。
 - 环拓扑中的全局 ledger revision 还会被不可达 E/F 的正常反熵退避账务推进，不能用“revision 完全静止”代表没有 conflict 消息环。精确判据是同一 evidence 不重复 commit、公开 conflict 数保持一、membership effects 不增加。
 - 四个环节点必须都属于两条 sibling history 的 Active 交集；E/F 只负责制造不同分支并保持隔离，B-C 与 D-A 才是两个相反方向的冲突传播边。
+
+## 2026-08-31 · F6 offline sponsor boundary
+
+- 深链描述的是准入与历史来源，不代表设备承担网络路由；Iroh 成员之间仍是认证直连，中间 Sponsor 离线后其他 Active 成员可直接完成证据和恢复交互。
+- branch recovery 的 external commit 由 target 生成，并作为持久 group-update 欠账定向投递给其他成员；接收者应用后不会转发该 MLS commit。因此可以用相邻链验证 evidence/recovery peer 选择，但最终安全 epoch 需要 target 能直连仍在线成员。
+- F6 不应同时验收“所有中间成员离线时签发新邀请”；先形成两条合法 sibling 并让安全 epoch 收敛，再停 B/D，才能只检验 conflict 选择和恢复不依赖原 Sponsor。
+- Membership branch/head 和 MLS epoch 收敛仍不足以证明正文可发；target 侧的 peer reconciliation 若被旧 conflict evidence 回退为 Diverged，发送 scope 会把 Active recipient 排除为零目标。
+- 已提交的 target recovery session 是“该 recipient 已选择本分支并完成密码恢复”的唯一耐久证据；后续旧 sibling evidence 只能幂等应答，不能重新扩展冲突状态。

@@ -18,7 +18,7 @@ use super::*;
 use crate::space::membership::{
     CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
     MembershipBranchRecoverySession, MembershipConflictRecord, MembershipConflictStatus,
-    MembershipLedger, MembershipLedgerError, MembershipLedgerMutation,
+    MembershipLedger, MembershipLedgerError, MembershipLedgerMutation, PeerReconciliationRecord,
 };
 
 struct AcceptingVerifier;
@@ -589,7 +589,7 @@ async fn issuer_authenticates_recipient_before_preparing_and_signing_material() 
 
     let package = issuer
         .issue_membership_branch_recovery(IssueMembershipBranchRecoveryInput {
-            source_device_id: local_device_id,
+            source_device_id: local_device_id.clone(),
             ..request
         })
         .await
@@ -624,6 +624,17 @@ async fn target_recovery_commits_only_after_caching_an_idempotent_package() {
             .get_mut(&fixture.conflict_id)
             .unwrap()
             .local_branch_id = target_branch_id;
+        record.peer_reconciliation.insert(
+            local_device_id.clone(),
+            PeerReconciliationRecord {
+                peer_device_id: local_device_id.clone(),
+                relationship: uc_core::membership::MembershipHistoryRelationship::Diverged,
+                confirmed_position: None,
+                sync_state: Default::default(),
+                restricted_delivery: Vec::new(),
+                updated_at_ms: 0,
+            },
+        );
         (local_device_id, recipient_member, target_branch_id)
     };
     let ledger = Arc::new(MembershipLedger::new(
@@ -666,6 +677,14 @@ async fn target_recovery_commits_only_after_caching_an_idempotent_package() {
     assert!(format!("{session:?}").contains("TargetCommitted"));
     assert_eq!(session.recipient_completion().map(|(_, value)| value), None);
     assert_eq!(package.conflict_id(), fixture.conflict_id);
+    assert_eq!(
+        persisted.membership_conflicts[&fixture.conflict_id].status,
+        MembershipConflictStatus::Completed
+    );
+    assert_eq!(
+        persisted.peer_reconciliation[&local_device_id].relationship,
+        uc_core::membership::MembershipHistoryRelationship::Consistent
+    );
 }
 
 #[tokio::test]

@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-F0–F5 已完成；下一切片进入 F6：深链 A-B-C-D-E-F 在 B/D 离线时，由叶子选择共同 branch 后逐跳收敛，验证恢复不依赖在线中间节点。
+F0–F6 已完成；下一切片进入 F7：十节点不平衡树形成三个 sibling branches，验证分支内公平反熵且冲突 peer 不饿死合法 peer。
 
 ## Constraints
 
@@ -63,3 +63,14 @@ F0–F5 已完成；下一切片进入 F6：深链 A-B-C-D-E-F 在 B/D 离线时
 | F4 连续准入第六节点超时 | 1 | 六节点基线改为每次扩容后等待 branch/member 与 MLS epoch 收敛，再签发下一次邀请，避免把异步安全传播当成同步完成。 |
 | F4 区域内十二次决定导致 pending 传播超时 | 1 | 收窄到 F4 真正 seam：只要求 A/D 两个 bridge 端点各自形成三成员 sibling；不为单桥不变量强制其他区域副本完成无关用户决定。 |
 | F4 双向互删的 bridge 无法认证 | 1 | 调整分支成员集合，让 A/D 在两条 sibling 中都保持 Active；bridge 通过普通认证历史交换形成 conflict，而不是依赖 Removed↔Removed 受限投递。 |
+| F6 首轮无法确定未收敛阶段 | 1 | 通用 branch 等待器只报告超时；增加纯测试阶段标签，区分共同基线、目标分支和最终在线链恢复后再定位。 |
+| F6 多端接受同一移除未形成共同目标 | 2 | A/C/E 分别接受远端移除引入本机决定与 MLS 时序变量；改为 B/D 停机后两侧分别新增 G/H，普通新增自动收敛，只测试深链恢复。 |
+| F6 恢复后错误要求旧 MLS epoch | 3 | F 的 external commit 会让目标端 E 与 F 进入下一 epoch；改为读取恢复后的 E epoch，再断言在线链安全状态收敛。 |
+| F6 中间节点停机后 Sponsor 无法签发邀请 | 4 | `IssueSpaceInvitation` 返回可重试 1221；F6 不验收离线准入，改为两侧 sibling 与 epoch 先收敛，再停 B/D 执行选择恢复。 |
+| F6 冲突选择遇到可重试 unavailable 被驱动器终止 | 5 | `resolve_conflict` 与已有待定变更选择不一致；统一在 deadline 内重试 retryable EngineError，稳定错误仍立即失败。 |
+| F6 永久单链阻断目标 MLS commit 投递 | 6 | group update 是 target 对成员的定向安全投递，不由接收者路由；单链仅用于冲突发现与恢复，选择完成后恢复在线 A/C/E/F 直连，B/D 保持停机。 |
+| F6 分区后邀请签发遇到暂态 1221 | 7 | `join_through` 原先直接 `expect`；与其他稳定操作一致，在统一 deadline 内重试 retryable unavailable，超时和稳定错误仍失败。 |
+| F6 第二侧分区后邀请稳定 InvalidState | 8 | F 在 A→G 完成后持续 1221；共同基线在线时由 A/F 预签发邀请，分区后 G/H 使用既有邀请加入，避免把离线邀请资格混入 F6。 |
+| F6 安全状态收敛后首次正文发送未被接受 | 9 | MLS epoch 一致不代表 Heal 后的正文连接已刷新；与 F0/F1 一致，在正文矩阵前通过稳定 `RefreshPeerConnections` operation 刷新在线节点。 |
+| F6 Heal 后显式刷新仍有正文发送未接受 | 10 | 原断言未输出 hop 和发送报告；先增强红测诊断，获取精确 sender/receiver 与稳定拒绝分类后再修复。 |
+| F6 E→F 在 branch/epoch 收敛后仍为零目标 | 11 | 恢复 target 已接纳 recipient 的 external commit，但旧 sibling evidence 又把该 peer 标为 `Diverged`。TargetCommitted 现在同时完成 conflict/关系投影，ledger 证据入口以已提交 recovery session 作幂等屏障。 |

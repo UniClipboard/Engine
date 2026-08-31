@@ -11,8 +11,9 @@ use uc_core::membership::{
 use super::model::MembershipConflictRecord;
 use super::{
     CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
-    LoadedMembershipLedger, MembershipConflictStatus, MembershipEffectPhase, MembershipLedgerError,
-    MembershipLedgerMutation, PausedSpaceMember, SpaceMemberPauseReason,
+    LoadedMembershipLedger, MembershipBranchRecoverySession, MembershipConflictStatus,
+    MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
+    SpaceMemberPauseReason,
 };
 
 /// Loads the complete decrypted application membership record.
@@ -197,6 +198,39 @@ impl MembershipLedger {
         let remote_choice = conflict
             .choice_for(conflict.remote_branch_id)
             .ok_or(MembershipLedgerError::Corrupt)?;
+        let target_recovery_completed = snapshot
+            .record()
+            .membership_branch_recovery_sessions
+            .values()
+            .filter_map(MembershipBranchRecoverySession::target_completion)
+            .any(|(_, package)| {
+                package.conflict_id() == conflict.conflict_id
+                    && package.target_branch_id() == conflict.local_branch_id
+                    && local
+                        .admission_facts_for(package.recipient_member())
+                        .is_some_and(|facts| &facts.device_id == source_device_id)
+            });
+        if target_recovery_completed {
+            if snapshot
+                .record()
+                .peer_reconciliation
+                .get(source_device_id)
+                .is_some_and(|peer| peer.relationship == MembershipHistoryRelationship::Consistent)
+            {
+                return Ok(Some(response_pages));
+            }
+            let source_device_id = source_device_id.clone();
+            self.compare_and_commit(|record| {
+                let peer = record
+                    .peer_reconciliation
+                    .get_mut(&source_device_id)
+                    .ok_or(MembershipLedgerError::RecoveryRequired)?;
+                peer.relationship = MembershipHistoryRelationship::Consistent;
+                Ok(())
+            })
+            .await?;
+            return Ok(Some(response_pages));
+        }
         let evidence_already_recorded = snapshot
             .record()
             .membership_conflicts

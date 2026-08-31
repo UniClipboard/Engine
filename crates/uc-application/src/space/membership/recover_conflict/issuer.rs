@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use uc_core::membership::{MembershipBranchTransitionV1, MembershipConflictPolicy};
+use uc_core::membership::{
+    MembershipBranchTransitionV1, MembershipConflictPolicy, MembershipHistoryRelationship,
+};
 use uc_core::ports::ClockPort;
 
 use crate::space::membership::{
     CurrentMemberSignaturePort, MembershipBranchRecoverySession, MembershipLedger,
-    MembershipLedgerError,
+    MembershipLedgerError, PeerReconciliationRecord,
 };
 
 use super::{
@@ -165,7 +167,8 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
                 }
                 let staged = staged.to_vec();
                 let package = package.clone();
-                self.commit_target_material(transition_id, staged).await?;
+                self.commit_target_material(transition_id, input.source_device_id, staged)
+                    .await?;
                 return Ok(package);
             }
             return Err(corrupt());
@@ -247,8 +250,12 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
             })
             .await
             .map_err(map_ledger_error)?;
-        self.commit_target_material(transition_id, target_staged_space_material)
-            .await?;
+        self.commit_target_material(
+            transition_id,
+            input.source_device_id,
+            target_staged_space_material,
+        )
+        .await?;
         Ok(package)
     }
 }
@@ -257,12 +264,14 @@ impl IssueMembershipBranchRecoveryUseCase {
     async fn commit_target_material(
         &self,
         transition_id: [u8; 32],
+        recipient_device_id: uc_core::ids::DeviceId,
         target_staged_space_material: Vec<u8>,
     ) -> Result<(), IssueMembershipBranchRecoveryError> {
         self.material
             .commit_membership_branch_recovery_material(target_staged_space_material)
             .await
             .map_err(map_material_error)?;
+        let updated_at_ms = self.clock.now_ms();
         self.ledger
             .compare_and_commit(move |record| {
                 record
@@ -271,7 +280,36 @@ impl IssueMembershipBranchRecoveryUseCase {
                     .ok_or(MembershipLedgerError::Conflict)?
                     .commit_target()
                     .then_some(())
-                    .ok_or(MembershipLedgerError::Conflict)
+                    .ok_or(MembershipLedgerError::Conflict)?;
+                let (_, package) = record
+                    .membership_branch_recovery_sessions
+                    .get(&transition_id)
+                    .and_then(MembershipBranchRecoverySession::target_completion)
+                    .ok_or(MembershipLedgerError::Conflict)?;
+                let conflict = record
+                    .membership_conflicts
+                    .get_mut(&package.conflict_id())
+                    .ok_or(MembershipLedgerError::Conflict)?;
+                if conflict.local_branch_id != package.target_branch_id() {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                conflict.status = crate::space::membership::MembershipConflictStatus::Completed;
+                conflict.selected_branch_id = Some(package.target_branch_id());
+                conflict.transition_id = Some(transition_id);
+                let peer = record
+                    .peer_reconciliation
+                    .entry(recipient_device_id.clone())
+                    .or_insert_with(|| PeerReconciliationRecord {
+                        peer_device_id: recipient_device_id,
+                        relationship: MembershipHistoryRelationship::Unknown,
+                        confirmed_position: None,
+                        sync_state: Default::default(),
+                        restricted_delivery: Vec::new(),
+                        updated_at_ms,
+                    });
+                peer.relationship = MembershipHistoryRelationship::Consistent;
+                peer.updated_at_ms = updated_at_ms;
+                Ok(())
             })
             .await
             .map_err(map_ledger_error)?;

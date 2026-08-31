@@ -3218,7 +3218,11 @@ impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
                 "MLS recovery epoch does not advance current space material"
             )));
         }
-        let next = self
+        let local_signing_public = MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(
+            material.group_state().to_vec(),
+        ))
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let mut next = self
             .session
             .rotate_space_material(
                 &material,
@@ -3229,6 +3233,40 @@ impl PrepareMembershipBranchRecoveryMaterialPort for DefaultSpaceAccessAdapter {
             .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
         let encrypted_content_key_catalog = seal_group_catalog(&completed.wrapping_key, &next)
             .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let group_update = serde_json::to_vec(&GroupEpochUpdate {
+            version: 1,
+            group_epoch: completed.epoch,
+            commit: input.external_commit.clone(),
+            encrypted_key_catalog: encrypted_content_key_catalog.clone(),
+        })
+        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let mut recipients = Vec::new();
+        for member in input.target_history.active_members() {
+            if member == input.recipient_member {
+                continue;
+            }
+            let credential = input.target_history.credential_for(member).ok_or_else(|| {
+                recovery_material_invalid(anyhow::anyhow!(
+                    "active target member has no membership credential"
+                ))
+            })?;
+            if credential.public_key == local_signing_public {
+                continue;
+            }
+            let facts = input
+                .target_history
+                .admission_facts_for(member)
+                .ok_or_else(|| {
+                    recovery_material_invalid(anyhow::anyhow!(
+                        "active target member has no admission facts"
+                    ))
+                })?;
+            recipients.push(PendingGroupUpdate::persistent(
+                facts.device_id.clone(),
+                group_update.clone(),
+            ));
+        }
+        next.add_pending_group_updates(recipients, chrono::Utc::now().timestamp_millis());
         let confirmation = MembershipBranchRecoveryConfirmationV1 {
             version: 1,
             epoch: completed.epoch,
@@ -5702,7 +5740,7 @@ mod admission_tests {
         let recipient = adapter(
             local_key_material(&recipient_dir, memory_secure_storage()),
             recipient_session,
-            recipient_repository,
+            Arc::clone(&recipient_repository),
         );
         let recipient_device = DeviceId::new("recovery-recipient");
         let pending = recipient
@@ -5737,7 +5775,7 @@ mod admission_tests {
         let contender = adapter(
             local_key_material(&contender_dir, memory_secure_storage()),
             contender_session,
-            contender_repository,
+            Arc::clone(&contender_repository),
         );
         let contender_device = DeviceId::new("recovery-contender");
         let contender_pending = contender
@@ -5787,26 +5825,73 @@ mod admission_tests {
             .prepare_membership_branch_recovery_recipient(group_info)
             .await
             .unwrap();
-        let credential = MembershipCredential::new(
+        let recipient_material = recipient_repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let recipient_credential = MembershipCredential::new(
             uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
-            vec![0x41; 32],
+            MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(
+                recipient_material.group_state().to_vec(),
+            ))
+            .unwrap(),
         );
-        let recipient_member = credential.member_instance_id(&recipient_device);
-        let history = uc_core::membership::VersionedMembershipHistory::new_single_member_root(
-            space_id.as_ref().to_owned(),
-            uc_core::membership::AdmissionChangeFacts {
-                member_instance: recipient_member,
-                device_id: recipient_device,
-                device_name: "Recovery recipient".to_owned(),
-                identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
-                    "ABCD-EFGH-IJKL-MNOP",
-                )
-                .unwrap(),
-                transport_public_key: vec![1],
-                transport_address_blob: vec![2],
-                identity_signature: vec![3],
+        let contender_material = contender_repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let contender_credential = MembershipCredential::new(
+            uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
+            MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(
+                contender_material.group_state().to_vec(),
+            ))
+            .unwrap(),
+        );
+        let recipient_member = recipient_credential.member_instance_id(&recipient_device);
+        let contender_member = contender_credential.member_instance_id(&contender_device);
+        let history = uc_core::membership::VersionedMembershipHistory::from_activation_baseline(
+            uc_core::membership::MembershipActivationBaselineV2::Established {
+                lineage_id: space_id.as_ref().to_owned(),
+                head_event_id: uc_core::membership::MembershipEventId::from_hex(&"11".repeat(32))
+                    .unwrap(),
+                head_depth: 0,
+                current_members: vec![
+                    (
+                        uc_core::membership::AdmissionChangeFacts {
+                            member_instance: recipient_member,
+                            device_id: recipient_device,
+                            device_name: "Recovery recipient".to_owned(),
+                            identity_fingerprint:
+                                uc_core::security::IdentityFingerprint::from_display_string(
+                                    "ABCD-EFGH-IJKL-MNOP",
+                                )
+                                .unwrap(),
+                            transport_public_key: vec![1],
+                            transport_address_blob: vec![2],
+                            identity_signature: vec![3],
+                        },
+                        recipient_credential,
+                    ),
+                    (
+                        uc_core::membership::AdmissionChangeFacts {
+                            member_instance: contender_member,
+                            device_id: contender_device.clone(),
+                            device_name: "Recovery contender".to_owned(),
+                            identity_fingerprint:
+                                uc_core::security::IdentityFingerprint::from_display_string(
+                                    "QRST-UVWX-YZAB-CDEF",
+                                )
+                                .unwrap(),
+                            transport_public_key: vec![4],
+                            transport_address_blob: vec![5],
+                            identity_signature: vec![6],
+                        },
+                        contender_credential,
+                    ),
+                ],
             },
-            credential,
         )
         .unwrap();
         let target_branch_id =
@@ -5846,6 +5931,16 @@ mod admission_tests {
         );
         assert!(!prepared.sealed_mls_recovery_material.is_empty());
         assert!(!prepared.encrypted_content_key_catalog.is_empty());
+        let staged: SpaceKeyMaterial =
+            postcard::from_bytes(&prepared.target_staged_space_material).unwrap();
+        assert_eq!(
+            staged.pending_group_updates().len(),
+            before.pending_group_updates().len() + 1
+        );
+        assert!(staged
+            .pending_group_updates()
+            .iter()
+            .any(|update| update.recipient() == &contender_device));
         let recovered = recipient
             .prepare_recovered_membership_branch_material(
                 &recipient_recovery.staged_mls_state,
