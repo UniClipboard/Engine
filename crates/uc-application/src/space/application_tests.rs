@@ -664,6 +664,14 @@ impl PrepareMembershipBranchTransitionPort for PassivePorts {
 
 #[async_trait]
 impl PrepareMembershipBranchRecoveryMaterialPort for PassivePorts {
+    async fn export_membership_branch_recovery_group_info(
+        &self,
+    ) -> Result<Vec<u8>, PrepareMembershipBranchRecoveryMaterialError> {
+        Err(PrepareMembershipBranchRecoveryMaterialError::Unavailable {
+            source: anyhow::anyhow!("passive recovery group info"),
+        })
+    }
+
     async fn prepare_membership_branch_recovery_material(
         &self,
         _input: PrepareMembershipBranchRecoveryMaterialInput,

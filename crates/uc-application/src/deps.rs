@@ -49,10 +49,11 @@ pub use crate::profile::probe_profile_key_access::{
     ProfileKeyAccessProbePortError,
 };
 pub use crate::space::{
-    build_space_session_activity, CleanupLegacyMembershipDataPort, CommitMembershipLedgerPort,
-    CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentSpaceIdentityError,
-    CurrentSpaceIdentityPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
-    CurrentSpaceMemberScopePort, DeliverRestrictedMembershipPort, DeviceManagementResetDataPort,
+    build_space_session_activity, BeginMembershipBranchRecoveryInput,
+    CleanupLegacyMembershipDataPort, CommitMembershipLedgerPort, CurrentMemberSignatureError,
+    CurrentMemberSignaturePort, CurrentSpaceIdentityError, CurrentSpaceIdentityPort,
+    CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
+    DeliverRestrictedMembershipPort, DeviceManagementResetDataPort,
     FetchMembershipBranchRecoveryError, FetchMembershipBranchRecoveryInput,
     FetchMembershipBranchRecoveryPort, InboundMembershipTransfer, InitialSpaceActivationPort,
     InitializeSpacePort, IsSpaceUnlockedPort, IssueMembershipBranchRecoveryError,

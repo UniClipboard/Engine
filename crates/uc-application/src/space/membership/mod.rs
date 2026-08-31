@@ -40,13 +40,13 @@ pub use query_device_trust::{
 };
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
 pub use recover_conflict::{
-    FetchMembershipBranchRecoveryError, FetchMembershipBranchRecoveryInput,
-    FetchMembershipBranchRecoveryPort, IssueMembershipBranchRecoveryError,
-    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
-    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
-    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchTransitionError,
-    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
-    PreparedMembershipBranchRecoveryMaterial,
+    BeginMembershipBranchRecoveryInput, FetchMembershipBranchRecoveryError,
+    FetchMembershipBranchRecoveryInput, FetchMembershipBranchRecoveryPort,
+    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
+    IssueMembershipBranchRecoveryPort, PrepareMembershipBranchRecoveryMaterialError,
+    PrepareMembershipBranchRecoveryMaterialInput, PrepareMembershipBranchRecoveryMaterialPort,
+    PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
+    PrepareMembershipBranchTransitionPort, PreparedMembershipBranchRecoveryMaterial,
 };
 pub use remove_space_member::{
     MembershipCommitReceipt, RemoveSpaceMemberError, RemoveSpaceMemberResult,

@@ -69,6 +69,7 @@ pub struct SpaceFacade {
     query_committed_device_management_reset: Arc<QueryCommittedDeviceManagementResetUseCase>,
     membership_history_endpoint:
         Arc<dyn uc_core::membership::MembershipHistoryExchangeEndpointPort>,
+    membership_branch_recovery_endpoint: Arc<dyn crate::deps::IssueMembershipBranchRecoveryPort>,
     space_admission_endpoint: Arc<dyn crate::deps::HandleAuthenticatedSpaceAdmissionMessagePort>,
     application: Mutex<Option<SpaceApplication>>,
 }
@@ -115,6 +116,7 @@ impl SpaceFacade {
         let peer_scope = application.current_scope();
         let membership_reset = application.membership_reset();
         let membership_history_endpoint = application.membership_history_endpoint();
+        let membership_branch_recovery_endpoint = application.membership_branch_recovery_endpoint();
         let space_admission = application.space_admission();
         let space_admission_endpoint = application.space_admission_endpoint();
         let membership_session_activity = application.membership_session_activity();
@@ -288,6 +290,7 @@ impl SpaceFacade {
             reset_space,
             query_committed_device_management_reset,
             membership_history_endpoint,
+            membership_branch_recovery_endpoint,
             space_admission_endpoint,
             application: Mutex::new(Some(application)),
         }
@@ -297,6 +300,12 @@ impl SpaceFacade {
         &self,
     ) -> Arc<dyn uc_core::membership::MembershipHistoryExchangeEndpointPort> {
         Arc::clone(&self.membership_history_endpoint)
+    }
+
+    pub fn membership_branch_recovery_endpoint(
+        &self,
+    ) -> Arc<dyn crate::deps::IssueMembershipBranchRecoveryPort> {
+        Arc::clone(&self.membership_branch_recovery_endpoint)
     }
 
     pub fn space_admission_endpoint(

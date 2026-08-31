@@ -9,9 +9,10 @@ use crate::space::membership::{
 };
 
 use super::{
-    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
-    IssueMembershipBranchRecoveryPort, PrepareMembershipBranchRecoveryMaterialError,
-    PrepareMembershipBranchRecoveryMaterialInput, PrepareMembershipBranchRecoveryMaterialPort,
+    BeginMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryError,
+    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
+    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
+    PrepareMembershipBranchRecoveryMaterialPort,
 };
 
 const RECOVERY_PACKAGE_TTL_MS: i64 = 5 * 60 * 1_000;
@@ -37,15 +38,18 @@ impl IssueMembershipBranchRecoveryUseCase {
             clock,
         }
     }
-}
 
-#[async_trait::async_trait]
-impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase {
-    async fn issue_membership_branch_recovery(
+    async fn authorize(
         &self,
-        input: IssueMembershipBranchRecoveryInput,
+        source_device_id: &uc_core::ids::DeviceId,
+        conflict_id: uc_core::membership::MembershipConflictId,
+        target_branch_id: uc_core::membership::MembershipBranchId,
+        recipient_member: uc_core::membership::MemberInstanceId,
     ) -> Result<
-        uc_core::membership::MembershipBranchRecoveryPackageV1,
+        (
+            uc_core::membership::VersionedMembershipHistory,
+            uc_core::membership::MemberInstanceId,
+        ),
         IssueMembershipBranchRecoveryError,
     > {
         let snapshot = self
@@ -57,21 +61,21 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
         let record = snapshot
             .record()
             .membership_conflicts
-            .get(&input.conflict_id)
+            .get(&conflict_id)
             .ok_or_else(rejected)?;
-        if record.local_branch_id != input.target_branch_id
+        if record.local_branch_id != target_branch_id
             || MembershipConflictPolicy::branch_id(&history).map_err(|error| {
                 IssueMembershipBranchRecoveryError::Corrupt {
                     source: anyhow::Error::new(error),
                 }
-            })? != input.target_branch_id
+            })? != target_branch_id
         {
             return Err(rejected());
         }
         history
-            .admission_facts_for(input.recipient_member)
-            .filter(|facts| facts.device_id == input.source_device_id)
-            .filter(|_| history.active_members().contains(&input.recipient_member))
+            .admission_facts_for(recipient_member)
+            .filter(|facts| &facts.device_id == source_device_id)
+            .filter(|_| history.active_members().contains(&recipient_member))
             .ok_or_else(rejected)?;
         let local_device_id = snapshot
             .record()
@@ -89,6 +93,52 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
         {
             return Err(corrupt());
         }
+        Ok((history, authorizing_member))
+    }
+}
+
+#[async_trait::async_trait]
+impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase {
+    async fn begin_membership_branch_recovery(
+        &self,
+        input: BeginMembershipBranchRecoveryInput,
+    ) -> Result<Vec<u8>, IssueMembershipBranchRecoveryError> {
+        self.authorize(
+            &input.source_device_id,
+            input.conflict_id,
+            input.target_branch_id,
+            input.recipient_member,
+        )
+        .await?;
+        let group_info = self
+            .material
+            .export_membership_branch_recovery_group_info()
+            .await
+            .map_err(map_material_error)?;
+        if group_info.is_empty() {
+            return Err(corrupt());
+        }
+        Ok(group_info)
+    }
+
+    async fn issue_membership_branch_recovery(
+        &self,
+        input: IssueMembershipBranchRecoveryInput,
+    ) -> Result<
+        uc_core::membership::MembershipBranchRecoveryPackageV1,
+        IssueMembershipBranchRecoveryError,
+    > {
+        if input.external_commit.is_empty() {
+            return Err(rejected());
+        }
+        let (history, authorizing_member) = self
+            .authorize(
+                &input.source_device_id,
+                input.conflict_id,
+                input.target_branch_id,
+                input.recipient_member,
+            )
+            .await?;
         let prepared = self
             .material
             .prepare_membership_branch_recovery_material(
@@ -97,6 +147,7 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
                     target_branch_id: input.target_branch_id,
                     recipient_member: input.recipient_member,
                     target_history: history.clone(),
+                    external_commit: input.external_commit,
                 },
             )
             .await

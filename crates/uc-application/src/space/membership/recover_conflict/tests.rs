@@ -105,10 +105,18 @@ struct TransitionPreparer {
 
 struct RecoveryMaterialSource {
     calls: AtomicUsize,
+    group_info_calls: AtomicUsize,
 }
 
 #[async_trait]
 impl PrepareMembershipBranchRecoveryMaterialPort for RecoveryMaterialSource {
+    async fn export_membership_branch_recovery_group_info(
+        &self,
+    ) -> Result<Vec<u8>, PrepareMembershipBranchRecoveryMaterialError> {
+        self.group_info_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![0x70])
+    }
+
     async fn prepare_membership_branch_recovery_material(
         &self,
         _input: PrepareMembershipBranchRecoveryMaterialInput,
@@ -377,6 +385,7 @@ async fn issuer_authenticates_recipient_before_preparing_and_signing_material() 
     ));
     let material = Arc::new(RecoveryMaterialSource {
         calls: AtomicUsize::new(0),
+        group_info_calls: AtomicUsize::new(0),
     });
     let issuer = IssueMembershipBranchRecoveryUseCase::new(
         ledger,
@@ -389,7 +398,35 @@ async fn issuer_authenticates_recipient_before_preparing_and_signing_material() 
         conflict_id: fixture.conflict_id,
         target_branch_id,
         recipient_member,
+        external_commit: vec![0x73],
     };
+
+    let begin_rejected = issuer
+        .begin_membership_branch_recovery(BeginMembershipBranchRecoveryInput {
+            source_device_id: DeviceId::new("wrong-device"),
+            conflict_id: fixture.conflict_id,
+            target_branch_id,
+            recipient_member,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        begin_rejected,
+        IssueMembershipBranchRecoveryError::Rejected { .. }
+    ));
+    assert_eq!(material.group_info_calls.load(Ordering::SeqCst), 0);
+
+    let group_info = issuer
+        .begin_membership_branch_recovery(BeginMembershipBranchRecoveryInput {
+            source_device_id: local_device_id.clone(),
+            conflict_id: fixture.conflict_id,
+            target_branch_id,
+            recipient_member,
+        })
+        .await
+        .unwrap();
+    assert_eq!(group_info, vec![0x70]);
+    assert_eq!(material.group_info_calls.load(Ordering::SeqCst), 1);
 
     let rejected = issuer
         .issue_membership_branch_recovery(request.clone())

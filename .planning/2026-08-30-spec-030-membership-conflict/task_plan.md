@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：MLS external recovery 原语和两阶段 Iroh wire contract 已完成；下一切片实现认证 handler、client 和 staged state 持久化。
+Phase 4：MLS external recovery 原语、wire contract 和认证服务端已完成；下一切片实现 client 与 staged state 持久化。
 
 ## Next Step
 
-实现两阶段 Iroh handler/client，调用 Application issuer 做每阶段资格复核，并把 recipient/target staged state 纳入 MasterKey AEAD 持久边界。
+实现恢复 client，并把 recipient/target staged state 与幂等响应纳入 MasterKey AEAD 持久边界。
 
 ## Constraints
 
@@ -48,3 +48,4 @@ Phase 4：MLS external recovery 原语和两阶段 Iroh wire contract 已完成�
 | 收窄 coordinator outcome re-export 后模块内测试找不到类型 | 1 | 仅在 `cfg(test)` 下重新导出 outcome，避免生产 unused import。 |
 | workspace 全量测试的 3 个既有 clipboard/search host-adapter 用例失败 | 1 | 成员套件与 all-target check 均通过；单独重跑首项仍返回 QueryHistory unavailable 1243，记录为本切片外既有失败，不误报全量通过。 |
 | `VerifiableGroupInfo` 无法从 OpenMLS prelude 解析 | 1 | 使用公开的 `openmls::messages::group_info::VerifiableGroupInfo` 显式导入。 |
+| 新增两阶段端口后测试替身缺少 GroupInfo 方法和 external commit | 1 | 补齐显式 begin/complete 输入与所有 passive/test adapter，实现阶段边界。 |

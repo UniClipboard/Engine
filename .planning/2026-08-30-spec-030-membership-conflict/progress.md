@@ -73,6 +73,14 @@
 - `uc-infra` MLS 定向测试、workspace all-target check、fmt、架构检查与 `git diff --check` 通过。
 - 复审修正 external recovery 新增路径的错误吞噬：稳定分类改为携带 `anyhow::Error` source，脱敏 `Debug` 不输出底层细节；测试验证 InvalidMessage 分类、`source()` 非空和稳定显示文本。
 
+## 2026-08-31 · Authenticated recovery server
+
+- Application issuer 新增 begin 动作；在导出 GroupInfo 前执行与最终签发相同的 branch、source device、recipient 和本机签发者校验。
+- 最终签发要求非空 external commit，并把它传给材料 adapter；两阶段不共享未经重新验证的内存授权状态。
+- Iroh handler 从连接公钥解析已知成员设备，未知连接、畸形帧、错误消息方向或 Application 拒绝均只返回脱敏 Rejected。
+- 共享 Iroh node 已注册 recovery ALPN；生产组装测试增加协议可达性断言。
+- Application issuer 定向测试与 Engine 生产协议装配测试通过；workspace all-target check、fmt、架构检查和 `git diff --check` 通过。
+
 ## 2026-08-31 · Two-phase recovery wire contract
 
 - Infra 定义专用 Iroh ALPN 和五类有界帧：GroupInfo 请求/响应、external commit 提交、最终恢复包和拒绝。

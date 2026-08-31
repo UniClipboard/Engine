@@ -74,6 +74,7 @@ pub struct PrepareMembershipBranchRecoveryMaterialInput {
     pub target_branch_id: MembershipBranchId,
     pub recipient_member: MemberInstanceId,
     pub target_history: VersionedMembershipHistory,
+    pub external_commit: Vec<u8>,
 }
 
 pub struct PreparedMembershipBranchRecoveryMaterial {
@@ -97,6 +98,10 @@ pub enum PrepareMembershipBranchRecoveryMaterialError {
 
 #[async_trait]
 pub trait PrepareMembershipBranchRecoveryMaterialPort: Send + Sync {
+    async fn export_membership_branch_recovery_group_info(
+        &self,
+    ) -> Result<Vec<u8>, PrepareMembershipBranchRecoveryMaterialError>;
+
     async fn prepare_membership_branch_recovery_material(
         &self,
         input: PrepareMembershipBranchRecoveryMaterialInput,
@@ -107,11 +112,20 @@ pub trait PrepareMembershipBranchRecoveryMaterialPort: Send + Sync {
 }
 
 #[derive(Clone)]
+pub struct BeginMembershipBranchRecoveryInput {
+    pub source_device_id: DeviceId,
+    pub conflict_id: MembershipConflictId,
+    pub target_branch_id: MembershipBranchId,
+    pub recipient_member: MemberInstanceId,
+}
+
+#[derive(Clone)]
 pub struct IssueMembershipBranchRecoveryInput {
     pub source_device_id: DeviceId,
     pub conflict_id: MembershipConflictId,
     pub target_branch_id: MembershipBranchId,
     pub recipient_member: MemberInstanceId,
+    pub external_commit: Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +149,11 @@ pub enum IssueMembershipBranchRecoveryError {
 
 #[async_trait]
 pub trait IssueMembershipBranchRecoveryPort: Send + Sync {
+    async fn begin_membership_branch_recovery(
+        &self,
+        input: BeginMembershipBranchRecoveryInput,
+    ) -> Result<Vec<u8>, IssueMembershipBranchRecoveryError>;
+
     async fn issue_membership_branch_recovery(
         &self,
         input: IssueMembershipBranchRecoveryInput,

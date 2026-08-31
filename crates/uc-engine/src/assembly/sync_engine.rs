@@ -176,6 +176,16 @@ struct DeferredMembershipBranchRecoveryMaterial;
 impl uc_application::deps::PrepareMembershipBranchRecoveryMaterialPort
     for DeferredMembershipBranchRecoveryMaterial
 {
+    async fn export_membership_branch_recovery_group_info(
+        &self,
+    ) -> Result<Vec<u8>, uc_application::deps::PrepareMembershipBranchRecoveryMaterialError> {
+        Err(
+            uc_application::deps::PrepareMembershipBranchRecoveryMaterialError::Unavailable {
+                source: anyhow::anyhow!("membership branch recovery material is unavailable"),
+            },
+        )
+    }
+
     async fn prepare_membership_branch_recovery_material(
         &self,
         _input: uc_application::deps::PrepareMembershipBranchRecoveryMaterialInput,
@@ -286,6 +296,13 @@ impl SyncEngineAssembly {
     pub(crate) async fn membership_history_exchange_is_reachable_for_test(&self) -> bool {
         self.iroh_node
             .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn membership_branch_recovery_is_reachable_for_test(&self) -> bool {
+        self.iroh_node
+            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN)
             .await
     }
 
@@ -998,6 +1015,11 @@ pub async fn build_sync_engine_assembly(
         Arc::clone(&deps.device.member_repo),
         Arc::clone(&deps.security.fingerprint),
         facade.membership_history_endpoint(),
+    )?;
+    builder.install_membership_branch_recovery(
+        Arc::clone(&deps.device.member_repo),
+        Arc::clone(&deps.security.fingerprint),
+        facade.membership_branch_recovery_endpoint(),
     )?;
     let content_gate: Arc<dyn ContentExchangeGatePort> =
         Arc::new(CurrentMemberContentGate::new(facade.current_member_scope()));

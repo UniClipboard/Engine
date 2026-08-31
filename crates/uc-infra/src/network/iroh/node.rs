@@ -30,7 +30,7 @@ use iroh::{Endpoint, EndpointAddr, RelayConfig, RelayMode, RelayUrl, TransportAd
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::{debug, info, instrument, warn};
-use uc_application::deps::CurrentMemberSignaturePort;
+use uc_application::deps::{CurrentMemberSignaturePort, IssueMembershipBranchRecoveryPort};
 use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -79,6 +79,8 @@ use super::membership_attestation_adapter::{
     IrohMembershipAttestationAdapter, IrohMembershipGossipTransportAdapter,
     IrohMembershipIdentityAdapter, MEMBERSHIP_ATTESTATION_ALPN,
 };
+use super::membership_branch_recovery_adapter::IrohMembershipBranchRecoveryHandler;
+use super::membership_branch_recovery_wire::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use super::membership_history_exchange_adapter::{
     IrohMembershipHistoryExchangeAdapter, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
 };
@@ -998,6 +1000,20 @@ impl IrohNodeBuilder {
         self.router_builder = Some(builder.accept(
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
             adapter.handler(member_repo, fingerprint_factory, endpoint),
+        ));
+        Ok(())
+    }
+
+    pub fn install_membership_branch_recovery(
+        &mut self,
+        member_repo: Arc<dyn MemberRepositoryPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        endpoint: Arc<dyn IssueMembershipBranchRecoveryPort>,
+    ) -> Result<(), IrohNodeError> {
+        let builder = self.take_router_builder()?;
+        self.router_builder = Some(builder.accept(
+            MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+            IrohMembershipBranchRecoveryHandler::new(member_repo, fingerprint_factory, endpoint),
         ));
         Ok(())
     }

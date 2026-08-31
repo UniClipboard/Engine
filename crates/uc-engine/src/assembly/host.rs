@@ -811,6 +811,10 @@ mod tests {
             .sync_engine_assembly
             .membership_history_exchange_is_reachable_for_test()
             .await;
+        let membership_branch_recovery_reachable = lifecycle
+            .sync_engine_assembly
+            .membership_branch_recovery_is_reachable_for_test()
+            .await;
         let space_admission_reachable = lifecycle
             .sync_engine_assembly
             .space_admission_is_reachable_for_test()
@@ -827,6 +831,10 @@ mod tests {
         assert!(
             membership_history_reachable,
             "membership history exchange was not installed"
+        );
+        assert!(
+            membership_branch_recovery_reachable,
+            "membership branch recovery protocol was not installed"
         );
         assert!(
             space_admission_reachable,

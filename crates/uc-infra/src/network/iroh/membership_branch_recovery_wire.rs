@@ -3,10 +3,9 @@ use uc_core::membership::{
     MemberInstanceId, MembershipBranchId, MembershipBranchRecoveryPackageV1, MembershipConflictId,
 };
 
-pub(crate) const MEMBERSHIP_BRANCH_RECOVERY_ALPN: &[u8] =
-    b"uniclipboard/membership-branch-recovery/1";
+pub const MEMBERSHIP_BRANCH_RECOVERY_ALPN: &[u8] = b"uniclipboard/membership-branch-recovery/1";
 const WIRE_VERSION: u16 = 1;
-const MAX_RECOVERY_FRAME_SIZE: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_RECOVERY_FRAME_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum MembershipBranchRecoveryWireMessage {
@@ -47,6 +46,26 @@ impl MembershipBranchRecoveryWireMessage {
             conflict_id,
             target_branch_id,
             recipient_member,
+        }
+    }
+
+    pub(crate) fn group_info(group_info: Vec<u8>) -> Self {
+        Self::GroupInfo {
+            version: WIRE_VERSION,
+            group_info,
+        }
+    }
+
+    pub(crate) fn recovery_package(package: MembershipBranchRecoveryPackageV1) -> Self {
+        Self::RecoveryPackage {
+            version: WIRE_VERSION,
+            package,
+        }
+    }
+
+    pub(crate) const fn rejected() -> Self {
+        Self::Rejected {
+            version: WIRE_VERSION,
         }
     }
 
