@@ -254,3 +254,11 @@
 - 六节点准入改为每次扩容后等待 branch/member 与 MLS epoch 收敛，避免下一次邀请抢跑安全传播。
 - 两条分支各保留 A/D 作为共同 Active bridge 端点，并分别形成不同的三成员集合；Removed↔Removed 不能通过普通成员认证，不再被误作 bridge。
 - F4 Desktop E2E 通过：A/D 各记录一个 sibling conflict，成员数保持 3、branch id 不变、跨桥正文零 accepted，未形成联合历史。
+
+## 2026-08-31 · F5 ring propagation red test
+
+- 四个共同成员在分区内分别准入 E/F 形成 sibling，再将 A-B-C-D 配置为只有相邻边可达的环，E/F 完全隔离。
+- 首轮红测发现分叉前 AddDevice effects 仍可能处于恢复队列，不能把“无重复 effects”误写为“全局 effects 必须为零”；改为环接通前后及重复刷新前后比较稳定计数。
+- 第二轮红测确认同一 conflict evidence 会被无条件重复提交，四端 revision 随往返增长；Application 单测固定同一来源相同 evidence 只能提交一次，ledger 已增加幂等短路。
+- 全局 revision 同时包含隔离 E/F 的正常 peer 退避账务，不能作为 conflict 防环判据；最终 E2E 以唯一公开 conflict、同 evidence 单次 commit 和 effects 不增加组成强断言。
+- F5 Desktop E2E 通过，耗时 192.21 秒；A/B/C/D 各只公开一个 conflict，两个相反传播方向没有产生重复 effects。

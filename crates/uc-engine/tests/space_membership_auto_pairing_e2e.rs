@@ -261,6 +261,10 @@ enum TopologyAction<'a> {
         left_group: &'a [&'a str],
         right_group: &'a [&'a str],
     },
+    Ring {
+        nodes: &'a [&'a str],
+        isolated: &'a [&'a str],
+    },
     Heal {
         nodes: &'a [&'a str],
     },
@@ -274,6 +278,131 @@ enum TopologyAction<'a> {
 enum PendingChangeChoice {
     Apply,
     Keep,
+}
+
+// F5：同一 sibling conflict 沿四节点环的两个方向传播时，只能提示一次且不得形成消息环。
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+async fn f5_ring_propagates_one_conflict_without_message_or_effect_loops() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Start { node: "C" },
+            TopologyAction::Start { node: "D" },
+            TopologyAction::Start { node: "E" },
+            TopologyAction::Start { node: "F" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "C",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C"], 3)
+        .await;
+    let epoch_three = topology.diagnostics("A").await.group_epoch;
+    topology
+        .wait_for_group_epoch(&["B", "C"], epoch_three)
+        .await;
+    topology
+        .run(&[TopologyAction::Join {
+            sponsor: "A",
+            joiner: "D",
+        }])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C", "D"], 4)
+        .await;
+    let epoch_four = topology.diagnostics("A").await.group_epoch;
+    topology
+        .wait_for_group_epoch(&["B", "C", "D"], epoch_four)
+        .await;
+    topology
+        .run(&[TopologyAction::Partition {
+            left: &["A", "B", "E"],
+            right: &["C", "D", "F"],
+        }])
+        .await;
+    topology
+        .run(&[
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "E",
+            },
+            TopologyAction::Join {
+                sponsor: "C",
+                joiner: "F",
+            },
+        ])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "E"], 5)
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["C", "D", "F"], 5)
+        .await;
+    let left_branch = topology.diagnostics("A").await.branch_id;
+    let right_branch = topology.diagnostics("C").await.branch_id;
+    assert_ne!(left_branch, right_branch);
+    let effects_before_ring = topology
+        .wait_for_stable_pending_effects(&["A", "B", "C", "D"])
+        .await;
+
+    topology
+        .run(&[TopologyAction::Ring {
+            nodes: &["A", "B", "C", "D"],
+            isolated: &["E", "F"],
+        }])
+        .await;
+    topology
+        .wait_for_branch_conflict(&["A", "B", "C", "D"])
+        .await;
+
+    for (index, node) in ["A", "B", "C", "D"].into_iter().enumerate() {
+        let choices = topology.device_group_choices(node).await;
+        assert_eq!(
+            choices
+                .issues
+                .iter()
+                .filter(|issue| issue.issue_id.starts_with("c:"))
+                .count(),
+            1,
+            "node {node} must expose one conflict prompt"
+        );
+        assert!(
+            topology.diagnostics(node).await.pending_effect_count <= effects_before_ring[index],
+            "node {node} must not enqueue an effect while propagating conflict evidence"
+        );
+    }
+    assert_eq!(topology.diagnostics("A").await.branch_id, left_branch);
+    assert_eq!(topology.diagnostics("B").await.branch_id, left_branch);
+    assert_eq!(topology.diagnostics("C").await.branch_id, right_branch);
+    assert_eq!(topology.diagnostics("D").await.branch_id, right_branch);
+
+    let effects_before_refresh = topology
+        .wait_for_stable_pending_effects(&["A", "B", "C", "D"])
+        .await;
+    for _ in 0..2 {
+        for node in ["A", "B", "C", "D"] {
+            wait_for_peer_refresh(topology.engine(node), node).await;
+        }
+    }
+    topology
+        .wait_for_branch_conflict(&["A", "B", "C", "D"])
+        .await;
+    let effects_after_refresh = topology
+        .wait_for_stable_pending_effects(&["A", "B", "C", "D"])
+        .await;
+    assert_eq!(effects_after_refresh, effects_before_refresh);
+    topology.shutdown().await;
 }
 
 // F4：两个三节点 sibling 分支只开放一条 bridge 后，不得被拼成六节点联合历史。
@@ -761,6 +890,7 @@ impl MembershipTopology {
                 } => {
                     self.bridge(left, right, left_group, right_group).await;
                 }
+                TopologyAction::Ring { nodes, isolated } => self.ring(nodes, isolated).await,
                 TopologyAction::Heal { nodes } => self.heal(nodes).await,
                 TopologyAction::ResolveConflict { node, branch_from } => {
                     self.resolve_conflict(node, branch_from).await
@@ -901,6 +1031,37 @@ impl MembershipTopology {
             .await;
         self.set_partition(right, self.endpoint_ids(&right_blocked).await)
             .await;
+    }
+
+    async fn ring(&self, nodes: &[&str], isolated: &[&str]) {
+        assert!(nodes.len() >= 4, "ring requires at least four nodes");
+        let all = nodes
+            .iter()
+            .chain(isolated.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        for (index, node) in nodes.iter().enumerate() {
+            let previous = nodes[(index + nodes.len() - 1) % nodes.len()];
+            let next = nodes[(index + 1) % nodes.len()];
+            let blocked = all
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    candidate != node && *candidate != previous && *candidate != next
+                })
+                .collect::<Vec<_>>();
+            self.set_partition(node, self.endpoint_ids(&blocked).await)
+                .await;
+        }
+        for node in isolated {
+            let blocked = all
+                .iter()
+                .copied()
+                .filter(|candidate| candidate != node)
+                .collect::<Vec<_>>();
+            self.set_partition(node, self.endpoint_ids(&blocked).await)
+                .await;
+        }
     }
 
     async fn heal(&self, nodes: &[&str]) {
@@ -1087,6 +1248,33 @@ impl MembershipTopology {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "branch conflict did not reach every bridge endpoint"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_for_stable_pending_effects(&self, nodes: &[&str]) -> Vec<u32> {
+        const REQUIRED_STABLE_SAMPLES: usize = 10;
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        let mut previous = None;
+        let mut stable_samples = 0;
+        loop {
+            let mut state = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                state.push(self.diagnostics(node).await.pending_effect_count);
+            }
+            if previous.as_ref() == Some(&state) {
+                stable_samples += 1;
+                if stable_samples >= REQUIRED_STABLE_SAMPLES {
+                    return state;
+                }
+            } else {
+                previous = Some(state);
+                stable_samples = 0;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "membership pending effects did not stabilize"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

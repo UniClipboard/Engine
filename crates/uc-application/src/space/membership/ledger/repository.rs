@@ -197,6 +197,22 @@ impl MembershipLedger {
         let remote_choice = conflict
             .choice_for(conflict.remote_branch_id)
             .ok_or(MembershipLedgerError::Corrupt)?;
+        let evidence_already_recorded = snapshot
+            .record()
+            .membership_conflicts
+            .get(&conflict.conflict_id)
+            .is_some_and(|current| current.evidence_peer_device_ids.contains(source_device_id))
+            && snapshot
+                .record()
+                .peer_reconciliation
+                .get(source_device_id)
+                .is_some_and(|peer| {
+                    peer.relationship == MembershipHistoryRelationship::Diverged
+                        && peer.confirmed_position.is_none()
+                });
+        if evidence_already_recorded {
+            return Ok(Some(response_pages));
+        }
         let source_device_id = source_device_id.clone();
         self.compare_and_commit(|record| {
             let peer = record

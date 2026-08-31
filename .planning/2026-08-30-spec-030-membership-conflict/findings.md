@@ -115,3 +115,9 @@
 - F4 使用同 lineage 的六节点共同基线，再把网络分成两个三节点区域；A 与 D 各自在自己的合法链依次移除对侧三节点，形成两个各三成员的 sibling histories。区域内其他副本不需要为 bridge 不变量额外完成用户决定。
 - 单 bridge 只开放 A-D 一条跨区连接，其余跨区连接继续由认证 endpoint gate 阻断。验收只观察公开 branch/member/choice 与正文结果，不读内部 ledger。
 - A 与 D 必须在两条分支中都保持 Active，才能构成真正可认证的 bridge；若双方互相移除，成员认证会在业务协议前关闭连接。桥接后两端应各记录同一 sibling conflict，但不得应用或联合远端成员集合。
+
+## 2026-08-31 · F5 ring conflict idempotency
+
+- `MembershipLedger::exchange_conflict_evidence` 原先即使 conflict 与 evidence peer 已存在也会无条件 CAS，导致同一证据每次往返都增加 revision；幂等短路必须同时确认 conflict 已包含该来源，且 peer 已是无确认位置的 `Diverged`。
+- 环拓扑中的全局 ledger revision 还会被不可达 E/F 的正常反熵退避账务推进，不能用“revision 完全静止”代表没有 conflict 消息环。精确判据是同一 evidence 不重复 commit、公开 conflict 数保持一、membership effects 不增加。
+- 四个环节点必须都属于两条 sibling history 的 Active 交集；E/F 只负责制造不同分支并保持隔离，B-C 与 D-A 才是两个相反方向的冲突传播边。

@@ -151,6 +151,24 @@ async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
             .map(|record| record.relationship),
         Some(MembershipHistoryRelationship::Diverged)
     );
+
+    let repeated = handler
+        .execute(
+            &source,
+            MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
+                transfer_id: remote_position.history_digest,
+                pages: remote_history
+                    .export_conflict_evidence_pages_v2(peer.clone())
+                    .unwrap(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        repeated,
+        MembershipHistoryMessage::ConflictEvidenceV3(_)
+    ));
+    assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
 }
 
 #[async_trait]

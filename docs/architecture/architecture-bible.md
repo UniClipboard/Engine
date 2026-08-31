@@ -854,6 +854,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | F3 restricted event 根因诊断 | 分层脱敏 tracing 排除地址、Iroh、身份、handler 与 ACK 链路，确认 restricted handler 绕过普通 merge 的本机待决定 head 规则；临时探针已清理，后续由 Core 单一远端事件接收入口统一该语义。 |
 | 2026-08-31 | F3 相反移除决定闭环 | Core 以唯一“面向本机成员接收远端事件”入口统一完整历史 merge、分页 suffix 与 restricted event：远端移除保存证据但保持父 head，新增正常推进，重复与 sibling 保持既有结果。分页同时使用 sender projection 验证远端目标位置，不能拿本机待决定位置冒充远端声明。Desktop F3 已通过 Accept/Reject、重启持久化和跨分支正文隔离。 |
 | 2026-08-31 | F4 单 bridge sibling 隔离 | Desktop 声明式拓扑新增只开放两个认证端点、其余跨区链路保持阻断的 `Bridge` 动作。六节点共同基线分裂为两个各三成员的 sibling history 后，唯一 bridge 只交换冲突证据：两端各记录一个冲突，成员集合与 branch 不变，跨分支正文继续关闭式拒绝，不能联合成伪历史。 |
+| 2026-08-31 | F5 环形冲突幂等传播 | Application ledger 对已记录的同来源 conflict evidence 返回现有响应而不重复提交；Desktop 六节点从共同历史形成 E/F 两条 sibling 分支，再把共同成员 A-B-C-D 接成单环。冲突沿 B-C 与 D-A 两个方向传播后，每端只公开一个设备组选择，重复刷新不增加 membership effects。peer 重试账务 revision 可独立推进，不作为 conflict 消息环判据。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |
 | 2026-08-29 | 安全持久化 | 成员账本、准入状态和 OPAQUE credential 均使用 MasterKey AEAD 加密保存，并绑定当前 Space generation。 |

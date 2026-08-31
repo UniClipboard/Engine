@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-F0–F4 已完成；提交 F4 切片后进入 F5：环 A-B-C-D-A 从相反方向传播同一冲突，验证只提示一次且无消息环或重复 effects。
+F0–F5 已完成；下一切片进入 F6：深链 A-B-C-D-E-F 在 B/D 离线时，由叶子选择共同 branch 后逐跳收敛，验证恢复不依赖在线中间节点。
 
 ## Constraints
 
