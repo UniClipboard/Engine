@@ -732,6 +732,7 @@ impl DurableAdmissionSpaceTransition {
                     membership_conflicts: Default::default(),
                     membership_branch_transitions: Default::default(),
                     consumed_membership_recovery_nonces: Default::default(),
+                    membership_branch_recovery_sessions: Default::default(),
                 },
             })
             .await

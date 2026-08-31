@@ -45,3 +45,9 @@
 - 内容密钥目录必须在 external commit 后使用新 epoch exporter wrapping key 密封：目标端先给签名 GroupInfo，recipient 返回 external commit，目标端应用到 detached state 后才得到与 recipient 相同的 wrapping key。因此真实恢复协议是两阶段握手，不是单次请求响应。
 - Iroh handler 只能把认证连接公钥映射为 source device；begin 与 submit 两阶段都必须重新调用 Application issuer 复核 conflict、branch、recipient 和 Active 状态，不能让第一阶段认证结果跨网络往返隐式延续。
 - 两阶段 Iroh wire 必须在两个请求中重复绑定 conflict、target branch 和 recipient；连接身份只证明 source device，不能替代 Application 对目标历史的成员资格复核。
+# 2026-08-31 · 恢复事务持久化边界
+
+- membership ledger 已是按 generation 绑定的整体 MasterKey AEAD 载荷，恢复 staged state 放入该 ledger 可复用现有加密、CAS 与重启恢复边界，不应另建明文表或文件。
+- transition id 是恢复事务的稳定索引；session 内再次保存并校验它，能在反序列化和提交前识别 map key 与载荷错配。
+- target 必须缓存签发后的 recovery package，才能在 external commit 已应用但响应丢失时返回同一结果；recipient 必须保留 staged MLS state，直到最终 generation 提升完成。
+- 状态推进由 session 对象隐藏，recipient 与 target 角色不能互相转换，重复完成操作只接受同一绑定结果。

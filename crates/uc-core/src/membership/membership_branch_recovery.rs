@@ -114,6 +114,10 @@ impl MembershipBranchRecoveryPackageV1 {
         self.target_branch_id
     }
 
+    pub const fn recipient_member(&self) -> MemberInstanceId {
+        self.recipient_member
+    }
+
     pub fn validate(
         &self,
         expected_conflict_id: MembershipConflictId,

@@ -196,6 +196,7 @@ impl MembershipLedger {
             record.membership_conflicts.clear();
             record.membership_branch_transitions.clear();
             record.consumed_membership_recovery_nonces.clear();
+            record.membership_branch_recovery_sessions.clear();
             Ok(())
         })
         .await?;
@@ -216,6 +217,7 @@ impl MembershipLedger {
             record.membership_conflicts.clear();
             record.membership_branch_transitions.clear();
             record.consumed_membership_recovery_nonces.clear();
+            record.membership_branch_recovery_sessions.clear();
             Ok(())
         })
         .await?;
@@ -226,11 +228,19 @@ impl MembershipLedger {
         &self,
         loaded: &LoadedMembershipLedger,
     ) -> Result<Option<VersionedMembershipHistory>, MembershipLedgerError> {
+        if loaded
+            .membership_branch_recovery_sessions
+            .iter()
+            .any(|(key, session)| key != session.transition_id() || !session.validate())
+        {
+            return Err(MembershipLedgerError::Corrupt);
+        }
         let Some(lineage_id) = loaded.lineage_id.as_deref() else {
             if loaded.membership_history.is_some()
                 || loaded.local_device_id.is_some()
                 || loaded.local_member_instance.is_some()
                 || loaded.local_join_active
+                || !loaded.membership_branch_recovery_sessions.is_empty()
             {
                 return Err(MembershipLedgerError::Corrupt);
             }

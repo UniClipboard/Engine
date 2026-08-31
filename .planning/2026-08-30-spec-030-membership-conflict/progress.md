@@ -87,3 +87,10 @@
 - 两个请求阶段均显式绑定 conflict、target branch 与 recipient；所有 `Debug` 对绑定与密码学负载脱敏。
 - postcard 解码错误保留 source，空密码学载荷、错误版本和超过 4 MiB 的帧稳定拒绝。
 - 定向 wire round-trip 与损坏帧 source 测试通过。
+
+## 2026-08-31 · Encrypted recovery session state
+
+- recipient 与 target 的两阶段 staged state、external commit 摘要和幂等恢复包进入 membership ledger 的现有 MasterKey AEAD 载荷。
+- session 以 transition id 为稳定键，并绑定 conflict、target branch 与 recipient；ledger 提交前拒绝键错配、空载荷、超限载荷和恢复包绑定错配。
+- session 自身负责 recipient completion 与 target commit 的单调、幂等推进，调用方不能直接构造或改写内部状态。
+- Space rebuild/reset 原子清除未完成恢复事务；旧 ledger 反序列化时以空 session map 兼容。

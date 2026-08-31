@@ -121,11 +121,11 @@ pub use membership::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
     CurrentSpaceMemberScopePort, InboundMembershipTransfer, LoadMembershipLedgerPort,
-    LoadedMembershipLedger, MembershipEffectExecutionError, MembershipEffectKind,
-    MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
-    RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
-    RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
+    LoadedMembershipLedger, MembershipBranchRecoverySession, MembershipBranchRecoverySessionState,
+    MembershipEffectExecutionError, MembershipEffectKind, MembershipEffectPhase,
+    MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember, PeerHistorySyncState,
+    PeerReconciliationRecord, PendingMembershipEffect, RestrictedMembershipDelivery,
+    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
 pub use membership::{
     BeginMembershipBranchRecoveryInput, CleanupLegacyMembershipDataPort,

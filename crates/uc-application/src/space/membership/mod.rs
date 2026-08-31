@@ -20,11 +20,11 @@ pub use ledger::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
     CurrentSpaceMemberScopePort, InboundMembershipTransfer, LoadMembershipLedgerPort,
-    LoadedMembershipLedger, MembershipConflictRecord, MembershipConflictStatus,
-    MembershipEffectExecutionError, MembershipEffectKind, MembershipEffectPhase,
-    MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember, PeerHistorySyncOutcome,
-    PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
-    RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    LoadedMembershipLedger, MembershipBranchRecoverySession, MembershipBranchRecoverySessionState,
+    MembershipConflictRecord, MembershipConflictStatus, MembershipEffectExecutionError,
+    MembershipEffectKind, MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation,
+    PausedSpaceMember, PeerHistorySyncOutcome, PeerHistorySyncState, PeerReconciliationRecord,
+    PendingMembershipEffect, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
 pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;

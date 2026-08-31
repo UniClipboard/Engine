@@ -709,6 +709,19 @@ async fn new_space_root_and_local_activation_commit_once() {
 #[tokio::test]
 async fn space_rebuild_reset_clears_every_previous_membership_fact_atomically() {
     let mut loaded = active_two_member_ledger();
+    let recipient_member = loaded.local_member_instance.unwrap();
+    let recovery_session = MembershipBranchRecoverySession::new_recipient_prepared(
+        [0xd1; 32],
+        uc_core::membership::MembershipConflictId::from_bytes([0xd2; 32]),
+        uc_core::membership::MembershipBranchId::from_bytes([0xd3; 32]),
+        recipient_member,
+        vec![0xd4],
+        vec![0xd5],
+    )
+    .unwrap();
+    loaded
+        .membership_branch_recovery_sessions
+        .insert([0xd1; 32], recovery_session);
     loaded.pending_effects.insert(
         [0xe4; 32],
         PendingMembershipEffect {
@@ -740,6 +753,82 @@ async fn space_rebuild_reset_clears_every_previous_membership_fact_atomically() 
     assert!(persisted.inbound_transfers.is_empty());
     assert!(persisted.completed_inbound_transfers.is_empty());
     assert!(persisted.pending_effects.is_empty());
+    assert!(persisted.membership_branch_recovery_sessions.is_empty());
+}
+
+#[tokio::test]
+async fn recovery_session_is_validated_before_encrypted_ledger_commit() {
+    let loaded = active_single_member_ledger();
+    let recipient_member = loaded.local_member_instance.unwrap();
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+
+    ledger
+        .compare_and_commit(|record| {
+            let session = MembershipBranchRecoverySession::new_recipient_prepared(
+                [0xa1; 32],
+                uc_core::membership::MembershipConflictId::from_bytes([0xa2; 32]),
+                uc_core::membership::MembershipBranchId::from_bytes([0xa3; 32]),
+                recipient_member,
+                vec![0xa4],
+                vec![0xa5],
+            )
+            .unwrap();
+            record
+                .membership_branch_recovery_sessions
+                .insert([0xa1; 32], session);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let persisted = repository.load().await.unwrap();
+    let session = persisted
+        .membership_branch_recovery_sessions
+        .get(&[0xa1; 32])
+        .unwrap();
+    assert_eq!(
+        format!("{session:?}"),
+        "MembershipBranchRecoverySession { bindings: \"[REDACTED]\", state: RecipientPrepared([REDACTED]) }"
+    );
+}
+
+#[tokio::test]
+async fn recovery_session_rejects_mismatched_key_without_committing() {
+    let loaded = active_single_member_ledger();
+    let recipient_member = loaded.local_member_instance.unwrap();
+    let repository = Arc::new(MemoryLedgerRepository::new(loaded));
+    let ledger = MembershipLedger::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(AcceptingVerifier),
+    );
+
+    let error = ledger
+        .compare_and_commit(|record| {
+            let session = MembershipBranchRecoverySession::new_recipient_prepared(
+                [0xb2; 32],
+                uc_core::membership::MembershipConflictId::from_bytes([0xb3; 32]),
+                uc_core::membership::MembershipBranchId::from_bytes([0xb4; 32]),
+                recipient_member,
+                vec![0xb5],
+                vec![0xb6],
+            )
+            .unwrap();
+            record
+                .membership_branch_recovery_sessions
+                .insert([0xb1; 32], session);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, MembershipLedgerError::Corrupt);
+    assert_eq!(repository.commit_calls.load(Ordering::SeqCst), 0);
 }
 
 struct SuccessfulActivation;

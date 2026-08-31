@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 4：MLS external recovery 原语、wire contract 和认证服务端已完成；下一切片实现 client 与 staged state 持久化。
+Phase 4：MLS external recovery 原语、wire contract、认证服务端和加密恢复 session 已完成；下一切片实现 client 编排。
 
 ## Next Step
 
-实现恢复 client，并把 recipient/target staged state 与幂等响应纳入 MasterKey AEAD 持久边界。
+实现恢复 client：驱动两阶段 Iroh 交换，并通过加密 recovery session 在重启后安全续跑。
 
 ## Constraints
 
