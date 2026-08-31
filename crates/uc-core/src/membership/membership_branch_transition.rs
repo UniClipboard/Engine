@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{MembershipBranchId, MembershipConflictId};
 
@@ -54,6 +55,17 @@ pub struct MembershipBranchTransitionV1 {
 }
 
 impl MembershipBranchTransitionV1 {
+    pub fn derive_id(
+        conflict_id: MembershipConflictId,
+        target_branch_id: MembershipBranchId,
+    ) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"uniclipboard/membership-branch-transition/v1\0");
+        hasher.update(conflict_id.as_bytes());
+        hasher.update(target_branch_id.as_bytes());
+        hasher.finalize().into()
+    }
+
     pub fn new(
         transition_id: [u8; 32],
         conflict_id: MembershipConflictId,

@@ -482,6 +482,23 @@ fn membership_branch_transition_advances_one_phase_and_never_retargets() {
 }
 
 #[test]
+fn membership_branch_transition_id_is_stable_for_both_recovery_roles() {
+    let conflict_id = MembershipConflictId::from_bytes([0x91; 32]);
+    let target_branch_id = MembershipBranchId::from_bytes([0x92; 32]);
+
+    let first = MembershipBranchTransitionV1::derive_id(conflict_id, target_branch_id);
+    let repeated = MembershipBranchTransitionV1::derive_id(conflict_id, target_branch_id);
+    let other = MembershipBranchTransitionV1::derive_id(
+        conflict_id,
+        MembershipBranchId::from_bytes([0x93; 32]),
+    );
+
+    assert_ne!(first, [0; 32]);
+    assert_eq!(first, repeated);
+    assert_ne!(first, other);
+}
+
+#[test]
 fn branch_recovery_package_binds_recipient_branch_expiry_and_authorization() {
     let verifier = DeterministicSignatureVerifier;
     let (history, author, recipient, _, _) = history_with_a_and_b(true);

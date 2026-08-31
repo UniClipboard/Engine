@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
-use uc_core::membership::MembershipConflictChoice;
+use uc_core::membership::{MembershipBranchTransitionV1, MembershipConflictChoice};
 
 use crate::space::membership::{MembershipConflictStatus, MembershipLedger, MembershipLedgerError};
 
@@ -67,8 +66,9 @@ impl ResolveMembershipConflictUseCase {
         } else {
             MembershipConflictStatus::Selected
         };
-        let transition_id = (next_status == MembershipConflictStatus::Selected)
-            .then(|| transition_id(input.conflict_id, input.target_branch_id));
+        let transition_id = (next_status == MembershipConflictStatus::Selected).then(|| {
+            MembershipBranchTransitionV1::derive_id(input.conflict_id, input.target_branch_id)
+        });
         let commit = self
             .ledger
             .compare_and_commit(|record| {
@@ -182,15 +182,4 @@ fn recovery_required() -> ResolveMembershipConflictError {
     ResolveMembershipConflictError::RecoveryRequired {
         source: anyhow::Error::new(MembershipLedgerError::RecoveryRequired),
     }
-}
-
-fn transition_id(
-    conflict_id: uc_core::membership::MembershipConflictId,
-    target_branch_id: uc_core::membership::MembershipBranchId,
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"uniclipboard/membership-branch-transition/v1\0");
-    hasher.update(conflict_id.as_bytes());
-    hasher.update(target_branch_id.as_bytes());
-    hasher.finalize().into()
 }

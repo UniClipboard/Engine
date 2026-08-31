@@ -116,3 +116,9 @@
 - staged payload 同时保存 recipient MLS snapshot、共享 exporter wrapping key 和 epoch；该 payload 只返回 Application，并在 external commit 发送前进入 MasterKey AEAD ledger。
 - Engine 的 recipient deferred adapter 已删除，组装根复用同一个 space access adapter 的窄 recovery port。
 - 复核 target 侧发现直接 apply commit 后再构造/保存响应存在崩溃窗口，因此没有接入不安全实现；下一切片必须使用现有 TargetPrepared/TargetCommitted session 完成 prepare/commit 分离。
+
+## 2026-08-31 · Shared recovery transaction key
+
+- transition id 推导从 Application resolve use case 移入 Core `MembershipBranchTransitionV1::derive_id`。
+- recipient 与 target 现在可仅凭 conflict/target branch 得到同一稳定事务键，无需扩展 wire 携带另一份可错配标识。
+- Core 测试覆盖重复推导稳定、非零和不同目标分支隔离。
