@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use uc_engine::{
@@ -20,6 +20,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 const ADMISSION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const EXPIRES_AT_MS: i64 = 2_000_000_000_000;
+const PAIRING_HOT_PATH_BUDGET: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Default)]
 struct MemorySecureStorage(Arc<Mutex<HashMap<String, Vec<u8>>>>);
@@ -2036,6 +2037,65 @@ async fn topology_script_builds_a_two_node_space_through_public_operations() {
         ])
         .await;
     topology.shutdown().await;
+}
+
+// 新设备只经过稳定 JoinSpace 入口，并最终形成可查询的活动 Space。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "显式性能门禁：需要空闲的本机真实网络栈，使用 --ignored 运行"]
+async fn two_device_hot_path_pairing_completes_within_one_second() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_harness = DeviceHarness::new(rendezvous.uri());
+    let joiner_harness = DeviceHarness::new(rendezvous.uri());
+    let sponsor = sponsor_harness.start().await;
+    let joiner = joiner_harness.start().await;
+    let space_id = create_space(&sponsor, "Sponsor").await.0;
+    let invitation = issue_invitation(&sponsor).await;
+
+    let started = Instant::now();
+    join_with_invitation(&joiner, "Joiner", &space_id, invitation).await;
+    wait_for_active_member_count(&sponsor, 2).await;
+    wait_for_active_member_count(&joiner, 2).await;
+    let elapsed = started.elapsed();
+
+    tracing::info!(
+        target: "admission.performance",
+        phase = "public_pairing_active",
+        elapsed_ms = elapsed.as_millis() as u64,
+        budget_ms = PAIRING_HOT_PATH_BUDGET.as_millis() as u64,
+        "双设备热路径配对验收完成"
+    );
+
+    assert!(
+        elapsed < PAIRING_HOT_PATH_BUDGET,
+        "two-device hot-path pairing took {elapsed:?}, budget is {PAIRING_HOT_PATH_BUDGET:?}"
+    );
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down sponsor");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down joiner");
+}
+
+async fn wait_for_active_member_count(engine: &Engine, expected: u32) {
+    let deadline = tokio::time::Instant::now() + ADMISSION_WAIT_TIMEOUT;
+    loop {
+        if let Ok(OperationResult::MembershipDiagnostics(summary)) =
+            engine.execute(Operation::QueryMembershipDiagnostics).await
+        {
+            if summary.effective_member_count == expected {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "active member count did not reach {expected}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 // 新设备只经过稳定 JoinSpace 入口，并最终形成可查询的活动 Space。

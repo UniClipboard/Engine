@@ -9,6 +9,7 @@ use crate::space::admission::protocol::{
 use crate::space::membership::{
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
 };
+use std::time::Instant;
 use uc_core::membership::{
     AdmissionPendingRecovery, AdmissionRecoveryCategory, JoinerAdmission,
     SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
@@ -38,6 +39,7 @@ impl AdmissionRecoveryService {
         joiner: &JoinerAdmissionService,
         trigger: AdmissionRecoveryTrigger,
     ) -> AdmissionRecoveryReport {
+        let round_started = Instant::now();
         let mut report = AdmissionRecoveryReport::default();
         let loaded = match self.state.load(trigger).await {
             Ok(loaded) => loaded,
@@ -58,6 +60,7 @@ impl AdmissionRecoveryService {
             let Some(recovery) = aggregate.pending_recovery() else {
                 continue;
             };
+            let connection_started = Instant::now();
             let (channel_kind, established) = match recovery {
                 AdmissionPendingRecovery::Initial {
                     encrypted_password_equivalent,
@@ -88,6 +91,14 @@ impl AdmissionRecoveryService {
                         .await,
                 ),
             };
+            tracing::info!(
+                target: "admission.performance",
+                phase = "joiner_channel_establish",
+                channel = channel_kind.as_str(),
+                elapsed_ms = connection_started.elapsed().as_millis() as u64,
+                outcome = if established.is_ok() { "ok" } else { "error" },
+                "配对阶段完成"
+            );
 
             let mut exchange = match established {
                 Ok(exchange) => exchange,
@@ -146,13 +157,40 @@ impl AdmissionRecoveryService {
                 report.recovery_required_count += 1;
                 continue;
             };
-            match exchange.exchange(pending_exchange.request_envelope()).await {
+            let exchange_started = Instant::now();
+            let exchanged = exchange.exchange(pending_exchange.request_envelope()).await;
+            tracing::info!(
+                target: "admission.performance",
+                phase = "joiner_message_exchange",
+                message_kind = ?pending_exchange.request_envelope().kind(),
+                elapsed_ms = exchange_started.elapsed().as_millis() as u64,
+                outcome = if exchanged.is_ok() { "ok" } else { "error" },
+                "配对阶段完成"
+            );
+            match exchanged {
                 Ok(reply) => {
                     self.commit_joiner_reply(joiner, &mut report, aggregate, commit_token, reply)
                         .await;
                 }
                 Err(_) => report.deferred_count += 1,
             }
+        }
+
+        if report.advanced_count > 0
+            || report.deferred_count > 0
+            || report.rejected_count > 0
+            || report.recovery_required_count > 0
+        {
+            tracing::info!(
+                target: "admission.performance",
+                phase = "joiner_recovery_round",
+                elapsed_ms = round_started.elapsed().as_millis() as u64,
+                advanced_count = report.advanced_count,
+                deferred_count = report.deferred_count,
+                rejected_count = report.rejected_count,
+                recovery_required_count = report.recovery_required_count,
+                "配对恢复轮次完成"
+            );
         }
 
         report
@@ -311,6 +349,15 @@ impl AdmissionRecoveryService {
                 )
                 .await;
             }
+        }
+    }
+}
+
+impl RecoveryChannel {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::Continuation => "continuation",
         }
     }
 }

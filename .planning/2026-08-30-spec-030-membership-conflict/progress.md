@@ -291,3 +291,10 @@
 - 共同基线改用 A→B→C→D→E→F→G 链式 Sponsor 来源；十 Engine 负载下只将 admission completion 的测试观察窗口放宽到 120 秒，公平性业务窗口仍为 60 秒。
 - A/B/C 并发准入 H/I/J 形成三条八成员 sibling；D 暂留七成员祖先，随后在 A↔B 冲突边存在时补齐 A 分支的 branch/head 和 MLS epoch。
 - F7 Desktop E2E 通过，耗时 462.19 秒；合法 peer D 未被冲突 peer B 饿死，十节点 90 条有向正文矩阵中同分支精确接收、跨分支全部关闭式拒绝。
+
+## 2026-09-01 · two-device pairing performance acceptance
+
+- 在稳定 Engine operation seam 新增显式性能门禁：邀请签发不计时，从 Joiner 提交完整邀请开始，到 Sponsor/Joiner 均公开两名有效成员结束，预算为 1 秒。
+- 红测连续得到 7.56 秒与 7.53 秒，确认当前实现不满足目标；用例标记为显式 `--ignored` 性能门禁，避免共享 CI 机器把性能结果混入功能正确性。
+- 正式脱敏 tracing 显示首次信道建立约 157ms，后续恢复信道约 3–4ms；主要耗时是串行 JoinRequest、Prepared、Applied、激活与 CompleteAck 阶段，而非地址发现或 30 秒维护兜底周期。
+- 2 秒和 10 秒维护周期实验分别在 332.05 秒与 372.62 秒令 F7 同分支正文矩阵失败；实验代码已撤回。维护 runtime 本来就立即执行 Startup round，并由 StateChanged 主动唤醒，缩短持续周期只增加 Iroh/SQLite 竞争。

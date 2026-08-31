@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-F0–F7 已完成；下一切片进入 F8：选择目标后 Sponsor 离线、恢复包 ACK 丢失且 chooser 重启，验证 intent 持久、幂等重发与唯一 promoted generation。
+F0–F7 已完成；双设备一秒热路径性能门禁与全链路脱敏 tracing 已建立，当前基线约 7.53 秒且未达标。下一切片可先设计准入往返/持久化优化，或按原计划进入 F8。
 
 ## Constraints
 
