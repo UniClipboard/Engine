@@ -610,6 +610,20 @@ impl EngineRuntime for ProductionRuntime {
                     digest: fetched.digest.as_bytes().to_vec(),
                 })
                 .map_err(|error| operation_error_with_code(1910, "fetch blob", error)),
+            crate::DevOperation::QueryNetworkEndpointId => self
+                .network_partition_gate
+                .local_endpoint_id()
+                .map(crate::DevOperationResult::NetworkEndpointId)
+                .ok_or_else(|| {
+                    EngineError::new(1911, crate::EngineErrorCategory::Unavailable, true)
+                }),
+            crate::DevOperation::SetNetworkPartition {
+                blocked_endpoint_ids,
+            } => Ok(crate::DevOperationResult::NetworkPartitionUpdated {
+                blocked_peer_count: self
+                    .network_partition_gate
+                    .replace_blocked(blocked_endpoint_ids),
+            }),
         }
     }
 

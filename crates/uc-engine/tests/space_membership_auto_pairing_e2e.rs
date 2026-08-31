@@ -240,6 +240,13 @@ enum TopologyAction<'a> {
         pending_conflicts: u32,
         pending_effects: u32,
     },
+    Partition {
+        left: &'a [&'a str],
+        right: &'a [&'a str],
+    },
+    Heal {
+        nodes: &'a [&'a str],
+    },
 }
 
 struct MembershipTopology {
@@ -247,6 +254,7 @@ struct MembershipTopology {
     harnesses: HashMap<String, DeviceHarness>,
     engines: HashMap<String, Engine>,
     space_ids: HashMap<String, String>,
+    device_ids: HashMap<String, String>,
 }
 
 impl MembershipTopology {
@@ -256,6 +264,7 @@ impl MembershipTopology {
             harnesses: HashMap::new(),
             engines: HashMap::new(),
             space_ids: HashMap::new(),
+            device_ids: HashMap::new(),
         }
     }
 
@@ -287,6 +296,8 @@ impl MembershipTopology {
                     )
                     .await
                 }
+                TopologyAction::Partition { left, right } => self.partition(left, right).await,
+                TopologyAction::Heal { nodes } => self.heal(nodes).await,
             }
         }
     }
@@ -304,16 +315,89 @@ impl MembershipTopology {
 
     async fn create(&mut self, node: &str) {
         let engine = self.engine(node);
-        let (space_id, _) = create_space(engine, node).await;
+        let (space_id, device_id) = create_space(engine, node).await;
         self.space_ids.insert(node.to_owned(), space_id);
+        self.device_ids.insert(node.to_owned(), device_id);
     }
 
-    async fn join(&self, sponsor: &str, joiner: &str) {
+    async fn join(&mut self, sponsor: &str, joiner: &str) {
         let space_id = self
             .space_ids
             .get(sponsor)
             .unwrap_or_else(|| panic!("sponsor {sponsor} has no space"));
-        join_through(self.engine(sponsor), self.engine(joiner), joiner, space_id).await;
+        let joined =
+            join_through(self.engine(sponsor), self.engine(joiner), joiner, space_id).await;
+        self.device_ids
+            .insert(joiner.to_owned(), joined.self_device_id);
+    }
+
+    async fn partition(&self, left: &[&str], right: &[&str]) {
+        let left_ids = self.endpoint_ids(left).await;
+        let right_ids = self.endpoint_ids(right).await;
+        for node in left {
+            self.set_partition(node, right_ids.clone()).await;
+        }
+        for node in right {
+            self.set_partition(node, left_ids.clone()).await;
+        }
+    }
+
+    async fn heal(&self, nodes: &[&str]) {
+        for node in nodes {
+            self.set_partition(node, Vec::new()).await;
+        }
+    }
+
+    async fn endpoint_ids(&self, nodes: &[&str]) -> Vec<[u8; 32]> {
+        let mut endpoint_ids = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let result = self
+                .engine(node)
+                .execute_dev(uc_engine::DevOperation::QueryNetworkEndpointId)
+                .await
+                .unwrap_or_else(|error| panic!("node {node} endpoint query failed: {error}"));
+            let uc_engine::DevOperationResult::NetworkEndpointId(endpoint_id) = result else {
+                panic!("node {node} returned an unexpected endpoint result");
+            };
+            endpoint_ids.push(endpoint_id);
+        }
+        endpoint_ids
+    }
+
+    async fn set_partition(&self, node: &str, blocked_endpoint_ids: Vec<[u8; 32]>) {
+        let expected_count = blocked_endpoint_ids.len();
+        let result = self
+            .engine(node)
+            .execute_dev(uc_engine::DevOperation::SetNetworkPartition {
+                blocked_endpoint_ids,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("node {node} partition update failed: {error}"));
+        assert_eq!(
+            result,
+            uc_engine::DevOperationResult::NetworkPartitionUpdated {
+                blocked_peer_count: expected_count,
+            }
+        );
+    }
+
+    async fn send(&self, sender: &str, receiver: &str, text: &str) -> uc_engine::SendReportSummary {
+        let receiver_id = self
+            .device_ids
+            .get(receiver)
+            .unwrap_or_else(|| panic!("receiver {receiver} has no device id"));
+        let result = self
+            .engine(sender)
+            .execute(Operation::SendText(SendTextInput {
+                text: text.to_owned(),
+                target_devices: vec![receiver_id.clone()],
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("node {sender} send failed: {error}"));
+        let OperationResult::EntrySent(report) = result else {
+            panic!("node {sender} returned an unexpected send result");
+        };
+        report
     }
 
     async fn assert_snapshot(
@@ -390,6 +474,46 @@ impl MembershipTopology {
                 .expect("shut down topology node");
         }
     }
+}
+
+// 分区门必须同时拒绝新连接并关闭已存在连接；Heal 后使用同一 Engine 恢复通信。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn topology_partition_blocks_all_iroh_channels_until_healed() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = MembershipTopology::new(rendezvous.uri());
+    topology
+        .run(&[
+            TopologyAction::Start { node: "A" },
+            TopologyAction::Start { node: "B" },
+            TopologyAction::Create { node: "A" },
+            TopologyAction::Join {
+                sponsor: "A",
+                joiner: "B",
+            },
+            TopologyAction::Partition {
+                left: &["A"],
+                right: &["B"],
+            },
+        ])
+        .await;
+
+    let blocked_text = "partitioned transfer must stay isolated";
+    let blocked = topology.send("A", "B", blocked_text).await;
+    assert_eq!(blocked.total_accepted, 0);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!receiver_has_exact_text(topology.engine("B"), blocked_text).await);
+
+    topology
+        .run(&[TopologyAction::Heal { nodes: &["A", "B"] }])
+        .await;
+    wait_for_peer_refresh(topology.engine("A"), "A after heal").await;
+    wait_for_peer_refresh(topology.engine("B"), "B after heal").await;
+    let healed_text = "healed transfer succeeds";
+    let healed = topology.send("A", "B", healed_text).await;
+    assert_eq!(healed.total_accepted, 1);
+    wait_for_received_text(topology.engine("B"), healed_text).await;
+    topology.shutdown().await;
 }
 
 // 声明式拓扑脚本只能通过稳定 Engine operation 观察和推进节点。

@@ -191,3 +191,10 @@
 - Engine 仅执行脱敏字符串与计数映射，不记录诊断标识，也不把入口接入移动绑定。
 - 声明式双节点拓扑测试通过公开 operation 断言 64 字符 branch/head、非零 epoch、两个有效成员及零待处理恢复状态。
 - 定向 Application 错误测试、Engine contract 测试和真实双节点拓扑测试均通过。
+
+## 2026-08-31 · Phase 6 authenticated Partition/Heal
+
+- 先以 Engine dev contract 红测固定本机 EndpointId 查询和认证 peer 阻断集合替换，缺少 variant 时按预期编译失败。
+- Infra 在唯一共享 Iroh endpoint 安装可选 gate；出站连接在发包前拒绝，入站与出站握手后再次拒绝，建立分区时同时关闭匹配的存量连接。
+- Engine `dev-tools` 持有跨 session 重建稳定的 gate，拓扑驱动器以节点 EndpointId 双向设置 `Partition`，以空集合执行 `Heal`；默认/生产组装传 `None`。
+- 真实双节点测试确认已完成准入的连接在 Partition 后正文零 accepted 且接收端无内容，Heal 后同一 Engine 恢复发送并精确收到正文。

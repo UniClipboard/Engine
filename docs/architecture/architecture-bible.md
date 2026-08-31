@@ -835,6 +835,7 @@ node scripts/release/verify-release-bundle.mjs <产物目录>
 | 2026-08-31 | 统一设备组选择入口 | 将待定成员变更与 sibling branch 冲突合并为 `QueryDeviceGroupChoices` / `ChooseDeviceGroup`；Application 负责一致 revision 校验和内部路由，Engine、UniFFI、HarmonyOS 与移动 probe 删除四个旧操作入口并只保留薄映射。 |
 | 2026-08-31 | Phase 6 拓扑验收驱动器 | Engine 集成测试新增声明式 `Start/Create/Join/AssertSnapshot` tracer bullet；驱动器仅通过稳定 `Engine::execute(Operation)` 推进和观察多节点，不读取内部 ledger。本轮没有生产架构语义变化。 |
 | 2026-08-31 | Phase 6 成员诊断接缝 | `dev-tools` 增加只读成员诊断 operation，由 Application 一次性返回 branch/head、group epoch、有效成员数及待处理 conflict/effect/transition 阶段；Engine 只做脱敏映射。该入口不进入默认构建和移动绑定，声明式拓扑测试用它验证密码学与恢复状态，不直接读取内部 ledger。 |
+| 2026-08-31 | Phase 6 受控 P2P 分区 | 共享 Iroh endpoint 可选安装按认证 EndpointId 工作的测试 gate；它在握手前拒绝新出站连接、握手后拒绝双向连接，并在分区建立时主动关闭已存在连接，因此所有业务 ALPN 使用同一 Partition/Heal 边界。控制入口仅存在于 Engine `dev-tools`，生产组装不安装 gate，诊断输出不暴露 EndpointId。 |
 | 2026-08-31 | 成员冲突跨端 contract | Engine 新增完整冲突查询与单次选择两个稳定 operation，统一映射 result/error；iOS、Android 和 HarmonyOS 绑定只转发同版本 Engine contract，并明确结果仅代表本机选择完成。 |
 | 2026-08-30 | 目标 Space OPAQUE 凭据 | Joiner 在 Candidate 阶段由本次加入口令预生成目标 OPAQUE 服务端凭据，凭据随加密 transition 计划保存，并在目标 generation 提升前与 manifest 绑定安装。因此新成员重启后可成为下一代 Sponsor，无需从 source Space 复制凭据。 |
 | 2026-08-30 | 首次 Space generation 激活 | 当前版本首次初始化在成员、安全状态和 ledger 建立后，通过单一持久化激活入口整体提升 generation，发布 active manifest 后记录 Engine 版本基线；不再写入 legacy current-space identity。旧资料升级仍执行独立化 rebuild 并要求重新配对。 |

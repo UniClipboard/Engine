@@ -65,6 +65,8 @@ pub(crate) struct ProductionRuntime {
     files: Arc<dyn HostFileAccess>,
     clipboard_change_runtime: HostClipboardChangeRuntime,
     events: EventSender,
+    #[cfg(feature = "dev-tools")]
+    network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
 }
 
 struct SessionFactory {
@@ -75,6 +77,8 @@ struct SessionFactory {
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
     iroh_bind_port_override: Option<u16>,
+    #[cfg(feature = "dev-tools")]
+    network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     recovery_generation: Arc<AtomicU64>,
 }
@@ -252,6 +256,8 @@ impl ProductionRuntime {
         let rendezvous_base_url = config.rendezvous_base_url_override();
         let relay_fallback_override = config.test_relay_fallback_override();
         let iroh_bind_port_override = config.test_iroh_bind_port_override();
+        #[cfg(feature = "dev-tools")]
+        let network_partition_gate = uc_infra::network::iroh::IrohNetworkPartitionGate::default();
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
         let HostWiring {
             wired,
@@ -307,6 +313,8 @@ impl ProductionRuntime {
             rendezvous_base_url: rendezvous_base_url.clone(),
             relay_fallback_override,
             iroh_bind_port_override,
+            #[cfg(feature = "dev-tools")]
+            network_partition_gate: network_partition_gate.clone(),
             network_recovery: Arc::clone(&network_recovery),
             recovery_generation: Arc::new(AtomicU64::new(0)),
         });
@@ -364,6 +372,8 @@ impl ProductionRuntime {
             files,
             clipboard_change_runtime,
             events,
+            #[cfg(feature = "dev-tools")]
+            network_partition_gate,
         })
     }
 
@@ -381,6 +391,10 @@ impl ProductionRuntime {
             factory.rendezvous_base_url.clone(),
             factory.relay_fallback_override,
             factory.iroh_bind_port_override,
+            #[cfg(feature = "dev-tools")]
+            Some(factory.network_partition_gate.clone()),
+            #[cfg(not(feature = "dev-tools"))]
+            None,
         )
         .await
         .map_err(|error| startup_error("p2p session", error))?;

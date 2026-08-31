@@ -50,6 +50,7 @@ pub async fn build_daemon_lifecycle(
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
     iroh_bind_port_override: Option<u16>,
+    network_partition_gate: Option<uc_infra::network::iroh::IrohNetworkPartitionGate>,
 ) -> anyhow::Result<DaemonLifecycle> {
     // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
     // member_repo 已不再持有的孤儿条目清掉,恢复设计意图的不变量
@@ -122,6 +123,7 @@ pub async fn build_daemon_lifecycle(
     if let Some(port) = iroh_bind_port_override {
         iroh_config.bind_port = Some(port);
     }
+    iroh_config.network_partition_gate = network_partition_gate;
     crate::assembly::network::apply_congestion_controller_from_env(&mut iroh_config);
 
     tracing::info!(

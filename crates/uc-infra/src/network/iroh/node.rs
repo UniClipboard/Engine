@@ -86,6 +86,7 @@ use super::membership_history_exchange_adapter::{
 };
 use super::net_recovery::DemandRecoveryCoordinator;
 use super::net_recovery::NetworkRecoveryObservationSource;
+use super::network_partition::IrohNetworkPartitionGate;
 use super::presence_adapter::{IrohPresenceAdapter, PRESENCE_ALPN};
 use super::space_admission::{
     IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport, SpaceAdmissionChannelCredentialPort,
@@ -371,6 +372,8 @@ pub struct IrohNodeConfig {
     ///
     /// Sourced from `UC_IROH_PUBLIC_ADDR` (parsed in `uc-bootstrap`).
     pub public_addr: Option<SocketAddr>,
+    /// 测试专用的认证 peer 网络分区门；生产组装始终为 `None`。
+    pub network_partition_gate: Option<IrohNetworkPartitionGate>,
 }
 
 /// Snapshot the candidate set this endpoint is currently advertising and
@@ -710,6 +713,9 @@ impl IrohNodeBuilder {
             // address-lookup service in one shot, and drop CGNAT/Tailscale
             // overlay IPs unless the user opts in. See `build_addr_filter`.
             .addr_filter(build_addr_filter(allow_overlay));
+        if let Some(gate) = &config.network_partition_gate {
+            endpoint_builder = endpoint_builder.hooks(gate.clone());
+        }
 
         // LAN-only Mode 收紧（Pitfall 5 防御 + 与 `disable_relays` 字段 doc 一致）：
         // `presets::N0` 默认注入 `PkarrPublisher` (publish 到 dns.iroh.link) +
@@ -783,6 +789,9 @@ impl IrohNodeBuilder {
             .await
             .map_err(|err| IrohNodeError::Bind(err.to_string()))?;
         let endpoint = Arc::new(endpoint);
+        if let Some(gate) = &config.network_partition_gate {
+            gate.install_local_endpoint_id(*endpoint.id().as_bytes());
+        }
         let demand_recovery = Arc::new(DemandRecoveryCoordinator::new(
             (*endpoint).clone(),
             !config.disable_relays,

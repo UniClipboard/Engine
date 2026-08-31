@@ -1392,6 +1392,36 @@ fn membership_diagnostics_is_available_only_to_dev_tools() {
     assert_eq!(query.kind().to_string(), "query_membership_diagnostics");
 }
 
+#[cfg(feature = "dev-tools")]
+#[test]
+fn development_network_partition_contract_uses_authenticated_endpoint_ids() {
+    let endpoint_id = [7_u8; 32];
+    let query = uc_engine::DevOperation::QueryNetworkEndpointId;
+    let partition = uc_engine::DevOperation::SetNetworkPartition {
+        blocked_endpoint_ids: vec![endpoint_id],
+    };
+
+    assert_eq!(query, uc_engine::DevOperation::QueryNetworkEndpointId);
+    assert_eq!(
+        partition,
+        uc_engine::DevOperation::SetNetworkPartition {
+            blocked_endpoint_ids: vec![endpoint_id],
+        }
+    );
+    assert_eq!(
+        uc_engine::DevOperationResult::NetworkEndpointId(endpoint_id),
+        uc_engine::DevOperationResult::NetworkEndpointId(endpoint_id)
+    );
+    assert_eq!(
+        uc_engine::DevOperationResult::NetworkPartitionUpdated {
+            blocked_peer_count: 1,
+        },
+        uc_engine::DevOperationResult::NetworkPartitionUpdated {
+            blocked_peer_count: 1,
+        }
+    );
+}
+
 #[test]
 fn device_trust_debug_output_redacts_device_facts_and_change_ids() {
     let mut snapshot = DeviceTrustSnapshotSummary::empty_unavailable("private-local-id".into());

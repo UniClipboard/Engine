@@ -20,6 +20,7 @@ mod membership_branch_recovery_adapter;
 pub(crate) mod membership_branch_recovery_wire;
 pub mod membership_history_exchange_adapter;
 mod net_recovery;
+mod network_partition;
 pub mod node;
 pub mod persistable_addr;
 pub mod presence_adapter;
@@ -65,6 +66,7 @@ pub use membership_history_exchange_adapter::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
 };
 pub use net_recovery::NetworkRecoveryObservation;
+pub use network_partition::IrohNetworkPartitionGate;
 pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     GroupUpdateHandlers, IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError,

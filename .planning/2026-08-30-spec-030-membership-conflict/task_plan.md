@@ -28,7 +28,7 @@ Phase 6：Desktop F0-F13、20 个固定 chaos seed 与 Spec 029 回归（Phase 5
 
 ## Next Step
 
-扩展只在测试启用的受控 Partition/Heal 能力，并先写 F0 红测，固定两侧分区期间形成 sibling branch、恢复联网后暴露单一设备组选择的行为。
+用已验证的 Partition/Heal 动作编写 F0 红测：A-B-C 共同基线分区后分别准入 D/E，断言 sibling branch 隔离、分支内正文成功、跨分支正文失败，并在 Heal 后只暴露单一设备组选择。
 
 ## Constraints
 

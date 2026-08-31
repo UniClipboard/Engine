@@ -37,6 +37,8 @@ pub enum DevOperation {
     IssueInvitationForAddress { address: IpAddr },
     PublishBlob { bytes: Vec<u8> },
     FetchBlob { ticket: Vec<u8>, entry_id: String },
+    QueryNetworkEndpointId,
+    SetNetworkPartition { blocked_endpoint_ids: Vec<[u8; 32]> },
 }
 
 impl fmt::Debug for DevOperation {
@@ -48,6 +50,8 @@ impl fmt::Debug for DevOperation {
             Self::IssueInvitationForAddress { .. } => "issue_invitation_for_address",
             Self::PublishBlob { .. } => "publish_blob",
             Self::FetchBlob { .. } => "fetch_blob",
+            Self::QueryNetworkEndpointId => "query_network_endpoint_id",
+            Self::SetNetworkPartition { .. } => "set_network_partition",
         };
         formatter
             .debug_struct("DevOperation")
@@ -170,6 +174,10 @@ pub enum DevOperationResult {
         plaintext_hash: Vec<u8>,
         digest: Vec<u8>,
     },
+    NetworkEndpointId([u8; 32]),
+    NetworkPartitionUpdated {
+        blocked_peer_count: usize,
+    },
 }
 
 impl fmt::Debug for DevOperationResult {
@@ -181,6 +189,8 @@ impl fmt::Debug for DevOperationResult {
             Self::InvitationIssued(_) => "invitation_issued",
             Self::BlobPublished(_) => "blob_published",
             Self::BlobFetched { .. } => "blob_fetched",
+            Self::NetworkEndpointId(_) => "network_endpoint_id",
+            Self::NetworkPartitionUpdated { .. } => "network_partition_updated",
         };
         formatter
             .debug_struct("DevOperationResult")

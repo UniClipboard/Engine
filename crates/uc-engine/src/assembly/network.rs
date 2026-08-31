@@ -67,6 +67,7 @@ pub fn relay_policy_to_iroh_config(
         // `apply_iroh_direct_reachability_from_env` 在 daemon / CLI 入口处填充。
         bind_port: None,
         public_addr: None,
+        network_partition_gate: None,
     }
 }
 

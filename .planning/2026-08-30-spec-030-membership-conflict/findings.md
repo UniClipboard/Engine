@@ -94,3 +94,9 @@
 - 现有真实多节点公开接缝是 `uc-engine` integration test 中直接启动多个 `Engine` 实例；它支持真实建 Space、邀请、加入与查询，但没有 Partition、Heal、DropNextFrame 或 CrashAtPhase 驱动能力。
 - 因此 F0 不能直接写成“现有 CLI 脚本”：首个 Phase 6 切片必须先在 `uc-engine` dev/test 边界建立声明式拓扑驱动器，并让动作只调用公开 Engine contract；网络分区与故障注入需要后续补充受控测试 capability，不能读写内部 ledger 冒充端到端结果。
 - 当前公开快照能断言成员状态和待定选择，但不直接给出 branch/head 等价类、MLS group epoch、pending effect 数量；F0 前需要一个仅 `dev-tools` 可用、对敏感标识保持结构化且不写日志的诊断结果，否则无法满足规格的强断言。
+
+# 2026-08-31 · Phase 6 真实网络分区接缝
+
+- 仅在拓扑驱动器跳过动作或暂停 Engine 不能模拟 Partition：后台反熵、group update、recovery、presence 和正文各自持有 Iroh 通道，而且 F0 两侧必须能继续进行本地/分支内操作。
+- Iroh 1.0 `EndpointHooks` 同时提供出站 `before_connect` 和双向 `after_handshake` 拦截；hook 可保存 `WeakConnectionHandle`，分区建立时关闭已经存在的匹配连接，从而覆盖新连接和存量连接。
+- 最窄实现是在共享 Iroh endpoint 建立时注入一个按认证 EndpointId 阻断的可变 gate。Engine `dev-tools` 只负责查询本机 endpoint id 和设置阻断集合；所有业务 ALPN 自动共享该 gate，生产配置保持 `None`。
