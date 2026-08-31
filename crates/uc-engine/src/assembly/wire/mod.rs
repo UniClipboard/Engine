@@ -740,6 +740,7 @@ pub fn wire_dependencies_from_inputs(
             admission_state,
             admission_credentials,
             admission_space_transition,
+            active_generation_manifest_store,
             device_management_reset_data,
             blob_reference_repo: Arc::clone(&infra.blob_reference_repo),
             iroh_blob_store_dir: iroh_blob_store_dir_for_wiring,

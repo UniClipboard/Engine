@@ -86,13 +86,13 @@ use uc_infra::space::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
     DefaultJoinerAppliedPreparation, DefaultJoinerCancellationPreparation,
     DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
-    DefaultJoinerStartMaterial, DefaultMembershipSecurityUpdateAdapter,
-    DefaultSponsorAdmissionActivation, DefaultSponsorCandidatePreparation,
-    DefaultSponsorCommitPreparation, DefaultSponsorCompletePreparation,
-    DefaultSponsorSettledPreparation, DeviceTrustObservationsAdapter,
-    GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport, MembershipActivationAdapter,
-    MembershipMemberFactsAdapter, MembershipNetworkGate, MembershipProjectionCleanupAdapter,
-    OpenMlsHistoricalSignatureVerifier,
+    DefaultJoinerStartMaterial, DefaultMembershipBranchTransitionPreparation,
+    DefaultMembershipSecurityUpdateAdapter, DefaultSponsorAdmissionActivation,
+    DefaultSponsorCandidatePreparation, DefaultSponsorCommitPreparation,
+    DefaultSponsorCompletePreparation, DefaultSponsorSettledPreparation,
+    DeviceTrustObservationsAdapter, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
+    MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
+    MembershipProjectionCleanupAdapter, OpenMlsHistoricalSignatureVerifier,
 };
 
 #[derive(Default)]
@@ -165,27 +165,6 @@ impl uc_application::deps::FetchMembershipBranchRecoveryPort for DeferredMembers
         Err(
             uc_application::deps::FetchMembershipBranchRecoveryError::Unavailable {
                 source: anyhow::anyhow!("membership branch recovery transport is unavailable"),
-            },
-        )
-    }
-}
-
-struct DeferredMembershipBranchTransition;
-
-#[async_trait::async_trait]
-impl uc_application::deps::PrepareMembershipBranchTransitionPort
-    for DeferredMembershipBranchTransition
-{
-    async fn prepare_membership_branch_transition(
-        &self,
-        _input: uc_application::deps::PrepareMembershipBranchTransitionInput,
-    ) -> Result<
-        uc_core::membership::MembershipBranchTransitionV1,
-        uc_application::deps::PrepareMembershipBranchTransitionError,
-    > {
-        Err(
-            uc_application::deps::PrepareMembershipBranchTransitionError::Unavailable {
-                source: anyhow::anyhow!("membership branch transition is unavailable"),
             },
         )
     }
@@ -958,7 +937,11 @@ pub async fn build_sync_engine_assembly(
                 as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
             membership_history_transport: membership_history_transport.clone(),
             membership_branch_recovery: Arc::new(DeferredMembershipBranchRecovery),
-            membership_branch_transition: Arc::new(DeferredMembershipBranchTransition),
+            membership_branch_transition: Arc::new(
+                DefaultMembershipBranchTransitionPreparation::new(Arc::clone(
+                    &space_setup.active_generation_manifest_store,
+                )),
+            ),
             apply_membership_member_facts: Arc::new(MembershipMemberFactsAdapter::new(
                 Arc::clone(&deps.device.member_repo),
                 Arc::clone(&shared.trusted_peer_repo),

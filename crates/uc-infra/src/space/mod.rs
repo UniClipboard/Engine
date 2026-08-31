@@ -1,5 +1,6 @@
 mod adapters;
 mod admission;
+mod membership_branch_transition;
 mod membership_ledger;
 mod security;
 
@@ -24,6 +25,7 @@ pub use admission::{
     DefaultSponsorSettledPreparation, SpaceAdmissionCredentialStoreError,
     SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
+pub use membership_branch_transition::DefaultMembershipBranchTransitionPreparation;
 pub use membership_ledger::SqliteMembershipLedger;
 pub use security::{
     DefaultMembershipSecurityUpdateAdapter, DefaultSpaceAccessAdapter, InMemorySession,

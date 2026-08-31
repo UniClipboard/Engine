@@ -94,6 +94,8 @@ pub struct SyncEngineDeps {
         >,
     >,
     pub admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort>,
+    pub active_generation_manifest_store:
+        Arc<uc_infra::security::ActiveSpaceGenerationManifestStore>,
     pub device_management_reset_data: Arc<dyn uc_application::deps::DeviceManagementResetDataPort>,
     /// plaintext-hash → ciphertext-digest dedupe cache (Slice 3 Phase 1).
     pub blob_reference_repo: Arc<dyn BlobReferenceRepositoryPort>,

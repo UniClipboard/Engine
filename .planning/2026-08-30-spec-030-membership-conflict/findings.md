@@ -37,3 +37,5 @@
 - transition preparation port 只允许返回无外部副作用的 `Prepared` 计划，generation 文件写入必须留给 CAS 成功后的后续阶段。
 - conflict recovery 必须位于 membership effects 之后、group update 与受限交付之前；这样先恢复已有本地安全欠账，再决定是否具备切换准备条件，且损坏状态能阻断后续权限扩展。
 - peer-online 是恢复包重新获取的直接触发条件，不能像 admissions/effects 一样跳过。
+- active manifest 的 `database_generation` 是当前完整数据库 generation 的真实来源；transition preparation 不应从 ledger revision 或随机 source 推断。
+- recovery package 的安全签发能力尚不存在；在它能绑定当前有效成员签名、MLS 恢复密文和内容密钥目录前，不应只安装一个会稳定拒绝的 Iroh 协议外壳并宣称 transport 已完成。

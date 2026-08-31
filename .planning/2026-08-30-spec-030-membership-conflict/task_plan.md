@@ -24,11 +24,11 @@
 
 ## Current Slice
 
-Phase 3：选择 CAS、稳定 transition id、Application facade、恢复 coordinator 与维护运行期接线已完成；下一切片实现真实 Iroh recovery 和 generation adapter。
+Phase 4：真实 transition preparation adapter 已接入 Engine；下一切片实现恢复包安全签发与 Iroh exchange。
 
 ## Next Step
 
-实现 Iroh recovery package exchange，替换 Engine deferred adapters，并推进真实 generation transition 的 `SourceBackedUp` 阶段。
+实现当前有效成员的 recovery package 签发 capability，再以认证 Iroh exchange 替换 recovery deferred adapter。
 
 ## Constraints
 

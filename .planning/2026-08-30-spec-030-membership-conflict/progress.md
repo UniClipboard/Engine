@@ -49,3 +49,10 @@
 - `cargo metadata --locked --format-version 1`、workspace all-target check、fmt、架构检查和 `git diff --check`：通过（仅既有 warning）。
 - `cargo test --workspace --all-targets --locked`：成员相关套件通过；`uc-engine` 115 passed / 3 failed，失败集中于既有 clipboard/search host-adapter 路径。
 - 单独重跑 `host_clipboard_change_is_processed_by_the_engine_and_stops_on_shutdown` 仍以既有 QueryHistory unavailable code 1243 失败；失败发生在本切片未修改的 history search 路径。
+
+## 2026-08-31 · Real transition preparation adapter
+
+- Infra 新增 `DefaultMembershipBranchTransitionPreparation`，从加密 active manifest 读取真实 source database generation。
+- target generation 使用非零随机 128-bit 标识，并保证不同于 source；准备阶段无目录、数据库或 manifest 写入。
+- Engine 已替换 transition deferred adapter；recovery transport 仍显式 Deferred。
+- Infra 定向测试 2 项通过，Engine all-target check 通过。
